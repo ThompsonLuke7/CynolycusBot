@@ -1,0 +1,47 @@
+import webbrowser
+from urllib.parse import urlparse, parse_qs, quote
+
+# === FILL THESE IN ===
+CLIENT_ID = "DodBaa8AR1twJGwT5srKqFUdl6SepUnCwck38IGFlxc8QVt9"          # from Schwab Developer Portal (App Key)
+REDIRECT_URI = "https://127.0.0.1"       # must exactly match your app's callback URL
+
+def build_auth_url(client_id: str, redirect_uri: str) -> str:
+    base = "https://api.schwabapi.com/v1/oauth/authorize"
+    return (
+        f"{base}"
+        f"?client_id={client_id}"
+        f"&redirect_uri={quote(redirect_uri, safe='')}"
+    )
+        
+auth_url = build_auth_url(CLIENT_ID, REDIRECT_URI)
+
+print("Opening Schwab login page in your browser...")
+print("If it doesn't open, copy-paste this URL manually:\n")
+print(auth_url)
+
+# Open default browser
+webbrowser.open(auth_url)
+
+print("\n1) Log in with your normal Schwab credentials (NOT the dev portal).")
+print("2) Select accounts, click Done.")
+print("3) You’ll land on a blank/error page at https://127.0.0.1/ (that's fine).")
+print("4) COPY the entire URL from your browser's address bar and paste it below.\n")
+
+redirected_url = input("Paste the full redirected URL here:\n> ").strip()
+
+# Parse ?code=... from the pasted URL
+parsed = urlparse(redirected_url)
+params = parse_qs(parsed.query)
+code = params.get("code", [None])[0]
+
+if not code:
+    print("\nERROR: Couldn’t find a 'code' query parameter.")
+    print("Make sure you pasted the **entire** URL you were redirected to.")
+    exit()
+
+    print("\n✅ Authorization code captured:")
+    print(code)
+
+    # You’ll use this `code` immediately in the next step to POST to:
+    #   https://api.schwabapi.com/v1/oauth/token
+    # to get your access + refresh tokens.
