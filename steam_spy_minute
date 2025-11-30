@@ -1,0 +1,113 @@
+# stream_spy_minute.py
+
+import os
+import csv
+import json
+import asyncio
+import datetime as dt
+
+from schwab.auth import client_from_token_file
+from schwab.streaming import StreamClient
+
+# === SAME VALUES YOU USED IN schwab_client.py ===
+API_KEY      = "DodBaa8AR1twJGwT5srKqFUdl6SepUnCwck38IGFlxc8QVt9"
+APP_SECRET   = "GAq7IMKHL5AiIJrZunI13WP7z7nGgAy0USgUxB0zZA3hTUP260kAJidKxjsAETBj"
+CALLBACK_URL = "https://127.0.0.1"
+TOKEN_PATH   = "schwab_token.json"
+
+# Your actual Schwab *account number* (not hash); used for stream auth
+ACCOUNT_ID   = 123456789  # <-- put your real account number here as int or str
+
+CSV_PATH = "spy_1min_stream.csv"
+
+
+def init_csv():
+    """Create CSV with header if it doesn't exist yet."""
+    if not os.path.exists(CSV_PATH):
+        with open(CSV_PATH, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                ["epoch_ms", "timestamp_iso", "open", "high", "low", "close", "volume"]
+            )
+
+
+def chart_handler(message: dict):
+    """
+    Handles incoming CHART_EQUITY messages.
+    schwab-py already relabels numeric fields to names like OPEN_PRICE, etc. :contentReference[oaicite:6]{index=6}
+    """
+    # Debug: uncomment to inspect raw
+    # print(json.dumps(message, indent=2))
+
+    if message.get("service") != "CHART_EQUITY":
+        return
+
+    content = message.get("content", [])
+    if not content:
+        return
+
+    rows = []
+    for bar in content:
+        # bar["key"] is the symbol, e.g. "SPY"
+        if bar.get("key") != "SPY":
+            continue
+
+        ts_ms = bar["CHART_TIME_MILLIS"]  # milliseconds since epoch :contentReference[oaicite:7]{index=7}
+        ts = dt.datetime.fromtimestamp(ts_ms / 1000, tz=dt.timezone.utc)
+
+        row = [
+            ts_ms,
+            ts.isoformat(),
+            bar["OPEN_PRICE"],
+            bar["HIGH_PRICE"],
+            bar["LOW_PRICE"],
+            bar["CLOSE_PRICE"],
+            bar["VOLUME"],
+        ]
+        rows.append(row)
+
+    if rows:
+        with open(CSV_PATH, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerows(rows)
+
+        # For now, echo to console too
+        for r in rows:
+            print("SPY 1m bar:", r)
+
+
+async def main():
+    init_csv()
+
+    # Re-use your existing token file; schwab-py will refresh as needed. :contentReference[oaicite:8]{index=8}
+    client = client_from_token_file(
+        token_path=TOKEN_PATH,
+        api_key=API_KEY,
+        app_secret=APP_SECRET,
+    )
+
+    # Stream client uses that HTTP client + your account id
+    stream_client = StreamClient(client, account_id=ACCOUNT_ID)
+
+    # 1) Log into the stream
+    await stream_client.login()
+
+    # 2) Register handler BEFORE subscribing so we don't miss early messages :contentReference[oaicite:9]{index=9}
+    stream_client.add_chart_equity_handler(chart_handler)
+
+    # 3) Subscribe to OHLCV equity charts for SPY (1-min candles)
+    await stream_client.chart_equity_subs(["SPY"])
+
+    print("Streaming SPY 1-minute OHLCV. Ctrl+C to stop.")
+
+    # 4) Main loop: read messages and dispatch to handlers
+    try:
+        while True:
+            await stream_client.handle_message()
+    except KeyboardInterrupt:
+        print("\nStopping stream...")
+        await stream_client.logout()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
