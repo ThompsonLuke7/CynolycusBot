@@ -1,0 +1,15 @@
+[Raw Features]
+      ↓
+Sanity Filters (corr, low variance)
+      ↓
+GA + XGBoost (main selector)
+      ↓
+Permutation Importance (refine)
+      ↓
+Lasso / ElasticNet (cross-check)
+      ↓
+SHAP (optional bonus)
+      ↓
+Final Feature Set
+      ↓
+Train your chosen classifier (XGBoost, LGBM, NN, hybrid)
