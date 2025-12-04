@@ -1,83 +1,64 @@
 import pandas_ta as ta
 import pandas as pd
 import numpy as np
+import os
+from ta_all_features import add_all_pandasta_indicators
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    # Momentum
-    df["rsi_14"]   = ta.rsi(df["Close"], length=14)
-    df["stoch_k"]  = ta.stoch(df["High"], df["Low"], df["Close"]).iloc[:, 0]  # %K
-    df["stoch_d"]  = ta.stoch(df["High"], df["Low"], df["Close"]).iloc[:, 1]  # %D
-    df["macd"]     = ta.macd(df["Close"]).iloc[:, 0]
-    df["macd_sig"] = ta.macd(df["Close"]).iloc[:, 1]
-    df["macd_hist"]= ta.macd(df["Close"]).iloc[:, 2]
+global_file_path = "C:/Users/luket/CynolycusBot"
 
-    # Trend
-    df["ema_10"]   = ta.ema(df["Close"], length=10)
-    df["ema_20"]   = ta.ema(df["Close"], length=20)
-    df["ema_50"]   = ta.ema(df["Close"], length=50)
-    df["sma_20"]   = ta.sma(df["Close"], length=20)
-    df["sma_50"]   = ta.sma(df["Close"], length=50)
+def load_spy_csv() -> pd.DataFrame:
+    path = os.path.join(global_file_path, "Data", "spy_data.csv")
+    df = pd.read_csv(path, index_col=0, parse_dates=[0])
 
-    # Volatility
-    bbands = ta.bbands(df["Close"], length=20, std=2)
-    df["bb_lower"]  = bbands.iloc[:, 0]   # first column
-    df["bb_middle"] = bbands.iloc[:, 1]   # second
-    df["bb_upper"]  = bbands.iloc[:, 2]   # third
-    df["bb_pct"]   = (df["Close"] - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"])
+    # 1) Keep only the columns we care about initially (drop any 'Symbol', etc.)
+    keep_cols = [c for c in df.columns if c in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]]
+    df = df[keep_cols]
 
-    df["atr_14"]   = ta.atr(df["High"], df["Low"], df["Close"], length=14)
+    # 2) Rename to lowercase OHLCV for pandas_ta
+    rename_map = {
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Adj Close": "adj_close",
+        "Volume": "volume",
+    }
+    df = df.rename(columns=rename_map)
 
-    # Volume / money flow
-    df["mfi_14"]   = ta.mfi(df["High"], df["Low"], df["Close"], df["Volume"], length=14)
-    df["obv"]      = ta.obv(df["Close"], df["Volume"])
-
-    # Returns (simple + log)
-    df["ret_1"]    = df["Close"].pct_change(1)
-    df["ret_5"]    = df["Close"].pct_change(5)
-    df["ret_10"]   = df["Close"].pct_change(10)
-
-    # Candle structure
-    df["body"]     = df["Close"] - df["Open"]
-    df["range"]    = df["High"] - df["Low"]
-    df["upper_wick"]= df["High"] - df[["Close","Open"]].max(axis=1)
-    df["lower_wick"]= df[["Close","Open"]].min(axis=1) - df["Low"]
+    # 3) Force OHLCV columns to numeric
+    for col in ["open", "high", "low", "close", "adj_close", "volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df
 
 def make_labels(df: pd.DataFrame) -> pd.Series:
     # Shift close by -1 to represent "tomorrow's" close
     future_close = df["Close"].shift(-1)
-    direction = (future_close > df["Close"]).astype(int)
+    direction = (future_close > df["Close"]).astype(int).iloc[:-1].values
     return direction
 
 def main():
-    df = pd.read_csv("spy_data.csv", index_col=0, parse_dates=[0])
-    # Force numeric columns
-    numeric_cols = ["Open", "High", "Low", "Close", "Volume"]
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = load_spy_csv()
 
-    df = add_indicators(df)
-     # Create label
-    df["target"] = make_labels(df)
+    # Add ALL pandas_ta indicators except statistics & performance
+    df = add_all_pandasta_indicators(df, verbose=True)
 
-    # Drop last row (no future close) and any rows with NaNs from indicators
+    # Drop NaNs introduced by indicators
     df = df.dropna()
 
-    # Choose which columns are features
-    feature_cols = [
-        "rsi_14", "stoch_k", "stoch_d",
-        "macd", "macd_sig", "macd_hist",
-        "ema_10", "ema_20", "ema_50",
-        "sma_20", "sma_50",
-        "bb_upper", "bb_middle", "bb_lower", "bb_pct",
-        "atr_14", "mfi_14", "obv",
-        "ret_1", "ret_5", "ret_10",
-        "body", "range", "upper_wick", "lower_wick",
-    ]
+    numeric_df = df.select_dtypes(include=["number"])
 
-    X = df[feature_cols].values
-    y = df["target"].values
+    # label: next-day direction based on close
+    future_close = numeric_df["close"].shift(-1)
+    numeric_df["target"] = (future_close > numeric_df["close"]).astype(int)
+
+    numeric_df = numeric_df.dropna()
+
+    # Features = all numeric columns except target
+    feature_cols = [c for c in numeric_df.columns if c != "target"]
+    X = numeric_df[feature_cols].to_numpy(dtype=np.float32)
+    y = numeric_df["target"].to_numpy(dtype=np.int64)
 
     np.save("X_spy_daily.npy", X)
     np.save("y_spy_daily.npy", y)
