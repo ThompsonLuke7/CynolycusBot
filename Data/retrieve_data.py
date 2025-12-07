@@ -1,7 +1,7 @@
 import yfinance as yf
 
 def retrieve_data(ticker):
-    data = yf.download(ticker, start="2024-01-01", end="2024-12-31")
+    data = yf.download(ticker, start="2015-01-01", interval="1d",) #, end="2024-12-31"
     return data
 
 def main():
