@@ -4,8 +4,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 from xgboost import XGBClassifier
 
 
@@ -26,7 +25,7 @@ class GAXGBoostFeatureSelector:
     generations: int = 30
     crossover_rate: float = 0.5
     mutation_rate: float = 0.375
-    val_size: float = 0.15          # portion of given data used as validation
+    val_size: float = 0.08          # portion of given data used as validation
     random_state: Optional[int] = 42
     xgb_params: Dict[str, Any] = field(default_factory=lambda: {
         "n_estimators": 100,
@@ -54,13 +53,13 @@ class GAXGBoostFeatureSelector:
         """
         rng = np.random.default_rng(self.random_state)
 
-        X_train, X_val, y_train, y_val = train_test_split(
-            X, y,
-            test_size=self.val_size,
-            stratify=y,
-            random_state=self.random_state,
-            shuffle=True,
-        )
+        # Chronological split: first chunk = train, later chunk = validation
+        n_samples = X.shape[0]
+        split_idx = int(n_samples * (1.0 - self.val_size))
+
+        X_train, X_val = X[:split_idx], X[split_idx:]
+        y_train, y_val = y[:split_idx], y[split_idx:]
+
 
         n_features = X.shape[1]
 
@@ -188,7 +187,8 @@ class GAXGBoostFeatureSelector:
         model = XGBClassifier(**self.xgb_params)
         model.fit(X_tr, y_train)
         y_pred = model.predict(X_v)
-        return accuracy_score(y_val, y_pred)
+        # Assuming label 1 = “good swing / up move”
+        return f1_score(y_val, y_pred, pos_label=1)
 
     def _crossover(self, parents: np.ndarray, rng) -> np.ndarray:
         """

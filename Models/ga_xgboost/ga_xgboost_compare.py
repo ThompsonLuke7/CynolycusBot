@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
-    accuracy_score,
+    f1_score,
     confusion_matrix,
     classification_report,
 )
@@ -33,19 +33,20 @@ from models.ga_xgboost.ga_xgboost import GAXGBoostFeatureSelector
 # Load data
 # ---------------------------------------------------------------------
 
-X = np.load("data/X_spy_daily.npy")
-y = np.load("data/y_spy_daily.npy")
+X = np.load("data/processed/X_spy_daily.npy")
+y = np.load("data/processed/y_spy_daily.npy")
 
 # Close prices aligned with X/y (saved during feature engineering)
-close = np.load("data/close_spy_daily.npy")
+close = np.load("data/processed/close_spy_daily.npy")
 
 # Use a fixed chronological split so the test set is a real "future" segment.
 # (If your X/y are already shuffled, switch to shuffle=True in train_test_split instead.)
-split_idx = int(0.8 * len(X))
+n = len(X)
+split = int(n * 0.92)
 
-X_train, X_test = X[:split_idx], X[split_idx:]
-y_train, y_test = y[:split_idx], y[split_idx:]
-close_train, close_test = close[:split_idx], close[split_idx:]
+X_train, X_test = X[:split], X[split:]
+y_train, y_test = y[:split], y[split:]
+close_train, close_test = close[:split], close[split:]
 
 
 # ---------------------------------------------------------------------
@@ -66,8 +67,8 @@ xgb_all = XGBClassifier(
 
 xgb_all.fit(X_train, y_train)
 y_pred_all = xgb_all.predict(X_test)
-acc_all = accuracy_score(y_test, y_pred_all)
-print(f"[Baseline] XGB on all features - test acc: {acc_all:.4f}")
+test_f1 = f1_score(y_test, y_pred_all, pos_label=1)
+print(f"[Baseline] XGB on all features - test F1 score: {test_f1:.4f}")
 
 
 # ---------------------------------------------------------------------
@@ -121,7 +122,7 @@ def ga_lr_feature_selector(
         clf = LogisticRegression(max_iter=1000, n_jobs=-1)
         clf.fit(X_tr_sel, y_tr)
         y_hat = clf.predict(X_val_sel)
-        return accuracy_score(y_val, y_hat)
+        return f1_score(y_val, y_hat, pos_label=1)
 
     pop = ensure_valid_population(pop)
     best_mask = None
@@ -199,8 +200,8 @@ X_test_ga_lr = X_test[:, ga_lr_mask]
 
 xgb_ga_lr.fit(X_train_ga_lr, y_train)
 y_pred_ga_lr = xgb_ga_lr.predict(X_test_ga_lr)
-acc_ga_lr = accuracy_score(y_test, y_pred_ga_lr)
-print(f"[GA-LR + XGB] test acc: {acc_ga_lr:.4f}")
+test_f1 = f1_score(y_test, y_pred_ga_lr, pos_label=1)
+print(f"[GA-LR + XGB] test F1 score: {test_f1:.4f}")
 
 
 # ---------------------------------------------------------------------
@@ -216,12 +217,12 @@ selector = GAXGBoostFeatureSelector(
 )
 
 selector.fit(X_train, y_train)
-print(f"[GA-XGB] best val acc: {selector.best_score_:.4f}")
+print(f"[GA-XGB] best val F1 score: {selector.best_score_:.4f}")
 print(f"[GA-XGB] selected features: {selector.best_mask_.sum()}")
 
 y_pred_ga_xgb = selector.predict(X_test)
-acc_ga_xgb = accuracy_score(y_test, y_pred_ga_xgb)
-print(f"[GA-XGB] test acc: {acc_ga_xgb:.4f}")
+test_f1 = f1_score(y_test, y_pred_ga_xgb, pos_label=1)
+print(f"[GA-XGB] test F1 score: {test_f1:.4f}")
 
 
 # ---------------------------------------------------------------------
