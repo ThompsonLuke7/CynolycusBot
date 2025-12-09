@@ -41,6 +41,7 @@ def make_labels(df: pd.DataFrame) -> pd.Series:
     future_close = df["close"].shift(-1)
     direction = (future_close > df["close"]).astype(int).iloc[:-1].values
     return direction
+
 def add_atr_pivot_swing_labels(
     df: pd.DataFrame,
     high_col: str = "high",
@@ -220,17 +221,21 @@ def main():
     max_holding=18,  # bars to look ahead
     )
 
+    #drop any rows that have NA in these columns
     df = df.dropna(subset=["atr_swing_label", "close", "open", "high", "low", "volume"])
 
     # --- NEW: binary labels for two-model swing detector ---
     df["long_swing_label"] = (df["atr_swing_label"] == 1.0).astype(np.int64)
     df["short_swing_label"] = (df["atr_swing_label"] == -1.0).astype(np.int64)
 
+    labels = ["atr_swing_label","atr_entry_price","atr_exit_price","atr_holding_bars","atr_realized_return" ]
     # Features = everything except labels
     feature_cols = [
         c for c in df.columns
-        if c not in ["atr_swing_label", "long_swing_label", "short_swing_label"]
+        if c not in labels
     ]
+    
+    print()
     X = df[feature_cols].to_numpy(dtype=np.float32)
 
     y_long = df["long_swing_label"].to_numpy(dtype=np.int64)
