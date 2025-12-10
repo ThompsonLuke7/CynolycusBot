@@ -361,7 +361,3 @@ quarter
 is_month_end
 is_month_start
 atr
-atr_entry_price
-atr_exit_price
-atr_holding_bars
-atr_realized_return
