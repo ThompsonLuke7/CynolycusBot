@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import pandas_ta as ta
 
 def add_fractal_pivots(
     df,
@@ -275,5 +276,161 @@ def add_tmo(df, length=14, calc_length=5, smooth_length=3):
     df["tmo_buy"] = ((prev_main <= prev_signal) & (df["tmo_main"] > df["tmo_signal"])).astype(int)
     df["tmo_sell"] = ((prev_main >= prev_signal) & (df["tmo_main"] < df["tmo_signal"])).astype(int)
 
+    return df
+
+def add_atr_swing_state_features(
+    df: pd.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    atr_length: int = 14,
+    reversal_atr: float = 2.0,
+    start_atr: float | None = None,
+    use_high_low_extremes: bool = True,
+    prefix: str = "atr_swing",
+) -> pd.DataFrame:
+    """
+    Causal ATR-based swing-state features (SAFE for inference, no lookahead).
+
+    How it works (online):
+      - Maintain a swing state: 0 unknown, +1 up, -1 down
+      - Maintain the current swing extreme (HH for up, LL for down)
+      - Flip state ONLY on the bar where price reverses from the extreme by reversal_atr * ATR
+      - Never retroactively relabel past bars
+
+    Outputs (columns):
+      - {prefix}_state: Int64 in {-1,0,+1}
+      - {prefix}_extreme: float, current extreme price of the active swing
+      - {prefix}_dist_from_extreme_atr: float, pullback from extreme in ATR units (>=0)
+      - {prefix}_bars_since_flip: Int64
+      - {prefix}_flip: Int64 {0,1} on the bar where swing state flips
+    """
+    if start_atr is None:
+        start_atr = reversal_atr
+
+    # ATR
+    if "atr" not in df.columns:
+        df["atr"] = ta.atr(df[high_col], df[low_col], df[close_col], length=atr_length)
+
+    high = df[high_col].to_numpy(dtype=float)
+    low = df[low_col].to_numpy(dtype=float)
+    close = df[close_col].to_numpy(dtype=float)
+    atr = df["atr"].to_numpy(dtype=float)
+
+    n = len(df)
+
+    state = np.zeros(n, dtype=float)          # -1,0,+1
+    extreme = np.full(n, np.nan, dtype=float) # running extreme
+    dist_atr = np.full(n, np.nan, dtype=float)
+    bars_since = np.zeros(n, dtype=float)
+    flip = np.zeros(n, dtype=float)
+
+    # helpers
+    def up_ext(i: int) -> float:
+        return high[i] if use_high_low_extremes else close[i]
+
+    def dn_ext(i: int) -> float:
+        return low[i] if use_high_low_extremes else close[i]
+
+    # init at first valid bar
+    valid = np.where(~np.isnan(close) & ~np.isnan(atr) & (atr > 0))[0]
+    if len(valid) == 0:
+        df[f"{prefix}_state"] = pd.Series(state, index=df.index).astype("Int64")
+        df[f"{prefix}_extreme"] = extreme
+        df[f"{prefix}_dist_from_extreme_atr"] = dist_atr
+        df[f"{prefix}_bars_since_flip"] = pd.Series(bars_since, index=df.index).astype("Int64")
+        df[f"{prefix}_flip"] = pd.Series(flip, index=df.index).astype("Int64")
+        return df
+
+    start_i = int(valid[0])
+
+    cur_state = 0
+    cur_extreme = close[start_i]
+    last_pivot_price = close[start_i]
+    last_flip_i = start_i
+
+    # fill initial
+    state[start_i] = 0
+    extreme[start_i] = cur_extreme
+    dist_atr[start_i] = 0.0
+    bars_since[start_i] = 0
+    flip[start_i] = 0
+
+    for i in range(start_i + 1, n):
+        if np.isnan(close[i]) or np.isnan(atr[i]) or atr[i] <= 0:
+            # carry forward what we last knew
+            state[i] = cur_state
+            extreme[i] = cur_extreme
+            dist_atr[i] = np.nan
+            bars_since[i] = i - last_flip_i
+            flip[i] = 0
+            continue
+
+        thresh_start = start_atr * atr[i]
+        thresh_rev = reversal_atr * atr[i]
+
+        # establish initial direction (causal)
+        if cur_state == 0:
+            if close[i] >= last_pivot_price + thresh_start:
+                cur_state = 1
+                cur_extreme = up_ext(i)
+                last_flip_i = i
+                flip[i] = 1
+            elif close[i] <= last_pivot_price - thresh_start:
+                cur_state = -1
+                cur_extreme = dn_ext(i)
+                last_flip_i = i
+                flip[i] = 1
+
+        # update extreme + check reversal (causal)
+        if cur_state == 1:
+            # update HH extreme
+            cur_extreme = max(cur_extreme, up_ext(i))
+
+            # pullback from extreme
+            dist = max(0.0, (cur_extreme - close[i]) / atr[i])
+            dist_atr[i] = dist
+
+            # flip to down ONLY when confirmed now
+            if close[i] <= cur_extreme - thresh_rev:
+                cur_state = -1
+                cur_extreme = dn_ext(i)  # start tracking lows from here
+                last_pivot_price = close[i]
+                last_flip_i = i
+                flip[i] = 1
+
+        elif cur_state == -1:
+            # update LL extreme
+            cur_extreme = min(cur_extreme, dn_ext(i))
+
+            # rally from extreme (as "pullback" in downtrend)
+            dist = max(0.0, (close[i] - cur_extreme) / atr[i])
+            dist_atr[i] = dist
+
+            # flip to up ONLY when confirmed now
+            if close[i] >= cur_extreme + thresh_rev:
+                cur_state = 1
+                cur_extreme = up_ext(i)
+                last_pivot_price = close[i]
+                last_flip_i = i
+                flip[i] = 1
+
+        else:
+            # still unknown, define dist as 0
+            dist_atr[i] = 0.0
+
+        # write per-bar outputs (what you know at bar i)
+        state[i] = cur_state
+        extreme[i] = cur_extreme
+        bars_since[i] = i - last_flip_i
+        # if we didn't flip at i, ensure flip is 0
+        if flip[i] != 1:
+            flip[i] = 0
+
+    df[f"{prefix}_state"] = pd.Series(state, index=df.index).astype("Int64")
+    df[f"{prefix}_extreme"] = extreme
+    df[f"{prefix}_dist_from_extreme_atr"] = dist_atr
+    df[f"{prefix}_bars_since_flip"] = pd.Series(bars_since, index=df.index).astype("Int64")
+    df[f"{prefix}_flip"] = pd.Series(flip, index=df.index).astype("Int64")
     return df
 

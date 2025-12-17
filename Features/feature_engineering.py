@@ -1,10 +1,8 @@
-import pandas_ta as ta
 import pandas as pd
-import numpy as np
 import os
-import seaborn as sns
 from Features.pandas_ta_indicators import add_all_pandasta_indicators
-from Features.custom_indicators import add_tmo, add_rsilg_fe_gauss, add_fractal_pivots
+from Features.label_generations import add_all_labels, plot_zig_zag
+from Features.custom_indicators import add_tmo, add_rsilg_fe_gauss, add_fractal_pivots, add_atr_swing_state_features
 import matplotlib.pyplot as plt
 
 global_file_path = "C:/Users/luket/CynolycusBot"
@@ -37,148 +35,6 @@ def load_spy_csv() -> pd.DataFrame:
 
     return df
 
-def make_labels(df: pd.DataFrame) -> pd.Series:
-    # Shift close by -1 to represent "tomorrow's" close
-    future_close = df["close"].shift(-1)
-    direction = (future_close > df["close"]).astype(int).iloc[:-1].values
-    return direction
-
-def add_atr_pivot_swing_labels(
-    df: pd.DataFrame,
-    high_col: str = "high",
-    low_col: str = "low",
-    close_col: str = "close",
-    pivot_up_col: str = "pivot_up",
-    pivot_down_col: str = "pivot_down",
-    atr_length: int = 14,
-    tp_mult: float = 1.5,
-    sl_mult: float = 1.0,
-    max_holding: int = 20,
-):
-    """
-    ATR-based swing labeling anchored on fractal pivots.
-
-    At each pivot:
-      - For a pivot_down (local low): treat as potential LONG entry.
-        * Entry price = close at pivot.
-        * TP = entry + tp_mult * ATR
-        * SL = entry - sl_mult * ATR
-        * Look ahead up to max_holding bars:
-            - If price hits TP before SL -> label +1 (good long pivot).
-            - If price hits SL first or neither -> label 0.
-
-      - For a pivot_up (local high): treat as potential SHORT entry.
-        * Entry price = close at pivot.
-        * TP = entry - tp_mult * ATR
-        * SL = entry + sl_mult * ATR
-        * Same logic; if TP hit first -> label -1 (good short pivot).
-
-    Returns df with added columns:
-        atr                      - ATR series
-        atr_swing_label          - {-1, 0, +1} (short / none / long)
-        atr_entry_price
-        atr_exit_price
-        atr_holding_bars
-        atr_realized_return      - (exit / entry - 1)
-    """
-
-    high = df[high_col].to_numpy(dtype=float)
-    low = df[low_col].to_numpy(dtype=float)
-    close = df[close_col].to_numpy(dtype=float)
-    pivot_up = df[pivot_up_col].to_numpy(dtype=int)
-    pivot_down = df[pivot_down_col].to_numpy(dtype=int)
-
-    n = len(df)
-
-    # --- ATR ---
-    df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=atr_length)
-    atr = df["atr"].to_numpy()
-
-
-    # --- outputs ---
-    labels = np.zeros(n, dtype=float)          # -1, 0, +1
-    entry_price = np.full(n, np.nan)
-    exit_price = np.full(n, np.nan)
-    holding_bars = np.full(n, np.nan)
-    realized_ret = np.full(n, np.nan)
-
-    for i in range(n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            continue
-
-        # LONG setup at pivot_down
-        if pivot_down[i] == 1:
-            side = 1
-            ep = close[i]
-            tp = ep + tp_mult * atr[i]
-            sl = ep - sl_mult * atr[i]
-
-            entry_price[i] = ep
-
-            hit_label = 0
-            hit_exit = ep
-            hit_bars = 0
-
-            for j in range(i + 1, min(i + 1 + max_holding, n)):
-                # did we hit stop or target?
-                if low[j] <= sl:
-                    # stop first -> bad pivot
-                    hit_label = 0
-                    hit_exit = sl
-                    hit_bars = j - i
-                    break
-                if high[j] >= tp:
-                    # target first -> good long
-                    hit_label = 1
-                    hit_exit = tp
-                    hit_bars = j - i
-                    break
-
-            labels[i] = hit_label * side   # 1 if good long, 0 otherwise
-            exit_price[i] = hit_exit
-            holding_bars[i] = hit_bars
-            realized_ret[i] = (hit_exit / ep - 1.0)
-
-        # SHORT setup at pivot_up
-        elif pivot_up[i] == 1:
-            side = -1
-            ep = close[i]
-            tp = ep - tp_mult * atr[i]   # profit target BELOW
-            sl = ep + sl_mult * atr[i]   # stop ABOVE
-
-            entry_price[i] = ep
-
-            hit_label = 0
-            hit_exit = ep
-            hit_bars = 0
-
-            for j in range(i + 1, min(i + 1 + max_holding, n)):
-                # For shorts: TP is when low <= tp, SL when high >= sl
-                if high[j] >= sl:
-                    hit_label = 0        # stopped out
-                    hit_exit = sl
-                    hit_bars = j - i
-                    break
-                if low[j] <= tp:
-                    hit_label = 1        # good short
-                    hit_exit = tp
-                    hit_bars = j - i
-                    break
-
-            labels[i] = hit_label * side   # -1 if good short, 0 otherwise
-            exit_price[i] = hit_exit
-            holding_bars[i] = hit_bars
-            realized_ret[i] = (hit_exit / ep - 1.0)
-
-    df["atr"] = atr
-    df["atr_swing_label"] = labels          # -1 / 0 / +1
-    df["atr_entry_price"] = entry_price
-    df["atr_exit_price"] = exit_price
-    df["atr_holding_bars"] = holding_bars
-    df["atr_realized_return"] = realized_ret
-
-    return df
-
 def add_date_features(df: pd.DataFrame) -> pd.DataFrame:
     df["day_of_week"] = df.index.dayofweek        # 0 = Monday … 4 = Friday
     df["day_of_month"] = df.index.day            # sometimes helps
@@ -192,6 +48,7 @@ def add_all_custom_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = add_tmo(df)
     df = add_rsilg_fe_gauss(df)
     df = add_fractal_pivots(df)
+    df = add_atr_swing_state_features(df)
     return df
 
 def main():
@@ -209,20 +66,51 @@ def main():
     df = add_all_custom_indicators(df)
     df = add_date_features(df)
 
-    df = add_atr_pivot_swing_labels(
-    df,
-    high_col="high",
-    low_col="low",
-    close_col="close",
-    pivot_up_col="pivot_up",
-    pivot_down_col="pivot_down",
-    atr_length=14,   # tweak later
-    tp_mult=2,     # 2x ATR target
-    sl_mult=1.0,     # 1x ATR stop
-    max_holding=18,  # bars to look ahead
-    )
+    df = add_all_labels(df)
+    # Filter to keep only the last year of data
+    if isinstance(df.index, pd.DatetimeIndex):
+        last_date = df.index[-1]
+        one_year_ago = last_date - pd.DateOffset(years=1)
+        df = df[df.index >= one_year_ago]
 
-    #drop any rows that have NA in these columns
+    # Plot close with atr_swing_label (+1/-1 markers) and atr_swing_flip (vertical lines)
+    fig, ax = plt.subplots(figsize=(18, 6))
+    close_y = df["close"].to_numpy()
+    ax.plot(df.index, close_y, label="Close", color="black", linewidth=1.6, zorder=1)
+
+    # Plot atr_swing_label as ±1 markers on close
+    if "atr_swing_label" in df.columns:
+        mask_pos = (df["atr_swing_label"].fillna(0) == 1).to_numpy()
+        mask_neg = (df["atr_swing_label"].fillna(0) == -1).to_numpy()
+        pos_idx = df.index[mask_pos]
+        neg_idx = df.index[mask_neg]
+        if len(pos_idx) > 0:
+            ax.scatter(
+                pos_idx, close_y[mask_pos], color="#1976D2", marker="^", s=42,
+                label="atr_swing_label = +1", alpha=0.96, zorder=2
+            )
+        if len(neg_idx) > 0:
+            ax.scatter(
+                neg_idx, close_y[mask_neg], color="#E53935", marker="v", s=42,
+                label="atr_swing_label = -1", alpha=0.96, zorder=2
+            )
+
+    # Plot atr_swing_flip as vertical lines on the close price chart
+    if "atr_swing_flip" in df.columns:
+        flip_idx = df.index[df["atr_swing_flip"].fillna(0).astype(int) == 1]
+        for flip_time in flip_idx:
+            ax.axvline(flip_time, color="#43A047", alpha=0.55, linestyle="--", linewidth=1.3, label="atr_swing_flip" if flip_time==flip_idx[0] else "")
+
+    ax.set_title("Close with atr_swing_label (±1 markers) & atr_swing_flip (vlines)", fontsize=14)
+    ax.set_ylabel("Close Price")
+    ax.legend(loc="upper left", fontsize=11, ncol=3)
+    ax.set_xlabel("Date")
+    plt.tight_layout()
+    plt.suptitle("Close Price with ATR Swing Label & Flip Points - Last Year", fontsize=17, y=1.02)
+    plt.subplots_adjust(top=0.93)
+    plt.show()
+
+"""    #drop any rows that have NA in these columns
     df = df.dropna(subset=["atr_swing_label", "close", "open", "high", "low", "volume"])
 
     # --- NEW: binary labels for two-model swing detector ---
@@ -332,6 +220,7 @@ def main():
     
     X_df = feature_df_final.astype(np.float32)
     X_df.to_parquet(os.path.join(output_dir, "X_spy_daily.parquet"), index=False)
+    """
 
 if __name__ == "__main__":
     main()
