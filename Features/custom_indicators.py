@@ -5,7 +5,7 @@ import pandas_ta as ta
 
 def add_fractal_pivots(
     df,
-    sequence_count=5,   # same as ThinkScript default in your version
+    sequence_count=3,   # same as ThinkScript default in your version
     vol_length=60,
     num_dev=1.0,
     allow_negative=False,

@@ -95,6 +95,16 @@ def main():
                 label="atr_swing_label = -1", alpha=0.96, zorder=2
             )
 
+    # Plot pivot_down markers in green
+    if "pivot_down" in df.columns:
+        mask_pivot_down = (df["pivot_down"].fillna(0).astype(int) == 1).to_numpy()
+        pivot_idx = df.index[mask_pivot_down]
+        if len(pivot_idx) > 0:
+            ax.scatter(
+                pivot_idx, close_y[mask_pivot_down], color="#2E7D32", marker="v", s=52,
+                label="pivot_down", alpha=0.95, zorder=2.2
+            )
+
     # Plot atr_swing_flip as vertical lines on the close price chart
     if "atr_swing_flip" in df.columns:
         flip_idx = df.index[df["atr_swing_flip"].fillna(0).astype(int) == 1]
