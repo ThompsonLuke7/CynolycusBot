@@ -46,9 +46,65 @@ def add_next_day_direction_label(
     return df
 
 
+def compute_capitulation_pivots(
+    df: pd.DataFrame,
+    *,
+    close_col: str = "close",
+    low_col: str = "low",
+    open_col: str = "open",
+    volume_col: str = "volume",
+    drawdown_lookback: int = 60,
+    drawdown_thresh: float = -0.08,
+    local_window: int = 5,
+    snapback_bars: int = 3,
+    volume_mult: float | None = 1.2,
+    reversal_confirm_bars: int = 3,
+    reversal_atr_mult: float = 0.5,
+) -> pd.Series:
+    """
+    Fallback pivot detector for deep drawdowns that can break ATR-based logic.
+    Triggers when price is deeply below a rolling high, prints a local-low
+    (uses past+future window), and shows a snapback (bullish/reclaim or ATR
+    retrace). Optional volume spike filter.
+    """
+    roll_high = df[close_col].rolling(drawdown_lookback, min_periods=5).max()
+    drawdown_pct = (df[close_col] / roll_high) - 1.0
+    is_extreme_dd = drawdown_pct <= drawdown_thresh
+
+    past_min = df[low_col].rolling(local_window, min_periods=1).min()
+    future_min = df[low_col].rolling(local_window, min_periods=1).min().shift(-(local_window - 1))
+    local_low = (df[low_col] <= past_min) & (df[low_col] <= future_min)
+
+    bullish_bar = df[close_col] > df[open_col]
+    reclaim_prior = df[close_col] > df[close_col].shift(1)
+    snapback = (bullish_bar | reclaim_prior).rolling(snapback_bars, min_periods=1).max().astype(bool)
+
+    # ATR-based reclaim within a few bars after the extreme
+    if "atr" in df.columns:
+        atr = df["atr"]
+    else:
+        atr = ta.atr(df.get("high", df[close_col]), df.get("low", df[close_col]), df[close_col], length=14)
+    reclaim_level = df[low_col] + reversal_atr_mult * atr
+    fwd_reclaim = pd.concat(
+        [(df[close_col].shift(-k) >= reclaim_level) for k in range(1, reversal_confirm_bars + 1)],
+        axis=1,
+    ).max(axis=1).astype(bool)
+    snapback = snapback | fwd_reclaim
+
+    volume_ok = pd.Series(True, index=df.index)
+    if volume_mult is not None and volume_col in df.columns:
+        vol_mean = df[volume_col].rolling(drawdown_lookback, min_periods=5).mean()
+        volume_ok = df[volume_col] > (vol_mean * volume_mult)
+        volume_ok = volume_ok.fillna(False)
+
+    capitulation_pivot = (is_extreme_dd & local_low & snapback & volume_ok).fillna(False)
+    return capitulation_pivot
+
+
 # ----------------------------------------------------------------------
-# 2) ATR + Pivot-based swing labels (your current scheme)
+# 2) ATR + Pivot-based swing labels (The best scheme)
 # ----------------------------------------------------------------------
+
 def add_atr_pivot_swing_labels(
     df: pd.DataFrame,
     high_col: str = "high",
@@ -61,45 +117,30 @@ def add_atr_pivot_swing_labels(
     sl_mult: float = 0.5,
     max_holding: int = 20,
     base_label_col: str = "atr_swing_label",
+    *,
+    enable_capitulation: bool = True,
+    drawdown_lookback: int = 40,
+    drawdown_thresh: float = -0.05,  # e.g., -5% or -10% drop
+    local_window: int = 4,           # lookback for local min
+    snapback_bars: int = 2,
+    volume_mult: float | None = 1.5,
 ) -> pd.DataFrame:
     """
-    ATR-based swing labeling anchored on fractal pivots.
-
-    At each pivot:
-      - pivot_down (local low)  -> potential LONG entry.
-      - pivot_up   (local high) -> potential SHORT entry.
-
-    For each pivot bar i:
-      LONG setup (pivot_down == 1):
-        entry  = close[i]
-        TP     = entry + tp_mult * ATR[i]
-        SL     = entry - sl_mult * ATR[i]
-        Look ahead up to max_holding bars:
-          - if TP is touched before SL -> +1
-          - else                       -> 0
-
-      SHORT setup (pivot_up == 1):
-        entry  = close[i]
-        TP     = entry - tp_mult * ATR[i]  # profit target below
-        SL     = entry + sl_mult * ATR[i]  # stop above
-        Look ahead:
-          - if TP is touched before SL -> -1
-          - else                       -> 0
-
-    Adds columns:
-        atr                      - ATR series
-        base_label_col           - {-1, 0, +1}
-        atr_entry_price
-        atr_exit_price
-        atr_holding_bars
-        atr_realized_return
-        long_swing_label         - {0,1}
-        short_swing_label        - {0,1}
+    ATR-based swing labeling with "Capitulation" logic to catch deep bottoms.
     """
 
     high = df[high_col].to_numpy(dtype=float)
     low = df[low_col].to_numpy(dtype=float)
     close = df[close_col].to_numpy(dtype=float)
+    
+    # Optional: Volume check if column exists
+    if "volume" in df.columns and volume_mult is not None:
+        vol = df["volume"].to_numpy(dtype=float)
+        # Simple rolling avg volume for spike detection
+        vol_ma = df["volume"].rolling(20).mean().to_numpy(dtype=float)
+    else:
+        vol = None
+        vol_ma = None
 
     pivot_up = df[pivot_up_col].to_numpy(dtype=int)
     pivot_down = df[pivot_down_col].to_numpy(dtype=int)
@@ -109,6 +150,13 @@ def add_atr_pivot_swing_labels(
     # --- ATR ---
     df["atr"] = ta.atr(df[high_col], df[low_col], df[close_col], length=atr_length)
     atr = df["atr"].to_numpy(dtype=float)
+
+    # --- 1. Drawdown Calculation (New Factor) ---
+    # Rolling Max High to define "Peak"
+    rolling_peak = df[high_col].rolling(drawdown_lookback, min_periods=1).max()
+    # Drawdown %
+    dd_series = (df[close_col] - rolling_peak) / rolling_peak
+    is_in_drawdown = (dd_series < drawdown_thresh).to_numpy()
 
     # --- outputs ---
     labels = np.zeros(n, dtype=float)          # -1, 0, +1
@@ -121,11 +169,35 @@ def add_atr_pivot_swing_labels(
         if np.isnan(atr[i]) or atr[i] == 0:
             continue
 
-        # LONG setup at pivot_down
-        if pivot_down[i] == 1:
+        # ============================================================
+        # LONG LOGIC: Standard Pivot OR Capitulation Catch
+        # ============================================================
+        is_pivot_long = (pivot_down[i] == 1)
+        
+        # Check Capitulation (The "Added Factor")
+        is_capitulation_long = False
+        if enable_capitulation and is_in_drawdown[i]:
+            # 1. Are we at a local low relative to recent history?
+            #    (Checks if current low is lowest in last 'local_window' bars)
+            start_idx = max(0, i - local_window)
+            if low[i] == np.min(low[start_idx : i + 1]):
+                is_capitulation_long = True
+                
+                # Optional: Volume Spike Filter
+                if vol is not None and vol_ma is not None and not np.isnan(vol_ma[i]):
+                    if vol[i] < (vol_ma[i] * volume_mult):
+                        is_capitulation_long = False
+
+        if is_pivot_long or is_capitulation_long:
             ep = close[i]
+            
+            # --- INTELLIGENT STOP LOSS ---
+            # If this is a capitulation trade (high volatility/fear), 
+            # we widen the stop to prevent being shaken out by wicks.
+            current_sl_mult = sl_mult * 2.0 if is_capitulation_long else sl_mult
+            
             tp = ep + tp_mult * atr[i]
-            sl = ep - sl_mult * atr[i]
+            sl = ep - current_sl_mult * atr[i]
 
             entry_price[i] = ep
 
@@ -134,26 +206,40 @@ def add_atr_pivot_swing_labels(
             hit_bars = 0
 
             for j in range(i + 1, min(i + 1 + max_holding, n)):
-                # did we hit stop or target?
+                # Stop check first (conservative)
                 if low[j] <= sl:
-                    # stop first -> bad pivot
                     hit_label = 0
                     hit_exit = sl
                     hit_bars = j - i
                     break
                 if high[j] >= tp:
-                    # target first -> good long
                     hit_label = 1
                     hit_exit = tp
                     hit_bars = j - i
                     break
 
-            labels[i] = hit_label  # +1 or 0
-            exit_price[i] = hit_exit
-            holding_bars[i] = hit_bars
-            realized_ret[i] = (hit_exit / ep - 1.0)
+            # If we already have a label (e.g. from pivot), overwrite it ONLY if 
+            # the capitulation logic found a winner where pivot failed.
+            # But for simplicity, we just take the result if it's currently 0.
+            if labels[i] == 0:
+                labels[i] = hit_label
+                exit_price[i] = hit_exit
+                holding_bars[i] = hit_bars
+                realized_ret[i] = (hit_exit / ep - 1.0)
+            
+            # If pivot failed (stopped out) but capitulation (wider stop) would have won,
+            # you might want to force the capitulation logic. 
+            # Here, we prioritize the WIN (1) if both triggered.
+            elif labels[i] == 0 and hit_label == 1:
+                labels[i] = 1
+                exit_price[i] = hit_exit
+                holding_bars[i] = hit_bars
+                realized_ret[i] = (hit_exit / ep - 1.0)
 
-        # SHORT setup at pivot_up
+
+        # ============================================================
+        # SHORT LOGIC (Standard)
+        # ============================================================
         elif pivot_up[i] == 1:
             ep = close[i]
             tp = ep - tp_mult * atr[i]   # profit target BELOW
@@ -166,31 +252,30 @@ def add_atr_pivot_swing_labels(
             hit_bars = 0
 
             for j in range(i + 1, min(i + 1 + max_holding, n)):
-                # For shorts: TP is when low <= tp, SL when high >= sl
                 if high[j] >= sl:
                     hit_label = 0        # stopped out
                     hit_exit = sl
                     hit_bars = j - i
                     break
                 if low[j] <= tp:
-                    hit_label = 1        # good short
+                    hit_label = -1       # good short
                     hit_exit = tp
                     hit_bars = j - i
                     break
 
-            labels[i] = -hit_label   # -1 or 0
+            labels[i] = hit_label
             exit_price[i] = hit_exit
             holding_bars[i] = hit_bars
             realized_ret[i] = (hit_exit / ep - 1.0)
 
     # Attach back to df
-    df[base_label_col] = labels          # -1 / 0 / +1
+    df[base_label_col] = labels
     df["atr_entry_price"] = entry_price
     df["atr_exit_price"] = exit_price
     df["atr_holding_bars"] = holding_bars
     df["atr_realized_return"] = realized_ret
-
-    # Convenient binary labels for two-model setup
+    
+    # Binary labels
     df["long_swing_label"] = (df[base_label_col] == 1.0).astype("Int64")
     df["short_swing_label"] = (df[base_label_col] == -1.0).astype("Int64")
 
@@ -684,4 +769,3 @@ def main():
 if __name__ == "__main__":
     main()
     
-

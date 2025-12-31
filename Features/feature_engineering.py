@@ -51,22 +51,59 @@ def add_all_custom_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = add_atr_swing_state_features(df)
     return df
 
-def main():
-    df = load_spy_csv()
-    print(df.head())
-    print(df.info())
-    
-    # Add ALL pandas_ta indicators except statistics & performance
-    df = add_all_pandasta_indicators(df, verbose=True)
-    print(df.head())
-    # Drop NaNs introduced by indicators
-    # 1) Drop columns that are completely NaN
-    df = df.dropna(axis=1, how="all")
-    # Add date features
-    df = add_all_custom_indicators(df)
-    df = add_date_features(df)
 
-    df = add_all_labels(df)
+def get_processed_feature_path(filename: str = "spy_features_with_labels.parquet") -> str:
+    """
+    Build the path where the processed feature/label matrix is stored.
+    Ensures the directory exists so we can write the cache.
+    """
+    output_dir = os.path.join(global_file_path, "Data", "processed")
+    os.makedirs(output_dir, exist_ok=True)
+    return os.path.join(output_dir, filename)
+
+
+def load_cached_features(cache_path: str):
+    """
+    Load a previously cached feature matrix if present, otherwise return None.
+    """
+    if os.path.exists(cache_path):
+        cached = pd.read_parquet(cache_path)
+        if not isinstance(cached.index, pd.DatetimeIndex):
+            cached.index = pd.to_datetime(cached.index, errors="coerce")
+        cached = cached[cached.index.notna()]
+        print(f"Loaded cached features + labels from {cache_path}")
+        return cached
+    return None
+
+
+def main(use_cached: bool = False, save_processed: bool = True) -> None:
+    """
+    Build the full feature/label matrix once, cache it, and reuse it for plotting.
+    Set use_cached=False to force a recompute, or save_processed=False to skip writing.
+    """
+    cache_path = get_processed_feature_path()
+    df = load_cached_features(cache_path) if use_cached else None
+
+    if df is None:
+        df = load_spy_csv()
+        print(df.head())
+        print(df.info())
+        
+        # Add ALL pandas_ta indicators except statistics & performance
+        df = add_all_pandasta_indicators(df, verbose=True)
+        print(df.head())
+        # Drop NaNs introduced by indicators
+        # 1) Drop columns that are completely NaN
+        df = df.dropna(axis=1, how="all")
+        # Add date features
+        df = add_all_custom_indicators(df)
+        df = add_date_features(df)
+
+        df = add_all_labels(df)
+
+        if save_processed:
+            df.to_parquet(cache_path, index=True)
+            print(f"Saved processed features + labels to {cache_path}")
     # Filter to keep only the last year of data
     if isinstance(df.index, pd.DatetimeIndex):
         last_date = df.index[-1]
@@ -103,6 +140,15 @@ def main():
             ax.scatter(
                 pivot_idx, close_y[mask_pivot_down], color="#2E7D32", marker="v", s=52,
                 label="pivot_down", alpha=0.95, zorder=2.2
+            )
+            
+    if "pivot_up" in df.columns:
+        mask_pivot_up = (df["pivot_up"].fillna(0).astype(int) == 1).to_numpy()
+        pivot_idx = df.index[mask_pivot_up]
+        if len(pivot_idx) > 0:
+            ax.scatter(
+                pivot_idx, close_y[mask_pivot_up], color="#1E0D32", marker="^", s=52,
+                label="pivot_up", alpha=0.95, zorder=2.2
             )
 
     # Plot atr_swing_flip as vertical lines on the close price chart
