@@ -2,7 +2,7 @@ import pandas as pd
 import os
 from Features.pandas_ta_indicators import add_all_pandasta_indicators
 from Features.label_generations import add_all_labels, plot_zig_zag
-from Features.custom_indicators import add_tmo, add_rsilg_fe_gauss, add_fractal_pivots, add_atr_swing_state_features
+from Features.custom_indicators import add_tmo, add_rsilg_fe_gauss, add_fractal_pivots, add_atr_swing_state_features, add_vmd_return_features
 import matplotlib.pyplot as plt
 
 global_file_path = "C:/Users/luket/CynolycusBot"
@@ -49,6 +49,7 @@ def add_all_custom_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = add_rsilg_fe_gauss(df)
     df = add_fractal_pivots(df)
     df = add_atr_swing_state_features(df)
+    df = add_vmd_return_features(df)
     return df
 
 
@@ -76,7 +77,7 @@ def load_cached_features(cache_path: str):
     return None
 
 
-def main(use_cached: bool = False, save_processed: bool = True) -> None:
+def main(use_cached: bool = True, save_processed: bool = True) -> None:
     """
     Build the full feature/label matrix once, cache it, and reuse it for plotting.
     Set use_cached=False to force a recompute, or save_processed=False to skip writing.

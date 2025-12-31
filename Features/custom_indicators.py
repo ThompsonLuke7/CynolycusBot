@@ -2,6 +2,70 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import pandas_ta as ta
+import vmdpy as vmd
+
+def add_vmd_return_features(
+    df: pd.DataFrame,
+    close_col: str = "close",
+    window: int = 200,
+    k: int = 4,
+    alpha: float = 2000.0,
+    tau: float = 0.0,
+    dc: int = 0,
+    init: int = 1,
+    tol: float = 1e-7,
+    energy_window: int = 20,
+    prefix: str = "vmd_r",
+) -> pd.DataFrame:
+    """
+    Decompose rolling log returns with VMD to avoid lookahead.
+
+    For each bar t (t >= window - 1):
+      - Take log-returns over the past `window` closes (inclusive of t).
+      - Run VMD on that trailing slice only.
+      - Store the last value of each mode and its recent energy.
+
+    Adds columns:
+      {prefix}_mode{i}_last
+      {prefix}_mode{i}_energy_{energy_window}
+    """
+    close = df[close_col].to_numpy(dtype=float)
+    log_close = np.log(close)
+    returns = np.diff(log_close, prepend=np.nan)
+
+    n = len(df)
+    mode_last = np.full((n, k), np.nan)
+    mode_energy = np.full((n, k), np.nan)
+
+    for t in tqdm(range(n), desc="Computing VMD on returns"):
+        if t + 1 < window:
+            continue
+
+        window_data = returns[t - window + 1 : t + 1]
+        if np.isnan(window_data).any() or not np.isfinite(window_data).all():
+            continue
+
+        # VMD returns (K, T) array of modes; we only use what is known at bar t.
+        u, _, _ = vmd.VMD(
+            window_data,
+            alpha=alpha,
+            tau=tau,
+            K=k,
+            DC=dc,
+            init=init,
+            tol=tol,
+        )
+
+        mode_last[t] = u[:, -1]
+
+        ew = min(energy_window, window_data.shape[0])
+        mode_energy[t] = np.mean(u[:, -ew:] ** 2, axis=1)
+
+    for i in range(k):
+        df[f"{prefix}_mode{i+1}_last"] = mode_last[:, i]
+        df[f"{prefix}_mode{i+1}_energy_{energy_window}"] = mode_energy[:, i]
+
+    return df
 
 def add_fractal_pivots(
     df,
