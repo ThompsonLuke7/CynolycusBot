@@ -282,68 +282,74 @@ def add_atr_pivot_swing_labels(
     return df
 
 
-# ----------------------------------------------------------------------
-# 3) Forward N-bar return sign (slope-based label)
-# ----------------------------------------------------------------------
-def add_forward_return_label(
+def add_pullback_entry_labels(
     df: pd.DataFrame,
-    horizon: int = 10,
+    *,
+    pivot_down_col: str = "pivot_down",
+    pivot_up_col: str = "pivot_up",
     close_col: str = "close",
-    pct_threshold: float = 0.03,
-    label_col: str = "fwd_ret_label",
-    ret_col: str | None = None,
+    high_col: str = "high",
+    low_col: str = "low",
+    atr_col: str = "atr",
+    atr_length: int = 14,
+    dd_atr: float = 1.0,
+    max_entries: int = 2,
+    rebound_mode: str = "break_prev_high",
+    label_col: str = "pullback_entry",
+    rank_col: str = "pullback_entry_rank",
 ) -> pd.DataFrame:
     """
-    Label based on the sign of the N-bar forward return.
-
-      r_t = (close[t + horizon] / close[t]) - 1
-
-    If pct_threshold == 0:
-        label = sign(r_t): +1, -1, or 0 if exactly 0 or NaN
-    Else:
-        label = +1 if r_t >= +pct_threshold
-                -1 if r_t <= -pct_threshold
-                 0 otherwise
-
-    Parameters
-    ----------
-    df : DataFrame
-    horizon : int
-        Number of bars into the future for the return.
-    close_col : str
-    pct_threshold : float
-        Minimum absolute return to count as +1/-1.
-    label_col : str
-    ret_col : str | None
-        Optional column name to store the forward return. If None, uses
-        f"{close_col}_fwd_ret_{horizon}".
-
-    Returns
-    -------
-    DataFrame
-        df with new columns: ret_col (float) and label_col (Int64).
+    Tag up to `max_entries` higher-low pullbacks inside each upswing (pivot_down -> next pivot_up).
+    A pullback must be at least `dd_atr` ATRs off the running high of the upswing.
+    If rebound_mode == "break_prev_high", the label is placed on the first reclaim bar after the dip;
+    otherwise the dip bar itself is labeled.
     """
-    if ret_col is None:
-        ret_col = f"{close_col}_fwd_ret_{horizon}"
+    if pivot_down_col not in df.columns or pivot_up_col not in df.columns:
+        return df
 
-    future_price = df[close_col].shift(-horizon)
-    fwd_ret = (future_price / df[close_col]) - 1.0
-    df[ret_col] = fwd_ret
+    if atr_col not in df.columns:
+        df[atr_col] = ta.atr(df[high_col], df[low_col], df[close_col], length=atr_length)
 
-    labels = np.zeros(len(df), dtype=float)
+    labels = pd.Series(0, index=df.index, dtype="Int64")
+    ranks = pd.Series(pd.NA, index=df.index, dtype="Int64")
 
-    if pct_threshold <= 0:
-        labels[fwd_ret > 0] = 1.0
-        labels[fwd_ret < 0] = -1.0
-    else:
-        labels[fwd_ret >= pct_threshold] = 1.0
-        labels[fwd_ret <= -pct_threshold] = -1.0
+    pivot_down_idx = df.index[df[pivot_down_col].fillna(0).astype(int) == 1]
+    pivot_up_idx = df.index[df[pivot_up_col].fillna(0).astype(int) == 1]
 
-    labels[pd.isna(future_price.to_numpy())] = np.nan
+    for start in pivot_down_idx:
+        end_candidates = pivot_up_idx[pivot_up_idx > start]
+        end = end_candidates[0] if len(end_candidates) > 0 else df.index[-1]
 
-    df[label_col] = pd.Series(labels, index=df.index).astype("Int64")
+        seg = df.loc[start:end]
+        if seg.empty:
+            continue
+
+        run_high = seg[high_col].cummax()
+        atr_seg = seg[atr_col].replace(0, np.nan)
+        drawdown_atr = (run_high - seg[close_col]) / atr_seg
+
+        higher_low = seg[low_col] > df.at[start, low_col]
+        candidates = seg[higher_low & (drawdown_atr >= dd_atr)]
+        if candidates.empty:
+            continue
+
+        candidates = candidates.copy()
+        candidates["_dd_atr"] = drawdown_atr.loc[candidates.index]
+        top_dips = candidates.nlargest(max_entries, columns="_dd_atr")
+
+        for rank, dip_idx in enumerate(top_dips.index, start=1):
+            entry_idx = dip_idx
+            if rebound_mode == "break_prev_high":
+                post = df.loc[dip_idx:]
+                trigger = post[post[close_col] > post[high_col].shift(1)]
+                if not trigger.empty:
+                    entry_idx = trigger.index[0]
+            labels.loc[entry_idx] = 1
+            ranks.loc[entry_idx] = rank
+
+    df[label_col] = labels
+    df[rank_col] = ranks
     return df
-
 
 # ----------------------------------------------------------------------
 # 4) Triple Barrier label (pure price-based, no pivots required)
@@ -723,6 +729,7 @@ def add_all_labels(
     *,
     next_day_kwargs: dict | None = None,
     atr_pivot_kwargs: dict | None = None,
+    pullback_kwargs: dict | None = None,
     fwd_ret_kwargs: dict | None = None,
     triple_barrier_kwargs: dict | None = None,
     zigzag_kwargs: dict | None = None,
@@ -744,6 +751,7 @@ def add_all_labels(
 
     next_day_kwargs = next_day_kwargs or {}
     atr_pivot_kwargs = atr_pivot_kwargs or {}
+    pullback_kwargs = pullback_kwargs or {}
     fwd_ret_kwargs = fwd_ret_kwargs or {}
     triple_barrier_kwargs = triple_barrier_kwargs or {}
     zigzag_kwargs = zigzag_kwargs or {}
@@ -751,6 +759,7 @@ def add_all_labels(
 
     df = add_next_day_direction_label(df, **next_day_kwargs)
     df = add_atr_pivot_swing_labels(df, **atr_pivot_kwargs)
+    df = add_pullback_entry_labels(df, **pullback_kwargs)
     df = add_forward_return_label(df, **fwd_ret_kwargs)
     df = add_triple_barrier_labels(df, **triple_barrier_kwargs)
     df = add_zigzag_leg_labels(df, **zigzag_kwargs)

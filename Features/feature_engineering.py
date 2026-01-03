@@ -1,9 +1,11 @@
 import pandas as pd
+import numpy as np
 import os
 from Features.pandas_ta_indicators import add_all_pandasta_indicators
 from Features.label_generations import add_all_labels, plot_zig_zag
 from Features.custom_indicators import add_tmo, add_rsilg_fe_gauss, add_fractal_pivots, add_atr_swing_state_features, add_vmd_return_features
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 global_file_path = "C:/Users/luket/CynolycusBot"
 
@@ -77,7 +79,120 @@ def load_cached_features(cache_path: str):
     return None
 
 
-def main(use_cached: bool = True, save_processed: bool = True) -> None:
+def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> None:
+    """
+    Plot OHLC candles with ATR swing labels, pivots, and flip markers for a quick visual check.
+    """
+    fig, ax = plt.subplots(figsize=(18, 6))
+
+    date_nums = mdates.date2num(df.index.to_pydatetime())
+    open_y = df["open"].to_numpy()
+    high_y = df["high"].to_numpy()
+    low_y = df["low"].to_numpy()
+    close_y = df["close"].to_numpy()
+    if "atr" in df.columns:
+        marker_offset = np.nanmedian(df["atr"].to_numpy())
+    else:
+        marker_offset = np.nanmedian(high_y - low_y)
+    if not np.isfinite(marker_offset) or marker_offset <= 0:
+        marker_offset = np.nanmax(high_y) * 0.001
+    up_offset = marker_offset * 0.6
+    down_offset = marker_offset * 0.6
+
+    up = close_y >= open_y
+    down = ~up
+    wick_color = "#444444"
+    up_color = "#1976D2"
+    down_color = "#E53935"
+
+    # Marker positions
+    pivot_up_y = high_y + up_offset * 1.2
+    pivot_dn_y = low_y - down_offset * 1.2
+    swing_pos_y = close_y + up_offset
+    swing_neg_y = close_y - down_offset
+
+    # Wick lines
+    ax.vlines(date_nums, low_y, high_y, color=wick_color, linewidth=1.0, zorder=1)
+    # Candle bodies
+    width = 0.6
+    ax.bar(date_nums[up], close_y[up] - open_y[up], width=width, bottom=open_y[up], color=up_color, edgecolor="none", label="Bull candle", zorder=1.2)
+    ax.bar(date_nums[down], close_y[down] - open_y[down], width=width, bottom=open_y[down], color=down_color, edgecolor="none", label="Bear candle", zorder=1.2)
+
+    if "atr_swing_label" in df.columns:
+        mask_pos = (df["atr_swing_label"].fillna(0) == 1).to_numpy()
+        mask_neg = (df["atr_swing_label"].fillna(0) == -1).to_numpy()
+        pos_idx = date_nums[mask_pos]
+        neg_idx = date_nums[mask_neg]
+        # Align with pivots when both occur
+        if "pivot_down" in df.columns:
+            mask_pivot_down = (df["pivot_down"].fillna(0).astype(int) == 1).to_numpy()
+            coincide = mask_pos & mask_pivot_down
+            swing_pos_y[coincide] = pivot_dn_y[coincide]
+        if "pivot_up" in df.columns:
+            mask_pivot_up = (df["pivot_up"].fillna(0).astype(int) == 1).to_numpy()
+            coincide = mask_neg & mask_pivot_up
+            swing_neg_y[coincide] = pivot_up_y[coincide]
+        if len(pos_idx) > 0:
+            ax.scatter(
+                pos_idx, swing_pos_y[mask_pos], color="#1976D2", marker="^", s=42,
+                label="atr_swing_label = +1", alpha=0.96, zorder=2
+            )
+        if len(neg_idx) > 0:
+            ax.scatter(
+                neg_idx, swing_neg_y[mask_neg], color="#E53935", marker="v", s=42,
+                label="atr_swing_label = -1", alpha=0.96, zorder=2
+            )
+
+    if "pivot_down" in df.columns:
+        mask_pivot_down = (df["pivot_down"].fillna(0).astype(int) == 1).to_numpy()
+        pivot_idx = date_nums[mask_pivot_down]
+        if len(pivot_idx) > 0:
+            ax.scatter(
+                pivot_idx, pivot_dn_y[mask_pivot_down], color="#2E7D32", marker="v", s=52,
+                label="pivot_down", alpha=0.95, zorder=2.2
+            )
+
+    if "pivot_up" in df.columns:
+        mask_pivot_up = (df["pivot_up"].fillna(0).astype(int) == 1).to_numpy()
+        pivot_idx = date_nums[mask_pivot_up]
+        if len(pivot_idx) > 0:
+            ax.scatter(
+                pivot_idx, pivot_up_y[mask_pivot_up], color="#1E0D32", marker="^", s=52,
+                label="pivot_up", alpha=0.95, zorder=2.2
+            )
+
+    if "atr_swing_flip" in df.columns:
+        flip_idx = date_nums[df["atr_swing_flip"].fillna(0).astype(int) == 1]
+        for flip_time in flip_idx:
+            ax.axvline(
+                flip_time, color="#43A047", alpha=0.55, linestyle="--", linewidth=1.3,
+                label="atr_swing_flip" if flip_time == flip_idx[0] else ""
+            )
+
+    ax.set_title("Close with atr_swing_label (+/-1 markers) & atr_swing_flip (vlines)", fontsize=14)
+    ax.set_ylabel("Close Price")
+    ax.legend(loc="upper left", fontsize=11, ncol=3)
+    ax.set_xlabel("Date")
+
+    ax.xaxis.set_major_locator(mdates.DayLocator(interval=5))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    fig.autofmt_xdate()
+
+    plt.tight_layout()
+    plt.suptitle("Close Price with ATR Swing Label & Flip Points - Last Year", fontsize=17, y=1.02)
+    plt.subplots_adjust(top=0.93)
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, bbox_inches="tight", dpi=200)
+        print(f"Saved plot to {save_path}")
+    plt.show()
+
+
+def main(
+    use_cached: bool = True,
+    save_processed: bool = True,
+    save_plot_path: str | None = None,
+) -> None:
     """
     Build the full feature/label matrix once, cache it, and reuse it for plotting.
     Set use_cached=False to force a recompute, or save_processed=False to skip writing.
@@ -111,61 +226,9 @@ def main(use_cached: bool = True, save_processed: bool = True) -> None:
         one_year_ago = last_date - pd.DateOffset(years=1)
         df = df[df.index >= one_year_ago]
 
-    # Plot close with atr_swing_label (+1/-1 markers) and atr_swing_flip (vertical lines)
-    fig, ax = plt.subplots(figsize=(18, 6))
-    close_y = df["close"].to_numpy()
-    ax.plot(df.index, close_y, label="Close", color="black", linewidth=1.6, zorder=1)
-
-    # Plot atr_swing_label as ±1 markers on close
-    if "atr_swing_label" in df.columns:
-        mask_pos = (df["atr_swing_label"].fillna(0) == 1).to_numpy()
-        mask_neg = (df["atr_swing_label"].fillna(0) == -1).to_numpy()
-        pos_idx = df.index[mask_pos]
-        neg_idx = df.index[mask_neg]
-        if len(pos_idx) > 0:
-            ax.scatter(
-                pos_idx, close_y[mask_pos], color="#1976D2", marker="^", s=42,
-                label="atr_swing_label = +1", alpha=0.96, zorder=2
-            )
-        if len(neg_idx) > 0:
-            ax.scatter(
-                neg_idx, close_y[mask_neg], color="#E53935", marker="v", s=42,
-                label="atr_swing_label = -1", alpha=0.96, zorder=2
-            )
-
-    # Plot pivot_down markers in green
-    if "pivot_down" in df.columns:
-        mask_pivot_down = (df["pivot_down"].fillna(0).astype(int) == 1).to_numpy()
-        pivot_idx = df.index[mask_pivot_down]
-        if len(pivot_idx) > 0:
-            ax.scatter(
-                pivot_idx, close_y[mask_pivot_down], color="#2E7D32", marker="v", s=52,
-                label="pivot_down", alpha=0.95, zorder=2.2
-            )
-            
-    if "pivot_up" in df.columns:
-        mask_pivot_up = (df["pivot_up"].fillna(0).astype(int) == 1).to_numpy()
-        pivot_idx = df.index[mask_pivot_up]
-        if len(pivot_idx) > 0:
-            ax.scatter(
-                pivot_idx, close_y[mask_pivot_up], color="#1E0D32", marker="^", s=52,
-                label="pivot_up", alpha=0.95, zorder=2.2
-            )
-
-    # Plot atr_swing_flip as vertical lines on the close price chart
-    if "atr_swing_flip" in df.columns:
-        flip_idx = df.index[df["atr_swing_flip"].fillna(0).astype(int) == 1]
-        for flip_time in flip_idx:
-            ax.axvline(flip_time, color="#43A047", alpha=0.55, linestyle="--", linewidth=1.3, label="atr_swing_flip" if flip_time==flip_idx[0] else "")
-
-    ax.set_title("Close with atr_swing_label (±1 markers) & atr_swing_flip (vlines)", fontsize=14)
-    ax.set_ylabel("Close Price")
-    ax.legend(loc="upper left", fontsize=11, ncol=3)
-    ax.set_xlabel("Date")
-    plt.tight_layout()
-    plt.suptitle("Close Price with ATR Swing Label & Flip Points - Last Year", fontsize=17, y=1.02)
-    plt.subplots_adjust(top=0.93)
-    plt.show()
+    if save_plot_path is None:
+        save_plot_path = os.path.join(global_file_path, "Data", "plots", "atr_swing_plot.png")
+    plot_atr_swing_signals(df, save_path=save_plot_path)
 
 """    #drop any rows that have NA in these columns
     df = df.dropna(subset=["atr_swing_label", "close", "open", "high", "low", "volume"])
