@@ -5,7 +5,7 @@ import os
 from typing import Optional
 
 import pandas as pd
-from alpaca.data.enums import Adjustment
+from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -20,7 +20,9 @@ def _parse_time(ts: dt.datetime | str) -> dt.datetime:
             return ts.replace(tzinfo=dt.timezone.utc)
         return ts.astimezone(dt.timezone.utc)
     # assume ISO string; handle trailing Z
-    return dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+    return dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(
+        dt.timezone.utc
+    )
 
 
 def _to_timeframe(timeframe: str) -> TimeFrame:
@@ -31,7 +33,9 @@ def _to_timeframe(timeframe: str) -> TimeFrame:
     if tf_val.endswith("hour"):
         hours = int(tf_val.replace("hour", ""))
         return TimeFrame(hours, TimeFrameUnit.Hour)
-    raise ValueError(f"Unsupported timeframe '{timeframe}'. Use e.g. 1Min, 5Min, 15Min, 1Hour.")
+    raise ValueError(
+        f"Unsupported timeframe '{timeframe}'. Use e.g. 1Min, 5Min, 15Min, 1Hour."
+    )
 
 
 def fetch_intraday_spy(
@@ -55,7 +59,10 @@ def fetch_intraday_spy(
         save_path: optional path (csv/parquet) to persist results.
     """
     cfg = AlpacaConfig.from_env()
-    client = StockHistoricalDataClient(api_key=cfg.key_id, secret_key=cfg.secret_key)
+    client = StockHistoricalDataClient(
+        api_key=cfg.key_id,
+        secret_key=cfg.secret_key,
+    )
 
     tf = _to_timeframe(timeframe)
     start_dt = _parse_time(start)
@@ -68,6 +75,7 @@ def fetch_intraday_spy(
         end=end_dt,
         limit=limit,
         adjustment=Adjustment(adjustment),
+        feed=DataFeed.IEX,
     )
 
     bars = client.get_stock_bars(request)
@@ -93,11 +101,12 @@ def fetch_intraday_spy(
 
 if __name__ == "__main__":
     now_utc = dt.datetime.now(dt.timezone.utc)
-    default_start = now_utc - dt.timedelta(days=5)
+    default_start = now_utc - dt.timedelta(days=90)
     df = fetch_intraday_spy(
         start=default_start,
-        timeframe="5Min",
-        limit=20000,
-        save_path=os.path.join("Data", "spy_intraday_5m.parquet"),
+        timeframe="1hour",
+        limit=10000,
+        save_path=os.path.join("Data", "spy_intraday_1hr.parquet"),
     )
+
     print(df.tail())

@@ -74,6 +74,60 @@ def load_ticker_csv(ticker: str) -> pd.DataFrame:
     return df
 
 
+def load_ticker_parquet(
+    ticker: str,
+    parquet_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Load a parquet of OHLCV data for a ticker and normalize columns/index.
+
+    If parquet_path is None, defaults to Data/{ticker}_intraday.parquet.
+    """
+    slug = normalize_ticker(ticker).lower()
+    path = (
+        Path(parquet_path)
+        if parquet_path is not None
+        else DATA_DIR / f"{slug}_intraday_1hr.parquet"
+    )
+
+    df = pd.read_parquet(path)
+
+    # Standardize column names
+    rename_map = {
+        "timestamp": "date",
+        "Date": "date",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "adj_close": "adj_close",
+        "volume": "volume",
+    }
+    df = df.rename(columns=rename_map)
+
+    # Set datetime index
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=True)
+        df = df.set_index("date")
+    elif df.index.name:
+        df.index = pd.to_datetime(df.index, errors="coerce", utc=True)
+
+    df = df[df.index.notna()]
+
+    # Keep only standard OHLCV columns if present
+    keep_cols = [
+        c
+        for c in ["open", "high", "low", "close", "adj_close", "volume"]
+        if c in df.columns
+    ]
+    df = df[keep_cols]
+
+    for col in keep_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
+
+
 def add_date_features(df: pd.DataFrame) -> pd.DataFrame:
     df["day_of_week"] = df.index.dayofweek  # 0 = Monday … 4 = Friday
     df["day_of_month"] = df.index.day  # sometimes helps
@@ -128,10 +182,12 @@ def get_default_plot_path(ticker: str) -> Path:
 def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> None:
     """
     Plot OHLC candles with ATR swing labels, pivots, and flip markers for a quick visual check.
+    Uses compressed x positions to avoid gaps from non-trading days.
     """
     fig, ax = plt.subplots(figsize=(18, 6))
 
-    date_nums = mdates.date2num(df.index.to_pydatetime())
+    date_index = df.index
+    pos = np.arange(len(df))  # compressed positions
     open_y = df["open"].to_numpy()
     high_y = df["high"].to_numpy()
     low_y = df["low"].to_numpy()
@@ -151,6 +207,8 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
     up_color = "#1976D2"
     down_color = "#E53935"
 
+    width = 0.8
+
     # Marker positions
     pivot_up_y = high_y + up_offset * 1.2
     pivot_dn_y = low_y - down_offset * 1.2
@@ -158,11 +216,10 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
     swing_neg_y = close_y - down_offset
 
     # Wick lines
-    ax.vlines(date_nums, low_y, high_y, color=wick_color, linewidth=1.0, zorder=1)
+    ax.vlines(pos, low_y, high_y, color=wick_color, linewidth=1.0, zorder=1)
     # Candle bodies
-    width = 0.6
     ax.bar(
-        date_nums[up],
+        pos[up],
         close_y[up] - open_y[up],
         width=width,
         bottom=open_y[up],
@@ -172,7 +229,7 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
         zorder=1.2,
     )
     ax.bar(
-        date_nums[down],
+        pos[down],
         close_y[down] - open_y[down],
         width=width,
         bottom=open_y[down],
@@ -185,8 +242,8 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
     if "atr_swing_label" in df.columns:
         mask_pos = (df["atr_swing_label"].fillna(0) == 1).to_numpy()
         mask_neg = (df["atr_swing_label"].fillna(0) == -1).to_numpy()
-        pos_idx = date_nums[mask_pos]
-        neg_idx = date_nums[mask_neg]
+        pos_idx = pos[mask_pos]
+        neg_idx = pos[mask_neg]
         # Align with pivots when both occur
         if "pivot_down" in df.columns:
             mask_pivot_down = (df["pivot_down"].fillna(0).astype(int) == 1).to_numpy()
@@ -221,7 +278,7 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
 
     if "pivot_down" in df.columns:
         mask_pivot_down = (df["pivot_down"].fillna(0).astype(int) == 1).to_numpy()
-        pivot_idx = date_nums[mask_pivot_down]
+        pivot_idx = pos[mask_pivot_down]
         if len(pivot_idx) > 0:
             ax.scatter(
                 pivot_idx,
@@ -236,7 +293,7 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
 
     if "pivot_up" in df.columns:
         mask_pivot_up = (df["pivot_up"].fillna(0).astype(int) == 1).to_numpy()
-        pivot_idx = date_nums[mask_pivot_up]
+        pivot_idx = pos[mask_pivot_up]
         if len(pivot_idx) > 0:
             ax.scatter(
                 pivot_idx,
@@ -249,18 +306,6 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
                 zorder=2.2,
             )
 
-    if "atr_swing_flip" in df.columns:
-        flip_idx = date_nums[df["atr_swing_flip"].fillna(0).astype(int) == 1]
-        for flip_time in flip_idx:
-            ax.axvline(
-                flip_time,
-                color="#43A047",
-                alpha=0.55,
-                linestyle="--",
-                linewidth=1.3,
-                label="atr_swing_flip" if flip_time == flip_idx[0] else "",
-            )
-
     ax.set_title(
         "Close with atr_swing_label (+/-1 markers) & atr_swing_flip (vlines)",
         fontsize=14,
@@ -269,9 +314,22 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
     ax.legend(loc="upper left", fontsize=11, ncol=3)
     ax.set_xlabel("Date")
 
-    ax.xaxis.set_major_locator(mdates.DayLocator(interval=5))
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-    fig.autofmt_xdate()
+    dates = pd.Series(date_index)
+    day_start = dates.dt.normalize().ne(dates.dt.normalize().shift())
+    tick_positions = pos[day_start.to_numpy()]
+    tick_labels = dates[day_start].dt.strftime("%Y-%m-%d").to_list()
+    if len(tick_positions) > 25:
+        step = int(np.ceil(len(tick_positions) / 25))
+        tick_positions = tick_positions[::step]
+        tick_labels = tick_labels[::step]
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+
+    # Light vertical lines for each new day to improve readability
+    for x in tick_positions:
+        ax.axvline(
+            x, color="#d0d0d000", linestyle="--", linewidth=1, alpha=0.7, zorder=0.5
+        )
 
     plt.tight_layout()
     plt.suptitle(
@@ -303,7 +361,7 @@ def main(
     df = load_cached_features(cache_path) if use_cached else None
 
     if df is None:
-        df = load_ticker_csv(clean_ticker)
+        df = load_ticker_parquet(clean_ticker)
         print(df.head())
         print(df.info())
 
