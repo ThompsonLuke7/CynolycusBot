@@ -6,6 +6,11 @@ from Features import feature_engineering, test_leakage
 def parse_args():
     parser = argparse.ArgumentParser(description="Run feature engineering pipeline.")
     parser.add_argument(
+        "--ticker",
+        default="$SPY",
+        help='Ticker symbol to fetch and process (default: "$SPY").',
+    )
+    parser.add_argument(
         "--use-cached",
         dest="use_cached",
         action="store_true",
@@ -43,6 +48,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     feature_engineering.main(
+        ticker=args.ticker,
         use_cached=args.use_cached,
         save_processed=args.save_processed,
         save_plot_path=args.save_plot_path,

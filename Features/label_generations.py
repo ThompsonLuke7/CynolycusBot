@@ -72,23 +72,45 @@ def compute_capitulation_pivots(
     is_extreme_dd = drawdown_pct <= drawdown_thresh
 
     past_min = df[low_col].rolling(local_window, min_periods=1).min()
-    future_min = df[low_col].rolling(local_window, min_periods=1).min().shift(-(local_window - 1))
+    future_min = (
+        df[low_col]
+        .rolling(local_window, min_periods=1)
+        .min()
+        .shift(-(local_window - 1))
+    )
     local_low = (df[low_col] <= past_min) & (df[low_col] <= future_min)
 
     bullish_bar = df[close_col] > df[open_col]
     reclaim_prior = df[close_col] > df[close_col].shift(1)
-    snapback = (bullish_bar | reclaim_prior).rolling(snapback_bars, min_periods=1).max().astype(bool)
+    snapback = (
+        (bullish_bar | reclaim_prior)
+        .rolling(snapback_bars, min_periods=1)
+        .max()
+        .astype(bool)
+    )
 
     # ATR-based reclaim within a few bars after the extreme
     if "atr" in df.columns:
         atr = df["atr"]
     else:
-        atr = ta.atr(df.get("high", df[close_col]), df.get("low", df[close_col]), df[close_col], length=14)
+        atr = ta.atr(
+            df.get("high", df[close_col]),
+            df.get("low", df[close_col]),
+            df[close_col],
+            length=14,
+        )
     reclaim_level = df[low_col] + reversal_atr_mult * atr
-    fwd_reclaim = pd.concat(
-        [(df[close_col].shift(-k) >= reclaim_level) for k in range(1, reversal_confirm_bars + 1)],
-        axis=1,
-    ).max(axis=1).astype(bool)
+    fwd_reclaim = (
+        pd.concat(
+            [
+                (df[close_col].shift(-k) >= reclaim_level)
+                for k in range(1, reversal_confirm_bars + 1)
+            ],
+            axis=1,
+        )
+        .max(axis=1)
+        .astype(bool)
+    )
     snapback = snapback | fwd_reclaim
 
     volume_ok = pd.Series(True, index=df.index)
@@ -97,13 +119,16 @@ def compute_capitulation_pivots(
         volume_ok = df[volume_col] > (vol_mean * volume_mult)
         volume_ok = volume_ok.fillna(False)
 
-    capitulation_pivot = (is_extreme_dd & local_low & snapback & volume_ok).fillna(False)
+    capitulation_pivot = (is_extreme_dd & local_low & snapback & volume_ok).fillna(
+        False
+    )
     return capitulation_pivot
 
 
 # ----------------------------------------------------------------------
 # 2) ATR + Pivot-based swing labels (The best scheme)
 # ----------------------------------------------------------------------
+
 
 def add_atr_pivot_swing_labels(
     df: pd.DataFrame,
@@ -117,30 +142,14 @@ def add_atr_pivot_swing_labels(
     sl_mult: float = 0.5,
     max_holding: int = 20,
     base_label_col: str = "atr_swing_label",
-    *,
-    enable_capitulation: bool = True,
-    drawdown_lookback: int = 40,
-    drawdown_thresh: float = -0.05,  # e.g., -5% or -10% drop
-    local_window: int = 4,           # lookback for local min
-    snapback_bars: int = 2,
-    volume_mult: float | None = 1.5,
 ) -> pd.DataFrame:
     """
-    ATR-based swing labeling with "Capitulation" logic to catch deep bottoms.
+    ATR-based swing labeling using pivots only (no capitulation fallback).
     """
 
     high = df[high_col].to_numpy(dtype=float)
     low = df[low_col].to_numpy(dtype=float)
     close = df[close_col].to_numpy(dtype=float)
-    
-    # Optional: Volume check if column exists
-    if "volume" in df.columns and volume_mult is not None:
-        vol = df["volume"].to_numpy(dtype=float)
-        # Simple rolling avg volume for spike detection
-        vol_ma = df["volume"].rolling(20).mean().to_numpy(dtype=float)
-    else:
-        vol = None
-        vol_ma = None
 
     pivot_up = df[pivot_up_col].to_numpy(dtype=int)
     pivot_down = df[pivot_down_col].to_numpy(dtype=int)
@@ -151,15 +160,8 @@ def add_atr_pivot_swing_labels(
     df["atr"] = ta.atr(df[high_col], df[low_col], df[close_col], length=atr_length)
     atr = df["atr"].to_numpy(dtype=float)
 
-    # --- 1. Drawdown Calculation (New Factor) ---
-    # Rolling Max High to define "Peak"
-    rolling_peak = df[high_col].rolling(drawdown_lookback, min_periods=1).max()
-    # Drawdown %
-    dd_series = (df[close_col] - rolling_peak) / rolling_peak
-    is_in_drawdown = (dd_series < drawdown_thresh).to_numpy()
-
     # --- outputs ---
-    labels = np.zeros(n, dtype=float)          # -1, 0, +1
+    labels = np.zeros(n, dtype=float)  # -1, 0, +1
     entry_price = np.full(n, np.nan)
     exit_price = np.full(n, np.nan)
     holding_bars = np.full(n, np.nan)
@@ -170,34 +172,15 @@ def add_atr_pivot_swing_labels(
             continue
 
         # ============================================================
-        # LONG LOGIC: Standard Pivot OR Capitulation Catch
+        # LONG LOGIC: Standard Pivot
         # ============================================================
-        is_pivot_long = (pivot_down[i] == 1)
-        
-        # Check Capitulation (The "Added Factor")
-        is_capitulation_long = False
-        if enable_capitulation and is_in_drawdown[i]:
-            # 1. Are we at a local low relative to recent history?
-            #    (Checks if current low is lowest in last 'local_window' bars)
-            start_idx = max(0, i - local_window)
-            if low[i] == np.min(low[start_idx : i + 1]):
-                is_capitulation_long = True
-                
-                # Optional: Volume Spike Filter
-                if vol is not None and vol_ma is not None and not np.isnan(vol_ma[i]):
-                    if vol[i] < (vol_ma[i] * volume_mult):
-                        is_capitulation_long = False
+        is_pivot_long = pivot_down[i] == 1
 
-        if is_pivot_long or is_capitulation_long:
-            ep = close[i]
-            
-            # --- INTELLIGENT STOP LOSS ---
-            # If this is a capitulation trade (high volatility/fear), 
-            # we widen the stop to prevent being shaken out by wicks.
-            current_sl_mult = sl_mult * 2.0 if is_capitulation_long else sl_mult
-            
+        if is_pivot_long:
+            ep = low[i]
+
             tp = ep + tp_mult * atr[i]
-            sl = ep - current_sl_mult * atr[i]
+            sl = ep - sl_mult * atr[i]
 
             entry_price[i] = ep
 
@@ -218,32 +201,31 @@ def add_atr_pivot_swing_labels(
                     hit_bars = j - i
                     break
 
-            # If we already have a label (e.g. from pivot), overwrite it ONLY if 
+            # If we already have a label (e.g. from pivot), overwrite it ONLY if
             # the capitulation logic found a winner where pivot failed.
             # But for simplicity, we just take the result if it's currently 0.
             if labels[i] == 0:
                 labels[i] = hit_label
                 exit_price[i] = hit_exit
                 holding_bars[i] = hit_bars
-                realized_ret[i] = (hit_exit / ep - 1.0)
-            
+                realized_ret[i] = hit_exit / ep - 1.0
+
             # If pivot failed (stopped out) but capitulation (wider stop) would have won,
-            # you might want to force the capitulation logic. 
+            # you might want to force the capitulation logic.
             # Here, we prioritize the WIN (1) if both triggered.
             elif labels[i] == 0 and hit_label == 1:
                 labels[i] = 1
                 exit_price[i] = hit_exit
                 holding_bars[i] = hit_bars
-                realized_ret[i] = (hit_exit / ep - 1.0)
-
+                realized_ret[i] = hit_exit / ep - 1.0
 
         # ============================================================
         # SHORT LOGIC (Standard)
         # ============================================================
         elif pivot_up[i] == 1:
-            ep = close[i]
-            tp = ep - tp_mult * atr[i]   # profit target BELOW
-            sl = ep + sl_mult * atr[i]   # stop ABOVE
+            ep = high[i]
+            tp = ep - tp_mult * atr[i]  # profit target BELOW
+            sl = ep + sl_mult * atr[i]  # stop ABOVE
 
             entry_price[i] = ep
 
@@ -253,12 +235,12 @@ def add_atr_pivot_swing_labels(
 
             for j in range(i + 1, min(i + 1 + max_holding, n)):
                 if high[j] >= sl:
-                    hit_label = 0        # stopped out
+                    hit_label = 0  # stopped out
                     hit_exit = sl
                     hit_bars = j - i
                     break
                 if low[j] <= tp:
-                    hit_label = -1       # good short
+                    hit_label = -1  # good short
                     hit_exit = tp
                     hit_bars = j - i
                     break
@@ -266,7 +248,7 @@ def add_atr_pivot_swing_labels(
             labels[i] = hit_label
             exit_price[i] = hit_exit
             holding_bars[i] = hit_bars
-            realized_ret[i] = (hit_exit / ep - 1.0)
+            realized_ret[i] = hit_exit / ep - 1.0
 
     # Attach back to df
     df[base_label_col] = labels
@@ -274,7 +256,7 @@ def add_atr_pivot_swing_labels(
     df["atr_exit_price"] = exit_price
     df["atr_holding_bars"] = holding_bars
     df["atr_realized_return"] = realized_ret
-    
+
     # Binary labels
     df["long_swing_label"] = (df[base_label_col] == 1.0).astype("Int64")
     df["short_swing_label"] = (df[base_label_col] == -1.0).astype("Int64")
@@ -308,7 +290,9 @@ def add_pullback_entry_labels(
         return df
 
     if atr_col not in df.columns:
-        df[atr_col] = ta.atr(df[high_col], df[low_col], df[close_col], length=atr_length)
+        df[atr_col] = ta.atr(
+            df[high_col], df[low_col], df[close_col], length=atr_length
+        )
 
     labels = pd.Series(0, index=df.index, dtype="Int64")
     ranks = pd.Series(pd.NA, index=df.index, dtype="Int64")
@@ -350,6 +334,7 @@ def add_pullback_entry_labels(
     df[label_col] = labels
     df[rank_col] = ranks
     return df
+
 
 # ----------------------------------------------------------------------
 # 4) Triple Barrier label (pure price-based, no pivots required)
@@ -474,7 +459,9 @@ def add_zigzag_leg_labels(
             zz = df[candidate]
         else:
             # Compute explicitly with chosen sensitivity
-            zz_tmp = ta.zigzag(df["high"], df["low"], df["close"], percent=percent, legs=legs)
+            zz_tmp = ta.zigzag(
+                df["high"], df["low"], df["close"], percent=percent, legs=legs
+            )
             zz = zz_tmp.iloc[:, 0] if isinstance(zz_tmp, pd.DataFrame) else zz_tmp
 
     zz_vals = zz.to_numpy(dtype=float)
@@ -503,6 +490,7 @@ def add_zigzag_leg_labels(
 
     df[label_col] = pd.Series(labels, index=df.index).astype("Int64")
     return df
+
 
 # ----------------------------------------------------------------------
 # Helpers: handle multiple zigzag variants and visualize
@@ -556,6 +544,7 @@ def plot_zigzags_vs_close(
     ax.grid(True, linestyle="--", alpha=0.3)
     fig.tight_layout()
     return fig, ax
+
 
 def add_atr_leg_segmentation_labels(
     df: pd.DataFrame,
@@ -721,6 +710,7 @@ def add_atr_leg_segmentation_labels(
 
     return df
 
+
 # ----------------------------------------------------------------------
 # Helper: run all label builders in one call
 # ----------------------------------------------------------------------
@@ -760,21 +750,22 @@ def add_all_labels(
     df = add_next_day_direction_label(df, **next_day_kwargs)
     df = add_atr_pivot_swing_labels(df, **atr_pivot_kwargs)
     df = add_pullback_entry_labels(df, **pullback_kwargs)
-    df = add_forward_return_label(df, **fwd_ret_kwargs)
     df = add_triple_barrier_labels(df, **triple_barrier_kwargs)
     df = add_zigzag_leg_labels(df, **zigzag_kwargs)
     df = add_atr_leg_segmentation_labels(df, **atr_leg_kwargs)
 
     return df
 
+
 def plot_zig_zag(df):
     df = add_multiple_zigzag_leg_labels(df)
     fig, ax = plot_zigzags_vs_close(df)
     plt.show()
-    
+
+
 def main():
-    print('goodbye')
+    print("goodbye")
+
 
 if __name__ == "__main__":
     main()
-    

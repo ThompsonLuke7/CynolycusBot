@@ -1,25 +1,61 @@
-import pandas as pd
-import numpy as np
 import os
-from Features.pandas_ta_indicators import add_all_pandasta_indicators
-from Features.label_generations import add_all_labels, plot_zig_zag
-from Features.custom_indicators import add_tmo, add_rsilg_fe_gauss, add_fractal_pivots, add_atr_swing_state_features, add_vmd_return_features
-import matplotlib.pyplot as plt
+from pathlib import Path
+
 import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from Data.retrieve_data import get_output_path, normalize_ticker, retrieve_data
+from Features.custom_indicators import (
+    add_atr_swing_state_features,
+    add_fractal_pivots,
+    add_rsilg_fe_gauss,
+    add_tmo,
+    add_vmd_return_features,
+)
+from Features.label_generations import add_all_labels, plot_zig_zag
+from Features.pandas_ta_indicators import add_all_pandasta_indicators
 
-global_file_path = "C:/Users/luket/CynolycusBot"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "Data"
+PROCESSED_DIR = DATA_DIR / "processed"
+global_file_path = str(PROJECT_ROOT)
 
-def load_spy_csv() -> pd.DataFrame:
-    path = os.path.join(global_file_path, "Data", "spy_data.csv")
+
+def get_raw_data_path(ticker: str) -> Path:
+    """
+    Build the CSV path for the requested ticker under Data/.
+    """
+    return get_output_path(ticker, base_dir=DATA_DIR)
+
+
+def ensure_raw_data(ticker: str) -> Path:
+    """
+    Make sure we have a CSV for the ticker; download it if missing.
+    """
+    raw_path = get_raw_data_path(ticker)
+    if not raw_path.exists():
+        df_raw = retrieve_data(ticker)
+        df_raw.to_csv(raw_path)
+        print(f"Downloaded {normalize_ticker(ticker)} data to {raw_path}")
+    return raw_path
+
+
+def load_ticker_csv(ticker: str) -> pd.DataFrame:
+    path = ensure_raw_data(ticker)
     df = pd.read_csv(path, index_col=0, parse_dates=[0], date_format="%Y-%m-%d")
     df.index = pd.to_datetime(df.index, errors="coerce", format="%Y-%m-%d")
-    # 2) Drop rows where index is NaT (these are 'Ticker', 'Date', etc.)
+    # Drop rows where index is NaT (these are 'Ticker', 'Date', etc.)
     df = df[df.index.notna()]
-    # 1) Keep only the columns we care about initially (drop any 'Symbol', etc.)
-    keep_cols = [c for c in df.columns if c in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]]
+    # Keep only the columns we care about initially (drop any 'Symbol', etc.)
+    keep_cols = [
+        c
+        for c in df.columns
+        if c in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+    ]
     df = df[keep_cols]
 
-    # 2) Rename to lowercase OHLCV for pandas_ta
+    # Rename to lowercase OHLCV for pandas_ta
     rename_map = {
         "Open": "open",
         "High": "high",
@@ -30,21 +66,23 @@ def load_spy_csv() -> pd.DataFrame:
     }
     df = df.rename(columns=rename_map)
 
-    # 3) Force OHLCV columns to numeric
+    # Force OHLCV columns to numeric
     for col in ["open", "high", "low", "close", "adj_close", "volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df
 
+
 def add_date_features(df: pd.DataFrame) -> pd.DataFrame:
-    df["day_of_week"] = df.index.dayofweek        # 0 = Monday … 4 = Friday
-    df["day_of_month"] = df.index.day            # sometimes helps
+    df["day_of_week"] = df.index.dayofweek  # 0 = Monday … 4 = Friday
+    df["day_of_month"] = df.index.day  # sometimes helps
     df["month"] = df.index.month
     df["quarter"] = df.index.quarter
     df["is_month_end"] = df.index.is_month_end.astype(int)
     df["is_month_start"] = df.index.is_month_start.astype(int)
     return df
+
 
 def add_all_custom_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = add_tmo(df)
@@ -55,21 +93,21 @@ def add_all_custom_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def get_processed_feature_path(filename: str = "spy_features_with_labels.parquet") -> str:
+def get_processed_feature_path(ticker: str) -> Path:
     """
     Build the path where the processed feature/label matrix is stored.
     Ensures the directory exists so we can write the cache.
     """
-    output_dir = os.path.join(global_file_path, "Data", "processed")
-    os.makedirs(output_dir, exist_ok=True)
-    return os.path.join(output_dir, filename)
+    slug = normalize_ticker(ticker).lower()
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    return PROCESSED_DIR / f"{slug}_features_with_labels.parquet"
 
 
-def load_cached_features(cache_path: str):
+def load_cached_features(cache_path: Path):
     """
     Load a previously cached feature matrix if present, otherwise return None.
     """
-    if os.path.exists(cache_path):
+    if cache_path.exists():
         cached = pd.read_parquet(cache_path)
         if not isinstance(cached.index, pd.DatetimeIndex):
             cached.index = pd.to_datetime(cached.index, errors="coerce")
@@ -77,6 +115,14 @@ def load_cached_features(cache_path: str):
         print(f"Loaded cached features + labels from {cache_path}")
         return cached
     return None
+
+
+def get_default_plot_path(ticker: str) -> Path:
+    slug = normalize_ticker(ticker).lower()
+    plots_dir = DATA_DIR / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    filename = "atr_swing_plot.png" if slug == "spy" else f"{slug}_atr_swing_plot.png"
+    return plots_dir / filename
 
 
 def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> None:
@@ -115,8 +161,26 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
     ax.vlines(date_nums, low_y, high_y, color=wick_color, linewidth=1.0, zorder=1)
     # Candle bodies
     width = 0.6
-    ax.bar(date_nums[up], close_y[up] - open_y[up], width=width, bottom=open_y[up], color=up_color, edgecolor="none", label="Bull candle", zorder=1.2)
-    ax.bar(date_nums[down], close_y[down] - open_y[down], width=width, bottom=open_y[down], color=down_color, edgecolor="none", label="Bear candle", zorder=1.2)
+    ax.bar(
+        date_nums[up],
+        close_y[up] - open_y[up],
+        width=width,
+        bottom=open_y[up],
+        color=up_color,
+        edgecolor="none",
+        label="Bull candle",
+        zorder=1.2,
+    )
+    ax.bar(
+        date_nums[down],
+        close_y[down] - open_y[down],
+        width=width,
+        bottom=open_y[down],
+        color=down_color,
+        edgecolor="none",
+        label="Bear candle",
+        zorder=1.2,
+    )
 
     if "atr_swing_label" in df.columns:
         mask_pos = (df["atr_swing_label"].fillna(0) == 1).to_numpy()
@@ -134,13 +198,25 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
             swing_neg_y[coincide] = pivot_up_y[coincide]
         if len(pos_idx) > 0:
             ax.scatter(
-                pos_idx, swing_pos_y[mask_pos], color="#1976D2", marker="^", s=42,
-                label="atr_swing_label = +1", alpha=0.96, zorder=2
+                pos_idx,
+                swing_pos_y[mask_pos],
+                color="#1976D2",
+                marker="^",
+                s=42,
+                label="atr_swing_label = +1",
+                alpha=0.96,
+                zorder=2,
             )
         if len(neg_idx) > 0:
             ax.scatter(
-                neg_idx, swing_neg_y[mask_neg], color="#E53935", marker="v", s=42,
-                label="atr_swing_label = -1", alpha=0.96, zorder=2
+                neg_idx,
+                swing_neg_y[mask_neg],
+                color="#E53935",
+                marker="v",
+                s=42,
+                label="atr_swing_label = -1",
+                alpha=0.96,
+                zorder=2,
             )
 
     if "pivot_down" in df.columns:
@@ -148,8 +224,14 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
         pivot_idx = date_nums[mask_pivot_down]
         if len(pivot_idx) > 0:
             ax.scatter(
-                pivot_idx, pivot_dn_y[mask_pivot_down], color="#2E7D32", marker="v", s=52,
-                label="pivot_down", alpha=0.95, zorder=2.2
+                pivot_idx,
+                pivot_dn_y[mask_pivot_down],
+                color="#2E7D32",
+                marker="v",
+                s=52,
+                label="pivot_down",
+                alpha=0.95,
+                zorder=2.2,
             )
 
     if "pivot_up" in df.columns:
@@ -157,19 +239,32 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
         pivot_idx = date_nums[mask_pivot_up]
         if len(pivot_idx) > 0:
             ax.scatter(
-                pivot_idx, pivot_up_y[mask_pivot_up], color="#1E0D32", marker="^", s=52,
-                label="pivot_up", alpha=0.95, zorder=2.2
+                pivot_idx,
+                pivot_up_y[mask_pivot_up],
+                color="#1E0D32",
+                marker="^",
+                s=52,
+                label="pivot_up",
+                alpha=0.95,
+                zorder=2.2,
             )
 
     if "atr_swing_flip" in df.columns:
         flip_idx = date_nums[df["atr_swing_flip"].fillna(0).astype(int) == 1]
         for flip_time in flip_idx:
             ax.axvline(
-                flip_time, color="#43A047", alpha=0.55, linestyle="--", linewidth=1.3,
-                label="atr_swing_flip" if flip_time == flip_idx[0] else ""
+                flip_time,
+                color="#43A047",
+                alpha=0.55,
+                linestyle="--",
+                linewidth=1.3,
+                label="atr_swing_flip" if flip_time == flip_idx[0] else "",
             )
 
-    ax.set_title("Close with atr_swing_label (+/-1 markers) & atr_swing_flip (vlines)", fontsize=14)
+    ax.set_title(
+        "Close with atr_swing_label (+/-1 markers) & atr_swing_flip (vlines)",
+        fontsize=14,
+    )
     ax.set_ylabel("Close Price")
     ax.legend(loc="upper left", fontsize=11, ncol=3)
     ax.set_xlabel("Date")
@@ -179,7 +274,11 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
     fig.autofmt_xdate()
 
     plt.tight_layout()
-    plt.suptitle("Close Price with ATR Swing Label & Flip Points - Last Year", fontsize=17, y=1.02)
+    plt.suptitle(
+        "Close Price with ATR Swing Label & Flip Points - Last Year",
+        fontsize=17,
+        y=1.02,
+    )
     plt.subplots_adjust(top=0.93)
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -189,22 +288,25 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
 
 
 def main(
+    ticker: str = "$SPY",
     use_cached: bool = True,
     save_processed: bool = True,
-    save_plot_path: str | None = None,
+    save_plot_path: str | Path | None = None,
 ) -> None:
     """
-    Build the full feature/label matrix once, cache it, and reuse it for plotting.
+    Build the full feature/label matrix once for the chosen ticker, cache it, and reuse it for plotting.
     Set use_cached=False to force a recompute, or save_processed=False to skip writing.
+    Ticker defaults to $SPY; caches and plot outputs are separated per ticker.
     """
-    cache_path = get_processed_feature_path()
+    clean_ticker = normalize_ticker(ticker)
+    cache_path = get_processed_feature_path(clean_ticker)
     df = load_cached_features(cache_path) if use_cached else None
 
     if df is None:
-        df = load_spy_csv()
+        df = load_ticker_csv(clean_ticker)
         print(df.head())
         print(df.info())
-        
+
         # Add ALL pandas_ta indicators except statistics & performance
         df = add_all_pandasta_indicators(df, verbose=True)
         print(df.head())
@@ -215,8 +317,6 @@ def main(
         df = add_all_custom_indicators(df)
         df = add_date_features(df)
 
-        df = add_all_labels(df)
-
         if save_processed:
             df.to_parquet(cache_path, index=True)
             print(f"Saved processed features + labels to {cache_path}")
@@ -226,9 +326,12 @@ def main(
         one_year_ago = last_date - pd.DateOffset(years=1)
         df = df[df.index >= one_year_ago]
 
+    df = add_all_labels(df)
+
     if save_plot_path is None:
-        save_plot_path = os.path.join(global_file_path, "Data", "plots", "atr_swing_plot.png")
-    plot_atr_swing_signals(df, save_path=save_plot_path)
+        save_plot_path = get_default_plot_path(clean_ticker)
+    plot_atr_swing_signals(df, save_path=str(save_plot_path))
+
 
 """    #drop any rows that have NA in these columns
     df = df.dropna(subset=["atr_swing_label", "close", "open", "high", "low", "volume"])
