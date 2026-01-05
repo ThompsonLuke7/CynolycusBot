@@ -101,7 +101,7 @@ def fetch_intraday_spy(
 
 if __name__ == "__main__":
     now_utc = dt.datetime.now(dt.timezone.utc)
-    default_start = now_utc - dt.timedelta(days=90)
+    default_start = now_utc - dt.timedelta(days=45)
     df = fetch_intraday_spy(
         start=default_start,
         timeframe="1hour",
