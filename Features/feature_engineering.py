@@ -90,11 +90,10 @@ def main(
         save_plot_path = get_default_plot_path(clean_ticker, DATA_DIR)
     plot_atr_swing_signals(df, save_path=str(save_plot_path))
 
-
-"""    #drop any rows that have NA in these columns
+    # drop any rows that have NA in these columns
     df = df.dropna(subset=["atr_swing_label", "close", "open", "high", "low", "volume"])
 
-    # --- NEW: binary labels for two-model swing detector ---
+    # --- binary labels for two-model swing detector ---
     df["long_swing_label"] = (df["atr_swing_label"] == 1.0).astype(np.int64)
     df["short_swing_label"] = (df["atr_swing_label"] == -1.0).astype(np.int64)
 
@@ -110,7 +109,6 @@ def main(
     # Features = everything except labels
     feature_cols = [c for c in df.columns if c not in labels]
 
-    
     # Start with only feature columns so labels never leak back in
     feature_df = df[feature_cols]
 
@@ -129,18 +127,26 @@ def main(
     np.save(os.path.join(output_dir, "X_spy_daily.npy"), X)
     np.save(os.path.join(output_dir, "y_spy_daily_long.npy"), y_long)
     np.save(os.path.join(output_dir, "y_spy_daily_short.npy"), y_short)
-    
+
     X_df = feature_df.astype(np.float32)
     y_long_df = df[["long_swing_label"]].astype("int64")
     y_short_df = df[["short_swing_label"]].astype("int64")
     close_df = df[["close"]].astype(float)
 
     X_df.to_parquet(os.path.join(output_dir, "X_spy_daily.parquet"), index=False)
-    y_long_df.to_parquet(os.path.join(output_dir, "y_spy_daily_long.parquet"), index=False)
-    y_short_df.to_parquet(os.path.join(output_dir, "y_spy_daily_short.parquet"), index=False)
-    close_df.to_parquet(os.path.join(output_dir, "close_spy_daily.parquet"), index=False)
+    y_long_df.to_parquet(
+        os.path.join(output_dir, "y_spy_daily_long.parquet"), index=False
+    )
+    y_short_df.to_parquet(
+        os.path.join(output_dir, "y_spy_daily_short.parquet"), index=False
+    )
+    close_df.to_parquet(
+        os.path.join(output_dir, "close_spy_daily.parquet"), index=False
+    )
     labels_df = df[labels]
-    labels_df.to_parquet(os.path.join(output_dir, "labels_spy_daily.parquet"), index=False)
+    labels_df.to_parquet(
+        os.path.join(output_dir, "labels_spy_daily.parquet"), index=False
+    )
     # Optional: keep feature names for reference
     with open(os.path.join(output_dir, "features_spy_daily.txt"), "w") as f:
         for c in feature_cols:
@@ -149,7 +155,7 @@ def main(
     print("X shape:", X.shape)
     print("y_long shape:", y_long.shape)
     print("y_short shape:", y_short.shape)
-    
+
     print("describe:")
     print(df.describe().T)
     print("corr:")
@@ -161,27 +167,29 @@ def main(
     print("atr_swing_label value counts:")
     print(df["atr_swing_label"].value_counts())
 
-
     corr = feature_df.corr().abs()
 
     # Upper triangle mask
-    upper = corr.where(
-        np.triu(np.ones(corr.shape), k=1).astype(bool)
-    )
+    upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
 
-    for col in ['high','low','open','atr','tmo_main','tmo_signal','pivot_up','pivot_down']:
+    for col in [
+        "high",
+        "low",
+        "open",
+        "atr",
+        "tmo_main",
+        "tmo_signal",
+        "pivot_up",
+        "pivot_down",
+    ]:
         print(f"\nHighly correlated with {col}:")
-        print(
-            corr[col][corr[col] > 0.999].sort_values(ascending=False)
-        )
+        print(corr[col][corr[col] > 0.999].sort_values(ascending=False))
 
-    core_keep = ['high', 'low', 'open', 'close', 'volume']
+    core_keep = ["high", "low", "open", "close", "volume"]
 
     to_drop = [
-        col for col in upper.columns
-        if any(upper[col] > 0.999) and col not in core_keep
+        col for col in upper.columns if any(upper[col] > 0.999) and col not in core_keep
     ]
-
 
     print("Dropping redundant features:", len(to_drop))
     print(to_drop)
@@ -189,19 +197,21 @@ def main(
     feature_df_reduced = feature_df.drop(columns=to_drop)
     print("Original feature shape:", feature_df.shape)
     print("Reduced feature shape:", feature_df_reduced.shape)
-    
-    constant_cols = [c for c in feature_df_reduced.columns if feature_df_reduced[c].nunique() <= 1]
+
+    constant_cols = [
+        c for c in feature_df_reduced.columns if feature_df_reduced[c].nunique() <= 1
+    ]
     print("constant cols:")
     print(constant_cols)
-    
+
     feature_df_final = feature_df_reduced.drop(columns=constant_cols)
-    
+
     X = feature_df_final.to_numpy(dtype=np.float32)
     np.save(os.path.join(output_dir, "X_spy_daily.npy"), X)
-    
+
     X_df = feature_df_final.astype(np.float32)
     X_df.to_parquet(os.path.join(output_dir, "X_spy_daily.parquet"), index=False)
-    """
+
 
 if __name__ == "__main__":
     main()
