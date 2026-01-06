@@ -1,26 +1,32 @@
+from pathlib import Path
+
 import numpy as np
-from sklearn.metrics import f1_score, confusion_matrix
+from sklearn.metrics import confusion_matrix, f1_score
 
 from models.ga_xgboost.ga_xgboost import GAXGBoostFeatureSelector
 
 # ------------------------------
-# Load shared features + 2 labels
+# Load pre-split features + labels
 # ------------------------------
-X = np.load("data/processed/X_spy_daily.npy")
-y_long = np.load("data/processed/y_spy_daily_long.npy")   # 1 = good long swing
-y_short = np.load("data/processed/y_spy_daily_short.npy") # 1 = good short swing
+SPLIT_ROOT = Path("Data/processed/splits/spy_daily")
 
 
-# Chronological time-series split (no shuffling)
-n = len(X)
-split = int(n * 0.92)   # first 92% train, last 8% test
+def load_split(name: str):
+    """Load a specific split (train/val/test) if it exists."""
+    split_dir = SPLIT_ROOT / name
+    X = np.load(split_dir / f"X_spy_daily_{name}.npy")
+    y_long = np.load(split_dir / f"y_spy_daily_long_{name}.npy")  # 1 = good long swing
+    y_short = np.load(
+        split_dir / f"y_spy_daily_short_{name}.npy"
+    )  # 1 = good short swing
+    return X, y_long, y_short
 
-X_train, X_test = X[:split], X[split:]
-y_long_train, y_long_test = y_long[:split], y_long[split:]
-y_short_train, y_short_test = y_short[:split], y_short[split:]
 
-print("Train window:", 0, "→", split)
-print("Test window:", split, "→", n)
+X_train, y_long_train, y_short_train = load_split("train")
+X_test, y_long_test, y_short_test = load_split("test")
+
+print(f"Loaded train split: {X_train.shape}")
+print(f"Loaded test split:  {X_test.shape}")
 
 
 def train_and_eval_side(y_train, y_test, side_name):
@@ -33,7 +39,9 @@ def train_and_eval_side(y_train, y_test, side_name):
     neg = (y_train == 0).sum()
     scale = neg / max(pos, 1)
     print(f"\n=== {side_name} side ===")
-    print(f"{side_name} train positives: {pos}, negatives: {neg}, scale_pos_weight: {scale:.2f}")
+    print(
+        f"{side_name} train positives: {pos}, negatives: {neg}, scale_pos_weight: {scale:.2f}"
+    )
 
     # Start from default XGB params and add scale_pos_weight
     base_selector = GAXGBoostFeatureSelector()
@@ -45,7 +53,7 @@ def train_and_eval_side(y_train, y_test, side_name):
         generations=30,
         crossover_rate=0.5,
         mutation_rate=0.375,
-        val_size=0.08,           # last 8% of TRAIN used as GA validation
+        val_size=0.08,  # last 8% of TRAIN used as GA validation
         random_state=42,
         xgb_params=xgb_params,
     )
@@ -77,8 +85,8 @@ short_selector = train_and_eval_side(y_short_train, y_short_test, "SHORT")
 # ------------------------------
 # Tiny inference example
 # ------------------------------
-# Use the last bar in the full dataset as an example input
-x_latest = X[-1:].astype(np.float32)
+# Use the last bar in the test split as an example input
+x_latest = X_test[-1:].astype(np.float32)
 
 long_pred = long_selector.predict(x_latest)[0]
 short_pred = short_selector.predict(x_latest)[0]
