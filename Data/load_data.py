@@ -6,7 +6,36 @@ from Data.retrieve_data import get_output_path, normalize_ticker, retrieve_data
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "Data"
-PROCESSED_DIR = DATA_DIR / "processed"
+
+
+def get_ticker_data_dir(ticker: str, base_dir: Path | None = None) -> Path:
+    base = base_dir if base_dir is not None else DATA_DIR
+    slug = normalize_ticker(ticker).lower()
+    return base / slug
+
+
+def get_ticker_raw_dir(ticker: str, base_dir: Path | None = None) -> Path:
+    return get_ticker_data_dir(ticker, base_dir) / "raw"
+
+
+def get_ticker_processed_dir(ticker: str, base_dir: Path | None = None) -> Path:
+    return get_ticker_data_dir(ticker, base_dir) / "processed"
+
+
+def get_ticker_processed_base_dir(ticker: str, base_dir: Path | None = None) -> Path:
+    return get_ticker_processed_dir(ticker, base_dir) / "base"
+
+
+def get_ticker_processed_split_dir(ticker: str, base_dir: Path | None = None) -> Path:
+    return get_ticker_processed_dir(ticker, base_dir) / "splits"
+
+
+def get_ticker_processed_stats_dir(ticker: str, base_dir: Path | None = None) -> Path:
+    return get_ticker_processed_dir(ticker, base_dir) / "stats"
+
+
+def get_ticker_plots_dir(ticker: str, base_dir: Path | None = None) -> Path:
+    return get_ticker_data_dir(ticker, base_dir) / "plots"
 
 
 def get_raw_data_path(ticker: str) -> Path:
@@ -72,11 +101,7 @@ def load_ticker_parquet(
     If parquet_path is None, defaults to Data/{ticker}_intraday.parquet.
     """
     slug = normalize_ticker(ticker).lower()
-    path = (
-        Path(parquet_path)
-        if parquet_path is not None
-        else DATA_DIR / f"{slug}_intraday_1hr.parquet"
-    )
+    path = resolve_intraday_parquet_path(ticker, parquet_path=parquet_path)
 
     df = pd.read_parquet(path)
 
@@ -113,14 +138,39 @@ def load_ticker_parquet(
     return df
 
 
-def get_processed_feature_path(ticker: str) -> Path:
+def resolve_intraday_parquet_path(
+    ticker: str, parquet_path: str | Path | None = None
+) -> Path:
+    """
+    Resolve the parquet path for a ticker's intraday data.
+    """
+    slug = normalize_ticker(ticker).lower()
+    if parquet_path is not None:
+        return Path(parquet_path)
+
+    raw_dir = get_ticker_raw_dir(ticker)
+    candidates = sorted(raw_dir.glob(f"{slug}_intraday_*.parquet"))
+    if candidates:
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    path = raw_dir / f"{slug}_intraday_1hr.parquet"
+    legacy_path = DATA_DIR / f"{slug}_intraday_1hr.parquet"
+    if not path.exists() and legacy_path.exists():
+        return legacy_path
+    return path
+
+
+def get_processed_feature_path(ticker: str, prefix: str | None = None) -> Path:
     """
     Build the path where the processed feature/label matrix is stored.
     Ensures the directory exists so we can write the cache.
     """
     slug = normalize_ticker(ticker).lower()
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    return PROCESSED_DIR / f"{slug}_features_with_labels.parquet"
+    processed_dir = get_ticker_processed_dir(ticker)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    if prefix is None:
+        return processed_dir / f"{slug}_features_with_labels.parquet"
+    return processed_dir / f"{prefix}_features_with_labels.parquet"
 
 
 def load_cached_features(cache_path: Path):

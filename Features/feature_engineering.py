@@ -5,9 +5,15 @@ import numpy as np
 import pandas as pd
 from Data.load_data import (
     get_processed_feature_path,
+    get_ticker_data_dir,
+    get_ticker_processed_base_dir,
+    resolve_intraday_parquet_path,
     load_cached_features,
     load_ticker_parquet,
 )
+from Data.plots.all_labels_plot import plot_all_labels
+from Data.plots.swing_state_machine_plot import plot_swing_state_machine_signals
+from Data.plots.leg_segmentation_plot import plot_leg_segmentation_signals
 from Data.plots.atr_swing_plot import get_default_plot_path, plot_atr_swing_signals
 from Data.retrieve_data import normalize_ticker
 from Features.custom_indicators import (
@@ -49,6 +55,16 @@ SWING_LABEL_COLUMNS = [
     "atr_cont_label_exit_price",
     "atr_cont_label_holding_bars",
     "atr_cont_label_realized_return",
+    # Leg segmentation labels
+    "atr_leg_label",
+    "leg_up_label",
+    "leg_down_label",
+    # State machine gates (label-like, avoid leakage)
+    "p_long_state_gate",
+    "p_short_state_gate",
+    "p_long_pending",
+    "p_short_pending",
+    "p_flat_state_gate",
 ]
 SCALE_FEATURE_COLUMNS = {
     # Raw price & volume (only if kept as-is)
@@ -227,7 +243,9 @@ def add_binary_swing_labels(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_feature_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     feature_cols = [
-        c for c in df.columns if c not in SWING_LABEL_COLUMNS and c not in LEAKY_FEATURE_COLUMNS
+        c
+        for c in df.columns
+        if c not in SWING_LABEL_COLUMNS and c not in LEAKY_FEATURE_COLUMNS
     ]
     feature_df = df[feature_cols]
     return feature_df, feature_cols
@@ -346,31 +364,50 @@ def save_feature_outputs(
     feature_df: pd.DataFrame,
     feature_cols: list[str],
     df: pd.DataFrame,
+    *,
+    prefix: str = "spy_daily",
+    label_mode: str = "swing",
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     X = feature_df.to_numpy(dtype=np.float32)
-    y_long = df["long_swing_label"].to_numpy(dtype=np.int64)
-    y_short = df["short_swing_label"].to_numpy(dtype=np.int64)
+    if label_mode == "swing":
+        long_col = "long_swing_label"
+        short_col = "short_swing_label"
+        label_suffix = "swing"
+    elif label_mode == "leg":
+        long_col = "leg_up_label"
+        short_col = "leg_down_label"
+        label_suffix = "leg"
+    else:
+        raise ValueError(f"Unknown label_mode: {label_mode}")
+
+    y_long = df[long_col].to_numpy(dtype=np.int64)
+    y_short = df[short_col].to_numpy(dtype=np.int64)
     close = df["close"].to_numpy(dtype=float)
 
-    np.save(output_dir / "close_spy_daily.npy", close)
-    np.save(output_dir / "X_spy_daily.npy", X)
-    np.save(output_dir / "y_spy_daily_long.npy", y_long)
-    np.save(output_dir / "y_spy_daily_short.npy", y_short)
+    np.save(output_dir / f"close_{prefix}.npy", close)
+    np.save(output_dir / f"X_{prefix}.npy", X)
+    np.save(output_dir / f"y_{prefix}_{label_suffix}_long.npy", y_long)
+    np.save(output_dir / f"y_{prefix}_{label_suffix}_short.npy", y_short)
 
     X_df = feature_df.astype(np.float32)
-    y_long_df = df[["long_swing_label"]].astype("int64")
-    y_short_df = df[["short_swing_label"]].astype("int64")
+    y_long_df = df[[long_col]].astype("int64")
+    y_short_df = df[[short_col]].astype("int64")
     close_df = df[["close"]].astype(float)
 
-    X_df.to_parquet(output_dir / "X_spy_daily.parquet", index=False)
-    y_long_df.to_parquet(output_dir / "y_spy_daily_long.parquet", index=False)
-    y_short_df.to_parquet(output_dir / "y_spy_daily_short.parquet", index=False)
-    close_df.to_parquet(output_dir / "close_spy_daily.parquet", index=False)
-    labels_df = df[SWING_LABEL_COLUMNS]
-    labels_df.to_parquet(output_dir / "labels_spy_daily.parquet", index=False)
-    with open(output_dir / "features_spy_daily.txt", "w") as f:
+    X_df.to_parquet(output_dir / f"X_{prefix}.parquet", index=False)
+    y_long_df.to_parquet(
+        output_dir / f"y_{prefix}_{label_suffix}_long.parquet", index=False
+    )
+    y_short_df.to_parquet(
+        output_dir / f"y_{prefix}_{label_suffix}_short.parquet", index=False
+    )
+    close_df.to_parquet(output_dir / f"close_{prefix}.parquet", index=False)
+    label_cols = [c for c in SWING_LABEL_COLUMNS if c in df.columns]
+    labels_df = df[label_cols]
+    labels_df.to_parquet(output_dir / f"labels_{prefix}.parquet", index=False)
+    with open(output_dir / f"features_{prefix}.txt", "w") as f:
         for c in feature_cols:
             f.write(c + "\n")
 
@@ -384,6 +421,7 @@ def main(
     use_cached: bool = True,
     save_processed: bool = True,
     save_plot_path: str | Path | None = None,
+    label_mode: str = "leg",
 ) -> None:
     """
     Build the full feature/label matrix once for the chosen ticker, cache it, and reuse it for plotting.
@@ -391,11 +429,19 @@ def main(
     Ticker defaults to $SPY; caches and plot outputs are separated per ticker.
     """
     clean_ticker = normalize_ticker(ticker)
-    cache_path = get_processed_feature_path(clean_ticker)
+    ticker_slug = clean_ticker.lower()
+    raw_parquet_path = resolve_intraday_parquet_path(clean_ticker)
+    prefix = (
+        raw_parquet_path.stem
+        if raw_parquet_path is not None
+        else f"{ticker_slug}_daily"
+    )
+    ticker_data_dir = get_ticker_data_dir(clean_ticker)
+    cache_path = get_processed_feature_path(clean_ticker, prefix=prefix)
     df = load_cached_features(cache_path) if use_cached else None
 
     if df is None:
-        df = load_ticker_parquet(clean_ticker)
+        df = load_ticker_parquet(clean_ticker, parquet_path=raw_parquet_path)
         print(df.head())
         print(df.info())
 
@@ -418,10 +464,19 @@ def main(
         one_year_ago = last_date - pd.DateOffset(years=1)
         df = df[df.index >= one_year_ago]
 
-    df = add_all_labels(df)
+    df = add_all_labels(df, swing_state_machine_kwargs={})
 
     if save_plot_path is None:
-        save_plot_path = get_default_plot_path(clean_ticker, DATA_DIR)
+        save_plot_path = get_default_plot_path(clean_ticker, ticker_data_dir)
+    # plot_all_labels(
+    #    df, save_path=str(save_plot_path).replace("atr_swing", "all_labels")
+    # )
+    # plot_swing_state_machine_signals(
+    #    df, save_path=str(save_plot_path).replace("atr_swing", "swing_state_machine")
+    # )
+    #  plot_leg_segmentation_signals(
+    #    df, save_path=str(save_plot_path).replace("atr_swing", "leg_segmentation")
+    # )
     plot_atr_swing_signals(df, save_path=str(save_plot_path))
 
     df = add_binary_swing_labels(df)
@@ -430,9 +485,16 @@ def main(
     corr_features = run_feature_diagnostics(df, feature_df)
     feature_df_final = drop_correlated_and_constant_features(feature_df, corr_features)
 
-    output_dir = PROCESSED_BASE_DIR
+    output_dir = get_ticker_processed_base_dir(clean_ticker)
     final_feature_cols = list(feature_df_final.columns)
-    save_feature_outputs(output_dir, feature_df_final, final_feature_cols, df)
+    save_feature_outputs(
+        output_dir,
+        feature_df_final,
+        final_feature_cols,
+        df,
+        prefix=prefix,
+        label_mode=label_mode,
+    )
 
 
 if __name__ == "__main__":

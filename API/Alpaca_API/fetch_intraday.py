@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import argparse
 import os
 from typing import Optional
 
@@ -11,6 +12,8 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from .config import AlpacaConfig
+from Data.load_data import get_ticker_raw_dir
+from Data.retrieve_data import normalize_ticker
 
 
 def _parse_time(ts: dt.datetime | str) -> dt.datetime:
@@ -38,8 +41,20 @@ def _to_timeframe(timeframe: str) -> TimeFrame:
     )
 
 
-def fetch_intraday_spy(
+def _timeframe_slug(timeframe: str) -> str:
+    tf_val = timeframe.lower().rstrip("s")
+    if tf_val.endswith("min"):
+        minutes = int(tf_val.replace("min", ""))
+        return f"{minutes}min"
+    if tf_val.endswith("hour"):
+        hours = int(tf_val.replace("hour", ""))
+        return f"{hours}hr"
+    return tf_val
+
+
+def fetch_intraday(
     *,
+    ticker: str,
     start: dt.datetime | str,
     end: dt.datetime | str | None = None,
     timeframe: str = "1Min",
@@ -48,9 +63,10 @@ def fetch_intraday_spy(
     save_path: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Fetch intraday SPY bars using Alpaca's official SDK (alpaca-py).
+    Fetch intraday bars using Alpaca's official SDK (alpaca-py).
 
     Args:
+        ticker: symbol to fetch (e.g., "AAPL", "$SPY").
         start: ISO string or datetime for the beginning (inclusive).
         end: ISO string or datetime for the end (exclusive). If None, defaults to now.
         timeframe: e.g., "1Min", "5Min", "15Min", "1Hour".
@@ -58,6 +74,7 @@ def fetch_intraday_spy(
         adjustment: "raw", "split", or "all".
         save_path: optional path (csv/parquet) to persist results.
     """
+    clean_ticker = normalize_ticker(ticker)
     cfg = AlpacaConfig.from_env()
     client = StockHistoricalDataClient(
         api_key=cfg.key_id,
@@ -69,7 +86,7 @@ def fetch_intraday_spy(
     end_dt = _parse_time(end) if end is not None else dt.datetime.now(dt.timezone.utc)
 
     request = StockBarsRequest(
-        symbol_or_symbols="SPY",
+        symbol_or_symbols=clean_ticker,
         timeframe=tf,
         start=start_dt,
         end=end_dt,
@@ -86,8 +103,15 @@ def fetch_intraday_spy(
     # For single symbol the index is a MultiIndex; flatten to plain DataFrame.
     df = df.reset_index()
     if "symbol" in df.columns:
-        df = df[df["symbol"] == "SPY"]
+        df = df[df["symbol"] == clean_ticker]
     df = df.sort_values("timestamp").reset_index(drop=True)
+
+    if save_path is None:
+        slug = clean_ticker.lower()
+        raw_dir = get_ticker_raw_dir(clean_ticker)
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        tf_slug = _timeframe_slug(timeframe)
+        save_path = str(raw_dir / f"{slug}_intraday_{tf_slug}.parquet")
 
     if save_path:
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -99,14 +123,52 @@ def fetch_intraday_spy(
     return df
 
 
+def fetch_intraday_spy(
+    *,
+    start: dt.datetime | str,
+    end: dt.datetime | str | None = None,
+    timeframe: str = "1Min",
+    limit: int = 10000,
+    adjustment: str = "raw",
+    save_path: Optional[str] = None,
+) -> pd.DataFrame:
+    return fetch_intraday(
+        ticker="SPY",
+        start=start,
+        end=end,
+        timeframe=timeframe,
+        limit=limit,
+        adjustment=adjustment,
+        save_path=save_path,
+    )
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Fetch intraday bars and save to Data/<ticker>/raw."
+    )
+    parser.add_argument("--ticker", type=str, default="$SPY")
+    parser.add_argument("--start", type=str, default=None)
+    parser.add_argument("--end", type=str, default=None)
+    parser.add_argument("--timeframe", type=str, default="1Hour")
+    parser.add_argument("--limit", type=int, default=10000)
+    parser.add_argument("--adjustment", type=str, default="raw")
+    parser.add_argument("--save_path", type=str, default=None)
+    args = parser.parse_args()
+
     now_utc = dt.datetime.now(dt.timezone.utc)
     default_start = now_utc - dt.timedelta(days=200)
-    df = fetch_intraday_spy(
-        start=default_start,
-        timeframe="1hour",
-        limit=10000,
-        save_path=os.path.join("Data", "spy_intraday_1hr.parquet"),
+    start = args.start or default_start
+    end = args.end
+
+    df = fetch_intraday(
+        ticker=args.ticker,
+        start=start,
+        end=end,
+        timeframe=args.timeframe,
+        limit=args.limit,
+        adjustment=args.adjustment,
+        save_path=args.save_path,
     )
 
     print(df.tail())

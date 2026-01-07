@@ -14,14 +14,28 @@ def normalize_ticker(ticker: str) -> str:
     return clean
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "Data"
+
+
+def get_ticker_dir(ticker: str, base_dir: Path | None = None) -> Path:
+    base = base_dir if base_dir is not None else DATA_DIR
+    slug = normalize_ticker(ticker).lower()
+    return base / slug
+
+
+def get_raw_dir(ticker: str, base_dir: Path | None = None) -> Path:
+    return get_ticker_dir(ticker, base_dir) / "raw"
+
+
 def get_output_path(ticker: str, base_dir: Path | None = None) -> Path:
     """
     Build the CSV path for the ticker inside the Data directory.
     """
-    base = base_dir if base_dir is not None else Path(__file__).resolve().parent
-    base.mkdir(parents=True, exist_ok=True)
     slug = normalize_ticker(ticker).lower()
-    return base / f"{slug}_data.csv"
+    raw_dir = get_raw_dir(ticker, base_dir)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    return raw_dir / f"{slug}_data.csv"
 
 
 def retrieve_data(ticker: str, start="2015-01-01", interval="1d"):

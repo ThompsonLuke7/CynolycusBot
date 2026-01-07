@@ -2,6 +2,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from Data.load_data import get_ticker_processed_base_dir
+from Data.retrieve_data import normalize_ticker
+
 
 LABEL_COLS = [
     "atr_swing_label",
@@ -13,11 +16,22 @@ LABEL_COLS = [
 ]
 
 
-def load_base():
-    base_dir = Path(__file__).resolve().parent.parent / "Data" / "processed" / "base"
-    X = pd.read_parquet(base_dir / "X_spy_daily.parquet")
-    labels = pd.read_parquet(base_dir / "labels_spy_daily.parquet")
-    features_txt = base_dir / "features_spy_daily.txt"
+def _infer_prefix(processed_dir: Path, slug: str) -> str | None:
+    candidates = sorted(processed_dir.glob(f"X_{slug}_*.parquet"))
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+    name = newest.stem
+    return name[2:] if name.startswith("X_") else None
+
+
+def load_base(ticker: str = "$SPY"):
+    slug = normalize_ticker(ticker).lower()
+    base_dir = get_ticker_processed_base_dir(ticker)
+    prefix = _infer_prefix(base_dir, slug) or f"{slug}_daily"
+    X = pd.read_parquet(base_dir / f"X_{prefix}.parquet")
+    labels = pd.read_parquet(base_dir / f"labels_{prefix}.parquet")
+    features_txt = base_dir / f"features_{prefix}.txt"
     feature_cols = (
         [line.strip() for line in features_txt.read_text().splitlines() if line.strip()]
         if features_txt.exists()

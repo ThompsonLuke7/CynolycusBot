@@ -1,12 +1,29 @@
-import numpy as np
-import pandas as pd
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-processed_dir = PROJECT_ROOT / "Data" / "processed" / "base"
+import numpy as np
+import pandas as pd
 
-data_path = processed_dir / "X_spy_daily.npy"
-features_txt = processed_dir / "features_spy_daily.txt"
+from Data.load_data import get_ticker_processed_base_dir
+from Data.retrieve_data import normalize_ticker
+
+def _infer_prefix(processed_dir: Path, slug: str) -> str | None:
+    candidates = sorted(processed_dir.glob(f"X_{slug}_*.npy"))
+    if not candidates:
+        candidates = sorted(processed_dir.glob(f"X_{slug}_*.parquet"))
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+    name = newest.stem
+    return name[2:] if name.startswith("X_") else None
+
+
+ticker = "$SPY"
+slug = normalize_ticker(ticker).lower()
+processed_dir = get_ticker_processed_base_dir(ticker)
+prefix = _infer_prefix(processed_dir, slug) or f"{slug}_daily"
+
+data_path = processed_dir / f"X_{prefix}.npy"
+features_txt = processed_dir / f"features_{prefix}.txt"
 
 X = np.load(data_path)
 print("X shape:", X.shape)
@@ -27,4 +44,4 @@ print(df.head().T)  # values stacked under each column for easier scanning
 print("\nColumn summary:")
 print(df.describe().T)
 
-df.to_csv(processed_dir / "X_spy_daily_preview.csv", index=False)
+df.to_csv(processed_dir / f"X_{prefix}_preview.csv", index=False)
