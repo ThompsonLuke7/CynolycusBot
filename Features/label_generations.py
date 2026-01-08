@@ -9,6 +9,10 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta
 
+from Features.custom_indicators import add_fractal_pivots
+from Features.feature_constants import SWING_LABEL_COLUMNS
+from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
+
 
 def _get_prob_array(
     df: pd.DataFrame,
@@ -834,6 +838,98 @@ def add_all_labels(
         df = add_atr_continuation_entry_labels(df, **continuation_kwargs)
 
     return df
+
+
+def add_all_labels_on_timeframe(
+    df: pd.DataFrame,
+    *,
+    label_timeframe: str = "15T",
+    tz: str | None = "America/New_York",
+    resample_label: str = "right",
+    resample_closed: str = "right",
+    shift_forward_bars: int = 1,
+    atr_pivot_kwargs: dict | None = None,
+    leg_state_kwargs: dict | None = None,
+    swing_state_decay_kwargs: dict | None = None,
+    swing_state_machine_kwargs: dict | None = None,
+    continuation_kwargs: dict | None = None,
+) -> pd.DataFrame:
+    """
+    Compute labels on a higher timeframe and forward-fill them onto the base index.
+    """
+    base_index = df.index
+    if not isinstance(base_index, pd.DatetimeIndex):
+        raise ValueError("DataFrame index must be a DatetimeIndex.")
+
+    df_local = ensure_time_index(df, tz=tz)
+    tf_df = resample_ohlcv(
+        df_local,
+        label_timeframe,
+        label=resample_label,
+        closed=resample_closed,
+    )
+    if tf_df.empty:
+        return df
+
+    tf_df = add_fractal_pivots(tf_df)
+    tf_df = add_all_labels(
+        tf_df,
+        atr_pivot_kwargs=atr_pivot_kwargs,
+        leg_state_kwargs=leg_state_kwargs,
+        swing_state_decay_kwargs=swing_state_decay_kwargs,
+        swing_state_machine_kwargs=swing_state_machine_kwargs,
+        continuation_kwargs=continuation_kwargs,
+    )
+
+    label_cols = [c for c in SWING_LABEL_COLUMNS if c in tf_df.columns]
+    if not label_cols:
+        return df
+
+    labels = tf_df[label_cols].copy()
+    pivot_mask = None
+    if "pivot_up" in tf_df.columns or "pivot_down" in tf_df.columns:
+        pivot_up = (
+            tf_df["pivot_up"].fillna(0).astype(int).to_numpy()
+            if "pivot_up" in tf_df.columns
+            else np.zeros(len(tf_df), dtype=int)
+        )
+        pivot_down = (
+            tf_df["pivot_down"].fillna(0).astype(int).to_numpy()
+            if "pivot_down" in tf_df.columns
+            else np.zeros(len(tf_df), dtype=int)
+        )
+        pivot_mask = (pivot_up == 1) | (pivot_down == 1)
+
+    if pivot_mask is not None:
+        pivot_label_cols = {
+            "atr_swing_label",
+            "long_swing_label",
+            "short_swing_label",
+            "atr_entry_price",
+            "atr_exit_price",
+            "atr_holding_bars",
+            "atr_realized_return",
+        }
+        for col in pivot_label_cols:
+            if col in labels.columns:
+                labels.loc[~pivot_mask, col] = np.nan
+    if isinstance(labels.index, pd.DatetimeIndex):
+        if base_index.tz is None and labels.index.tz is not None:
+            labels.index = labels.index.tz_convert(None)
+        elif base_index.tz is not None and labels.index.tz is None:
+            labels.index = labels.index.tz_localize(base_index.tz)
+        elif base_index.tz is not None and labels.index.tz is not None:
+            if base_index.tz != labels.index.tz:
+                labels = labels.tz_convert(base_index.tz)
+
+    labels = labels.reindex(base_index, method="ffill")
+    if shift_forward_bars:
+        labels = labels.shift(shift_forward_bars)
+
+    out = df.copy()
+    for col in label_cols:
+        out[col] = labels[col]
+    return out
 
 
 def main():

@@ -38,6 +38,40 @@ def get_ticker_plots_dir(ticker: str, base_dir: Path | None = None) -> Path:
     return get_ticker_data_dir(ticker, base_dir) / "plots"
 
 
+def ensure_ticker_dirs(ticker: str, base_dir: Path | None = None) -> dict[str, Path]:
+    """
+    Ensure the standard directory structure exists for a ticker.
+    """
+    data_dir = get_ticker_data_dir(ticker, base_dir)
+    raw_dir = get_ticker_raw_dir(ticker, base_dir)
+    processed_dir = get_ticker_processed_dir(ticker, base_dir)
+    processed_base_dir = get_ticker_processed_base_dir(ticker, base_dir)
+    processed_split_dir = get_ticker_processed_split_dir(ticker, base_dir)
+    processed_stats_dir = get_ticker_processed_stats_dir(ticker, base_dir)
+    plots_dir = get_ticker_plots_dir(ticker, base_dir)
+
+    for path in [
+        data_dir,
+        raw_dir,
+        processed_dir,
+        processed_base_dir,
+        processed_split_dir,
+        processed_stats_dir,
+        plots_dir,
+    ]:
+        path.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "data": data_dir,
+        "raw": raw_dir,
+        "processed": processed_dir,
+        "processed_base": processed_base_dir,
+        "processed_splits": processed_split_dir,
+        "processed_stats": processed_stats_dir,
+        "plots": plots_dir,
+    }
+
+
 def get_raw_data_path(ticker: str) -> Path:
     """
     Build the CSV path for the requested ticker under Data/.

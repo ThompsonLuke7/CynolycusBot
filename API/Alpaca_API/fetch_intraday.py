@@ -31,24 +31,36 @@ def _parse_time(ts: dt.datetime | str) -> dt.datetime:
 def _to_timeframe(timeframe: str) -> TimeFrame:
     tf_val = timeframe.lower().rstrip("s")
     if tf_val.endswith("min"):
-        minutes = int(tf_val.replace("min", ""))
+        minutes = int(tf_val.replace("min", "") or "1")
         return TimeFrame(minutes, TimeFrameUnit.Minute)
     if tf_val.endswith("hour"):
-        hours = int(tf_val.replace("hour", ""))
+        hours = int(tf_val.replace("hour", "") or "1")
         return TimeFrame(hours, TimeFrameUnit.Hour)
+    if tf_val.endswith("day"):
+        days = int(tf_val.replace("day", "") or "1")
+        return TimeFrame(days, TimeFrameUnit.Day)
+    if tf_val.endswith("d"):
+        days = int(tf_val.replace("d", "") or "1")
+        return TimeFrame(days, TimeFrameUnit.Day)
     raise ValueError(
-        f"Unsupported timeframe '{timeframe}'. Use e.g. 1Min, 5Min, 15Min, 1Hour."
+        f"Unsupported timeframe '{timeframe}'. Use e.g. 1Min, 5Min, 15Min, 1Hour, 1Day."
     )
 
 
 def _timeframe_slug(timeframe: str) -> str:
     tf_val = timeframe.lower().rstrip("s")
     if tf_val.endswith("min"):
-        minutes = int(tf_val.replace("min", ""))
+        minutes = int(tf_val.replace("min", "") or "1")
         return f"{minutes}min"
     if tf_val.endswith("hour"):
-        hours = int(tf_val.replace("hour", ""))
+        hours = int(tf_val.replace("hour", "") or "1")
         return f"{hours}hr"
+    if tf_val.endswith("day"):
+        days = int(tf_val.replace("day", "") or "1")
+        return f"{days}d"
+    if tf_val.endswith("d"):
+        days = int(tf_val.replace("d", "") or "1")
+        return f"{days}d"
     return tf_val
 
 
@@ -69,7 +81,7 @@ def fetch_intraday(
         ticker: symbol to fetch (e.g., "AAPL", "$SPY").
         start: ISO string or datetime for the beginning (inclusive).
         end: ISO string or datetime for the end (exclusive). If None, defaults to now.
-        timeframe: e.g., "1Min", "5Min", "15Min", "1Hour".
+        timeframe: e.g., "1Min", "5Min", "15Min", "1Hour", "1Day".
         limit: maximum bars to request (SDK handles pagination internally).
         adjustment: "raw", "split", or "all".
         save_path: optional path (csv/parquet) to persist results.
