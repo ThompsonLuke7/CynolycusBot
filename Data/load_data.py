@@ -196,11 +196,11 @@ def resolve_intraday_parquet_path(
 
 def get_processed_feature_path(ticker: str, prefix: str | None = None) -> Path:
     """
-    Build the path where the processed feature/label matrix is stored.
-    Ensures the directory exists so we can write the cache.
+    Build the path where the processed feature/label matrix cache is stored.
+    Ensures the base processed directory exists so we can write the cache.
     """
     slug = normalize_ticker(ticker).lower()
-    processed_dir = get_ticker_processed_dir(ticker)
+    processed_dir = get_ticker_processed_base_dir(ticker)
     processed_dir.mkdir(parents=True, exist_ok=True)
     if prefix is None:
         return processed_dir / f"{slug}_features_with_labels.parquet"

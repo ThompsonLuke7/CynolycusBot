@@ -8,6 +8,27 @@ from pathlib import Path
 from Data.retrieve_data import normalize_ticker
 
 
+def _infer_bar_label(index: pd.DatetimeIndex) -> str:
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
+        return "Unknown bars"
+    deltas = index.to_series().diff().dropna().dt.total_seconds()
+    if deltas.empty:
+        return "Unknown bars"
+    seconds = float(deltas.median())
+    if not np.isfinite(seconds) or seconds <= 0:
+        return "Unknown bars"
+    if seconds % 86400 == 0:
+        days = int(seconds / 86400)
+        return f"{days} day bars"
+    if seconds % 3600 == 0:
+        hours = int(seconds / 3600)
+        return f"{hours} hour bars"
+    if seconds % 60 == 0:
+        minutes = int(seconds / 60)
+        return f"{minutes} min bars"
+    return f"{int(seconds)} sec bars"
+
+
 def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> None:
     """
     Plot OHLC candles with ATR swing labels from label generation.
@@ -36,6 +57,8 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
     down_color = "#E53935"
     swing_long_color = "#2E7D32"
     swing_short_color = "#C62828"
+    pivot_dn_color = "#00695C"
+    pivot_up_color = "#6A1B9A"
 
     width = 0.8
 
@@ -103,7 +126,43 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
             zorder=2,
         )
 
-    ax.set_title("Close with ATR swing labels", fontsize=14)
+    if "pivot_down" in df.columns:
+        mask_pivot_down = (df["pivot_down"].fillna(0).astype(int) == 1).to_numpy()
+        if mask_pivot_down.any():
+            ax.scatter(
+                pos[mask_pivot_down],
+                low_y[mask_pivot_down] - down_offset * 1.2,
+                facecolors="none",
+                edgecolors=pivot_dn_color,
+                marker="v",
+                s=56,
+                label="pivot_down",
+                alpha=0.95,
+                zorder=2.1,
+            )
+
+    if "pivot_up" in df.columns:
+        mask_pivot_up = (df["pivot_up"].fillna(0).astype(int) == 1).to_numpy()
+        if mask_pivot_up.any():
+            ax.scatter(
+                pos[mask_pivot_up],
+                high_y[mask_pivot_up] + up_offset * 1.2,
+                facecolors="none",
+                edgecolors=pivot_up_color,
+                marker="^",
+                s=56,
+                label="pivot_up",
+                alpha=0.95,
+                zorder=2.1,
+            )
+
+    bar_label = _infer_bar_label(date_index)
+    pos_count = int(mask_pos.sum())
+    neg_count = int(mask_neg.sum())
+    title = (
+        f"{bar_label} | bars: {len(df)} | +1: {pos_count} | -1: {neg_count}"
+    )
+    ax.set_title(title, fontsize=14)
     ax.set_ylabel("Close Price")
     ax.legend(loc="upper left", fontsize=11, ncol=3)
     ax.set_xlabel("Date")
@@ -126,11 +185,7 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
         )
 
     plt.tight_layout()
-    plt.suptitle(
-        "Close Price with ATR Swing Labels - Last Year",
-        fontsize=17,
-        y=1.02,
-    )
+    plt.suptitle("Close Price with ATR Swing Labels", fontsize=17, y=1.02)
     plt.subplots_adjust(top=0.93)
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)

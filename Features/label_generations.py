@@ -50,7 +50,7 @@ def add_atr_pivot_swing_labels(
     pivot_up_col: str = "pivot_up",
     pivot_down_col: str = "pivot_down",
     atr_length: int = 14,
-    tp_mult: float = 0.5,
+    tp_mult: float = 1.0,
     sl_mult: float = 0.5,
     max_holding: int = 20,
     base_label_col: str = "atr_swing_label",
@@ -118,15 +118,6 @@ def add_atr_pivot_swing_labels(
             # But for simplicity, we just take the result if it's currently 0.
             if labels[i] == 0:
                 labels[i] = hit_label
-                exit_price[i] = hit_exit
-                holding_bars[i] = hit_bars
-                realized_ret[i] = hit_exit / ep - 1.0
-
-            # If pivot failed (stopped out) but capitulation (wider stop) would have won,
-            # you might want to force the capitulation logic.
-            # Here, we prioritize the WIN (1) if both triggered.
-            elif labels[i] == 0 and hit_label == 1:
-                labels[i] = 1
                 exit_price[i] = hit_exit
                 holding_bars[i] = hit_bars
                 realized_ret[i] = hit_exit / ep - 1.0
@@ -612,6 +603,20 @@ def add_pivot_swing_state_machine(
     max_holding: int = 120,
     cooldown_bars: int = 3,
     use_tp_exit: bool = False,
+    state_id_col: str = "p_state_id",
+    swing_id_col: str = "p_swing_id",
+    bars_in_state_col: str = "p_bars_in_state",
+    pending_age_col: str = "p_pending_age",
+    cooldown_remaining_col: str = "p_cooldown_remaining",
+    dist_to_sl_atr_col: str = "p_dist_to_sl_atr",
+    dist_to_entry_atr_col: str = "p_dist_to_entry_atr",
+    dist_to_tp_atr_col: str = "p_dist_to_tp_atr",
+    session_phase_col: str = "session_phase",
+    session_tz: str | None = "America/New_York",
+    session_open_time: str = "09:30",
+    session_close_time: str = "16:00",
+    session_open_minutes: int = 30,
+    session_late_minutes: int = 30,
     long_state_col: str = "p_long_state_gate",
     short_state_col: str = "p_short_state_gate",
     long_pending_col: str = "p_long_pending",
@@ -631,6 +636,10 @@ def add_pivot_swing_state_machine(
     - Optional TP exit can be enabled with use_tp_exit.
     - Adds long_state_col / short_state_col as {0.0, 1.0} indicators.
     - Adds long_pending_col / short_pending_col / flat_state_col for visualization.
+    - Adds state_id_col (0=FLAT,1=PEND_LONG,2=LONG,3=PEND_SHORT,4=SHORT),
+      swing_id_col, bars_in_state_col, pending_age_col, cooldown_remaining_col.
+    - Adds dist_to_sl_atr_col/dist_to_entry_atr_col/dist_to_tp_atr_col risk features.
+    - Adds session_phase_col as {0=OPEN,1=MID,2=LATE} when index is intraday.
     """
     n = len(df)
 
@@ -657,11 +666,50 @@ def add_pivot_swing_state_machine(
         )
     atr = df[atr_col].to_numpy(dtype=float)
 
+    state_id = np.zeros(n, dtype=float)
+    swing_id = np.zeros(n, dtype=float)
+    bars_in_state = np.zeros(n, dtype=float)
+    pending_age_series = np.zeros(n, dtype=float)
+    cooldown_remaining = np.zeros(n, dtype=float)
+    dist_to_sl_atr = np.full(n, np.nan, dtype=float)
+    dist_to_entry_atr = np.full(n, np.nan, dtype=float)
+    dist_to_tp_atr = np.full(n, np.nan, dtype=float)
+
     long_state = np.zeros(n, dtype=float)
     short_state = np.zeros(n, dtype=float)
     long_pending = np.zeros(n, dtype=float)
     short_pending = np.zeros(n, dtype=float)
     flat_state = np.zeros(n, dtype=float)
+
+    session_phase = np.full(n, np.nan, dtype=float)
+    if isinstance(df.index, pd.DatetimeIndex) and n > 0:
+        idx = df.index
+        if session_tz is not None:
+            if idx.tz is None:
+                idx = idx.tz_localize(session_tz)
+            else:
+                idx = idx.tz_convert(session_tz)
+
+        try:
+            open_hour, open_minute = [int(x) for x in session_open_time.split(":")]
+            close_hour, close_minute = [int(x) for x in session_close_time.split(":")]
+        except ValueError:
+            open_hour, open_minute = 9, 30
+            close_hour, close_minute = 16, 0
+
+        open_total = open_hour * 60 + open_minute
+        close_total = close_hour * 60 + close_minute
+        minutes = idx.hour * 60 + idx.minute
+        in_session = (minutes >= open_total) & (minutes <= close_total)
+        open_end = open_total + max(0, session_open_minutes)
+        late_start = close_total - max(0, session_late_minutes)
+
+        open_mask = in_session & (minutes < open_end)
+        late_mask = in_session & (minutes >= late_start)
+        mid_mask = in_session & ~open_mask & ~late_mask
+        session_phase[open_mask] = 0
+        session_phase[mid_mask] = 1
+        session_phase[late_mask] = 2
 
     state = "FLAT"
     cooldown = 0
@@ -673,8 +721,18 @@ def add_pivot_swing_state_machine(
     sl = np.nan
     tp = np.nan
     age = 0
+    state_age = 0
+    swing_counter = 0
+    state_id_map = {
+        "FLAT": 0,
+        "PENDING_LONG": 1,
+        "LONG": 2,
+        "PENDING_SHORT": 3,
+        "SHORT": 4,
+    }
 
     for t in range(n):
+        prev_state = state
         if cooldown > 0:
             cooldown -= 1
             state = "FLAT"
@@ -782,17 +840,64 @@ def add_pivot_swing_state_machine(
                 if cooldown_bars > 0:
                     cooldown = cooldown_bars
 
+        if prev_state != state:
+            state_age = 0
+            if state in ("LONG", "SHORT"):
+                swing_counter += 1
+        else:
+            state_age += 1
+
         long_state[t] = 1.0 if state == "LONG" else 0.0
         short_state[t] = 1.0 if state == "SHORT" else 0.0
         long_pending[t] = 1.0 if state == "PENDING_LONG" else 0.0
         short_pending[t] = 1.0 if state == "PENDING_SHORT" else 0.0
         flat_state[t] = 1.0 if state == "FLAT" else 0.0
+        state_id[t] = state_id_map[state]
+        swing_id[t] = swing_counter
+        bars_in_state[t] = state_age
+        pending_age_series[t] = (
+            pending_age if state in ("PENDING_LONG", "PENDING_SHORT") else 0
+        )
+        cooldown_remaining[t] = cooldown
+
+        if not np.isnan(atr[t]) and atr[t] > 0 and not np.isnan(close[t]):
+            if state in ("LONG", "PENDING_LONG"):
+                ref_entry = entry if state == "LONG" else pending_entry
+                ref_sl = sl if state == "LONG" else pending_sl
+                ref_tp = tp if state == "LONG" else pending_tp
+                if np.isfinite(ref_sl):
+                    dist_to_sl_atr[t] = (close[t] - ref_sl) / atr[t]
+                if np.isfinite(ref_entry):
+                    dist_to_entry_atr[t] = (close[t] - ref_entry) / atr[t]
+                if use_tp_exit and np.isfinite(ref_tp):
+                    dist_to_tp_atr[t] = (ref_tp - close[t]) / atr[t]
+            elif state in ("SHORT", "PENDING_SHORT"):
+                ref_entry = entry if state == "SHORT" else pending_entry
+                ref_sl = sl if state == "SHORT" else pending_sl
+                ref_tp = tp if state == "SHORT" else pending_tp
+                if np.isfinite(ref_sl):
+                    dist_to_sl_atr[t] = (ref_sl - close[t]) / atr[t]
+                if np.isfinite(ref_entry):
+                    dist_to_entry_atr[t] = (ref_entry - close[t]) / atr[t]
+                if use_tp_exit and np.isfinite(ref_tp):
+                    dist_to_tp_atr[t] = (close[t] - ref_tp) / atr[t]
 
     df[long_state_col] = long_state
     df[short_state_col] = short_state
     df[long_pending_col] = long_pending
     df[short_pending_col] = short_pending
     df[flat_state_col] = flat_state
+    df[state_id_col] = pd.Series(state_id, index=df.index).astype("Int64")
+    df[swing_id_col] = pd.Series(swing_id, index=df.index).astype("Int64")
+    df[bars_in_state_col] = pd.Series(bars_in_state, index=df.index).astype("Int64")
+    df[pending_age_col] = pd.Series(pending_age_series, index=df.index).astype("Int64")
+    df[cooldown_remaining_col] = pd.Series(cooldown_remaining, index=df.index).astype(
+        "Int64"
+    )
+    df[dist_to_sl_atr_col] = dist_to_sl_atr
+    df[dist_to_entry_atr_col] = dist_to_entry_atr
+    df[dist_to_tp_atr_col] = dist_to_tp_atr
+    df[session_phase_col] = pd.Series(session_phase, index=df.index).astype("Int64")
     return df
 
 

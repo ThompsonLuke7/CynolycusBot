@@ -4,6 +4,7 @@ from tqdm import tqdm
 import pandas_ta as ta
 import vmdpy as vmd
 
+
 def add_vmd_return_features(
     df: pd.DataFrame,
     close_col: str = "close",
@@ -67,18 +68,24 @@ def add_vmd_return_features(
 
     return df
 
+
 def add_fractal_pivots(
     df,
-    sequence_count=3,   # same as ThinkScript default in your version
+    sequence_count=3,
     vol_length=60,
     num_dev=1.0,
     allow_negative=False,
+    eps=0.02,
+    collapse_window=1,
 ):
     """
     Mobius / AlphaInvestor-style fractal pivots + SuperPivots
     translated from the RSIL_SelfAdj_wFE_wSPivots code.
 
     Requires columns: 'high', 'low', 'volume'
+
+    eps: price tolerance for treating near-equal highs/lows as a plateau.
+    collapse_window: collapse pivot clusters within +/- N bars into a single pivot.
 
     Adds:
         pivot_up          : 1 if fractal high at bar, else 0
@@ -115,16 +122,16 @@ def add_fractal_pivots(
             other = data[j]
 
             if is_up:
-                # UpFractal side logic
-                if other > val or (other == val and count == 0):
+                # UpFractal side logic (allow plateaus within eps)
+                if other > val + eps:
                     return -1
-                elif other < val:
+                elif other < val - eps:
                     count += 1
             else:
-                # DownFractal side logic
-                if other < val or (other == val and count == 0):
+                # DownFractal side logic (allow plateaus within eps)
+                if other < val - eps:
                     return -1
-                elif other > val:
+                elif other > val + eps:
                     count += 1
 
             if count == sequence_count:
@@ -154,6 +161,60 @@ def add_fractal_pivots(
     else:
         rel_vol = raw_rel_vol
 
+    def collapse_pivots(pivot_flags, price, rel_vol_z, window, pick_max):
+        if window <= 0:
+            return pivot_flags
+        idx = np.where(pivot_flags == 1)[0]
+        if len(idx) <= 1:
+            return pivot_flags
+        collapsed = np.zeros_like(pivot_flags)
+        start = 0
+        while start < len(idx):
+            end = start + 1
+            while end < len(idx) and idx[end] - idx[end - 1] <= window:
+                end += 1
+            cluster = idx[start:end]
+
+            best_idx = int(cluster[0])
+            best_price = price[best_idx]
+            best_rel = (
+                rel_vol_z[best_idx]
+                if np.isfinite(rel_vol_z[best_idx])
+                else -np.inf
+            )
+
+            for i in cluster[1:]:
+                price_i = price[i]
+                rel_i = rel_vol_z[i] if np.isfinite(rel_vol_z[i]) else -np.inf
+                if pick_max:
+                    if price_i > best_price:
+                        best_idx = int(i)
+                        best_price = price_i
+                        best_rel = rel_i
+                    elif price_i == best_price and rel_i > best_rel:
+                        best_idx = int(i)
+                        best_rel = rel_i
+                else:
+                    if price_i < best_price:
+                        best_idx = int(i)
+                        best_price = price_i
+                        best_rel = rel_i
+                    elif price_i == best_price and rel_i > best_rel:
+                        best_idx = int(i)
+                        best_rel = rel_i
+
+            collapsed[best_idx] = 1
+            start = end
+        return collapsed
+
+    if collapse_window and collapse_window > 0:
+        pivot_up = collapse_pivots(
+            pivot_up, highs, rel_vol.to_numpy(), collapse_window, pick_max=True
+        )
+        pivot_down = collapse_pivots(
+            pivot_down, lows, rel_vol.to_numpy(), collapse_window, pick_max=False
+        )
+
     # --- SuperPivots: pivot + rel_vol > num_dev ---
     super_up = ((rel_vol > num_dev) & (pivot_up == 1)).astype(int)
     super_down = ((rel_vol > num_dev) & (pivot_down == 1)).astype(int)
@@ -166,6 +227,7 @@ def add_fractal_pivots(
     df["super_pivot_down"] = super_down
 
     return df
+
 
 def add_rsilg_fe_gauss(df, nFE=8, glength=13, beta_dev=8):
     """
@@ -203,15 +265,15 @@ def add_rsilg_fe_gauss(df, nFE=8, glength=13, beta_dev=8):
         a = alpha
         one_minus = 1.0 - a
         for t in range(n):
-            g0 = (a ** 4) * x[t]
+            g0 = (a**4) * x[t]
             if t >= 1:
                 g0 += 4 * one_minus * g[t - 1]
             if t >= 2:
-                g0 += -6 * (one_minus ** 2) * g[t - 2]
+                g0 += -6 * (one_minus**2) * g[t - 2]
             if t >= 3:
-                g0 += 4 * (one_minus ** 3) * g[t - 3]
+                g0 += 4 * (one_minus**3) * g[t - 3]
             if t >= 4:
-                g0 += -(one_minus ** 4) * g[t - 4]
+                g0 += -(one_minus**4) * g[t - 4]
             g[t] = g0
         return g
 
@@ -304,6 +366,7 @@ def add_rsilg_fe_gauss(df, nFE=8, glength=13, beta_dev=8):
 
     return df
 
+
 def add_tmo(df, length=14, calc_length=5, smooth_length=3):
     close = df["close"].to_numpy()
     open_ = df["open"].to_numpy()
@@ -337,10 +400,15 @@ def add_tmo(df, length=14, calc_length=5, smooth_length=3):
     prev_main = df["tmo_main"].shift(1)
     prev_signal = df["tmo_signal"].shift(1)
 
-    df["tmo_buy"] = ((prev_main <= prev_signal) & (df["tmo_main"] > df["tmo_signal"])).astype(int)
-    df["tmo_sell"] = ((prev_main >= prev_signal) & (df["tmo_main"] < df["tmo_signal"])).astype(int)
+    df["tmo_buy"] = (
+        (prev_main <= prev_signal) & (df["tmo_main"] > df["tmo_signal"])
+    ).astype(int)
+    df["tmo_sell"] = (
+        (prev_main >= prev_signal) & (df["tmo_main"] < df["tmo_signal"])
+    ).astype(int)
 
     return df
+
 
 def add_atr_swing_state_features(
     df: pd.DataFrame,
@@ -383,8 +451,8 @@ def add_atr_swing_state_features(
 
     n = len(df)
 
-    state = np.zeros(n, dtype=float)          # -1,0,+1
-    extreme = np.full(n, np.nan, dtype=float) # running extreme
+    state = np.zeros(n, dtype=float)  # -1,0,+1
+    extreme = np.full(n, np.nan, dtype=float)  # running extreme
     dist_atr = np.full(n, np.nan, dtype=float)
     bars_since = np.zeros(n, dtype=float)
     flip = np.zeros(n, dtype=float)
@@ -402,7 +470,9 @@ def add_atr_swing_state_features(
         df[f"{prefix}_state"] = pd.Series(state, index=df.index).astype("Int64")
         df[f"{prefix}_extreme"] = extreme
         df[f"{prefix}_dist_from_extreme_atr"] = dist_atr
-        df[f"{prefix}_bars_since_flip"] = pd.Series(bars_since, index=df.index).astype("Int64")
+        df[f"{prefix}_bars_since_flip"] = pd.Series(bars_since, index=df.index).astype(
+            "Int64"
+        )
         df[f"{prefix}_flip"] = pd.Series(flip, index=df.index).astype("Int64")
         return df
 
@@ -494,7 +564,8 @@ def add_atr_swing_state_features(
     df[f"{prefix}_state"] = pd.Series(state, index=df.index).astype("Int64")
     df[f"{prefix}_extreme"] = extreme
     df[f"{prefix}_dist_from_extreme_atr"] = dist_atr
-    df[f"{prefix}_bars_since_flip"] = pd.Series(bars_since, index=df.index).astype("Int64")
+    df[f"{prefix}_bars_since_flip"] = pd.Series(bars_since, index=df.index).astype(
+        "Int64"
+    )
     df[f"{prefix}_flip"] = pd.Series(flip, index=df.index).astype("Int64")
     return df
-

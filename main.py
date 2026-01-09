@@ -3,10 +3,21 @@ import datetime as dt
 
 from API.Alpaca_API.fetch_intraday import fetch_intraday
 from Data.load_data import ensure_ticker_dirs, get_ticker_data_dir, load_ticker_parquet
+from Data.plots.all_labels_plot import get_default_plot_path as get_all_labels_plot_path
 from Data.plots.all_labels_plot import plot_all_labels
+from Data.plots.atr_swing_plot import get_default_plot_path as get_atr_swing_plot_path
 from Data.plots.atr_swing_plot import plot_atr_swing_signals
+from Data.plots.continuation_plot import (
+    get_default_plot_path as get_continuation_plot_path,
+)
 from Data.plots.continuation_plot import plot_continuation_signals
+from Data.plots.leg_segmentation_plot import (
+    get_default_plot_path as get_leg_plot_path,
+)
 from Data.plots.leg_segmentation_plot import plot_leg_segmentation_signals
+from Data.plots.swing_state_machine_plot import (
+    get_default_plot_path as get_swing_state_plot_path,
+)
 from Data.plots.swing_state_machine_plot import plot_swing_state_machine_signals
 from Features import data_pipeline, feature_engineering, test_leakage
 from Features.custom_indicators import add_fractal_pivots
@@ -181,7 +192,7 @@ if __name__ == "__main__":
             print("Refresh requested; forcing use_cached=False.")
         use_cached = False
         now_utc = dt.datetime.now(dt.timezone.utc)
-        default_start = now_utc - dt.timedelta(days=200)
+        default_start = now_utc - dt.timedelta(days=100)
         start = args.start or default_start
         end = args.end
         fetch_intraday(
@@ -189,7 +200,7 @@ if __name__ == "__main__":
             start=start,
             end=end,
             timeframe=args.timeframe,
-            limit=200,
+            limit=250,
             adjustment=args.adjustment,
         )
 
@@ -200,25 +211,38 @@ if __name__ == "__main__":
         if rule != "1T":
             df = resample_ohlcv(df, rule)
 
+        plot_save_path = args.save_plot_path
+        if plot_save_path is None:
+            if args.plot_type == "atr_swing":
+                plot_save_path = get_atr_swing_plot_path(args.ticker, data_dir)
+            elif args.plot_type == "leg":
+                plot_save_path = get_leg_plot_path(args.ticker, data_dir)
+            elif args.plot_type == "continuation":
+                plot_save_path = get_continuation_plot_path(args.ticker, data_dir)
+            elif args.plot_type == "swing_state_machine":
+                plot_save_path = get_swing_state_plot_path(args.ticker, data_dir)
+            elif args.plot_type == "all_labels":
+                plot_save_path = get_all_labels_plot_path(args.ticker, data_dir)
+
         if args.plot_type == "atr_swing":
             df = add_fractal_pivots(df)
             df = add_atr_pivot_swing_labels(df)
-            plot_atr_swing_signals(df, save_path=args.save_plot_path)
+            plot_atr_swing_signals(df, save_path=str(plot_save_path))
         elif args.plot_type == "leg":
             df = add_atr_leg_segmentation_labels(df)
-            plot_leg_segmentation_signals(df, save_path=args.save_plot_path)
+            plot_leg_segmentation_signals(df, save_path=str(plot_save_path))
         elif args.plot_type == "continuation":
             df = add_fractal_pivots(df)
             df = add_atr_continuation_entry_labels(df)
-            plot_continuation_signals(df, save_path=args.save_plot_path)
+            plot_continuation_signals(df, save_path=str(plot_save_path))
         elif args.plot_type == "swing_state_machine":
             df = add_fractal_pivots(df)
             df = add_pivot_swing_state_machine(df)
-            plot_swing_state_machine_signals(df, save_path=args.save_plot_path)
+            plot_swing_state_machine_signals(df, save_path=str(plot_save_path))
         elif args.plot_type == "all_labels":
             df = add_fractal_pivots(df)
             df = add_all_labels(df, swing_state_machine_kwargs={})
-            plot_all_labels(df, save_path=args.save_plot_path)
+            plot_all_labels(df, save_path=str(plot_save_path))
         raise SystemExit(0)
 
     tf_norm = args.timeframe.lower().strip()
