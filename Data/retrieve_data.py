@@ -16,16 +16,17 @@ def normalize_ticker(ticker: str) -> str:
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "Data"
+RAW_DIR = DATA_DIR / "raw"
 
 
 def get_ticker_dir(ticker: str, base_dir: Path | None = None) -> Path:
-    base = base_dir if base_dir is not None else DATA_DIR
+    base = base_dir if base_dir is not None else RAW_DIR
     slug = normalize_ticker(ticker).lower()
     return base / slug
 
 
 def get_raw_dir(ticker: str, base_dir: Path | None = None) -> Path:
-    return get_ticker_dir(ticker, base_dir) / "raw"
+    return get_ticker_dir(ticker, base_dir)
 
 
 def get_output_path(ticker: str, base_dir: Path | None = None) -> Path:

@@ -2,7 +2,13 @@ import argparse
 import datetime as dt
 
 from API.Alpaca_API.fetch_intraday import fetch_intraday
-from Data.load_data import ensure_ticker_dirs, get_ticker_data_dir, load_ticker_parquet
+from Data.load_data import (
+    ensure_ticker_dirs,
+    get_ticker_data_dir,
+    get_ticker_processed_base_dir,
+    load_ticker_parquet,
+    resolve_intraday_parquet_path,
+)
 from Data.plots.all_labels_plot import get_default_plot_path as get_all_labels_plot_path
 from Data.plots.all_labels_plot import plot_all_labels
 from Data.plots.atr_swing_plot import get_default_plot_path as get_atr_swing_plot_path
@@ -19,7 +25,7 @@ from Data.plots.swing_state_machine_plot import (
     get_default_plot_path as get_swing_state_plot_path,
 )
 from Data.plots.swing_state_machine_plot import plot_swing_state_machine_signals
-from Features import data_pipeline, feature_engineering, test_leakage
+from Features import data_pipeline
 from Features.custom_indicators import add_fractal_pivots
 from Features.label_generations import (
     add_all_labels,
@@ -28,11 +34,8 @@ from Features.label_generations import (
     add_atr_pivot_swing_labels,
     add_pivot_swing_state_machine,
 )
-from Features.multi_timeframe_features import (
-    DEFAULT_TIMEFRAMES,
-    ensure_time_index,
-    resample_ohlcv,
-)
+from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
+from Features.training_matrix import build_training_matrix, clean_training_matrix
 
 
 def parse_args():
@@ -181,13 +184,26 @@ if __name__ == "__main__":
             return f"{days}D"
         return timeframe
 
+    def _dataset_name_from_label_timeframe(label_timeframe: str) -> str:
+        tf = _normalize_plot_timeframe(label_timeframe).lower()
+        if tf.endswith("t"):
+            return f"{tf[:-1]}min"
+        if tf.endswith("h"):
+            return f"{tf[:-1]}h"
+        if tf.endswith("d"):
+            return f"{tf[:-1]}d"
+        return tf
+
     data_dir = get_ticker_data_dir(args.ticker)
-    data_dir_missing = not data_dir.exists()
     ensure_ticker_dirs(args.ticker)
 
-    refresh_data = args.refresh_data or data_dir_missing
+    raw_path = resolve_intraday_parquet_path(args.ticker)
+    raw_missing = not raw_path.exists()
+    refresh_data = args.refresh_data or raw_missing
     use_cached = args.use_cached
     if refresh_data:
+        if raw_missing and not args.refresh_data:
+            print("Raw data missing; fetching intraday data.")
         if use_cached:
             print("Refresh requested; forcing use_cached=False.")
         use_cached = False
@@ -200,7 +216,7 @@ if __name__ == "__main__":
             start=start,
             end=end,
             timeframe=args.timeframe,
-            limit=250,
+            limit=args.limit,
             adjustment=args.adjustment,
         )
 
@@ -245,23 +261,41 @@ if __name__ == "__main__":
             plot_all_labels(df, save_path=str(plot_save_path))
         raise SystemExit(0)
 
-    tf_norm = args.timeframe.lower().strip()
-    multi_timeframes = None
-    if tf_norm.endswith("min") and tf_norm.replace("min", "") in {"1", ""}:
-        multi_timeframes = DEFAULT_TIMEFRAMES
+    label_timeframe = "15T"
+    dataset_name = _dataset_name_from_label_timeframe(label_timeframe)
+    processed_base_dir = get_ticker_processed_base_dir(args.ticker)
+    dataset_dir = processed_base_dir / "datasets" / dataset_name
+    dataset_exists = (dataset_dir / "X.parquet").exists() and (
+        dataset_dir / "y.parquet"
+    ).exists()
 
-    feature_engineering.main(
-        ticker=args.ticker,
-        use_cached=use_cached,
-        save_processed=args.save_processed,
-        save_plot_path=args.save_plot_path,
-        label_mode=args.label_mode,
-        multi_timeframes=multi_timeframes,
-    )
-    data_pipeline.main(
-        ticker=args.ticker,
-        label_mode=args.label_mode,
-        train_frac=args.train_frac,
-        val_frac=args.val_frac,
-    )
-    # test_leakage.main()
+    used_cache = use_cached and dataset_exists
+    if used_cache:
+        print(f"Using cached dataset at {dataset_dir}")
+    else:
+        parquet_path = resolve_intraday_parquet_path(args.ticker)
+        df = build_training_matrix(
+            parquet_path=parquet_path,
+            ticker=args.ticker,
+            label_timeframe=label_timeframe,
+        )
+        clean_training_matrix(
+            df,
+            save_outputs=args.save_processed,
+            ticker=args.ticker,
+            dataset_name=dataset_name,
+        )
+
+    if args.save_processed:
+        dataset_exists = True
+
+    if args.save_processed or used_cache:
+        data_pipeline.main(
+            ticker=args.ticker,
+            dataset_name=dataset_name,
+            label_mode=args.label_mode,
+            train_frac=args.train_frac,
+            val_frac=args.val_frac,
+        )
+    else:
+        print("save_processed=False and no cached dataset; skipping data pipeline.")

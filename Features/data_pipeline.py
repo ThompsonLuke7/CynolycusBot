@@ -19,7 +19,7 @@ from Features.feature_engineering import (
 
 # Default dataset name for processed artifacts
 DATASETS_DIRNAME = "datasets"
-DEFAULT_DATASET_NAME = "15m"
+DEFAULT_DATASET_NAME = "15min"
 
 
 def _datasets_root(processed_dir: Path) -> Path:

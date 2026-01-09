@@ -45,10 +45,10 @@ def _normalize_timeframe_label(label_timeframe: str) -> str:
     tf = label_timeframe.strip().lower()
     if tf.endswith("min"):
         value = tf.replace("min", "") or "1"
-        return f"{value}m"
+        return f"{value}min"
     if tf.endswith("t"):
         value = tf[:-1] or "1"
-        return f"{value}m"
+        return f"{value}min"
     if tf.endswith("hour"):
         value = tf.replace("hour", "") or "1"
         return f"{value}h"
@@ -254,6 +254,15 @@ def clean_training_matrix(
         with open(dataset_dir / "features.txt", "w") as f:
             for col in feature_cols:
                 f.write(col + "\n")
+
+        features_dir = resolved_output_dir / "features"
+        labels_dir = resolved_output_dir / "labels"
+        features_dir.mkdir(parents=True, exist_ok=True)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        with open(features_dir / f"{dataset_name}_features.txt", "w") as f:
+            for col in feature_cols:
+                f.write(col + "\n")
+        labels_df.to_parquet(labels_dir / f"{dataset_name}_labels.parquet", index=False)
 
     return cleaned, feature_df, feature_cols
 

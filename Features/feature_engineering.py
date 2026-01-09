@@ -6,7 +6,7 @@ import pandas as pd
 from Data.load_data import (
     get_processed_feature_path,
     get_ticker_data_dir,
-    get_ticker_processed_base_dir,
+    get_ticker_processed_features_dir,
     resolve_intraday_parquet_path,
     load_cached_features,
     load_ticker_parquet,
@@ -344,7 +344,7 @@ def main(
     corr_features = run_feature_diagnostics(df, feature_df)
     feature_df_final = drop_correlated_and_constant_features(feature_df, corr_features)
 
-    output_dir = get_ticker_processed_base_dir(clean_ticker)
+    output_dir = get_ticker_processed_features_dir(clean_ticker)
     final_feature_cols = list(feature_df_final.columns)
     save_feature_outputs(
         output_dir,
