@@ -36,7 +36,6 @@ class GAXGBoostFeatureSelector:
         "colsample_bytree": 0.8,
         "objective": "binary:logistic",
         "eval_metric": "logloss",
-        "tree_method": "hist",
         "n_jobs": -1,
     })
 
@@ -240,12 +239,14 @@ class GAXGBoostFeatureSelector:
     def _xgb_params_for_mode(self, use_gpu: bool) -> Dict[str, Any]:
         params = dict(self.xgb_params)
         if use_gpu:
-            params.setdefault("tree_method", "gpu_hist")
-            params.setdefault("predictor", "gpu_predictor")
+            params["tree_method"] = "gpu_hist"
+            params["predictor"] = "gpu_predictor"
             return params
 
         if params.get("tree_method") == "gpu_hist":
             params["tree_method"] = "hist"
+        else:
+            params.setdefault("tree_method", "hist")
         params.pop("predictor", None)
         params.pop("gpu_id", None)
         params.pop("device", None)
