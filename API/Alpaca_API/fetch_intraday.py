@@ -117,6 +117,12 @@ def fetch_intraday(
     if "symbol" in df.columns:
         df = df[df["symbol"] == clean_ticker]
     df = df.sort_values("timestamp").reset_index(drop=True)
+    if "timestamp" in df.columns:
+        ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        ny = ts.dt.tz_convert("America/New_York")
+        minutes = ny.dt.hour * 60 + ny.dt.minute
+        regular_mask = ts.notna() & (minutes >= 570) & (minutes <= 960)
+        df = df.loc[regular_mask].reset_index(drop=True)
 
     if save_path is None:
         slug = clean_ticker.lower()

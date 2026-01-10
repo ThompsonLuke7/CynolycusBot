@@ -38,37 +38,38 @@ def _filter_by_time(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="View a parquet file.")
+    parser = argparse.ArgumentParser(description="Print a parquet file as CSV.")
     parser.add_argument("path", help="Path to a parquet file.")
-    parser.add_argument("--rows", type=int, default=20, help="Rows to display.")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Write CSV to this path (defaults to the parquet path with .csv).",
+    )
+    parser.add_argument(
+        "--rows",
+        type=int,
+        default=100,
+        help="Rows to output (0 or negative for all).",
+    )
     parser.add_argument(
         "--tail",
         action="store_true",
-        help="Show tail instead of head.",
+        help="Output tail instead of head.",
     )
     parser.add_argument(
         "--columns",
         type=str,
         default=None,
-        help="Comma-separated column list to display.",
+        help="Comma-separated column list to include.",
     )
-    parser.add_argument("--sort", type=str, default=None, help="Sort by column name.")
-    parser.add_argument("--start", type=str, default=None, help="Start datetime filter.")
+    parser.add_argument(
+        "--start", type=str, default=None, help="Start datetime filter."
+    )
     parser.add_argument("--end", type=str, default=None, help="End datetime filter.")
-    parser.add_argument(
-        "--describe",
-        action="store_true",
-        help="Show describe() output.",
-    )
-    parser.add_argument(
-        "--info",
-        action="store_true",
-        help="Show DataFrame info().",
-    )
     parser.add_argument(
         "--no-index",
         action="store_true",
-        help="Hide the index when printing rows.",
+        help="Omit the index column in CSV output.",
     )
     return parser.parse_args()
 
@@ -81,13 +82,6 @@ def main() -> None:
 
     df = pd.read_parquet(path)
 
-    print(f"Path: {path}")
-    print(f"Rows: {len(df)} | Cols: {len(df.columns)}")
-
-    if args.info:
-        print("\nInfo:")
-        df.info()
-
     if args.columns:
         requested = [c.strip() for c in args.columns.split(",") if c.strip()]
         missing = [c for c in requested if c not in df.columns]
@@ -96,20 +90,18 @@ def main() -> None:
         df = df[requested]
 
     df = _filter_by_time(df, args.start, args.end)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(
+        "America/New_York"
+    )
+    rows = int(args.rows)
+    if rows > 0:
+        df = df.tail(rows) if args.tail else df.head(rows)
 
-    if args.sort:
-        if args.sort not in df.columns:
-            raise SystemExit(f"Sort column not found: {args.sort}")
-        df = df.sort_values(args.sort)
-
-    if args.describe:
-        print("\nDescribe:")
-        print(df.describe(include="all"))
-
-    rows = max(0, int(args.rows))
-    view = df.tail(rows) if args.tail else df.head(rows)
-    print("\nPreview:")
-    print(view.to_string(index=not args.no_index))
+    csv_text = df.to_csv(index=not args.no_index)
+    output_path = Path(args.output) if args.output else path.with_suffix(".csv")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(csv_text, encoding="utf-8")
+    print(f"Wrote CSV to {output_path}")
 
 
 if __name__ == "__main__":

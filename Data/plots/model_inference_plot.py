@@ -24,6 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 from Data.load_data import (  # noqa: E402
     get_ticker_plots_dir,
     get_ticker_processed_base_dir,
+    load_ticker_parquet,
     load_split_indices,
 )
 from Data.retrieve_data import normalize_ticker  # noqa: E402
@@ -44,16 +45,35 @@ def _load_feature_frame(
     features_path = dataset_dir / "features.txt"
     if features_path.exists():
         feature_cols = [
-            line.strip() for line in features_path.read_text().splitlines() if line.strip()
+            line.strip()
+            for line in features_path.read_text().splitlines()
+            if line.strip()
         ]
         missing = [c for c in feature_cols if c not in X_df.columns]
         if missing:
-            raise KeyError(f"Missing feature columns in X.parquet: {', '.join(missing)}")
+            raise KeyError(
+                f"Missing feature columns in X.parquet: {', '.join(missing)}"
+            )
         X_df = X_df[feature_cols]
     else:
         feature_cols = list(X_df.columns)
 
     return X_df, feature_cols, dataset_dir
+
+
+def _load_plot_frame(
+    ticker: str, row_idx: np.ndarray | None
+) -> pd.DataFrame | None:
+    try:
+        plot_df = load_ticker_parquet(ticker)
+    except Exception:
+        return None
+    if row_idx is None or len(row_idx) == 0:
+        return plot_df
+    max_idx = int(np.max(row_idx))
+    if max_idx >= len(plot_df):
+        return None
+    return plot_df.iloc[row_idx]
 
 
 def _load_model_and_mask(model_dir: Path) -> tuple[XGBClassifier, np.ndarray]:
@@ -87,9 +107,10 @@ def plot_model_inference(
     title: str | None = None,
     save_path: str | None = None,
 ) -> None:
-    pos = np.arange(len(X_df))
+    plot_index = X_df.index if isinstance(X_df.index, pd.DatetimeIndex) else None
     has_ohlc = all(c in X_df.columns for c in ("open", "high", "low", "close"))
     close_y = X_df["close"].to_numpy() if "close" in X_df.columns else None
+    pos = np.arange(len(X_df))
 
     fig, (ax_price, ax_prob) = plt.subplots(
         2,
@@ -103,48 +124,73 @@ def plot_model_inference(
         open_y = X_df["open"].to_numpy()
         high_y = X_df["high"].to_numpy()
         low_y = X_df["low"].to_numpy()
+        valid_mask = (
+            np.isfinite(open_y)
+            & np.isfinite(high_y)
+            & np.isfinite(low_y)
+            & np.isfinite(close_y)
+        )
+    elif close_y is not None:
+        valid_mask = np.isfinite(close_y)
+    else:
+        raise ValueError(
+            "X.parquet must include close (or open/high/low/close) to plot."
+        )
+
+    if not valid_mask.any():
+        raise ValueError("No valid price bars to plot after filtering NaNs.")
+
+    if has_ohlc:
         wick_color = "#4a4a4a"
         up_color = "#1976D2"
         down_color = "#E53935"
         up = close_y >= open_y
-        down = ~up
+        up_mask = up & valid_mask
+        down_mask = (~up) & valid_mask
 
-        ax_price.vlines(pos, low_y, high_y, color=wick_color, linewidth=1.0, zorder=1)
+        ax_price.vlines(
+            pos[valid_mask],
+            low_y[valid_mask],
+            high_y[valid_mask],
+            color=wick_color,
+            linewidth=1.0,
+            zorder=1,
+        )
         ax_price.bar(
-            pos[up],
-            close_y[up] - open_y[up],
+            pos[up_mask],
+            close_y[up_mask] - open_y[up_mask],
             width=0.8,
-            bottom=open_y[up],
+            bottom=open_y[up_mask],
             color=up_color,
             edgecolor="none",
             zorder=1.2,
         )
         ax_price.bar(
-            pos[down],
-            close_y[down] - open_y[down],
+            pos[down_mask],
+            close_y[down_mask] - open_y[down_mask],
             width=0.8,
-            bottom=open_y[down],
+            bottom=open_y[down_mask],
             color=down_color,
             edgecolor="none",
             zorder=1.2,
         )
-        marker_offset = np.nanmedian(high_y - low_y)
+        spread = (high_y - low_y)[valid_mask]
+        marker_offset = np.nanmedian(spread)
         if not np.isfinite(marker_offset) or marker_offset <= 0:
-            marker_offset = np.nanmax(high_y) * 0.002
+            marker_offset = np.nanmax(high_y[valid_mask]) * 0.002
         long_y = low_y - marker_offset * 0.6
         short_y = high_y + marker_offset * 0.6
     elif close_y is not None:
         ax_price.plot(pos, close_y, color="#1f77b4", linewidth=1.6, label="Close")
-        marker_offset = np.nanmedian(np.abs(np.diff(close_y)))
+        clean_close = close_y[valid_mask]
+        marker_offset = np.nanmedian(np.abs(np.diff(clean_close)))
         if not np.isfinite(marker_offset) or marker_offset <= 0:
-            marker_offset = np.nanmax(close_y) * 0.002
+            marker_offset = np.nanmax(clean_close) * 0.002
         long_y = close_y - marker_offset * 2
         short_y = close_y + marker_offset * 2
-    else:
-        raise ValueError("X.parquet must include close (or open/high/low/close) to plot.")
 
     if long_probs is not None:
-        long_mask = long_probs >= threshold
+        long_mask = (long_probs >= threshold) & valid_mask
         if long_mask.any():
             ax_price.scatter(
                 pos[long_mask],
@@ -152,11 +198,11 @@ def plot_model_inference(
                 color="#1565C0",
                 marker="^",
                 s=60,
-                label=f"LONG prob ≥ {threshold:.2f}",
+                label=f"LONG prob >= {threshold:.2f}",
                 zorder=2,
             )
     if short_probs is not None:
-        short_mask = short_probs >= threshold
+        short_mask = (short_probs >= threshold) & valid_mask
         if short_mask.any():
             ax_price.scatter(
                 pos[short_mask],
@@ -164,7 +210,7 @@ def plot_model_inference(
                 color="#FB8C00",
                 marker="v",
                 s=60,
-                label=f"SHORT prob ≥ {threshold:.2f}",
+                label=f"SHORT prob >= {threshold:.2f}",
                 zorder=2,
             )
 
@@ -173,16 +219,49 @@ def plot_model_inference(
     ax_price.set_title(title or "Model Inference (Window)")
 
     if long_probs is not None:
-        ax_prob.plot(long_probs, label="LONG P(class=1)", color="#1565C0", linewidth=1.5)
+        ax_prob.plot(
+            pos, long_probs, label="LONG P(class=1)", color="#1565C0", linewidth=1.5
+        )
     if short_probs is not None:
         ax_prob.plot(
-            short_probs, label="SHORT P(class=1)", color="#FB8C00", linewidth=1.5
+            pos, short_probs, label="SHORT P(class=1)", color="#FB8C00", linewidth=1.5
         )
     ax_prob.axhline(threshold, color="#1f77b4", linestyle="--", label="Threshold")
     ax_prob.set_ylim(0, 1.02)
     ax_prob.set_title("Model Probabilities (Window)")
     ax_prob.legend(loc="upper right")
-    ax_prob.set_xlabel("Bar")
+    tick_positions = None
+    tick_labels = None
+    if isinstance(plot_index, pd.DatetimeIndex):
+        dates = pd.Series(plot_index)
+        day_start = dates.dt.normalize().ne(dates.dt.normalize().shift())
+        tick_positions = pos[day_start.to_numpy()]
+        tick_labels = dates[day_start].dt.strftime("%Y-%m-%d").to_list()
+    elif "month" in X_df.columns and "day_of_month" in X_df.columns:
+        month = pd.Series(X_df["month"].to_numpy()).astype(int)
+        day = pd.Series(X_df["day_of_month"].to_numpy()).astype(int)
+        day_key = month.astype(str).str.zfill(2) + "-" + day.astype(str).str.zfill(2)
+        day_start = day_key.ne(day_key.shift())
+        tick_positions = pos[day_start.to_numpy()]
+        tick_labels = day_key[day_start].to_list()
+
+    if tick_positions is not None and len(tick_positions) > 0:
+        if len(tick_positions) > 25:
+            step = int(np.ceil(len(tick_positions) / 25))
+            tick_positions = tick_positions[::step]
+            tick_labels = tick_labels[::step]
+        ax_prob.set_xticks(tick_positions)
+        ax_prob.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+        for x in tick_positions:
+            ax_price.axvline(
+                x, color="#cfd8dc", linestyle="--", linewidth=0.8, alpha=0.7, zorder=0.5
+            )
+            ax_prob.axvline(
+                x, color="#cfd8dc", linestyle="--", linewidth=0.8, alpha=0.7, zorder=0.5
+            )
+        ax_prob.set_xlabel("Session")
+    else:
+        ax_prob.set_xlabel("Bar")
 
     plt.tight_layout()
     if save_path:
@@ -207,19 +286,29 @@ def main() -> None:
     parser.add_argument("--dataset", default="15min")
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--threshold", type=float, default=0.6)
-    parser.add_argument("--split", choices=["all", "train", "val", "test"], default="test")
+    parser.add_argument(
+        "--split", choices=["all", "train", "val", "test"], default="test"
+    )
     parser.add_argument("--tail", type=int, default=None)
     parser.add_argument("--save", default=None)
     args = parser.parse_args()
 
     X_df, feature_cols, _ = _load_feature_frame(args.ticker, args.dataset)
+    row_idx = np.arange(len(X_df))
 
     if args.split != "all":
         splits = load_split_indices(args.ticker, args.dataset)
-        X_df = X_df.iloc[splits[args.split]]
+        row_idx = splits[args.split]
 
     if args.tail:
-        X_df = X_df.tail(args.tail)
+        row_idx = row_idx[-args.tail :]
+
+    row_idx = np.asarray(row_idx, dtype=int)
+    X_df = X_df.iloc[row_idx]
+
+    plot_df = _load_plot_frame(args.ticker, row_idx)
+    if plot_df is None:
+        plot_df = X_df
 
     X = X_df.to_numpy(dtype=np.float32)
 
@@ -245,7 +334,7 @@ def main() -> None:
     title = f"{normalize_ticker(args.ticker)} | {args.model_name} | split={args.split}"
     save_path = args.save or str(get_default_plot_path(args.ticker, args.model_name))
     plot_model_inference(
-        X_df,
+        plot_df,
         long_probs,
         short_probs,
         threshold=args.threshold,

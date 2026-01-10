@@ -163,7 +163,7 @@ def load_ticker_parquet(
 
     If parquet_path is None, defaults to Data/{ticker}_intraday.parquet.
     """
-    slug = normalize_ticker(ticker).lower()
+    ticker = normalize_ticker(ticker).lower()
     path = resolve_intraday_parquet_path(ticker, parquet_path=parquet_path)
 
     df = pd.read_parquet(path)

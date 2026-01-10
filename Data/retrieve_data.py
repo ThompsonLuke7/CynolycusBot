@@ -6,7 +6,7 @@ import yfinance as yf
 
 def normalize_ticker(ticker: str) -> str:
     """
-    Normalize user input like "$SPY" to the plain uppercase ticker symbol.
+    Normalize user input like "$SPY" to "spy"
     """
     clean = ticker.strip().upper()
     if clean.startswith("$"):
