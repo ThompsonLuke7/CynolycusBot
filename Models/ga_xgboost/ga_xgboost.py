@@ -1,5 +1,6 @@
 # models/ga_xgboost/ga_xgboost.py
 
+import os
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
@@ -44,6 +45,7 @@ class GAXGBoostFeatureSelector:
     best_score_: Optional[float] = field(init=False, default=None)
     xgb_model_: Optional[XGBClassifier] = field(init=False, default=None)
     _use_gpu: Optional[bool] = field(init=False, default=None)
+    _last_printed_device: Optional[bool] = field(init=False, default=None)
 
     # ---------- Public API ----------
 
@@ -226,6 +228,7 @@ class GAXGBoostFeatureSelector:
             try:
                 model.fit(X, y)
                 self._use_gpu = True
+                self._maybe_print_device(use_gpu=True)
                 return model
             except XGBoostError as exc:
                 if not self._is_gpu_error(exc):
@@ -234,6 +237,7 @@ class GAXGBoostFeatureSelector:
 
         model = XGBClassifier(**self._xgb_params_for_mode(use_gpu=False))
         model.fit(X, y)
+        self._maybe_print_device(use_gpu=False)
         return model
 
     def _xgb_params_for_mode(self, use_gpu: bool) -> Dict[str, Any]:
@@ -256,3 +260,18 @@ class GAXGBoostFeatureSelector:
     def _is_gpu_error(exc: Exception) -> bool:
         message = str(exc).lower()
         return "gpu" in message or "cuda" in message
+
+    def _maybe_print_device(self, use_gpu: bool) -> None:
+        if self._last_printed_device is not None and self._last_printed_device == use_gpu:
+            return
+        self._last_printed_device = use_gpu
+
+        if use_gpu:
+            gpu_id = self.xgb_params.get("gpu_id", 0)
+            cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+            if cuda_visible:
+                print(f"[GA-XGB] Using GPU {gpu_id} (CUDA_VISIBLE_DEVICES={cuda_visible})")
+            else:
+                print(f"[GA-XGB] Using GPU {gpu_id}")
+        else:
+            print("[GA-XGB] Using CPU")
