@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
 from sklearn.metrics import accuracy_score, f1_score
+import xgboost as xgb
 from xgboost import XGBClassifier
 from xgboost.core import XGBoostError
 
@@ -46,6 +47,7 @@ class GAXGBoostFeatureSelector:
     xgb_model_: Optional[XGBClassifier] = field(init=False, default=None)
     _use_gpu: Optional[bool] = field(init=False, default=None)
     _last_printed_device: Optional[bool] = field(init=False, default=None)
+    _gpu_error_printed: bool = field(init=False, default=False)
 
     # ---------- Public API ----------
 
@@ -224,27 +226,40 @@ class GAXGBoostFeatureSelector:
         """
         use_gpu = True if self._use_gpu is None else self._use_gpu
         if use_gpu:
-            model = XGBClassifier(**self._xgb_params_for_mode(use_gpu=True))
+            gpu_params = self._xgb_params_for_mode(use_gpu=True)
+            model = XGBClassifier(**gpu_params)
             try:
                 model.fit(X, y)
                 self._use_gpu = True
-                self._maybe_print_device(use_gpu=True)
+                self._maybe_print_device(use_gpu=True, params=gpu_params)
                 return model
             except XGBoostError as exc:
                 if not self._is_gpu_error(exc):
                     raise
+                self._maybe_print_gpu_error(exc)
                 self._use_gpu = False
 
-        model = XGBClassifier(**self._xgb_params_for_mode(use_gpu=False))
+        cpu_params = self._xgb_params_for_mode(use_gpu=False)
+        model = XGBClassifier(**cpu_params)
         model.fit(X, y)
-        self._maybe_print_device(use_gpu=False)
+        self._maybe_print_device(use_gpu=False, params=cpu_params)
         return model
 
     def _xgb_params_for_mode(self, use_gpu: bool) -> Dict[str, Any]:
         params = dict(self.xgb_params)
         if use_gpu:
-            params["tree_method"] = "gpu_hist"
-            params["predictor"] = "gpu_predictor"
+            if self._xgb_supports_device_param():
+                gpu_id = params.pop("gpu_id", None)
+                params.pop("predictor", None)
+                params["tree_method"] = "hist"
+                if gpu_id is None:
+                    params["device"] = "cuda"
+                else:
+                    params["device"] = f"cuda:{gpu_id}"
+            else:
+                params["tree_method"] = "gpu_hist"
+                params["predictor"] = "gpu_predictor"
+                params.pop("device", None)
             return params
 
         if params.get("tree_method") == "gpu_hist":
@@ -253,7 +268,10 @@ class GAXGBoostFeatureSelector:
             params.setdefault("tree_method", "hist")
         params.pop("predictor", None)
         params.pop("gpu_id", None)
-        params.pop("device", None)
+        if self._xgb_supports_device_param():
+            params["device"] = "cpu"
+        else:
+            params.pop("device", None)
         return params
 
     @staticmethod
@@ -261,17 +279,41 @@ class GAXGBoostFeatureSelector:
         message = str(exc).lower()
         return "gpu" in message or "cuda" in message
 
-    def _maybe_print_device(self, use_gpu: bool) -> None:
+    @staticmethod
+    def _xgb_supports_device_param() -> bool:
+        version = getattr(xgb, "__version__", "0")
+        try:
+            major = int(version.split(".", 1)[0])
+        except ValueError:
+            return False
+        return major >= 2
+
+    def _maybe_print_device(self, use_gpu: bool, params: Dict[str, Any]) -> None:
         if self._last_printed_device is not None and self._last_printed_device == use_gpu:
             return
         self._last_printed_device = use_gpu
 
         if use_gpu:
-            gpu_id = self.xgb_params.get("gpu_id", 0)
+            device_param = params.get("device")
+            if isinstance(device_param, str) and device_param.startswith("cuda"):
+                device_label = device_param
+            else:
+                gpu_id = params.get("gpu_id", self.xgb_params.get("gpu_id", 0))
+                device_label = f"cuda:{gpu_id}"
             cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
             if cuda_visible:
-                print(f"[GA-XGB] Using GPU {gpu_id} (CUDA_VISIBLE_DEVICES={cuda_visible})")
+                print(f"[GA-XGB] Using GPU {device_label} (CUDA_VISIBLE_DEVICES={cuda_visible})")
             else:
-                print(f"[GA-XGB] Using GPU {gpu_id}")
+                print(f"[GA-XGB] Using GPU {device_label}")
         else:
             print("[GA-XGB] Using CPU")
+
+    def _maybe_print_gpu_error(self, exc: Exception) -> None:
+        if self._gpu_error_printed:
+            return
+        self._gpu_error_printed = True
+        message = str(exc).splitlines()[0].strip()
+        if message:
+            print(f"[GA-XGB] GPU init failed, falling back to CPU: {message}")
+        else:
+            print("[GA-XGB] GPU init failed, falling back to CPU")
