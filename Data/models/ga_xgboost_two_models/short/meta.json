@@ -1,8 +1,8 @@
 {
   "side": "short",
-  "best_score": 0.75,
-  "n_features": 1224,
-  "selected_features": 624,
+  "best_score": 0.6666666666666666,
+  "n_features": 1233,
+  "selected_features": 602,
   "xgb_params": {
     "n_estimators": 100,
     "max_depth": 3,
@@ -11,9 +11,8 @@
     "colsample_bytree": 0.8,
     "objective": "binary:logistic",
     "eval_metric": "logloss",
-    "tree_method": "hist",
     "n_jobs": -1,
-    "scale_pos_weight": 11.105263157894736
+    "scale_pos_weight": 11.104477611940299
   },
   "ticker": "$SPY",
   "dataset_name": "15min",
