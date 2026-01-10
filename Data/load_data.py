@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from Data.retrieve_data import get_output_path, normalize_ticker, retrieve_data
@@ -44,9 +45,7 @@ def get_ticker_processed_features_dir(
     return get_ticker_processed_dir(ticker, base_dir) / "features"
 
 
-def get_ticker_processed_labels_dir(
-    ticker: str, base_dir: Path | None = None
-) -> Path:
+def get_ticker_processed_labels_dir(ticker: str, base_dir: Path | None = None) -> Path:
     return get_ticker_processed_dir(ticker, base_dir) / "labels"
 
 
@@ -222,6 +221,104 @@ def resolve_intraday_parquet_path(
     if not path.exists() and legacy_path.exists():
         return legacy_path
     return path
+
+
+##########################
+# Dataset split loading
+##########################
+
+
+def _infer_latest_dataset_name(processed_dir: Path) -> str | None:
+    datasets_root = processed_dir / "datasets"
+    if not datasets_root.exists():
+        return None
+    candidates = [p for p in datasets_root.iterdir() if p.is_dir()]
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+    return newest.name
+
+
+def load_split_indices(
+    ticker: str,
+    dataset_name: str | None = None,
+    base_dir: Path | None = None,
+) -> dict[str, np.ndarray]:
+    """
+    Load train/val/test index arrays for a processed dataset.
+    """
+    clean = normalize_ticker(ticker)
+    processed_dir = get_ticker_processed_base_dir(clean, base_dir)
+    if dataset_name is None:
+        dataset_name = _infer_latest_dataset_name(processed_dir)
+        if dataset_name is None:
+            raise FileNotFoundError(
+                f"No datasets found under {processed_dir / 'datasets'}"
+            )
+
+    split_dir = get_ticker_processed_split_dir(clean, base_dir) / dataset_name
+    train_path = split_dir / "train_idx.npy"
+    val_path = split_dir / "val_idx.npy"
+    test_path = split_dir / "test_idx.npy"
+
+    missing = [p.name for p in [train_path, val_path, test_path] if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing split files in {split_dir}: {', '.join(missing)}"
+        )
+
+    return {
+        "train": np.load(train_path),
+        "val": np.load(val_path),
+        "test": np.load(test_path),
+    }
+
+
+def load_dataset_splits(
+    ticker: str,
+    dataset_name: str | None = None,
+    label_mode: str = "swing",
+    base_dir: Path | None = None,
+) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """
+    Load full X/y and apply train/val/test split indices.
+    """
+    clean = normalize_ticker(ticker)
+    processed_dir = get_ticker_processed_base_dir(clean, base_dir)
+    if dataset_name is None:
+        dataset_name = _infer_latest_dataset_name(processed_dir)
+        if dataset_name is None:
+            raise FileNotFoundError(
+                f"No datasets found under {processed_dir / 'datasets'}"
+            )
+
+    dataset_dir = processed_dir / "datasets" / dataset_name
+    X_path = dataset_dir / "X.parquet"
+    y_path = dataset_dir / "y.parquet"
+    if not X_path.exists() or not y_path.exists():
+        raise FileNotFoundError(f"Missing X.parquet or y.parquet in {dataset_dir}")
+
+    X = pd.read_parquet(X_path).to_numpy(dtype=np.float32)
+    y_df = pd.read_parquet(y_path)
+
+    if label_mode == "swing":
+        long_col, short_col = "long_swing_label", "short_swing_label"
+    elif label_mode == "leg":
+        long_col, short_col = "leg_up_label", "leg_down_label"
+    else:
+        raise ValueError(f"Unknown label_mode: {label_mode}")
+
+    missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
+    if missing_cols:
+        raise KeyError(
+            f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
+        )
+
+    y_long = y_df[long_col].to_numpy(dtype=np.int64)
+    y_short = y_df[short_col].to_numpy(dtype=np.int64)
+
+    splits = load_split_indices(clean, dataset_name, base_dir)
+    return {name: (X[idx], y_long[idx], y_short[idx]) for name, idx in splits.items()}
 
 
 def get_processed_feature_path(ticker: str, prefix: str | None = None) -> Path:

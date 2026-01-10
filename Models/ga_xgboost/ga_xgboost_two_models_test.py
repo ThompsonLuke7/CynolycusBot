@@ -1,29 +1,90 @@
+import json
 from pathlib import Path
 
 import numpy as np
 from sklearn.metrics import confusion_matrix, f1_score
 
-from models.ga_xgboost.ga_xgboost import GAXGBoostFeatureSelector
+from Data.load_data import get_ticker_processed_base_dir, load_dataset_splits
+
+from Models.ga_xgboost.ga_xgboost import GAXGBoostFeatureSelector
+
+
+def _resolve_repo_root() -> Path:
+    try:
+        return Path(__file__).resolve().parents[2]
+    except NameError:
+        return Path.cwd()
+
+
+def load_feature_names(ticker: str, dataset_name: str) -> list[str] | None:
+    dataset_dir = get_ticker_processed_base_dir(ticker) / "datasets" / dataset_name
+    features_path = dataset_dir / "features.txt"
+    if not features_path.exists():
+        return None
+    return [
+        line.strip() for line in features_path.read_text().splitlines() if line.strip()
+    ]
+
+
+def save_selector_artifacts(
+    selector: GAXGBoostFeatureSelector,
+    output_dir: Path,
+    side_name: str,
+    *,
+    feature_names: list[str] | None = None,
+    metadata: dict | None = None,
+) -> Path:
+    if selector.xgb_model_ is None or selector.best_mask_ is None:
+        raise RuntimeError("Model must be fit before saving artifacts.")
+
+    side_dir = output_dir / side_name.lower()
+    side_dir.mkdir(parents=True, exist_ok=True)
+
+    selector.xgb_model_.save_model(side_dir / "xgb_model.json")
+    np.save(side_dir / "best_mask.npy", selector.best_mask_.astype(np.int8))
+
+    meta = {
+        "side": side_name,
+        "best_score": selector.best_score_,
+        "n_features": int(selector.best_mask_.size),
+        "selected_features": int(selector.best_mask_.sum()),
+        "xgb_params": selector.xgb_params,
+    }
+    if metadata:
+        meta.update(metadata)
+    (side_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+    if feature_names:
+        selected = [
+            name
+            for name, keep in zip(feature_names, selector.best_mask_.tolist())
+            if keep
+        ]
+        (side_dir / "selected_features.txt").write_text("\n".join(selected))
+
+    return side_dir
+
 
 # ------------------------------
-# Load pre-split features + labels
+# Load dataset + split indices
 # ------------------------------
-SPLIT_ROOT = Path("Data/processed/splits/spy_daily")
+TICKER = "$SPY"
+DATASET_NAME = "15min"
+LABEL_MODE = "swing"
+MODEL_NAME = "ga_xgboost_two_models"
 
+REPO_ROOT = _resolve_repo_root()
+MODEL_DIR = REPO_ROOT / "Data" / "models" / MODEL_NAME
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-def load_split(name: str):
-    """Load a specific split (train/val/test) if it exists."""
-    split_dir = SPLIT_ROOT / name
-    X = np.load(split_dir / f"X_spy_daily_{name}.npy")
-    y_long = np.load(split_dir / f"y_spy_daily_long_{name}.npy")  # 1 = good long swing
-    y_short = np.load(
-        split_dir / f"y_spy_daily_short_{name}.npy"
-    )  # 1 = good short swing
-    return X, y_long, y_short
+splits = load_dataset_splits(
+    ticker=TICKER,
+    dataset_name=DATASET_NAME,
+    label_mode=LABEL_MODE,
+)
 
-
-X_train, y_long_train, y_short_train = load_split("train")
-X_test, y_long_test, y_short_test = load_split("test")
+X_train, y_long_train, y_short_train = splits["train"]
+X_test, y_long_test, y_short_test = splits["test"]
 
 print(f"Loaded train split: {X_train.shape}")
 print(f"Loaded test split:  {X_test.shape}")
@@ -81,6 +142,34 @@ def train_and_eval_side(y_train, y_test, side_name):
 # ------------------------------
 long_selector = train_and_eval_side(y_long_train, y_long_test, "LONG")
 short_selector = train_and_eval_side(y_short_train, y_short_test, "SHORT")
+
+# ------------------------------
+# Save artifacts
+# ------------------------------
+feature_names = load_feature_names(TICKER, DATASET_NAME)
+common_meta = {
+    "ticker": TICKER,
+    "dataset_name": DATASET_NAME,
+    "label_mode": LABEL_MODE,
+}
+
+long_dir = save_selector_artifacts(
+    long_selector,
+    MODEL_DIR,
+    "long",
+    feature_names=feature_names,
+    metadata=common_meta,
+)
+short_dir = save_selector_artifacts(
+    short_selector,
+    MODEL_DIR,
+    "short",
+    feature_names=feature_names,
+    metadata=common_meta,
+)
+
+print(f"\nSaved LONG artifacts to: {long_dir}")
+print(f"Saved SHORT artifacts to: {short_dir}")
 
 # ------------------------------
 # Tiny inference example
