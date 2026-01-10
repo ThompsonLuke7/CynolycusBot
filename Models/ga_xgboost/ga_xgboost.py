@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any
 
 from sklearn.metrics import accuracy_score, f1_score
 from xgboost import XGBClassifier
+from xgboost.core import XGBoostError
 
 
 @dataclass
@@ -43,6 +44,7 @@ class GAXGBoostFeatureSelector:
     best_mask_: Optional[np.ndarray] = field(init=False, default=None)
     best_score_: Optional[float] = field(init=False, default=None)
     xgb_model_: Optional[XGBClassifier] = field(init=False, default=None)
+    _use_gpu: Optional[bool] = field(init=False, default=None)
 
     # ---------- Public API ----------
 
@@ -116,8 +118,7 @@ class GAXGBoostFeatureSelector:
 
         # Train final XGB on full data using selected features
         X_selected = X[:, self.best_mask_.astype(bool)]
-        self.xgb_model_ = XGBClassifier(**self.xgb_params)
-        self.xgb_model_.fit(X_selected, y)
+        self.xgb_model_ = self._fit_xgb(X_selected, y)
 
         return self
 
@@ -184,8 +185,7 @@ class GAXGBoostFeatureSelector:
         X_tr = X_train[:, selected]
         X_v = X_val[:, selected]
 
-        model = XGBClassifier(**self.xgb_params)
-        model.fit(X_tr, y_train)
+        model = self._fit_xgb(X_tr, y_train)
         y_pred = model.predict(X_v)
         # Assuming label 1 = “good swing / up move”
         return f1_score(y_val, y_pred, pos_label=1)
@@ -216,3 +216,42 @@ class GAXGBoostFeatureSelector:
         mutation_mask = rng.random(pop.shape) < self.mutation_rate
         pop[mutation_mask] = 1 - pop[mutation_mask]
         return pop
+
+    def _fit_xgb(self, X: np.ndarray, y: np.ndarray) -> XGBClassifier:
+        """
+        Train XGB with GPU when available; fall back to CPU once if GPU fails.
+        """
+        use_gpu = True if self._use_gpu is None else self._use_gpu
+        if use_gpu:
+            model = XGBClassifier(**self._xgb_params_for_mode(use_gpu=True))
+            try:
+                model.fit(X, y)
+                self._use_gpu = True
+                return model
+            except XGBoostError as exc:
+                if not self._is_gpu_error(exc):
+                    raise
+                self._use_gpu = False
+
+        model = XGBClassifier(**self._xgb_params_for_mode(use_gpu=False))
+        model.fit(X, y)
+        return model
+
+    def _xgb_params_for_mode(self, use_gpu: bool) -> Dict[str, Any]:
+        params = dict(self.xgb_params)
+        if use_gpu:
+            params.setdefault("tree_method", "gpu_hist")
+            params.setdefault("predictor", "gpu_predictor")
+            return params
+
+        if params.get("tree_method") == "gpu_hist":
+            params["tree_method"] = "hist"
+        params.pop("predictor", None)
+        params.pop("gpu_id", None)
+        params.pop("device", None)
+        return params
+
+    @staticmethod
+    def _is_gpu_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "gpu" in message or "cuda" in message
