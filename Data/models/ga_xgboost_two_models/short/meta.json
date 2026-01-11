@@ -1,8 +1,8 @@
 {
   "side": "short",
   "best_score": 0.6666666666666666,
-  "n_features": 1233,
-  "selected_features": 602,
+  "n_features": 1350,
+  "selected_features": 669,
   "xgb_params": {
     "n_estimators": 100,
     "max_depth": 3,

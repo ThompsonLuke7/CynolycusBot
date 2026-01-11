@@ -1,8 +1,8 @@
 {
   "side": "long",
-  "best_score": 0.7142857142857143,
-  "n_features": 1233,
-  "selected_features": 609,
+  "best_score": 0.8571428571428571,
+  "n_features": 1350,
+  "selected_features": 649,
   "xgb_params": {
     "n_estimators": 100,
     "max_depth": 3,
