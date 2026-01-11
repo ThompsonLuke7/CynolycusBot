@@ -115,14 +115,39 @@ def run_feature_diagnostics(df: pd.DataFrame, feature_df: pd.DataFrame) -> pd.Da
 
 
 def drop_correlated_and_constant_features(
-    feature_df: pd.DataFrame, corr_features: pd.DataFrame
+    feature_df: pd.DataFrame,
+    corr_features: pd.DataFrame,
+    report_path: Path | None = None,
 ) -> pd.DataFrame:
     upper = corr_features.where(np.triu(np.ones(corr_features.shape), k=1).astype(bool))
 
+    corr_threshold = 0.999
     core_keep = ["high", "low", "open", "close", "volume"]
     to_drop = [
-        col for col in upper.columns if any(upper[col] > 0.999) and col not in core_keep
+        col
+        for col in upper.columns
+        if col not in core_keep and (upper[col] > corr_threshold).any()
     ]
+
+    report_path = report_path or (PROCESSED_STATS_DIR / "dropped_correlated_features.txt")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_lines = [
+        f"correlation_threshold={corr_threshold}",
+        f"to_drop_count={len(to_drop)}",
+        "",
+        "to_drop:",
+        *to_drop,
+        "",
+        "correlated_to:",
+    ]
+    for col in to_drop:
+        matches = upper[col][upper[col] > corr_threshold].sort_values(ascending=False)
+        if matches.empty:
+            report_lines.append(f"{col}\t(no matches)")
+            continue
+        match_str = ", ".join(f"{name} ({value:.6f})" for name, value in matches.items())
+        report_lines.append(f"{col}\t{match_str}")
+    report_path.write_text("\n".join(report_lines) + "\n")
 
     print("Dropping redundant features:", len(to_drop))
     print(to_drop)
