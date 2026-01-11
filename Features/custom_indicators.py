@@ -4,6 +4,29 @@ from tqdm import tqdm
 import pandas_ta as ta
 import vmdpy as vmd
 
+from Features.support_resistance_features import add_support_resistance_features
+
+
+def add_s_r_features(
+    df: pd.DataFrame,
+    open_col: str = "open",
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    volume_col: str = "volume",
+    **kwargs,
+) -> pd.DataFrame:
+    """Add support/resistance features to the DataFrame."""
+    return add_support_resistance_features(
+        df,
+        open_col=open_col,
+        high_col=high_col,
+        low_col=low_col,
+        close_col=close_col,
+        volume_col=volume_col,
+        **kwargs,
+    )
+
 
 def add_vmd_return_features(
     df: pd.DataFrame,
@@ -178,9 +201,7 @@ def add_fractal_pivots(
             best_idx = int(cluster[0])
             best_price = price[best_idx]
             best_rel = (
-                rel_vol_z[best_idx]
-                if np.isfinite(rel_vol_z[best_idx])
-                else -np.inf
+                rel_vol_z[best_idx] if np.isfinite(rel_vol_z[best_idx]) else -np.inf
             )
 
             for i in cluster[1:]:

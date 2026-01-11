@@ -13,6 +13,7 @@ from Features.custom_indicators import (
     add_rsilg_fe_gauss,
     add_tmo,
     add_vmd_return_features,
+    add_s_r_features,
 )
 from Features.feature_constants import SWING_LABEL_COLUMNS
 from Features.feature_engineering import (
@@ -89,6 +90,7 @@ def _add_feature_set(
         df = add_rsilg_fe_gauss(df)
         df = add_atr_swing_state_features(df)
         df = add_vmd_return_features(df)
+        df = add_s_r_features(df)
     if include_date_features:
         df = add_date_features(df)
     return df
