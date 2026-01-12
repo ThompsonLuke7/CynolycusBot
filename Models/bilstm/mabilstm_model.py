@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 
+
 class MABiLSTM(nn.Module):
     def __init__(
         self,
@@ -25,9 +26,10 @@ class MABiLSTM(nn.Module):
             bidirectional=True,
         )
 
-        # attention: score_t = (W_q h_t) · (W_k h_t)  (simplified to linear -> scalar)
-        # paper uses dot product q^T k; we implement a simple linear scoring over h_t
-        self.attn_linear = nn.Linear(hidden_dim * self.num_directions, 1)
+        # Attention block.
+        attn_dim = hidden_dim * self.num_directions
+        self.attn_query = nn.Linear(attn_dim, attn_dim)
+        self.attn_key = nn.Linear(attn_dim, attn_dim)
 
         self.dropout = nn.Dropout(dropout)
 
@@ -48,13 +50,16 @@ class MABiLSTM(nn.Module):
         """
         lstm_out, _ = self.lstm(x)   # (batch, seq_len, hidden*2)
 
-        # attention scores over time
-        scores = self.attn_linear(torch.tanh(lstm_out)).squeeze(-1)  # (batch, seq_len)
+        # Attention scores over time.
+        query = self.attn_query(lstm_out[:, -1, :])                 # (batch, hidden*2)
+        keys = self.attn_key(lstm_out)                              # (batch, seq_len, hidden*2)
+        scores = (keys * query.unsqueeze(1)).sum(dim=-1)            # (batch, seq_len)
+        scores = scores / (keys.size(-1) ** 0.5)
 
         attn_weights = torch.softmax(scores, dim=1)                  # (batch, seq_len)
         attn_weights_expanded = attn_weights.unsqueeze(-1)           # (batch, seq_len, 1)
 
-        # context vector = Σ α_t h_t
+        # Context vector = sum_t a_t * h_t.
         context = (lstm_out * attn_weights_expanded).sum(dim=1)      # (batch, hidden*2)
 
         context = self.dropout(context)
