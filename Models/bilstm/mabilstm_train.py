@@ -54,7 +54,7 @@ def _build_dataset(
     return SequenceRegressionDataset(X, y, seq_len=seq_len)
 
 
-def _update_binary_counts(logits: torch.Tensor, targets: torch.Tensor, counts: dict, threshold: float = 0.2):
+def _update_binary_counts(logits: torch.Tensor, targets: torch.Tensor, counts: dict, threshold: float = 0.5):
     probs = torch.sigmoid(logits)
     preds = probs >= threshold
     labels = targets >= 0.5
