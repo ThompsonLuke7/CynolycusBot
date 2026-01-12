@@ -95,7 +95,7 @@ def parse_args():
     parser.add_argument(
         "--limit",
         type=int,
-        default=1000,
+        default=10000,
         help="Max bars to fetch from Alpaca (default: 10000).",
     )
     parser.add_argument(

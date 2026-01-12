@@ -20,6 +20,7 @@ from Features.feature_engineering import (
     add_binary_swing_labels,
     add_date_features,
     build_feature_frame,
+    clean_nan_inf_entries,
     drop_correlated_and_constant_features,
     run_feature_diagnostics,
 )
@@ -218,6 +219,8 @@ def clean_training_matrix(
         if drop_cols:
             cleaned = cleaned.drop(columns=drop_cols)
         feature_cols = kept_cols
+        cleaned, _ = clean_nan_inf_entries(cleaned)
+        feature_df = cleaned[feature_cols]
 
     if save_outputs:
         clean_ticker = normalize_ticker(ticker)

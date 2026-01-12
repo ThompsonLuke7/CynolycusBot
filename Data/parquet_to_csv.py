@@ -90,9 +90,16 @@ def main() -> None:
         df = df[requested]
 
     df = _filter_by_time(df, args.start, args.end)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(
-        "America/New_York"
-    )
+    ts_series = _pick_time_series(df)
+    if ts_series is not None:
+        ts = pd.to_datetime(ts_series, errors="coerce", utc=True)
+        ts = ts.dt.tz_convert("America/New_York")
+        if "timestamp" in df.columns:
+            df["timestamp"] = ts
+        else:
+            df.insert(0, "timestamp", ts)
+    else:
+        print("No timestamp/date column or datetime index found; skipping time zone conversion.")
     rows = int(args.rows)
     if rows > 0:
         df = df.tail(rows) if args.tail else df.head(rows)

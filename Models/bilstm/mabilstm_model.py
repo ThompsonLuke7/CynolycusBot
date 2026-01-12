@@ -7,7 +7,7 @@ class MABiLSTM(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        hidden_dim: int = 1024,      # matches paper's best setting
+        hidden_dim: int = 128,      # matches paper's best setting
         lstm_layers: int = 1,
         mlp_hidden_dim: int = 256,
         mlp_hidden_dim2: int = 128,

@@ -70,7 +70,7 @@ def fetch_intraday(
     start: dt.datetime | str,
     end: dt.datetime | str | None = None,
     timeframe: str = "1Min",
-    limit: int = 10000,
+    limit: int = 100000,
     adjustment: str = "raw",
     save_path: Optional[str] = None,
 ) -> pd.DataFrame:

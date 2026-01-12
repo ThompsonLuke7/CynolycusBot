@@ -192,6 +192,24 @@ def normalize_continuous_features(
     return norm_df, stats
 
 
+def clean_nan_inf_entries(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+    """
+    Count NaN/Inf entries, convert Inf to NaN, and zero-fill NaNs.
+    """
+    nan_count = int(df.isna().sum().sum())
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols) == 0:
+        return df.copy(), {"nan_count": nan_count, "inf_count": 0}
+
+    numeric_frame = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    numeric_array = numeric_frame.to_numpy(dtype="float64", na_value=np.nan)
+    inf_count = int(np.isinf(numeric_array).sum())
+    cleaned = df.copy()
+    cleaned[numeric_cols] = cleaned[numeric_cols].replace([np.inf, -np.inf], np.nan)
+    cleaned[numeric_cols] = cleaned[numeric_cols].ffill().fillna(0)
+    return cleaned, {"nan_count": nan_count, "inf_count": inf_count}
+
+
 def apply_scaler_from_stats(
     feature_df: pd.DataFrame, stats: dict[str, dict[str, float]]
 ) -> pd.DataFrame:
