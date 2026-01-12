@@ -1,0 +1,16 @@
+{
+  "ticker": "$SPY",
+  "dataset_name": "15min",
+  "label_mode": "swing",
+  "target_side": "short",
+  "seq_len": 30,
+  "n_features": 1391,
+  "epochs": 30,
+  "learning_rate": 0.0001,
+  "train_size": 1600,
+  "val_size": 0,
+  "test_size": 112,
+  "test_loss": 0.2819057106971741,
+  "test_acc": 0.9196428571428571,
+  "test_f1": 0.0
+}
