@@ -54,8 +54,9 @@ def _build_dataset(
     return SequenceRegressionDataset(X, y, seq_len=seq_len)
 
 
-def _update_binary_counts(logits: torch.Tensor, targets: torch.Tensor, counts: dict):
-    preds = logits >= 0
+def _update_binary_counts(logits: torch.Tensor, targets: torch.Tensor, counts: dict, threshold: float = 0.2):
+    probs = torch.sigmoid(logits)
+    preds = probs >= threshold
     labels = targets >= 0.5
     counts["tp"] += int(((preds == 1) & (labels == 1)).sum().item())
     counts["fp"] += int(((preds == 1) & (labels == 0)).sum().item())
@@ -104,7 +105,10 @@ def train_and_eval_side(
     print(f"{side_name.upper()} train positives: {pos}, negatives: {neg}")
 
     model = MABiLSTM(input_dim=X_train.shape[1]).to(device)
-    criterion = nn.BCEWithLogitsLoss()
+    pos_weight = torch.tensor([neg / max(pos, 1)], device=device)
+
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
     epochs = 30
