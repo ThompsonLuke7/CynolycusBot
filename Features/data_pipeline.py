@@ -44,13 +44,14 @@ def _resolve_dataset_dir(processed_dir: Path, dataset_name: str) -> Path:
 def load_processed_frames(
     processed_dir: Path,
     dataset_name: str = DEFAULT_DATASET_NAME,
+    x_filename: str = "X.parquet",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Load the cleaned, unnormalized feature matrix and labels produced by training_matrix.
+    Load the cleaned, unnormalized feature matrix and labels produced by feature_matrix.
     """
     processed_dir = Path(processed_dir)
     dataset_dir = _resolve_dataset_dir(processed_dir, dataset_name)
-    X = pd.read_parquet(dataset_dir / "X.parquet")
+    X = pd.read_parquet(dataset_dir / x_filename)
     y = pd.read_parquet(dataset_dir / "y.parquet")
     if len(X) != len(y):
         raise ValueError("X and y must have the same number of rows.")
@@ -104,11 +105,12 @@ def save_split_indices(
     split_root: Path,
     dataset_name: str,
     splits: Dict[str, np.ndarray],
+    x_stem: str
 ) -> None:
     """
     Persist split indices.
     """
-    split_dir = split_root / dataset_name
+    split_dir = split_root / dataset_name / x_stem
     split_dir.mkdir(parents=True, exist_ok=True)
     np.save(split_dir / "train_idx.npy", splits["train"])
     np.save(split_dir / "val_idx.npy", splits["val"])
@@ -122,6 +124,7 @@ def main(
     label_mode: str | None = None,
     train_frac: float = 0.7,
     val_frac: float = 0.15,
+    x_filename: str = "X.parquet",
 ) -> None:
     """
     End-to-end: load processed features (unnormalized), split chronologically,
@@ -134,20 +137,21 @@ def main(
         inferred = _infer_dataset_name(processed_dir)
         dataset_name = inferred or DEFAULT_DATASET_NAME
 
-    X, y = load_processed_frames(processed_dir, dataset_name)
+    X, y = load_processed_frames(processed_dir, dataset_name,x_filename=x_filename)
     splits = chronological_split_indices(len(X), train_frac, val_frac)
     stats = fit_scaler_on_train(X, splits["train"], SCALE_FEATURE_COLUMNS)
 
     split_root = get_ticker_processed_split_dir(clean_ticker)
     stats_dir = get_ticker_processed_stats_dir(clean_ticker)
-    save_split_indices(split_root, dataset_name, splits)
+    x_stem = Path(x_filename).stem
+    save_split_indices(split_root, dataset_name, splits, x_stem)
     save_normalization_stats(
         stats_dir,
         stats,
-        filename=f"norm_stats_{dataset_name}_train.json",
+        filename=f"norm_stats_{dataset_name}_{x_stem}_train.json",
     )
     print(
-        f"Saved split indices under {split_root / dataset_name} "
+        f"Saved split indices under {split_root / dataset_name / x_stem} "
         f"and scaler stats to {stats_dir} "
         f"with train/val/test = {train_frac}/{val_frac}/{1 - train_frac - val_frac}"
     )
@@ -163,6 +167,7 @@ if __name__ == "__main__":
     parser.add_argument("--label_mode", type=str, default="leg", choices=["leg", "swing"])
     parser.add_argument("--train_frac", type=float, default=0.7)
     parser.add_argument("--val_frac", type=float, default=0.15)
+    parser.add_argument("--x-file", type=str, default="X.parquet")
     args = parser.parse_args()
 
     main(
@@ -172,4 +177,5 @@ if __name__ == "__main__":
         label_mode=args.label_mode,
         train_frac=args.train_frac,
         val_frac=args.val_frac,
+        x_filename=args.x_file,
     )

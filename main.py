@@ -35,7 +35,7 @@ from Features.label_generations import (
     add_pivot_swing_state_machine,
 )
 from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
-from Features.training_matrix import build_training_matrix, clean_training_matrix
+from Features.feature_matrix import build_feature_matrices, build_feature_matrix, clean_feature_matrix
 
 
 def parse_args():
@@ -265,37 +265,50 @@ if __name__ == "__main__":
     dataset_name = _dataset_name_from_label_timeframe(label_timeframe)
     processed_base_dir = get_ticker_processed_base_dir(args.ticker)
     dataset_dir = processed_base_dir / "datasets" / dataset_name
-    dataset_exists = (dataset_dir / "X.parquet").exists() and (
-        dataset_dir / "y.parquet"
-    ).exists()
+    x_tree = dataset_dir / f"X_{dataset_name}_tree.parquet"
+    x_lstm = dataset_dir / f"X_{dataset_name}_lstm.parquet"
+    y_file = dataset_dir / "y.parquet"
+    dataset_exists = x_tree.exists() and x_lstm.exists() and y_file.exists()
 
     used_cache = use_cached and dataset_exists
     if used_cache:
         print(f"Using cached dataset at {dataset_dir}")
     else:
         parquet_path = resolve_intraday_parquet_path(args.ticker)
-        df = build_training_matrix(
+
+        model_dfs = build_feature_matrices(
             parquet_path=parquet_path,
             ticker=args.ticker,
             label_timeframe=label_timeframe,
+            models=("LSTM",),
         )
-        clean_training_matrix(
-            df,
-            save_outputs=args.save_processed,
-            ticker=args.ticker,
-            dataset_name=dataset_name,
-        )
+        first = True
+        for model_name, df in model_dfs.items():
+            model_key = model_name.strip().lower()
+            x_file = f"X_{dataset_name}_{model_key}.parquet"  # X_15min_tree.parquet
+
+            clean_feature_matrix(
+                df,
+                save_outputs=args.save_processed,
+                ticker=args.ticker,
+                dataset_name=dataset_name,   # <-- SAME folder
+                x_filename=x_file,           # <-- separate X files
+                write_y=first,
+            )
+            first = False
 
     if args.save_processed:
         dataset_exists = True
 
     if args.save_processed or used_cache:
-        data_pipeline.main(
-            ticker=args.ticker,
-            dataset_name=dataset_name,
-            label_mode=args.label_mode,
-            train_frac=args.train_frac,
-            val_frac=args.val_frac,
+        for model_key in ("lstm",):
+            data_pipeline.main(
+                ticker=args.ticker,
+                dataset_name=dataset_name,
+                label_mode=args.label_mode,
+                train_frac=args.train_frac,
+                val_frac=args.val_frac,
+                x_filename=f"X_{dataset_name}_{model_key}.parquet",
         )
     else:
         print("save_processed=False and no cached dataset; skipping data pipeline.")
