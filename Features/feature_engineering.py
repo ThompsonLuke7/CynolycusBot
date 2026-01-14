@@ -100,17 +100,6 @@ def run_feature_diagnostics(df: pd.DataFrame, feature_df: pd.DataFrame) -> pd.Da
     print("atr_swing_label value counts:")
     print(df["atr_swing_label"].value_counts())
 
-    for col in [
-        "high",
-        "low",
-        "open",
-        "atr",
-    ]:
-        print(f"\nHighly correlated with {col}:")
-        print(
-            corr_features[col][corr_features[col] > 0.999].sort_values(ascending=False)
-        )
-
     return corr_features
 
 
@@ -122,11 +111,10 @@ def drop_correlated_and_constant_features(
     upper = corr_features.where(np.triu(np.ones(corr_features.shape), k=1).astype(bool))
 
     corr_threshold = 0.999
-    core_keep = ["high", "low", "open", "close", "volume"]
     to_drop = [
         col
         for col in upper.columns
-        if col not in core_keep and (upper[col] > corr_threshold).any()
+        if col and (upper[col] > corr_threshold).any()
     ]
 
     report_path = report_path or (PROCESSED_STATS_DIR / "dropped_correlated_features.txt")
