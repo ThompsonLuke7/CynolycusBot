@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -20,6 +21,7 @@ DATASET_NAME = "15min"
 LABEL_MODE = "swing"
 MODEL_NAME = "mabilstm"
 SIDES = ("long", "short")
+X_FILENAME = f"X_{DATASET_NAME}_lstm.parquet"
 
 
 def _resolve_repo_root() -> Path:
@@ -33,15 +35,18 @@ REPO_ROOT = _resolve_repo_root()
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from Data.load_data import load_dataset_splits  # noqa: E402
+from Data.load_data import (  # noqa: E402
+    get_ticker_processed_base_dir,
+    get_ticker_processed_split_dir,
+)
 from Data.retrieve_data import normalize_ticker  # noqa: E402
 
 
 def _select_target(side: str, y_long: np.ndarray, y_short: np.ndarray) -> np.ndarray:
     side = side.strip().lower()
-    if side in ("long", "up", "bull"):
+    if side in ("long", "up"):
         return y_long
-    if side in ("short", "down", "bear"):
+    if side in ("short", "down"):
         return y_short
     raise ValueError(f"Unknown side: {side}")
 
@@ -70,6 +75,73 @@ def _metrics_from_counts(counts: dict) -> tuple[float, float]:
     denom = 2 * counts["tp"] + counts["fp"] + counts["fn"]
     f1 = (2 * counts["tp"]) / denom if denom else 0.0
     return acc, f1
+
+
+def _load_split_indices_for_xfile(
+    ticker: str,
+    dataset_name: str,
+    x_filename: str,
+) -> dict[str, np.ndarray]:
+    clean = normalize_ticker(ticker)
+    split_dir = (
+        get_ticker_processed_split_dir(clean)
+        / dataset_name
+        / Path(x_filename).stem
+    )
+    train_path = split_dir / "train_idx.npy"
+    val_path = split_dir / "val_idx.npy"
+    test_path = split_dir / "test_idx.npy"
+
+    missing = [p.name for p in (train_path, val_path, test_path) if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing split files in {split_dir}: {', '.join(missing)}"
+        )
+
+    return {
+        "train": np.load(train_path),
+        "val": np.load(val_path),
+        "test": np.load(test_path),
+    }
+
+
+def _load_dataset_splits_for_xfile(
+    *,
+    ticker: str,
+    dataset_name: str,
+    label_mode: str,
+    x_filename: str,
+) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    clean = normalize_ticker(ticker)
+    processed_dir = get_ticker_processed_base_dir(clean)
+    dataset_dir = processed_dir / "datasets" / dataset_name
+    x_path = dataset_dir / x_filename
+    y_path = dataset_dir / "y.parquet"
+
+    if not x_path.exists() or not y_path.exists():
+        raise FileNotFoundError(f"Missing {x_filename} or y.parquet in {dataset_dir}")
+
+    X = pd.read_parquet(x_path).to_numpy(dtype=np.float32)
+    y_df = pd.read_parquet(y_path)
+
+    if label_mode == "swing":
+        long_col, short_col = "long_swing_label", "short_swing_label"
+    elif label_mode == "leg":
+        long_col, short_col = "leg_up_label", "leg_down_label"
+    else:
+        raise ValueError(f"Unknown label_mode: {label_mode}")
+
+    missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
+    if missing_cols:
+        raise KeyError(
+            f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
+        )
+
+    y_long = y_df[long_col].to_numpy(dtype=np.int64)
+    y_short = y_df[short_col].to_numpy(dtype=np.int64)
+
+    splits = _load_split_indices_for_xfile(clean, dataset_name, x_filename)
+    return {name: (X[idx], y_long[idx], y_short[idx]) for name, idx in splits.items()}
 
 
 def train_and_eval_side(
@@ -201,10 +273,11 @@ def train_and_eval_side(
 
 
 def main():
-    splits = load_dataset_splits(
+    splits = _load_dataset_splits_for_xfile(
         ticker=TICKER,
         dataset_name=DATASET_NAME,
         label_mode=LABEL_MODE,
+        x_filename=X_FILENAME,
     )
 
     X_train, y_long_train, y_short_train = splits["train"]

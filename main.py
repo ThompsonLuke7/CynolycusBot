@@ -123,6 +123,12 @@ def parse_args():
         help='Label mode for feature engineering and splits (default: "leg").',
     )
     parser.add_argument(
+        "--model",
+        default="LSTM",
+        choices=["all", "Tree", "LSTM"],
+        help='Model feature set to build/use: "all", "Tree", or "LSTM" (default: "LSTM").',
+    )
+    parser.add_argument(
         "--train-frac",
         type=float,
         default=0.92,
@@ -263,12 +269,16 @@ if __name__ == "__main__":
 
     label_timeframe = "15T"
     dataset_name = _dataset_name_from_label_timeframe(label_timeframe)
+    selected_models = ("Tree", "LSTM") if args.model == "all" else (args.model,)
+    selected_model_keys = [model.strip().lower() for model in selected_models]
     processed_base_dir = get_ticker_processed_base_dir(args.ticker)
     dataset_dir = processed_base_dir / "datasets" / dataset_name
-    x_tree = dataset_dir / f"X_{dataset_name}_tree.parquet"
-    x_lstm = dataset_dir / f"X_{dataset_name}_lstm.parquet"
+    x_files = [
+        dataset_dir / f"X_{dataset_name}_{model_key}.parquet"
+        for model_key in selected_model_keys
+    ]
     y_file = dataset_dir / "y.parquet"
-    dataset_exists = x_tree.exists() and x_lstm.exists() and y_file.exists()
+    dataset_exists = all(x_file.exists() for x_file in x_files) and y_file.exists()
 
     used_cache = use_cached and dataset_exists
     if used_cache:
@@ -280,7 +290,7 @@ if __name__ == "__main__":
             parquet_path=parquet_path,
             ticker=args.ticker,
             label_timeframe=label_timeframe,
-            models=("LSTM",),
+            models=selected_models,
         )
         first = True
         for model_name, df in model_dfs.items():
@@ -301,7 +311,7 @@ if __name__ == "__main__":
         dataset_exists = True
 
     if args.save_processed or used_cache:
-        for model_key in ("lstm",):
+        for model_key in selected_model_keys:
             data_pipeline.main(
                 ticker=args.ticker,
                 dataset_name=dataset_name,
