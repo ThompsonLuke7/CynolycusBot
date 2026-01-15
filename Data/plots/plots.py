@@ -1,0 +1,1402 @@
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+from typing import Iterable, Mapping, Sequence, TYPE_CHECKING
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from Data.retrieve_data import normalize_ticker
+
+if TYPE_CHECKING:
+    from xgboost import XGBClassifier
+
+
+DEFAULT_LABEL_PLOT_TYPES = [
+    "atr_swing",
+    "leg_segmentation",
+    "continuation",
+    "swing_state_machine",
+    "all_labels",
+]
+
+_PLOT_TYPE_ALIASES = {
+    "atr": "atr_swing",
+    "leg": "leg_segmentation",
+    "state_machine": "swing_state_machine",
+    "swing_state": "swing_state_machine",
+    "mfe": "mfe_mae",
+    "mae": "mfe_mae",
+    "exhaustion": "bars_to_exhaustion",
+}
+
+_LABEL_PLOT_FILES = {
+    "atr_swing": "atr_swing_plot.png",
+    "leg_segmentation": "leg_segmentation_plot.png",
+    "continuation": "continuation_plot.png",
+    "swing_state_machine": "swing_state_machine_plot.png",
+    "all_labels": "all_labels_plot.png",
+    "mfe_mae": "mfe_mae_plot.png",
+    "bars_to_exhaustion": "bars_to_exhaustion_plot.png",
+}
+
+
+def _infer_bar_label(index: pd.DatetimeIndex) -> str:
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
+        return "Unknown bars"
+    deltas = index.to_series().diff().dropna().dt.total_seconds()
+    if deltas.empty:
+        return "Unknown bars"
+    seconds = float(deltas.median())
+    if not np.isfinite(seconds) or seconds <= 0:
+        return "Unknown bars"
+    if seconds % 86400 == 0:
+        days = int(seconds / 86400)
+        return f"{days} day bars"
+    if seconds % 3600 == 0:
+        hours = int(seconds / 3600)
+        return f"{hours} hour bars"
+    if seconds % 60 == 0:
+        minutes = int(seconds / 60)
+        return f"{minutes} min bars"
+    return f"{int(seconds)} sec bars"
+
+
+def _normalize_plot_type(plot_type: str) -> str:
+    key = plot_type.strip().lower()
+    key = _PLOT_TYPE_ALIASES.get(key, key)
+    if key not in _LABEL_PLOT_FILES:
+        raise ValueError(
+            f"Unknown plot_type '{plot_type}'. Expected one of: "
+            f"{', '.join(sorted(_LABEL_PLOT_FILES))}."
+        )
+    return key
+
+
+def _extract_ohlc(
+    df: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    pos = np.arange(len(df))
+    open_y = df["open"].to_numpy()
+    high_y = df["high"].to_numpy()
+    low_y = df["low"].to_numpy()
+    close_y = df["close"].to_numpy()
+    return pos, open_y, high_y, low_y, close_y
+
+
+def _compute_marker_offset(
+    df: pd.DataFrame,
+    high_y: np.ndarray,
+    low_y: np.ndarray,
+    *,
+    atr_col: str = "atr",
+    fallback_scale: float = 0.001,
+) -> float:
+    if atr_col in df.columns:
+        marker_offset = np.nanmedian(df[atr_col].to_numpy())
+    else:
+        marker_offset = np.nanmedian(high_y - low_y)
+    if not np.isfinite(marker_offset) or marker_offset <= 0:
+        marker_offset = np.nanmax(high_y) * fallback_scale
+    return marker_offset
+
+
+def _plot_candles(
+    ax: plt.Axes,
+    pos: np.ndarray,
+    open_y: np.ndarray,
+    high_y: np.ndarray,
+    low_y: np.ndarray,
+    close_y: np.ndarray,
+    *,
+    wick_color: str = "#444444",
+    up_color: str = "#1976D2",
+    down_color: str = "#E53935",
+    width: float = 0.8,
+) -> tuple[np.ndarray, np.ndarray]:
+    up = close_y >= open_y
+    down = ~up
+    ax.vlines(pos, low_y, high_y, color=wick_color, linewidth=1.0, zorder=1)
+    ax.bar(
+        pos[up],
+        close_y[up] - open_y[up],
+        width=width,
+        bottom=open_y[up],
+        color=up_color,
+        edgecolor="none",
+        label="Bull candle",
+        zorder=1.2,
+    )
+    ax.bar(
+        pos[down],
+        close_y[down] - open_y[down],
+        width=width,
+        bottom=open_y[down],
+        color=down_color,
+        edgecolor="none",
+        label="Bear candle",
+        zorder=1.2,
+    )
+    return up, down
+
+
+def _compute_time_ticks(
+    date_index: pd.DatetimeIndex,
+    pos: np.ndarray,
+    *,
+    max_ticks: int = 25,
+) -> tuple[np.ndarray | None, list[str] | None]:
+    if not isinstance(date_index, pd.DatetimeIndex):
+        return None, None
+    dates = pd.Series(date_index)
+    day_start = dates.dt.normalize().ne(dates.dt.normalize().shift())
+    tick_positions = pos[day_start.to_numpy()]
+    tick_labels = dates[day_start].dt.strftime("%Y-%m-%d").to_list()
+    if len(tick_positions) > max_ticks:
+        step = int(np.ceil(len(tick_positions) / max_ticks))
+        tick_positions = tick_positions[::step]
+        tick_labels = tick_labels[::step]
+    return tick_positions, tick_labels
+
+
+def _apply_time_ticks(
+    ax: plt.Axes,
+    tick_positions: np.ndarray | None,
+    tick_labels: list[str] | None,
+) -> None:
+    if tick_positions is None or tick_labels is None:
+        return
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+
+
+def _draw_day_lines(
+    axes: Sequence[plt.Axes],
+    tick_positions: np.ndarray | None,
+    *,
+    line_color: str = "#d0d0d000",
+) -> None:
+    if tick_positions is None:
+        return
+    for ax in axes:
+        for x in tick_positions:
+            ax.axvline(
+                x, color=line_color, linestyle="--", linewidth=1, alpha=0.7, zorder=0.5
+            )
+
+
+def _finalize_plot(
+    fig: plt.Figure,
+    *,
+    suptitle: str | None = None,
+    suptitle_y: float = 1.02,
+    top: float = 0.93,
+    save_path: str | Path | None = None,
+) -> None:
+    plt.tight_layout()
+    if suptitle:
+        plt.suptitle(suptitle, fontsize=17, y=suptitle_y)
+        plt.subplots_adjust(top=top)
+    if save_path:
+        save_path = str(save_path)
+        save_dir = os.path.dirname(save_path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        plt.savefig(save_path, bbox_inches="tight", dpi=200)
+        print(f"Saved plot to {save_path}")
+    plt.show()
+
+
+def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> None:
+    """
+    Plot OHLC candles with ATR swing labels from label generation.
+    Uses compressed x positions to avoid gaps from non-trading days.
+    """
+    fig, ax = plt.subplots(figsize=(18, 6))
+
+    date_index = df.index
+    pos, open_y, high_y, low_y, close_y = _extract_ohlc(df)
+    marker_offset = _compute_marker_offset(df, high_y, low_y)
+    up_offset = marker_offset * 0.6
+    down_offset = marker_offset * 0.6
+
+    swing_long_color = "#2E7D32"
+    swing_short_color = "#C62828"
+    pivot_dn_color = "#00695C"
+    pivot_up_color = "#6A1B9A"
+
+    _plot_candles(ax, pos, open_y, high_y, low_y, close_y)
+
+    swing_pos_y = low_y - down_offset
+    swing_neg_y = high_y + up_offset
+
+    mask_pos = np.zeros(len(df), dtype=bool)
+    mask_neg = np.zeros(len(df), dtype=bool)
+    if "atr_swing_label" in df.columns:
+        mask_pos = (df["atr_swing_label"].fillna(0) == 1).to_numpy()
+        mask_neg = (df["atr_swing_label"].fillna(0) == -1).to_numpy()
+    else:
+        if "long_swing_label" in df.columns:
+            mask_pos = df["long_swing_label"].fillna(0).astype(int).to_numpy() == 1
+        if "short_swing_label" in df.columns:
+            mask_neg = df["short_swing_label"].fillna(0).astype(int).to_numpy() == 1
+
+    if mask_pos.any():
+        ax.scatter(
+            pos[mask_pos],
+            swing_pos_y[mask_pos],
+            color=swing_long_color,
+            marker="^",
+            s=48,
+            label="atr_swing_label = +1",
+            alpha=0.95,
+            zorder=2,
+        )
+    if mask_neg.any():
+        ax.scatter(
+            pos[mask_neg],
+            swing_neg_y[mask_neg],
+            color=swing_short_color,
+            marker="v",
+            s=48,
+            label="atr_swing_label = -1",
+            alpha=0.95,
+            zorder=2,
+        )
+
+    if "pivot_down" in df.columns:
+        mask_pivot_down = (df["pivot_down"].fillna(0).astype(int) == 1).to_numpy()
+        if mask_pivot_down.any():
+            ax.scatter(
+                pos[mask_pivot_down],
+                low_y[mask_pivot_down] - down_offset * 1.2,
+                facecolors="none",
+                edgecolors=pivot_dn_color,
+                marker="v",
+                s=56,
+                label="pivot_down",
+                alpha=0.95,
+                zorder=2.1,
+            )
+
+    if "pivot_up" in df.columns:
+        mask_pivot_up = (df["pivot_up"].fillna(0).astype(int) == 1).to_numpy()
+        if mask_pivot_up.any():
+            ax.scatter(
+                pos[mask_pivot_up],
+                high_y[mask_pivot_up] + up_offset * 1.2,
+                facecolors="none",
+                edgecolors=pivot_up_color,
+                marker="^",
+                s=56,
+                label="pivot_up",
+                alpha=0.95,
+                zorder=2.1,
+            )
+
+    bar_label = _infer_bar_label(date_index)
+    title = (
+        f"{bar_label} | bars: {len(df)} | +1: {int(mask_pos.sum())} | -1: {int(mask_neg.sum())}"
+    )
+    ax.set_title(title, fontsize=14)
+    ax.set_ylabel("Close Price")
+    ax.legend(loc="upper left", fontsize=11, ncol=3)
+    ax.set_xlabel("Date")
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax, tick_positions, tick_labels)
+    _draw_day_lines([ax], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="Close Price with ATR Swing Labels",
+        suptitle_y=1.02,
+        top=0.93,
+        save_path=save_path,
+    )
+
+
+def plot_continuation_signals(
+    df: pd.DataFrame,
+    *,
+    long_cont_col: str = "long_cont_label",
+    short_cont_col: str = "short_cont_label",
+    cont_label_col: str = "atr_cont_label",
+    save_path: str | None = None,
+) -> None:
+    """
+    Plot OHLC candles with continuation labels only.
+    Uses compressed x positions to avoid gaps from non-trading days.
+    """
+    fig, ax = plt.subplots(figsize=(18, 6))
+
+    date_index = df.index
+    pos, open_y, high_y, low_y, close_y = _extract_ohlc(df)
+
+    marker_offset = _compute_marker_offset(df, high_y, low_y)
+    cont_offset = marker_offset * 0.4
+
+    cont_long_color = "#7CB342"
+    cont_short_color = "#F9A825"
+
+    _plot_candles(ax, pos, open_y, high_y, low_y, close_y)
+
+    cont_long_mask = None
+    cont_short_mask = None
+    if long_cont_col in df.columns:
+        cont_long_mask = df[long_cont_col].fillna(0).astype(int).to_numpy() == 1
+    if short_cont_col in df.columns:
+        cont_short_mask = df[short_cont_col].fillna(0).astype(int).to_numpy() == 1
+    if cont_long_mask is None or cont_short_mask is None:
+        if cont_label_col in df.columns:
+            cont_vals = df[cont_label_col].fillna(0).to_numpy()
+            cont_long_mask = cont_vals == 1
+            cont_short_mask = cont_vals == -1
+
+    if cont_long_mask is not None and cont_long_mask.any():
+        ax.scatter(
+            pos[cont_long_mask],
+            close_y[cont_long_mask] + cont_offset,
+            color=cont_long_color,
+            marker="^",
+            s=40,
+            label=long_cont_col,
+            alpha=0.9,
+            zorder=2,
+        )
+    if cont_short_mask is not None and cont_short_mask.any():
+        ax.scatter(
+            pos[cont_short_mask],
+            close_y[cont_short_mask] - cont_offset,
+            color=cont_short_color,
+            marker="v",
+            s=40,
+            label=short_cont_col,
+            alpha=0.9,
+            zorder=2,
+        )
+
+    ax.set_title("Close with continuation labels", fontsize=14)
+    ax.set_ylabel("Close Price")
+    ax.legend(loc="upper left", fontsize=11, ncol=3)
+    ax.set_xlabel("Date")
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax, tick_positions, tick_labels)
+    _draw_day_lines([ax], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="Close Price with Continuation Labels - Last Year",
+        suptitle_y=1.02,
+        top=0.93,
+        save_path=save_path,
+    )
+
+
+def plot_leg_segmentation_signals(
+    df: pd.DataFrame, save_path: str | None = None
+) -> None:
+    """
+    Plot OHLC candles with ATR leg-state labels and pivot markers.
+    Uses compressed x positions to avoid gaps from non-trading days.
+    """
+    fig, ax = plt.subplots(figsize=(18, 6))
+
+    date_index = df.index
+    pos, open_y, high_y, low_y, close_y = _extract_ohlc(df)
+
+    marker_offset = _compute_marker_offset(df, high_y, low_y)
+    up_offset = marker_offset * 0.6
+    down_offset = marker_offset * 0.6
+
+    leg_up_color = "#2E7D32"
+    leg_down_color = "#C62828"
+    leg_chop_color = "#757575"
+    pivot_low_color = "#2E7D32"
+    pivot_high_color = "#1E0D32"
+
+    _plot_candles(ax, pos, open_y, high_y, low_y, close_y)
+
+    leg_up_mask = None
+    leg_down_mask = None
+    leg_chop_mask = None
+
+    if "leg_up_label" in df.columns:
+        leg_up_mask = (df["leg_up_label"].fillna(0).astype(int) == 1).to_numpy()
+    if "leg_down_label" in df.columns:
+        leg_down_mask = (df["leg_down_label"].fillna(0).astype(int) == 1).to_numpy()
+    if leg_up_mask is None or leg_down_mask is None:
+        if "atr_leg_label" in df.columns:
+            leg_vals = df["atr_leg_label"].fillna(0).to_numpy()
+            leg_up_mask = leg_vals == 1
+            leg_down_mask = leg_vals == -1
+            leg_chop_mask = leg_vals == 0
+    if leg_chop_mask is None and leg_up_mask is not None and leg_down_mask is not None:
+        leg_chop_mask = ~(leg_up_mask | leg_down_mask)
+
+    if leg_up_mask is not None and leg_up_mask.any():
+        ax.scatter(
+            pos[leg_up_mask],
+            close_y[leg_up_mask] + up_offset,
+            color=leg_up_color,
+            marker="o",
+            s=36,
+            label="leg_up_label",
+            alpha=0.9,
+            zorder=2,
+        )
+    if leg_down_mask is not None and leg_down_mask.any():
+        ax.scatter(
+            pos[leg_down_mask],
+            close_y[leg_down_mask] - down_offset,
+            color=leg_down_color,
+            marker="o",
+            s=36,
+            label="leg_down_label",
+            alpha=0.9,
+            zorder=2,
+        )
+    if leg_chop_mask is not None and leg_chop_mask.any():
+        ax.scatter(
+            pos[leg_chop_mask],
+            close_y[leg_chop_mask],
+            facecolors="none",
+            edgecolors=leg_chop_color,
+            marker="o",
+            s=28,
+            label="leg_chop",
+            alpha=0.85,
+            zorder=2,
+        )
+    if "atr_leg_pivot_type" in df.columns:
+        pivot_type = df["atr_leg_pivot_type"].fillna(0).to_numpy()
+        pivot_price = (
+            df["atr_leg_pivot_price"].to_numpy()
+            if "atr_leg_pivot_price" in df.columns
+            else np.full(len(df), np.nan)
+        )
+        mask_low = pivot_type == 1
+        mask_high = pivot_type == -1
+
+        pivot_low_y = np.where(
+            np.isfinite(pivot_price), pivot_price - down_offset * 1.2, low_y
+        )
+        pivot_high_y = np.where(
+            np.isfinite(pivot_price), pivot_price + up_offset * 1.2, high_y
+        )
+
+        if mask_low.any():
+            ax.scatter(
+                pos[mask_low],
+                pivot_low_y[mask_low],
+                color=pivot_low_color,
+                marker="v",
+                s=54,
+                label="atr_leg_pivot_low",
+                alpha=0.95,
+                zorder=2.2,
+            )
+        if mask_high.any():
+            ax.scatter(
+                pos[mask_high],
+                pivot_high_y[mask_high],
+                color=pivot_high_color,
+                marker="^",
+                s=54,
+                label="atr_leg_pivot_high",
+                alpha=0.95,
+                zorder=2.2,
+            )
+
+    ax.set_title("Close with ATR leg-state labels and pivots", fontsize=14)
+    ax.set_ylabel("Close Price")
+    ax.legend(loc="upper left", fontsize=11, ncol=3)
+    ax.set_xlabel("Date")
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax, tick_positions, tick_labels)
+    _draw_day_lines([ax], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="Close Price with ATR Leg Segmentation - Last Year",
+        suptitle_y=1.02,
+        top=0.93,
+        save_path=save_path,
+    )
+
+
+def plot_swing_state_machine_signals(
+    df: pd.DataFrame,
+    *,
+    long_state_col: str = "p_long_state_gate",
+    short_state_col: str = "p_short_state_gate",
+    long_pending_col: str = "p_long_pending",
+    short_pending_col: str = "p_short_pending",
+    save_path: str | None = None,
+) -> None:
+    """
+    Plot OHLC candles with swing state-machine labels.
+    Uses compressed x positions to avoid gaps from non-trading days.
+    """
+    fig, ax = plt.subplots(figsize=(18, 6))
+
+    date_index = df.index
+    pos, open_y, high_y, low_y, close_y = _extract_ohlc(df)
+
+    marker_offset = _compute_marker_offset(df, high_y, low_y)
+    up_offset = marker_offset * 0.6
+    down_offset = marker_offset * 0.6
+
+    long_color = "#2E7D32"
+    short_color = "#C62828"
+    pending_long_color = "#43A047"
+    pending_short_color = "#D32F2F"
+
+    _plot_candles(ax, pos, open_y, high_y, low_y, close_y)
+
+    long_mask = None
+    short_mask = None
+    pending_long_mask = None
+    pending_short_mask = None
+    if long_state_col in df.columns:
+        long_mask = df[long_state_col].fillna(0).astype(int).to_numpy() == 1
+    if short_state_col in df.columns:
+        short_mask = df[short_state_col].fillna(0).astype(int).to_numpy() == 1
+    if long_pending_col in df.columns:
+        pending_long_mask = (
+            df[long_pending_col].fillna(0).astype(int).to_numpy() == 1
+        )
+    if short_pending_col in df.columns:
+        pending_short_mask = (
+            df[short_pending_col].fillna(0).astype(int).to_numpy() == 1
+        )
+
+    if long_mask is None and "p_long_state_gate" in df.columns:
+        long_mask = df["p_long_state_gate"].fillna(0).astype(int).to_numpy() == 1
+    if short_mask is None and "p_short_state_gate" in df.columns:
+        short_mask = df["p_short_state_gate"].fillna(0).astype(int).to_numpy() == 1
+    if pending_long_mask is None and "p_long_pending" in df.columns:
+        pending_long_mask = df["p_long_pending"].fillna(0).astype(int).to_numpy() == 1
+    if pending_short_mask is None and "p_short_pending" in df.columns:
+        pending_short_mask = (
+            df["p_short_pending"].fillna(0).astype(int).to_numpy() == 1
+        )
+
+    if long_mask is not None and long_mask.any():
+        ax.scatter(
+            pos[long_mask],
+            close_y[long_mask] + up_offset,
+            color=long_color,
+            marker="o",
+            s=36,
+            label=long_state_col,
+            alpha=0.9,
+            zorder=2,
+        )
+    if short_mask is not None and short_mask.any():
+        ax.scatter(
+            pos[short_mask],
+            close_y[short_mask] - down_offset,
+            color=short_color,
+            marker="o",
+            s=36,
+            label=short_state_col,
+            alpha=0.9,
+            zorder=2,
+        )
+    if pending_long_mask is not None and pending_long_mask.any():
+        ax.scatter(
+            pos[pending_long_mask],
+            close_y[pending_long_mask] + up_offset * 0.6,
+            facecolors="none",
+            edgecolors=pending_long_color,
+            marker="o",
+            s=46,
+            label=long_pending_col,
+            alpha=0.95,
+            zorder=2.1,
+        )
+    if pending_short_mask is not None and pending_short_mask.any():
+        ax.scatter(
+            pos[pending_short_mask],
+            close_y[pending_short_mask] - down_offset * 0.6,
+            facecolors="none",
+            edgecolors=pending_short_color,
+            marker="o",
+            s=46,
+            label=short_pending_col,
+            alpha=0.95,
+            zorder=2.1,
+        )
+
+    ax.set_title("Close with swing state-machine labels", fontsize=14)
+    ax.set_ylabel("Close Price")
+    ax.legend(loc="upper left", fontsize=11, ncol=3)
+    ax.set_xlabel("Date")
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax, tick_positions, tick_labels)
+    _draw_day_lines([ax], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="Close Price with Swing State Machine - Last Year",
+        suptitle_y=1.02,
+        top=0.93,
+        save_path=save_path,
+    )
+
+
+def plot_all_labels(
+    df: pd.DataFrame,
+    *,
+    long_state_col: str = "p_long_state_gate",
+    short_state_col: str = "p_short_state_gate",
+    long_pending_col: str = "p_long_pending",
+    short_pending_col: str = "p_short_pending",
+    pivot_down_col: str = "pivot_down",
+    pivot_up_col: str = "pivot_up",
+    long_cont_col: str = "long_cont_label",
+    short_cont_col: str = "short_cont_label",
+    leg_label_col: str = "atr_leg_label",
+    leg_up_col: str = "leg_up_label",
+    leg_down_col: str = "leg_down_label",
+    save_path: str | None = None,
+) -> None:
+    """
+    Plot candles with pivot, state machine, continuation labels, plus a leg-state subplot.
+    Uses compressed x positions to avoid gaps from non-trading days.
+    """
+    fig, (ax, ax_leg) = plt.subplots(
+        2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
+    )
+
+    date_index = df.index
+    pos, open_y, high_y, low_y, close_y = _extract_ohlc(df)
+
+    marker_offset = _compute_marker_offset(df, high_y, low_y)
+    up_offset = marker_offset * 0.6
+    down_offset = marker_offset * 0.6
+    cont_offset = marker_offset * 0.4
+
+    pivot_dn_color = "#2E7D32"
+    pivot_up_color = "#1E0D32"
+    long_state_color = "#2E7D32"
+    short_state_color = "#C62828"
+    pending_long_color = "#43A047"
+    pending_short_color = "#D32F2F"
+    cont_long_color = "#7CB342"
+    cont_short_color = "#F9A825"
+    leg_up_color = "#2E7D32"
+    leg_down_color = "#C62828"
+
+    _plot_candles(ax, pos, open_y, high_y, low_y, close_y)
+
+    if pivot_down_col in df.columns:
+        mask_pivot_down = (df[pivot_down_col].fillna(0).astype(int) == 1).to_numpy()
+        if mask_pivot_down.any():
+            ax.scatter(
+                pos[mask_pivot_down],
+                low_y[mask_pivot_down] - down_offset * 1.2,
+                color=pivot_dn_color,
+                marker="v",
+                s=52,
+                label=pivot_down_col,
+                alpha=0.95,
+                zorder=2.2,
+            )
+
+    if pivot_up_col in df.columns:
+        mask_pivot_up = (df[pivot_up_col].fillna(0).astype(int) == 1).to_numpy()
+        if mask_pivot_up.any():
+            ax.scatter(
+                pos[mask_pivot_up],
+                high_y[mask_pivot_up] + up_offset * 1.2,
+                color=pivot_up_color,
+                marker="^",
+                s=52,
+                label=pivot_up_col,
+                alpha=0.95,
+                zorder=2.2,
+            )
+
+    if long_state_col in df.columns:
+        mask_long = (df[long_state_col].fillna(0).astype(int) == 1).to_numpy()
+        if mask_long.any():
+            ax.scatter(
+                pos[mask_long],
+                close_y[mask_long] + up_offset,
+                color=long_state_color,
+                marker="o",
+                s=36,
+                label=long_state_col,
+                alpha=0.9,
+                zorder=2,
+            )
+
+    if short_state_col in df.columns:
+        mask_short = (df[short_state_col].fillna(0).astype(int) == 1).to_numpy()
+        if mask_short.any():
+            ax.scatter(
+                pos[mask_short],
+                close_y[mask_short] - down_offset,
+                color=short_state_color,
+                marker="o",
+                s=36,
+                label=short_state_col,
+                alpha=0.9,
+                zorder=2,
+            )
+
+    if long_pending_col in df.columns:
+        mask_pending_long = (
+            df[long_pending_col].fillna(0).astype(int).to_numpy() == 1
+        )
+        if mask_pending_long.any():
+            ax.scatter(
+                pos[mask_pending_long],
+                close_y[mask_pending_long] + up_offset * 0.6,
+                facecolors="none",
+                edgecolors=pending_long_color,
+                marker="o",
+                s=46,
+                label=long_pending_col,
+                alpha=0.95,
+                zorder=2.1,
+            )
+
+    if short_pending_col in df.columns:
+        mask_pending_short = (
+            df[short_pending_col].fillna(0).astype(int).to_numpy() == 1
+        )
+        if mask_pending_short.any():
+            ax.scatter(
+                pos[mask_pending_short],
+                close_y[mask_pending_short] - down_offset * 0.6,
+                facecolors="none",
+                edgecolors=pending_short_color,
+                marker="o",
+                s=46,
+                label=short_pending_col,
+                alpha=0.95,
+                zorder=2.1,
+            )
+
+    if long_cont_col in df.columns:
+        mask_cont_long = (df[long_cont_col].fillna(0).astype(int) == 1).to_numpy()
+        if mask_cont_long.any():
+            ax.scatter(
+                pos[mask_cont_long],
+                close_y[mask_cont_long] + cont_offset,
+                color=cont_long_color,
+                marker="^",
+                s=40,
+                label=long_cont_col,
+                alpha=0.9,
+                zorder=2.1,
+            )
+
+    if short_cont_col in df.columns:
+        mask_cont_short = (df[short_cont_col].fillna(0).astype(int) == 1).to_numpy()
+        if mask_cont_short.any():
+            ax.scatter(
+                pos[mask_cont_short],
+                close_y[mask_cont_short] - cont_offset,
+                color=cont_short_color,
+                marker="v",
+                s=40,
+                label=short_cont_col,
+                alpha=0.9,
+                zorder=2.1,
+            )
+
+    ax.set_title("Close with pivots, state machine, and continuation labels", fontsize=14)
+    ax.set_ylabel("Close Price")
+    ax.legend(loc="upper left", fontsize=10, ncol=3)
+
+    leg_vals = None
+    if leg_label_col in df.columns:
+        leg_vals = df[leg_label_col].fillna(0).to_numpy(dtype=float)
+    elif leg_up_col in df.columns or leg_down_col in df.columns:
+        leg_vals = np.zeros(len(df), dtype=float)
+        if leg_up_col in df.columns:
+            leg_vals[df[leg_up_col].fillna(0).astype(int).to_numpy() == 1] = 1.0
+        if leg_down_col in df.columns:
+            leg_vals[df[leg_down_col].fillna(0).astype(int).to_numpy() == 1] = -1.0
+
+    if leg_vals is not None:
+        ax_leg.step(
+            pos,
+            leg_vals,
+            where="post",
+            color="#455A64",
+            linewidth=1.4,
+            label=leg_label_col if leg_label_col in df.columns else "leg_state",
+        )
+        up_leg_mask = leg_vals == 1
+        down_leg_mask = leg_vals == -1
+        if up_leg_mask.any():
+            ax_leg.scatter(
+                pos[up_leg_mask],
+                leg_vals[up_leg_mask],
+                color=leg_up_color,
+                s=14,
+                alpha=0.9,
+                label="leg_up",
+            )
+        if down_leg_mask.any():
+            ax_leg.scatter(
+                pos[down_leg_mask],
+                leg_vals[down_leg_mask],
+                color=leg_down_color,
+                s=14,
+                alpha=0.9,
+                label="leg_down",
+            )
+        ax_leg.set_yticks([-1, 0, 1])
+        ax_leg.axhline(0, color="#999999", linewidth=0.8)
+        ax_leg.set_ylabel("Leg")
+        ax_leg.legend(loc="upper left", fontsize=10, ncol=3)
+
+    ax_leg.set_xlabel("Date")
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax_leg, tick_positions, tick_labels)
+    _draw_day_lines([ax, ax_leg], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="All Labels Overview - Last Year",
+        suptitle_y=1.02,
+        top=0.92,
+        save_path=save_path,
+    )
+
+
+def plot_mfe_mae_labels(
+    df: pd.DataFrame,
+    *,
+    close_col: str = "close",
+    mfe_col: str = "mfe_up_atr",
+    mae_col: str = "mfe_down_atr",
+    save_path: str | None = None,
+) -> None:
+    """
+    Plot close price with a subplot showing MFE (up) and MAE (down) bars.
+    """
+    fig, (ax_price, ax_bar) = plt.subplots(
+        2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [2.2, 1]}
+    )
+
+    date_index = df.index
+    pos = np.arange(len(df))
+    close_y = df[close_col].to_numpy()
+
+    ax_price.plot(pos, close_y, color="#1f77b4", linewidth=1.6, label="Close")
+    ax_price.set_ylabel("Close Price")
+    ax_price.legend(loc="upper left")
+    ax_price.set_title("Close with MFE/MAE (ATR units)")
+
+    mfe = df[mfe_col].to_numpy(dtype=float) if mfe_col in df.columns else None
+    mae = df[mae_col].to_numpy(dtype=float) if mae_col in df.columns else None
+
+    if mfe is None or mae is None:
+        raise KeyError(f"Missing required columns: {mfe_col} and/or {mae_col}")
+
+    mfe_plot = np.where(np.isfinite(mfe), mfe, 0.0)
+    mae_plot = np.where(np.isfinite(mae), -mae, 0.0)
+
+    ax_bar.bar(
+        pos,
+        mfe_plot,
+        color="#43A047",
+        width=0.8,
+        alpha=0.7,
+        label="MFE (up, ATR)",
+    )
+    ax_bar.bar(
+        pos,
+        mae_plot,
+        color="#E53935",
+        width=0.8,
+        alpha=0.6,
+        label="MAE (down, ATR)",
+    )
+    ax_bar.axhline(0, color="#999999", linewidth=0.8)
+    ax_bar.set_ylabel("ATR Units")
+    ax_bar.legend(loc="upper left", ncol=2)
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax_bar, tick_positions, tick_labels)
+    _draw_day_lines([ax_price, ax_bar], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="Close with MFE/MAE Bars - Last Year",
+        suptitle_y=1.02,
+        top=0.92,
+        save_path=save_path,
+    )
+
+
+def plot_bars_to_exhaustion(
+    df: pd.DataFrame,
+    *,
+    close_col: str = "close",
+    exhaustion_col: str = "bars_to_exhaustion",
+    save_path: str | None = None,
+) -> None:
+    """
+    Plot close price with a subplot showing bars-to-exhaustion values.
+    """
+    fig, (ax_price, ax_bar) = plt.subplots(
+        2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [2.2, 1]}
+    )
+
+    date_index = df.index
+    pos = np.arange(len(df))
+    close_y = df[close_col].to_numpy()
+
+    ax_price.plot(pos, close_y, color="#1f77b4", linewidth=1.6, label="Close")
+    ax_price.set_ylabel("Close Price")
+    ax_price.legend(loc="upper left")
+    ax_price.set_title("Close with Bars-to-Exhaustion")
+
+    if exhaustion_col not in df.columns:
+        raise KeyError(f"Missing required column: {exhaustion_col}")
+    exhaustion = df[exhaustion_col].to_numpy(dtype=float)
+    exhaustion_plot = np.where(np.isfinite(exhaustion), exhaustion, 0.0)
+
+    ax_bar.bar(
+        pos,
+        exhaustion_plot,
+        color="#7B1FA2",
+        width=0.8,
+        alpha=0.7,
+        label="bars_to_exhaustion",
+    )
+    ax_bar.set_ylabel("Bars")
+    ax_bar.legend(loc="upper left")
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax_bar, tick_positions, tick_labels)
+    _draw_day_lines([ax_price, ax_bar], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="Bars-to-Exhaustion - Last Year",
+        suptitle_y=1.02,
+        top=0.92,
+        save_path=save_path,
+    )
+
+
+_LABEL_PLOTTERS = {
+    "atr_swing": plot_atr_swing_signals,
+    "leg_segmentation": plot_leg_segmentation_signals,
+    "continuation": plot_continuation_signals,
+    "swing_state_machine": plot_swing_state_machine_signals,
+    "all_labels": plot_all_labels,
+    "mfe_mae": plot_mfe_mae_labels,
+    "bars_to_exhaustion": plot_bars_to_exhaustion,
+}
+
+
+def plot_selected_label_plots(
+    df: pd.DataFrame,
+    *,
+    plot_types: Iterable[str] | str | None = None,
+    save_paths: Mapping[str, str | Path] | None = None,
+    plot_kwargs: Mapping[str, Mapping[str, object]] | None = None,
+    ticker: str | None = None,
+    data_dir: Path | None = None,
+) -> None:
+    """
+    Run one or more label plots, with optional save paths or plot-specific kwargs.
+    """
+    if plot_types is None:
+        plot_list = list(DEFAULT_LABEL_PLOT_TYPES)
+    elif isinstance(plot_types, str):
+        plot_types = plot_types.strip()
+        if plot_types.lower() == "all":
+            plot_list = list(DEFAULT_LABEL_PLOT_TYPES)
+        else:
+            plot_list = [p.strip() for p in plot_types.split(",") if p.strip()]
+    else:
+        plot_list = list(plot_types)
+
+    seen: set[str] = set()
+    resolved = []
+    for plot_type in plot_list:
+        canonical = _normalize_plot_type(plot_type)
+        if canonical not in seen:
+            resolved.append(canonical)
+            seen.add(canonical)
+
+    normalized_save_paths: dict[str, str | Path] = {}
+    if save_paths:
+        for key, value in save_paths.items():
+            normalized_save_paths[_normalize_plot_type(key)] = value
+
+    normalized_plot_kwargs: dict[str, dict[str, object]] = {}
+    if plot_kwargs:
+        for key, value in plot_kwargs.items():
+            normalized_plot_kwargs[_normalize_plot_type(key)] = dict(value)
+
+    for plot_type in resolved:
+        plotter = _LABEL_PLOTTERS[plot_type]
+        kwargs = dict(normalized_plot_kwargs.get(plot_type, {}))
+        if "save_path" not in kwargs:
+            if plot_type in normalized_save_paths:
+                kwargs["save_path"] = normalized_save_paths[plot_type]
+            elif ticker is not None and data_dir is not None:
+                kwargs["save_path"] = get_default_plot_path(ticker, data_dir, plot_type)
+        plotter(df, **kwargs)
+
+
+def get_default_plot_path(ticker: str, data_dir: Path, plot_type: str) -> Path:
+    plot_key = _normalize_plot_type(plot_type)
+    slug = normalize_ticker(ticker).lower()
+    plots_dir = data_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    base = _LABEL_PLOT_FILES[plot_key]
+    filename = base if slug == "spy" else f"{slug}_{base}"
+    return plots_dir / filename
+
+
+def _resolve_repo_root() -> Path:
+    try:
+        return Path(__file__).resolve().parents[2]
+    except NameError:
+        return Path.cwd()
+
+
+def _load_feature_frame(
+    ticker: str,
+    dataset_name: str,
+) -> tuple[pd.DataFrame, list[str], Path]:
+    from Data.load_data import get_ticker_processed_base_dir
+
+    clean = normalize_ticker(ticker)
+    processed_dir = get_ticker_processed_base_dir(clean)
+    dataset_dir = processed_dir / "datasets" / dataset_name
+    X_path = dataset_dir / "X.parquet"
+    if not X_path.exists():
+        raise FileNotFoundError(f"Missing {X_path}")
+
+    X_df = pd.read_parquet(X_path)
+    features_path = dataset_dir / "features.txt"
+    if features_path.exists():
+        feature_cols = [
+            line.strip()
+            for line in features_path.read_text().splitlines()
+            if line.strip()
+        ]
+        missing = [c for c in feature_cols if c not in X_df.columns]
+        if missing:
+            raise KeyError(
+                f"Missing feature columns in X.parquet: {', '.join(missing)}"
+            )
+        X_df = X_df[feature_cols]
+    else:
+        feature_cols = list(X_df.columns)
+
+    return X_df, feature_cols, dataset_dir
+
+
+def _load_plot_frame(ticker: str, row_idx: np.ndarray | None) -> pd.DataFrame | None:
+    from Data.load_data import load_ticker_parquet
+
+    try:
+        plot_df = load_ticker_parquet(ticker)
+    except Exception:
+        return None
+    if row_idx is None or len(row_idx) == 0:
+        return plot_df
+    max_idx = int(np.max(row_idx))
+    if max_idx >= len(plot_df):
+        return None
+    return plot_df.iloc[row_idx]
+
+
+def _load_model_and_mask(model_dir: Path) -> tuple["XGBClassifier", np.ndarray]:
+    from xgboost import XGBClassifier
+
+    model_path = model_dir / "xgb_model.json"
+    mask_path = model_dir / "best_mask.npy"
+    if not model_path.exists() or not mask_path.exists():
+        raise FileNotFoundError(f"Missing model artifacts in {model_dir}")
+
+    model = XGBClassifier()
+    model.load_model(model_path)
+    mask = np.load(mask_path).astype(bool)
+    return model, mask
+
+
+def _select_features(X: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    if mask.ndim != 1:
+        raise ValueError("best_mask.npy must be a 1D array.")
+    if X.shape[1] != mask.size:
+        raise ValueError(
+            f"Feature count mismatch: X has {X.shape[1]} cols, mask has {mask.size}."
+        )
+    return X[:, mask]
+
+
+def plot_model_inference(
+    X_df: pd.DataFrame,
+    long_probs: np.ndarray | None,
+    short_probs: np.ndarray | None,
+    *,
+    threshold: float = 0.6,
+    title: str | None = None,
+    save_path: str | None = None,
+) -> None:
+    plot_index = X_df.index if isinstance(X_df.index, pd.DatetimeIndex) else None
+    has_ohlc = all(c in X_df.columns for c in ("open", "high", "low", "close"))
+    close_y = X_df["close"].to_numpy() if "close" in X_df.columns else None
+    pos = np.arange(len(X_df))
+
+    fig, (ax_price, ax_prob) = plt.subplots(
+        2,
+        1,
+        figsize=(18, 8),
+        sharex=True,
+        gridspec_kw={"height_ratios": [2.2, 1]},
+    )
+
+    if has_ohlc:
+        open_y = X_df["open"].to_numpy()
+        high_y = X_df["high"].to_numpy()
+        low_y = X_df["low"].to_numpy()
+        valid_mask = (
+            np.isfinite(open_y)
+            & np.isfinite(high_y)
+            & np.isfinite(low_y)
+            & np.isfinite(close_y)
+        )
+    elif close_y is not None:
+        valid_mask = np.isfinite(close_y)
+    else:
+        raise ValueError(
+            "X.parquet must include close (or open/high/low/close) to plot."
+        )
+
+    if not valid_mask.any():
+        raise ValueError("No valid price bars to plot after filtering NaNs.")
+
+    if has_ohlc:
+        wick_color = "#4a4a4a"
+        up_color = "#1976D2"
+        down_color = "#E53935"
+        up = close_y >= open_y
+        up_mask = up & valid_mask
+        down_mask = (~up) & valid_mask
+
+        ax_price.vlines(
+            pos[valid_mask],
+            low_y[valid_mask],
+            high_y[valid_mask],
+            color=wick_color,
+            linewidth=1.0,
+            zorder=1,
+        )
+        ax_price.bar(
+            pos[up_mask],
+            close_y[up_mask] - open_y[up_mask],
+            width=0.8,
+            bottom=open_y[up_mask],
+            color=up_color,
+            edgecolor="none",
+            zorder=1.2,
+        )
+        ax_price.bar(
+            pos[down_mask],
+            close_y[down_mask] - open_y[down_mask],
+            width=0.8,
+            bottom=open_y[down_mask],
+            color=down_color,
+            edgecolor="none",
+            zorder=1.2,
+        )
+        spread = (high_y - low_y)[valid_mask]
+        marker_offset = np.nanmedian(spread)
+        if not np.isfinite(marker_offset) or marker_offset <= 0:
+            marker_offset = np.nanmax(high_y[valid_mask]) * 0.002
+        long_y = low_y - marker_offset * 0.6
+        short_y = high_y + marker_offset * 0.6
+    elif close_y is not None:
+        ax_price.plot(pos, close_y, color="#1f77b4", linewidth=1.6, label="Close")
+        clean_close = close_y[valid_mask]
+        marker_offset = np.nanmedian(np.abs(np.diff(clean_close)))
+        if not np.isfinite(marker_offset) or marker_offset <= 0:
+            marker_offset = np.nanmax(clean_close) * 0.002
+        long_y = close_y - marker_offset * 2
+        short_y = close_y + marker_offset * 2
+
+    if long_probs is not None:
+        long_mask = (long_probs >= threshold) & valid_mask
+        if long_mask.any():
+            ax_price.scatter(
+                pos[long_mask],
+                long_y[long_mask],
+                color="#1565C0",
+                marker="^",
+                s=60,
+                label=f"LONG prob >= {threshold:.2f}",
+                zorder=2,
+            )
+    if short_probs is not None:
+        short_mask = (short_probs >= threshold) & valid_mask
+        if short_mask.any():
+            ax_price.scatter(
+                pos[short_mask],
+                short_y[short_mask],
+                color="#FB8C00",
+                marker="v",
+                s=60,
+                label=f"SHORT prob >= {threshold:.2f}",
+                zorder=2,
+            )
+
+    ax_price.set_ylabel("Price")
+    ax_price.legend(loc="upper left")
+    ax_price.set_title(title or "Model Inference (Window)")
+
+    if long_probs is not None:
+        ax_prob.plot(
+            pos, long_probs, label="LONG P(class=1)", color="#1565C0", linewidth=1.5
+        )
+    if short_probs is not None:
+        ax_prob.plot(
+            pos, short_probs, label="SHORT P(class=1)", color="#FB8C00", linewidth=1.5
+        )
+    ax_prob.axhline(threshold, color="#1f77b4", linestyle="--", label="Threshold")
+    ax_prob.set_ylim(0, 1.02)
+    ax_prob.set_title("Model Probabilities (Window)")
+    ax_prob.legend(loc="upper right")
+    tick_positions = None
+    tick_labels = None
+    if isinstance(plot_index, pd.DatetimeIndex):
+        dates = pd.Series(plot_index)
+        day_start = dates.dt.normalize().ne(dates.dt.normalize().shift())
+        tick_positions = pos[day_start.to_numpy()]
+        tick_labels = dates[day_start].dt.strftime("%Y-%m-%d").to_list()
+    elif "month" in X_df.columns and "day_of_month" in X_df.columns:
+        month = pd.Series(X_df["month"].to_numpy()).astype(int)
+        day = pd.Series(X_df["day_of_month"].to_numpy()).astype(int)
+        day_key = month.astype(str).str.zfill(2) + "-" + day.astype(str).str.zfill(2)
+        day_start = day_key.ne(day_key.shift())
+        tick_positions = pos[day_start.to_numpy()]
+        tick_labels = day_key[day_start].to_list()
+
+    if tick_positions is not None and len(tick_positions) > 0:
+        if len(tick_positions) > 25:
+            step = int(np.ceil(len(tick_positions) / 25))
+            tick_positions = tick_positions[::step]
+            tick_labels = tick_labels[::step]
+        ax_prob.set_xticks(tick_positions)
+        ax_prob.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+        for x in tick_positions:
+            ax_price.axvline(
+                x, color="#cfd8dc", linestyle="--", linewidth=0.8, alpha=0.7, zorder=0.5
+            )
+            ax_prob.axvline(
+                x, color="#cfd8dc", linestyle="--", linewidth=0.8, alpha=0.7, zorder=0.5
+            )
+        ax_prob.set_xlabel("Session")
+    else:
+        ax_prob.set_xlabel("Bar")
+
+    plt.tight_layout()
+    if save_path:
+        save_path = str(save_path)
+        save_dir = os.path.dirname(save_path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        plt.savefig(save_path, bbox_inches="tight", dpi=200)
+        print(f"Saved plot to {save_path}")
+    plt.show()
+
+
+def get_default_model_inference_plot_path(ticker: str, model_name: str) -> Path:
+    from Data.load_data import get_ticker_plots_dir
+
+    slug = normalize_ticker(ticker).lower()
+    plots_dir = get_ticker_plots_dir(slug)
+    filename = f"{slug}_{model_name}_inference.png"
+    return plots_dir / filename
+
+
+def model_inference_main() -> None:
+    from Data.load_data import load_split_indices
+
+    parser = argparse.ArgumentParser(
+        description="Plot model inference signals over price bars."
+    )
+    parser.add_argument("--ticker", default="$SPY")
+    parser.add_argument("--dataset", default="15min")
+    parser.add_argument("--model-name", required=True)
+    parser.add_argument("--threshold", type=float, default=0.6)
+    parser.add_argument(
+        "--split", choices=["all", "train", "val", "test"], default="test"
+    )
+    parser.add_argument("--tail", type=int, default=None)
+    parser.add_argument("--save", default=None)
+    args = parser.parse_args()
+
+    X_df, feature_cols, _ = _load_feature_frame(args.ticker, args.dataset)
+    row_idx = np.arange(len(X_df))
+
+    if args.split != "all":
+        splits = load_split_indices(args.ticker, args.dataset)
+        row_idx = splits[args.split]
+
+    if args.tail:
+        row_idx = row_idx[-args.tail :]
+
+    row_idx = np.asarray(row_idx, dtype=int)
+    X_df = X_df.iloc[row_idx]
+
+    plot_df = _load_plot_frame(args.ticker, row_idx)
+    if plot_df is None:
+        plot_df = X_df
+
+    X = X_df.to_numpy(dtype=np.float32)
+
+    repo_root = _resolve_repo_root()
+    model_root = repo_root / "Data" / "models" / args.model_name
+
+    long_probs = None
+    short_probs = None
+
+    long_dir = model_root / "long"
+    if long_dir.exists():
+        long_model, long_mask = _load_model_and_mask(long_dir)
+        long_probs = long_model.predict_proba(_select_features(X, long_mask))[:, 1]
+
+    short_dir = model_root / "short"
+    if short_dir.exists():
+        short_model, short_mask = _load_model_and_mask(short_dir)
+        short_probs = short_model.predict_proba(_select_features(X, short_mask))[:, 1]
+
+    if long_probs is None and short_probs is None:
+        raise FileNotFoundError(f"No model artifacts found under {model_root}")
+
+    title = f"{normalize_ticker(args.ticker)} | {args.model_name} | split={args.split}"
+    save_path = args.save or str(
+        get_default_model_inference_plot_path(args.ticker, args.model_name)
+    )
+    plot_model_inference(
+        plot_df,
+        long_probs,
+        short_probs,
+        threshold=args.threshold,
+        title=title,
+        save_path=save_path,
+    )

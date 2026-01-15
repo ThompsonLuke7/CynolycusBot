@@ -18,7 +18,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 TICKER = "$SPY"
 DATASET_NAME = "15min"
-LABEL_MODE = "swing"
+LABEL_MODE = "mfe"
 MODEL_NAME = "mabilstm"
 SIDES = ("long", "short")
 X_FILENAME = f"X_{DATASET_NAME}_lstm.parquet"
@@ -49,6 +49,10 @@ def _select_target(side: str, y_long: np.ndarray, y_short: np.ndarray) -> np.nda
     if side in ("short", "down"):
         return y_short
     raise ValueError(f"Unknown side: {side}")
+
+
+def _is_regression_label_mode(label_mode: str) -> bool:
+    return label_mode in ("mfe", "mae", "mfe_mae")
 
 
 def _build_dataset(
@@ -128,6 +132,8 @@ def _load_dataset_splits_for_xfile(
         long_col, short_col = "long_swing_label", "short_swing_label"
     elif label_mode == "leg":
         long_col, short_col = "leg_up_label", "leg_down_label"
+    elif label_mode in ("mfe", "mae", "mfe_mae"):
+        long_col, short_col = "mfe_up_atr", "mfe_down_atr"
     else:
         raise ValueError(f"Unknown label_mode: {label_mode}")
 
@@ -137,8 +143,14 @@ def _load_dataset_splits_for_xfile(
             f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
         )
 
-    y_long = y_df[long_col].to_numpy(dtype=np.int64)
-    y_short = y_df[short_col].to_numpy(dtype=np.int64)
+    if _is_regression_label_mode(label_mode):
+        y_long = y_df[long_col].to_numpy(dtype=np.float32)
+        y_short = y_df[short_col].to_numpy(dtype=np.float32)
+        y_long = np.nan_to_num(y_long, nan=0.0, posinf=0.0, neginf=0.0)
+        y_short = np.nan_to_num(y_short, nan=0.0, posinf=0.0, neginf=0.0)
+    else:
+        y_long = y_df[long_col].to_numpy(dtype=np.int64)
+        y_short = y_df[short_col].to_numpy(dtype=np.int64)
 
     splits = _load_split_indices_for_xfile(clean, dataset_name, x_filename)
     return {name: (X[idx], y_long[idx], y_short[idx]) for name, idx in splits.items()}
@@ -160,6 +172,7 @@ def train_and_eval_side(
     y_train = _select_target(side_name, y_long_train, y_short_train).astype(np.float32)
     y_val = _select_target(side_name, y_long_val, y_short_val).astype(np.float32)
     y_test = _select_target(side_name, y_long_test, y_short_test).astype(np.float32)
+    use_regression = _is_regression_label_mode(LABEL_MODE)
 
     train_ds = _build_dataset(X_train, y_train, seq_len)
     val_ds = _build_dataset(X_val, y_val, seq_len)
@@ -174,12 +187,20 @@ def train_and_eval_side(
     pos = int((y_train == 1).sum())
     neg = int((y_train == 0).sum())
     print(f"\n=== {side_name.upper()} side ===")
-    print(f"{side_name.upper()} train positives: {pos}, negatives: {neg}")
+    if use_regression:
+        print(
+            f"{side_name.upper()} train target mean={float(np.nanmean(y_train)):.4f}, "
+            f"std={float(np.nanstd(y_train)):.4f}"
+        )
+    else:
+        print(f"{side_name.upper()} train positives: {pos}, negatives: {neg}")
 
     model = MABiLSTM(input_dim=X_train.shape[1]).to(device)
-    pos_weight = torch.tensor([neg / max(pos, 1)], device=device)
-
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    if use_regression:
+        criterion = nn.MSELoss()
+    else:
+        pos_weight = torch.tensor([neg / max(pos, 1)], device=device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
@@ -207,37 +228,49 @@ def train_and_eval_side(
         else:
             model.eval()
             val_loss = 0.0
-            counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
+            counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0} if not use_regression else None
             with torch.no_grad():
                 for xb, yb in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [val]"):
                     xb, yb = xb.to(device), yb.to(device)
                     preds, _ = model(xb)
                     loss = criterion(preds, yb)
                     val_loss += loss.item() * xb.size(0)
-                    _update_binary_counts(preds, yb, counts)
+                    if counts is not None:
+                        _update_binary_counts(preds, yb, counts)
 
             val_loss /= len(val_loader.dataset)
-            val_acc, val_f1 = _metrics_from_counts(counts)
-            print(
-                f"Epoch {epoch+1}: train_loss={train_loss:.5f}, "
-                f"val_loss={val_loss:.5f}, val_acc={val_acc:.4f}, val_f1={val_f1:.4f}"
-            )
+            if use_regression:
+                print(
+                    f"Epoch {epoch+1}: train_loss={train_loss:.5f}, "
+                    f"val_loss={val_loss:.5f}"
+                )
+            else:
+                val_acc, val_f1 = _metrics_from_counts(counts)
+                print(
+                    f"Epoch {epoch+1}: train_loss={train_loss:.5f}, "
+                    f"val_loss={val_loss:.5f}, val_acc={val_acc:.4f}, val_f1={val_f1:.4f}"
+                )
 
     # ----- test -----
     model.eval()
     test_loss = 0.0
-    counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
+    counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0} if not use_regression else None
     with torch.no_grad():
         for xb, yb in tqdm(test_loader, desc="Test"):
             xb, yb = xb.to(device), yb.to(device)
             preds, _ = model(xb)
             loss = criterion(preds, yb)
             test_loss += loss.item() * xb.size(0)
-            _update_binary_counts(preds, yb, counts)
+            if counts is not None:
+                _update_binary_counts(preds, yb, counts)
 
     test_loss /= len(test_loader.dataset)
-    test_acc, test_f1 = _metrics_from_counts(counts)
-    print(f"Test: loss={test_loss:.5f}, acc={test_acc:.4f}, f1={test_f1:.4f}")
+    if use_regression:
+        print(f"Test: loss={test_loss:.5f}")
+        test_acc, test_f1 = 0.0, 0.0
+    else:
+        test_acc, test_f1 = _metrics_from_counts(counts)
+        print(f"Test: loss={test_loss:.5f}, acc={test_acc:.4f}, f1={test_f1:.4f}")
 
     model_dir = REPO_ROOT / "Data" / "models" / MODEL_NAME
     model_dir.mkdir(parents=True, exist_ok=True)

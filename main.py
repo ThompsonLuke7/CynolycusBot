@@ -9,22 +9,7 @@ from Data.load_data import (
     load_ticker_parquet,
     resolve_intraday_parquet_path,
 )
-from Data.plots.all_labels_plot import get_default_plot_path as get_all_labels_plot_path
-from Data.plots.all_labels_plot import plot_all_labels
-from Data.plots.atr_swing_plot import get_default_plot_path as get_atr_swing_plot_path
-from Data.plots.atr_swing_plot import plot_atr_swing_signals
-from Data.plots.continuation_plot import (
-    get_default_plot_path as get_continuation_plot_path,
-)
-from Data.plots.continuation_plot import plot_continuation_signals
-from Data.plots.leg_segmentation_plot import (
-    get_default_plot_path as get_leg_plot_path,
-)
-from Data.plots.leg_segmentation_plot import plot_leg_segmentation_signals
-from Data.plots.swing_state_machine_plot import (
-    get_default_plot_path as get_swing_state_plot_path,
-)
-from Data.plots.swing_state_machine_plot import plot_swing_state_machine_signals
+from Data.plots.plots import plot_selected_label_plots
 from Features import data_pipeline
 from Features.custom_indicators import add_fractal_pivots
 from Features.label_generations import (
@@ -32,6 +17,8 @@ from Features.label_generations import (
     add_atr_continuation_entry_labels,
     add_atr_leg_segmentation_labels,
     add_atr_pivot_swing_labels,
+    add_bars_to_exhaustion_label,
+    add_mfe_mae_labels,
     add_pivot_swing_state_machine,
 )
 from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
@@ -75,7 +62,7 @@ def parse_args():
         "--save-plot",
         dest="save_plot_path",
         default=None,
-        help="Path to save the ATR swing plot PNG (default: Data/plots/atr_swing_plot.png).",
+        help="Path to save a single plot PNG (defaults to Data/processed/<ticker>/plots/...).",
     )
     parser.add_argument(
         "--timeframe",
@@ -153,14 +140,10 @@ def parse_args():
     parser.add_argument(
         "--plot-type",
         default="atr_swing",
-        choices=[
-            "atr_swing",
-            "all_labels",
-            "leg",
-            "continuation",
-            "swing_state_machine",
-        ],
-        help="Which plot to render (default: atr_swing).",
+        help=(
+            "Which plot(s) to render (default: atr_swing). "
+            "Use comma-separated values or 'all'."
+        ),
     )
     return parser.parse_args()
 
@@ -232,39 +215,67 @@ if __name__ == "__main__":
         rule = _normalize_plot_timeframe(args.plot_timeframe)
         if rule != "1T":
             df = resample_ohlcv(df, rule)
+        raw_plot_types = [p.strip() for p in str(args.plot_type).split(",") if p.strip()]
+        if not raw_plot_types:
+            raw_plot_types = ["atr_swing"]
+        canonical_plot_types: set[str] = set()
+        for plot_type in raw_plot_types:
+            key = plot_type.lower()
+            if key == "atr":
+                key = "atr_swing"
+            elif key == "leg":
+                key = "leg_segmentation"
+            elif key in {"state_machine", "swing_state"}:
+                key = "swing_state_machine"
+            elif key in {"mfe", "mae"}:
+                key = "mfe_mae"
+            elif key == "exhaustion":
+                key = "bars_to_exhaustion"
+            canonical_plot_types.add(key)
 
-        plot_save_path = args.save_plot_path
-        if plot_save_path is None:
-            if args.plot_type == "atr_swing":
-                plot_save_path = get_atr_swing_plot_path(args.ticker, data_dir)
-            elif args.plot_type == "leg":
-                plot_save_path = get_leg_plot_path(args.ticker, data_dir)
-            elif args.plot_type == "continuation":
-                plot_save_path = get_continuation_plot_path(args.ticker, data_dir)
-            elif args.plot_type == "swing_state_machine":
-                plot_save_path = get_swing_state_plot_path(args.ticker, data_dir)
-            elif args.plot_type == "all_labels":
-                plot_save_path = get_all_labels_plot_path(args.ticker, data_dir)
+        if "all" in canonical_plot_types or "all_labels" in canonical_plot_types:
+            df = add_fractal_pivots(df)
+            df = add_all_labels(
+                df,
+                swing_state_machine_kwargs={},
+                mfe_mae_kwargs={},
+                bars_to_exhaustion_kwargs={},
+            )
+        else:
+            needs_pivots = any(
+                p in {"atr_swing", "continuation", "swing_state_machine", "bars_to_exhaustion"}
+                for p in canonical_plot_types
+            )
+            if needs_pivots:
+                df = add_fractal_pivots(df)
 
-        if args.plot_type == "atr_swing":
-            df = add_fractal_pivots(df)
-            df = add_atr_pivot_swing_labels(df)
-            plot_atr_swing_signals(df, save_path=str(plot_save_path))
-        elif args.plot_type == "leg":
-            df = add_atr_leg_segmentation_labels(df)
-            plot_leg_segmentation_signals(df, save_path=str(plot_save_path))
-        elif args.plot_type == "continuation":
-            df = add_fractal_pivots(df)
-            df = add_atr_continuation_entry_labels(df)
-            plot_continuation_signals(df, save_path=str(plot_save_path))
-        elif args.plot_type == "swing_state_machine":
-            df = add_fractal_pivots(df)
-            df = add_pivot_swing_state_machine(df)
-            plot_swing_state_machine_signals(df, save_path=str(plot_save_path))
-        elif args.plot_type == "all_labels":
-            df = add_fractal_pivots(df)
-            df = add_all_labels(df, swing_state_machine_kwargs={})
-            plot_all_labels(df, save_path=str(plot_save_path))
+            if "atr_swing" in canonical_plot_types:
+                df = add_atr_pivot_swing_labels(df)
+            if "continuation" in canonical_plot_types:
+                df = add_atr_continuation_entry_labels(df)
+            if "swing_state_machine" in canonical_plot_types:
+                df = add_pivot_swing_state_machine(df)
+            if "leg_segmentation" in canonical_plot_types:
+                df = add_atr_leg_segmentation_labels(df)
+            if "mfe_mae" in canonical_plot_types:
+                df = add_mfe_mae_labels(df)
+            if "bars_to_exhaustion" in canonical_plot_types:
+                df = add_bars_to_exhaustion_label(df)
+
+        save_paths = None
+        if args.save_plot_path:
+            if len(raw_plot_types) == 1 and "all" not in canonical_plot_types:
+                save_paths = {raw_plot_types[0]: args.save_plot_path}
+            else:
+                print("save_plot_path ignored because multiple plot types were requested.")
+
+        plot_selected_label_plots(
+            df,
+            plot_types=args.plot_type,
+            save_paths=save_paths,
+            ticker=args.ticker,
+            data_dir=data_dir,
+        )
         raise SystemExit(0)
 
     label_timeframe = "15T"

@@ -527,6 +527,113 @@ def add_atr_continuation_entry_labels(
 
     return df
 
+def add_mfe_mae_labels(
+    df: pd.DataFrame,
+    *,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    atr_col: str = "atr",
+    atr_length: int = 14,
+    horizon: int = 20,
+    mfe_up_col: str = "mfe_up_atr",
+    mfe_down_col: str = "mfe_down_atr",
+) -> pd.DataFrame:
+    """
+    Dense MFE / MAE regression labels.
+
+    For each bar t:
+      MFE_up   = (max high[t+1 : t+H] - close[t]) / ATR[t]
+      MFE_down = (close[t] - min low[t+1 : t+H]) / ATR[t]
+
+    Uses future data by design (labels only).
+    """
+
+    if atr_col not in df.columns:
+        df[atr_col] = ta.atr(
+            df[high_col], df[low_col], df[close_col], length=atr_length
+        )
+
+    high = df[high_col].to_numpy(dtype=float)
+    low = df[low_col].to_numpy(dtype=float)
+    close = df[close_col].to_numpy(dtype=float)
+    atr = df[atr_col].to_numpy(dtype=float)
+
+    n = len(df)
+    mfe_up = np.full(n, np.nan)
+    mfe_dn = np.full(n, np.nan)
+
+    for t in range(n):
+        if np.isnan(close[t]) or np.isnan(atr[t]) or atr[t] == 0:
+            continue
+
+        end = min(t + horizon + 1, n)
+        if t + 1 >= end:
+            continue
+
+        hi = np.nanmax(high[t + 1 : end])
+        lo = np.nanmin(low[t + 1 : end])
+
+        mfe_up[t] = (hi - close[t]) / atr[t]
+        mfe_dn[t] = (close[t] - lo) / atr[t]
+
+    df[mfe_up_col] = mfe_up
+    df[mfe_down_col] = mfe_dn
+    return df
+
+def add_bars_to_exhaustion_label(
+    df: pd.DataFrame,
+    *,
+    pivot_up_col: str = "pivot_up",
+    pivot_down_col: str = "pivot_down",
+    max_bars: int = 20,
+    label_col: str = "bars_to_exhaustion",
+) -> pd.DataFrame:
+    """
+    Bars until the next pivot (either up or down).
+
+    For bar t:
+      y = min(distance to next pivot, max_bars)
+
+    Dense regression label.
+    """
+
+    piv_up = df[pivot_up_col].fillna(0).astype(int).to_numpy()
+    piv_dn = df[pivot_down_col].fillna(0).astype(int).to_numpy()
+
+    n = len(df)
+    y = np.full(n, np.nan)
+
+    pivot_idx = np.where((piv_up == 1) | (piv_dn == 1))[0]
+    if len(pivot_idx) == 0:
+        df[label_col] = y
+        return df
+
+    next_pivot_ptr = 0
+
+    for t in range(n):
+        while next_pivot_ptr < len(pivot_idx) and pivot_idx[next_pivot_ptr] <= t:
+            next_pivot_ptr += 1
+
+        if next_pivot_ptr < len(pivot_idx):
+            dist = pivot_idx[next_pivot_ptr] - t
+            y[t] = min(dist, max_bars)
+        else:
+            y[t] = max_bars
+
+    df[label_col] = y
+    return df
+
+
+def add_bars_to_exhaustion_labels(
+    df: pd.DataFrame,
+    **kwargs,
+) -> pd.DataFrame:
+    """
+    Backwards-compatible alias for add_bars_to_exhaustion_label.
+    """
+    return add_bars_to_exhaustion_label(df, **kwargs)
+
 
 def add_pivot_swing_state_probabilities(
     df: pd.DataFrame,
@@ -912,6 +1019,8 @@ def add_all_labels(
     swing_state_decay_kwargs: dict | None = None,
     swing_state_machine_kwargs: dict | None = None,
     continuation_kwargs: dict | None = None,
+    mfe_mae_kwargs: dict | None = None,
+    bars_to_exhaustion_kwargs: dict | None = None,
 ) -> pd.DataFrame:
     """
     Convenience wrapper that applies every label function in this module
@@ -930,6 +1039,8 @@ def add_all_labels(
     atr_pivot_kwargs = atr_pivot_kwargs or {}
     leg_state_kwargs = leg_state_kwargs or {}
     continuation_kwargs = continuation_kwargs or {}
+    mfe_mae_kwargs = mfe_mae_kwargs or {}
+    bars_to_exhaustion_kwargs = bars_to_exhaustion_kwargs or {}
 
     df = add_atr_pivot_swing_labels(df, **atr_pivot_kwargs)
     if leg_state_kwargs is not None:
@@ -941,6 +1052,10 @@ def add_all_labels(
         df = add_pivot_swing_state_machine(df, **swing_state_machine_kwargs)
     if continuation_kwargs is not None:
         df = add_atr_continuation_entry_labels(df, **continuation_kwargs)
+    if mfe_mae_kwargs is not None:
+        df = add_mfe_mae_labels(df, **mfe_mae_kwargs)
+    if bars_to_exhaustion_kwargs is not None:
+        df = add_bars_to_exhaustion_label(df, **bars_to_exhaustion_kwargs)
 
     return df
 
@@ -958,6 +1073,8 @@ def add_all_labels_on_timeframe(
     swing_state_decay_kwargs: dict | None = None,
     swing_state_machine_kwargs: dict | None = None,
     continuation_kwargs: dict | None = None,
+    mfe_mae_kwargs: dict | None = None,
+    bars_to_exhaustion_kwargs: dict | None = None,
 ) -> pd.DataFrame:
     """
     Compute labels on a higher timeframe and forward-fill them onto the base index.
@@ -984,6 +1101,8 @@ def add_all_labels_on_timeframe(
         swing_state_decay_kwargs=swing_state_decay_kwargs,
         swing_state_machine_kwargs=swing_state_machine_kwargs,
         continuation_kwargs=continuation_kwargs,
+        mfe_mae_kwargs=mfe_mae_kwargs,
+        bars_to_exhaustion_kwargs=bars_to_exhaustion_kwargs,
     )
 
     label_cols = [c for c in SWING_LABEL_COLUMNS if c in tf_df.columns]

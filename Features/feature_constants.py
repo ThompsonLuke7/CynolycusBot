@@ -25,6 +25,10 @@ SWING_LABEL_COLUMNS = [
     "atr_leg_label",
     "leg_up_label",
     "leg_down_label",
+    # Regression labels
+    "mfe_up_atr",
+    "mfe_down_atr",
+    "bars_to_exhaustion",
     # State machine gates (label-like, avoid leakage)
     "p_long_state_gate",
     "p_short_state_gate",
