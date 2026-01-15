@@ -1124,6 +1124,107 @@ def _load_plot_frame(ticker: str, row_idx: np.ndarray | None) -> pd.DataFrame | 
     return plot_df.iloc[row_idx]
 
 
+def _select_side_target(
+    side: str, y_long: np.ndarray, y_short: np.ndarray
+) -> np.ndarray:
+    side_key = side.strip().lower()
+    if side_key in {"long", "up"}:
+        return y_long
+    if side_key in {"short", "down"}:
+        return y_short
+    raise ValueError(f"Unknown side: {side}")
+
+
+def _candidate_label_tokens(label_mode: str) -> list[str]:
+    mode = label_mode.strip().lower()
+    if mode == "mfe_mae":
+        return ["mfe_mae", "mfe", "mae"]
+    if mode in {"mfe", "mae"}:
+        return [mode, "mfe_mae"]
+    return [mode]
+
+
+def _quintile_means(
+    preds: np.ndarray, actual: np.ndarray, bins: int = 5
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    mask = np.isfinite(preds) & np.isfinite(actual)
+    if mask.sum() < bins:
+        return None
+    preds = preds[mask]
+    actual = actual[mask]
+    quantiles = np.linspace(0.0, 1.0, bins + 1)
+    edges = np.quantile(preds, quantiles)
+    edges = np.unique(edges)
+    if edges.size < 2:
+        return None
+    bin_ids = np.digitize(preds, edges[1:-1], right=True)
+    means = np.zeros(edges.size - 1, dtype=float)
+    counts = np.zeros(edges.size - 1, dtype=int)
+    for idx in range(edges.size - 1):
+        bin_mask = bin_ids == idx
+        counts[idx] = int(bin_mask.sum())
+        means[idx] = float(np.nanmean(actual[bin_mask])) if counts[idx] else np.nan
+    return edges, means, counts
+
+
+def _load_bilstm_split_data(
+    *,
+    ticker: str,
+    dataset_name: str,
+    label_mode: str,
+    x_filename: str,
+    split: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    from Data.load_data import get_ticker_processed_base_dir, get_ticker_processed_split_dir
+
+    clean = normalize_ticker(ticker)
+    processed_dir = get_ticker_processed_base_dir(clean)
+    dataset_dir = processed_dir / "datasets" / dataset_name
+    x_path = dataset_dir / x_filename
+    y_path = dataset_dir / "y.parquet"
+
+    if not x_path.exists() or not y_path.exists():
+        raise FileNotFoundError(f"Missing {x_filename} or y.parquet in {dataset_dir}")
+
+    X = pd.read_parquet(x_path).to_numpy(dtype=np.float32)
+    y_df = pd.read_parquet(y_path)
+
+    if label_mode == "swing":
+        long_col, short_col = "long_swing_label", "short_swing_label"
+    elif label_mode == "leg":
+        long_col, short_col = "leg_up_label", "leg_down_label"
+    elif label_mode in {"mfe", "mae", "mfe_mae"}:
+        long_col, short_col = "mfe_up_atr", "mfe_down_atr"
+    else:
+        raise ValueError(f"Unknown label_mode: {label_mode}")
+
+    missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
+    if missing_cols:
+        raise KeyError(
+            f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
+        )
+
+    if label_mode in {"mfe", "mae", "mfe_mae"}:
+        y_long = y_df[long_col].to_numpy(dtype=np.float32)
+        y_short = y_df[short_col].to_numpy(dtype=np.float32)
+        y_long = np.nan_to_num(y_long, nan=0.0, posinf=0.0, neginf=0.0)
+        y_short = np.nan_to_num(y_short, nan=0.0, posinf=0.0, neginf=0.0)
+    else:
+        y_long = y_df[long_col].to_numpy(dtype=np.int64)
+        y_short = y_df[short_col].to_numpy(dtype=np.int64)
+
+    split_dir = (
+        get_ticker_processed_split_dir(clean)
+        / dataset_name
+        / Path(x_filename).stem
+    )
+    split_path = split_dir / f"{split}_idx.npy"
+    if not split_path.exists():
+        raise FileNotFoundError(f"Missing split file: {split_path}")
+    idx = np.load(split_path)
+    return X[idx], y_long[idx], y_short[idx]
+
+
 def _load_model_and_mask(model_dir: Path) -> tuple["XGBClassifier", np.ndarray]:
     from xgboost import XGBClassifier
 
@@ -1136,6 +1237,153 @@ def _load_model_and_mask(model_dir: Path) -> tuple["XGBClassifier", np.ndarray]:
     model.load_model(model_path)
     mask = np.load(mask_path).astype(bool)
     return model, mask
+
+
+def plot_bilstm_inference_vs_actual(
+    *,
+    ticker: str = "$SPY",
+    dataset_name: str = "15min",
+    model_name: str = "mabilstm",
+    label_mode: str = "mfe_mae",
+    seq_len: int = 30,
+    x_filename: str | None = None,
+    split: str = "test",
+    sides: Sequence[str] = ("long", "short"),
+    batch_size: int = 256,
+    tail: int | None = None,
+    save_path: str | None = None,
+    device: str | None = None,
+    quintile_bins: int = 5,
+    print_quintile_test: bool = True,
+) -> None:
+    """
+    Plot BiLSTM inference vs actual targets on a dataset split.
+    """
+    import torch
+    from torch.utils.data import DataLoader
+
+    from Models.bilstm.mabilstm_dataset import SequenceRegressionDataset
+    from Models.bilstm.mabilstm_model import MABiLSTM
+
+    if x_filename is None:
+        x_filename = f"X_{dataset_name}_lstm.parquet"
+
+    X_split, y_long, y_short = _load_bilstm_split_data(
+        ticker=ticker,
+        dataset_name=dataset_name,
+        label_mode=label_mode,
+        x_filename=x_filename,
+        split=split,
+    )
+
+    if tail is not None and tail > 0:
+        X_split = X_split[-tail:]
+        y_long = y_long[-tail:]
+        y_short = y_short[-tail:]
+
+    if len(X_split) < seq_len:
+        raise ValueError("Split is too small for the requested seq_len.")
+
+    if device is None:
+        torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        torch_device = torch.device(device)
+
+    repo_root = _resolve_repo_root()
+    model_dir = repo_root / "Data" / "models" / model_name
+    slug = normalize_ticker(ticker).lower()
+
+    regression_mode = label_mode in {"mfe", "mae", "mfe_mae"}
+
+    fig, axes = plt.subplots(
+        len(sides),
+        1,
+        figsize=(18, max(5, 4 * len(sides))),
+        sharex=True,
+    )
+    if not isinstance(axes, np.ndarray):
+        axes = np.array([axes])
+
+    for ax, side in zip(axes, sides, strict=False):
+        target = _select_side_target(side, y_long, y_short).astype(np.float32)
+        dataset = SequenceRegressionDataset(X_split, target, seq_len=seq_len)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+        model_path = None
+        label_tokens = _candidate_label_tokens(label_mode)
+        for token in label_tokens:
+            candidate = (
+                model_dir / f"{slug}_{dataset_name}_{token}_{side}_seq{seq_len}.pth"
+            )
+            if candidate.exists():
+                model_path = candidate
+                break
+        if model_path is None:
+            expected = ", ".join(
+                f"{slug}_{dataset_name}_{token}_{side}_seq{seq_len}.pth"
+                for token in label_tokens
+            )
+            raise FileNotFoundError(
+                f"Missing model file under {model_dir}. Tried: {expected}"
+            )
+
+        model = MABiLSTM(input_dim=X_split.shape[1]).to(torch_device)
+        state = torch.load(model_path, map_location=torch_device)
+        model.load_state_dict(state)
+        model.eval()
+
+        preds_list: list[np.ndarray] = []
+        target_list: list[np.ndarray] = []
+        with torch.no_grad():
+            for xb, yb in loader:
+                xb = xb.to(torch_device)
+                yb = yb.to(torch_device)
+                preds, _ = model(xb)
+                if not regression_mode:
+                    preds = torch.sigmoid(preds)
+                preds_list.append(preds.detach().cpu().numpy())
+                target_list.append(yb.detach().cpu().numpy())
+
+        preds = np.concatenate(preds_list, axis=0) if preds_list else np.array([])
+        actual = np.concatenate(target_list, axis=0) if target_list else np.array([])
+
+        pos = np.arange(len(actual))
+        ax.plot(pos, actual, color="#1f77b4", linewidth=1.6, label="actual")
+        ax.plot(pos, preds, color="#FB8C00", linewidth=1.4, alpha=0.85, label="pred")
+        ax.set_ylabel("Target")
+        ax.set_title(f"{side.upper()} | {label_mode} | split={split}")
+        ax.legend(loc="upper left")
+
+        if print_quintile_test and regression_mode:
+            side_key = side.strip().lower()
+            if side_key in {"long", "up"}:
+                result = _quintile_means(preds, actual, bins=quintile_bins)
+                if result is None:
+                    print("Quintile test skipped: not enough valid data.")
+                else:
+                    edges, means, counts = result
+                    print("\nQuintile test (predicted MFE_up -> realized MFE_up):")
+                    for i, (mean, count) in enumerate(zip(means, counts), start=1):
+                        lo = edges[i - 1]
+                        hi = edges[i]
+                        print(f"  Bin {i}: [{lo:.4f}, {hi:.4f}] n={count} mean={mean:.4f}")
+                    if len(means) >= 2 and np.isfinite(means[0]) and np.isfinite(means[-1]):
+                        delta = means[-1] - means[0]
+                        print(f"  Bin{len(means)} - Bin1: {delta:.4f}")
+        from scipy.stats import spearmanr
+        mask = np.isfinite(preds) & np.isfinite(actual)
+        rho, p = spearmanr(preds[mask], actual[mask])
+        print("Spearman rho:", rho, "p:", p, "n:", mask.sum())
+
+    axes[-1].set_xlabel("Sample")
+
+    _finalize_plot(
+        fig,
+        suptitle=f"{normalize_ticker(ticker)} | BiLSTM inference vs actual",
+        suptitle_y=1.02,
+        top=0.92,
+        save_path=save_path,
+    )
 
 
 def _select_features(X: np.ndarray, mask: np.ndarray) -> np.ndarray:
