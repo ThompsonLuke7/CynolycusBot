@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import numpy as np
@@ -18,8 +17,12 @@ from Data.plots.atr_swing_plot import get_default_plot_path, plot_atr_swing_sign
 from Data.retrieve_data import normalize_ticker
 from Features.feature_constants import (
     LEAKY_FEATURE_COLUMNS,
-    SCALE_FEATURE_COLUMNS,
     SWING_LABEL_COLUMNS,
+)
+from Features.feature_scaling import (
+    apply_scaler_from_stats,
+    normalize_continuous_features,
+    save_normalization_stats,
 )
 from Features.custom_indicators import (
     add_atr_swing_state_features,
@@ -153,33 +156,6 @@ def drop_correlated_and_constant_features(
     return feature_df_reduced.drop(columns=constant_cols)
 
 
-def normalize_continuous_features(
-    feature_df: pd.DataFrame, scale_cols: set[str] | None = None
-) -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
-    """
-    Standardize ONLY the vetted continuous magnitude features.
-    Any column not explicitly listed in scale_cols is left untouched.
-    """
-    target_cols = set(scale_cols) if scale_cols is not None else SCALE_FEATURE_COLUMNS
-    norm_df = feature_df.copy()
-    stats: dict[str, dict[str, float]] = {}
-
-    for col in norm_df.columns:
-        base_col = _base_feature_name(col)
-        if col not in target_cols and base_col not in target_cols:
-            continue
-        if not pd.api.types.is_numeric_dtype(norm_df[col]):
-            continue
-        mean = float(norm_df[col].mean())
-        std = float(norm_df[col].std(ddof=0))
-        if std == 0.0 or np.isnan(std):
-            continue
-        norm_df[col] = (norm_df[col] - mean) / std
-        stats[col] = {"mean": mean, "std": std}
-
-    return norm_df, stats
-
-
 def clean_nan_inf_entries(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     """
     Count NaN/Inf entries, convert Inf to NaN, and zero-fill NaNs.
@@ -206,34 +182,6 @@ def drop_ohlcv_columns(df: pd.DataFrame) -> pd.DataFrame:
     if not drop_cols:
         return df
     return df.drop(columns=drop_cols)
-
-
-def apply_scaler_from_stats(
-    feature_df: pd.DataFrame, stats: dict[str, dict[str, float]]
-) -> pd.DataFrame:
-    """
-    Apply precomputed mean/std stats to a feature frame without refitting.
-    """
-    norm_df = feature_df.copy()
-    for col, vals in stats.items():
-        if col not in norm_df.columns:
-            continue
-        std = vals.get("std")
-        mean = vals.get("mean")
-        if std is None or std == 0.0 or np.isnan(std) or mean is None:
-            continue
-        norm_df[col] = (norm_df[col] - mean) / std
-    return norm_df
-
-
-def save_normalization_stats(
-    output_dir: Path,
-    stats: dict[str, dict[str, float]],
-    filename: str = "norm_stats_spy_daily.json",
-) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / filename, "w") as f:
-        json.dump(stats, f, indent=2)
 
 
 def save_feature_outputs(

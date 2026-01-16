@@ -11,11 +11,8 @@ from Data.load_data import (
     get_ticker_processed_stats_dir,
 )
 from Data.retrieve_data import normalize_ticker
-from Features.feature_engineering import (
-    SCALE_FEATURE_COLUMNS,
-    normalize_continuous_features,
-    save_normalization_stats,
-)
+from Features.feature_constants import SCALE_FEATURE_COLUMNS
+from Features.feature_scaling import normalize_continuous_features, save_normalization_stats
 
 # Default dataset name for processed artifacts
 DATASETS_DIRNAME = "datasets"

@@ -43,7 +43,7 @@ from Data.load_data import (  # noqa: E402
     get_ticker_processed_stats_dir,
 )
 from Data.retrieve_data import normalize_ticker  # noqa: E402
-from Features.feature_engineering import apply_scaler_from_stats  # noqa: E402
+from Features.feature_scaling import apply_scaler_from_stats  # noqa: E402
 
 
 def _select_target(side: str, y_long: np.ndarray, y_short: np.ndarray) -> np.ndarray:
