@@ -168,7 +168,7 @@ TICKER = "$SPY"
 DATASET_NAME = "15min"
 LABEL_MODE = "swing"
 MODEL_NAME = "ga_xgboost_two_models"
-X_FILENAME = "X.parquet"
+X_FILENAME = "X_15min_tree.parquet"
 
 REPO_ROOT = _resolve_repo_root()
 MODEL_DIR = REPO_ROOT / "Data" / "models" / MODEL_NAME
