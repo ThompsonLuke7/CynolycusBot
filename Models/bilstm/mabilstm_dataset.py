@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import Dataset
 
 class SequenceRegressionDataset(Dataset):
-    def __init__(self, X, y, seq_len):
+    def __init__(self, X, y, seq_len, sample_weights=None):
         """
         X: (N, num_features)
         y: (N,)      # continuous target: close price
@@ -13,6 +13,9 @@ class SequenceRegressionDataset(Dataset):
         self.X = X.astype(np.float32)
         self.y = y.astype(np.float32)
         self.seq_len = seq_len
+        self.sample_weights = (
+            sample_weights.astype(np.float32) if sample_weights is not None else None
+        )
 
         self.max_idx = len(self.X) - 1
 
@@ -26,4 +29,7 @@ class SequenceRegressionDataset(Dataset):
         x_window = self.X[t - self.seq_len + 1 : t + 1]      # (seq_len, num_features)
         y_target = self.y[t]                                 # scalar
 
-        return torch.from_numpy(x_window), torch.tensor(y_target)
+        if self.sample_weights is None:
+            return torch.from_numpy(x_window), torch.tensor(y_target)
+        weight = self.sample_weights[t]
+        return torch.from_numpy(x_window), torch.tensor(y_target), torch.tensor(weight)

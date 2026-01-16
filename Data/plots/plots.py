@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence, TYPE_CHECKING
@@ -1144,6 +1145,27 @@ def _candidate_label_tokens(label_mode: str) -> list[str]:
     return [mode]
 
 
+def _load_bilstm_target_stats(
+    model_dir: Path,
+    slug: str,
+    dataset_name: str,
+    label_mode: str,
+    side: str,
+    seq_len: int,
+) -> tuple[float | None, float | None]:
+    label_tokens = _candidate_label_tokens(label_mode)
+    for token in label_tokens:
+        meta_path = model_dir / f"{slug}_{dataset_name}_{token}_{side}_seq{seq_len}_meta.json"
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text())
+            mean = meta.get("target_mean")
+            std = meta.get("target_std")
+            if mean is None or std is None:
+                return None, None
+            return float(mean), float(std)
+    return None, None
+
+
 def _quintile_means(
     preds: np.ndarray, actual: np.ndarray, bins: int = 5
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
@@ -1310,6 +1332,7 @@ def plot_bilstm_inference_vs_actual(
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
         model_path = None
+        matched_token = None
         label_tokens = _candidate_label_tokens(label_mode)
         for token in label_tokens:
             candidate = (
@@ -1317,6 +1340,7 @@ def plot_bilstm_inference_vs_actual(
             )
             if candidate.exists():
                 model_path = candidate
+                matched_token = token
                 break
         if model_path is None:
             expected = ", ".join(
@@ -1326,6 +1350,14 @@ def plot_bilstm_inference_vs_actual(
             raise FileNotFoundError(
                 f"Missing model file under {model_dir}. Tried: {expected}"
             )
+        target_mean, target_std = _load_bilstm_target_stats(
+            model_dir,
+            slug,
+            dataset_name,
+            matched_token or label_mode,
+            side,
+            seq_len,
+        )
 
         model = MABiLSTM(input_dim=X_split.shape[1]).to(torch_device)
         state = torch.load(model_path, map_location=torch_device)
@@ -1346,6 +1378,15 @@ def plot_bilstm_inference_vs_actual(
 
         preds = np.concatenate(preds_list, axis=0) if preds_list else np.array([])
         actual = np.concatenate(target_list, axis=0) if target_list else np.array([])
+        if (
+            regression_mode
+            and target_mean is not None
+            and target_std is not None
+            and np.isfinite(target_mean)
+            and np.isfinite(target_std)
+            and target_std != 0
+        ):
+            preds = preds * target_std + target_mean
 
         pos = np.arange(len(actual))
         ax.plot(pos, actual, color="#1f77b4", linewidth=1.6, label="actual")

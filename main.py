@@ -1,5 +1,6 @@
 import argparse
 import datetime as dt
+import math
 
 from API.Alpaca_API.fetch_intraday import fetch_intraday
 from Data.load_data import (
@@ -82,8 +83,8 @@ def parse_args():
     parser.add_argument(
         "--limit",
         type=int,
-        default=10000,
-        help="Max bars to fetch from Alpaca (default: 10000).",
+        default=100000,
+        help="Max bars to fetch from Alpaca (default: 100000).",
     )
     parser.add_argument(
         "--adjustment",
@@ -111,7 +112,7 @@ def parse_args():
     )
     parser.add_argument(
         "--model",
-        default="LSTM",
+        default="all",
         choices=["all", "Tree", "LSTM"],
         help='Model feature set to build/use: "all", "Tree", or "LSTM" (default: "LSTM").',
     )
@@ -197,7 +198,11 @@ if __name__ == "__main__":
             print("Refresh requested; forcing use_cached=False.")
         use_cached = False
         now_utc = dt.datetime.now(dt.timezone.utc)
-        default_start = now_utc - dt.timedelta(days=100)
+        target_bars = int(args.limit)
+        minutes_per_trading_day = 390
+        trading_days = math.ceil(target_bars / minutes_per_trading_day)
+        calendar_days = math.ceil(trading_days * 7 / 5)
+        default_start = now_utc - dt.timedelta(days=calendar_days)
         start = args.start or default_start
         end = args.end
         fetch_intraday(

@@ -1,46 +1,74 @@
 correlation_threshold=0.999
-to_drop_count=20
+to_drop_count=34
 
 to_drop:
+high
+low
+close
 ema20_slope_pct
 ema50_slope_pct
 dollar_vol_z_20
 bb_pos_20
+open__30m
+high__30m
+low__30m
+close__30m
 ema20_slope_pct__30m
 ema50_slope_pct__30m
 dollar_vol_z_20__30m
 bb_pos_20__30m
+open__1h
+high__1h
+low__1h
+close__1h
 ema20_slope_pct__1h
 ema50_slope_pct__1h
 dollar_vol_z_20__1h
 bb_pos_20__1h
+high__4h
+low__4h
+close__4h
 ema20_slope_pct__4h
 ema50_slope_pct__4h
 dollar_vol_z_20__4h
 bb_pos_20__4h
+low__1d
 ema20_slope_pct__1d
 ema50_slope_pct__1d
-dollar_vol_z_20__1d
 bb_pos_20__1d
 
 correlated_to:
-ema20_slope_pct	ema_20_ratio (1.000000)
-ema50_slope_pct	ema_50_ratio (1.000000)
-dollar_vol_z_20	vol_z_20 (0.999988)
+high	open (0.999841)
+low	open (0.999883), high (0.999738)
+close	high (0.999863), low (0.999863), open (0.999763)
+ema20_slope_pct	ema_20_ratio (0.999997)
+ema50_slope_pct	ema_50_ratio (0.999999)
+dollar_vol_z_20	vol_z_20 (0.999977)
 bb_pos_20	close_z_20 (1.000000)
-ema20_slope_pct__30m	ema_20_ratio__30m (1.000000)
-ema50_slope_pct__30m	ema_50_ratio__30m (1.000000)
-dollar_vol_z_20__30m	vol_z_20__30m (0.999967)
+open__30m	open (0.999883), low (0.999779), high (0.999735), close (0.999670)
+high__30m	high (0.999925), close (0.999763), open (0.999741), open__30m (0.999700), low (0.999605)
+low__30m	low (0.999937), open (0.999805), close (0.999794), open__30m (0.999773), high (0.999637), high__30m (0.999526)
+close__30m	close (0.999876), high (0.999756), low (0.999754), low__30m (0.999750), high__30m (0.999744), open (0.999660), open__30m (0.999567)
+ema20_slope_pct__30m	ema_20_ratio__30m (0.999997)
+ema50_slope_pct__30m	ema_50_ratio__30m (0.999999)
+dollar_vol_z_20__30m	vol_z_20__30m (0.999922)
 bb_pos_20__30m	close_z_20__30m (1.000000)
-ema20_slope_pct__1h	ema_20_ratio__1h (1.000000)
-ema50_slope_pct__1h	ema_50_ratio__1h (1.000000)
-dollar_vol_z_20__1h	vol_z_20__1h (0.999940)
+open__1h	open__30m (0.999793), open (0.999686), low (0.999567), low__30m (0.999553), high (0.999536), high__30m (0.999503), close (0.999468), close__30m (0.999346)
+high__1h	high__30m (0.999909), high (0.999823), close (0.999634), close__30m (0.999630), open (0.999602), open__30m (0.999568), open__1h (0.999471), low (0.999434), low__30m (0.999342)
+low__1h	low__30m (0.999850), low (0.999781), open (0.999637), open__30m (0.999615), close (0.999612), open__1h (0.999573), close__30m (0.999562), high (0.999427), high__30m (0.999311), high__1h (0.999167)
+close__1h	close__30m (0.999828), close (0.999700), high__30m (0.999628), high (0.999614), high__1h (0.999594), low (0.999556), low__30m (0.999546), open (0.999479), low__1h (0.999478), open__30m (0.999381), open__1h (0.999161)
+ema20_slope_pct__1h	ema_20_ratio__1h (0.999996)
+ema50_slope_pct__1h	ema_50_ratio__1h (0.999999)
+dollar_vol_z_20__1h	vol_z_20__1h (0.999874)
 bb_pos_20__1h	close_z_20__1h (1.000000)
-ema20_slope_pct__4h	ema_20_ratio__4h (0.999999)
-ema50_slope_pct__4h	ema_50_ratio__4h (1.000000)
-dollar_vol_z_20__4h	vol_z_20__4h (0.999765)
+high__4h	high__1h (0.999435), high__30m (0.999316), high (0.999171)
+low__4h	low__1h (0.999056)
+close__4h	close__1h (0.999187), close__30m (0.999034)
+ema20_slope_pct__4h	ema_20_ratio__4h (0.999991)
+ema50_slope_pct__4h	ema_50_ratio__4h (0.999998)
+dollar_vol_z_20__4h	vol_z_20__4h (0.999122)
 bb_pos_20__4h	close_z_20__4h (1.000000)
-ema20_slope_pct__1d	ema_20_ratio__1d (0.999999)
-ema50_slope_pct__1d	ema_50_ratio__1d (1.000000)
-dollar_vol_z_20__1d	vol_z_20__1d (0.999200)
+low__1d	low__4h (0.999170)
+ema20_slope_pct__1d	ema_20_ratio__1d (0.999989)
+ema50_slope_pct__1d	ema_50_ratio__1d (0.999998)
 bb_pos_20__1d	close_z_20__1d (1.000000)

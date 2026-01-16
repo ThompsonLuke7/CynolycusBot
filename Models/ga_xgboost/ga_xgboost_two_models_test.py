@@ -2,9 +2,16 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from sklearn.metrics import confusion_matrix, f1_score
 
-from Data.load_data import get_ticker_processed_base_dir, load_dataset_splits
+from Data.load_data import (
+    get_ticker_processed_base_dir,
+    get_ticker_processed_split_dir,
+    get_ticker_processed_stats_dir,
+)
+from Data.retrieve_data import normalize_ticker
+from Features.feature_engineering import apply_scaler_from_stats
 
 from Models.ga_xgboost.ga_xgboost import GAXGBoostFeatureSelector
 
@@ -14,6 +21,95 @@ def _resolve_repo_root() -> Path:
         return Path(__file__).resolve().parents[2]
     except NameError:
         return Path.cwd()
+
+
+def _load_norm_stats(
+    stats_dir: Path, dataset_name: str, x_filename: str
+) -> dict | None:
+    x_stem = Path(x_filename).stem
+    stats_path = stats_dir / f"norm_stats_{dataset_name}_{x_stem}_train.json"
+    if not stats_path.exists():
+        return None
+    return json.loads(stats_path.read_text())
+
+
+def _load_split_indices(
+    ticker: str,
+    dataset_name: str,
+    x_filename: str,
+) -> dict[str, np.ndarray]:
+    clean = normalize_ticker(ticker)
+    split_root = get_ticker_processed_split_dir(clean)
+    x_stem = Path(x_filename).stem
+    split_dirs = [
+        split_root / dataset_name / x_stem,
+        split_root / dataset_name,
+    ]
+    for split_dir in split_dirs:
+        train_path = split_dir / "train_idx.npy"
+        val_path = split_dir / "val_idx.npy"
+        test_path = split_dir / "test_idx.npy"
+        missing = [
+            p.name for p in (train_path, val_path, test_path) if not p.exists()
+        ]
+        if not missing:
+            return {
+                "train": np.load(train_path),
+                "val": np.load(val_path),
+                "test": np.load(test_path),
+            }
+    raise FileNotFoundError(
+        f"Missing split files under {split_root / dataset_name} (x_stem={x_stem})."
+    )
+
+
+def _load_scaled_dataset_splits(
+    *,
+    ticker: str,
+    dataset_name: str,
+    label_mode: str,
+    x_filename: str,
+) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    clean = normalize_ticker(ticker)
+    processed_dir = get_ticker_processed_base_dir(clean)
+    dataset_dir = processed_dir / "datasets" / dataset_name
+    x_path = dataset_dir / x_filename
+    y_path = dataset_dir / "y.parquet"
+
+    if not x_path.exists() or not y_path.exists():
+        raise FileNotFoundError(f"Missing {x_filename} or y.parquet in {dataset_dir}")
+
+    X_df = pd.read_parquet(x_path)
+    stats_dir = get_ticker_processed_stats_dir(clean)
+    stats = _load_norm_stats(stats_dir, dataset_name, x_filename)
+    if stats:
+        X_df = apply_scaler_from_stats(X_df, stats)
+    else:
+        x_stem = Path(x_filename).stem
+        stats_path = stats_dir / f"norm_stats_{dataset_name}_{x_stem}_train.json"
+        print(f"No scaler stats found at {stats_path}; using raw features.")
+
+    X = X_df.to_numpy(dtype=np.float32)
+    y_df = pd.read_parquet(y_path)
+
+    if label_mode == "swing":
+        long_col, short_col = "long_swing_label", "short_swing_label"
+    elif label_mode == "leg":
+        long_col, short_col = "leg_up_label", "leg_down_label"
+    else:
+        raise ValueError(f"Unknown label_mode: {label_mode}")
+
+    missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
+    if missing_cols:
+        raise KeyError(
+            f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
+        )
+
+    y_long = y_df[long_col].to_numpy(dtype=np.int64)
+    y_short = y_df[short_col].to_numpy(dtype=np.int64)
+
+    splits = _load_split_indices(clean, dataset_name, x_filename)
+    return {name: (X[idx], y_long[idx], y_short[idx]) for name, idx in splits.items()}
 
 
 def load_feature_names(ticker: str, dataset_name: str) -> list[str] | None:
@@ -72,15 +168,17 @@ TICKER = "$SPY"
 DATASET_NAME = "15min"
 LABEL_MODE = "swing"
 MODEL_NAME = "ga_xgboost_two_models"
+X_FILENAME = "X.parquet"
 
 REPO_ROOT = _resolve_repo_root()
 MODEL_DIR = REPO_ROOT / "Data" / "models" / MODEL_NAME
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-splits = load_dataset_splits(
+splits = _load_scaled_dataset_splits(
     ticker=TICKER,
     dataset_name=DATASET_NAME,
     label_mode=LABEL_MODE,
+    x_filename=X_FILENAME,
 )
 
 X_train, y_long_train, y_short_train = splits["train"]

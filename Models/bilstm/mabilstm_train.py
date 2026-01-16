@@ -22,6 +22,8 @@ LABEL_MODE = "mfe"
 MODEL_NAME = "mabilstm"
 SIDES = ("long", "short")
 X_FILENAME = f"X_{DATASET_NAME}_lstm.parquet"
+WEIGHT_TOP_PCT = 0.2
+WEIGHT_BOOST = 2.0
 
 
 def _resolve_repo_root() -> Path:
@@ -38,8 +40,10 @@ if str(REPO_ROOT) not in sys.path:
 from Data.load_data import (  # noqa: E402
     get_ticker_processed_base_dir,
     get_ticker_processed_split_dir,
+    get_ticker_processed_stats_dir,
 )
 from Data.retrieve_data import normalize_ticker  # noqa: E402
+from Features.feature_engineering import apply_scaler_from_stats  # noqa: E402
 
 
 def _select_target(side: str, y_long: np.ndarray, y_short: np.ndarray) -> np.ndarray:
@@ -56,11 +60,96 @@ def _is_regression_label_mode(label_mode: str) -> bool:
 
 
 def _build_dataset(
-    X: np.ndarray, y: np.ndarray, seq_len: int
+    X: np.ndarray, y: np.ndarray, seq_len: int, sample_weights: np.ndarray | None = None
 ) -> SequenceRegressionDataset | None:
     if len(X) < seq_len:
         return None
-    return SequenceRegressionDataset(X, y, seq_len=seq_len)
+    return SequenceRegressionDataset(X, y, seq_len=seq_len, sample_weights=sample_weights)
+
+
+def _load_norm_stats(
+    stats_dir: Path, dataset_name: str, x_filename: str
+) -> dict | None:
+    x_stem = Path(x_filename).stem
+    stats_path = stats_dir / f"norm_stats_{dataset_name}_{x_stem}_train.json"
+    if not stats_path.exists():
+        return None
+    return json.loads(stats_path.read_text())
+
+
+def _zscore_stats(values: np.ndarray) -> tuple[float, float]:
+    mean = float(np.nanmean(values))
+    std = float(np.nanstd(values))
+    if not np.isfinite(std) or std < 1e-8:
+        std = 1.0
+    if not np.isfinite(mean):
+        mean = 0.0
+    return mean, std
+
+
+def _zscore(values: np.ndarray, mean: float, std: float) -> np.ndarray:
+    return (values - mean) / std
+
+
+def _sample_weights_for_targets(
+    targets: np.ndarray,
+    *,
+    label_mode: str,
+    top_pct: float = WEIGHT_TOP_PCT,
+    boost: float = WEIGHT_BOOST,
+    threshold: float | None = None,
+) -> np.ndarray:
+    weights = np.ones_like(targets, dtype=np.float32)
+    if not _is_regression_label_mode(label_mode):
+        return weights
+    clean = targets.astype(np.float32)
+    if label_mode == "mae":
+        clean = np.abs(clean)
+    mask = np.isfinite(clean)
+    if not mask.any():
+        return weights
+    if threshold is None:
+        threshold = float(np.quantile(clean[mask], 1.0 - top_pct))
+    if not np.isfinite(threshold):
+        return weights
+    weights[clean >= threshold] = float(boost)
+    return weights
+
+
+def _weight_threshold_for_targets(
+    targets: np.ndarray,
+    *,
+    label_mode: str,
+    top_pct: float = WEIGHT_TOP_PCT,
+) -> float | None:
+    if not _is_regression_label_mode(label_mode):
+        return None
+    clean = targets.astype(np.float32)
+    if label_mode == "mae":
+        clean = np.abs(clean)
+    mask = np.isfinite(clean)
+    if not mask.any():
+        return None
+    threshold = float(np.quantile(clean[mask], 1.0 - top_pct))
+    if not np.isfinite(threshold):
+        return None
+    return threshold
+
+
+def _unpack_batch(
+    batch: tuple[torch.Tensor, ...],
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    if len(batch) == 2:
+        xb, yb = batch
+        wb = None
+    else:
+        xb, yb, wb = batch
+    xb = xb.to(device)
+    yb = yb.to(device)
+    if wb is not None:
+        wb = wb.to(device)
+    return xb, yb, wb
 
 
 def _update_binary_counts(logits: torch.Tensor, targets: torch.Tensor, counts: dict, threshold: float = 0.5):
@@ -125,7 +214,16 @@ def _load_dataset_splits_for_xfile(
     if not x_path.exists() or not y_path.exists():
         raise FileNotFoundError(f"Missing {x_filename} or y.parquet in {dataset_dir}")
 
-    X = pd.read_parquet(x_path).to_numpy(dtype=np.float32)
+    X_df = pd.read_parquet(x_path)
+    stats_dir = get_ticker_processed_stats_dir(clean)
+    stats = _load_norm_stats(stats_dir, dataset_name, x_filename)
+    if stats:
+        X_df = apply_scaler_from_stats(X_df, stats)
+    else:
+        x_stem = Path(x_filename).stem
+        stats_path = stats_dir / f"norm_stats_{dataset_name}_{x_stem}_train.json"
+        print(f"No scaler stats found at {stats_path}; using raw features.")
+    X = X_df.to_numpy(dtype=np.float32)
     y_df = pd.read_parquet(y_path)
 
     if label_mode == "swing":
@@ -169,14 +267,37 @@ def train_and_eval_side(
     y_short_test: np.ndarray,
     seq_len: int,
 ) -> dict:
-    y_train = _select_target(side_name, y_long_train, y_short_train).astype(np.float32)
-    y_val = _select_target(side_name, y_long_val, y_short_val).astype(np.float32)
-    y_test = _select_target(side_name, y_long_test, y_short_test).astype(np.float32)
+    y_train_raw = _select_target(side_name, y_long_train, y_short_train).astype(np.float32)
+    y_val_raw = _select_target(side_name, y_long_val, y_short_val).astype(np.float32)
+    y_test_raw = _select_target(side_name, y_long_test, y_short_test).astype(np.float32)
     use_regression = _is_regression_label_mode(LABEL_MODE)
 
-    train_ds = _build_dataset(X_train, y_train, seq_len)
-    val_ds = _build_dataset(X_val, y_val, seq_len)
-    test_ds = _build_dataset(X_test, y_test, seq_len)
+    if use_regression:
+        target_mean, target_std = _zscore_stats(y_train_raw)
+        y_train = _zscore(y_train_raw, target_mean, target_std)
+        y_val = _zscore(y_val_raw, target_mean, target_std)
+        y_test = _zscore(y_test_raw, target_mean, target_std)
+        weight_threshold = _weight_threshold_for_targets(
+            y_train_raw, label_mode=LABEL_MODE
+        )
+        train_weights = _sample_weights_for_targets(
+            y_train_raw, label_mode=LABEL_MODE, threshold=weight_threshold
+        )
+        val_weights = _sample_weights_for_targets(
+            y_val_raw, label_mode=LABEL_MODE, threshold=weight_threshold
+        )
+        test_weights = _sample_weights_for_targets(
+            y_test_raw, label_mode=LABEL_MODE, threshold=weight_threshold
+        )
+    else:
+        target_mean, target_std = 0.0, 1.0
+        y_train, y_val, y_test = y_train_raw, y_val_raw, y_test_raw
+        train_weights = val_weights = test_weights = None
+        weight_threshold = None
+
+    train_ds = _build_dataset(X_train, y_train, seq_len, sample_weights=train_weights)
+    val_ds = _build_dataset(X_val, y_val, seq_len, sample_weights=val_weights)
+    test_ds = _build_dataset(X_test, y_test, seq_len, sample_weights=test_weights)
     if train_ds is None or test_ds is None:
         raise ValueError("Train/test split too small for the requested seq_len.")
 
@@ -189,15 +310,15 @@ def train_and_eval_side(
     print(f"\n=== {side_name.upper()} side ===")
     if use_regression:
         print(
-            f"{side_name.upper()} train target mean={float(np.nanmean(y_train)):.4f}, "
-            f"std={float(np.nanstd(y_train)):.4f}"
+            f"{side_name.upper()} train target mean={target_mean:.4f}, "
+            f"std={target_std:.4f} (z-score stats)"
         )
     else:
         print(f"{side_name.upper()} train positives: {pos}, negatives: {neg}")
 
     model = MABiLSTM(input_dim=X_train.shape[1]).to(device)
     if use_regression:
-        criterion = nn.MSELoss()
+        criterion = nn.SmoothL1Loss(reduction="none")
     else:
         pos_weight = torch.tensor([neg / max(pos, 1)], device=device)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -209,18 +330,27 @@ def train_and_eval_side(
         # ----- train -----
         model.train()
         train_loss = 0.0
-        for xb, yb in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [train]"):
-            xb, yb = xb.to(device), yb.to(device)
+        train_weight_total = 0.0
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [train]"):
+            xb, yb, wb = _unpack_batch(batch, device)
 
             optimizer.zero_grad()
             preds, _ = model(xb)
-            loss = criterion(preds, yb)
+            if wb is not None:
+                loss_sum = (criterion(preds, yb) * wb).sum()
+                weight_sum = torch.clamp(wb.sum(), min=1.0)
+                loss = loss_sum / weight_sum
+                train_loss += float(loss_sum.item())
+                train_weight_total += float(weight_sum.item())
+            else:
+                loss = criterion(preds, yb).mean()
+                train_loss += loss.item() * xb.size(0)
+                train_weight_total += xb.size(0)
             loss.backward()
             optimizer.step()
 
-            train_loss += loss.item() * xb.size(0)
-
-        train_loss /= len(train_loader.dataset)
+        if train_weight_total:
+            train_loss /= train_weight_total
 
         # ----- validate -----
         if val_loader is None:
@@ -228,17 +358,27 @@ def train_and_eval_side(
         else:
             model.eval()
             val_loss = 0.0
+            val_weight_total = 0.0
             counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0} if not use_regression else None
             with torch.no_grad():
-                for xb, yb in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [val]"):
-                    xb, yb = xb.to(device), yb.to(device)
+                for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [val]"):
+                    xb, yb, wb = _unpack_batch(batch, device)
                     preds, _ = model(xb)
-                    loss = criterion(preds, yb)
-                    val_loss += loss.item() * xb.size(0)
+                    if wb is not None:
+                        loss_sum = (criterion(preds, yb) * wb).sum()
+                        weight_sum = torch.clamp(wb.sum(), min=1.0)
+                        loss = loss_sum / weight_sum
+                        val_loss += float(loss_sum.item())
+                        val_weight_total += float(weight_sum.item())
+                    else:
+                        loss = criterion(preds, yb).mean()
+                        val_loss += loss.item() * xb.size(0)
+                        val_weight_total += xb.size(0)
                     if counts is not None:
                         _update_binary_counts(preds, yb, counts)
 
-            val_loss /= len(val_loader.dataset)
+            if val_weight_total:
+                val_loss /= val_weight_total
             if use_regression:
                 print(
                     f"Epoch {epoch+1}: train_loss={train_loss:.5f}, "
@@ -254,17 +394,27 @@ def train_and_eval_side(
     # ----- test -----
     model.eval()
     test_loss = 0.0
+    test_weight_total = 0.0
     counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0} if not use_regression else None
     with torch.no_grad():
-        for xb, yb in tqdm(test_loader, desc="Test"):
-            xb, yb = xb.to(device), yb.to(device)
+        for batch in tqdm(test_loader, desc="Test"):
+            xb, yb, wb = _unpack_batch(batch, device)
             preds, _ = model(xb)
-            loss = criterion(preds, yb)
-            test_loss += loss.item() * xb.size(0)
+            if wb is not None:
+                loss_sum = (criterion(preds, yb) * wb).sum()
+                weight_sum = torch.clamp(wb.sum(), min=1.0)
+                loss = loss_sum / weight_sum
+                test_loss += float(loss_sum.item())
+                test_weight_total += float(weight_sum.item())
+            else:
+                loss = criterion(preds, yb).mean()
+                test_loss += loss.item() * xb.size(0)
+                test_weight_total += xb.size(0)
             if counts is not None:
                 _update_binary_counts(preds, yb, counts)
 
-    test_loss /= len(test_loader.dataset)
+    if test_weight_total:
+        test_loss /= test_weight_total
     if use_regression:
         print(f"Test: loss={test_loss:.5f}")
         test_acc, test_f1 = 0.0, 0.0
@@ -291,6 +441,11 @@ def train_and_eval_side(
         "train_size": len(train_ds),
         "val_size": len(val_ds) if val_ds else 0,
         "test_size": len(test_ds),
+        "target_mean": target_mean,
+        "target_std": target_std,
+        "weight_top_pct": WEIGHT_TOP_PCT if use_regression else None,
+        "weight_boost": WEIGHT_BOOST if use_regression else None,
+        "weight_threshold": weight_threshold if use_regression else None,
         "test_loss": test_loss,
         "test_acc": test_acc,
         "test_f1": test_f1,

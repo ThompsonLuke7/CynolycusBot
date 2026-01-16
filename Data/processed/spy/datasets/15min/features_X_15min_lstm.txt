@@ -1,8 +1,3 @@
-open
-high
-low
-close
-volume
 ret_1
 ret_2
 ret_4
@@ -46,11 +41,6 @@ dow_thu
 dow_fri
 is_opening_30m_flag
 is_power_hour_flag
-open__30m
-high__30m
-low__30m
-close__30m
-volume__30m
 ret_1__30m
 ret_2__30m
 ret_4__30m
@@ -84,11 +74,6 @@ squeeze_flag__30m
 rsi_14__30m
 stoch_k_14_3__30m
 roc_10__30m
-open__1h
-high__1h
-low__1h
-close__1h
-volume__1h
 ret_1__1h
 ret_2__1h
 ret_4__1h
@@ -122,11 +107,6 @@ squeeze_flag__1h
 rsi_14__1h
 stoch_k_14_3__1h
 roc_10__1h
-open__4h
-high__4h
-low__4h
-close__4h
-volume__4h
 ret_1__4h
 ret_2__4h
 ret_4__4h
@@ -160,11 +140,6 @@ squeeze_flag__4h
 rsi_14__4h
 stoch_k_14_3__4h
 roc_10__4h
-open__1d
-high__1d
-low__1d
-close__1d
-volume__1d
 ret_1__1d
 ret_2__1d
 ret_4__1d
@@ -192,6 +167,7 @@ vwap_slope_pct__1d
 above_vwap_flag__1d
 vol_z_20__1d
 vol_ratio_20__1d
+dollar_vol_z_20__1d
 bb_width_20_pct__1d
 keltner_width_pct__1d
 squeeze_flag__1d

@@ -198,6 +198,16 @@ def clean_nan_inf_entries(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int
     return cleaned, {"nan_count": nan_count, "inf_count": inf_count}
 
 
+def drop_ohlcv_columns(df: pd.DataFrame) -> pd.DataFrame:
+    drop_base = {"open", "high", "low", "close", "volume"}
+    drop_cols = [
+        col for col in df.columns if col.split("__", 1)[0] in drop_base
+    ]
+    if not drop_cols:
+        return df
+    return df.drop(columns=drop_cols)
+
+
 def apply_scaler_from_stats(
     feature_df: pd.DataFrame, stats: dict[str, dict[str, float]]
 ) -> pd.DataFrame:

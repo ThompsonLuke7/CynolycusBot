@@ -43,6 +43,20 @@ class MABiLSTM(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(mlp_hidden_dim2, 1),   # scalar price
         )
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        # Explicit Xavier init to match the stated setup.
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+        for name, param in self.lstm.named_parameters():
+            if "weight" in name:
+                nn.init.xavier_uniform_(param)
+            elif "bias" in name:
+                nn.init.zeros_(param)
 
     def forward(self, x):
         """
