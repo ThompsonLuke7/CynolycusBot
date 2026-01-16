@@ -5,7 +5,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import f1_score
 import xgboost as xgb
 from xgboost import XGBClassifier
 from xgboost.core import XGBoostError
@@ -22,13 +22,18 @@ class GAXGBoostFeatureSelector:
       - Generations = 30
       - Crossover rate = 0.5
       - Mutation rate = 0.375
-      - Fitness = validation accuracy of XGBoost on selected features
+      - Fitness = configurable (default: positive-class F1) with optional sparsity penalty
     """
     population_size: int = 8
     generations: int = 30
     crossover_rate: float = 0.5
     mutation_rate: float = 0.375
     val_size: float = 0.08          # portion of given data used as validation
+    fitness_metric: str = "f1"      # "f1" | "f1_penalized"
+    feature_penalty: float = 0.001  # penalty per selected feature when using f1_penalized
+    max_features: Optional[int] = 80  # hard cap; None disables
+    selection: str = "tournament"   # "tournament" | "roulette"
+    tournament_k: int = 3
     random_state: Optional[int] = 42
     xgb_params: Dict[str, Any] = field(default_factory=lambda: {
         "n_estimators": 100,
@@ -91,18 +96,34 @@ class GAXGBoostFeatureSelector:
                 best_score = gen_best_score
                 best_mask = gen_best_mask
 
+            metric_label = "val_fitness"
             print(f"[GA-XGB] Generation {gen+1}/{self.generations} "
-                  f"- best val acc: {gen_best_score:.4f}, global best: {best_score:.4f}")
+                  f"- best {metric_label}: {gen_best_score:.4f}, global best: {best_score:.4f}")
 
-            # Selection (roulette-wheel over fitness)
-            probs = fitness / fitness.sum()
-            parent_indices = rng.choice(
-                self.population_size,
-                size=self.population_size,
-                replace=True,
-                p=probs,
-            )
-            parents = population[parent_indices]
+            # Selection
+            if self.selection == "roulette":
+                total = float(fitness.sum())
+                if total <= 0 or not np.isfinite(total):
+                    # fallback to uniform if degenerate
+                    probs = np.ones_like(fitness) / fitness.size
+                else:
+                    probs = fitness / total
+                parent_indices = rng.choice(
+                    self.population_size,
+                    size=self.population_size,
+                    replace=True,
+                    p=probs,
+                )
+                parents = population[parent_indices]
+            else:
+                # tournament selection (more stable than roulette for sparse/flat fitness)
+                parents = np.empty_like(population)
+                for i in range(self.population_size):
+                    cand = rng.choice(
+                        self.population_size, size=self.tournament_k, replace=False
+                    )
+                    best = cand[int(np.argmax(fitness[cand]))]
+                    parents[i] = population[best]
 
             # Crossover
             offspring = self._crossover(parents, rng)
@@ -178,20 +199,24 @@ class GAXGBoostFeatureSelector:
         X_val: np.ndarray,
         y_val: np.ndarray,
     ) -> float:
-        """
-        Train XGB on selected features and return validation accuracy.
-        """
+        """Train XGB on selected features and return validation fitness."""
         if not mask.any():
             return 0.0
 
         selected = mask.astype(bool)
+        n_selected = int(selected.sum())
+        if self.max_features is not None and n_selected > self.max_features:
+            return 0.0
         X_tr = X_train[:, selected]
         X_v = X_val[:, selected]
 
         model = self._fit_xgb(X_tr, y_train)
         y_pred = model.predict(X_v)
-        # Assuming label 1 = “good swing / up move”
-        return f1_score(y_val, y_pred, pos_label=1)
+        base = f1_score(y_val, y_pred, pos_label=1)
+
+        if self.fitness_metric == "f1_penalized":
+            return float(base - self.feature_penalty * n_selected)
+        return float(base)
 
     def _crossover(self, parents: np.ndarray, rng) -> np.ndarray:
         """

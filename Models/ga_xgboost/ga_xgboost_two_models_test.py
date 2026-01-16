@@ -136,7 +136,7 @@ def save_selector_artifacts(
     side_dir = output_dir / side_name.lower()
     side_dir.mkdir(parents=True, exist_ok=True)
 
-    selector.xgb_model_.save_model(side_dir / "xgb_model.json")
+    selector.xgb_model_.get_booster().save_model(str(side_dir / "xgb_model.json"))
     np.save(side_dir / "best_mask.npy", selector.best_mask_.astype(np.int8))
 
     meta = {
@@ -212,7 +212,7 @@ def train_and_eval_side(y_train, y_test, side_name):
         generations=30,
         crossover_rate=0.5,
         mutation_rate=0.375,
-        val_size=0.08,  # last 8% of TRAIN used as GA validation
+        val_size=0.15,  # last 8% of TRAIN used as GA validation
         random_state=42,
         xgb_params=xgb_params,
     )
