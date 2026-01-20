@@ -134,7 +134,7 @@ def build_feature_matrix(
     include_htf_date_features: bool = False,
     verbose: bool = False,
     model: str = "tree",
-    shift_htf_bars: int = 0,
+    shift_htf_bars: int = 1,
     resample_label: str = "left",
     resample_closed: str = "left",
 ) -> pd.DataFrame:
@@ -210,7 +210,7 @@ def build_feature_matrices(
     include_htf_date_features: bool = False,
     verbose: bool = False,
     models: Iterable[str] = ("LSTM",),
-    shift_htf_bars: int = 0,
+    shift_htf_bars: int = 1,
     resample_label: str = "left",
     resample_closed: str = "left",
 ) -> dict[str, pd.DataFrame]:

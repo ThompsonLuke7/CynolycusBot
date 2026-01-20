@@ -4,6 +4,10 @@ LEAKY_FEATURE_COLUMNS = {
     "pivot_down",
     "super_pivot_up",
     "super_pivot_down",
+    # ZigZag uses future confirmation in most implementations; exclude from features
+    "ZIGZAGs_5.0%_10",
+    "ZIGZAGv_5.0%_10",
+    "ZIGZAGd_5.0%_10",
 }
 SWING_LABEL_COLUMNS = [
     "atr_swing_label",
