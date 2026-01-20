@@ -69,6 +69,7 @@ def _load_scaled_dataset_splits(
     dataset_name: str,
     label_mode: str,
     x_filename: str,
+    apply_scaler: bool = False,
 ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     clean = normalize_ticker(ticker)
     processed_dir = get_ticker_processed_base_dir(clean)
@@ -80,14 +81,15 @@ def _load_scaled_dataset_splits(
         raise FileNotFoundError(f"Missing {x_filename} or y.parquet in {dataset_dir}")
 
     X_df = pd.read_parquet(x_path)
-    stats_dir = get_ticker_processed_stats_dir(clean)
-    stats = _load_norm_stats(stats_dir, dataset_name, x_filename)
-    if stats:
-        X_df = apply_scaler_from_stats(X_df, stats)
-    else:
-        x_stem = Path(x_filename).stem
-        stats_path = stats_dir / f"norm_stats_{dataset_name}_{x_stem}_train.json"
-        print(f"No scaler stats found at {stats_path}; using raw features.")
+    if apply_scaler:
+        stats_dir = get_ticker_processed_stats_dir(clean)
+        stats = _load_norm_stats(stats_dir, dataset_name, x_filename)
+        if stats:
+            X_df = apply_scaler_from_stats(X_df, stats)
+        else:
+            x_stem = Path(x_filename).stem
+            stats_path = stats_dir / f"norm_stats_{dataset_name}_{x_stem}_train.json"
+            print(f"No scaler stats found at {stats_path}; using raw features.")
 
     X = X_df.to_numpy(dtype=np.float32)
     y_df = pd.read_parquet(y_path)
@@ -179,6 +181,7 @@ splits = _load_scaled_dataset_splits(
     dataset_name=DATASET_NAME,
     label_mode=LABEL_MODE,
     x_filename=X_FILENAME,
+    apply_scaler=False,
 )
 
 X_train, y_long_train, y_short_train = splits["train"]
@@ -208,13 +211,18 @@ def train_and_eval_side(y_train, y_test, side_name):
     xgb_params["scale_pos_weight"] = scale
 
     selector = GAXGBoostFeatureSelector(
-        population_size=8,
-        generations=30,
-        crossover_rate=0.5,
-        mutation_rate=0.375,
-        val_size=0.15,  # last 8% of TRAIN used as GA validation
+        population_size=24,
+        generations=60,
+        crossover_rate=0.6,
+        mutation_rate=0.005,
+        val_size=0.15,
         random_state=42,
         xgb_params=xgb_params,
+        fitness_metric="f1_penalized",
+        feature_penalty=0.0015,
+        max_features=80,
+        selection="tournament",
+        tournament_k=3,
     )
 
     # GA + XGB training on this side

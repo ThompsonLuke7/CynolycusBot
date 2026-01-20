@@ -1,5 +1,6 @@
 # models/ga_xgboost/ga_xgboost.py
 
+import math
 import os
 import numpy as np
 from dataclasses import dataclass, field
@@ -27,8 +28,8 @@ class GAXGBoostFeatureSelector:
     population_size: int = 8
     generations: int = 30
     crossover_rate: float = 0.5
-    mutation_rate: float = 0.375
-    val_size: float = 0.08          # portion of given data used as validation
+    mutation_rate: float = 0.005  # per-bit mutation probability
+    val_size: float = 0.15          # portion of given data used as validation
     fitness_metric: str = "f1"      # "f1" | "f1_penalized"
     feature_penalty: float = 0.001  # penalty per selected feature when using f1_penalized
     max_features: Optional[int] = 80  # hard cap; None disables
@@ -73,8 +74,8 @@ class GAXGBoostFeatureSelector:
 
         n_features = X.shape[1]
 
-        # Initialize population: binary masks
-        population = rng.integers(0, 2, size=(self.population_size, n_features), dtype=np.int8)
+        # Initialize population with k-sparse masks near the cap (or a sane default).
+        population = self._init_population(rng, n_features)
         population = self._ensure_valid_population(population, rng)
 
         best_mask = None
@@ -97,8 +98,9 @@ class GAXGBoostFeatureSelector:
                 best_mask = gen_best_mask
 
             metric_label = "val_fitness"
-            print(f"[GA-XGB] Generation {gen+1}/{self.generations} "
-                  f"- best {metric_label}: {gen_best_score:.4f}, global best: {best_score:.4f}")
+            if gen%10 ==0:
+                print(f"[GA-XGB] Generation {gen+1}/{self.generations} "
+                    f"- best {metric_label}: {gen_best_score:.4f}, global best: {best_score:.4f}")
 
             # Selection
             if self.selection == "roulette":
@@ -183,13 +185,49 @@ class GAXGBoostFeatureSelector:
 
     def _ensure_valid_population(self, pop: np.ndarray, rng) -> np.ndarray:
         """
-        Make sure no chromosome is all zeros; if so, randomly flip one gene to 1.
+        Enforce max_features (if set) and avoid all-zero masks.
         """
         for i in range(pop.shape[0]):
-            if not pop[i].any():
-                idx = rng.integers(0, pop.shape[1])
-                pop[i, idx] = 1
+            pop[i] = self._cap_mask(pop[i], rng)
         return pop
+
+    def _init_population(self, rng, n_features: int) -> np.ndarray:
+        """
+        Initialize a k-sparse population centered near the max feature cap.
+        """
+        pop = np.zeros((self.population_size, n_features), dtype=np.int8)
+        if self.max_features is None:
+            k0 = min(60, n_features)
+        else:
+            k0 = min(self.max_features, 60, n_features)
+
+        k_low = max(1, int(math.floor(0.5 * k0)))
+        k_high = max(k_low, int(math.ceil(1.2 * k0)))
+        k_high = min(k_high, n_features)
+
+        for i in range(self.population_size):
+            k = int(rng.integers(k_low, k_high + 1))
+            idx = rng.choice(n_features, size=k, replace=False)
+            pop[i, idx] = 1
+        return pop
+
+    def _cap_mask(self, mask: np.ndarray, rng) -> np.ndarray:
+        """
+        Enforce max_features and ensure at least one feature is selected.
+        """
+        if self.max_features is not None:
+            ones = np.flatnonzero(mask)
+            if ones.size > self.max_features:
+                drop = rng.choice(ones, size=ones.size - self.max_features, replace=False)
+                mask[drop] = 0
+
+        if not mask.any():
+            k = 1
+            if self.max_features is not None:
+                k = max(1, min(3, self.max_features, mask.size))
+            idx = rng.choice(mask.size, size=k, replace=False)
+            mask[idx] = 1
+        return mask
 
     def _evaluate_chromosome(
         self,
@@ -241,6 +279,8 @@ class GAXGBoostFeatureSelector:
         """
         Bit-flip mutation for each gene independently.
         """
+        if self.mutation_rate <= 0:
+            return pop
         mutation_mask = rng.random(pop.shape) < self.mutation_rate
         pop[mutation_mask] = 1 - pop[mutation_mask]
         return pop
