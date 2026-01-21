@@ -313,6 +313,8 @@ def clean_feature_matrix(
     processed/base/datasets/<dataset_name>/.
     """
     source_attrs = dict(df.attrs)
+    plot_cols = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
+    plot_frame = df[plot_cols].copy() if plot_cols else None
     cleaned = df.copy()
     if "atr_swing_label" in cleaned.columns:
         cleaned = add_binary_swing_labels(cleaned)
@@ -333,9 +335,6 @@ def clean_feature_matrix(
         feature_cols = kept_cols
         cleaned, _ = clean_nan_inf_entries(cleaned)
         feature_df = cleaned[feature_cols]
-
-    plot_cols = [c for c in ("open", "high", "low", "close", "volume") if c in cleaned.columns]
-    plot_frame = cleaned[plot_cols].copy() if plot_cols else None
 
     cleaned = drop_ohlcv_columns(cleaned)
     feature_df = drop_ohlcv_columns(feature_df)

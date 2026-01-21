@@ -1488,7 +1488,7 @@ def plot_model_inference(
     long_probs: np.ndarray | None,
     short_probs: np.ndarray | None,
     *,
-    threshold: float = 0.6,
+    threshold: float = 0.8,
     title: str | None = None,
     save_path: str | None = None,
 ) -> None:
@@ -1677,7 +1677,7 @@ def model_inference_main() -> None:
     parser.add_argument("--ticker", default="$SPY")
     parser.add_argument("--dataset", default="15min")
     parser.add_argument("--model-name", required=True)
-    parser.add_argument("--threshold", type=float, default=0.6)
+    parser.add_argument("--threshold", type=float, default=0.8)
     parser.add_argument(
         "--split", choices=["all", "train", "val", "test"], default="test"
     )

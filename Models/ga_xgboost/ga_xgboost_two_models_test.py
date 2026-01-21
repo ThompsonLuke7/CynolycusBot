@@ -231,12 +231,14 @@ def train_and_eval_side(y_train, y_test, side_name):
     print(f"{side_name} best GA val F1:", selector.best_score_)
     print(f"{side_name} selected features:", selector.best_mask_.sum())
 
-    # Evaluate on the hold-out test window
-    y_pred = selector.predict(X_test)
+    # Evaluate on the hold-out test window using probability thresholds
+    threshold = LONG_THRESHOLD if side_name.upper() == "LONG" else SHORT_THRESHOLD
+    y_prob = selector.predict_proba(X_test)[:, 1]
+    y_pred = (y_prob >= threshold).astype(np.int64)
     f1 = f1_score(y_test, y_pred, pos_label=1)
     cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
 
-    print(f"{side_name} TEST F1 (class 1): {f1:.4f}")
+    print(f"{side_name} TEST F1 (class 1) @ threshold={threshold:.2f}: {f1:.4f}")
     print(f"{side_name} TEST confusion matrix [[TN, FP], [FN, TP]]:")
     print(cm)
 
@@ -246,6 +248,9 @@ def train_and_eval_side(y_train, y_test, side_name):
 # ------------------------------
 # Train both models
 # ------------------------------
+LONG_THRESHOLD = 0.7
+SHORT_THRESHOLD = 0.7
+
 long_selector = train_and_eval_side(y_long_train, y_long_test, "LONG")
 short_selector = train_and_eval_side(y_short_train, y_short_test, "SHORT")
 
@@ -283,9 +288,17 @@ print(f"Saved SHORT artifacts to: {short_dir}")
 # Use the last bar in the test split as an example input
 x_latest = X_test[-1:].astype(np.float32)
 
-long_pred = long_selector.predict(x_latest)[0]
-short_pred = short_selector.predict(x_latest)[0]
+long_prob = long_selector.predict_proba(x_latest)[0, 1]
+short_prob = short_selector.predict_proba(x_latest)[0, 1]
+long_pred = int(long_prob >= LONG_THRESHOLD)
+short_pred = int(short_prob >= SHORT_THRESHOLD)
 
 print("\nLatest bar predictions:")
-print("  LONG model:  1 = good long swing, 0 = not:", long_pred)
-print("  SHORT model: 1 = good short swing, 0 = not:", short_pred)
+print(
+    f"  LONG model:  1 = good long swing, 0 = not: {long_pred} "
+    f"(p={long_prob:.3f}, threshold={LONG_THRESHOLD:.2f})"
+)
+print(
+    f"  SHORT model: 1 = good short swing, 0 = not: {short_pred} "
+    f"(p={short_prob:.3f}, threshold={SHORT_THRESHOLD:.2f})"
+)
