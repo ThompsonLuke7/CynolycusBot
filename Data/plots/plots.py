@@ -44,6 +44,7 @@ _LABEL_PLOT_FILES = {
     "bars_to_exhaustion": "bars_to_exhaustion_plot.png",
 }
 
+_PLOT_TAIL_BARS = 200
 
 def _infer_bar_label(index: pd.DatetimeIndex) -> str:
     if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
@@ -75,6 +76,12 @@ def _normalize_plot_type(plot_type: str) -> str:
             f"{', '.join(sorted(_LABEL_PLOT_FILES))}."
         )
     return key
+
+
+def _tail_df(df: pd.DataFrame, tail: int | None = _PLOT_TAIL_BARS) -> pd.DataFrame:
+    if tail is None or tail <= 0 or len(df) <= tail:
+        return df
+    return df.tail(tail)
 
 
 def _extract_ohlc(
@@ -216,6 +223,7 @@ def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> No
     Plot OHLC candles with ATR swing labels from label generation.
     Uses compressed x positions to avoid gaps from non-trading days.
     """
+    df = _tail_df(df)
     fig, ax = plt.subplots(figsize=(18, 6))
 
     date_index = df.index
@@ -332,6 +340,7 @@ def plot_continuation_signals(
     Plot OHLC candles with continuation labels only.
     Uses compressed x positions to avoid gaps from non-trading days.
     """
+    df = _tail_df(df)
     fig, ax = plt.subplots(figsize=(18, 6))
 
     date_index = df.index
@@ -405,6 +414,7 @@ def plot_leg_segmentation_signals(
     Plot OHLC candles with ATR leg-state labels and pivot markers.
     Uses compressed x positions to avoid gaps from non-trading days.
     """
+    df = _tail_df(df)
     fig, ax = plt.subplots(figsize=(18, 6))
 
     date_index = df.index
@@ -544,6 +554,7 @@ def plot_swing_state_machine_signals(
     Plot OHLC candles with swing state-machine labels.
     Uses compressed x positions to avoid gaps from non-trading days.
     """
+    df = _tail_df(df)
     fig, ax = plt.subplots(figsize=(18, 6))
 
     date_index = df.index
@@ -673,6 +684,7 @@ def plot_all_labels(
     Plot candles with pivot, state machine, continuation labels, plus a leg-state subplot.
     Uses compressed x positions to avoid gaps from non-trading days.
     """
+    df = _tail_df(df)
     fig, (ax, ax_leg) = plt.subplots(
         2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
     )
@@ -890,6 +902,7 @@ def plot_mfe_mae_labels(
     """
     Plot close price with a subplot showing MFE (up) and MAE (down) bars.
     """
+    df = _tail_df(df)
     fig, (ax_price, ax_bar) = plt.subplots(
         2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [2.2, 1]}
     )
@@ -955,6 +968,7 @@ def plot_bars_to_exhaustion(
     """
     Plot close price with a subplot showing bars-to-exhaustion values.
     """
+    df = _tail_df(df)
     fig, (ax_price, ax_bar) = plt.subplots(
         2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [2.2, 1]}
     )
@@ -1080,18 +1094,36 @@ def _resolve_repo_root() -> Path:
 def _load_feature_frame(
     ticker: str,
     dataset_name: str,
+    *,
+    x_filename: str | None = None,
 ) -> tuple[pd.DataFrame, list[str], Path]:
     from Data.load_data import get_ticker_processed_base_dir
 
     clean = normalize_ticker(ticker)
     processed_dir = get_ticker_processed_base_dir(clean)
     dataset_dir = processed_dir / "datasets" / dataset_name
-    X_path = dataset_dir / "X.parquet"
-    if not X_path.exists():
-        raise FileNotFoundError(f"Missing {X_path}")
+    if x_filename:
+        X_path = dataset_dir / x_filename
+    else:
+        X_path = dataset_dir / "X.parquet"
+        if not X_path.exists():
+            candidates = [
+                dataset_dir / f"X_{dataset_name}_tree.parquet",
+                dataset_dir / f"X_{dataset_name}_lstm.parquet",
+            ]
+            if X_path.exists():
+                candidates.insert(0, X_path)
+            X_path = next((p for p in candidates if p.exists()), None)
+            if X_path is None:
+                any_match = sorted(dataset_dir.glob("X_*.parquet"))
+                X_path = any_match[0] if any_match else None
+    if X_path is None or not X_path.exists():
+        raise FileNotFoundError(f"Missing X parquet under {dataset_dir}")
 
     X_df = pd.read_parquet(X_path)
-    features_path = dataset_dir / "features.txt"
+    features_path = dataset_dir / f"features_{Path(X_path).stem}.txt"
+    if not features_path.exists():
+        features_path = dataset_dir / "features.txt"
     if features_path.exists():
         feature_cols = [
             line.strip()
@@ -1107,16 +1139,30 @@ def _load_feature_frame(
     else:
         feature_cols = list(X_df.columns)
 
-    return X_df, feature_cols, dataset_dir
+    return X_df, feature_cols, X_path
 
 
-def _load_plot_frame(ticker: str, row_idx: np.ndarray | None) -> pd.DataFrame | None:
+def _load_plot_frame(
+    ticker: str,
+    row_idx: np.ndarray | None,
+    *,
+    x_path: Path | None = None,
+) -> pd.DataFrame | None:
     from Data.load_data import load_ticker_parquet
 
-    try:
-        plot_df = load_ticker_parquet(ticker)
-    except Exception:
-        return None
+    plot_df = None
+    if x_path is not None:
+        dataset_dir = x_path.parent
+        plot_path = dataset_dir / "plot_frame.parquet"
+        if plot_path.exists():
+            plot_df = pd.read_parquet(plot_path)
+
+    if plot_df is None:
+        try:
+            plot_df = load_ticker_parquet(ticker)
+        except Exception:
+            return None
+
     if row_idx is None or len(row_idx) == 0:
         return plot_df
     max_idx = int(np.max(row_idx))
@@ -1623,7 +1669,7 @@ def get_default_model_inference_plot_path(ticker: str, model_name: str) -> Path:
 
 
 def model_inference_main() -> None:
-    from Data.load_data import load_split_indices
+    from Data.load_data import get_ticker_processed_split_dir, load_split_indices
 
     parser = argparse.ArgumentParser(
         description="Plot model inference signals over price bars."
@@ -1639,12 +1685,19 @@ def model_inference_main() -> None:
     parser.add_argument("--save", default=None)
     args = parser.parse_args()
 
-    X_df, feature_cols, _ = _load_feature_frame(args.ticker, args.dataset)
+    X_df, feature_cols, x_path = _load_feature_frame(args.ticker, args.dataset)
     row_idx = np.arange(len(X_df))
 
     if args.split != "all":
-        splits = load_split_indices(args.ticker, args.dataset)
-        row_idx = splits[args.split]
+        clean = normalize_ticker(args.ticker)
+        split_root = get_ticker_processed_split_dir(clean)
+        x_stem = Path(x_path).stem
+        split_path = split_root / args.dataset / x_stem / f"{args.split}_idx.npy"
+        if split_path.exists():
+            row_idx = np.load(split_path)
+        else:
+            splits = load_split_indices(args.ticker, args.dataset)
+            row_idx = splits[args.split]
 
     if args.tail:
         row_idx = row_idx[-args.tail :]
@@ -1652,7 +1705,7 @@ def model_inference_main() -> None:
     row_idx = np.asarray(row_idx, dtype=int)
     X_df = X_df.iloc[row_idx]
 
-    plot_df = _load_plot_frame(args.ticker, row_idx)
+    plot_df = _load_plot_frame(args.ticker, row_idx, x_path=x_path)
     if plot_df is None:
         plot_df = X_df
 

@@ -334,6 +334,9 @@ def clean_feature_matrix(
         cleaned, _ = clean_nan_inf_entries(cleaned)
         feature_df = cleaned[feature_cols]
 
+    plot_cols = [c for c in ("open", "high", "low", "close", "volume") if c in cleaned.columns]
+    plot_frame = cleaned[plot_cols].copy() if plot_cols else None
+
     cleaned = drop_ohlcv_columns(cleaned)
     feature_df = drop_ohlcv_columns(feature_df)
     feature_cols = list(feature_df.columns)
@@ -370,6 +373,10 @@ def clean_feature_matrix(
 
         # X: model-specific filename
         feature_df.astype("float32").to_parquet(dataset_dir / x_filename, index=False)
+
+        # Plot frame: save OHLCV aligned to X rows if available.
+        if plot_frame is not None and not plot_frame.empty:
+            plot_frame.to_parquet(dataset_dir / "plot_frame.parquet", index=True)
 
         # y: shared, write once (or force if you want)
         if write_y or not (dataset_dir / "y.parquet").exists():
