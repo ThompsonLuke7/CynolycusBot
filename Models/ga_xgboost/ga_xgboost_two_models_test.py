@@ -138,7 +138,11 @@ def save_selector_artifacts(
     side_dir = output_dir / side_name.lower()
     side_dir.mkdir(parents=True, exist_ok=True)
 
-    selector.xgb_model_.get_booster().save_model(str(side_dir / "xgb_model.json"))
+    model = selector.xgb_model_
+    if hasattr(model, "save_model"):
+        model.save_model(str(side_dir / "xgb_model.json"))
+    else:
+        model.get_booster().save_model(str(side_dir / "xgb_model.json"))
     np.save(side_dir / "best_mask.npy", selector.best_mask_.astype(np.int8))
 
     meta = {

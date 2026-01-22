@@ -1488,6 +1488,10 @@ def plot_model_inference(
     long_probs: np.ndarray | None,
     short_probs: np.ndarray | None,
     *,
+    long_actual: np.ndarray | None = None,
+    short_actual: np.ndarray | None = None,
+    long_label_name: str | None = None,
+    short_label_name: str | None = None,
     threshold: float = 0.8,
     title: str | None = None,
     save_path: str | None = None,
@@ -1496,6 +1500,11 @@ def plot_model_inference(
     has_ohlc = all(c in X_df.columns for c in ("open", "high", "low", "close"))
     close_y = X_df["close"].to_numpy() if "close" in X_df.columns else None
     pos = np.arange(len(X_df))
+
+    if long_actual is not None and len(long_actual) != len(X_df):
+        raise ValueError("long_actual length must match X_df for plotting.")
+    if short_actual is not None and len(short_actual) != len(X_df):
+        raise ValueError("short_actual length must match X_df for plotting.")
 
     fig, (ax_price, ax_prob) = plt.subplots(
         2,
@@ -1598,6 +1607,36 @@ def plot_model_inference(
                 label=f"SHORT prob >= {threshold:.2f}",
                 zorder=2,
             )
+    if long_actual is not None:
+        long_label = f"{long_label_name or 'LONG'} actual"
+        long_actual_mask = (long_actual == 1) & valid_mask
+        if long_actual_mask.any():
+            ax_price.scatter(
+                pos[long_actual_mask],
+                long_y[long_actual_mask],
+                facecolors="none",
+                edgecolors="#0D47A1",
+                linewidths=1.4,
+                marker="^",
+                s=56,
+                label=long_label,
+                zorder=2.2,
+            )
+    if short_actual is not None:
+        short_label = f"{short_label_name or 'SHORT'} actual"
+        short_actual_mask = (short_actual == 1) & valid_mask
+        if short_actual_mask.any():
+            ax_price.scatter(
+                pos[short_actual_mask],
+                short_y[short_actual_mask],
+                facecolors="none",
+                edgecolors="#EF6C00",
+                linewidths=1.4,
+                marker="v",
+                s=56,
+                label=short_label,
+                zorder=2.2,
+            )
 
     ax_price.set_ylabel("Price")
     ax_price.legend(loc="upper left")
@@ -1610,6 +1649,28 @@ def plot_model_inference(
     if short_probs is not None:
         ax_prob.plot(
             pos, short_probs, label="SHORT P(class=1)", color="#FB8C00", linewidth=1.5
+        )
+    if long_actual is not None:
+        ax_prob.step(
+            pos,
+            long_actual,
+            where="post",
+            color="#0D47A1",
+            linewidth=1.1,
+            linestyle="--",
+            alpha=0.7,
+            label=f"{long_label_name or 'LONG'} actual",
+        )
+    if short_actual is not None:
+        ax_prob.step(
+            pos,
+            short_actual,
+            where="post",
+            color="#EF6C00",
+            linewidth=1.1,
+            linestyle="--",
+            alpha=0.7,
+            label=f"{short_label_name or 'SHORT'} actual",
         )
     ax_prob.axhline(threshold, color="#1f77b4", linestyle="--", label="Threshold")
     ax_prob.set_ylim(0, 1.02)
@@ -1668,6 +1729,51 @@ def get_default_model_inference_plot_path(ticker: str, model_name: str) -> Path:
     return plots_dir / filename
 
 
+def _extract_inference_labels(
+    y_df: pd.DataFrame,
+    *,
+    label_mode: str = "auto",
+) -> tuple[np.ndarray | None, np.ndarray | None, str | None, str | None]:
+    mode = (label_mode or "auto").strip().lower()
+
+    def from_pair(long_col: str, short_col: str):
+        if long_col in y_df.columns and short_col in y_df.columns:
+            long_vals = (
+                y_df[long_col].fillna(0).astype(int).to_numpy() == 1
+            ).astype(np.int64)
+            short_vals = (
+                y_df[short_col].fillna(0).astype(int).to_numpy() == 1
+            ).astype(np.int64)
+            return long_vals, short_vals, long_col, short_col
+        return None
+
+    def from_signed(col: str):
+        if col in y_df.columns:
+            values = y_df[col].fillna(0).astype(int).to_numpy()
+            long_vals = (values == 1).astype(np.int64)
+            short_vals = (values == -1).astype(np.int64)
+            return long_vals, short_vals, f"{col}=+1", f"{col}=-1"
+        return None
+
+    if mode in {"auto", "swing"}:
+        result = from_pair("long_swing_label", "short_swing_label")
+        if result:
+            return result
+        result = from_signed("atr_swing_label")
+        if result:
+            return result
+
+    if mode in {"auto", "leg"}:
+        result = from_pair("leg_up_label", "leg_down_label")
+        if result:
+            return result
+        result = from_signed("atr_leg_label")
+        if result:
+            return result
+
+    return None, None, None, None
+
+
 def model_inference_main() -> None:
     from Data.load_data import get_ticker_processed_split_dir, load_split_indices
 
@@ -1680,6 +1786,12 @@ def model_inference_main() -> None:
     parser.add_argument("--threshold", type=float, default=0.8)
     parser.add_argument(
         "--split", choices=["all", "train", "val", "test"], default="test"
+    )
+    parser.add_argument(
+        "--label-mode",
+        choices=["auto", "swing", "leg"],
+        default="auto",
+        help="Which labels to overlay for comparison.",
     )
     parser.add_argument("--tail", type=int, default=None)
     parser.add_argument("--save", default=None)
@@ -1716,6 +1828,31 @@ def model_inference_main() -> None:
 
     long_probs = None
     short_probs = None
+    long_actual = None
+    short_actual = None
+    long_label_name = None
+    short_label_name = None
+
+    y_path = x_path.parent / "y.parquet"
+    if y_path.exists():
+        y_df = pd.read_parquet(y_path)
+        max_idx = int(np.max(row_idx)) if len(row_idx) else -1
+        if max_idx < len(y_df):
+            y_df = y_df.iloc[row_idx]
+            (
+                long_actual,
+                short_actual,
+                long_label_name,
+                short_label_name,
+            ) = _extract_inference_labels(y_df, label_mode=args.label_mode)
+            if (
+                args.label_mode != "auto"
+                and long_actual is None
+                and short_actual is None
+            ):
+                raise KeyError(
+                    f"No labels found for label_mode='{args.label_mode}' in {y_path.name}."
+                )
 
     long_dir = model_root / "long"
     if long_dir.exists():
@@ -1738,6 +1875,10 @@ def model_inference_main() -> None:
         plot_df,
         long_probs,
         short_probs,
+        long_actual=long_actual,
+        short_actual=short_actual,
+        long_label_name=long_label_name,
+        short_label_name=short_label_name,
         threshold=args.threshold,
         title=title,
         save_path=save_path,

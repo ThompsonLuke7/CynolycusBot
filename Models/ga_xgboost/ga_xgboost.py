@@ -8,9 +8,12 @@ from typing import Optional, Dict, Any
 
 from sklearn.metrics import f1_score
 import xgboost as xgb
-from xgboost import XGBClassifier
 from xgboost.core import XGBoostError
 
+try:
+    import cupy as cp
+except Exception:
+    cp = None
 
 @dataclass
 class GAXGBoostFeatureSelector:
@@ -50,7 +53,7 @@ class GAXGBoostFeatureSelector:
     # learned attributes
     best_mask_: Optional[np.ndarray] = field(init=False, default=None)
     best_score_: Optional[float] = field(init=False, default=None)
-    xgb_model_: Optional[XGBClassifier] = field(init=False, default=None)
+    xgb_model_: Optional[xgb.Booster] = field(init=False, default=None)
     _use_gpu: Optional[bool] = field(init=False, default=None)
     _last_printed_device: Optional[bool] = field(init=False, default=None)
     _gpu_error_printed: bool = field(init=False, default=False)
@@ -163,24 +166,6 @@ class GAXGBoostFeatureSelector:
         self.fit(X, y)
         return self.transform(X)
 
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Predict class labels using the final trained XGB model and selected features.
-        """
-        if self.xgb_model_ is None or self.best_mask_ is None:
-            raise RuntimeError("You must call fit() before predict().")
-        X_selected = self.transform(X)
-        return self.xgb_model_.predict(X_selected)
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """
-        Predict probabilities using the final trained XGB model.
-        """
-        if self.xgb_model_ is None or self.best_mask_ is None:
-            raise RuntimeError("You must call fit() before predict_proba().")
-        X_selected = self.transform(X)
-        return self.xgb_model_.predict_proba(X_selected)
-
     # ---------- Internal helpers ----------
 
     def _ensure_valid_population(self, pop: np.ndarray, rng) -> np.ndarray:
@@ -249,7 +234,10 @@ class GAXGBoostFeatureSelector:
         X_v = X_val[:, selected]
 
         model = self._fit_xgb(X_tr, y_train)
-        y_pred = model.predict(X_v)
+        use_gpu = self._use_gpu is True
+        dval = self._make_dmatrix(X_v, y=None, use_gpu=use_gpu)
+        y_prob = model.predict(dval)
+        y_pred = (self._to_numpy(y_prob) >= 0.5).astype(np.int64)
         base = f1_score(y_val, y_pred, pos_label=1)
 
         if self.fitness_metric == "f1_penalized":
@@ -285,16 +273,16 @@ class GAXGBoostFeatureSelector:
         pop[mutation_mask] = 1 - pop[mutation_mask]
         return pop
 
-    def _fit_xgb(self, X: np.ndarray, y: np.ndarray) -> XGBClassifier:
+    def _fit_xgb(self, X: np.ndarray, y: np.ndarray) -> xgb.Booster:
         """
         Train XGB with GPU when available; fall back to CPU once if GPU fails.
         """
         use_gpu = True if self._use_gpu is None else self._use_gpu
         if use_gpu:
-            gpu_params = self._xgb_params_for_mode(use_gpu=True)
-            model = XGBClassifier(**gpu_params)
+            gpu_params, num_boost_round = self._xgb_params_for_mode(use_gpu=True)
+            dtrain = self._make_dmatrix(X, y=y, use_gpu=True)
             try:
-                model.fit(X, y)
+                model = xgb.train(gpu_params, dtrain, num_boost_round=num_boost_round)
                 self._use_gpu = True
                 self._maybe_print_device(use_gpu=True, params=gpu_params)
                 return model
@@ -304,14 +292,18 @@ class GAXGBoostFeatureSelector:
                 self._maybe_print_gpu_error(exc)
                 self._use_gpu = False
 
-        cpu_params = self._xgb_params_for_mode(use_gpu=False)
-        model = XGBClassifier(**cpu_params)
-        model.fit(X, y)
+        cpu_params, num_boost_round = self._xgb_params_for_mode(use_gpu=False)
+        dtrain = self._make_dmatrix(X, y=y, use_gpu=False)
+        model = xgb.train(cpu_params, dtrain, num_boost_round=num_boost_round)
         self._maybe_print_device(use_gpu=False, params=cpu_params)
         return model
 
-    def _xgb_params_for_mode(self, use_gpu: bool) -> Dict[str, Any]:
+    def _xgb_params_for_mode(self, use_gpu: bool) -> tuple[Dict[str, Any], int]:
         params = dict(self.xgb_params)
+        num_boost_round = int(params.pop("n_estimators", 100))
+        n_jobs = params.pop("n_jobs", None)
+        if n_jobs is not None:
+            params["nthread"] = n_jobs
         if use_gpu:
             if self._xgb_supports_device_param():
                 gpu_id = params.pop("gpu_id", None)
@@ -325,7 +317,7 @@ class GAXGBoostFeatureSelector:
                 params["tree_method"] = "gpu_hist"
                 params["predictor"] = "gpu_predictor"
                 params.pop("device", None)
-            return params
+            return params, num_boost_round
 
         if params.get("tree_method") == "gpu_hist":
             params["tree_method"] = "hist"
@@ -337,7 +329,7 @@ class GAXGBoostFeatureSelector:
             params["device"] = "cpu"
         else:
             params.pop("device", None)
-        return params
+        return params, num_boost_round
 
     @staticmethod
     def _is_gpu_error(exc: Exception) -> bool:
@@ -382,3 +374,52 @@ class GAXGBoostFeatureSelector:
             print(f"[GA-XGB] GPU init failed, falling back to CPU: {message}")
         else:
             print("[GA-XGB] GPU init failed, falling back to CPU")
+
+    def _make_dmatrix(
+        self,
+        X: np.ndarray,
+        y: Optional[np.ndarray],
+        *,
+        use_gpu: bool,
+    ) -> xgb.DMatrix:
+        data = self._to_device_array(X, use_gpu=use_gpu)
+        label = None if y is None else self._to_device_array(y, use_gpu=use_gpu)
+        nthread = self.xgb_params.get("n_jobs")
+        if nthread is not None:
+            return xgb.DMatrix(data=data, label=label, nthread=nthread)
+        return xgb.DMatrix(data=data, label=label)
+
+    def _to_device_array(self, array: np.ndarray, *, use_gpu: bool):
+        if use_gpu and cp is not None:
+            return cp.asarray(array)
+        return array
+
+    @staticmethod
+    def _to_numpy(array):
+        if cp is not None and isinstance(array, cp.ndarray):
+            return cp.asnumpy(array)
+        return np.asarray(array)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """
+        Predict class labels using the final trained XGB model and selected features.
+        """
+        if self.xgb_model_ is None or self.best_mask_ is None:
+            raise RuntimeError("You must call fit() before predict().")
+        X_selected = self.transform(X)
+        use_gpu = self._use_gpu is True
+        dmat = self._make_dmatrix(X_selected, y=None, use_gpu=use_gpu)
+        y_prob = self.xgb_model_.predict(dmat)
+        return (self._to_numpy(y_prob) >= 0.5).astype(np.int64)
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """
+        Predict probabilities using the final trained XGB model.
+        """
+        if self.xgb_model_ is None or self.best_mask_ is None:
+            raise RuntimeError("You must call fit() before predict_proba().")
+        X_selected = self.transform(X)
+        use_gpu = self._use_gpu is True
+        dmat = self._make_dmatrix(X_selected, y=None, use_gpu=use_gpu)
+        y_prob = self._to_numpy(self.xgb_model_.predict(dmat))
+        return np.column_stack([1.0 - y_prob, y_prob])
