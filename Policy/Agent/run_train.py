@@ -96,7 +96,7 @@ def _plot_actions(trace, output_path):
 
 def main():
     cfg = PipelineConfig(drop_na=True)
-    df = build_agent_training_matrix(cfg)
+    df = build_agent_training_matrix(cfg, save_parquet=True)
     splits = load_tree_split_indices(
         ticker=cfg.ticker,
         dataset_name=cfg.dataset_name,

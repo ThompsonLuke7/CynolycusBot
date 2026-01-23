@@ -38,7 +38,11 @@ class PipelineConfig:
     include_state_placeholders: bool = False
 
 
-def build_agent_training_matrix(cfg: PipelineConfig | None = None) -> pd.DataFrame:
+def build_agent_training_matrix(
+    cfg: PipelineConfig | None = None,
+    *,
+    save_parquet: bool = False,
+) -> pd.DataFrame:
     config = cfg or PipelineConfig()
     agent_cfg = AgentFeatureConfig(
         ticker=config.ticker,
@@ -48,7 +52,21 @@ def build_agent_training_matrix(cfg: PipelineConfig | None = None) -> pd.DataFra
         drop_na=False,
         include_state_placeholders=config.include_state_placeholders,
     )
-    return build_agent_feature_matrix(config=agent_cfg)
+    df = build_agent_feature_matrix(config=agent_cfg)
+    if save_parquet:
+        clean = normalize_ticker(config.ticker).lower()
+        out_dir = (
+            REPO_ROOT
+            / "Data"
+            / "models"
+            / "agent"
+            / config.dataset_name
+            / clean
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "agent_matrix.parquet"
+        df.to_parquet(out_path, index=True)
+    return df
 
 
 def load_tree_split_indices(
