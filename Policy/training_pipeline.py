@@ -44,7 +44,8 @@ def build_agent_training_matrix(cfg: PipelineConfig | None = None) -> pd.DataFra
         ticker=config.ticker,
         dataset_name=config.dataset_name,
         model_name=config.model_name,
-        drop_na=config.drop_na,
+        # Keep full matrix; handle NaN filtering at split-time to preserve indices.
+        drop_na=False,
         include_state_placeholders=config.include_state_placeholders,
     )
     return build_agent_feature_matrix(config=agent_cfg)
@@ -89,10 +90,6 @@ def split_agent_matrix(
     val_idx = splits["val"].sort_values()
     test_idx = splits["test"].sort_values()
 
-    train_idx = train_idx.intersection(df.index)
-    val_idx = val_idx.intersection(df.index)
-    test_idx = test_idx.intersection(df.index)
-
     def _contiguous_slices(idx: pd.Index, name: str) -> list[slice]:
         if idx.empty:
             return []
@@ -128,10 +125,13 @@ def filter_splits_for_non_nan(
 ) -> dict[str, pd.Index]:
     if not feature_cols:
         return splits
-    keep_idx = df.index[~df[feature_cols].isna().any(axis=1)]
+    keep = ~df[feature_cols].isna().any(axis=1)
+    keep_arr = keep.to_numpy()
     filtered = {}
     for name, idx in splits.items():
-        filtered[name] = idx.intersection(keep_idx)
+        idx_arr = idx.to_numpy()
+        valid_mask = keep_arr[idx_arr]
+        filtered[name] = pd.Index(idx_arr[valid_mask])
     return filtered
 
 
