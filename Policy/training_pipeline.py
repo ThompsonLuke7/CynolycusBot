@@ -85,9 +85,12 @@ def split_agent_matrix(
     train_idx = splits["train"].sort_values()
     val_idx = splits["val"].sort_values()
     test_idx = splits["test"].sort_values()
-    if max(train_idx.max(), val_idx.max(), test_idx.max()) >= len(df):
-        raise ValueError("Split indices exceed agent matrix length.")
-    return df.iloc[train_idx], df.iloc[val_idx], df.iloc[test_idx]
+
+    train_idx = train_idx.intersection(df.index)
+    val_idx = val_idx.intersection(df.index)
+    test_idx = test_idx.intersection(df.index)
+
+    return df.loc[train_idx], df.loc[val_idx], df.loc[test_idx]
 
 
 def filter_splits_for_non_nan(
@@ -97,13 +100,10 @@ def filter_splits_for_non_nan(
 ) -> dict[str, pd.Index]:
     if not feature_cols:
         return splits
-    keep = ~df[feature_cols].isna().any(axis=1)
-    keep_arr = keep.to_numpy()
+    keep_idx = df.index[~df[feature_cols].isna().any(axis=1)]
     filtered = {}
     for name, idx in splits.items():
-        idx_arr = idx.to_numpy()
-        valid_mask = keep_arr[idx_arr]
-        filtered[name] = pd.Index(idx_arr[valid_mask])
+        filtered[name] = idx.intersection(keep_idx)
     return filtered
 
 
