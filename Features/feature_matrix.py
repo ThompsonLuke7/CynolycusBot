@@ -26,7 +26,7 @@ from Features.feature_engineering import (
     run_feature_diagnostics,
 )
 from Features.label_generations import add_all_labels
-from Features.feature_sets.multi_timeframe_features import ensure_time_index, resample_ohlcv
+from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
 from Features.feature_sets.pandas_ta_indicators import add_all_pandasta_indicators
 from Features.feature_sets.LSTM_features import add_lstm_features
 

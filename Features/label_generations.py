@@ -11,7 +11,7 @@ import pandas_ta as ta
 
 from Features.feature_sets.custom_indicators import add_fractal_pivots
 from Features.feature_sets.feature_constants import SWING_LABEL_COLUMNS
-from Features.feature_sets.multi_timeframe_features import ensure_time_index, resample_ohlcv
+from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
 
 
 def _get_prob_array(

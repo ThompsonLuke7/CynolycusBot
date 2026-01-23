@@ -22,7 +22,7 @@ from Features.label_generations import (
     add_mfe_mae_labels,
     add_pivot_swing_state_machine,
 )
-from Features.feature_sets.multi_timeframe_features import ensure_time_index, resample_ohlcv
+from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
 from Features.feature_matrix import build_feature_matrices, build_feature_matrix, clean_feature_matrix
 
 
