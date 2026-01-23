@@ -32,7 +32,7 @@ from Features.feature_sets.custom_indicators import (
     add_vmd_return_features,
 )
 from Features.label_generations import add_all_labels, add_all_labels_on_timeframe
-from Features.multi_timeframe_features import (
+from Features.feature_sets.multi_timeframe_features import (
     add_multi_timeframe_features,
     ensure_time_index,
 )

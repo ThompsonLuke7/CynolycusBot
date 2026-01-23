@@ -41,7 +41,7 @@ def train_ppo(
     entropy_coef: float = 0.01,
     value_coef: float = 0.5,
     max_grad_norm: float = 0.5,
-    device: str = "gpu",
+    device: str = "cuda",
     seed: int = 7,
     verbose: bool = True,
 ) -> ActorCritic:
