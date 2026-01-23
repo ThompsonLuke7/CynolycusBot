@@ -9,6 +9,7 @@ if str(_POLICY_ROOT) not in sys.path:
 from training_pipeline import (
     PipelineConfig,
     build_agent_training_matrix,
+    filter_splits_for_non_nan,
     load_tree_split_indices,
     split_agent_matrix,
 )
@@ -101,9 +102,11 @@ def main():
         dataset_name=cfg.dataset_name,
         x_filename=cfg.x_filename,
     )
-    train_df, _val_df, test_df = split_agent_matrix(df, splits)
 
     feature_cols = [c for c in df.columns if c not in ("timestamp", "day_id", "close")]
+    if cfg.drop_na:
+        splits = filter_splits_for_non_nan(df, splits, feature_cols)
+    train_df, _val_df, test_df = split_agent_matrix(df, splits)
 
     train_env = TradingEnv(
         df=train_df,

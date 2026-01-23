@@ -90,6 +90,23 @@ def split_agent_matrix(
     return df.iloc[train_idx], df.iloc[val_idx], df.iloc[test_idx]
 
 
+def filter_splits_for_non_nan(
+    df: pd.DataFrame,
+    splits: dict[str, pd.Index],
+    feature_cols: list[str],
+) -> dict[str, pd.Index]:
+    if not feature_cols:
+        return splits
+    keep = ~df[feature_cols].isna().any(axis=1)
+    keep_arr = keep.to_numpy()
+    filtered = {}
+    for name, idx in splits.items():
+        idx_arr = idx.to_numpy()
+        valid_mask = keep_arr[idx_arr]
+        filtered[name] = pd.Index(idx_arr[valid_mask])
+    return filtered
+
+
 # TODO: Fetch/load data for the target ticker (raw OHLCV + any required metadata).
 # TODO: Build the feature matrix from raw data (feature_engineering + scaling).
 # TODO: Add labels (pivot/ATR labels, state machine labels, etc.).
