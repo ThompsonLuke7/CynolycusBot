@@ -1,5 +1,4 @@
 from __future__ import annotations
-from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
 import math
 import numpy as np
@@ -159,17 +158,20 @@ class TradingEnv:
 
         price = float(self.df.loc[self._i, "close"])
         ret_next = float(self.df.loc[self._i, "ret_next"])
+        ret_next_missing = not np.isfinite(ret_next)
+        if ret_next_missing:
+            ret_next = 0.0
         is_last = bool(self.df.loc[self._i, "is_last_of_day"])
 
         reward_costs = 0.0
         flipped = (self.position == 1 and desired_pos == -1) or (self.position == -1 and desired_pos == 1)
+        blocked_flip = flipped and not self.allow_direct_flip
+        if blocked_flip:
+            desired_pos = 0
+            flipped = False
 
         if desired_pos != self.position:
-            if flipped and not self.allow_direct_flip:
-                reward_costs += self._trade_cost(price)  # exit
-                reward_costs += self._trade_cost(price)  # enter
-            else:
-                reward_costs += self._trade_cost(price)
+            reward_costs += self._trade_cost(price)
 
             if flipped:
                 reward_costs += self.flip_penalty
@@ -204,11 +206,13 @@ class TradingEnv:
         info: Dict[str, Any] = {
             "price": price,
             "ret_next": ret_next,
+            "ret_next_missing": ret_next_missing,
             "pos": self.position,
             "reward_pnl": reward_pnl,
             "reward_costs": reward_costs,
             "realized_pnl_today": self.realized_pnl_today,
             "unrealized_pnl": self.unrealized_pnl,
+            "flip_blocked": blocked_flip,
         }
 
         if is_last or (self._i >= len(self.df) - 2):

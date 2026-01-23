@@ -1,5 +1,4 @@
 from __future__ import annotations
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -23,7 +22,7 @@ class ActorCritic(nn.Module):
         return logits, value
 
     @torch.no_grad()
-    def act(self, obs: np.ndarray, device: torch.device):
+    def act(self, obs, device: torch.device):
         x = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
         logits, value = self.forward(x)
         dist = torch.distributions.Categorical(logits=logits)

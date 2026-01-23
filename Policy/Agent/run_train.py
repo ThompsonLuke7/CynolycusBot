@@ -1,5 +1,13 @@
+from pathlib import Path
+import sys
+import torch
+
 import numpy as np
 import pandas as pd
+
+_POLICY_ROOT = Path(__file__).resolve().parents[1]
+if str(_POLICY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_POLICY_ROOT))
 
 from Agent.env import TradingEnv
 from Agent.train import train_ppo
@@ -64,7 +72,7 @@ def main():
         rollout_len=1024,
         train_epochs=5,
         minibatch_size=256,
-        device="cpu",
+        device="cuda" if torch.cuda.is_available() else "cpu",
         verbose=True,
     )
 
