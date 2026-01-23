@@ -80,7 +80,10 @@ def load_tree_split_indices(
 
 
 def split_agent_matrix(
-    df: pd.DataFrame, splits: dict[str, pd.Index]
+    df: pd.DataFrame,
+    splits: dict[str, pd.Index],
+    *,
+    verbose: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     train_idx = splits["train"].sort_values()
     val_idx = splits["val"].sort_values()
@@ -90,7 +93,32 @@ def split_agent_matrix(
     val_idx = val_idx.intersection(df.index)
     test_idx = test_idx.intersection(df.index)
 
-    return df.loc[train_idx], df.loc[val_idx], df.loc[test_idx]
+    def _contiguous_slices(idx: pd.Index, name: str) -> list[slice]:
+        if idx.empty:
+            return []
+        arr = idx.to_numpy()
+        slices = []
+        start = 0
+        for i in range(1, arr.size):
+            if arr[i] != arr[i - 1] + 1:
+                slices.append(slice(arr[start], arr[i - 1] + 1))
+                start = i
+        slices.append(slice(arr[start], arr[-1] + 1))
+        if verbose:
+            print(f"{name} split: {arr.size} rows -> {len(slices)} contiguous chunks")
+        return slices
+
+    def _concat_by_slices(slices: list[slice]) -> pd.DataFrame:
+        parts = [df.iloc[s] for s in slices if s.start is not None]
+        if not parts:
+            return df.iloc[0:0].copy()
+        out = pd.concat(parts, axis=0)
+        return out.reset_index(drop=True)
+
+    train_df = _concat_by_slices(_contiguous_slices(train_idx, "train"))
+    val_df = _concat_by_slices(_contiguous_slices(val_idx, "val"))
+    test_df = _concat_by_slices(_contiguous_slices(test_idx, "test"))
+    return train_df, val_df, test_df
 
 
 def filter_splits_for_non_nan(

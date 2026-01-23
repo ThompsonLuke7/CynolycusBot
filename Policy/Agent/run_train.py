@@ -106,7 +106,7 @@ def main():
     feature_cols = [c for c in df.columns if c not in ("timestamp", "day_id", "close")]
     if cfg.drop_na:
         splits = filter_splits_for_non_nan(df, splits, feature_cols)
-    train_df, _val_df, test_df = split_agent_matrix(df, splits)
+    train_df, _val_df, test_df = split_agent_matrix(df, splits, verbose=True)
 
     train_env = TradingEnv(
         df=train_df,
