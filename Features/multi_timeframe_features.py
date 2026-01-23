@@ -4,14 +4,14 @@ from typing import Mapping
 
 import pandas as pd
 
-from Features.custom_indicators import (
+from Features.feature_sets.custom_indicators import (
     add_atr_swing_state_features,
     add_fractal_pivots,
     add_rsilg_fe_gauss,
     add_tmo,
     add_vmd_return_features,
 )
-from Features.pandas_ta_indicators import add_all_pandasta_indicators
+from Features.feature_sets.pandas_ta_indicators import add_all_pandasta_indicators
 
 NY_TZ = "America/New_York"
 DEFAULT_TIMEFRAMES: dict[str, str] = {

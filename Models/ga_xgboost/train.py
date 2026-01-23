@@ -38,7 +38,7 @@ class TrainConfig:
     dataset_name: str = "15min"
     x_filename: str = "X_15min_tree.parquet"
     label_mode: str = "swing"
-    model_dirname: str = "ga_xgboost_two_models"
+    model_dirname: str = "ga_xgboost"
     n_folds: int = 5
     initial_train_size: int | None = None
     apply_scaler: bool = False

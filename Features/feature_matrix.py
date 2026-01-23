@@ -7,7 +7,7 @@ import pandas as pd
 
 from Data.load_data import get_ticker_processed_base_dir, load_ticker_parquet
 from Data.retrieve_data import normalize_ticker
-from Features.custom_indicators import (
+from Features.feature_sets.custom_indicators import (
     add_atr_swing_state_features,
     add_fractal_pivots,
     add_rsilg_fe_gauss,
@@ -15,7 +15,7 @@ from Features.custom_indicators import (
     add_vmd_return_features,
     add_s_r_features,
 )
-from Features.feature_constants import SWING_LABEL_COLUMNS
+from Features.feature_sets.feature_constants import SWING_LABEL_COLUMNS
 from Features.feature_engineering import (
     add_binary_swing_labels,
     add_date_features,
@@ -27,8 +27,8 @@ from Features.feature_engineering import (
 )
 from Features.label_generations import add_all_labels
 from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
-from Features.pandas_ta_indicators import add_all_pandasta_indicators
-from Data.processed.feature_sets.LSTM_features import add_lstm_features
+from Features.feature_sets.pandas_ta_indicators import add_all_pandasta_indicators
+from Features.feature_sets.LSTM_features import add_lstm_features
 
 DEFAULT_FEATURE_TIMEFRAMES: dict[str, str] = {
     "30m": "30T",

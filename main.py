@@ -12,7 +12,7 @@ from Data.load_data import (
 )
 from Data.plots.plots import plot_selected_label_plots
 from Features import data_pipeline
-from Features.custom_indicators import add_fractal_pivots
+from Features.feature_sets.custom_indicators import add_fractal_pivots
 from Features.label_generations import (
     add_all_labels,
     add_atr_continuation_entry_labels,

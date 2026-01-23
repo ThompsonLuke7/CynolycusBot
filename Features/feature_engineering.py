@@ -15,7 +15,7 @@ from Data.plots.swing_state_machine_plot import plot_swing_state_machine_signals
 from Data.plots.leg_segmentation_plot import plot_leg_segmentation_signals
 from Data.plots.atr_swing_plot import get_default_plot_path, plot_atr_swing_signals
 from Data.retrieve_data import normalize_ticker
-from Features.feature_constants import (
+from Features.feature_sets.feature_constants import (
     LEAKY_FEATURE_COLUMNS,
     SWING_LABEL_COLUMNS,
 )
@@ -24,7 +24,7 @@ from Features.feature_scaling import (
     normalize_continuous_features,
     save_normalization_stats,
 )
-from Features.custom_indicators import (
+from Features.feature_sets.custom_indicators import (
     add_atr_swing_state_features,
     add_fractal_pivots,
     add_rsilg_fe_gauss,
@@ -36,7 +36,7 @@ from Features.multi_timeframe_features import (
     add_multi_timeframe_features,
     ensure_time_index,
 )
-from Features.pandas_ta_indicators import add_all_pandasta_indicators
+from Features.feature_sets.pandas_ta_indicators import add_all_pandasta_indicators
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "Data"

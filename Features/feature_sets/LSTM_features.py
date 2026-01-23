@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta
 
-from Features.pandas_ta_indicators import prepare_ohlcv_columns
+from Features.feature_sets.pandas_ta_indicators import prepare_ohlcv_columns
 
 EPS = 1e-12
 REQUIRED_OHLCV = ("open", "high", "low", "close", "volume")

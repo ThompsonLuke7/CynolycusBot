@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta
 
-from Features.custom_indicators import add_fractal_pivots
-from Features.feature_constants import SWING_LABEL_COLUMNS
+from Features.feature_sets.custom_indicators import add_fractal_pivots
+from Features.feature_sets.feature_constants import SWING_LABEL_COLUMNS
 from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
 
 

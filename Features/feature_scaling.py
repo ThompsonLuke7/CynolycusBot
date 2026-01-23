@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from Features.feature_constants import SCALE_FEATURE_COLUMNS
+from Features.feature_sets.feature_constants import SCALE_FEATURE_COLUMNS
 
 
 def _base_feature_name(name: str) -> str:
