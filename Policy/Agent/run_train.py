@@ -104,9 +104,19 @@ def main():
     )
 
     feature_cols = [c for c in df.columns if c not in ("timestamp", "day_id", "close")]
+    all_nan_cols = [c for c in feature_cols if df[c].isna().all()]
+    if all_nan_cols:
+        print(f"Dropping all-NaN feature columns: {all_nan_cols}")
+        feature_cols = [c for c in feature_cols if c not in all_nan_cols]
     if cfg.drop_na:
         splits = filter_splits_for_non_nan(df, splits, feature_cols)
     train_df, _val_df, test_df = split_agent_matrix(df, splits, verbose=True)
+    if train_df.empty or test_df.empty:
+        nan_counts = df[feature_cols].isna().sum().sort_values(ascending=False).head(10)
+        raise ValueError(
+            "Train/Test split is empty after NaN filtering. "
+            f"Top NaN counts:\n{nan_counts}"
+        )
 
     train_env = TradingEnv(
         df=train_df,
