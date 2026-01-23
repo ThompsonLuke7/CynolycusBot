@@ -430,6 +430,7 @@ def main() -> None:
         raise ValueError("Not enough training samples for OOF.")
 
     model_root = REPO_ROOT / "Data" / "models" / cfg.model_dirname
+    model_dataset_root = model_root / cfg.dataset_name
     feature_names = load_feature_names(cfg.ticker, cfg.dataset_name, cfg.x_filename)
     common_meta = {
         "ticker": cfg.ticker,
@@ -445,8 +446,8 @@ def main() -> None:
     need_refresh = cfg.refresh_masks
     if not need_refresh:
         try:
-            long_mask, long_params = load_model_artifacts(model_root, "long")
-            short_mask, short_params = load_model_artifacts(model_root, "short")
+            long_mask, long_params = load_model_artifacts(model_dataset_root, "long")
+            short_mask, short_params = load_model_artifacts(model_dataset_root, "short")
         except FileNotFoundError:
             need_refresh = True
 
@@ -455,7 +456,7 @@ def main() -> None:
             X_train=X_train,
             y_long_train=y_long_train,
             y_short_train=y_short_train,
-            model_root=model_root,
+            model_root=model_dataset_root,
             feature_names=feature_names,
             metadata=common_meta,
         )
@@ -514,9 +515,9 @@ def main() -> None:
     if short_test.size:
         short_full[test_idx] = short_test
 
-    output_dir = model_root / cfg.output_dirname / cfg.dataset_name
+    probs_root = model_dataset_root
     _save_series(
-        output_dir=output_dir,
+        output_dir=probs_root / "long" / cfg.output_dirname,
         prefix="p_long",
         train_oof=long_oof,
         test_probs=long_test,
@@ -526,7 +527,7 @@ def main() -> None:
         index=plot_index,
     )
     _save_series(
-        output_dir=output_dir,
+        output_dir=probs_root / "short" / cfg.output_dirname,
         prefix="p_short",
         train_oof=short_oof,
         test_probs=short_test,
@@ -543,7 +544,7 @@ def main() -> None:
             "OOF gap detected (early bars without prior data). "
             f"long={missing_long}, short={missing_short}"
         )
-    print(f"Saved OOF/test/full probability arrays to {output_dir}")
+    print(f"Saved OOF/test/full probability arrays under {probs_root}")
 
 
 if __name__ == "__main__":
