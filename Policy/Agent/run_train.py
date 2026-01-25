@@ -76,8 +76,12 @@ def _plot_actions(trace, output_path):
 
     ts = plot_df["timestamp"]
     close = plot_df["close"].astype(float)
-    longs = plot_df["action"] == 1
-    shorts = plot_df["action"] == 2
+    if "did_trade" in plot_df.columns:
+        trade_mask = plot_df["did_trade"].astype(bool)
+    else:
+        trade_mask = plot_df["action"].ne(plot_df["action"].shift(1))
+    longs = trade_mask & (plot_df["action"] == 1)
+    shorts = trade_mask & (plot_df["action"] == 2)
 
     plt.figure(figsize=(12, 6))
     plt.plot(ts, close, label="SPY close", linewidth=1.5)
@@ -141,6 +145,20 @@ def main():
         device="cuda" if torch.cuda.is_available() else "cpu",
         verbose=True,
     )
+    output_dir = Path("Data") / "outputs" / "agent"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / "ppo_model.pt"
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "obs_dim": train_env.obs_dim,
+            "n_actions": 3,
+            "feature_cols": feature_cols,
+            "config": cfg.__dict__,
+        },
+        model_path,
+    )
+    print(f"Saved model to {model_path}")
 
     test_env = TradingEnv(
         df=test_df,
@@ -168,6 +186,9 @@ def main():
 
     trace = evaluate_policy_with_trace(test_env, model, device="cpu", deterministic=True)
     trace = _agent_equity_from_trace(trace, initial_cash=100_000)
+    trace_path = output_dir / "agent_trace.csv"
+    trace.to_csv(trace_path, index=False)
+    print(f"Saved trace to {trace_path}")
 
     daily_close = _daily_closes(test_df)
     bh_final, bh_pnl = _buy_and_hold(daily_close, 100_000)
