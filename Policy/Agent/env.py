@@ -32,6 +32,13 @@ class TradingEnv:
         slippage_bps: float = 0.0,
         spread_bps: float = 0.0,
         flip_penalty_ret: float = 0.0,
+        trade_penalty_ret: float = 0.0,
+        hold_penalty_ret: float = 0.0,
+        reward_on_exit: bool = False,
+        reward_exit_bonus: bool = False,
+        exit_pivot_bonus_ret: float = 0.0,
+        pivot_long_col: str = "p_pivot_long",
+        pivot_short_col: str = "p_pivot_short",
         force_flat_at_close: bool = True,
         allow_direct_flip: bool = True,
         seed: int = 7,
@@ -57,6 +64,18 @@ class TradingEnv:
         self.spread_bps = float(spread_bps)
         # flip_penalty_ret is in return units (not dollars).
         self.flip_penalty_ret = float(flip_penalty_ret)
+        # trade_penalty_ret is applied per entry/exit (return units).
+        self.trade_penalty_ret = float(trade_penalty_ret)
+        # hold_penalty_ret is applied per bar while in position (return units).
+        self.hold_penalty_ret = float(hold_penalty_ret)
+        # reward_on_exit pays realized return only when closing a trade.
+        self.reward_on_exit = bool(reward_on_exit)
+        # reward_exit_bonus adds realized return on exit even when dense rewards are enabled.
+        self.reward_exit_bonus = bool(reward_exit_bonus)
+        # exit_pivot_bonus_ret scales a bonus on exit using pivot probabilities.
+        self.exit_pivot_bonus_ret = float(exit_pivot_bonus_ret)
+        self.pivot_long_col = str(pivot_long_col)
+        self.pivot_short_col = str(pivot_short_col)
         self.force_flat_at_close = bool(force_flat_at_close)
         self.allow_direct_flip = bool(allow_direct_flip)
 
@@ -169,6 +188,8 @@ class TradingEnv:
         is_last = bool(self.df.loc[self._i, "is_last_of_day"])
 
         reward_costs = 0.0
+        reward_pnl = 0.0
+        reward_pivot_bonus = 0.0
         flipped = (self.position == 1 and desired_pos == -1) or (self.position == -1 and desired_pos == 1)
         blocked_flip = flipped and not self.allow_direct_flip
         if blocked_flip:
@@ -181,11 +202,32 @@ class TradingEnv:
 
             if flipped:
                 reward_costs += self.flip_penalty_ret
+                reward_costs += self.trade_penalty_ret * 2.0
+            else:
+                reward_costs += self.trade_penalty_ret
 
             # realize approximate pnl on exit
             if self.position != 0 and np.isfinite(self.entry_price):
                 move = (price / self.entry_price - 1.0) * float(self.position)
                 self.realized_pnl_today += move
+                if self.reward_on_exit or self.reward_exit_bonus:
+                    reward_pnl += move
+                if self.exit_pivot_bonus_ret:
+                    if self.position > 0:
+                        pivot_val = (
+                            float(self.df.loc[self._i, self.pivot_short_col])
+                            if self.pivot_short_col in self.df.columns
+                            else 0.0
+                        )
+                    else:
+                        pivot_val = (
+                            float(self.df.loc[self._i, self.pivot_long_col])
+                            if self.pivot_long_col in self.df.columns
+                            else 0.0
+                        )
+                    if np.isfinite(pivot_val):
+                        reward_pivot_bonus = self.exit_pivot_bonus_ret * pivot_val
+                        reward_pnl += reward_pivot_bonus
 
             if desired_pos != 0:
                 self.entry_price = price
@@ -196,8 +238,9 @@ class TradingEnv:
 
             self.position = desired_pos
 
-        # pnl reward for holding through next bar
-        reward_pnl = float(self.position) * ret_next
+        # pnl reward for holding through next bar (only in mark-to-market mode)
+        if not self.reward_on_exit:
+            reward_pnl = float(self.position) * ret_next
 
         if self.position != 0 and np.isfinite(self.entry_price):
             next_price = price * (1.0 + ret_next)
@@ -207,7 +250,8 @@ class TradingEnv:
             self.unrealized_pnl = 0.0
             self.time_in_pos = 0
 
-        reward = reward_pnl - reward_costs
+        hold_penalty = self.hold_penalty_ret if self.position != 0 else 0.0
+        reward = reward_pnl - reward_costs - hold_penalty
 
         info: Dict[str, Any] = {
             "price": price,
@@ -219,6 +263,7 @@ class TradingEnv:
             "did_flip": flipped,
             "reward_pnl": reward_pnl,
             "reward_costs": reward_costs,
+            "reward_pivot_bonus": reward_pivot_bonus,
             "realized_pnl_today": self.realized_pnl_today,
             "unrealized_pnl": self.unrealized_pnl,
             "flip_blocked": blocked_flip,
@@ -227,17 +272,44 @@ class TradingEnv:
         if is_last or (self._i >= len(self.df) - 2):
             if self.force_flat_at_close and self.position != 0:
                 exit_cost = self._trade_cost_ret(price)
-                reward -= exit_cost
+                reward_costs += exit_cost
+                if self.trade_penalty_ret:
+                    reward_costs += self.trade_penalty_ret
                 info["forced_flat_cost"] = exit_cost
 
                 if np.isfinite(self.entry_price):
                     move = (price / self.entry_price - 1.0) * float(self.position)
                     self.realized_pnl_today += move
+                    if self.reward_on_exit or self.reward_exit_bonus:
+                        reward_pnl += move
+                    if self.exit_pivot_bonus_ret:
+                        if self.position > 0:
+                            pivot_val = (
+                                float(self.df.loc[self._i, self.pivot_short_col])
+                                if self.pivot_short_col in self.df.columns
+                                else 0.0
+                            )
+                        else:
+                            pivot_val = (
+                                float(self.df.loc[self._i, self.pivot_long_col])
+                                if self.pivot_long_col in self.df.columns
+                                else 0.0
+                            )
+                        if np.isfinite(pivot_val):
+                            reward_pivot_bonus = self.exit_pivot_bonus_ret * pivot_val
+                            reward_pnl += reward_pivot_bonus
 
                 self.position = 0
                 self.entry_price = np.nan
                 self.unrealized_pnl = 0.0
                 self.time_in_pos = 0
+                reward = reward_pnl - reward_costs - hold_penalty
+                info["reward_pnl"] = reward_pnl
+                info["reward_costs"] = reward_costs
+                info["reward_pivot_bonus"] = reward_pivot_bonus
+                info["pos"] = self.position
+                info["realized_pnl_today"] = self.realized_pnl_today
+                info["unrealized_pnl"] = self.unrealized_pnl
 
             done = True
             return self._get_obs(), float(reward), done, info

@@ -1,6 +1,9 @@
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
 import sys
-from regex import F
+
 import numpy as np
 import pandas as pd
 import torch
@@ -12,16 +15,28 @@ if str(_POLICY_ROOT) not in sys.path:
 from training_pipeline import (
     PipelineConfig,
     build_agent_training_matrix,
-    filter_splits_for_non_nan,
     load_tree_split_indices,
     split_agent_matrix,
 )
 from Agent.env import TradingEnv
-from Agent.train import train_ppo
 from Agent.eval import evaluate_policy, evaluate_policy_with_trace
+from Agent.model import ActorCritic
 
 
-def _daily_first_last(df):
+def _agent_equity_from_trace(trace: pd.DataFrame, initial_cash: float) -> pd.DataFrame:
+    equity = float(initial_cash)
+    equity_series = []
+    for _, row in trace.iterrows():
+        costs = float(row.get("reward_costs", 0.0)) + float(row.get("forced_flat_cost", 0.0))
+        net_ret = float(row.get("reward_pnl", 0.0)) - costs
+        equity *= (1.0 + net_ret)
+        equity_series.append(equity)
+    trace = trace.copy()
+    trace["equity"] = equity_series
+    return trace
+
+
+def _daily_first_last(df: pd.DataFrame) -> pd.DataFrame:
     ordered = df.sort_values("timestamp")
     grouped = ordered.groupby("day_id", sort=True)
     daily = grouped.agg(
@@ -33,7 +48,7 @@ def _daily_first_last(df):
     return daily.reset_index(drop=True)
 
 
-def _buy_and_hold(daily_summary, initial_cash, trade_cost_ret):
+def _buy_and_hold(daily_summary: pd.DataFrame, initial_cash: float, trade_cost_ret) -> tuple[float, float, float]:
     start = float(daily_summary["first_close"].iloc[0])
     end = float(daily_summary["last_close"].iloc[-1])
     total_ret = (end / start - 1.0) - trade_cost_ret(start) - trade_cost_ret(end)
@@ -41,7 +56,7 @@ def _buy_and_hold(daily_summary, initial_cash, trade_cost_ret):
     return final_value, final_value - initial_cash, total_ret
 
 
-def _intraday_long(daily_summary, initial_cash, trade_cost_ret):
+def _intraday_long(daily_summary: pd.DataFrame, initial_cash: float, trade_cost_ret) -> tuple[float, float, float]:
     equity = float(initial_cash)
     for _, row in daily_summary.iterrows():
         start = float(row["first_close"])
@@ -52,43 +67,14 @@ def _intraday_long(daily_summary, initial_cash, trade_cost_ret):
     return equity, equity - initial_cash, total_ret
 
 
-def _dca_down_days(daily_summary, initial_cash):
-    closes = daily_summary["last_close"].astype(float).to_list()
-    tranche = initial_cash / max(1, len(closes))
-    cash = float(initial_cash)
-    shares = 0.0
-    prev = None
-    for close in closes:
-        if prev is not None and close < prev and cash > 0:
-            invest = min(tranche, cash)
-            shares += invest / close
-            cash -= invest
-        prev = close
-    final_value = cash + shares * closes[-1]
-    return final_value, final_value - initial_cash, tranche
-
-
-def _agent_equity_from_trace(trace, initial_cash):
-    equity = float(initial_cash)
-    equity_series = []
-    for _, row in trace.iterrows():
-        costs = float(row.get("reward_costs", 0.0)) + float(row.get("forced_flat_cost", 0.0))
-        net_ret = float(row.get("reward_pnl", 0.0)) - float(costs)
-        equity *= (1.0 + net_ret)
-        equity_series.append(equity)
-    trace = trace.copy()
-    trace["equity"] = equity_series
-    return trace
-
-
-def _plot_actions(trace, output_path):
+def _plot_actions(trace: pd.DataFrame, output_path: Path, tail: int = 100) -> None:
     try:
         import matplotlib.pyplot as plt
     except Exception as exc:
         print(f"Plot skipped: {exc}")
         return
 
-    plot_df = trace.dropna(subset=["timestamp", "close"]).tail(100)
+    plot_df = trace.dropna(subset=["timestamp", "close"]).tail(tail)
     if plot_df.empty:
         print("Plot skipped: no data.")
         return
@@ -120,10 +106,24 @@ def _plot_actions(trace, output_path):
         up_color = "#1976D2"
         down_color = "#E53935"
         ax.vlines(pos[valid], low_y[valid], high_y[valid], color=wick_color, linewidth=1.0, zorder=1)
-        ax.bar(pos[valid & up], close_y[valid & up] - open_y[valid & up], width=0.8,
-               bottom=open_y[valid & up], color=up_color, edgecolor="none", zorder=1.2)
-        ax.bar(pos[valid & ~up], close_y[valid & ~up] - open_y[valid & ~up], width=0.8,
-               bottom=open_y[valid & ~up], color=down_color, edgecolor="none", zorder=1.2)
+        ax.bar(
+            pos[valid & up],
+            close_y[valid & up] - open_y[valid & up],
+            width=0.8,
+            bottom=open_y[valid & up],
+            color=up_color,
+            edgecolor="none",
+            zorder=1.2,
+        )
+        ax.bar(
+            pos[valid & ~up],
+            close_y[valid & ~up] - open_y[valid & ~up],
+            width=0.8,
+            bottom=open_y[valid & ~up],
+            color=down_color,
+            edgecolor="none",
+            zorder=1.2,
+        )
         ax.scatter(pos[longs], close_y[longs], c="green", s=22, label="Long", marker="^", zorder=2.2)
         ax.scatter(pos[shorts], close_y[shorts], c="red", s=22, label="Short", marker="v", zorder=2.2)
         day_start = ts.dt.normalize().ne(ts.dt.normalize().shift())
@@ -152,73 +152,39 @@ def _plot_actions(trace, output_path):
     print(f"Saved action plot to {output_path}")
 
 
-def main():
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate a trained PPO agent and plot actions.")
+    parser.add_argument("--model-path", default="Data/outputs/agent/ppo_model.pt")
+    parser.add_argument("--baseline", choices=["intraday", "buy_hold", "none"], default="intraday")
+    parser.add_argument("--plot-tail", type=int, default=100)
+    parser.add_argument("--trace-out", default="Data/outputs/agent/agent_trace.csv")
+    parser.add_argument("--plot-out", default="Data/plots/agent_actions_vs_price.png")
+    parser.add_argument("--device", default=None, help="cuda/cpu (defaults to auto)")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    model_path = Path(args.model_path)
+    if not model_path.exists():
+        raise SystemExit(f"Missing model file: {model_path}")
+
     cfg = PipelineConfig(drop_na=True)
-    df = build_agent_training_matrix(cfg, save_parquet=True)
+    df = build_agent_training_matrix(cfg, save_parquet=False)
     splits = load_tree_split_indices(
         ticker=cfg.ticker,
         dataset_name=cfg.dataset_name,
         x_filename=cfg.x_filename,
     )
+    _train_df, _val_df, test_df = split_agent_matrix(df, splits, verbose=True)
 
     drop_base = {"timestamp", "day_id", "open", "high", "low", "close", "volume"}
     feature_cols = [c for c in df.columns if c not in drop_base]
-    all_nan_cols = [c for c in feature_cols if df[c].isna().all()]
-    if all_nan_cols:
-        print(f"Dropping all-NaN feature columns: {all_nan_cols}")
-        feature_cols = [c for c in feature_cols if c not in all_nan_cols]
-    if cfg.drop_na:
-        splits = filter_splits_for_non_nan(df, splits, feature_cols)
-    train_df, _val_df, test_df = split_agent_matrix(df, splits, verbose=True)
-    if train_df.empty or test_df.empty:
-        nan_counts = df[feature_cols].isna().sum().sort_values(ascending=False).head(10)
-        raise ValueError(
-            "Train/Test split is empty after NaN filtering. "
-            f"Top NaN counts:\n{nan_counts}"
-        )
 
-    train_env = TradingEnv(
-        df=train_df,
-        feature_cols=feature_cols,
-        add_time_features=False,
-        add_position_features=True,
-        commission_per_trade=0.00,
-        slippage_bps=0.5,
-        spread_bps=0.5,
-        flip_penalty_ret=0.0002,
-        trade_penalty_ret=0.00005,
-        hold_penalty_ret=0.00001,
-        reward_on_exit=False,
-        reward_exit_bonus=True,
-        exit_pivot_bonus_ret=0.0001,
-        force_flat_at_close=True,
-        allow_direct_flip=False,
-        seed=7,
-    )
-
-    model = train_ppo(
-        train_env,
-        total_timesteps=200_000,
-        rollout_len=1024,
-        train_epochs=5,
-        minibatch_size=256,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        verbose=True,
-    )
-    output_dir = Path("Data") / "outputs" / "agent"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    model_path = output_dir / "ppo_model.pt"
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "obs_dim": train_env.obs_dim,
-            "n_actions": 3,
-            "feature_cols": feature_cols,
-            "config": cfg.__dict__,
-        },
-        model_path,
-    )
-    print(f"Saved model to {model_path}")
+    ckpt = torch.load(model_path, map_location="cpu")
+    model = ActorCritic(obs_dim=ckpt["obs_dim"], n_actions=ckpt.get("n_actions", 3))
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
 
     test_env = TradingEnv(
         df=test_df,
@@ -239,53 +205,41 @@ def main():
         seed=7,
     )
 
-    eval_device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     report = evaluate_policy(
         test_env,
         model,
         n_days=len(test_env.day_starts),
-        device=eval_device,
+        device=device,
         deterministic=True,
     )
     print(report)
     print("Avg pnl component:", report["pnl_component"].mean(), "Avg costs:", report["costs_component"].mean())
 
-    initial_cash = 100_000.0
-    baseline_mode = "intraday"  # "intraday", "buy_hold", or "none"
-    include_dca = False
-
-    trace = evaluate_policy_with_trace(test_env, model, device=eval_device, deterministic=True)
-    trace = _agent_equity_from_trace(trace, initial_cash=initial_cash)
-    trace_path = output_dir / "agent_trace.csv"
+    trace = evaluate_policy_with_trace(test_env, model, device=device, deterministic=True)
+    trace = _agent_equity_from_trace(trace, initial_cash=100_000.0)
+    trace_path = Path(args.trace_out)
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
     trace.to_csv(trace_path, index=False)
     print(f"Saved trace to {trace_path}")
 
     daily_summary = _daily_first_last(test_df)
     trade_cost_ret = test_env._trade_cost_ret
-    agent_final = float(trace["equity"].iloc[-1]) if not trace.empty else initial_cash
-    agent_pnl = agent_final - initial_cash
-    agent_return = agent_final / initial_cash - 1.0
+    agent_final = float(trace["equity"].iloc[-1]) if not trace.empty else 100_000.0
+    agent_return = agent_final / 100_000.0 - 1.0
+    print(f"Agent total return: {agent_return:.2%} (equity: {agent_final:,.2f})")
 
-    print(f"Agent total return: {agent_return:.2%} (equity: {agent_final:,.2f}, PnL: {agent_pnl:,.2f})")
-
-    if baseline_mode == "intraday":
-        base_final, base_pnl, base_ret = _intraday_long(daily_summary, initial_cash, trade_cost_ret)
-        print(f"Intraday Long final equity: {base_final:,.2f} (PnL: {base_pnl:,.2f}, Return: {base_ret:.2%})")
-    elif baseline_mode == "buy_hold":
+    if args.baseline == "intraday":
+        base_final, _base_pnl, base_ret = _intraday_long(daily_summary, 100_000.0, trade_cost_ret)
+        print(f"Intraday Long final equity: {base_final:,.2f} (Return: {base_ret:.2%})")
+    elif args.baseline == "buy_hold":
         if test_env.force_flat_at_close:
             print("Warning: Buy & Hold baseline holds overnight while agent is forced flat at close.")
-        base_final, base_pnl, base_ret = _buy_and_hold(daily_summary, initial_cash, trade_cost_ret)
-        print(f"Buy & Hold final equity: {base_final:,.2f} (PnL: {base_pnl:,.2f}, Return: {base_ret:.2%})")
-    elif baseline_mode != "none":
-        raise ValueError(f"Unknown baseline_mode '{baseline_mode}'. Use 'intraday', 'buy_hold', or 'none'.")
+        base_final, _base_pnl, base_ret = _buy_and_hold(daily_summary, 100_000.0, trade_cost_ret)
+        print(f"Buy & Hold final equity: {base_final:,.2f} (Return: {base_ret:.2%})")
 
-    if include_dca:
-        dca_final, dca_pnl, tranche = _dca_down_days(daily_summary, initial_cash)
-        print(f"DCA down-days final equity: {dca_final:,.2f} (PnL: {dca_pnl:,.2f})")
-        print(f"DCA tranche size per down day: {tranche:,.2f}")
-
-    output_path = Path("Data") / "plots" / "agent_actions_vs_price.png"
-    _plot_actions(trace, output_path)
+    plot_path = Path(args.plot_out)
+    _plot_actions(trace, plot_path, tail=args.plot_tail)
 
 
 if __name__ == "__main__":
