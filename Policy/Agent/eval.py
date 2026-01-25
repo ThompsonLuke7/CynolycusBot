@@ -7,6 +7,18 @@ from Agent.env import TradingEnv
 from Agent.model import ActorCritic
 
 
+def _resolve_device(device: str) -> torch.device:
+    dev = (device or "auto").lower()
+    if dev in ("auto", "gpu", "cuda"):
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if dev == "mps":
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(device)
+
+
 def _policy_action(model: ActorCritic, x: torch.Tensor, deterministic: bool) -> int:
     logits, _ = model(x)
     if deterministic:
@@ -20,10 +32,10 @@ def evaluate_policy(
     env: TradingEnv,
     model: ActorCritic,
     n_days: int = 20,
-    device: str = "cpu",
+    device: str = "auto",
     deterministic: bool = True,
 ) -> pd.DataFrame:
-    dev = torch.device(device)
+    dev = _resolve_device(device)
     prev_training = model.training
     prev_device = next(model.parameters()).device
     moved = prev_device != dev
@@ -99,10 +111,10 @@ def evaluate_policy(
 def evaluate_policy_with_trace(
     env: TradingEnv,
     model: ActorCritic,
-    device: str = "cpu",
+    device: str = "auto",
     deterministic: bool = True,
 ) -> pd.DataFrame:
-    dev = torch.device(device)
+    dev = _resolve_device(device)
     prev_training = model.training
     prev_device = next(model.parameters()).device
     moved = prev_device != dev
@@ -119,6 +131,9 @@ def evaluate_policy_with_trace(
                 idx = env._i
                 ts = env.df.loc[idx, "timestamp"] if "timestamp" in env.df.columns else None
                 close = float(env.df.loc[idx, "close"])
+                open_px = float(env.df.loc[idx, "open"]) if "open" in env.df.columns else None
+                high_px = float(env.df.loc[idx, "high"]) if "high" in env.df.columns else None
+                low_px = float(env.df.loc[idx, "low"]) if "low" in env.df.columns else None
                 x = torch.as_tensor(obs, dtype=torch.float32, device=dev).unsqueeze(0)
                 action = _policy_action(model, x, deterministic)
 
@@ -127,6 +142,9 @@ def evaluate_policy_with_trace(
                     {
                         "day_ptr": d,
                         "timestamp": ts,
+                        "open": open_px,
+                        "high": high_px,
+                        "low": low_px,
                         "close": close,
                         "action": action,
                         "position": int(info.get("pos", 0)),
