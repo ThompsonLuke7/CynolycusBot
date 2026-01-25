@@ -31,7 +31,7 @@ class TradingEnv:
         commission_per_trade: float = 0.0,
         slippage_bps: float = 0.0,
         spread_bps: float = 0.0,
-        flip_penalty: float = 0.0,
+        flip_penalty_ret: float = 0.0,
         force_flat_at_close: bool = True,
         allow_direct_flip: bool = True,
         seed: int = 7,
@@ -55,7 +55,8 @@ class TradingEnv:
         self.commission_per_trade = float(commission_per_trade)
         self.slippage_bps = float(slippage_bps)
         self.spread_bps = float(spread_bps)
-        self.flip_penalty = float(flip_penalty)
+        # flip_penalty_ret is in return units (not dollars).
+        self.flip_penalty_ret = float(flip_penalty_ret)
         self.force_flat_at_close = bool(force_flat_at_close)
         self.allow_direct_flip = bool(allow_direct_flip)
 
@@ -69,7 +70,7 @@ class TradingEnv:
         if len(self.day_starts) == 0:
             raise ValueError("No day boundaries found. Ensure 'day_id' changes across days.")
 
-        self._day_ptr = 0
+        self._day_ptr = -1
         self._i = 0
 
         self.position = 0
@@ -157,6 +158,7 @@ class TradingEnv:
         if action not in (0, 1, 2):
             raise ValueError("action must be 0,1,2")
 
+        prev_pos = self.position
         desired_pos = 0 if action == 0 else (1 if action == 1 else -1)
 
         price = float(self.df.loc[self._i, "close"])
@@ -173,11 +175,12 @@ class TradingEnv:
             desired_pos = 0
             flipped = False
 
+        did_trade = desired_pos != prev_pos
         if desired_pos != self.position:
             reward_costs += self._trade_cost_ret(price)
 
             if flipped:
-                reward_costs += self.flip_penalty
+                reward_costs += self.flip_penalty_ret
 
             # realize approximate pnl on exit
             if self.position != 0 and np.isfinite(self.entry_price):
@@ -211,6 +214,9 @@ class TradingEnv:
             "ret_next": ret_next,
             "ret_next_missing": ret_next_missing,
             "pos": self.position,
+            "prev_pos": prev_pos,
+            "did_trade": did_trade,
+            "did_flip": flipped,
             "reward_pnl": reward_pnl,
             "reward_costs": reward_costs,
             "realized_pnl_today": self.realized_pnl_today,

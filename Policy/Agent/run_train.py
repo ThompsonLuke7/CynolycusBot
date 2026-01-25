@@ -126,7 +126,7 @@ def main():
         commission_per_trade=0.00,
         slippage_bps=0.5,
         spread_bps=0.5,
-        flip_penalty=0.0,
+        flip_penalty_ret=0.0,
         force_flat_at_close=True,
         allow_direct_flip=True,
         seed=7,
@@ -150,17 +150,23 @@ def main():
         commission_per_trade=0.00,
         slippage_bps=0.5,
         spread_bps=0.5,
-        flip_penalty=0.0,
+        flip_penalty_ret=0.0,
         force_flat_at_close=True,
         allow_direct_flip=True,
         seed=7,
     )
 
-    report = evaluate_policy(test_env, model, n_days=len(test_env.day_starts), device="cpu")
+    report = evaluate_policy(
+        test_env,
+        model,
+        n_days=len(test_env.day_starts),
+        device="cpu",
+        deterministic=True,
+    )
     print(report)
     print("Avg pnl component:", report["pnl_component"].mean(), "Avg costs:", report["costs_component"].mean())
 
-    trace = evaluate_policy_with_trace(test_env, model, device="cpu")
+    trace = evaluate_policy_with_trace(test_env, model, device="cpu", deterministic=True)
     trace = _agent_equity_from_trace(trace, initial_cash=100_000)
 
     daily_close = _daily_closes(test_df)
