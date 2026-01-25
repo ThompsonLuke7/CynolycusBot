@@ -225,11 +225,12 @@ def main():
         seed=7,
     )
 
+    eval_device = "cuda" if torch.cuda.is_available() else "cpu"
     report = evaluate_policy(
         test_env,
         model,
         n_days=len(test_env.day_starts),
-        device="auto",
+        device=eval_device,
         deterministic=True,
     )
     print(report)
@@ -239,7 +240,7 @@ def main():
     baseline_mode = "intraday"  # "intraday", "buy_hold", or "none"
     include_dca = False
 
-    trace = evaluate_policy_with_trace(test_env, model, device="auto", deterministic=True)
+    trace = evaluate_policy_with_trace(test_env, model, device=eval_device, deterministic=True)
     trace = _agent_equity_from_trace(trace, initial_cash=initial_cash)
     trace_path = output_dir / "agent_trace.csv"
     trace.to_csv(trace_path, index=False)
