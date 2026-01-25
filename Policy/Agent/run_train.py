@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+from regex import F
 import torch
 
 _POLICY_ROOT = Path(__file__).resolve().parents[1]
@@ -130,15 +131,15 @@ def main():
         commission_per_trade=0.00,
         slippage_bps=0.5,
         spread_bps=0.5,
-        flip_penalty_ret=0.0,
+        flip_penalty_ret=0.0002,
         force_flat_at_close=True,
-        allow_direct_flip=True,
+        allow_direct_flip=False,
         seed=7,
     )
 
     model = train_ppo(
         train_env,
-        total_timesteps=20_000,
+        total_timesteps=200_000,
         rollout_len=1024,
         train_epochs=5,
         minibatch_size=256,
@@ -168,9 +169,9 @@ def main():
         commission_per_trade=0.00,
         slippage_bps=0.5,
         spread_bps=0.5,
-        flip_penalty_ret=0.0,
+        flip_penalty_ret=0.0002,
         force_flat_at_close=True,
-        allow_direct_flip=True,
+        allow_direct_flip=False,
         seed=7,
     )
 
