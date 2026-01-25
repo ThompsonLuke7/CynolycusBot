@@ -136,6 +136,16 @@ def evaluate_policy_with_trace(
                     open_px = float(env.df.loc[idx, "open"])
                     high_px = float(env.df.loc[idx, "high"])
                     low_px = float(env.df.loc[idx, "low"])
+                p_pivot_long = (
+                    float(env.df.loc[idx, "p_pivot_long"])
+                    if "p_pivot_long" in env.df.columns
+                    else None
+                )
+                p_pivot_short = (
+                    float(env.df.loc[idx, "p_pivot_short"])
+                    if "p_pivot_short" in env.df.columns
+                    else None
+                )
                 x = torch.as_tensor(obs, dtype=torch.float32, device=dev).unsqueeze(0)
                 action = _policy_action(model, x, deterministic)
 
@@ -158,6 +168,10 @@ def evaluate_policy_with_trace(
                     row["open"] = open_px
                     row["high"] = high_px
                     row["low"] = low_px
+                if p_pivot_long is not None:
+                    row["p_pivot_long"] = p_pivot_long
+                if p_pivot_short is not None:
+                    row["p_pivot_short"] = p_pivot_short
                 rows.append(row)
     finally:
         if moved:

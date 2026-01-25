@@ -87,14 +87,42 @@ def _plot_actions(trace: pd.DataFrame, output_path: Path, tail: int = 100) -> No
         has_ohlc = np.isfinite(ohlc_vals).any()
     close = plot_df["close"].astype(float)
 
-    if "did_trade" in plot_df.columns:
-        trade_mask = plot_df["did_trade"].astype(bool).to_numpy()
-    else:
+    prev_pos = plot_df["prev_pos"].to_numpy(dtype=int) if "prev_pos" in plot_df.columns else None
+    pos_now = plot_df["position"].to_numpy(dtype=int) if "position" in plot_df.columns else None
+    if prev_pos is None or pos_now is None:
         trade_mask = plot_df["action"].ne(plot_df["action"].shift(1)).fillna(False).to_numpy()
-    longs = trade_mask & (plot_df["action"].to_numpy() == 1)
-    shorts = trade_mask & (plot_df["action"].to_numpy() == 2)
+        entry_long = trade_mask & (plot_df["action"].to_numpy() == 1)
+        entry_short = trade_mask & (plot_df["action"].to_numpy() == 2)
+        exit_long = np.zeros_like(entry_long, dtype=bool)
+        exit_short = np.zeros_like(entry_short, dtype=bool)
+    else:
+        entry_long = (prev_pos == 0) & (pos_now == 1)
+        entry_short = (prev_pos == 0) & (pos_now == -1)
+        exit_long = (prev_pos == 1) & (pos_now == 0)
+        exit_short = (prev_pos == -1) & (pos_now == 0)
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    pivot_cols = []
+    if "p_pivot_long" in plot_df.columns:
+        pivot_cols.append("p_pivot_long")
+    if "p_pivot_short" in plot_df.columns:
+        pivot_cols.append("p_pivot_short")
+    has_pivots = bool(pivot_cols)
+    if has_pivots:
+        pivot_vals = plot_df[pivot_cols].to_numpy(dtype=float)
+        has_pivots = np.isfinite(pivot_vals).any()
+
+    if has_pivots:
+        fig, (ax_price, ax_prob) = plt.subplots(
+            2,
+            1,
+            figsize=(12, 8),
+            sharex=True,
+            gridspec_kw={"height_ratios": [2.2, 1]},
+        )
+    else:
+        fig, ax_price = plt.subplots(figsize=(12, 6))
+        ax_prob = None
+
     if has_ohlc:
         open_y = plot_df["open"].to_numpy(dtype=float)
         high_y = plot_df["high"].to_numpy(dtype=float)
@@ -105,8 +133,8 @@ def _plot_actions(trace: pd.DataFrame, output_path: Path, tail: int = 100) -> No
         wick_color = "#4a4a4a"
         up_color = "#1976D2"
         down_color = "#E53935"
-        ax.vlines(pos[valid], low_y[valid], high_y[valid], color=wick_color, linewidth=1.0, zorder=1)
-        ax.bar(
+        ax_price.vlines(pos[valid], low_y[valid], high_y[valid], color=wick_color, linewidth=1.0, zorder=1)
+        ax_price.bar(
             pos[valid & up],
             close_y[valid & up] - open_y[valid & up],
             width=0.8,
@@ -115,7 +143,7 @@ def _plot_actions(trace: pd.DataFrame, output_path: Path, tail: int = 100) -> No
             edgecolor="none",
             zorder=1.2,
         )
-        ax.bar(
+        ax_price.bar(
             pos[valid & ~up],
             close_y[valid & ~up] - open_y[valid & ~up],
             width=0.8,
@@ -124,8 +152,10 @@ def _plot_actions(trace: pd.DataFrame, output_path: Path, tail: int = 100) -> No
             edgecolor="none",
             zorder=1.2,
         )
-        ax.scatter(pos[longs], close_y[longs], c="green", s=22, label="Long", marker="^", zorder=2.2)
-        ax.scatter(pos[shorts], close_y[shorts], c="red", s=22, label="Short", marker="v", zorder=2.2)
+        ax_price.scatter(pos[entry_long], close_y[entry_long], c="green", s=26, label="Long entry", marker="^", zorder=2.2)
+        ax_price.scatter(pos[entry_short], close_y[entry_short], c="red", s=26, label="Short entry", marker="v", zorder=2.2)
+        ax_price.scatter(pos[exit_long], close_y[exit_long], c="#1565C0", s=26, label="Long exit", marker="x", zorder=2.2)
+        ax_price.scatter(pos[exit_short], close_y[exit_short], c="#EF6C00", s=26, label="Short exit", marker="x", zorder=2.2)
         day_start = ts.dt.normalize().ne(ts.dt.normalize().shift())
         tick_positions = pos[day_start.to_numpy()]
         tick_labels = ts[day_start].dt.strftime("%Y-%m-%d").to_list()
@@ -133,23 +163,116 @@ def _plot_actions(trace: pd.DataFrame, output_path: Path, tail: int = 100) -> No
             step = int(np.ceil(len(tick_positions) / 25))
             tick_positions = tick_positions[::step]
             tick_labels = tick_labels[::step]
-        ax.set_xticks(tick_positions)
-        ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
-        ax.set_xlabel("Date")
+        if ax_prob is not None:
+            ax_price.tick_params(labelbottom=False)
+            ax_prob.set_xticks(tick_positions)
+            ax_prob.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+            ax_prob.set_xlabel("Date")
+        else:
+            ax_price.set_xticks(tick_positions)
+            ax_price.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+            ax_price.set_xlabel("Date")
     else:
-        ax.plot(ts, close, label="SPY close", linewidth=1.5)
-        ax.scatter(ts[longs], close[longs], c="green", s=18, label="Long", marker="^")
-        ax.scatter(ts[shorts], close[shorts], c="red", s=18, label="Short", marker="v")
-        ax.set_xlabel("Time")
+        ax_price.plot(ts, close, label="SPY close", linewidth=1.5)
+        ax_price.scatter(ts[entry_long], close[entry_long], c="green", s=20, label="Long entry", marker="^")
+        ax_price.scatter(ts[entry_short], close[entry_short], c="red", s=20, label="Short entry", marker="v")
+        ax_price.scatter(ts[exit_long], close[exit_long], c="#1565C0", s=20, label="Long exit", marker="x")
+        ax_price.scatter(ts[exit_short], close[exit_short], c="#EF6C00", s=20, label="Short exit", marker="x")
+        if ax_prob is not None:
+            ax_prob.set_xlabel("Time")
+        else:
+            ax_price.set_xlabel("Time")
 
-    ax.set_title("SPY Candles with Agent Actions (Test Set)")
-    ax.set_ylabel("Price")
-    ax.legend()
+    ax_price.set_title("SPY Candles with Agent Actions (Test Set)")
+    ax_price.set_ylabel("Price")
+    ax_price.legend(loc="upper left")
+
+    if ax_prob is not None:
+        if "p_pivot_long" in plot_df.columns:
+            ax_prob.plot(pos if has_ohlc else ts, plot_df["p_pivot_long"].to_numpy(dtype=float), color="#1565C0", linewidth=1.3, label="p_pivot_long")
+        if "p_pivot_short" in plot_df.columns:
+            ax_prob.plot(pos if has_ohlc else ts, plot_df["p_pivot_short"].to_numpy(dtype=float), color="#EF6C00", linewidth=1.3, label="p_pivot_short")
+        ax_prob.set_ylim(0, 1.02)
+        ax_prob.set_ylabel("Pivot prob")
+        ax_prob.legend(loc="upper left")
     plt.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=150)
     plt.close()
     print(f"Saved action plot to {output_path}")
+
+
+def _trade_stats_from_trace(trace: pd.DataFrame) -> pd.DataFrame:
+    trades = []
+    in_trade = False
+    entry_pos = 0
+    entry_price = 0.0
+    entry_time = None
+    acc_costs = 0.0
+    bars = 0
+
+    for _, row in trace.iterrows():
+        pos = int(row.get("position", 0))
+        prev_pos = int(row.get("prev_pos", 0))
+        price = float(row.get("close", 0.0))
+        ts = row.get("timestamp")
+        cost = float(row.get("reward_costs", 0.0)) + float(row.get("forced_flat_cost", 0.0))
+
+        if not in_trade:
+            if prev_pos == 0 and pos != 0:
+                in_trade = True
+                entry_pos = pos
+                entry_price = price
+                entry_time = ts
+                acc_costs = cost
+                bars = 1
+            continue
+
+        # Flip: close old trade and open new on same bar.
+        if prev_pos != 0 and pos != 0 and pos != entry_pos:
+            exit_cost = cost * 0.5
+            acc_costs += exit_cost
+            trade_ret = entry_pos * (price / entry_price - 1.0)
+            net_ret = trade_ret - acc_costs
+            trades.append(
+                {
+                    "entry_time": entry_time,
+                    "exit_time": ts,
+                    "side": entry_pos,
+                    "bars": bars,
+                    "gross_ret": trade_ret,
+                    "net_ret": net_ret,
+                    "costs": acc_costs,
+                }
+            )
+            entry_pos = pos
+            entry_price = price
+            entry_time = ts
+            acc_costs = cost - exit_cost
+            bars = 1
+            continue
+
+        acc_costs += cost
+        if pos == entry_pos and pos != 0:
+            bars += 1
+
+        if pos == 0 and prev_pos != 0:
+            trade_ret = entry_pos * (price / entry_price - 1.0)
+            net_ret = trade_ret - acc_costs
+            trades.append(
+                {
+                    "entry_time": entry_time,
+                    "exit_time": ts,
+                    "side": entry_pos,
+                    "bars": bars,
+                    "gross_ret": trade_ret,
+                    "net_ret": net_ret,
+                    "costs": acc_costs,
+                }
+            )
+            in_trade = False
+
+    return pd.DataFrame(trades)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -195,11 +318,11 @@ def main() -> None:
         slippage_bps=0.5,
         spread_bps=0.5,
         flip_penalty_ret=0.0002,
-        trade_penalty_ret=0.00005,
+        trade_penalty_ret=0.0001,
         hold_penalty_ret=0.0,
-        reward_on_exit=False,
-        reward_exit_bonus=True,
-        exit_pivot_bonus_ret=0.0001,
+        reward_on_exit=True,
+        reward_exit_bonus=False,
+        exit_pivot_bonus_ret=0.0,
         force_flat_at_close=True,
         allow_direct_flip=False,
         seed=7,
@@ -222,6 +345,29 @@ def main() -> None:
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     trace.to_csv(trace_path, index=False)
     print(f"Saved trace to {trace_path}")
+
+    if "prev_pos" in trace.columns:
+        by_prev = trace.groupby("prev_pos")["reward_pnl"].mean()
+        print("Mean reward_pnl by prev_pos:")
+        print(by_prev)
+
+    trades = _trade_stats_from_trace(trace)
+    if not trades.empty:
+        win_mask = trades["net_ret"] > 0
+        win_rate = float(win_mask.mean())
+        avg_win = float(trades.loc[win_mask, "net_ret"].mean()) if win_mask.any() else 0.0
+        avg_loss = float(trades.loc[~win_mask, "net_ret"].mean()) if (~win_mask).any() else 0.0
+        median_ret = float(trades["net_ret"].median())
+        trades_per_day = float(len(trades) / max(1, trace["day_ptr"].nunique()))
+        print(
+            "Trade stats:",
+            f"count={len(trades)}",
+            f"win_rate={win_rate:.2%}",
+            f"median_ret={median_ret:.4%}",
+            f"avg_win={avg_win:.4%}",
+            f"avg_loss={avg_loss:.4%}",
+            f"trades_per_day={trades_per_day:.2f}",
+        )
 
     daily_summary = _daily_first_last(test_df)
     trade_cost_ret = test_env._trade_cost_ret
