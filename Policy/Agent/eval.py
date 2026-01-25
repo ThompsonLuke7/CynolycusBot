@@ -122,6 +122,7 @@ def evaluate_policy_with_trace(
         model = model.to(dev)
     model.eval()
 
+    has_ohlc = all(c in env.df.columns for c in ("open", "high", "low", "close"))
     rows = []
     try:
         for d in range(len(env.day_starts)):
@@ -131,32 +132,33 @@ def evaluate_policy_with_trace(
                 idx = env._i
                 ts = env.df.loc[idx, "timestamp"] if "timestamp" in env.df.columns else None
                 close = float(env.df.loc[idx, "close"])
-                open_px = float(env.df.loc[idx, "open"]) if "open" in env.df.columns else None
-                high_px = float(env.df.loc[idx, "high"]) if "high" in env.df.columns else None
-                low_px = float(env.df.loc[idx, "low"]) if "low" in env.df.columns else None
+                if has_ohlc:
+                    open_px = float(env.df.loc[idx, "open"])
+                    high_px = float(env.df.loc[idx, "high"])
+                    low_px = float(env.df.loc[idx, "low"])
                 x = torch.as_tensor(obs, dtype=torch.float32, device=dev).unsqueeze(0)
                 action = _policy_action(model, x, deterministic)
 
                 obs, reward, done, info = env.step(action)
-                rows.append(
-                    {
-                        "day_ptr": d,
-                        "timestamp": ts,
-                        "open": open_px,
-                        "high": high_px,
-                        "low": low_px,
-                        "close": close,
-                        "action": action,
-                        "position": int(info.get("pos", 0)),
-                        "prev_pos": int(info.get("prev_pos", 0)),
-                        "did_trade": bool(info.get("did_trade", False)),
-                        "did_flip": bool(info.get("did_flip", False)),
-                        "reward": float(reward),
-                        "reward_pnl": float(info.get("reward_pnl", 0.0)),
-                        "reward_costs": float(info.get("reward_costs", 0.0)),
-                        "forced_flat_cost": float(info.get("forced_flat_cost", 0.0)),
-                    }
-                )
+                row = {
+                    "day_ptr": d,
+                    "timestamp": ts,
+                    "close": close,
+                    "action": action,
+                    "position": int(info.get("pos", 0)),
+                    "prev_pos": int(info.get("prev_pos", 0)),
+                    "did_trade": bool(info.get("did_trade", False)),
+                    "did_flip": bool(info.get("did_flip", False)),
+                    "reward": float(reward),
+                    "reward_pnl": float(info.get("reward_pnl", 0.0)),
+                    "reward_costs": float(info.get("reward_costs", 0.0)),
+                    "forced_flat_cost": float(info.get("forced_flat_cost", 0.0)),
+                }
+                if has_ohlc:
+                    row["open"] = open_px
+                    row["high"] = high_px
+                    row["low"] = low_px
+                rows.append(row)
     finally:
         if moved:
             model = model.to(prev_device)

@@ -96,6 +96,9 @@ def _plot_actions(trace, output_path):
     ts = pd.to_datetime(plot_df["timestamp"])
     pos = np.arange(len(plot_df))
     has_ohlc = all(c in plot_df.columns for c in ("open", "high", "low", "close"))
+    if has_ohlc:
+        ohlc_vals = plot_df[["open", "high", "low", "close"]].to_numpy(dtype=float)
+        has_ohlc = np.isfinite(ohlc_vals).any()
     close = plot_df["close"].astype(float)
 
     if "did_trade" in plot_df.columns:
@@ -158,7 +161,8 @@ def main():
         x_filename=cfg.x_filename,
     )
 
-    feature_cols = [c for c in df.columns if c not in ("timestamp", "day_id", "close")]
+    drop_base = {"timestamp", "day_id", "open", "high", "low", "close", "volume"}
+    feature_cols = [c for c in df.columns if c not in drop_base]
     all_nan_cols = [c for c in feature_cols if df[c].isna().all()]
     if all_nan_cols:
         print(f"Dropping all-NaN feature columns: {all_nan_cols}")

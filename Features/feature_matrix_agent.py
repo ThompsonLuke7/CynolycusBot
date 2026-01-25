@@ -198,7 +198,11 @@ def build_agent_feature_matrix(
     cols = [
         "timestamp",
         "day_id",
+        "open",
+        "high",
+        "low",
         "close",
+        "volume",
         "p_pivot_long",
         "p_pivot_long_lag1",
         "p_pivot_long_lag2",
