@@ -33,7 +33,9 @@ def evaluate_policy(
             while not done:
                 x = torch.as_tensor(obs, dtype=torch.float32, device=dev).unsqueeze(0)
                 logits, _ = model(x)
-                action = int(torch.argmax(logits, dim=-1).item())
+                dist = torch.distributions.Categorical(logits=logits)
+                action = int(dist.sample().item())
+ 
 
                 obs, r, done, info = env.step(action)
                 day_pnl += float(info.get("reward_pnl", 0.0))

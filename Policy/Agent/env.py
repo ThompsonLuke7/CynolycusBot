@@ -145,9 +145,12 @@ class TradingEnv:
         self.realized_pnl_today = 0.0
         return self._get_obs()
 
-    def _trade_cost(self, price: float) -> float:
+    def _trade_cost_ret(self, price: float) -> float:
+        # bps already represent fractional cost vs notional
         bps_cost = (self.slippage_bps + self.spread_bps) / 10000.0
-        return self.commission_per_trade + abs(price) * bps_cost
+        commission_ret = (self.commission_per_trade / price) if price else 0.0
+        return commission_ret + bps_cost
+
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
         action = int(action)
@@ -171,7 +174,7 @@ class TradingEnv:
             flipped = False
 
         if desired_pos != self.position:
-            reward_costs += self._trade_cost(price)
+            reward_costs += self._trade_cost_ret(price)
 
             if flipped:
                 reward_costs += self.flip_penalty
@@ -217,7 +220,7 @@ class TradingEnv:
 
         if is_last or (self._i >= len(self.df) - 2):
             if self.force_flat_at_close and self.position != 0:
-                exit_cost = self._trade_cost(price)
+                exit_cost = self._trade_cost_ret(price)
                 reward -= exit_cost
                 info["forced_flat_cost"] = exit_cost
 
