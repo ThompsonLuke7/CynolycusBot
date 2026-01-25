@@ -54,7 +54,7 @@ def _agent_equity_from_trace(trace, initial_cash):
     for _, row in trace.iterrows():
         price = float(row["close"])
         costs = float(row.get("reward_costs", 0.0)) + float(row.get("forced_flat_cost", 0.0))
-        net_ret = float(row.get("reward_pnl", 0.0)) - (costs / price if price else 0.0)
+        net_ret = float(row.get("reward_pnl", 0.0)) - float(costs)
         equity *= (1.0 + net_ret)
         equity_series.append(equity)
     trace = trace.copy()
