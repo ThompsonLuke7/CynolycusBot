@@ -334,13 +334,17 @@ def plot_continuation_signals(
     long_cont_col: str = "long_cont_label",
     short_cont_col: str = "short_cont_label",
     cont_label_col: str = "atr_cont_label",
+    show_pivots: bool = False,
+    pivot_down_col: str = "pivot_down",
+    pivot_up_col: str = "pivot_up",
+    tail: int | None = _PLOT_TAIL_BARS,
     save_path: str | None = None,
 ) -> None:
     """
     Plot OHLC candles with continuation labels only.
     Uses compressed x positions to avoid gaps from non-trading days.
     """
-    df = _tail_df(df)
+    df = _tail_df(df, tail=tail)
     fig, ax = plt.subplots(figsize=(18, 6))
 
     date_index = df.index
@@ -351,6 +355,8 @@ def plot_continuation_signals(
 
     cont_long_color = "#7CB342"
     cont_short_color = "#F9A825"
+    pivot_dn_color = "#2E7D32"
+    pivot_up_color = "#1E0D32"
 
     _plot_candles(ax, pos, open_y, high_y, low_y, close_y)
 
@@ -388,6 +394,34 @@ def plot_continuation_signals(
             alpha=0.9,
             zorder=2,
         )
+
+    if show_pivots:
+        if pivot_down_col in df.columns:
+            mask_pivot_down = (df[pivot_down_col].fillna(0).astype(int) == 1).to_numpy()
+            if mask_pivot_down.any():
+                ax.scatter(
+                    pos[mask_pivot_down],
+                    low_y[mask_pivot_down] - cont_offset * 1.6,
+                    color=pivot_dn_color,
+                    marker="v",
+                    s=52,
+                    label=pivot_down_col,
+                    alpha=0.95,
+                    zorder=2.2,
+                )
+        if pivot_up_col in df.columns:
+            mask_pivot_up = (df[pivot_up_col].fillna(0).astype(int) == 1).to_numpy()
+            if mask_pivot_up.any():
+                ax.scatter(
+                    pos[mask_pivot_up],
+                    high_y[mask_pivot_up] + cont_offset * 1.6,
+                    color=pivot_up_color,
+                    marker="^",
+                    s=52,
+                    label=pivot_up_col,
+                    alpha=0.95,
+                    zorder=2.2,
+                )
 
     ax.set_title("Close with continuation labels", fontsize=14)
     ax.set_ylabel("Close Price")

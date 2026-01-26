@@ -352,37 +352,31 @@ def add_atr_continuation_entry_labels(
     low_col: str = "low",
     atr_col: str = "atr",
     atr_length: int = 14,
-    # Continuation entry barriers (can be different from pivot model)
     tp_mult: float = 0.5,
     sl_mult: float = 0.5,
-    # How far ahead to evaluate the entry from this bar
     max_holding: int = 20,
-    # If True, only label bars strictly AFTER the pivot (skip the pivot bar itself)
     exclude_pivot_bar: bool = True,
-    # If True, restrict the lookahead window to not pass the next opposite pivot
     stop_at_next_opposite_pivot: bool = True,
     base_label_col: str = "atr_cont_label",
+    # --- NEW / IMPROVED KNOBS ---
+    include_opposite_pivot_bar: bool = False,  # if False, cap at end-1 (recommended)
+    min_runway: int = 3,                       # skip bars too close to horizon/leg end
+    prevent_overwrite: bool = True,            # only write if labels[t] still 0
+    tie_break: str = "stop",                   # "stop" | "tp" | "ignore"
 ) -> pd.DataFrame:
     """
     Continuation entry-quality labels INSIDE pivot-defined legs.
 
-    Long leg: from pivot_down (swing low) until next pivot_up (swing high).
-      For each eligible bar t in that interval:
-        entry = close[t]
-        tp = entry + tp_mult * ATR[t]
-        sl = entry - sl_mult * ATR[t]
-        label = +1 if tp hit before sl within lookahead else 0
+    Long leg: pivot_down -> next pivot_up
+      label +1 if TP hit before SL within window else 0
 
-    Short leg: from pivot_up until next pivot_down.
-      entry = close[t]
-      tp = entry - tp_mult * ATR[t]
-      sl = entry + sl_mult * ATR[t]
-      label = -1 if tp hit before sl within lookahead else 0
+    Short leg: pivot_up -> next pivot_down
+      label -1 if TP hit before SL within window else 0
 
-    Notes:
-      - Uses future data to evaluate outcomes (labels), which is intended.
-      - Uses pivots to define "we are in a leg" (for label eligibility), which is also intended.
-      - This is NOT a pivot detector label. It's "is entering now still good?"
+    Adds:
+      base_label_col in {-1,0,+1}
+      base_label_col_* metadata columns
+      long_cont_label / short_cont_label (binary helpers)
     """
 
     # Ensure ATR exists
@@ -407,11 +401,31 @@ def add_atr_continuation_entry_labels(
     holding_bars = np.full(n, np.nan)
     realized_ret = np.full(n, np.nan)
 
+    def _resolve_barrier(hit_tp: bool, hit_sl: bool) -> str | None:
+        """
+        Returns: "tp", "sl", or None if ambiguous and tie_break=="ignore"
+        """
+        if hit_tp and hit_sl:
+            if tie_break == "stop":
+                return "sl"
+            if tie_break == "tp":
+                return "tp"
+            if tie_break == "ignore":
+                return None
+            # default fallback
+            return "sl"
+        if hit_tp:
+            return "tp"
+        if hit_sl:
+            return "sl"
+        return ""
+
     # Helper to evaluate a single entry with TP/SL barriers
     def eval_long_from(t: int, horizon_end: int):
         ep = close[t]
         if np.isnan(ep) or np.isnan(atr[t]) or atr[t] == 0:
             return 0.0, np.nan, 0, np.nan
+
         tp = ep + tp_mult * atr[t]
         sl = ep - sl_mult * atr[t]
 
@@ -420,25 +434,33 @@ def add_atr_continuation_entry_labels(
         hit_bars = 0
 
         for j in range(t + 1, horizon_end + 1):
-            # conservative: stop first
-            if low[j] <= sl:
+            hit_sl = (low[j] <= sl)
+            hit_tp = (high[j] >= tp)
+            outcome = _resolve_barrier(hit_tp, hit_sl)
+
+            if outcome is None and (hit_tp or hit_sl):
+                # ambiguous + ignore => treat as no-label
+                return 0.0, np.nan, 0, np.nan
+
+            if outcome == "sl":
                 hit_label = 0.0
                 hit_exit = sl
                 hit_bars = j - t
                 break
-            if high[j] >= tp:
+            if outcome == "tp":
                 hit_label = 1.0
                 hit_exit = tp
                 hit_bars = j - t
                 break
 
-        rr = (hit_exit / ep - 1.0) if ep != 0 else np.nan
+        rr = (hit_exit / ep - 1.0) if ep != 0 and np.isfinite(hit_exit) else np.nan
         return hit_label, hit_exit, hit_bars, rr
 
     def eval_short_from(t: int, horizon_end: int):
         ep = close[t]
         if np.isnan(ep) or np.isnan(atr[t]) or atr[t] == 0:
             return 0.0, np.nan, 0, np.nan
+
         tp = ep - tp_mult * atr[t]
         sl = ep + sl_mult * atr[t]
 
@@ -447,18 +469,27 @@ def add_atr_continuation_entry_labels(
         hit_bars = 0
 
         for j in range(t + 1, horizon_end + 1):
-            if high[j] >= sl:
+            hit_sl = (high[j] >= sl)
+            hit_tp = (low[j] <= tp)
+            outcome = _resolve_barrier(hit_tp, hit_sl)
+
+            if outcome is None and (hit_tp or hit_sl):
+                return 0.0, np.nan, 0, np.nan
+
+            if outcome == "sl":
                 hit_label = 0.0
                 hit_exit = sl
                 hit_bars = j - t
                 break
-            if low[j] <= tp:
+            if outcome == "tp":
                 hit_label = -1.0
                 hit_exit = tp
                 hit_bars = j - t
                 break
 
-        rr = (hit_exit / ep - 1.0) if ep != 0 else np.nan
+        # FIX: profit-positive realized return for shorts
+        # If hit_exit < ep (short win), ep/hit_exit - 1 > 0
+        rr = (ep / hit_exit - 1.0) if hit_exit != 0 and np.isfinite(hit_exit) else np.nan
         return hit_label, hit_exit, hit_bars, rr
 
     # Identify pivot segments
@@ -467,7 +498,6 @@ def add_atr_continuation_entry_labels(
 
     # Long continuation labels inside (pivot_down -> next pivot_up)
     for start in pivot_dn_idx:
-        # find next pivot_up after start
         nxt = pivot_up_idx[pivot_up_idx > start]
         if len(nxt) == 0:
             continue
@@ -478,19 +508,27 @@ def add_atr_continuation_entry_labels(
             continue
 
         for t in range(t0, end):
-            # Determine evaluation window end
             horizon_end = min(t + max_holding, n - 1)
 
             if stop_at_next_opposite_pivot:
-                # Don't look past the next pivot_up (end) since leg is "done" there
-                horizon_end = min(horizon_end, end)
+                cap = end if include_opposite_pivot_bar else (end - 1)
+                horizon_end = min(horizon_end, cap)
 
-            y, xit, hb, rr = eval_long_from(t, horizon_end)
+            if horizon_end <= t:
+                continue
+            if (horizon_end - t) < min_runway:
+                continue
+
+            y, xit, hb, rr_ = eval_long_from(t, horizon_end)
+
+            if prevent_overwrite and labels[t] != 0.0:
+                continue
+
             labels[t] = y
             entry_price[t] = close[t]
             exit_price[t] = xit
             holding_bars[t] = hb
-            realized_ret[t] = rr
+            realized_ret[t] = rr_
 
     # Short continuation labels inside (pivot_up -> next pivot_down)
     for start in pivot_up_idx:
@@ -505,15 +543,26 @@ def add_atr_continuation_entry_labels(
 
         for t in range(t0, end):
             horizon_end = min(t + max_holding, n - 1)
-            if stop_at_next_opposite_pivot:
-                horizon_end = min(horizon_end, end)
 
-            y, xit, hb, rr = eval_short_from(t, horizon_end)
+            if stop_at_next_opposite_pivot:
+                cap = end if include_opposite_pivot_bar else (end - 1)
+                horizon_end = min(horizon_end, cap)
+
+            if horizon_end <= t:
+                continue
+            if (horizon_end - t) < min_runway:
+                continue
+
+            y, xit, hb, rr_ = eval_short_from(t, horizon_end)
+
+            if prevent_overwrite and labels[t] != 0.0:
+                continue
+
             labels[t] = y
             entry_price[t] = close[t]
             exit_price[t] = xit
             holding_bars[t] = hb
-            realized_ret[t] = rr
+            realized_ret[t] = rr_
 
     df[base_label_col] = labels
     df[f"{base_label_col}_entry_price"] = entry_price
@@ -521,11 +570,12 @@ def add_atr_continuation_entry_labels(
     df[f"{base_label_col}_holding_bars"] = holding_bars
     df[f"{base_label_col}_realized_return"] = realized_ret
 
-    # Binary helpers
+    # Binary helpers (still produced)
     df["long_cont_label"] = (df[base_label_col] == 1.0).astype("Int64")
     df["short_cont_label"] = (df[base_label_col] == -1.0).astype("Int64")
 
     return df
+
 
 def add_mfe_mae_labels(
     df: pd.DataFrame,
