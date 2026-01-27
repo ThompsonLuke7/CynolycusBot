@@ -342,272 +342,83 @@ def add_atr_leg_segmentation_labels(
     return df
 
 
-def add_atr_continuation_entry_labels(
+def add_atr_continuation_strength_labels(
     df: pd.DataFrame,
     *,
     pivot_down_col: str = "pivot_down",
     pivot_up_col: str = "pivot_up",
-    close_col: str = "close",
-    high_col: str = "high",
-    low_col: str = "low",
-    atr_col: str = "atr",
-    atr_length: int = 14,
-    tp_mult: float = 0.5,
-    sl_mult: float = 0.5,
+    leg_state_col: str | None = "atr_leg_label",
     max_holding: int = 20,
     exclude_pivot_bar: bool = True,
-    stop_at_next_opposite_pivot: bool = True,
-    base_label_col: str = "atr_cont_label",
-    tp_hit_bars_col: str | None = None,
-    tp_time_frac_col: str | None = None,
-    struct_label_col: str = "atr_cont_struct_label",
-    long_struct_col: str = "long_cont_struct_label",
-    short_struct_col: str = "short_cont_struct_label",
-    # --- NEW / IMPROVED KNOBS ---
-    include_opposite_pivot_bar: bool = False,  # if False, cap at end-1 (recommended)
-    min_runway: int = 2,                       # skip bars too close to horizon/leg end
-    prevent_overwrite: bool = True,            # only write if labels[t] still 0
-    tie_break: str = "stop",                   # "stop" | "tp" | "ignore"
+    strength_long_col: str = "cont_strength_long",
+    strength_short_col: str = "cont_strength_short",
+    combined_col: str = "cont_strength",
 ) -> pd.DataFrame:
     """
-    Continuation entry-quality labels INSIDE pivot-defined legs.
+    Smooth continuation strength ∈ [0,1].
 
-    Long leg: pivot_down -> next pivot_up
-      label +1 if TP hit before SL within window else 0
+    Interpretation:
+      1.0  -> very early in leg (strong continuation)
+      0.5  -> mid-leg
+      0.0  -> late / exhausted / invalid
 
-    Short leg: pivot_up -> next pivot_down
-      label -1 if TP hit before SL within window else 0
-
-    Adds:
-      base_label_col in {-1,0,+1}
-      base_label_col_* metadata columns
-      long_cont_label / short_cont_label (binary helpers)
-      (optional) tp_hit_bars_col / tp_time_frac_col (TP timing)
-      struct_label_col (+1/-1): new extreme beyond bar t before horizon end
-      long/short struct helper cols
+    This is a STATE label, not an EVENT label.
     """
-    import numpy as np
-
-    # Ensure ATR exists
-    if atr_col not in df.columns:
-        df[atr_col] = ta.atr(df[high_col], df[low_col], df[close_col], length=atr_length)
-
-    close = df[close_col].to_numpy(dtype=float)
-    high = df[high_col].to_numpy(dtype=float)
-    low = df[low_col].to_numpy(dtype=float)
-    atr = df[atr_col].to_numpy(dtype=float)
 
     piv_dn = df[pivot_down_col].fillna(0).astype(int).to_numpy()
     piv_up = df[pivot_up_col].fillna(0).astype(int).to_numpy()
+    n = len(df)
 
-    n = int(len(df))
+    # --- find next pivots ---
+    next_up = np.full(n, -1, dtype=int)
+    next_dn = np.full(n, -1, dtype=int)
+    nu, nd = -1, -1
+    for i in range(n - 1, -1, -1):
+        next_up[i] = nu
+        next_dn[i] = nd
+        if piv_up[i] == 1:
+            nu = i
+        if piv_dn[i] == 1:
+            nd = i
 
-    labels = np.zeros(n, dtype=float)  # -1, 0, +1
-    struct_labels = np.zeros(n, dtype=float)  # -1, 0, +1
-    entry_price = np.full(n, np.nan, dtype=float)
-    exit_price = np.full(n, np.nan, dtype=float)
-    holding_bars = np.full(n, np.nan, dtype=float)
-    realized_ret = np.full(n, np.nan, dtype=float)
+    # --- leg state ---
+    leg_state = None
+    if leg_state_col and leg_state_col in df.columns:
+        leg_state = df[leg_state_col].fillna(0).to_numpy(dtype=float)
 
-    tp_hit_bars = np.full(n, np.nan, dtype=float)
-    tp_time_frac = np.full(n, np.nan, dtype=float)
+    cont_long = np.full(n, np.nan, dtype=float)
+    cont_short = np.full(n, np.nan, dtype=float)
 
-    def _resolve_barrier(hit_tp: bool, hit_sl: bool) -> str | None:
-        """
-        Returns:
-          "tp" or "sl" when resolved,
-          None when ambiguous and tie_break=="ignore",
-          "" when neither hit.
-        """
-        if hit_tp and hit_sl:
-            if tie_break == "stop":
-                return "sl"
-            if tie_break == "tp":
-                return "tp"
-            if tie_break == "ignore":
-                return None
-            return "sl"
-        if hit_tp:
-            return "tp"
-        if hit_sl:
-            return "sl"
-        return ""
-
-    def eval_long_from(t: int, horizon_end: int) -> tuple[float, float, int, float]:
-        ep = close[t]
-        a = atr[t]
-        if not np.isfinite(ep) or not np.isfinite(a) or a <= 0:
-            return 0.0, np.nan, 0, np.nan
-
-        tp = ep + tp_mult * a
-        sl = ep - sl_mult * a
-
-        hit_label = 0.0
-        hit_exit = np.nan
-        hit_bars = 0
-
-        for j in range(t + 1, horizon_end + 1):
-            hit_sl = (low[j] <= sl)
-            hit_tp = (high[j] >= tp)
-            outcome = _resolve_barrier(hit_tp, hit_sl)
-
-            if outcome is None and (hit_tp or hit_sl):
-                return 0.0, np.nan, 0, np.nan
-
-            if outcome == "sl":
-                hit_label = 0.0
-                hit_exit = sl
-                hit_bars = j - t
-                break
-            if outcome == "tp":
-                hit_label = 1.0
-                hit_exit = tp
-                hit_bars = j - t
-                break
-
-        rr = (hit_exit / ep - 1.0) if np.isfinite(hit_exit) and ep != 0 else np.nan
-        return hit_label, hit_exit, hit_bars, rr
-
-    def eval_short_from(t: int, horizon_end: int) -> tuple[float, float, int, float]:
-        ep = close[t]
-        a = atr[t]
-        if not np.isfinite(ep) or not np.isfinite(a) or a <= 0:
-            return 0.0, np.nan, 0, np.nan
-
-        tp = ep - tp_mult * a
-        sl = ep + sl_mult * a
-
-        hit_label = 0.0
-        hit_exit = np.nan
-        hit_bars = 0
-
-        for j in range(t + 1, horizon_end + 1):
-            hit_sl = (high[j] >= sl)
-            hit_tp = (low[j] <= tp)
-            outcome = _resolve_barrier(hit_tp, hit_sl)
-
-            if outcome is None and (hit_tp or hit_sl):
-                return 0.0, np.nan, 0, np.nan
-
-            if outcome == "sl":
-                hit_label = 0.0
-                hit_exit = sl
-                hit_bars = j - t
-                break
-            if outcome == "tp":
-                hit_label = -1.0
-                hit_exit = tp
-                hit_bars = j - t
-                break
-
-        # profit-positive realized return for shorts
-        rr = (ep / hit_exit - 1.0) if np.isfinite(hit_exit) and hit_exit != 0 else np.nan
-        return hit_label, hit_exit, hit_bars, rr
-
-    pivot_dn_idx = np.where(piv_dn == 1)[0]
-    pivot_up_idx = np.where(piv_up == 1)[0]
-
-    # Long continuation labels inside (pivot_down -> next pivot_up)
-    for start in pivot_dn_idx:
-        nxt = pivot_up_idx[pivot_up_idx > start]
-        if nxt.size == 0:
-            continue
-        end = int(nxt[0])
-
-        t0 = start + 1 if exclude_pivot_bar else start
-        if t0 >= end:
+    for t in range(n):
+        if exclude_pivot_bar and (piv_up[t] == 1 or piv_dn[t] == 1):
             continue
 
-        for t in range(t0, end):
-            if prevent_overwrite and labels[t] != 0.0:
-                continue
+        # LONG continuation: distance to next UP pivot
+        if next_up[t] >= 0:
+            remaining = next_up[t] - t
+            strength = 1.0 - min(remaining, max_holding) / max_holding
+            cont_long[t] = np.clip(1.0 - strength, 0.0, 1.0)
 
-            horizon_end = min(t + max_holding, n - 1)
-            if stop_at_next_opposite_pivot:
-                cap = end if include_opposite_pivot_bar else (end - 1)
-                horizon_end = min(horizon_end, cap)
+        # SHORT continuation: distance to next DOWN pivot
+        if next_dn[t] >= 0:
+            remaining = next_dn[t] - t
+            strength = 1.0 - min(remaining, max_holding) / max_holding
+            cont_short[t] = np.clip(1.0 - strength, 0.0, 1.0)
 
-            if horizon_end <= t or (horizon_end - t) < min_runway:
-                continue
+    # --- mask to active leg (important) ---
+    if leg_state is not None:
+        cont_long[leg_state != 1] = np.nan
+        cont_short[leg_state != -1] = np.nan
 
-            y, xit, hb, rr_ = eval_long_from(t, horizon_end)
+    # --- combined (direction-aware) ---
+    cont = np.full(n, np.nan, dtype=float)
+    if leg_state is not None:
+        cont[leg_state == 1] = cont_long[leg_state == 1]
+        cont[leg_state == -1] = cont_short[leg_state == -1]
 
-            window_high = high[t + 1 : horizon_end + 1]
-            if window_high.size and np.isfinite(window_high).any():
-                if np.nanmax(window_high) > high[t]:
-                    struct_labels[t] = 1.0
-
-            labels[t] = y
-            entry_price[t] = close[t]
-            exit_price[t] = xit
-            holding_bars[t] = float(hb) if hb else np.nan
-            realized_ret[t] = rr_
-            if y == 1.0 and hb > 0:
-                tp_hit_bars[t] = float(hb)
-                runway = horizon_end - t
-                if runway > 0:
-                    tp_time_frac[t] = hb / runway
-
-    # Short continuation labels inside (pivot_up -> next pivot_down)
-    for start in pivot_up_idx:
-        nxt = pivot_dn_idx[pivot_dn_idx > start]
-        if nxt.size == 0:
-            continue
-        end = int(nxt[0])
-
-        t0 = start + 1 if exclude_pivot_bar else start
-        if t0 >= end:
-            continue
-
-        for t in range(t0, end):
-            if prevent_overwrite and labels[t] != 0.0:
-                continue
-
-            horizon_end = min(t + max_holding, n - 1)
-            if stop_at_next_opposite_pivot:
-                cap = end if include_opposite_pivot_bar else (end - 1)
-                horizon_end = min(horizon_end, cap)
-
-            if horizon_end <= t or (horizon_end - t) < min_runway:
-                continue
-
-            y, xit, hb, rr_ = eval_short_from(t, horizon_end)
-
-            window_low = low[t + 1 : horizon_end + 1]
-            if window_low.size and np.isfinite(window_low).any():
-                if np.nanmin(window_low) < low[t]:
-                    struct_labels[t] = -1.0
-
-            labels[t] = y
-            entry_price[t] = close[t]
-            exit_price[t] = xit
-            holding_bars[t] = float(hb) if hb else np.nan
-            realized_ret[t] = rr_
-            if y == -1.0 and hb > 0:
-                tp_hit_bars[t] = float(hb)
-                runway = horizon_end - t
-                if runway > 0:
-                    tp_time_frac[t] = hb / runway
-
-    df[base_label_col] = labels
-    df[f"{base_label_col}_entry_price"] = entry_price
-    df[f"{base_label_col}_exit_price"] = exit_price
-    df[f"{base_label_col}_holding_bars"] = holding_bars
-    df[f"{base_label_col}_realized_return"] = realized_ret
-
-    # Only write optional columns if caller requested names
-    if tp_hit_bars_col is not None:
-        df[tp_hit_bars_col] = tp_hit_bars
-    if tp_time_frac_col is not None:
-        df[tp_time_frac_col] = tp_time_frac
-
-    df[struct_label_col] = struct_labels
-
-    # Binary helpers
-    df["long_cont_label"] = (df[base_label_col] == 1.0).astype("Int64")
-    df["short_cont_label"] = (df[base_label_col] == -1.0).astype("Int64")
-    df[long_struct_col] = (df[struct_label_col] == 1.0).astype("Int64")
-    df[short_struct_col] = (df[struct_label_col] == -1.0).astype("Int64")
+    df[strength_long_col] = cont_long
+    df[strength_short_col] = cont_short
+    df[combined_col] = cont
 
     return df
 
@@ -1341,7 +1152,7 @@ def add_all_labels(
     if swing_state_machine_kwargs is not None:
         df = add_pivot_swing_state_machine(df, **swing_state_machine_kwargs)
     if continuation_kwargs is not None:
-        df = add_atr_continuation_entry_labels(df, **continuation_kwargs)
+        df = add_atr_continuation_strength_labels(df, **continuation_kwargs)
     if mfe_mae_kwargs is not None:
         df = add_mfe_mae_labels(df, **mfe_mae_kwargs)
     if bars_to_exhaustion_kwargs is not None:

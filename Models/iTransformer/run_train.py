@@ -183,7 +183,7 @@ def _infer_task(args) -> str:
     if args.x_path is not None or args.y_path is not None:
         return args.task
     mode = (args.label_mode or "").strip().lower()
-    if mode in {"mfe", "mae", "mfe_mae", "exhaustion"}:
+    if mode in {"mfe", "mae", "mfe_mae", "exhaustion", "continuation"}:
         return "regression"
     return "binary"
 

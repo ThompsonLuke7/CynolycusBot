@@ -30,6 +30,8 @@ SWING_LABEL_COLUMNS = [
     "atr_cont_struct_label",
     "long_cont_struct_label",
     "short_cont_struct_label",
+    "cont_strength_long",
+    "cont_strength_short",
     # Leg segmentation labels
     "atr_leg_label",
     "leg_up_label",

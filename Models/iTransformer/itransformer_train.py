@@ -128,7 +128,7 @@ def _select_target(side: str, y_long: np.ndarray, y_short: np.ndarray) -> np.nda
 
 
 def _is_regression_label_mode(label_mode: str) -> bool:
-    return label_mode in ("mfe", "mae", "mfe_mae", "exhaustion")
+    return label_mode in ("mfe", "mae", "mfe_mae", "exhaustion", "continuation")
 
 
 def _load_norm_stats(stats_dir: Path, dataset_name: str, x_filename: str) -> dict | None:
@@ -211,7 +211,7 @@ def _load_repo_full_dataset(
     elif label_mode == "leg":
         long_col, short_col = "leg_up_label", "leg_down_label"
     elif label_mode == "continuation":
-        long_col, short_col = "long_cont_label", "short_cont_label"
+        long_col, short_col = "cont_strength_long", "cont_strength_short"
     elif label_mode == "mfe":
         long_col, short_col = "mfe_up_atr", "mfe_down_atr"
     elif label_mode == "mae":
@@ -343,6 +343,10 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         else:
             y_scaled = y_raw
 
+        output_activation = None
+        if task == "regression" and args.label_mode in {"continuation", "exhaustion"}:
+            output_activation = "sigmoid"
+
         feature_mask = None
         ga_score = None
         if args.use_ga:
@@ -369,6 +373,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                 learning_rate=args.ga_lr,
                 weight_decay=args.ga_weight_decay,
                 clip=args.ga_clip,
+                output_activation=output_activation,
             )
 
             X_train = X[: split_idx.train_end]
@@ -414,6 +419,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             dropout=args.dropout,
             use_var_embedding=args.use_var_embedding,
             out_dim=out_dim,
+            output_activation=output_activation,
         ).to(device)
 
         if task == "binary":
@@ -541,6 +547,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             "val_end": int(split_idx.val_end),
             "task": task,
             "test_metrics": test_metrics,
+            "output_activation": output_activation,
         }
         meta_path = model_dir / f"{slug}_{args.dataset_name}_{args.label_mode}_{side}_seq{args.seq_len}_meta.json"
         meta_path.write_text(json.dumps(meta, indent=2))

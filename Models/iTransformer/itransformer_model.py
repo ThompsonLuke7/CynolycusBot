@@ -23,6 +23,7 @@ class iTransformerEncoder(nn.Module):
         dropout: float = 0.1,
         use_var_embedding: bool = False,
         out_dim: int = 1,
+        output_activation: str | None = None,
     ):
         super().__init__()
         if d_model % n_heads != 0:
@@ -31,6 +32,7 @@ class iTransformerEncoder(nn.Module):
         self.seq_len = int(seq_len)
         self.num_variates = int(num_variates)
         self.use_var_embedding = bool(use_var_embedding)
+        self.output_activation = output_activation
 
         self.input_proj = nn.Linear(self.seq_len, d_model)
         if self.use_var_embedding:
@@ -95,4 +97,6 @@ class iTransformerEncoder(nn.Module):
         x = self.encoder(x)
         pooled = x.mean(dim=1)
         out = self.head(pooled)
+        if self.output_activation == "sigmoid":
+            out = torch.sigmoid(out)
         return out

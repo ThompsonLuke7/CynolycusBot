@@ -85,6 +85,7 @@ class GAITransformerFeatureSelector:
     weight_decay: float = 1e-2
     clip: float = 1.0
     use_cuda: bool = True
+    output_activation: Optional[str] = None
     _best_mask: Optional[np.ndarray] = field(init=False, default=None)
     _best_score: Optional[float] = field(init=False, default=None)
 
@@ -276,6 +277,7 @@ class GAITransformerFeatureSelector:
             dropout=self.dropout,
             use_var_embedding=self.use_var_embedding,
             out_dim=out_dim,
+            output_activation=self.output_activation,
         ).to(device)
 
         if task == "binary":
