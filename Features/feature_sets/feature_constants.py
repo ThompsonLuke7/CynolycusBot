@@ -41,6 +41,12 @@ SWING_LABEL_COLUMNS = [
     "mae_down_atr",
     "bars_to_exhaustion",
     "bars_to_exhaustion_censored",
+    "bars_to_exhaustion_long",
+    "bars_to_exhaustion_short",
+    "bars_to_exhaustion_long_censored",
+    "bars_to_exhaustion_short_censored",
+    "exhaustion_progress_long",
+    "exhaustion_progress_short",
     # State machine gates (label-like, avoid leakage)
     "p_long_state_gate",
     "p_short_state_gate",
