@@ -71,9 +71,11 @@ class WindowedTimeSeries(Dataset):
         x = torch.from_numpy(x_win).float()
         y = torch.from_numpy(np.array(y_t)).float()
 
-        w = None
         if self.sample_weight is not None:
             w = torch.tensor(float(self.sample_weight[t]), dtype=torch.float32)
+        else:
+            # Return a tensor so default_collate doesn't choke on None.
+            w = torch.tensor(1.0, dtype=torch.float32)
 
         if self.device is not None:
             x = x.to(self.device)
