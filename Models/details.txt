@@ -1,0 +1,6 @@
+iTransformer: Continuation, MFE, MAE, Bars to Exhaustion
+XGBoost: Pivots
+TCN: Leg Segmentation, Bars to Exhaustion
+TFT: MFE, MAE
+PatchTST: Leg Segmentation
+LightGBM: Pivots, MFE, MAE

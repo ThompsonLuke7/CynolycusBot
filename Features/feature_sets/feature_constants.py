@@ -25,6 +25,11 @@ SWING_LABEL_COLUMNS = [
     "atr_cont_label_exit_price",
     "atr_cont_label_holding_bars",
     "atr_cont_label_realized_return",
+    "atr_cont_label_tp_hit_bars",
+    "atr_cont_label_tp_time_frac",
+    "atr_cont_struct_label",
+    "long_cont_struct_label",
+    "short_cont_struct_label",
     # Leg segmentation labels
     "atr_leg_label",
     "leg_up_label",
@@ -32,7 +37,10 @@ SWING_LABEL_COLUMNS = [
     # Regression labels
     "mfe_up_atr",
     "mfe_down_atr",
+    "mae_up_atr",
+    "mae_down_atr",
     "bars_to_exhaustion",
+    "bars_to_exhaustion_censored",
     # State machine gates (label-like, avoid leakage)
     "p_long_state_gate",
     "p_short_state_gate",

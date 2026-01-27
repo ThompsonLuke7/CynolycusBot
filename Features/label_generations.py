@@ -358,9 +358,14 @@ def add_atr_continuation_entry_labels(
     exclude_pivot_bar: bool = True,
     stop_at_next_opposite_pivot: bool = True,
     base_label_col: str = "atr_cont_label",
+    tp_hit_bars_col: str | None = None,
+    tp_time_frac_col: str | None = None,
+    struct_label_col: str = "atr_cont_struct_label",
+    long_struct_col: str = "long_cont_struct_label",
+    short_struct_col: str = "short_cont_struct_label",
     # --- NEW / IMPROVED KNOBS ---
     include_opposite_pivot_bar: bool = False,  # if False, cap at end-1 (recommended)
-    min_runway: int = 3,                       # skip bars too close to horizon/leg end
+    min_runway: int = 2,                       # skip bars too close to horizon/leg end
     prevent_overwrite: bool = True,            # only write if labels[t] still 0
     tie_break: str = "stop",                   # "stop" | "tp" | "ignore"
 ) -> pd.DataFrame:
@@ -377,13 +382,15 @@ def add_atr_continuation_entry_labels(
       base_label_col in {-1,0,+1}
       base_label_col_* metadata columns
       long_cont_label / short_cont_label (binary helpers)
+      (optional) tp_hit_bars_col / tp_time_frac_col (TP timing)
+      struct_label_col (+1/-1): new extreme beyond bar t before horizon end
+      long/short struct helper cols
     """
+    import numpy as np
 
     # Ensure ATR exists
     if atr_col not in df.columns:
-        df[atr_col] = ta.atr(
-            df[high_col], df[low_col], df[close_col], length=atr_length
-        )
+        df[atr_col] = ta.atr(df[high_col], df[low_col], df[close_col], length=atr_length)
 
     close = df[close_col].to_numpy(dtype=float)
     high = df[high_col].to_numpy(dtype=float)
@@ -393,17 +400,24 @@ def add_atr_continuation_entry_labels(
     piv_dn = df[pivot_down_col].fillna(0).astype(int).to_numpy()
     piv_up = df[pivot_up_col].fillna(0).astype(int).to_numpy()
 
-    n = len(df)
+    n = int(len(df))
 
     labels = np.zeros(n, dtype=float)  # -1, 0, +1
-    entry_price = np.full(n, np.nan)
-    exit_price = np.full(n, np.nan)
-    holding_bars = np.full(n, np.nan)
-    realized_ret = np.full(n, np.nan)
+    struct_labels = np.zeros(n, dtype=float)  # -1, 0, +1
+    entry_price = np.full(n, np.nan, dtype=float)
+    exit_price = np.full(n, np.nan, dtype=float)
+    holding_bars = np.full(n, np.nan, dtype=float)
+    realized_ret = np.full(n, np.nan, dtype=float)
+
+    tp_hit_bars = np.full(n, np.nan, dtype=float)
+    tp_time_frac = np.full(n, np.nan, dtype=float)
 
     def _resolve_barrier(hit_tp: bool, hit_sl: bool) -> str | None:
         """
-        Returns: "tp", "sl", or None if ambiguous and tie_break=="ignore"
+        Returns:
+          "tp" or "sl" when resolved,
+          None when ambiguous and tie_break=="ignore",
+          "" when neither hit.
         """
         if hit_tp and hit_sl:
             if tie_break == "stop":
@@ -412,7 +426,6 @@ def add_atr_continuation_entry_labels(
                 return "tp"
             if tie_break == "ignore":
                 return None
-            # default fallback
             return "sl"
         if hit_tp:
             return "tp"
@@ -420,17 +433,17 @@ def add_atr_continuation_entry_labels(
             return "sl"
         return ""
 
-    # Helper to evaluate a single entry with TP/SL barriers
-    def eval_long_from(t: int, horizon_end: int):
+    def eval_long_from(t: int, horizon_end: int) -> tuple[float, float, int, float]:
         ep = close[t]
-        if np.isnan(ep) or np.isnan(atr[t]) or atr[t] == 0:
+        a = atr[t]
+        if not np.isfinite(ep) or not np.isfinite(a) or a <= 0:
             return 0.0, np.nan, 0, np.nan
 
-        tp = ep + tp_mult * atr[t]
-        sl = ep - sl_mult * atr[t]
+        tp = ep + tp_mult * a
+        sl = ep - sl_mult * a
 
         hit_label = 0.0
-        hit_exit = ep
+        hit_exit = np.nan
         hit_bars = 0
 
         for j in range(t + 1, horizon_end + 1):
@@ -439,7 +452,6 @@ def add_atr_continuation_entry_labels(
             outcome = _resolve_barrier(hit_tp, hit_sl)
 
             if outcome is None and (hit_tp or hit_sl):
-                # ambiguous + ignore => treat as no-label
                 return 0.0, np.nan, 0, np.nan
 
             if outcome == "sl":
@@ -453,19 +465,20 @@ def add_atr_continuation_entry_labels(
                 hit_bars = j - t
                 break
 
-        rr = (hit_exit / ep - 1.0) if ep != 0 and np.isfinite(hit_exit) else np.nan
+        rr = (hit_exit / ep - 1.0) if np.isfinite(hit_exit) and ep != 0 else np.nan
         return hit_label, hit_exit, hit_bars, rr
 
-    def eval_short_from(t: int, horizon_end: int):
+    def eval_short_from(t: int, horizon_end: int) -> tuple[float, float, int, float]:
         ep = close[t]
-        if np.isnan(ep) or np.isnan(atr[t]) or atr[t] == 0:
+        a = atr[t]
+        if not np.isfinite(ep) or not np.isfinite(a) or a <= 0:
             return 0.0, np.nan, 0, np.nan
 
-        tp = ep - tp_mult * atr[t]
-        sl = ep + sl_mult * atr[t]
+        tp = ep - tp_mult * a
+        sl = ep + sl_mult * a
 
         hit_label = 0.0
-        hit_exit = ep
+        hit_exit = np.nan
         hit_bars = 0
 
         for j in range(t + 1, horizon_end + 1):
@@ -487,19 +500,17 @@ def add_atr_continuation_entry_labels(
                 hit_bars = j - t
                 break
 
-        # FIX: profit-positive realized return for shorts
-        # If hit_exit < ep (short win), ep/hit_exit - 1 > 0
-        rr = (ep / hit_exit - 1.0) if hit_exit != 0 and np.isfinite(hit_exit) else np.nan
+        # profit-positive realized return for shorts
+        rr = (ep / hit_exit - 1.0) if np.isfinite(hit_exit) and hit_exit != 0 else np.nan
         return hit_label, hit_exit, hit_bars, rr
 
-    # Identify pivot segments
     pivot_dn_idx = np.where(piv_dn == 1)[0]
     pivot_up_idx = np.where(piv_up == 1)[0]
 
     # Long continuation labels inside (pivot_down -> next pivot_up)
     for start in pivot_dn_idx:
         nxt = pivot_up_idx[pivot_up_idx > start]
-        if len(nxt) == 0:
+        if nxt.size == 0:
             continue
         end = int(nxt[0])
 
@@ -508,32 +519,39 @@ def add_atr_continuation_entry_labels(
             continue
 
         for t in range(t0, end):
-            horizon_end = min(t + max_holding, n - 1)
+            if prevent_overwrite and labels[t] != 0.0:
+                continue
 
+            horizon_end = min(t + max_holding, n - 1)
             if stop_at_next_opposite_pivot:
                 cap = end if include_opposite_pivot_bar else (end - 1)
                 horizon_end = min(horizon_end, cap)
 
-            if horizon_end <= t:
-                continue
-            if (horizon_end - t) < min_runway:
+            if horizon_end <= t or (horizon_end - t) < min_runway:
                 continue
 
             y, xit, hb, rr_ = eval_long_from(t, horizon_end)
 
-            if prevent_overwrite and labels[t] != 0.0:
-                continue
+            window_high = high[t + 1 : horizon_end + 1]
+            if window_high.size and np.isfinite(window_high).any():
+                if np.nanmax(window_high) > high[t]:
+                    struct_labels[t] = 1.0
 
             labels[t] = y
             entry_price[t] = close[t]
             exit_price[t] = xit
-            holding_bars[t] = hb
+            holding_bars[t] = float(hb) if hb else np.nan
             realized_ret[t] = rr_
+            if y == 1.0 and hb > 0:
+                tp_hit_bars[t] = float(hb)
+                runway = horizon_end - t
+                if runway > 0:
+                    tp_time_frac[t] = hb / runway
 
     # Short continuation labels inside (pivot_up -> next pivot_down)
     for start in pivot_up_idx:
         nxt = pivot_dn_idx[pivot_dn_idx > start]
-        if len(nxt) == 0:
+        if nxt.size == 0:
             continue
         end = int(nxt[0])
 
@@ -542,27 +560,34 @@ def add_atr_continuation_entry_labels(
             continue
 
         for t in range(t0, end):
-            horizon_end = min(t + max_holding, n - 1)
+            if prevent_overwrite and labels[t] != 0.0:
+                continue
 
+            horizon_end = min(t + max_holding, n - 1)
             if stop_at_next_opposite_pivot:
                 cap = end if include_opposite_pivot_bar else (end - 1)
                 horizon_end = min(horizon_end, cap)
 
-            if horizon_end <= t:
-                continue
-            if (horizon_end - t) < min_runway:
+            if horizon_end <= t or (horizon_end - t) < min_runway:
                 continue
 
             y, xit, hb, rr_ = eval_short_from(t, horizon_end)
 
-            if prevent_overwrite and labels[t] != 0.0:
-                continue
+            window_low = low[t + 1 : horizon_end + 1]
+            if window_low.size and np.isfinite(window_low).any():
+                if np.nanmin(window_low) < low[t]:
+                    struct_labels[t] = -1.0
 
             labels[t] = y
             entry_price[t] = close[t]
             exit_price[t] = xit
-            holding_bars[t] = hb
+            holding_bars[t] = float(hb) if hb else np.nan
             realized_ret[t] = rr_
+            if y == -1.0 and hb > 0:
+                tp_hit_bars[t] = float(hb)
+                runway = horizon_end - t
+                if runway > 0:
+                    tp_time_frac[t] = hb / runway
 
     df[base_label_col] = labels
     df[f"{base_label_col}_entry_price"] = entry_price
@@ -570,11 +595,22 @@ def add_atr_continuation_entry_labels(
     df[f"{base_label_col}_holding_bars"] = holding_bars
     df[f"{base_label_col}_realized_return"] = realized_ret
 
-    # Binary helpers (still produced)
+    # Only write optional columns if caller requested names
+    if tp_hit_bars_col is not None:
+        df[tp_hit_bars_col] = tp_hit_bars
+    if tp_time_frac_col is not None:
+        df[tp_time_frac_col] = tp_time_frac
+
+    df[struct_label_col] = struct_labels
+
+    # Binary helpers
     df["long_cont_label"] = (df[base_label_col] == 1.0).astype("Int64")
     df["short_cont_label"] = (df[base_label_col] == -1.0).astype("Int64")
+    df[long_struct_col] = (df[struct_label_col] == 1.0).astype("Int64")
+    df[short_struct_col] = (df[struct_label_col] == -1.0).astype("Int64")
 
     return df
+
 
 
 def add_mfe_mae_labels(
@@ -588,6 +624,13 @@ def add_mfe_mae_labels(
     horizon: int = 20,
     mfe_up_col: str = "mfe_up_atr",
     mfe_down_col: str = "mfe_down_atr",
+    mae_up_col: str = "mae_up_atr",
+    mae_down_col: str = "mae_down_atr",
+    compute_true_mae: bool = True,
+    mask_to_leg: bool = True,
+    leg_state_col: str | None = "atr_leg_label",
+    leg_up_col: str = "leg_up_label",
+    leg_down_col: str = "leg_down_label",
 ) -> pd.DataFrame:
     """
     Dense MFE / MAE regression labels.
@@ -595,6 +638,10 @@ def add_mfe_mae_labels(
     For each bar t:
       MFE_up   = (max high[t+1 : t+H] - close[t]) / ATR[t]
       MFE_down = (close[t] - min low[t+1 : t+H]) / ATR[t]
+
+    If compute_true_mae is True, also compute:
+      MAE_down = max adverse move before MFE_up (long adverse)
+      MAE_up   = max adverse move before MFE_down (short adverse)
 
     Uses future data by design (labels only).
     """
@@ -612,6 +659,8 @@ def add_mfe_mae_labels(
     n = len(df)
     mfe_up = np.full(n, np.nan)
     mfe_dn = np.full(n, np.nan)
+    mae_up = np.full(n, np.nan)
+    mae_dn = np.full(n, np.nan)
 
     for t in range(n):
         if np.isnan(close[t]) or np.isnan(atr[t]) or atr[t] == 0:
@@ -621,14 +670,59 @@ def add_mfe_mae_labels(
         if t + 1 >= end:
             continue
 
-        hi = np.nanmax(high[t + 1 : end])
-        lo = np.nanmin(low[t + 1 : end])
+        window_high = high[t + 1 : end]
+        window_low = low[t + 1 : end]
+        if not np.isfinite(window_high).any() or not np.isfinite(window_low).any():
+            continue
+
+        hi_idx = int(np.nanargmax(window_high))
+        lo_idx = int(np.nanargmin(window_low))
+        hi = window_high[hi_idx]
+        lo = window_low[lo_idx]
 
         mfe_up[t] = (hi - close[t]) / atr[t]
         mfe_dn[t] = (close[t] - lo) / atr[t]
 
+        if compute_true_mae:
+            if hi_idx >= 0:
+                before_hi = window_low[: hi_idx + 1]
+                if np.isfinite(before_hi).any():
+                    mae_dn[t] = (close[t] - np.nanmin(before_hi)) / atr[t]
+            if lo_idx >= 0:
+                before_lo = window_high[: lo_idx + 1]
+                if np.isfinite(before_lo).any():
+                    mae_up[t] = (np.nanmax(before_lo) - close[t]) / atr[t]
+
+    if mask_to_leg:
+        active_leg = None
+        if leg_state_col and leg_state_col in df.columns:
+            leg_state = df[leg_state_col].fillna(0).to_numpy(dtype=float)
+            active_leg = leg_state != 0
+        elif leg_up_col in df.columns or leg_down_col in df.columns:
+            leg_up = (
+                df[leg_up_col].fillna(0).astype(int).to_numpy()
+                if leg_up_col in df.columns
+                else np.zeros(n, dtype=int)
+            )
+            leg_dn = (
+                df[leg_down_col].fillna(0).astype(int).to_numpy()
+                if leg_down_col in df.columns
+                else np.zeros(n, dtype=int)
+            )
+            active_leg = (leg_up == 1) | (leg_dn == 1)
+
+        if active_leg is not None:
+            mfe_up[~active_leg] = np.nan
+            mfe_dn[~active_leg] = np.nan
+            if compute_true_mae:
+                mae_up[~active_leg] = np.nan
+                mae_dn[~active_leg] = np.nan
+
     df[mfe_up_col] = mfe_up
     df[mfe_down_col] = mfe_dn
+    if compute_true_mae:
+        df[mae_up_col] = mae_up
+        df[mae_down_col] = mae_dn
     return df
 
 def add_bars_to_exhaustion_label(
@@ -636,14 +730,19 @@ def add_bars_to_exhaustion_label(
     *,
     pivot_up_col: str = "pivot_up",
     pivot_down_col: str = "pivot_down",
+    leg_state_col: str | None = "atr_leg_label",
+    leg_up_col: str = "leg_up_label",
+    leg_down_col: str = "leg_down_label",
     max_bars: int = 20,
     label_col: str = "bars_to_exhaustion",
+    censored_col: str = "bars_to_exhaustion_censored",
 ) -> pd.DataFrame:
     """
-    Bars until the next pivot (either up or down).
+    Bars until the next pivot in the active leg direction.
 
     For bar t:
       y = min(distance to next pivot, max_bars)
+      censored = 1 if next pivot is beyond max_bars or does not exist
 
     Dense regression label.
     """
@@ -653,25 +752,63 @@ def add_bars_to_exhaustion_label(
 
     n = len(df)
     y = np.full(n, np.nan)
+    censored = np.full(n, np.nan)
 
-    pivot_idx = np.where((piv_up == 1) | (piv_dn == 1))[0]
-    if len(pivot_idx) == 0:
-        df[label_col] = y
-        return df
+    next_up = np.full(n, -1, dtype=int)
+    next_dn = np.full(n, -1, dtype=int)
+    next_any = np.full(n, -1, dtype=int)
+    next_up_idx = -1
+    next_dn_idx = -1
+    next_any_idx = -1
+    for i in range(n - 1, -1, -1):
+        next_up[i] = next_up_idx
+        next_dn[i] = next_dn_idx
+        next_any[i] = next_any_idx
+        if piv_up[i] == 1:
+            next_up_idx = i
+            next_any_idx = i
+        if piv_dn[i] == 1:
+            next_dn_idx = i
+            next_any_idx = i
 
-    next_pivot_ptr = 0
+    leg_state = None
+    if leg_state_col and leg_state_col in df.columns:
+        leg_state = df[leg_state_col].fillna(0).to_numpy(dtype=float)
+    elif leg_up_col in df.columns or leg_down_col in df.columns:
+        leg_up = (
+            df[leg_up_col].fillna(0).astype(int).to_numpy()
+            if leg_up_col in df.columns
+            else np.zeros(n, dtype=int)
+        )
+        leg_dn = (
+            df[leg_down_col].fillna(0).astype(int).to_numpy()
+            if leg_down_col in df.columns
+            else np.zeros(n, dtype=int)
+        )
+        leg_state = (leg_up == 1).astype(int) - (leg_dn == 1).astype(int)
 
     for t in range(n):
-        while next_pivot_ptr < len(pivot_idx) and pivot_idx[next_pivot_ptr] <= t:
-            next_pivot_ptr += 1
+        direction = 0
+        if leg_state is not None:
+            direction = int(np.sign(leg_state[t]))
 
-        if next_pivot_ptr < len(pivot_idx):
-            dist = pivot_idx[next_pivot_ptr] - t
+        if direction == 1:
+            target_idx = next_up[t]
+        elif direction == -1:
+            target_idx = next_dn[t]
+        else:
+            target_idx = next_any[t]
+
+        if target_idx >= 0:
+            dist = target_idx - t
             y[t] = min(dist, max_bars)
+            censored[t] = 1 if dist > max_bars else 0
         else:
             y[t] = max_bars
+            censored[t] = 1
 
     df[label_col] = y
+    df[censored_col] = pd.Series(censored, index=df.index).astype("Int64")
     return df
 
 
@@ -1064,6 +1201,7 @@ def add_pivot_swing_state_machine(
 def add_all_labels(
     df: pd.DataFrame,
     *,
+    label_horizon: int | None = None,
     atr_pivot_kwargs: dict | None = None,
     leg_state_kwargs: dict | None = None,
     swing_state_decay_kwargs: dict | None = None,
@@ -1092,6 +1230,11 @@ def add_all_labels(
     mfe_mae_kwargs = mfe_mae_kwargs or {}
     bars_to_exhaustion_kwargs = bars_to_exhaustion_kwargs or {}
 
+    if label_horizon is not None:
+        continuation_kwargs.setdefault("max_holding", label_horizon)
+        mfe_mae_kwargs.setdefault("horizon", label_horizon)
+        bars_to_exhaustion_kwargs.setdefault("max_bars", label_horizon)
+
     df = add_atr_pivot_swing_labels(df, **atr_pivot_kwargs)
     if leg_state_kwargs is not None:
         df = add_atr_leg_segmentation_labels(df, **leg_state_kwargs)
@@ -1118,6 +1261,7 @@ def add_all_labels_on_timeframe(
     resample_label: str = "right",
     resample_closed: str = "right",
     shift_forward_bars: int = 1,
+    label_horizon: int | None = None,
     atr_pivot_kwargs: dict | None = None,
     leg_state_kwargs: dict | None = None,
     swing_state_decay_kwargs: dict | None = None,
@@ -1146,6 +1290,7 @@ def add_all_labels_on_timeframe(
     tf_df = add_fractal_pivots(tf_df)
     tf_df = add_all_labels(
         tf_df,
+        label_horizon=label_horizon,
         atr_pivot_kwargs=atr_pivot_kwargs,
         leg_state_kwargs=leg_state_kwargs,
         swing_state_decay_kwargs=swing_state_decay_kwargs,

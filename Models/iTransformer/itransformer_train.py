@@ -210,7 +210,11 @@ def _load_repo_full_dataset(
         long_col, short_col = "long_swing_label", "short_swing_label"
     elif label_mode == "leg":
         long_col, short_col = "leg_up_label", "leg_down_label"
-    elif label_mode in ("mfe", "mae", "mfe_mae"):
+    elif label_mode == "mfe":
+        long_col, short_col = "mfe_up_atr", "mfe_down_atr"
+    elif label_mode == "mae":
+        long_col, short_col = "mae_down_atr", "mae_up_atr"
+    elif label_mode == "mfe_mae":
         long_col, short_col = "mfe_up_atr", "mfe_down_atr"
     else:
         raise ValueError(f"Unknown label_mode: {label_mode}")

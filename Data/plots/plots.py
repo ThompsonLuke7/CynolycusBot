@@ -930,7 +930,7 @@ def plot_mfe_mae_labels(
     *,
     close_col: str = "close",
     mfe_col: str = "mfe_up_atr",
-    mae_col: str = "mfe_down_atr",
+    mae_col: str = "mae_down_atr",
     save_path: str | None = None,
 ) -> None:
     """
@@ -951,7 +951,12 @@ def plot_mfe_mae_labels(
     ax_price.set_title("Close with MFE/MAE (ATR units)")
 
     mfe = df[mfe_col].to_numpy(dtype=float) if mfe_col in df.columns else None
-    mae = df[mae_col].to_numpy(dtype=float) if mae_col in df.columns else None
+    if mae_col in df.columns:
+        mae = df[mae_col].to_numpy(dtype=float)
+    elif "mfe_down_atr" in df.columns:
+        mae = df["mfe_down_atr"].to_numpy(dtype=float)
+    else:
+        mae = None
 
     if mfe is None or mae is None:
         raise KeyError(f"Missing required columns: {mfe_col} and/or {mae_col}")
@@ -1295,7 +1300,11 @@ def _load_bilstm_split_data(
         long_col, short_col = "long_swing_label", "short_swing_label"
     elif label_mode == "leg":
         long_col, short_col = "leg_up_label", "leg_down_label"
-    elif label_mode in {"mfe", "mae", "mfe_mae"}:
+    elif label_mode == "mfe":
+        long_col, short_col = "mfe_up_atr", "mfe_down_atr"
+    elif label_mode == "mae":
+        long_col, short_col = "mae_down_atr", "mae_up_atr"
+    elif label_mode == "mfe_mae":
         long_col, short_col = "mfe_up_atr", "mfe_down_atr"
     else:
         raise ValueError(f"Unknown label_mode: {label_mode}")
