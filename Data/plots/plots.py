@@ -1544,6 +1544,11 @@ def plot_model_inference(
     close_y = X_df["close"].to_numpy() if "close" in X_df.columns else None
     pos = np.arange(len(X_df))
 
+    if long_actual is not None:
+        long_actual = np.asarray(long_actual).reshape(-1)
+    if short_actual is not None:
+        short_actual = np.asarray(short_actual).reshape(-1)
+
     if long_actual is not None and len(long_actual) != len(X_df):
         raise ValueError("long_actual length must match X_df for plotting.")
     if short_actual is not None and len(short_actual) != len(X_df):

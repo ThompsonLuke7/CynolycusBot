@@ -734,47 +734,63 @@ def add_bars_to_exhaustion_label(
     leg_up_col: str = "leg_up_label",
     leg_down_col: str = "leg_down_label",
     max_bars: int = 20,
+    # --- existing outputs (backwards compatible) ---
     label_col: str = "bars_to_exhaustion",
     censored_col: str = "bars_to_exhaustion_censored",
+    # --- NEW: directional outputs ---
+    long_label_col: str = "bars_to_exhaustion_long",
+    short_label_col: str = "bars_to_exhaustion_short",
+    long_censored_col: str = "bars_to_exhaustion_long_censored",
+    short_censored_col: str = "bars_to_exhaustion_short_censored",
+    # --- NEW: normalized "progress" (0..1) ---
+    progress_long_col: str = "exhaustion_progress_long",
+    progress_short_col: str = "exhaustion_progress_short",
+    # --- behavior knobs ---
+    mask_to_leg: bool = True,          # only provide long target on up legs, short on down legs
+    exclude_pivot_bar: bool = True,    # if True, pivot bar itself becomes NaN (prevents trivial 0/1 labels)
+    fallback_to_any_when_flat: bool = False,  # if leg is 0, compute both anyway if False? (see below)
 ) -> pd.DataFrame:
     """
-    Bars until the next pivot in the active leg direction.
+    Directional bars-to-exhaustion.
 
-    For bar t:
-      y = min(distance to next pivot, max_bars)
-      censored = 1 if next pivot is beyond max_bars or does not exist
+    - LONG exhaustion: bars until next pivot_up
+    - SHORT exhaustion: bars until next pivot_down
 
-    Dense regression label.
+    Also adds progress targets:
+      progress = 1 - (bars_remaining / max_bars), clipped to [0,1]
+    which behaves like "how late in the leg are we?"
+
+    Backwards compatible:
+      df[label_col] becomes direction-aware:
+        - if in up leg => uses long
+        - if in down leg => uses short
+        - if flat/unknown => uses min(long, short) unless fallback_to_any_when_flat=False
     """
 
     piv_up = df[pivot_up_col].fillna(0).astype(int).to_numpy()
     piv_dn = df[pivot_down_col].fillna(0).astype(int).to_numpy()
 
     n = len(df)
-    y = np.full(n, np.nan)
-    censored = np.full(n, np.nan)
 
+    # ----- build next pivot indices (strictly in the future) -----
     next_up = np.full(n, -1, dtype=int)
     next_dn = np.full(n, -1, dtype=int)
-    next_any = np.full(n, -1, dtype=int)
-    next_up_idx = -1
-    next_dn_idx = -1
-    next_any_idx = -1
+    nxt_u = -1
+    nxt_d = -1
     for i in range(n - 1, -1, -1):
-        next_up[i] = next_up_idx
-        next_dn[i] = next_dn_idx
-        next_any[i] = next_any_idx
+        next_up[i] = nxt_u
+        next_dn[i] = nxt_d
         if piv_up[i] == 1:
-            next_up_idx = i
-            next_any_idx = i
+            nxt_u = i
         if piv_dn[i] == 1:
-            next_dn_idx = i
-            next_any_idx = i
+            nxt_d = i
 
+    # ----- leg state -----
     leg_state = None
     if leg_state_col and leg_state_col in df.columns:
         leg_state = df[leg_state_col].fillna(0).to_numpy(dtype=float)
-    elif leg_up_col in df.columns or leg_down_col in df.columns:
+    else:
+        # fallback from one-vs-all
         leg_up = (
             df[leg_up_col].fillna(0).astype(int).to_numpy()
             if leg_up_col in df.columns
@@ -787,39 +803,120 @@ def add_bars_to_exhaustion_label(
         )
         leg_state = (leg_up == 1).astype(int) - (leg_dn == 1).astype(int)
 
+    # ----- outputs -----
+    y_long = np.full(n, np.nan, dtype=float)
+    y_short = np.full(n, np.nan, dtype=float)
+    c_long = np.full(n, np.nan, dtype=float)
+    c_short = np.full(n, np.nan, dtype=float)
+
+    # helper: distance to next idx
+    def _dist_to(next_idx: int, t: int) -> tuple[float, float]:
+        if next_idx >= 0:
+            dist = next_idx - t
+            val = float(min(dist, max_bars))
+            cens = 1.0 if dist > max_bars else 0.0
+            return val, cens
+        # no pivot found -> censored at max
+        return float(max_bars), 1.0
+
     for t in range(n):
-        direction = 0
-        if leg_state is not None:
-            direction = int(np.sign(leg_state[t]))
+        # exclude pivot bar itself if requested (prevents trivial y=0/1 on the event)
+        if exclude_pivot_bar and (piv_up[t] == 1 or piv_dn[t] == 1):
+            continue
 
-        if direction == 1:
-            target_idx = next_up[t]
-        elif direction == -1:
-            target_idx = next_dn[t]
-        else:
-            target_idx = next_any[t]
+        # compute both directionals always (we'll mask later if desired)
+        yL, cL = _dist_to(next_up[t], t)
+        yS, cS = _dist_to(next_dn[t], t)
 
-        if target_idx >= 0:
-            dist = target_idx - t
-            y[t] = min(dist, max_bars)
-            censored[t] = 1 if dist > max_bars else 0
-        else:
-            y[t] = max_bars
-            censored[t] = 1
+        y_long[t], c_long[t] = yL, cL
+        y_short[t], c_short[t] = yS, cS
+
+    # ----- mask to leg direction (recommended) -----
+    if mask_to_leg and leg_state is not None:
+        up_mask = np.sign(leg_state) == 1
+        dn_mask = np.sign(leg_state) == -1
+        flat_mask = ~(up_mask | dn_mask)
+
+        # long label only meaningful in up legs
+        y_long[~up_mask] = np.nan
+        c_long[~up_mask] = np.nan
+
+        # short label only meaningful in down legs
+        y_short[~dn_mask] = np.nan
+        c_short[~dn_mask] = np.nan
+
+        # if flat/unknown: optionally compute both anyway
+        if fallback_to_any_when_flat:
+            # restore for flat bars only
+            for t in np.where(flat_mask)[0]:
+                if exclude_pivot_bar and (piv_up[t] == 1 or piv_dn[t] == 1):
+                    continue
+                yL, cL = _dist_to(next_up[t], t)
+                yS, cS = _dist_to(next_dn[t], t)
+                y_long[t], c_long[t] = yL, cL
+                y_short[t], c_short[t] = yS, cS
+
+    # ----- progress targets (0..1) -----
+    # progress = 1 - remaining/max_bars (late in swing => closer to 1)
+    prog_long = np.where(np.isfinite(y_long), 1.0 - (y_long / float(max_bars)), np.nan)
+    prog_short = np.where(np.isfinite(y_short), 1.0 - (y_short / float(max_bars)), np.nan)
+    prog_long = np.clip(prog_long, 0.0, 1.0)
+    prog_short = np.clip(prog_short, 0.0, 1.0)
+
+    # ----- backwards compatible combined label -----
+    # - if in up leg -> long
+    # - if in down leg -> short
+    # - if flat/unknown -> min(long, short) (closest pivot) unless you disabled both via mask
+    y = np.full(n, np.nan, dtype=float)
+    cens = np.full(n, np.nan, dtype=float)
+
+    if leg_state is not None:
+        up_mask = np.sign(leg_state) == 1
+        dn_mask = np.sign(leg_state) == -1
+        flat_mask = ~(up_mask | dn_mask)
+
+        y[up_mask] = y_long[up_mask]
+        cens[up_mask] = c_long[up_mask]
+        y[dn_mask] = y_short[dn_mask]
+        cens[dn_mask] = c_short[dn_mask]
+
+        # flat: choose closest event if available
+        if np.any(flat_mask):
+            # compute "any" without unmasking directionals
+            for t in np.where(flat_mask)[0]:
+                if exclude_pivot_bar and (piv_up[t] == 1 or piv_dn[t] == 1):
+                    continue
+                yL, cL = _dist_to(next_up[t], t)
+                yS, cS = _dist_to(next_dn[t], t)
+                if yL <= yS:
+                    y[t], cens[t] = yL, cL
+                else:
+                    y[t], cens[t] = yS, cS
+    else:
+        # no leg state: default to nearest of up/down pivots
+        for t in range(n):
+            if exclude_pivot_bar and (piv_up[t] == 1 or piv_dn[t] == 1):
+                continue
+            yL, cL = _dist_to(next_up[t], t)
+            yS, cS = _dist_to(next_dn[t], t)
+            if yL <= yS:
+                y[t], cens[t] = yL, cL
+            else:
+                y[t], cens[t] = yS, cS
+
+    # ----- attach -----
+    df[long_label_col] = y_long
+    df[short_label_col] = y_short
+    df[long_censored_col] = pd.Series(c_long, index=df.index).astype("Int64")
+    df[short_censored_col] = pd.Series(c_short, index=df.index).astype("Int64")
+
+    df[progress_long_col] = prog_long
+    df[progress_short_col] = prog_short
 
     df[label_col] = y
-    df[censored_col] = pd.Series(censored, index=df.index).astype("Int64")
+    df[censored_col] = pd.Series(cens, index=df.index).astype("Int64")
     return df
 
-
-def add_bars_to_exhaustion_labels(
-    df: pd.DataFrame,
-    **kwargs,
-) -> pd.DataFrame:
-    """
-    Backwards-compatible alias for add_bars_to_exhaustion_label.
-    """
-    return add_bars_to_exhaustion_label(df, **kwargs)
 
 
 def add_pivot_swing_state_probabilities(

@@ -219,7 +219,7 @@ def _load_repo_full_dataset(
     elif label_mode == "mfe_mae":
         long_col, short_col = "mfe_up_atr", "mfe_down_atr"
     elif label_mode == "exhaustion":
-        long_col = short_col = "bars_to_exhaustion"
+        long_col, short_col = "exhaustion_progress_long", "exhaustion_progress_short"
     else:
         raise ValueError(f"Unknown label_mode: {label_mode}")
 

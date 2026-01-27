@@ -17,11 +17,8 @@ if str(_MODELS_ROOT) not in sys.path:
 
 from iTransformer.itransformer_train import build_arg_parser, run_training
 
-from Data.plots.plots import (
-    _load_plot_frame,
-    get_default_model_inference_plot_path,
-    plot_model_inference,
-)
+from Data.plots.plots import _load_plot_frame, plot_model_inference
+from Data.retrieve_data import normalize_ticker
 
 
 def _plot_regression_inference(
@@ -147,7 +144,14 @@ def _plot_side(
         return
 
     model_name = f"itransformer_{label_mode}_{side}"
-    save_path = get_default_model_inference_plot_path(ticker, model_name)
+    slug = normalize_ticker(ticker).lower()
+    save_path = (
+        Path("Data")
+        / "processed"
+        / slug
+        / "plots"
+        / f"{slug}_{model_name}_inference.png"
+    )
 
     if task == "binary":
         long_probs = test_pred if side in {"long", "up"} else None
@@ -195,7 +199,7 @@ def main() -> None:
 
     x_path = None
     if args.x_path is None:
-        x_filename = args.x_filename or f"X_{args.dataset_name}_lstm.parquet"
+        x_filename = args.x_filename or f"X_{args.dataset_name}_tree.parquet"
         dataset_dir = (
             Path("Data")
             / "processed"
