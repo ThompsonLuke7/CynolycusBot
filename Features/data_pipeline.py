@@ -57,7 +57,7 @@ def load_processed_frames(
 
 def chronological_split_indices(
     n: int,
-    train_frac: float = 0.7,
+    train_frac: float = 0.75,
     val_frac: float = 0.15,
 ) -> Dict[str, np.ndarray]:
     """
@@ -119,7 +119,7 @@ def main(
     dataset_name: str | None = None,
     ticker: str = "$SPY",
     label_mode: str | None = None,
-    train_frac: float = 0.7,
+    train_frac: float = 0.75,
     val_frac: float = 0.15,
     x_filename: str = "X.parquet",
 ) -> None:

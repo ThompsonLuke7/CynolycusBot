@@ -119,13 +119,13 @@ def parse_args():
     parser.add_argument(
         "--train-frac",
         type=float,
-        default=0.92,
-        help="Train split fraction (default: 0.7).",
+        default=0.75,
+        help="Train split fraction (default: 0.).",
     )
     parser.add_argument(
         "--val-frac",
         type=float,
-        default=0.00,
+        default=0.15,
         help="Validation split fraction (default: 0.15).",
     )
     parser.add_argument(
@@ -309,19 +309,23 @@ if __name__ == "__main__":
             models=selected_models,
         )
         first = True
+        align_index = None
         for model_name, df in model_dfs.items():
             model_key = model_name.strip().lower()
             x_file = f"X_{dataset_name}_{model_key}.parquet"  # X_15min_tree.parquet
 
-            clean_feature_matrix(
+            cleaned, _, _ = clean_feature_matrix(
                 df,
                 save_outputs=args.save_processed,
                 ticker=args.ticker,
                 dataset_name=dataset_name,   # <-- SAME folder
                 x_filename=x_file,           # <-- separate X files
                 write_y=first,
+                align_index=align_index,
             )
             first = False
+            if align_index is None:
+                align_index = cleaned.index
 
     if args.save_processed:
         dataset_exists = True

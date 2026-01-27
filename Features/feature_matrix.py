@@ -305,6 +305,7 @@ def clean_feature_matrix(
     label_cols: list[str] | None = None,
     x_filename: str = "X.parquet",
     write_y: bool = True,
+    align_index: pd.Index | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     """
     Clean a training matrix using the same steps as feature_engineering.main.
@@ -339,6 +340,16 @@ def clean_feature_matrix(
     cleaned = drop_ohlcv_columns(cleaned)
     feature_df = drop_ohlcv_columns(feature_df)
     feature_cols = list(feature_df.columns)
+
+    if align_index is not None:
+        missing = align_index.difference(cleaned.index)
+        if len(missing) > 0:
+            raise ValueError(
+                "align_index contains rows not present in the cleaned frame. "
+                "Regenerate features or relax feature NaN handling."
+            )
+        cleaned = cleaned.loc[align_index]
+        feature_df = feature_df.loc[align_index]
 
     if save_outputs:
         clean_ticker = normalize_ticker(ticker)
