@@ -128,7 +128,7 @@ def _select_target(side: str, y_long: np.ndarray, y_short: np.ndarray) -> np.nda
 
 
 def _is_regression_label_mode(label_mode: str) -> bool:
-    return label_mode in ("mfe", "mae", "mfe_mae")
+    return label_mode in ("mfe", "mae", "mfe_mae", "exhaustion")
 
 
 def _load_norm_stats(stats_dir: Path, dataset_name: str, x_filename: str) -> dict | None:
@@ -210,12 +210,16 @@ def _load_repo_full_dataset(
         long_col, short_col = "long_swing_label", "short_swing_label"
     elif label_mode == "leg":
         long_col, short_col = "leg_up_label", "leg_down_label"
+    elif label_mode == "continuation":
+        long_col, short_col = "long_cont_label", "short_cont_label"
     elif label_mode == "mfe":
         long_col, short_col = "mfe_up_atr", "mfe_down_atr"
     elif label_mode == "mae":
         long_col, short_col = "mae_down_atr", "mae_up_atr"
     elif label_mode == "mfe_mae":
         long_col, short_col = "mfe_up_atr", "mfe_down_atr"
+    elif label_mode == "exhaustion":
+        long_col = short_col = "bars_to_exhaustion"
     else:
         raise ValueError(f"Unknown label_mode: {label_mode}")
 
