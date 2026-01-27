@@ -300,7 +300,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
     use_repo = args.x_path is None or args.y_path is None
     if use_repo:
         dataset_name = args.dataset_name
-        x_filename = args.x_filename or f"X_{dataset_name}_lstm.parquet"
+        x_filename = args.x_filename or f"X_{dataset_name}_tree.parquet"
         X, y_long, y_short, split_idx = _load_repo_full_dataset(
             ticker=args.ticker,
             dataset_name=dataset_name,
