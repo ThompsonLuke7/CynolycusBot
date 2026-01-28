@@ -207,10 +207,19 @@ class ForecastWindowDataset(Dataset):
 # Metrics
 # -----------------------------
 @torch.no_grad()
-def compute_metrics(pred: torch.Tensor, tgt: torch.Tensor) -> Dict[str, float]:
+def compute_metrics(
+    pred: torch.Tensor, tgt: torch.Tensor, mask: Optional[torch.Tensor] = None
+) -> Dict[str, float]:
     """
     pred, tgt: (N, pred_horizon, D) or (N, pred_horizon, 1)
+    mask: boolean tensor with same shape; metrics computed only where mask==True
     """
+    if mask is not None:
+        pred = pred[mask]
+        tgt = tgt[mask]
+    if pred.numel() == 0:
+        return {"mse": float("nan"), "mae": float("nan"), "r2": float("nan")}
+
     err = pred - tgt
     mse = torch.mean(err ** 2).item()
     mae = torch.mean(err.abs()).item()
@@ -373,6 +382,19 @@ def maybe_apply_output_activation(
     return pred
 
 
+def masked_loss(
+    pred: torch.Tensor,
+    tgt: torch.Tensor,
+    mask: Optional[torch.Tensor],
+    loss_fn: nn.Module,
+) -> torch.Tensor:
+    if mask is None:
+        return loss_fn(pred, tgt)
+    if mask.sum().item() == 0:
+        return torch.tensor(0.0, device=pred.device, dtype=pred.dtype, requires_grad=True)
+    return loss_fn(pred[mask], tgt[mask])
+
+
 def extract_pred_dict_output(
     preds: Dict[int, torch.Tensor] | torch.Tensor, pred_horizon: int
 ) -> torch.Tensor:
@@ -494,6 +516,7 @@ def train_one_epoch(
     label_mode: Optional[str],
     use_sigmoid: bool,
     use_amp: bool,
+    mask_nan_y: bool,
     clip_grad: float = 1.0,
 ) -> float:
     model.train()
@@ -508,16 +531,24 @@ def train_one_epoch(
             out_dict = model(x)  # dict[int, tensor]
             pred = extract_pred_dict_output(out_dict, pred_horizon)  # (B, H, D)
             pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
-            loss = loss_fn(pred, y)
+            mask = torch.isfinite(y) if mask_nan_y else None
+            loss = masked_loss(pred, y, mask, loss_fn)
 
         loss.backward()
         if clip_grad and clip_grad > 0:
             nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
         optimizer.step()
 
-        bs = x.size(0)
-        total += loss.item() * bs
-        n += bs
+        if mask_nan_y:
+            valid = int(mask.sum().item()) if mask is not None else 0
+            if valid == 0:
+                continue
+            total += loss.item() * valid
+            n += valid
+        else:
+            bs = x.size(0)
+            total += loss.item() * bs
+            n += bs
 
     return total / max(n, 1)
 
@@ -532,6 +563,7 @@ def evaluate(
     label_mode: Optional[str],
     use_sigmoid: bool,
     use_amp: bool,
+    mask_nan_y: bool,
 ) -> Dict[str, float]:
     model.eval()
     total_loss = 0.0
@@ -539,6 +571,7 @@ def evaluate(
 
     preds_all = []
     tgts_all = []
+    masks_all = [] if mask_nan_y else None
 
     for x, y in loader:
         x, y = maybe_to_device((x, y), device)
@@ -547,19 +580,34 @@ def evaluate(
             pred = extract_pred_dict_output(out_dict, pred_horizon)
             pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
 
-        loss = loss_fn(pred, y)
+        mask = torch.isfinite(y) if mask_nan_y else None
+        loss = masked_loss(pred, y, mask, loss_fn)
 
-        bs = x.size(0)
-        total_loss += loss.item() * bs
-        n += bs
+        if mask_nan_y:
+            valid = int(mask.sum().item()) if mask is not None else 0
+            if valid == 0:
+                continue
+            total_loss += loss.item() * valid
+            n += valid
+        else:
+            bs = x.size(0)
+            total_loss += loss.item() * bs
+            n += bs
 
         preds_all.append(pred.detach().cpu())
         tgts_all.append(y.detach().cpu())
+        if mask_nan_y:
+            masks_all.append(mask.detach().cpu())
 
     preds_cat = torch.cat(preds_all, dim=0) if preds_all else torch.empty(0)
     tgts_cat = torch.cat(tgts_all, dim=0) if tgts_all else torch.empty(0)
+    mask_cat = torch.cat(masks_all, dim=0) if (mask_nan_y and masks_all) else None
 
-    metrics = compute_metrics(preds_cat, tgts_cat) if preds_all else {"mse": float("nan"), "mae": float("nan"), "r2": float("nan")}
+    metrics = (
+        compute_metrics(preds_cat, tgts_cat, mask_cat)
+        if preds_all
+        else {"mse": float("nan"), "mae": float("nan"), "r2": float("nan")}
+    )
     metrics["loss"] = total_loss / max(n, 1)
     return metrics
 
@@ -578,6 +626,7 @@ def fit_model(
     label_mode: Optional[str],
     use_sigmoid: bool,
     use_amp: bool,
+    mask_nan_y: bool,
 ) -> Tuple[nn.Module, Dict[str, float]]:
     model = model.to(device)
 
@@ -603,10 +652,19 @@ def fit_model(
             label_mode,
             use_sigmoid,
             use_amp,
+            mask_nan_y,
             clip_grad=clip_grad,
         )
         val_metrics = evaluate(
-            model, val_loader, loss_fn, device, pred_horizon, label_mode, use_sigmoid, use_amp
+            model,
+            val_loader,
+            loss_fn,
+            device,
+            pred_horizon,
+            label_mode,
+            use_sigmoid,
+            use_amp,
+            mask_nan_y,
         )
         scheduler.step(val_metrics["loss"])
 
@@ -642,6 +700,12 @@ def main():
     ap.add_argument("--long_label_col", type=str, default=None, help="override long label column")
     ap.add_argument("--short_label_col", type=str, default=None, help="override short label column")
     ap.add_argument("--fill_nan_y", type=float, default=0.0, help="fill value for NaNs in labels")
+    ap.add_argument(
+        "--mask_nan_y",
+        type=int,
+        default=1,
+        help="mask NaN labels in loss/metrics instead of filling",
+    )
 
     ap.add_argument("--lookback_len", type=int, default=96)
     ap.add_argument("--pred_horizon", type=int, default=1)
@@ -795,9 +859,15 @@ def main():
 
     for side in sides:
         y_side_raw = y_long_raw if side == "long" else y_short_raw
-        y_side = np.nan_to_num(
-            y_side_raw, nan=args.fill_nan_y, posinf=args.fill_nan_y, neginf=args.fill_nan_y
-        )
+        if bool(args.mask_nan_y):
+            y_side = y_side_raw.astype(np.float32, copy=False)
+        else:
+            y_side = np.nan_to_num(
+                y_side_raw,
+                nan=args.fill_nan_y,
+                posinf=args.fill_nan_y,
+                neginf=args.fill_nan_y,
+            )
         if y_side.ndim == 1:
             y_side = y_side[:, None]
         elif y_side.ndim != 2:
@@ -913,6 +983,7 @@ def main():
                 label_mode=label_mode_for_activation,
                 use_sigmoid=use_sigmoid,
                 use_amp=use_amp,
+                mask_nan_y=bool(args.mask_nan_y),
             )
 
             # test
@@ -926,6 +997,7 @@ def main():
                 label_mode_for_activation,
                 use_sigmoid,
                 use_amp,
+                bool(args.mask_nan_y),
             )
 
             print(f"\nBest VAL for {variant}: {best_val_metrics}")
