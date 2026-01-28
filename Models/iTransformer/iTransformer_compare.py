@@ -387,12 +387,30 @@ def masked_loss(
     tgt: torch.Tensor,
     mask: Optional[torch.Tensor],
     loss_fn: nn.Module,
+    weight: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    if mask is None:
-        return loss_fn(pred, tgt)
-    if mask.sum().item() == 0:
-        return torch.tensor(0.0, device=pred.device, dtype=pred.dtype, requires_grad=True)
-    return loss_fn(pred[mask], tgt[mask])
+    loss_el = loss_fn(pred, tgt)
+    if weight is not None:
+        loss_el = loss_el * weight
+
+    if mask is not None:
+        if mask.sum().item() == 0:
+            return (
+                torch.tensor(0.0, device=pred.device, dtype=pred.dtype, requires_grad=True),
+                0.0,
+            )
+        loss_el = loss_el[mask]
+        denom = weight[mask].sum() if weight is not None else mask.sum()
+    else:
+        denom = weight.sum() if weight is not None else torch.tensor(loss_el.numel(), device=pred.device)
+
+    denom_val = float(denom.item()) if torch.is_tensor(denom) else float(denom)
+    if denom_val <= 0:
+        return (
+            torch.tensor(0.0, device=pred.device, dtype=pred.dtype, requires_grad=True),
+            0.0,
+        )
+    return loss_el.sum() / denom, denom_val
 
 
 def extract_pred_dict_output(
@@ -558,6 +576,8 @@ def train_one_epoch(
     mask_nan_y: bool,
     valid_loss_fn: Optional[nn.Module],
     valid_loss_weight: float,
+    spike_threshold: Optional[float],
+    spike_weight_mult: float,
     clip_grad: float = 1.0,
 ) -> float:
     model.train()
@@ -573,7 +593,11 @@ def train_one_epoch(
             pred, valid_logits = extract_pred_and_valid(out, pred_horizon)  # (B, H, D)
             pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
             mask = torch.isfinite(y) if mask_nan_y else None
-            loss = masked_loss(pred, y, mask, loss_fn)
+            weight = None
+            if spike_threshold is not None and spike_weight_mult > 1.0:
+                thresh = torch.tensor(spike_threshold, device=y.device, dtype=y.dtype)
+                weight = torch.where(y >= thresh, spike_weight_mult, 1.0).to(y.dtype)
+            loss, denom_val = masked_loss(pred, y, mask, loss_fn, weight)
             if valid_logits is not None and mask is not None and valid_loss_fn is not None:
                 valid_target = mask.to(dtype=valid_logits.dtype)
                 loss = loss + valid_loss_weight * valid_loss_fn(valid_logits, valid_target)
@@ -583,16 +607,10 @@ def train_one_epoch(
             nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
         optimizer.step()
 
-        if mask_nan_y:
-            valid = int(mask.sum().item()) if mask is not None else 0
-            if valid == 0:
-                continue
-            total += loss.item() * valid
-            n += valid
-        else:
-            bs = x.size(0)
-            total += loss.item() * bs
-            n += bs
+        if denom_val <= 0:
+            continue
+        total += loss.item() * denom_val
+        n += denom_val
 
     return total / max(n, 1)
 
@@ -609,6 +627,8 @@ def evaluate(
     use_amp: bool,
     mask_nan_y: bool,
     valid_loss_fn: Optional[nn.Module],
+    spike_threshold: Optional[float],
+    spike_weight_mult: float,
 ) -> Dict[str, float]:
     model.eval()
     total_loss = 0.0
@@ -629,7 +649,11 @@ def evaluate(
             pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
 
         mask = torch.isfinite(y) if mask_nan_y else None
-        loss = masked_loss(pred, y, mask, loss_fn)
+        weight = None
+        if spike_threshold is not None and spike_weight_mult > 1.0:
+            thresh = torch.tensor(spike_threshold, device=y.device, dtype=y.dtype)
+            weight = torch.where(y >= thresh, spike_weight_mult, 1.0).to(y.dtype)
+        loss, denom_val = masked_loss(pred, y, mask, loss_fn, weight)
         if valid_logits is not None and mask is not None and valid_loss_fn is not None:
             valid_target = mask.to(dtype=valid_logits.dtype)
             valid_bce = valid_loss_fn(valid_logits, valid_target).item()
@@ -639,16 +663,10 @@ def evaluate(
             valid_acc_sum += valid_acc
             valid_batches += 1
 
-        if mask_nan_y:
-            valid = int(mask.sum().item()) if mask is not None else 0
-            if valid == 0:
-                continue
-            total_loss += loss.item() * valid
-            n += valid
-        else:
-            bs = x.size(0)
-            total_loss += loss.item() * bs
-            n += bs
+        if denom_val <= 0:
+            continue
+        total_loss += loss.item() * denom_val
+        n += denom_val
 
         preds_all.append(pred.detach().cpu())
         tgts_all.append(y.detach().cpu())
@@ -687,11 +705,13 @@ def fit_model(
     use_amp: bool,
     mask_nan_y: bool,
     valid_loss_weight: float,
+    spike_threshold: Optional[float],
+    spike_weight_mult: float,
 ) -> Tuple[nn.Module, Dict[str, float]]:
     model = model.to(device)
 
     # Robust for markets; change to MSELoss if you prefer
-    loss_fn = nn.SmoothL1Loss()
+    loss_fn = nn.SmoothL1Loss(reduction="none")
     valid_loss_fn = nn.BCEWithLogitsLoss() if mask_nan_y else None
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -716,6 +736,8 @@ def fit_model(
             mask_nan_y,
             valid_loss_fn,
             valid_loss_weight,
+            spike_threshold,
+            spike_weight_mult,
             clip_grad=clip_grad,
         )
         val_metrics = evaluate(
@@ -729,6 +751,8 @@ def fit_model(
             use_amp,
             mask_nan_y,
             valid_loss_fn,
+            spike_threshold,
+            spike_weight_mult,
         )
         scheduler.step(val_metrics["loss"])
 
@@ -779,8 +803,20 @@ def main():
     ap.add_argument(
         "--valid_loss_weight",
         type=float,
-        default=1.0,
+        default=.5,
         help="weight for validity head BCE loss",
+    )
+    ap.add_argument(
+        "--spike_weight_pct",
+        type=float,
+        default=0.9,
+        help="percentile threshold for spike up-weighting (e.g., 0.9 for top 10%)",
+    )
+    ap.add_argument(
+        "--spike_weight_mult",
+        type=float,
+        default=1.0,
+        help="multiplier for spike samples (1.0 disables weighting)",
     )
 
     ap.add_argument("--lookback_len", type=int, default=96)
@@ -797,16 +833,16 @@ def main():
 
     # training
     ap.add_argument("--epochs", type=int, default=40)
-    ap.add_argument("--patience", type=int, default=8)
+    ap.add_argument("--patience", type=int, default=3)
     ap.add_argument("--batch_size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-2)
     ap.add_argument("--clip_grad", type=float, default=1.0)
 
     # model params (shared across variants)
-    ap.add_argument("--dim", type=int, default=256)
+    ap.add_argument("--dim", type=int, default=128)
     ap.add_argument("--depth", type=int, default=6)
-    ap.add_argument("--heads", type=int, default=8)
+    ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--dim_head", type=int, default=64)
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--num_tokens_per_variate", type=int, default=1)
@@ -974,6 +1010,21 @@ def main():
             if finite.size and (finite.min() < 0.0 or finite.max() > 1.0):
                 print("[warn] labels outside [0,1] with --use_sigmoid=1")
 
+        spike_threshold = None
+        if args.spike_weight_mult > 1.0:
+            if not (0.0 < args.spike_weight_pct < 1.0):
+                raise ValueError("--spike_weight_pct must be in (0, 1)")
+            y_train = y_side[: split_idx.train_end]
+            y_train = y_train[np.isfinite(y_train)]
+            if y_train.size == 0:
+                print("[warn] spike weighting enabled but no finite train targets.")
+            else:
+                spike_threshold = float(np.quantile(y_train, args.spike_weight_pct))
+                print(
+                    f"[info] spike weighting: pct={args.spike_weight_pct:.2f} "
+                    f"threshold={spike_threshold:.6f} mult={args.spike_weight_mult:.2f}"
+                )
+
         ds_train = ForecastWindowDataset(
             X,
             y_side,
@@ -1063,10 +1114,12 @@ def main():
                 use_amp=use_amp,
                 mask_nan_y=bool(args.mask_nan_y),
                 valid_loss_weight=args.valid_loss_weight,
+                spike_threshold=spike_threshold,
+                spike_weight_mult=args.spike_weight_mult,
             )
 
             # test
-            loss_fn = nn.SmoothL1Loss()
+            loss_fn = nn.SmoothL1Loss(reduction="none")
             test_metrics = evaluate(
                 model,
                 test_loader,
@@ -1078,6 +1131,8 @@ def main():
                 use_amp,
                 bool(args.mask_nan_y),
                 nn.BCEWithLogitsLoss() if use_valid_head else None,
+                spike_threshold,
+                args.spike_weight_mult,
             )
 
             print(f"\nBest VAL for {variant}: {best_val_metrics}")
