@@ -415,7 +415,6 @@ def build_model(
         heads=cfg.heads,
         dim_head=cfg.dim_head,
         pred_length=(pred_horizon,),
-        dropout=cfg.dropout,
         use_reversible_instance_norm=cfg.use_rev_inorm,
     )
 
