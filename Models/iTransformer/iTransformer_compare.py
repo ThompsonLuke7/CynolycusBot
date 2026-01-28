@@ -815,7 +815,7 @@ def main():
     ap.add_argument(
         "--spike_weight_mult",
         type=float,
-        default=1.0,
+        default=2.0,
         help="multiplier for spike samples (1.0 disables weighting)",
     )
 
