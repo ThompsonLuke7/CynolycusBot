@@ -364,11 +364,16 @@ def maybe_apply_output_activation(
     return pred
 
 
-def extract_pred_dict_output(preds: Dict[int, torch.Tensor], pred_horizon: int) -> torch.Tensor:
+def extract_pred_dict_output(
+    preds: Dict[int, torch.Tensor] | torch.Tensor, pred_horizon: int
+) -> torch.Tensor:
     """
-    lucidrains outputs: {pred_len: Tensor[B, pred_len, variate]}
-    We requested pred_length=(pred_horizon,) so it should exist.
+    lucidrains outputs:
+      - dict: {pred_len: Tensor[B, pred_len, variate]}
+      - or tensor directly for some versions.
     """
+    if torch.is_tensor(preds):
+        return preds
     if pred_horizon not in preds:
         raise KeyError(
             f"Model did not return pred_len={pred_horizon}. Available keys: {list(preds.keys())}"
@@ -400,9 +405,13 @@ class OutputProjector(nn.Module):
         self.base = base
         self.proj = nn.Linear(in_dim, out_dim)
 
-    def forward(self, x: torch.Tensor) -> Dict[int, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Dict[int, torch.Tensor] | torch.Tensor:
         out = self.base(x)
-        return {k: self.proj(v) for k, v in out.items()}
+        if isinstance(out, dict):
+            return {k: self.proj(v) for k, v in out.items()}
+        if torch.is_tensor(out):
+            return self.proj(out)
+        raise TypeError(f"Unexpected model output type: {type(out)}")
 
 
 def build_model(
