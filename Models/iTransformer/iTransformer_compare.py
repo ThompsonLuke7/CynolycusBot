@@ -412,6 +412,19 @@ def extract_pred_dict_output(
     return preds[pred_horizon]
 
 
+def extract_pred_and_valid(
+    out: Dict[int, torch.Tensor] | torch.Tensor | Tuple[object, object],
+    pred_horizon: int,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    if isinstance(out, tuple) and len(out) == 2:
+        value_out, valid_out = out
+        pred = extract_pred_dict_output(value_out, pred_horizon)
+        valid = extract_pred_dict_output(valid_out, pred_horizon)
+        return pred, valid
+    pred = extract_pred_dict_output(out, pred_horizon)
+    return pred, None
+
+
 # -----------------------------
 # Model factory (lucidrains)
 # -----------------------------
@@ -445,6 +458,29 @@ class OutputProjector(nn.Module):
         raise TypeError(f"Unexpected model output type: {type(out)}")
 
 
+class TwoHeadWrapper(nn.Module):
+    """Two-head outputs: validity logits + value prediction."""
+
+    def __init__(self, base: nn.Module, in_dim: int, out_dim: int) -> None:
+        super().__init__()
+        self.base = base
+        self.value_proj = nn.Identity() if in_dim == out_dim else nn.Linear(in_dim, out_dim)
+        self.valid_proj = nn.Linear(in_dim, out_dim)
+
+    def _apply_proj(self, out, proj):
+        if isinstance(out, dict):
+            return {k: proj(v) for k, v in out.items()}
+        if torch.is_tensor(out):
+            return proj(out)
+        raise TypeError(f"Unexpected model output type: {type(out)}")
+
+    def forward(self, x: torch.Tensor):
+        out = self.base(x)
+        value_out = self._apply_proj(out, self.value_proj)
+        valid_out = self._apply_proj(out, self.valid_proj)
+        return value_out, valid_out
+
+
 def build_model(
     variant: str,
     input_variates: int,
@@ -452,6 +488,7 @@ def build_model(
     pred_horizon: int,
     cfg: ModelConfig,
     output_variates: Optional[int] = None,
+    two_head_validity: bool = False,
 ):
     """
     variant: "original" | "2d" | "fft"
@@ -498,6 +535,8 @@ def build_model(
     else:
         raise ValueError(f"Unknown variant: {variant}")
 
+    if two_head_validity:
+        return TwoHeadWrapper(base, input_variates, output_variates)
     if output_variates != input_variates:
         return OutputProjector(base, input_variates, output_variates)
     return base
@@ -517,6 +556,8 @@ def train_one_epoch(
     use_sigmoid: bool,
     use_amp: bool,
     mask_nan_y: bool,
+    valid_loss_fn: Optional[nn.Module],
+    valid_loss_weight: float,
     clip_grad: float = 1.0,
 ) -> float:
     model.train()
@@ -528,11 +569,14 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
-            out_dict = model(x)  # dict[int, tensor]
-            pred = extract_pred_dict_output(out_dict, pred_horizon)  # (B, H, D)
+            out = model(x)
+            pred, valid_logits = extract_pred_and_valid(out, pred_horizon)  # (B, H, D)
             pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
             mask = torch.isfinite(y) if mask_nan_y else None
             loss = masked_loss(pred, y, mask, loss_fn)
+            if valid_logits is not None and mask is not None and valid_loss_fn is not None:
+                valid_target = mask.to(dtype=valid_logits.dtype)
+                loss = loss + valid_loss_weight * valid_loss_fn(valid_logits, valid_target)
 
         loss.backward()
         if clip_grad and clip_grad > 0:
@@ -564,10 +608,14 @@ def evaluate(
     use_sigmoid: bool,
     use_amp: bool,
     mask_nan_y: bool,
+    valid_loss_fn: Optional[nn.Module],
 ) -> Dict[str, float]:
     model.eval()
     total_loss = 0.0
     n = 0
+    valid_bce_sum = 0.0
+    valid_acc_sum = 0.0
+    valid_batches = 0
 
     preds_all = []
     tgts_all = []
@@ -576,12 +624,20 @@ def evaluate(
     for x, y in loader:
         x, y = maybe_to_device((x, y), device)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
-            out_dict = model(x)
-            pred = extract_pred_dict_output(out_dict, pred_horizon)
+            out = model(x)
+            pred, valid_logits = extract_pred_and_valid(out, pred_horizon)
             pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
 
         mask = torch.isfinite(y) if mask_nan_y else None
         loss = masked_loss(pred, y, mask, loss_fn)
+        if valid_logits is not None and mask is not None and valid_loss_fn is not None:
+            valid_target = mask.to(dtype=valid_logits.dtype)
+            valid_bce = valid_loss_fn(valid_logits, valid_target).item()
+            valid_probs = torch.sigmoid(valid_logits)
+            valid_acc = (valid_probs >= 0.5).eq(valid_target >= 0.5).float().mean().item()
+            valid_bce_sum += valid_bce
+            valid_acc_sum += valid_acc
+            valid_batches += 1
 
         if mask_nan_y:
             valid = int(mask.sum().item()) if mask is not None else 0
@@ -608,6 +664,9 @@ def evaluate(
         if preds_all
         else {"mse": float("nan"), "mae": float("nan"), "r2": float("nan")}
     )
+    if valid_loss_fn is not None and mask_nan_y and valid_batches > 0:
+        metrics["valid_bce"] = valid_bce_sum / valid_batches
+        metrics["valid_acc"] = valid_acc_sum / valid_batches
     metrics["loss"] = total_loss / max(n, 1)
     return metrics
 
@@ -627,11 +686,13 @@ def fit_model(
     use_sigmoid: bool,
     use_amp: bool,
     mask_nan_y: bool,
+    valid_loss_weight: float,
 ) -> Tuple[nn.Module, Dict[str, float]]:
     model = model.to(device)
 
     # Robust for markets; change to MSELoss if you prefer
     loss_fn = nn.SmoothL1Loss()
+    valid_loss_fn = nn.BCEWithLogitsLoss() if mask_nan_y else None
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2)
@@ -653,6 +714,8 @@ def fit_model(
             use_sigmoid,
             use_amp,
             mask_nan_y,
+            valid_loss_fn,
+            valid_loss_weight,
             clip_grad=clip_grad,
         )
         val_metrics = evaluate(
@@ -665,6 +728,7 @@ def fit_model(
             use_sigmoid,
             use_amp,
             mask_nan_y,
+            valid_loss_fn,
         )
         scheduler.step(val_metrics["loss"])
 
@@ -705,6 +769,18 @@ def main():
         type=int,
         default=1,
         help="mask NaN labels in loss/metrics instead of filling",
+    )
+    ap.add_argument(
+        "--two_head_validity",
+        type=int,
+        default=1,
+        help="use two-head model (validity + value) when mask_nan_y is enabled",
+    )
+    ap.add_argument(
+        "--valid_loss_weight",
+        type=float,
+        default=1.0,
+        help="weight for validity head BCE loss",
     )
 
     ap.add_argument("--lookback_len", type=int, default=96)
@@ -960,6 +1036,7 @@ def main():
             print(f"Training variant: {variant} (side={side})")
             print(f"==============================")
 
+            use_valid_head = bool(args.two_head_validity) and bool(args.mask_nan_y)
             model = build_model(
                 variant=variant,
                 input_variates=input_variates,
@@ -967,6 +1044,7 @@ def main():
                 pred_horizon=args.pred_horizon,
                 cfg=cfg,
                 output_variates=output_variates,
+                two_head_validity=use_valid_head,
             )
 
             model, best_val_metrics = fit_model(
@@ -984,6 +1062,7 @@ def main():
                 use_sigmoid=use_sigmoid,
                 use_amp=use_amp,
                 mask_nan_y=bool(args.mask_nan_y),
+                valid_loss_weight=args.valid_loss_weight,
             )
 
             # test
@@ -998,6 +1077,7 @@ def main():
                 use_sigmoid,
                 use_amp,
                 bool(args.mask_nan_y),
+                nn.BCEWithLogitsLoss() if use_valid_head else None,
             )
 
             print(f"\nBest VAL for {variant}: {best_val_metrics}")
