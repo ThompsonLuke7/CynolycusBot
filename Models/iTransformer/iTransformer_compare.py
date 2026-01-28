@@ -475,6 +475,7 @@ def train_one_epoch(
     pred_horizon: int,
     label_mode: Optional[str],
     use_sigmoid: bool,
+    use_amp: bool,
     clip_grad: float = 1.0,
 ) -> float:
     model.train()
@@ -485,10 +486,11 @@ def train_one_epoch(
         x, y = maybe_to_device((x, y), device)
 
         optimizer.zero_grad(set_to_none=True)
-        out_dict = model(x)  # dict[int, tensor]
-        pred = extract_pred_dict_output(out_dict, pred_horizon)  # (B, H, D)
-        pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
-        loss = loss_fn(pred, y)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            out_dict = model(x)  # dict[int, tensor]
+            pred = extract_pred_dict_output(out_dict, pred_horizon)  # (B, H, D)
+            pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
+            loss = loss_fn(pred, y)
 
         loss.backward()
         if clip_grad and clip_grad > 0:
@@ -511,6 +513,7 @@ def evaluate(
     pred_horizon: int,
     label_mode: Optional[str],
     use_sigmoid: bool,
+    use_amp: bool,
 ) -> Dict[str, float]:
     model.eval()
     total_loss = 0.0
@@ -521,9 +524,10 @@ def evaluate(
 
     for x, y in loader:
         x, y = maybe_to_device((x, y), device)
-        out_dict = model(x)
-        pred = extract_pred_dict_output(out_dict, pred_horizon)
-        pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            out_dict = model(x)
+            pred = extract_pred_dict_output(out_dict, pred_horizon)
+            pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
 
         loss = loss_fn(pred, y)
 
@@ -555,6 +559,7 @@ def fit_model(
     clip_grad: float,
     label_mode: Optional[str],
     use_sigmoid: bool,
+    use_amp: bool,
 ) -> Tuple[nn.Module, Dict[str, float]]:
     model = model.to(device)
 
@@ -579,9 +584,12 @@ def fit_model(
             pred_horizon,
             label_mode,
             use_sigmoid,
+            use_amp,
             clip_grad=clip_grad,
         )
-        val_metrics = evaluate(model, val_loader, loss_fn, device, pred_horizon, label_mode, use_sigmoid)
+        val_metrics = evaluate(
+            model, val_loader, loss_fn, device, pred_horizon, label_mode, use_sigmoid, use_amp
+        )
         scheduler.step(val_metrics["loss"])
 
         if val_metrics["loss"] < best_val:
@@ -654,6 +662,7 @@ def main():
     ap.add_argument("--device", type=str, default="auto")
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--use_sigmoid", type=int, default=1, help="apply sigmoid for exhaustion/continuation")
+    ap.add_argument("--amp_bf16", type=int, default=1, help="use bf16 autocast on cuda")
     ap.add_argument(
         "--sdpa_backend",
         type=str,
@@ -759,6 +768,9 @@ def main():
             )
 
     use_sigmoid = bool(args.use_sigmoid)
+    use_amp = (
+        device.startswith("cuda") and torch.cuda.is_available() and bool(args.amp_bf16)
+    )
     label_mode_for_activation = args.label_mode if use_parquet else None
 
     results: Dict[str, Dict[str, Dict[str, float]]] = {}
@@ -882,6 +894,7 @@ def main():
                 clip_grad=args.clip_grad,
                 label_mode=label_mode_for_activation,
                 use_sigmoid=use_sigmoid,
+                use_amp=use_amp,
             )
 
             # test
@@ -894,6 +907,7 @@ def main():
                 args.pred_horizon,
                 label_mode_for_activation,
                 use_sigmoid,
+                use_amp,
             )
 
             print(f"\nBest VAL for {variant}: {best_val_metrics}")
