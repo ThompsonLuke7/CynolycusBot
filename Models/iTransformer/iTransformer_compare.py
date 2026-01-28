@@ -77,6 +77,28 @@ def set_seed(seed: int = 42) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def configure_sdpa_backend(backend: str) -> None:
+    """
+    Configure PyTorch SDPA backend. Use 'math' for maximum compatibility.
+    """
+    if not torch.cuda.is_available():
+        return
+    mode = (backend or "auto").strip().lower()
+    if mode == "auto":
+        return
+    if mode not in {"math", "flash", "mem_efficient"}:
+        raise ValueError("sdpa_backend must be one of: auto, math, flash, mem_efficient")
+    enable_flash = mode == "flash"
+    enable_mem = mode == "mem_efficient"
+    enable_math = mode == "math"
+    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+        torch.backends.cuda.enable_flash_sdp(enable_flash)
+    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+        torch.backends.cuda.enable_mem_efficient_sdp(enable_mem)
+    if hasattr(torch.backends.cuda, "enable_math_sdp"):
+        torch.backends.cuda.enable_math_sdp(enable_math)
+
+
 # -----------------------------
 # Dataset (window by target-index, no leakage)
 # -----------------------------
@@ -632,6 +654,12 @@ def main():
     ap.add_argument("--device", type=str, default="auto")
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--use_sigmoid", type=int, default=1, help="apply sigmoid for exhaustion/continuation")
+    ap.add_argument(
+        "--sdpa_backend",
+        type=str,
+        default="math",
+        help="SDPA backend: auto, math, flash, mem_efficient",
+    )
 
     # which variants
     ap.add_argument(
@@ -654,6 +682,7 @@ def main():
     device = args.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    configure_sdpa_backend(args.sdpa_backend)
 
     use_parquet = args.x_parquet is not None or args.y_parquet is not None
     if use_parquet:
