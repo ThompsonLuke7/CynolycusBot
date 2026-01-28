@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import math
 import os
 import random
@@ -97,6 +98,14 @@ def configure_sdpa_backend(backend: str) -> None:
         torch.backends.cuda.enable_mem_efficient_sdp(enable_mem)
     if hasattr(torch.backends.cuda, "enable_math_sdp"):
         torch.backends.cuda.enable_math_sdp(enable_math)
+
+
+def cleanup_cuda() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        if hasattr(torch.cuda, "ipc_collect"):
+            torch.cuda.ipc_collect()
+    gc.collect()
 
 
 # -----------------------------
@@ -649,7 +658,7 @@ def main():
     # training
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--patience", type=int, default=8)
-    ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--batch_size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-2)
     ap.add_argument("--clip_grad", type=float, default=1.0)
@@ -932,6 +941,10 @@ def main():
                 "test_mae": float(test_metrics["mae"]),
                 "test_r2": float(test_metrics["r2"]),
             }
+
+            # free GPU memory before next variant
+            del model, loss_fn
+            cleanup_cuda()
 
         # pretty print per side
         print(
