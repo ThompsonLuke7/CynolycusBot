@@ -4,6 +4,7 @@ Compare lucidrains iTransformer variants (original / 2D / FFT) on a held-out tes
 
 Targets:
 - Forecasting-style by default: predict y[t + pred_horizon] from X[t - lookback + 1 : t + 1]
+- For label-mode parquet inputs, target_offset defaults to 0 (predict current label).
 - Supports multivariate targets (y has shape (N, D)) or single target (N,) / (N,1)
 
 Models (from lucidrains/iTransformer):
@@ -16,6 +17,8 @@ Notes
 - lucidrains models return a dict: {pred_len: Tensor[B, pred_len, num_variates]}
   This script uses pred_length=(pred_horizon,) and reads preds[pred_horizon] -> (B, pred_horizon, D)
 - If your y is 1D, it is treated as D=1.
+- If X has C>1 and y has D=1, a small linear projection head is added so the model
+  can accept C inputs and predict a single target (D=1).
 - For iTransformer2D you must set num_time_tokens that divides lookback_len (ideally).
 - This is NOT the official THUML implementation; it's lucidrains' unofficial code. See repo README. 
   https://github.com/lucidrains/iTransformer
@@ -33,6 +36,18 @@ python iTransformer_compare.py \
   --use_rev_inorm 1 \
   --num_time_tokens 16
 
+Parquet + exhaustion labels (long/short)
+----------------------------------------
+python iTransformer_compare.py \
+  --x_parquet /path/to/X_15min_tree.parquet \
+  --y_parquet /path/to/y_labels.parquet \
+  --label_mode exhaustion \
+  --sides long,short \
+  --lookback_len 96 \
+  --pred_horizon 1 \
+  --epochs 40 --batch_size 256 \
+  --dim 256 --depth 6 --heads 8 --dim_head 64
+
 """
 
 from __future__ import annotations
@@ -46,6 +61,7 @@ from dataclasses import dataclass, asdict
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -73,13 +89,14 @@ class SplitIndex:
 class ForecastWindowDataset(Dataset):
     """
     Windowed dataset built over full timeline, split by target index t.
-    Input window ends at t and predicts y[t + pred_horizon].
+    Input window ends at t and predicts y[t + target_offset].
 
     x_win: X[t - lookback + 1 : t + 1]          -> (lookback, C)
-    y_fut: y[t + pred_horizon : t + pred_horizon + pred_horizon]
+    y_fut: y[t + target_offset : t + target_offset + pred_horizon]
            -> (pred_horizon, D)
 
-    So you can train multi-step horizons; this script uses pred_horizon=K and trains for K steps ahead.
+    So you can train multi-step horizons; this script uses pred_horizon=K and trains for
+    K steps ahead, starting at t + target_offset.
     """
 
     def __init__(
@@ -90,6 +107,7 @@ class ForecastWindowDataset(Dataset):
         pred_horizon: int,
         split: str,                 # "train" | "val" | "test"
         split_index: SplitIndex,
+        target_offset: Optional[int] = None,
         device: Optional[str] = None,
     ):
         assert X.ndim == 2, "X must be (N, C)"
@@ -105,17 +123,18 @@ class ForecastWindowDataset(Dataset):
         self.y = y.astype(np.float32, copy=False)
         self.lookback_len = lookback_len
         self.pred_horizon = pred_horizon
+        self.target_offset = pred_horizon if target_offset is None else int(target_offset)
+        if self.target_offset < 0:
+            raise ValueError("target_offset must be >= 0")
         self.device = device
 
         N = X.shape[0]
 
-        # valid t must have enough left history AND enough future for y[t+pred_horizon ...]
+        # valid t must have enough left history AND enough future for y[t+target_offset ...]
         t_min = lookback_len - 1
-        t_max = N - pred_horizon - 1  # so t + pred_horizon + (pred_horizon-1) <= N-1 -> t <= N - 2*pred_horizon
-        # But since we define y_fut as pred_horizon steps starting at t+pred_horizon, we need:
-        # t + pred_horizon + pred_horizon - 1 <= N - 1  =>  t <= N - 2*pred_horizon
-        # For simplicity and typical use (pred_horizon=1), it's fine. Keep correct:
-        t_max = N - 2 * pred_horizon
+        # y_start = t + target_offset
+        # y_start + pred_horizon - 1 <= N - 1  =>  t <= N - pred_horizon - target_offset
+        t_max = N - pred_horizon - self.target_offset
         if t_max < t_min:
             raise ValueError("Not enough data for the chosen lookback_len and pred_horizon.")
 
@@ -140,7 +159,7 @@ class ForecastWindowDataset(Dataset):
         t = int(self.targets[idx])
 
         x_win = self.X[t - self.lookback_len + 1 : t + 1]  # (lookback, C)
-        y_start = t + self.pred_horizon
+        y_start = t + self.target_offset
         y_fut = self.y[y_start : y_start + self.pred_horizon]  # (pred_horizon, D)
 
         x = torch.from_numpy(x_win)  # float32
@@ -175,6 +194,119 @@ def compute_metrics(pred: torch.Tensor, tgt: torch.Tensor) -> Dict[str, float]:
 
 
 # -----------------------------
+# Data helpers
+# -----------------------------
+def parse_comma_list(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+LABEL_MODE_COLUMNS = {
+    "swing": ("long_swing_label", "short_swing_label"),
+    "leg": ("leg_up_label", "leg_down_label"),
+    "continuation": ("cont_strength_long", "cont_strength_short"),
+    "mfe": ("mfe_up_atr", "mfe_down_atr"),
+    "mae": ("mae_down_atr", "mae_up_atr"),
+    "mfe_mae": ("mfe_up_atr", "mfe_down_atr"),
+    "exhaustion": ("exhaustion_progress_long", "exhaustion_progress_short"),
+}
+
+
+def resolve_label_columns(
+    label_mode: str,
+    long_label_col: Optional[str],
+    short_label_col: Optional[str],
+) -> Tuple[str, str]:
+    if (long_label_col is None) ^ (short_label_col is None):
+        raise ValueError("Provide both --long_label_col and --short_label_col, or neither.")
+    if long_label_col and short_label_col:
+        return long_label_col, short_label_col
+    mode = (label_mode or "").strip().lower()
+    if mode not in LABEL_MODE_COLUMNS:
+        raise ValueError(
+            f"Unknown label_mode '{label_mode}'. Supported: {sorted(LABEL_MODE_COLUMNS)}"
+        )
+    return LABEL_MODE_COLUMNS[mode]
+
+
+def load_parquet_features(x_path: str, x_cols: Optional[str]) -> Tuple[np.ndarray, List[str]]:
+    df = pd.read_parquet(x_path)
+    cols = parse_comma_list(x_cols)
+    if cols:
+        missing = [c for c in cols if c not in df.columns]
+        if missing:
+            raise KeyError(f"Missing X columns in {x_path}: {', '.join(missing)}")
+        df = df[cols]
+    else:
+        numeric_df = df.select_dtypes(include=[np.number])
+        dropped = [c for c in df.columns if c not in numeric_df.columns]
+        if dropped:
+            preview = ", ".join(dropped[:8])
+            suffix = "..." if len(dropped) > 8 else ""
+            print(f"[warn] Dropping non-numeric X columns: {preview}{suffix}")
+        df = numeric_df
+    if df.shape[1] == 0:
+        raise ValueError("No numeric X columns found in parquet.")
+    return df.to_numpy(dtype=np.float32), list(df.columns)
+
+
+def load_parquet_labels(
+    y_path: str,
+    label_mode: str,
+    long_label_col: Optional[str],
+    short_label_col: Optional[str],
+) -> Tuple[np.ndarray, np.ndarray, str, str]:
+    df = pd.read_parquet(y_path)
+    long_col, short_col = resolve_label_columns(label_mode, long_label_col, short_label_col)
+    missing = [c for c in (long_col, short_col) if c not in df.columns]
+    if missing:
+        raise KeyError(f"Missing label columns in {y_path}: {', '.join(missing)}")
+    y_long = df[long_col].to_numpy(dtype=np.float32)
+    y_short = df[short_col].to_numpy(dtype=np.float32)
+    return y_long, y_short, long_col, short_col
+
+
+def _summarize_array(arr: np.ndarray) -> Dict[str, float]:
+    flat = arr.reshape(-1)
+    total = flat.size
+    nan_count = int(np.isnan(flat).sum())
+    finite = flat[np.isfinite(flat)]
+    if finite.size == 0:
+        return {
+            "n": total,
+            "nan_pct": 100.0,
+            "mean": float("nan"),
+            "std": float("nan"),
+            "min": float("nan"),
+            "max": float("nan"),
+            "zero_pct": float("nan"),
+        }
+    zero_pct = float(np.mean(finite == 0.0) * 100.0)
+    return {
+        "n": total,
+        "nan_pct": float(nan_count / max(total, 1) * 100.0),
+        "mean": float(np.mean(finite)),
+        "std": float(np.std(finite)),
+        "min": float(np.min(finite)),
+        "max": float(np.max(finite)),
+        "zero_pct": zero_pct,
+    }
+
+
+def print_label_stats(name: str, arr: np.ndarray, fill_value: float) -> None:
+    raw_stats = _summarize_array(arr)
+    filled = np.nan_to_num(arr, nan=fill_value, posinf=fill_value, neginf=fill_value)
+    filled_zero_pct = float(np.mean(filled.reshape(-1) == 0.0) * 100.0)
+    print(
+        f"{name}: n={raw_stats['n']}, nan%={raw_stats['nan_pct']:.2f}, "
+        f"mean={raw_stats['mean']:.6f}, std={raw_stats['std']:.6f}, "
+        f"min={raw_stats['min']:.6f}, max={raw_stats['max']:.6f}, "
+        f"zero%={raw_stats['zero_pct']:.2f}, zero_after_fill%={filled_zero_pct:.2f}"
+    )
+
+
+# -----------------------------
 # Training utils
 # -----------------------------
 class EarlyStopper:
@@ -197,6 +329,17 @@ def maybe_to_device(batch, device: str):
     if isinstance(batch, (tuple, list)):
         return tuple(maybe_to_device(x, device) for x in batch)
     return batch.to(device)
+
+
+def maybe_apply_output_activation(
+    pred: torch.Tensor, label_mode: Optional[str], use_sigmoid: bool
+) -> torch.Tensor:
+    if not use_sigmoid:
+        return pred
+    mode = (label_mode or "").strip().lower()
+    if mode in {"exhaustion", "continuation"}:
+        return torch.sigmoid(pred)
+    return pred
 
 
 def extract_pred_dict_output(preds: Dict[int, torch.Tensor], pred_horizon: int) -> torch.Tensor:
@@ -227,12 +370,26 @@ class ModelConfig:
     num_time_tokens: int = 16
 
 
+class OutputProjector(nn.Module):
+    """Project model outputs from input variates -> target variates."""
+
+    def __init__(self, base: nn.Module, in_dim: int, out_dim: int) -> None:
+        super().__init__()
+        self.base = base
+        self.proj = nn.Linear(in_dim, out_dim)
+
+    def forward(self, x: torch.Tensor) -> Dict[int, torch.Tensor]:
+        out = self.base(x)
+        return {k: self.proj(v) for k, v in out.items()}
+
+
 def build_model(
     variant: str,
-    num_variates: int,
+    input_variates: int,
     lookback_len: int,
     pred_horizon: int,
     cfg: ModelConfig,
+    output_variates: Optional[int] = None,
 ):
     """
     variant: "original" | "2d" | "fft"
@@ -247,8 +404,11 @@ def build_model(
             f"Original import error: {e}"
         )
 
+    if output_variates is None:
+        output_variates = input_variates
+
     common = dict(
-        num_variates=num_variates,
+        num_variates=input_variates,
         lookback_len=lookback_len,
         dim=cfg.dim,
         depth=cfg.depth,
@@ -260,22 +420,26 @@ def build_model(
     )
 
     if variant == "original":
-        return iTransformer(
+        base = iTransformer(
             **common,
             num_tokens_per_variate=cfg.num_tokens_per_variate,
         )
     elif variant == "2d":
-        return iTransformer2D(
+        base = iTransformer2D(
             **common,
             num_time_tokens=cfg.num_time_tokens,
         )
     elif variant == "fft":
-        return iTransformerFFT(
+        base = iTransformerFFT(
             **common,
             num_tokens_per_variate=cfg.num_tokens_per_variate,
         )
     else:
         raise ValueError(f"Unknown variant: {variant}")
+
+    if output_variates != input_variates:
+        return OutputProjector(base, input_variates, output_variates)
+    return base
 
 
 # -----------------------------
@@ -288,6 +452,8 @@ def train_one_epoch(
     loss_fn: nn.Module,
     device: str,
     pred_horizon: int,
+    label_mode: Optional[str],
+    use_sigmoid: bool,
     clip_grad: float = 1.0,
 ) -> float:
     model.train()
@@ -300,6 +466,7 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
         out_dict = model(x)  # dict[int, tensor]
         pred = extract_pred_dict_output(out_dict, pred_horizon)  # (B, H, D)
+        pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
         loss = loss_fn(pred, y)
 
         loss.backward()
@@ -321,6 +488,8 @@ def evaluate(
     loss_fn: nn.Module,
     device: str,
     pred_horizon: int,
+    label_mode: Optional[str],
+    use_sigmoid: bool,
 ) -> Dict[str, float]:
     model.eval()
     total_loss = 0.0
@@ -333,6 +502,7 @@ def evaluate(
         x, y = maybe_to_device((x, y), device)
         out_dict = model(x)
         pred = extract_pred_dict_output(out_dict, pred_horizon)
+        pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
 
         loss = loss_fn(pred, y)
 
@@ -362,6 +532,8 @@ def fit_model(
     epochs: int,
     patience: int,
     clip_grad: float,
+    label_mode: Optional[str],
+    use_sigmoid: bool,
 ) -> Tuple[nn.Module, Dict[str, float]]:
     model = model.to(device)
 
@@ -378,9 +550,17 @@ def fit_model(
 
     for ep in range(1, epochs + 1):
         tr_loss = train_one_epoch(
-            model, train_loader, optimizer, loss_fn, device, pred_horizon, clip_grad=clip_grad
+            model,
+            train_loader,
+            optimizer,
+            loss_fn,
+            device,
+            pred_horizon,
+            label_mode,
+            use_sigmoid,
+            clip_grad=clip_grad,
         )
-        val_metrics = evaluate(model, val_loader, loss_fn, device, pred_horizon)
+        val_metrics = evaluate(model, val_loader, loss_fn, device, pred_horizon, label_mode, use_sigmoid)
         scheduler.step(val_metrics["loss"])
 
         if val_metrics["loss"] < best_val:
@@ -405,11 +585,25 @@ def fit_model(
 def main():
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--x_path", type=str, required=True, help="npy file for X, shape (N, C)")
-    ap.add_argument("--y_path", type=str, required=True, help="npy file for y, shape (N,) or (N, D)")
+    ap.add_argument("--x_path", type=str, default=None, help="npy file for X, shape (N, C)")
+    ap.add_argument("--y_path", type=str, default=None, help="npy file for y, shape (N,) or (N, D)")
+    ap.add_argument("--x_parquet", type=str, default=None, help="parquet file for X (overrides x_path)")
+    ap.add_argument("--y_parquet", type=str, default=None, help="parquet file for y labels (overrides y_path)")
+    ap.add_argument("--x_cols", type=str, default=None, help="comma-separated X columns for parquet")
+    ap.add_argument("--label_mode", type=str, default="exhaustion", help="label mode for y_parquet")
+    ap.add_argument("--sides", type=str, default="", help="comma-separated: long,short")
+    ap.add_argument("--long_label_col", type=str, default=None, help="override long label column")
+    ap.add_argument("--short_label_col", type=str, default=None, help="override short label column")
+    ap.add_argument("--fill_nan_y", type=float, default=0.0, help="fill value for NaNs in labels")
 
     ap.add_argument("--lookback_len", type=int, default=96)
     ap.add_argument("--pred_horizon", type=int, default=1)
+    ap.add_argument(
+        "--target_offset",
+        type=int,
+        default=None,
+        help="offset of target relative to window end (default: pred_horizon for npy; 0 for parquet)",
+    )
 
     ap.add_argument("--train_frac", type=float, default=0.8)
     ap.add_argument("--val_frac", type=float, default=0.1)
@@ -438,6 +632,7 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", type=str, default="auto")
     ap.add_argument("--num_workers", type=int, default=0)
+    ap.add_argument("--use_sigmoid", type=int, default=1, help="apply sigmoid for exhaustion/continuation")
 
     # which variants
     ap.add_argument(
@@ -450,49 +645,63 @@ def main():
     args = ap.parse_args()
     set_seed(args.seed)
 
+    if not (0.0 < args.train_frac < 1.0):
+        raise ValueError("--train_frac must be in (0, 1)")
+    if not (0.0 <= args.val_frac < 1.0):
+        raise ValueError("--val_frac must be in [0, 1)")
+    if args.train_frac + args.val_frac >= 1.0:
+        raise ValueError("--train_frac + --val_frac must be < 1 (need a test split)")
+
     device = args.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    X = np.load(args.x_path)
-    y = np.load(args.y_path)
+    use_parquet = args.x_parquet is not None or args.y_parquet is not None
+    if use_parquet:
+        if not args.x_parquet or not args.y_parquet:
+            raise ValueError("Provide both --x_parquet and --y_parquet.")
+        X, x_cols = load_parquet_features(args.x_parquet, args.x_cols)
+        y_long_raw, y_short_raw, long_col, short_col = load_parquet_labels(
+            args.y_parquet, args.label_mode, args.long_label_col, args.short_label_col
+        )
+        if X.shape[0] != y_long_raw.shape[0]:
+            raise ValueError(
+                f"X rows ({X.shape[0]}) do not match y rows ({y_long_raw.shape[0]})."
+            )
+        print(f"[info] Loaded X parquet with {X.shape[1]} features.")
+        print_label_stats(f"[labels] long ({long_col})", y_long_raw, args.fill_nan_y)
+        print_label_stats(f"[labels] short ({short_col})", y_short_raw, args.fill_nan_y)
+        sides = parse_comma_list(args.sides) or ["long", "short"]
+        bad_sides = [s for s in sides if s not in {"long", "short"}]
+        if bad_sides:
+            raise ValueError(f"Unknown sides: {bad_sides}. Use long,short.")
+        target_offset = args.target_offset if args.target_offset is not None else 0
+    else:
+        if not args.x_path or not args.y_path:
+            raise ValueError("Provide --x_path and --y_path (npy) or parquet inputs.")
+        X = np.load(args.x_path)
+        y_raw = np.load(args.y_path)
+        if X.ndim != 2:
+            raise ValueError(f"X must be (N, C). Got shape {X.shape}")
+        if y_raw.ndim == 1:
+            y_raw = y_raw[:, None]
+        elif y_raw.ndim != 2:
+            raise ValueError(f"y must be (N,) or (N, D). Got shape {y_raw.shape}")
+        y_long_raw = y_raw
+        y_short_raw = y_raw
+        sides = ["long"]
+        if parse_comma_list(args.sides) not in ([], ["long"]):
+            print("[warn] --sides ignored for npy inputs; using single target.")
+        target_offset = args.target_offset if args.target_offset is not None else args.pred_horizon
 
     if X.ndim != 2:
         raise ValueError(f"X must be (N, C). Got shape {X.shape}")
-    if y.ndim == 1:
-        y = y[:, None]
-    elif y.ndim != 2:
-        raise ValueError(f"y must be (N,) or (N, D). Got shape {y.shape}")
 
     N, C = X.shape
-    _, D = y.shape
-
-    # lucidrains model predicts "num_variates" channels
-    # In this compare script, we require D == num_variates.
-    # If your y is a single target, set y_path to shape (N,1) and it will work.
-    if D != C and D != 1:
-        raise ValueError(
-            f"y has D={D} targets but X has C={C} variates.\n"
-            "lucidrains iTransformer predicts num_variates channels.\n"
-            "Either make y have shape (N, C) for multivariate forecasting, or (N, 1) for single-target.\n"
-            "If you want to predict a scalar label from features, you'd typically use a custom head (different task)."
-        )
-
-    num_variates = D  # forecast D channels
 
     train_end = int(N * args.train_frac)
     val_end = int(N * (args.train_frac + args.val_frac))
     split_idx = SplitIndex(train_end=train_end, val_end=val_end)
-
-    ds_train = ForecastWindowDataset(X, y, args.lookback_len, args.pred_horizon, "train", split_idx)
-    ds_val = ForecastWindowDataset(X, y, args.lookback_len, args.pred_horizon, "val", split_idx)
-    ds_test = ForecastWindowDataset(X, y, args.lookback_len, args.pred_horizon, "test", split_idx)
-
-    train_loader = DataLoader(
-        ds_train, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers
-    )
-    val_loader = DataLoader(ds_val, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-    test_loader = DataLoader(ds_test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     cfg = ModelConfig(
         dim=args.dim,
@@ -515,94 +724,193 @@ def main():
     if "2d" in variants:
         if args.num_time_tokens <= 0:
             raise ValueError("--num_time_tokens must be > 0 for 2d variant")
-        # lucidrains note: patch size ~ (lookback_len // num_time_tokens)
-        # Not strictly required, but good to keep clean
         if args.lookback_len % args.num_time_tokens != 0:
             print(
                 f"[warn] lookback_len={args.lookback_len} not divisible by num_time_tokens={args.num_time_tokens}.\n"
                 "       2D variant may still run, but patching may be uneven."
             )
 
-    print("\n=== Config ===")
-    print(f"device={device}")
-    print(f"N={N}, X.C={C}, y.D={D}, forecasting num_variates={num_variates}")
-    print(f"lookback_len={args.lookback_len}, pred_horizon={args.pred_horizon}")
-    print(f"splits: train_end={train_end}, val_end={val_end}, test_end={N}")
-    print("model cfg:", asdict(cfg))
-    print("variants:", variants)
-    print()
+    use_sigmoid = bool(args.use_sigmoid)
+    label_mode_for_activation = args.label_mode if use_parquet else None
 
-    results: Dict[str, Dict[str, float]] = {}
+    results: Dict[str, Dict[str, Dict[str, float]]] = {}
 
-    # train and evaluate each variant
-    for variant in variants:
-        print(f"\n==============================")
-        print(f"Training variant: {variant}")
-        print(f"==============================")
-
-        model = build_model(
-            variant=variant,
-            num_variates=num_variates,
-            lookback_len=args.lookback_len,
-            pred_horizon=args.pred_horizon,
-            cfg=cfg,
+    for side in sides:
+        y_side_raw = y_long_raw if side == "long" else y_short_raw
+        y_side = np.nan_to_num(
+            y_side_raw, nan=args.fill_nan_y, posinf=args.fill_nan_y, neginf=args.fill_nan_y
         )
+        if y_side.ndim == 1:
+            y_side = y_side[:, None]
+        elif y_side.ndim != 2:
+            raise ValueError(f"y must be (N,) or (N, D). Got shape {y_side.shape}")
 
-        model, best_val_metrics = fit_model(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            device=device,
-            pred_horizon=args.pred_horizon,
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            epochs=args.epochs,
-            patience=args.patience,
-            clip_grad=args.clip_grad,
-        )
+        D = y_side.shape[1]
 
-        # test
-        loss_fn = nn.SmoothL1Loss()
-        test_metrics = evaluate(model, test_loader, loss_fn, device, args.pred_horizon)
-
-        print(f"\nBest VAL for {variant}: {best_val_metrics}")
-        print(f"TEST for {variant}: {test_metrics}")
-
-        results[variant] = {
-            "val_loss": float(best_val_metrics.get("loss", float("nan"))),
-            "val_mse": float(best_val_metrics.get("mse", float("nan"))),
-            "val_mae": float(best_val_metrics.get("mae", float("nan"))),
-            "val_r2": float(best_val_metrics.get("r2", float("nan"))),
-            "test_loss": float(test_metrics["loss"]),
-            "test_mse": float(test_metrics["mse"]),
-            "test_mae": float(test_metrics["mae"]),
-            "test_r2": float(test_metrics["r2"]),
-        }
-
-    # pretty print
-    print("\n\n=== Summary (lower is better for loss/mse/mae; higher is better for r2) ===")
-    header = ["variant", "val_loss", "test_loss", "test_mse", "test_mae", "test_r2"]
-    print(" | ".join(f"{h:>10s}" for h in header))
-    print("-" * (len(header) * 13))
-
-    for v in variants:
-        r = results[v]
-        print(
-            " | ".join(
-                [
-                    f"{v:>10s}",
-                    f"{r['val_loss']:10.6f}",
-                    f"{r['test_loss']:10.6f}",
-                    f"{r['test_mse']:10.6f}",
-                    f"{r['test_mae']:10.6f}",
-                    f"{r['test_r2']:10.6f}" if not math.isnan(r["test_r2"]) else f"{'nan':>10s}",
-                ]
+        # lucidrains model predicts "num_variates" channels, which must match input variates.
+        # For D=1 with C>1, we add a small projection head to map C -> 1.
+        if D != C and D != 1:
+            raise ValueError(
+                f"y has D={D} targets but X has C={C} variates.\n"
+                "lucidrains iTransformer predicts num_variates channels.\n"
+                "Either make y have shape (N, C) for multivariate forecasting, or (N, 1) for single-target.\n"
+                "If you want to predict a scalar label from features, you'd typically use a custom head (different task)."
             )
+
+        input_variates = C
+        output_variates = D
+        if D == 1 and C > 1:
+            print(
+                f"[info] X has C={C} variates and y has D=1. "
+                "Adding a linear projection head (C -> 1) on model outputs."
+            )
+
+        if use_sigmoid and label_mode_for_activation in {"exhaustion", "continuation"}:
+            finite = y_side[np.isfinite(y_side)]
+            if finite.size and (finite.min() < 0.0 or finite.max() > 1.0):
+                print("[warn] labels outside [0,1] with --use_sigmoid=1")
+
+        ds_train = ForecastWindowDataset(
+            X,
+            y_side,
+            args.lookback_len,
+            args.pred_horizon,
+            "train",
+            split_idx,
+            target_offset=target_offset,
+        )
+        ds_val = ForecastWindowDataset(
+            X,
+            y_side,
+            args.lookback_len,
+            args.pred_horizon,
+            "val",
+            split_idx,
+            target_offset=target_offset,
+        )
+        ds_test = ForecastWindowDataset(
+            X,
+            y_side,
+            args.lookback_len,
+            args.pred_horizon,
+            "test",
+            split_idx,
+            target_offset=target_offset,
         )
 
-    # pick best by test_loss
-    best = min(results.items(), key=lambda kv: kv[1]["test_loss"])
-    print(f"\nBest by test_loss: {best[0]}  (test_loss={best[1]['test_loss']:.6f})")
+        train_loader = DataLoader(
+            ds_train,
+            batch_size=args.batch_size,
+            shuffle=True,
+            drop_last=True,
+            num_workers=args.num_workers,
+        )
+        val_loader = DataLoader(
+            ds_val, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
+        )
+        test_loader = DataLoader(
+            ds_test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
+        )
+
+        print(f"\n=== Config (side={side}) ===")
+        print(f"device={device}")
+        print(f"N={N}, X.C={C}, y.D={D}, model_in={input_variates}, model_out={output_variates}")
+        print(f"lookback_len={args.lookback_len}, pred_horizon={args.pred_horizon}")
+        print(f"target_offset={target_offset}")
+        print(f"splits: train_end={train_end}, val_end={val_end}, test_end={N}")
+        if use_parquet:
+            print(f"label_mode={args.label_mode}")
+        print("model cfg:", asdict(cfg))
+        print("variants:", variants)
+        print()
+
+        results[side] = {}
+
+        # train and evaluate each variant
+        for variant in variants:
+            print(f"\n==============================")
+            print(f"Training variant: {variant} (side={side})")
+            print(f"==============================")
+
+            model = build_model(
+                variant=variant,
+                input_variates=input_variates,
+                lookback_len=args.lookback_len,
+                pred_horizon=args.pred_horizon,
+                cfg=cfg,
+                output_variates=output_variates,
+            )
+
+            model, best_val_metrics = fit_model(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                device=device,
+                pred_horizon=args.pred_horizon,
+                lr=args.lr,
+                weight_decay=args.weight_decay,
+                epochs=args.epochs,
+                patience=args.patience,
+                clip_grad=args.clip_grad,
+                label_mode=label_mode_for_activation,
+                use_sigmoid=use_sigmoid,
+            )
+
+            # test
+            loss_fn = nn.SmoothL1Loss()
+            test_metrics = evaluate(
+                model,
+                test_loader,
+                loss_fn,
+                device,
+                args.pred_horizon,
+                label_mode_for_activation,
+                use_sigmoid,
+            )
+
+            print(f"\nBest VAL for {variant}: {best_val_metrics}")
+            print(f"TEST for {variant}: {test_metrics}")
+
+            results[side][variant] = {
+                "val_loss": float(best_val_metrics.get("loss", float("nan"))),
+                "val_mse": float(best_val_metrics.get("mse", float("nan"))),
+                "val_mae": float(best_val_metrics.get("mae", float("nan"))),
+                "val_r2": float(best_val_metrics.get("r2", float("nan"))),
+                "test_loss": float(test_metrics["loss"]),
+                "test_mse": float(test_metrics["mse"]),
+                "test_mae": float(test_metrics["mae"]),
+                "test_r2": float(test_metrics["r2"]),
+            }
+
+        # pretty print per side
+        print(
+            "\n\n=== Summary (lower is better for loss/mse/mae; higher is better for r2) "
+            f"| side={side} ==="
+        )
+        header = ["variant", "val_loss", "test_loss", "test_mse", "test_mae", "test_r2"]
+        print(" | ".join(f"{h:>10s}" for h in header))
+        print("-" * (len(header) * 13))
+
+        for v in variants:
+            r = results[side][v]
+            print(
+                " | ".join(
+                    [
+                        f"{v:>10s}",
+                        f"{r['val_loss']:10.6f}",
+                        f"{r['test_loss']:10.6f}",
+                        f"{r['test_mse']:10.6f}",
+                        f"{r['test_mae']:10.6f}",
+                        f"{r['test_r2']:10.6f}" if not math.isnan(r["test_r2"]) else f"{'nan':>10s}",
+                    ]
+                )
+            )
+
+        best = min(results[side].items(), key=lambda kv: kv[1]["test_loss"])
+        print(
+            f"\nBest by test_loss (side={side}): {best[0]}  "
+            f"(test_loss={best[1]['test_loss']:.6f})"
+        )
 
 
 if __name__ == "__main__":
