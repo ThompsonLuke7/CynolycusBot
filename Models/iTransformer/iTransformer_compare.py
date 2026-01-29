@@ -484,9 +484,20 @@ def plot_test_quantiles(
     q50 = pred_q[-use_n:, 0, 0, 1]
     q75 = pred_q[-use_n:, 0, 0, 2]
 
-    x = np.arange(use_n)
+    # sort to avoid quantile crossing in the plot view
+    q_stack = np.stack([q25, q50, q75], axis=-1)
+    q_stack = np.sort(q_stack, axis=-1)
+    q25, q50, q75 = q_stack[:, 0], q_stack[:, 1], q_stack[:, 2]
+
+    valid_mask = np.isfinite(y)
+    y = y[valid_mask]
+    q25 = q25[valid_mask]
+    q50 = q50[valid_mask]
+    q75 = q75[valid_mask]
+
+    x = np.arange(len(y))
     fig, ax = plt.subplots(figsize=(14, 5))
-    ax.plot(x, y, color="#1565C0", linewidth=1.4, label="true")
+    ax.plot(x, y, color="#1565C0", linewidth=1.4, label="true (valid only)")
     ax.plot(x, q50, color="#2E7D32", linewidth=1.4, label="q50")
     ax.fill_between(x, q25, q75, color="#66BB6A", alpha=0.25, label="q25-q75")
     ax.set_title(title)
@@ -497,6 +508,41 @@ def plot_test_quantiles(
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path)
     plt.close(fig)
+
+
+def quantile_calibration_metrics(
+    y_true: np.ndarray, pred_q: np.ndarray
+) -> Dict[str, float]:
+    y = y_true[..., 0, 0] if y_true.ndim == 4 else y_true[..., 0]
+    q25 = pred_q[..., 0, 0, 0] if pred_q.ndim == 4 else pred_q[..., 0]
+    q50 = pred_q[..., 0, 0, 1] if pred_q.ndim == 4 else pred_q[..., 1]
+    q75 = pred_q[..., 0, 0, 2] if pred_q.ndim == 4 else pred_q[..., 2]
+
+    mask = np.isfinite(y) & np.isfinite(q25) & np.isfinite(q50) & np.isfinite(q75)
+    if not np.any(mask):
+        return {
+            "iqr_coverage": float("nan"),
+            "p_le_q25": float("nan"),
+            "p_le_q50": float("nan"),
+            "p_le_q75": float("nan"),
+            "crossing_rate": float("nan"),
+        }
+    y = y[mask]
+    q25 = q25[mask]
+    q50 = q50[mask]
+    q75 = q75[mask]
+    iqr_cov = float(np.mean((y >= q25) & (y <= q75)))
+    p25 = float(np.mean(y <= q25))
+    p50 = float(np.mean(y <= q50))
+    p75 = float(np.mean(y <= q75))
+    crossing = float(np.mean(~((q25 <= q50) & (q50 <= q75))))
+    return {
+        "iqr_coverage": iqr_cov,
+        "p_le_q25": p25,
+        "p_le_q50": p50,
+        "p_le_q75": p75,
+        "crossing_rate": crossing,
+    }
 
 
 QUANTILES: tuple[float, ...] = (0.25, 0.5, 0.75)
@@ -1358,6 +1404,17 @@ def main():
                         preds.to(torch.float32), D, QUANTILES
                     ).numpy()
                     y_true = targets.to(torch.float32).numpy()
+                    calib = quantile_calibration_metrics(y_true, pred_q)
+                    print(
+                        "[calib] iqr={:.3f} p(y<=q25)={:.3f} p(y<=q50)={:.3f} "
+                        "p(y<=q75)={:.3f} crossing={:.3f}".format(
+                            calib["iqr_coverage"],
+                            calib["p_le_q25"],
+                            calib["p_le_q50"],
+                            calib["p_le_q75"],
+                            calib["crossing_rate"],
+                        )
+                    )
                     plot_dir = (
                         Path(args.plot_dir)
                         if args.plot_dir
