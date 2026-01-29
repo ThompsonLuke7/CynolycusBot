@@ -248,7 +248,6 @@ LABEL_MODE_COLUMNS = {
     "continuation": ("cont_strength_long", "cont_strength_short"),
     "mfe": ("mfe_up_atr", "mfe_down_atr"),
     "mae": ("mae_down_atr", "mae_up_atr"),
-    "mfe_mae": ("mfe_up_atr", "mfe_down_atr"),
     "exhaustion": ("exhaustion_progress_long", "exhaustion_progress_short"),
 }
 
@@ -1095,7 +1094,11 @@ def main():
         print(f"splits: train_end={train_end}, val_end={val_end}, test_end={N}")
         if use_parquet:
             print(f"label_mode={args.label_mode}")
-        print("loss: QuantileLoss(q=0.25,0.50,0.75) + valid_bce" if use_valid_head else "loss: QuantileLoss(q=0.25,0.50,0.75)")
+        print(
+            "loss: QuantileLoss(q=0.25,0.50,0.75) + valid_bce"
+            if (bool(args.two_head_validity) and bool(args.mask_nan_y))
+            else "loss: QuantileLoss(q=0.25,0.50,0.75)"
+        )
         print("model cfg:", asdict(cfg))
         print("variants:", variants)
         print()
