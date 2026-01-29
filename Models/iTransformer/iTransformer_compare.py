@@ -1106,6 +1106,14 @@ def main():
                     f"[info] spike weighting: pct={args.spike_weight_pct:.2f} "
                     f"threshold={spike_threshold:.6f} mult={args.spike_weight_mult:.2f}"
                 )
+        else:
+            y_train = y_side[: split_idx.train_end]
+            y_train = y_train[np.isfinite(y_train)]
+
+        if y_train.size > 0:
+            q50 = float(np.quantile(y_train, 0.50))
+            q75 = float(np.quantile(y_train, 0.75))
+            print(f"[info] train quantiles: q50={q50:.6f} q75={q75:.6f}")
 
         ds_train = ForecastWindowDataset(
             X,
