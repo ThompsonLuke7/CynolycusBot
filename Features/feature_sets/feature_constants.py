@@ -34,6 +34,7 @@ SWING_LABEL_COLUMNS = [
     "cont_strength_short",
     # Leg segmentation labels
     "atr_leg_label",
+    "leg_state",
     "leg_up_label",
     "leg_down_label",
     # Regression labels

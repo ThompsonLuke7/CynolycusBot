@@ -15,7 +15,7 @@ from Features import data_pipeline
 from Features.feature_sets.custom_indicators import add_fractal_pivots
 from Features.label_generations import (
     add_all_labels,
-    add_atr_continuation_entry_labels,
+    add_atr_continuation_strength_labels,
     add_atr_leg_segmentation_labels,
     add_atr_pivot_swing_labels,
     add_bars_to_exhaustion_label,
@@ -257,7 +257,7 @@ if __name__ == "__main__":
             if "atr_swing" in canonical_plot_types:
                 df = add_atr_pivot_swing_labels(df)
             if "continuation" in canonical_plot_types:
-                df = add_atr_continuation_entry_labels(df)
+                df = add_atr_continuation_strength_labels(df)
             if "swing_state_machine" in canonical_plot_types:
                 df = add_pivot_swing_state_machine(df)
             if "leg_segmentation" in canonical_plot_types:

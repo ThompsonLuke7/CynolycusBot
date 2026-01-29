@@ -413,6 +413,19 @@ def masked_loss(
     return loss_el.sum() / denom, denom_val
 
 
+class QuantileLoss(nn.Module):
+    def __init__(self, quantiles: tuple[float, ...] = (0.25, 0.5, 0.75)) -> None:
+        super().__init__()
+        self.quantiles = quantiles
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        err = target - pred
+        losses = []
+        for q in self.quantiles:
+            losses.append(torch.maximum((q - 1) * err, q * err))
+        return torch.mean(torch.stack(losses, dim=0), dim=0)
+
+
 def extract_pred_dict_output(
     preds: Dict[int, torch.Tensor] | torch.Tensor, pred_horizon: int
 ) -> torch.Tensor:
@@ -710,8 +723,8 @@ def fit_model(
 ) -> Tuple[nn.Module, Dict[str, float]]:
     model = model.to(device)
 
-    # Robust for markets; change to MSELoss if you prefer
-    loss_fn = nn.SmoothL1Loss(reduction="none")
+    # Quantile loss for regression
+    loss_fn = QuantileLoss()
     valid_loss_fn = nn.BCEWithLogitsLoss() if mask_nan_y else None
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -761,7 +774,14 @@ def fit_model(
             best_state = copy.deepcopy(model.state_dict())
             best_val_metrics = val_metrics
 
-        print(f"  epoch {ep:03d} | train_loss={tr_loss:.6f} | val={val_metrics}")
+        loss_desc = "QuantileLoss(q=0.25,0.50,0.75)"
+        if use_valid_head:
+            loss_desc += f" + ValidBCE(w={valid_loss_weight:.2f})"
+        print(
+            "  epoch {:03d} | train_loss={:.6f} | val={} | loss={}".format(
+                ep, tr_loss, val_metrics, loss_desc
+            )
+        )
 
         if stopper.step(val_metrics["loss"]):
             break
@@ -1075,6 +1095,7 @@ def main():
         print(f"splits: train_end={train_end}, val_end={val_end}, test_end={N}")
         if use_parquet:
             print(f"label_mode={args.label_mode}")
+        print("loss: QuantileLoss(q=0.25,0.50,0.75) + valid_bce" if use_valid_head else "loss: QuantileLoss(q=0.25,0.50,0.75)")
         print("model cfg:", asdict(cfg))
         print("variants:", variants)
         print()
@@ -1119,7 +1140,7 @@ def main():
             )
 
             # test
-            loss_fn = nn.SmoothL1Loss(reduction="none")
+            loss_fn = QuantileLoss()
             test_metrics = evaluate(
                 model,
                 test_loader,

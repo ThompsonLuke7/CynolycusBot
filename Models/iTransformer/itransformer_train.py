@@ -42,6 +42,20 @@ class EarlyStopper:
         return self.bad >= self.patience
 
 
+class QuantileLoss(nn.Module):
+    def __init__(self, quantiles: tuple[float, ...] = (0.25, 0.5, 0.75)) -> None:
+        super().__init__()
+        self.quantiles = quantiles
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Pinball loss averaged over quantiles.
+        err = target - pred
+        losses = []
+        for q in self.quantiles:
+            losses.append(torch.maximum((q - 1) * err, q * err))
+        return torch.mean(torch.stack(losses, dim=0))
+
+
 @torch.no_grad()
 def evaluate(model, loader, loss_fn, task: str, y_mu=None, y_std=None, device="cpu"):
     model.eval()
@@ -62,6 +76,12 @@ def evaluate(model, loader, loss_fn, task: str, y_mu=None, y_std=None, device="c
             preds = (probs >= 0.5).float()
             correct += (preds == yb).sum().item()
             total += yb.numel()
+        elif task == "multiclass":
+            yb = y.view(-1).long()
+            loss = loss_fn(out, yb)
+            preds = torch.argmax(out, dim=-1)
+            correct += (preds == yb).sum().item()
+            total += yb.numel()
         else:
             yt = y.view_as(out)
             loss = loss_fn(out, yt)
@@ -76,6 +96,8 @@ def evaluate(model, loader, loss_fn, task: str, y_mu=None, y_std=None, device="c
 
     metrics = {"loss": total_loss / max(n, 1)}
     if task == "binary":
+        metrics["acc"] = correct / max(total, 1)
+    elif task == "multiclass":
         metrics["acc"] = correct / max(total, 1)
     else:
         if y_mu is not None and y_std is not None:
@@ -220,6 +242,8 @@ def _load_repo_full_dataset(
         long_col, short_col = "mfe_up_atr", "mfe_down_atr"
     elif label_mode == "exhaustion":
         long_col, short_col = "exhaustion_progress_long", "exhaustion_progress_short"
+    elif label_mode == "leg_state":
+        long_col, short_col = "leg_state", "leg_state"
     else:
         raise ValueError(f"Unknown label_mode: {label_mode}")
 
@@ -307,8 +331,14 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             label_mode=args.label_mode,
             x_filename=x_filename,
         )
-        task = "regression" if _is_regression_label_mode(args.label_mode) else "binary"
-        sides = [s.strip() for s in args.sides.split(",") if s.strip()]
+        if args.label_mode == "leg_state":
+            task = "multiclass"
+            if args.sides.strip():
+                print("[warn] --sides ignored for label_mode=leg_state.")
+            sides = ["state"]
+        else:
+            task = "regression" if _is_regression_label_mode(args.label_mode) else "binary"
+            sides = [s.strip() for s in args.sides.split(",") if s.strip()]
     else:
         X = np.load(args.x_path).astype(np.float32)
         y = np.load(args.y_path).astype(np.float32)
@@ -325,13 +355,16 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
     results: dict[str, dict] = {}
 
     for side in sides:
-        y_raw = _select_target(side, y_long, y_short)
-        if task == "binary":
-            y_raw = (y_raw > 0).astype(np.float32)
+        if task == "multiclass":
+            y_raw = y_long.astype(np.int64, copy=False)
+        else:
+            y_raw = _select_target(side, y_long, y_short)
+            if task == "binary":
+                y_raw = (y_raw > 0).astype(np.float32)
 
-        if y_raw.ndim == 1:
-            y_raw = y_raw[:, None]
-        y_raw = y_raw.astype(np.float32)
+            if y_raw.ndim == 1:
+                y_raw = y_raw[:, None]
+            y_raw = y_raw.astype(np.float32)
 
         # Normalize y for regression (train stats only).
         y_mu = y_std = None
@@ -350,6 +383,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         feature_mask = None
         ga_score = None
         if args.use_ga:
+            if task == "multiclass":
+                raise ValueError("--use_ga is not supported for task=multiclass.")
             selector = GAITransformerFeatureSelector(
                 population_size=args.ga_population_size,
                 generations=args.ga_generations,
@@ -408,7 +443,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         dl_val = DataLoader(ds_val, batch_size=args.batch_size, shuffle=False, num_workers=0)
         dl_test = DataLoader(ds_test, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-        out_dim = y_scaled.shape[1]
+        out_dim = 3 if task == "multiclass" else y_scaled.shape[1]
         model = iTransformerEncoder(
             seq_len=args.seq_len,
             num_variates=X_masked.shape[1],
@@ -424,8 +459,10 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
 
         if task == "binary":
             loss_fn = nn.BCEWithLogitsLoss()
+        elif task == "multiclass":
+            loss_fn = nn.CrossEntropyLoss()
         else:
-            loss_fn = nn.SmoothL1Loss()
+            loss_fn = QuantileLoss()
 
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -447,6 +484,9 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                 out = model(x)
                 if task == "binary":
                     target = yb.view(-1, 1)
+                    loss = loss_fn(out, target)
+                elif task == "multiclass":
+                    target = yb.view(-1).long()
                     loss = loss_fn(out, target)
                 else:
                     target = yb.view_as(out)

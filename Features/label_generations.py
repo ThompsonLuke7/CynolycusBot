@@ -183,6 +183,7 @@ def add_atr_leg_segmentation_labels(
     pivot_type_col: str = "atr_leg_pivot_type",
     up_label_col: str = "leg_up_label",
     down_label_col: str = "leg_down_label",
+    leg_state_col: str = "leg_state",
 ) -> pd.DataFrame:
     """
     ATR-based leg segmentation for leg-state labels (not entry outcome labels).
@@ -200,6 +201,7 @@ def add_atr_leg_segmentation_labels(
       - pivot_price_col: pivot price at pivot index (NaN otherwise)
       - pivot_type_col: +1 at swing LOW pivots, -1 at swing HIGH pivots
       - up_label_col/down_label_col: one-vs-all labels (1/0)
+      - leg_state_col: {0=neutral,1=down,2=up}
       - Also adds df[atr_col] if not present
 
     Notes:
@@ -250,6 +252,10 @@ def add_atr_leg_segmentation_labels(
         df[pivot_type_col] = pivot_type
         df[up_label_col] = (leg_series == 1).astype("Int64")
         df[down_label_col] = (leg_series == -1).astype("Int64")
+        leg_state = pd.Series(0, index=df.index).astype("Int64")
+        leg_state[leg_series == 1] = 2
+        leg_state[leg_series == -1] = 1
+        df[leg_state_col] = leg_state
         return df
 
     start_i = int(first_valid[0])
@@ -338,6 +344,10 @@ def add_atr_leg_segmentation_labels(
     df[pivot_type_col] = pivot_type
     df[up_label_col] = (leg_series == 1).astype("Int64")
     df[down_label_col] = (leg_series == -1).astype("Int64")
+    leg_state = pd.Series(0, index=df.index).astype("Int64")
+    leg_state[leg_series == 1] = 2
+    leg_state[leg_series == -1] = 1
+    df[leg_state_col] = leg_state
 
     return df
 
