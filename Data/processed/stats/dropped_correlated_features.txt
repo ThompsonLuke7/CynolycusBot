@@ -1,5 +1,5 @@
 correlation_threshold=0.999
-to_drop_count=30
+to_drop_count=76
 
 to_drop:
 high
@@ -9,7 +9,7 @@ ema20_slope_pct
 ema50_slope_pct
 dollar_vol_z_20
 bb_pos_20
-open__30m
+time_since_pivot
 high__30m
 low__30m
 close__30m
@@ -17,50 +17,142 @@ ema20_slope_pct__30m
 ema50_slope_pct__30m
 dollar_vol_z_20__30m
 bb_pos_20__30m
+swing_leg_count__30m
+time_since_pivot__30m
 open__1h
 high__1h
 low__1h
 close__1h
+volume__1h
+ret_1__1h
+ret_2__1h
+ret_4__1h
+ret_8__1h
+ret_16__1h
+body_pct__1h
+range_pct__1h
+upper_wick_pct__1h
+lower_wick_pct__1h
+close_pos_in_range__1h
+atr_14_pct__1h
+tr_pct__1h
+rv_10__1h
+rv_20__1h
+rv_ratio_10_20__1h
+ema_20_ratio__1h
+ema_50_ratio__1h
+ema_20_50_ratio__1h
 ema20_slope_pct__1h
 ema50_slope_pct__1h
+adx_14__1h
+close_z_20__1h
+close_z_50__1h
+ret_z_20__1h
+vwap_dist_pct__1h
+vwap_slope_pct__1h
+above_vwap_flag__1h
+vol_z_20__1h
+vol_ratio_20__1h
 dollar_vol_z_20__1h
+bb_width_20_pct__1h
 bb_pos_20__1h
+keltner_width_pct__1h
+squeeze_flag__1h
+rsi_14__1h
+stoch_k_14_3__1h
+roc_10__1h
+atr__1h
+atr_swing_state__1h
+atr_swing_extreme__1h
+atr_swing_dist_from_extreme_atr__1h
+atr_swing_bars_since_flip__1h
+atr_swing_flip__1h
+swing_leg_count__1h
+time_since_pivot__1h
 ema20_slope_pct__4h
 ema50_slope_pct__4h
 dollar_vol_z_20__4h
 bb_pos_20__4h
+time_since_pivot__4h
 ema20_slope_pct__1d
 ema50_slope_pct__1d
 bb_pos_20__1d
+time_since_pivot__1d
 
 correlated_to:
-high	open (0.999843)
-low	open (0.999885), high (0.999743)
-close	high (0.999865), low (0.999865), open (0.999765)
-ema20_slope_pct	ema_20_ratio (0.999997)
+high	open (0.999500)
+low	open (0.999603), high (0.999171)
+close	high (0.999609), low (0.999516), open (0.999246)
+ema20_slope_pct	ema_20_ratio (0.999996)
 ema50_slope_pct	ema_50_ratio (0.999999)
-dollar_vol_z_20	vol_z_20 (0.999976)
+dollar_vol_z_20	vol_z_20 (0.999888)
 bb_pos_20	close_z_20 (1.000000)
-open__30m	open (0.999200), low (0.999079), high (0.999062)
-high__30m	open__30m (0.999706), open (0.999376), high (0.999368), close (0.999205), low (0.999188)
-low__30m	open__30m (0.999782), high__30m (0.999532), open (0.999352), low (0.999310), close (0.999140), high (0.999122)
-close__30m	low__30m (0.999756), high__30m (0.999751), open (0.999597), open__30m (0.999583), low (0.999485), high (0.999475), close (0.999394)
-ema20_slope_pct__30m	ema_20_ratio__30m (0.999997)
+time_since_pivot	atr_swing_bars_since_flip (1.000000)
+high__30m	open__30m (0.999500)
+low__30m	open__30m (0.999603), high__30m (0.999171)
+close__30m	high__30m (0.999609), low__30m (0.999517), open (0.999414), open__30m (0.999246)
+ema20_slope_pct__30m	ema_20_ratio__30m (0.999996)
 ema50_slope_pct__30m	ema_50_ratio__30m (0.999999)
-dollar_vol_z_20__30m	vol_z_20__30m (0.999911)
+dollar_vol_z_20__30m	vol_z_20__30m (0.999888)
 bb_pos_20__30m	close_z_20__30m (1.000000)
-open__1h	open__30m (0.999408), low__30m (0.999174), high__30m (0.999112)
-high__1h	high__30m (0.999653), open__30m (0.999634), open__1h (0.999492), close__30m (0.999381), low__30m (0.999293), open (0.999001)
-low__1h	low__30m (0.999639), open__1h (0.999597), open__30m (0.999572), close__30m (0.999275), high__1h (0.999191), high__30m (0.999133)
-close__1h	close__30m (0.999791), open__30m (0.999787), low__30m (0.999774), high__30m (0.999705), high__1h (0.999607), low__1h (0.999485), open (0.999399), high (0.999275), low (0.999271), open__1h (0.999192), close (0.999190)
-ema20_slope_pct__1h	ema_20_ratio__1h (0.999996)
-ema50_slope_pct__1h	ema_50_ratio__1h (0.999999)
-dollar_vol_z_20__1h	vol_z_20__1h (0.999821)
-bb_pos_20__1h	close_z_20__1h (1.000000)
+swing_leg_count__30m	swing_leg_count (0.999977)
+time_since_pivot__30m	atr_swing_bars_since_flip__30m (1.000000)
+open__1h	open__30m (1.000000), low__30m (0.999603), high__30m (0.999500), close__30m (0.999246)
+high__1h	high__30m (1.000000), close__30m (0.999609), open__30m (0.999500), open__1h (0.999500), low__30m (0.999171)
+low__1h	low__30m (1.000000), open__30m (0.999603), open__1h (0.999603), close__30m (0.999517), high__30m (0.999171), high__1h (0.999171)
+close__1h	close__30m (1.000000), high__30m (0.999609), high__1h (0.999609), low__30m (0.999517), low__1h (0.999517), open (0.999414), open__30m (0.999246), open__1h (0.999246)
+volume__1h	volume__30m (1.000000)
+ret_1__1h	ret_1__30m (1.000000)
+ret_2__1h	ret_2__30m (1.000000)
+ret_4__1h	ret_4__30m (1.000000)
+ret_8__1h	ret_8__30m (1.000000)
+ret_16__1h	ret_16__30m (1.000000)
+body_pct__1h	body_pct__30m (1.000000)
+range_pct__1h	range_pct__30m (1.000000)
+upper_wick_pct__1h	upper_wick_pct__30m (1.000000)
+lower_wick_pct__1h	lower_wick_pct__30m (1.000000)
+close_pos_in_range__1h	close_pos_in_range__30m (1.000000)
+atr_14_pct__1h	atr_14_pct__30m (1.000000)
+tr_pct__1h	tr_pct__30m (1.000000)
+rv_10__1h	rv_10__30m (1.000000)
+rv_20__1h	rv_20__30m (1.000000)
+rv_ratio_10_20__1h	rv_ratio_10_20__30m (1.000000)
+ema_20_ratio__1h	ema_20_ratio__30m (1.000000), ema20_slope_pct__30m (0.999996)
+ema_50_ratio__1h	ema_50_ratio__30m (1.000000), ema50_slope_pct__30m (0.999999)
+ema_20_50_ratio__1h	ema_20_50_ratio__30m (1.000000)
+ema20_slope_pct__1h	ema20_slope_pct__30m (1.000000), ema_20_ratio__30m (0.999996), ema_20_ratio__1h (0.999996)
+ema50_slope_pct__1h	ema50_slope_pct__30m (1.000000), ema_50_ratio__30m (0.999999), ema_50_ratio__1h (0.999999)
+adx_14__1h	adx_14__30m (1.000000)
+close_z_20__1h	close_z_20__30m (1.000000), bb_pos_20__30m (1.000000)
+close_z_50__1h	close_z_50__30m (1.000000)
+ret_z_20__1h	ret_z_20__30m (1.000000)
+vwap_dist_pct__1h	vwap_dist_pct__30m (1.000000)
+vwap_slope_pct__1h	vwap_slope_pct__30m (1.000000)
+above_vwap_flag__1h	above_vwap_flag__30m (1.000000)
+vol_z_20__1h	vol_z_20__30m (1.000000), dollar_vol_z_20__30m (0.999888)
+vol_ratio_20__1h	vol_ratio_20__30m (1.000000)
+dollar_vol_z_20__1h	dollar_vol_z_20__30m (1.000000), vol_z_20__30m (0.999888), vol_z_20__1h (0.999888)
+bb_width_20_pct__1h	bb_width_20_pct__30m (1.000000)
+bb_pos_20__1h	bb_pos_20__30m (1.000000), close_z_20__30m (1.000000), close_z_20__1h (1.000000)
+keltner_width_pct__1h	keltner_width_pct__30m (1.000000)
+squeeze_flag__1h	squeeze_flag__30m (1.000000)
+rsi_14__1h	rsi_14__30m (1.000000)
+stoch_k_14_3__1h	stoch_k_14_3__30m (1.000000)
+roc_10__1h	roc_10__30m (1.000000)
+atr__1h	atr__30m (1.000000)
+atr_swing_state__1h	atr_swing_state__30m (1.000000)
+atr_swing_extreme__1h	atr_swing_extreme__30m (1.000000)
+atr_swing_dist_from_extreme_atr__1h	atr_swing_dist_from_extreme_atr__30m (1.000000)
+atr_swing_bars_since_flip__1h	atr_swing_bars_since_flip__30m (1.000000), time_since_pivot__30m (1.000000)
+atr_swing_flip__1h	atr_swing_flip__30m (1.000000)
+swing_leg_count__1h	swing_leg_count__30m (1.000000), swing_leg_count (0.999977)
+time_since_pivot__1h	atr_swing_bars_since_flip__30m (1.000000), time_since_pivot__30m (1.000000), atr_swing_bars_since_flip__1h (1.000000)
 ema20_slope_pct__4h	ema_20_ratio__4h (0.999991)
 ema50_slope_pct__4h	ema_50_ratio__4h (0.999998)
-dollar_vol_z_20__4h	vol_z_20__4h (0.999115)
+dollar_vol_z_20__4h	vol_z_20__4h (0.999277)
 bb_pos_20__4h	close_z_20__4h (1.000000)
+time_since_pivot__4h	atr_swing_bars_since_flip__4h (1.000000)
 ema20_slope_pct__1d	ema_20_ratio__1d (0.999989)
-ema50_slope_pct__1d	ema_50_ratio__1d (0.999999)
+ema50_slope_pct__1d	ema_50_ratio__1d (0.999998)
 bb_pos_20__1d	close_z_20__1d (1.000000)
+time_since_pivot__1d	atr_swing_bars_since_flip__1d (1.000000)

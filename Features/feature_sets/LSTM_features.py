@@ -10,6 +10,7 @@ import pandas as pd
 import pandas_ta as ta
 
 from Features.feature_sets.pandas_ta_indicators import prepare_ohlcv_columns
+from Features.feature_sets.custom_indicators import add_atr_swing_state_features
 
 EPS = 1e-12
 REQUIRED_OHLCV = ("open", "high", "low", "close", "volume")
@@ -252,6 +253,40 @@ def add_time_features(
     return df
 
 
+def add_leg_structure_features(
+    df: pd.DataFrame,
+    *,
+    close_col: str = "close",
+    swing_prefix: str = "atr_swing",
+    eps: float = 1e-12,
+) -> pd.DataFrame:
+    """
+    Causal leg structure features based on ATR swing flips.
+
+    No leakage: uses only past flips and current close.
+    """
+    flip_col = f"{swing_prefix}_flip"
+    bars_col = f"{swing_prefix}_bars_since_flip"
+
+    if flip_col not in df.columns or bars_col not in df.columns:
+        df = add_atr_swing_state_features(df, prefix=swing_prefix)
+
+    flip = df[flip_col].fillna(0).astype(int)
+    df["swing_leg_count"] = flip.cumsum().astype(int)
+    df["time_since_pivot"] = df[bars_col]
+
+    close = df[close_col].astype(float)
+    pivot_price = close.where(flip == 1)
+    last_pivot_price = pivot_price.ffill()
+    prev_pivot_price = last_pivot_price.shift(1).ffill()
+
+    current_leg_move = (close - last_pivot_price).abs()
+    prev_leg_move = (last_pivot_price - prev_pivot_price).abs()
+    df["leg_extension_ratio"] = current_leg_move / prev_leg_move.replace(0, np.nan)
+    df["leg_extension_ratio"] = df["leg_extension_ratio"].replace([np.inf, -np.inf], np.nan)
+    return df
+
+
 def add_lstm_features(
     df: pd.DataFrame,
     *,
@@ -271,6 +306,7 @@ def add_lstm_features(
     df = add_volume_features(df)
     df = add_compression_features(df)
     df = add_momentum_features(df)
+    df = add_leg_structure_features(df)
 
     if include_time_features:
         df = add_time_features(df, **(time_kwargs or {}))
