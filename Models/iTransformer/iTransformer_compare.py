@@ -58,6 +58,7 @@ import gc
 import math
 import os
 import random
+from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -65,6 +66,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -425,17 +427,103 @@ def masked_bce_with_logits(
     return loss_el[mask].mean()
 
 
+@torch.no_grad()
+def predict_on_loader(
+    model: nn.Module,
+    loader: DataLoader,
+    device: str,
+    pred_horizon: int,
+    label_mode: Optional[str],
+    use_sigmoid: bool,
+    use_amp: bool,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    model.eval()
+    preds = []
+    valids = []
+    tgts = []
+    for x, y in loader:
+        x, y = maybe_to_device((x, y), device)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            out = model(x)
+            pred, valid_logits = extract_pred_and_valid(out, pred_horizon)
+            pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
+        preds.append(pred.detach().cpu())
+        tgts.append(y.detach().cpu())
+        if valid_logits is not None:
+            valids.append(valid_logits.detach().cpu())
+    pred_cat = torch.cat(preds, dim=0) if preds else torch.empty(0)
+    tgt_cat = torch.cat(tgts, dim=0) if tgts else torch.empty(0)
+    valid_cat = torch.cat(valids, dim=0) if valids else None
+    return pred_cat, valid_cat, tgt_cat
+
+
+def infer_plot_dir(y_parquet: str) -> Path:
+    p = Path(y_parquet).resolve()
+    parts = [str(x) for x in p.parts]
+    for i, part in enumerate(parts):
+        if part.lower() == "processed" and i + 1 < len(parts):
+            return Path(*parts[: i + 2]) / "plots"
+    return Path("Data") / "plots"
+
+
+def plot_test_quantiles(
+    y_true: np.ndarray,
+    pred_q: np.ndarray,
+    save_path: Path,
+    title: str,
+    max_points: int = 300,
+) -> None:
+    """
+    y_true: (N, H, D)
+    pred_q: (N, H, D, Q)
+    """
+    n = y_true.shape[0]
+    use_n = min(n, max_points)
+    y = y_true[-use_n:, 0, 0]
+    q25 = pred_q[-use_n:, 0, 0, 0]
+    q50 = pred_q[-use_n:, 0, 0, 1]
+    q75 = pred_q[-use_n:, 0, 0, 2]
+
+    x = np.arange(use_n)
+    fig, ax = plt.subplots(figsize=(14, 5))
+    ax.plot(x, y, color="#1565C0", linewidth=1.4, label="true")
+    ax.plot(x, q50, color="#2E7D32", linewidth=1.4, label="q50")
+    ax.fill_between(x, q25, q75, color="#66BB6A", alpha=0.25, label="q25-q75")
+    ax.set_title(title)
+    ax.set_xlabel("test index (last window)")
+    ax.set_ylabel("value")
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path)
+    plt.close(fig)
+
+
+QUANTILES: tuple[float, ...] = (0.25, 0.5, 0.75)
+
+
 class QuantileLoss(nn.Module):
-    def __init__(self, quantiles: tuple[float, ...] = (0.25, 0.5, 0.75)) -> None:
+    def __init__(self, quantiles: tuple[float, ...] = QUANTILES) -> None:
         super().__init__()
         self.quantiles = quantiles
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        err = target - pred
+        """
+        pred: (B, H, D * Q) or (B, H, D, Q)
+        target: (B, H, D)
+        returns: per-element loss (B, H, D)
+        """
+        if pred.ndim == target.ndim + 1:
+            pred_q = pred
+        else:
+            q = len(self.quantiles)
+            d = target.shape[-1]
+            pred_q = pred.view(*target.shape, q)
+        err = target.unsqueeze(-1) - pred_q
         losses = []
-        for q in self.quantiles:
-            losses.append(torch.maximum((q - 1) * err, q * err))
-        return torch.mean(torch.stack(losses, dim=0), dim=0)
+        for i, qv in enumerate(self.quantiles):
+            losses.append(torch.maximum((qv - 1) * err[..., i], qv * err[..., i]))
+        return torch.mean(torch.stack(losses, dim=-1), dim=-1)
 
 
 def quantile_loss_components(
@@ -445,10 +533,15 @@ def quantile_loss_components(
     mask: Optional[torch.Tensor] = None,
     weight: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
-    err = tgt - pred
+    if pred.ndim == tgt.ndim + 1:
+        pred_q = pred
+    else:
+        q = len(quantiles)
+        pred_q = pred.view(*tgt.shape, q)
+    err = tgt.unsqueeze(-1) - pred_q
     out: Dict[str, float] = {}
-    for q in quantiles:
-        loss_el = torch.maximum((q - 1) * err, q * err)
+    for i, q in enumerate(quantiles):
+        loss_el = torch.maximum((q - 1) * err[..., i], q * err[..., i])
         if weight is not None:
             loss_el = loss_el * weight
         if mask is not None:
@@ -498,6 +591,13 @@ def extract_pred_and_valid(
     return pred, None
 
 
+def split_quantile_preds(
+    pred: torch.Tensor, d: int, quantiles: tuple[float, ...]
+) -> torch.Tensor:
+    q = len(quantiles)
+    return pred.view(pred.shape[0], pred.shape[1], d, q)
+
+
 # -----------------------------
 # Model factory (lucidrains)
 # -----------------------------
@@ -534,11 +634,11 @@ class OutputProjector(nn.Module):
 class TwoHeadWrapper(nn.Module):
     """Two-head outputs: validity logits + value prediction."""
 
-    def __init__(self, base: nn.Module, in_dim: int, out_dim: int) -> None:
+    def __init__(self, base: nn.Module, in_dim: int, value_dim: int, valid_dim: int) -> None:
         super().__init__()
         self.base = base
-        self.value_proj = nn.Identity() if in_dim == out_dim else nn.Linear(in_dim, out_dim)
-        self.valid_proj = nn.Linear(in_dim, out_dim)
+        self.value_proj = nn.Identity() if in_dim == value_dim else nn.Linear(in_dim, value_dim)
+        self.valid_proj = nn.Identity() if in_dim == valid_dim else nn.Linear(in_dim, valid_dim)
 
     def _apply_proj(self, out, proj):
         if isinstance(out, dict):
@@ -562,6 +662,7 @@ def build_model(
     cfg: ModelConfig,
     output_variates: Optional[int] = None,
     two_head_validity: bool = False,
+    valid_variates: Optional[int] = None,
 ):
     """
     variant: "original" | "2d" | "fft"
@@ -578,6 +679,8 @@ def build_model(
 
     if output_variates is None:
         output_variates = input_variates
+    if valid_variates is None:
+        valid_variates = output_variates
 
     common = dict(
         num_variates=input_variates,
@@ -609,7 +712,7 @@ def build_model(
         raise ValueError(f"Unknown variant: {variant}")
 
     if two_head_validity:
-        return TwoHeadWrapper(base, input_variates, output_variates)
+        return TwoHeadWrapper(base, input_variates, output_variates, valid_variates)
     if output_variates != input_variates:
         return OutputProjector(base, input_variates, output_variates)
     return base
@@ -738,7 +841,11 @@ def evaluate(
                 q_sums[q_key] += val
                 q_counts[q_key] += 1
 
-        preds_all.append(pred.detach().cpu())
+            pred_q = split_quantile_preds(pred, y.shape[-1], loss_fn.quantiles)
+            pred_q50 = pred_q[..., 1]
+            preds_all.append(pred_q50.detach().cpu())
+        else:
+            preds_all.append(pred.detach().cpu())
         tgts_all.append(y.detach().cpu())
         if mask_nan_y:
             masks_all.append(mask.detach().cpu())
@@ -900,6 +1007,11 @@ def main():
         default=2.0,
         help="multiplier for spike samples (1.0 disables weighting)",
     )
+    ap.add_argument("--plot_test", type=int, default=0, help="plot test quantiles to png")
+    ap.add_argument(
+        "--plot_test_n", type=int, default=300, help="max points to plot from test"
+    )
+    ap.add_argument("--plot_dir", type=str, default=None, help="override plot output dir")
 
     ap.add_argument("--lookback_len", type=int, default=96)
     ap.add_argument("--pred_horizon", type=int, default=1)
@@ -1080,7 +1192,9 @@ def main():
             )
 
         input_variates = C
-        output_variates = D
+        quantile_count = len(QUANTILES)
+        output_variates = D * quantile_count
+        valid_variates = D
         if D == 1 and C > 1:
             print(
                 f"[info] X has C={C} variates and y has D=1. "
@@ -1165,11 +1279,6 @@ def main():
         print(f"splits: train_end={train_end}, val_end={val_end}, test_end={N}")
         if use_parquet:
             print(f"label_mode={args.label_mode}")
-        print(
-            "loss: QuantileLoss(q=0.25,0.50,0.75) + valid_bce"
-            if (bool(args.two_head_validity) and bool(args.mask_nan_y))
-            else "loss: QuantileLoss(q=0.25,0.50,0.75)"
-        )
         print("model cfg:", asdict(cfg))
         print("variants:", variants)
         print()
@@ -1190,6 +1299,7 @@ def main():
                 pred_horizon=args.pred_horizon,
                 cfg=cfg,
                 output_variates=output_variates,
+                valid_variates=valid_variates,
                 two_head_validity=use_valid_head,
             )
 
@@ -1233,7 +1343,34 @@ def main():
             print(f"\nBest VAL for {variant}: {best_val_metrics}")
             print(f"TEST for {variant}: {test_metrics}")
 
-        results[side][variant] = {
+            if args.plot_test:
+                preds, _, targets = predict_on_loader(
+                    model,
+                    test_loader,
+                    device,
+                    args.pred_horizon,
+                    label_mode_for_activation,
+                    use_sigmoid,
+                    use_amp,
+                )
+                if preds.numel() > 0:
+                    pred_q = split_quantile_preds(preds, D, QUANTILES).numpy()
+                    y_true = targets.numpy()
+                    plot_dir = (
+                        Path(args.plot_dir)
+                        if args.plot_dir
+                        else infer_plot_dir(args.y_parquet) if use_parquet else Path("Data") / "plots"
+                    )
+                    fname = f"itransformer_compare_{args.label_mode}_{side}_{variant}.png"
+                    plot_test_quantiles(
+                        y_true,
+                        pred_q,
+                        plot_dir / fname,
+                        title=f"{args.label_mode} | {side} | {variant}",
+                        max_points=args.plot_test_n,
+                    )
+
+            results[side][variant] = {
             "val_loss": float(best_val_metrics.get("loss", float("nan"))),
             "val_mse": float(best_val_metrics.get("mse", float("nan"))),
             "val_mae": float(best_val_metrics.get("mae", float("nan"))),
