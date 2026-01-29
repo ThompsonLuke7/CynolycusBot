@@ -71,6 +71,11 @@ def parse_args():
         help='Alpaca timeframe (e.g., "1Hour", "1Day"). Defaults to "1Hour".',
     )
     parser.add_argument(
+        "--raw-parquet",
+        default=None,
+        help="Override raw parquet path (e.g., Data/raw/spy/spy_intraday_15min.parquet).",
+    )
+    parser.add_argument(
         "--start",
         default=None,
         help="Fetch start time (ISO string). Defaults to now - 200 days.",
@@ -187,7 +192,7 @@ if __name__ == "__main__":
     data_dir = get_ticker_data_dir(args.ticker)
     ensure_ticker_dirs(args.ticker)
 
-    raw_path = resolve_intraday_parquet_path(args.ticker)
+    raw_path = resolve_intraday_parquet_path(args.ticker, parquet_path=args.raw_parquet)
     raw_missing = not raw_path.exists()
     refresh_data = args.refresh_data or raw_missing
     use_cached = args.use_cached
@@ -215,7 +220,7 @@ if __name__ == "__main__":
         )
 
     if args.plot_only:
-        df = load_ticker_parquet(args.ticker)
+        df = load_ticker_parquet(args.ticker, parquet_path=args.raw_parquet)
         df = ensure_time_index(df)
         rule = _normalize_plot_timeframe(args.plot_timeframe)
         if rule != "1T":
@@ -303,7 +308,9 @@ if __name__ == "__main__":
     if used_cache:
         print(f"Using cached dataset at {dataset_dir}")
     else:
-        parquet_path = resolve_intraday_parquet_path(args.ticker)
+        parquet_path = resolve_intraday_parquet_path(
+            args.ticker, parquet_path=args.raw_parquet
+        )
 
         model_dfs = build_feature_matrices(
             parquet_path=parquet_path,

@@ -70,11 +70,10 @@ def add_all_custom_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_binary_swing_labels(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.dropna(
-        subset=["atr_swing_label", "close", "open", "high", "low", "volume"]
-    ).copy()
-    df["long_swing_label"] = (df["atr_swing_label"] == 1.0).astype(np.int64)
-    df["short_swing_label"] = (df["atr_swing_label"] == -1.0).astype(np.int64)
+    df = df.copy()
+    swing = df["atr_swing_label"].fillna(0.0)
+    df["long_swing_label"] = (swing == 1.0).astype(np.int64)
+    df["short_swing_label"] = (swing == -1.0).astype(np.int64)
     return df
 
 
