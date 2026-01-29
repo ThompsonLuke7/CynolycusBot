@@ -1227,9 +1227,9 @@ def main():
             "test_q75": float(test_metrics.get("q75", float("nan"))),
         }
 
-            # free GPU memory before next variant
-            del model, loss_fn
-            cleanup_cuda()
+        # free GPU memory before next variant
+        del model, loss_fn
+        cleanup_cuda()
 
         # pretty print per side
         print(
