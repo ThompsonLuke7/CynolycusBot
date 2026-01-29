@@ -412,6 +412,19 @@ def masked_loss(
     return loss_el.sum() / denom, denom_val
 
 
+def masked_bce_with_logits(
+    logits: torch.Tensor, targets: torch.Tensor, mask: Optional[torch.Tensor]
+) -> torch.Tensor:
+    loss_el = nn.functional.binary_cross_entropy_with_logits(
+        logits, targets, reduction="none"
+    )
+    if mask is None:
+        return loss_el.mean()
+    if mask.sum().item() == 0:
+        return torch.tensor(0.0, device=logits.device, dtype=logits.dtype, requires_grad=True)
+    return loss_el[mask].mean()
+
+
 class QuantileLoss(nn.Module):
     def __init__(self, quantiles: tuple[float, ...] = (0.25, 0.5, 0.75)) -> None:
         super().__init__()
@@ -642,7 +655,9 @@ def train_one_epoch(
             loss, denom_val = masked_loss(pred, y, mask, loss_fn, weight)
             if valid_logits is not None and mask is not None and valid_loss_fn is not None:
                 valid_target = mask.to(dtype=valid_logits.dtype)
-                loss = loss + valid_loss_weight * valid_loss_fn(valid_logits, valid_target)
+                loss = loss + valid_loss_weight * masked_bce_with_logits(
+                    valid_logits, valid_target, mask
+                )
 
         loss.backward()
         if clip_grad and clip_grad > 0:
@@ -700,7 +715,7 @@ def evaluate(
         loss, denom_val = masked_loss(pred, y, mask, loss_fn, weight)
         if valid_logits is not None and mask is not None and valid_loss_fn is not None:
             valid_target = mask.to(dtype=valid_logits.dtype)
-            valid_bce = valid_loss_fn(valid_logits, valid_target).item()
+            valid_bce = masked_bce_with_logits(valid_logits, valid_target, mask).item()
             valid_probs = torch.sigmoid(valid_logits)
             valid_acc = (valid_probs >= 0.5).eq(valid_target >= 0.5).float().mean().item()
             valid_bce_sum += valid_bce
@@ -772,7 +787,7 @@ def fit_model(
 
     # Quantile loss for regression
     loss_fn = QuantileLoss()
-    valid_loss_fn = nn.BCEWithLogitsLoss() if mask_nan_y else None
+    valid_loss_fn = nn.BCEWithLogitsLoss(reduction="none") if mask_nan_y else None
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2)
@@ -900,7 +915,7 @@ def main():
 
     # training
     ap.add_argument("--epochs", type=int, default=40)
-    ap.add_argument("--patience", type=int, default=3)
+    ap.add_argument("--patience", type=int, default=4)
     ap.add_argument("--batch_size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-2)
@@ -1202,7 +1217,7 @@ def main():
                 use_sigmoid,
                 use_amp,
                 bool(args.mask_nan_y),
-                nn.BCEWithLogitsLoss() if use_valid_head else None,
+                nn.BCEWithLogitsLoss(reduction="none") if use_valid_head else None,
                 spike_threshold,
                 args.spike_weight_mult,
             )
