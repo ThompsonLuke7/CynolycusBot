@@ -775,7 +775,7 @@ def fit_model(
             best_val_metrics = val_metrics
 
         loss_desc = "QuantileLoss(q=0.25,0.50,0.75)"
-        if use_valid_head:
+        if valid_loss_fn is not None:
             loss_desc += f" + ValidBCE(w={valid_loss_weight:.2f})"
         print(
             "  epoch {:03d} | train_loss={:.6f} | val={} | loss={}".format(
