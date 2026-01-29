@@ -1354,8 +1354,10 @@ def main():
                     use_amp,
                 )
                 if preds.numel() > 0:
-                    pred_q = split_quantile_preds(preds, D, QUANTILES).numpy()
-                    y_true = targets.numpy()
+                    pred_q = split_quantile_preds(
+                        preds.to(torch.float32), D, QUANTILES
+                    ).numpy()
+                    y_true = targets.to(torch.float32).numpy()
                     plot_dir = (
                         Path(args.plot_dir)
                         if args.plot_dir
