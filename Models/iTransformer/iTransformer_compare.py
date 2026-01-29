@@ -395,6 +395,21 @@ def maybe_apply_output_activation(
     return pred
 
 
+def apply_quantile_parametrization(
+    pred: torch.Tensor,
+    d: int,
+    label_mode: Optional[str],
+    use_sigmoid: bool,
+    quantile_monotonic: bool,
+    quantiles: tuple[float, ...],
+) -> torch.Tensor:
+    if quantile_monotonic:
+        pred_q = monotonic_quantile_params_to_q(pred, d, quantiles)
+        return maybe_apply_output_activation(pred_q, label_mode, use_sigmoid)
+    pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
+    return pred
+
+
 def quantile_crossing_penalty(
     pred: torch.Tensor, d: int, quantiles: tuple[float, ...]
 ) -> torch.Tensor:
@@ -458,6 +473,7 @@ def predict_on_loader(
     label_mode: Optional[str],
     use_sigmoid: bool,
     use_amp: bool,
+    quantile_monotonic: bool,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
     model.eval()
     preds = []
@@ -468,7 +484,14 @@ def predict_on_loader(
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
             out = model(x)
             pred, valid_logits = extract_pred_and_valid(out, pred_horizon)
-            pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
+            pred = apply_quantile_parametrization(
+                pred,
+                y.shape[-1],
+                label_mode,
+                use_sigmoid,
+                quantile_monotonic,
+                QUANTILES,
+            )
         preds.append(pred.detach().cpu())
         tgts.append(y.detach().cpu())
         if valid_logits is not None:
@@ -662,8 +685,27 @@ def extract_pred_and_valid(
 def split_quantile_preds(
     pred: torch.Tensor, d: int, quantiles: tuple[float, ...]
 ) -> torch.Tensor:
+    if pred.ndim == 4:
+        return pred
     q = len(quantiles)
     return pred.view(pred.shape[0], pred.shape[1], d, q)
+
+
+def monotonic_quantile_params_to_q(
+    pred: torch.Tensor, d: int, quantiles: tuple[float, ...]
+) -> torch.Tensor:
+    """
+    pred carries (m, d_lo, d_hi) per target; d_* passed through softplus.
+    Returns quantiles in order of `quantiles`.
+    """
+    pred_q = split_quantile_preds(pred, d, quantiles)
+    m = pred_q[..., 0]
+    d_lo = nn.functional.softplus(pred_q[..., 1])
+    d_hi = nn.functional.softplus(pred_q[..., 2])
+    q25 = m - d_lo
+    q50 = m
+    q75 = m + d_hi
+    return torch.stack([q25, q50, q75], dim=-1)
 
 
 # -----------------------------
@@ -805,6 +847,7 @@ def train_one_epoch(
     spike_threshold: Optional[float],
     spike_weight_mult: float,
     q_crossing_penalty: float,
+    quantile_monotonic: bool,
     clip_grad: float = 1.0,
 ) -> float:
     model.train()
@@ -818,21 +861,33 @@ def train_one_epoch(
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
             out = model(x)
             pred, valid_logits = extract_pred_and_valid(out, pred_horizon)  # (B, H, D)
-            pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
+            pred = apply_quantile_parametrization(
+                pred,
+                y.shape[-1],
+                label_mode,
+                use_sigmoid,
+                quantile_monotonic,
+                QUANTILES,
+            )
             mask = torch.isfinite(y) if mask_nan_y else None
             weight = None
             if spike_threshold is not None and spike_weight_mult > 1.0:
                 thresh = torch.tensor(spike_threshold, device=y.device, dtype=y.dtype)
                 weight = torch.where(y >= thresh, spike_weight_mult, 1.0).to(y.dtype)
             loss, denom_val = masked_loss(pred, y, mask, loss_fn, weight)
-            if isinstance(loss_fn, QuantileLoss) and q_crossing_penalty > 0:
+            if (
+                isinstance(loss_fn, QuantileLoss)
+                and q_crossing_penalty > 0
+                and not quantile_monotonic
+            ):
                 loss = loss + q_crossing_penalty * quantile_crossing_penalty(
                     pred, y.shape[-1], loss_fn.quantiles
                 )
             if valid_logits is not None and mask is not None and valid_loss_fn is not None:
                 valid_target = mask.to(dtype=valid_logits.dtype)
+                # compute BCE over both valid and invalid targets (no masking)
                 loss = loss + valid_loss_weight * masked_bce_with_logits(
-                    valid_logits, valid_target, mask
+                    valid_logits, valid_target, None
                 )
 
         loss.backward()
@@ -863,6 +918,7 @@ def evaluate(
     spike_threshold: Optional[float],
     spike_weight_mult: float,
     q_crossing_penalty: float,
+    quantile_monotonic: bool,
 ) -> Dict[str, float]:
     model.eval()
     total_loss = 0.0
@@ -882,7 +938,14 @@ def evaluate(
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
             out = model(x)
             pred, valid_logits = extract_pred_and_valid(out, pred_horizon)
-            pred = maybe_apply_output_activation(pred, label_mode, use_sigmoid)
+            pred = apply_quantile_parametrization(
+                pred,
+                y.shape[-1],
+                label_mode,
+                use_sigmoid,
+                quantile_monotonic,
+                QUANTILES,
+            )
 
         mask = torch.isfinite(y) if mask_nan_y else None
         weight = None
@@ -890,13 +953,17 @@ def evaluate(
             thresh = torch.tensor(spike_threshold, device=y.device, dtype=y.dtype)
             weight = torch.where(y >= thresh, spike_weight_mult, 1.0).to(y.dtype)
         loss, denom_val = masked_loss(pred, y, mask, loss_fn, weight)
-        if isinstance(loss_fn, QuantileLoss) and q_crossing_penalty > 0:
+        if (
+            isinstance(loss_fn, QuantileLoss)
+            and q_crossing_penalty > 0
+            and not quantile_monotonic
+        ):
             loss = loss + q_crossing_penalty * quantile_crossing_penalty(
                 pred, y.shape[-1], loss_fn.quantiles
             )
         if valid_logits is not None and mask is not None and valid_loss_fn is not None:
             valid_target = mask.to(dtype=valid_logits.dtype)
-            valid_bce = masked_bce_with_logits(valid_logits, valid_target, mask).item()
+            valid_bce = masked_bce_with_logits(valid_logits, valid_target, None).item()
             valid_probs = torch.sigmoid(valid_logits)
             valid_acc = (valid_probs >= 0.5).eq(valid_target >= 0.5).float().mean().item()
             valid_bce_sum += valid_bce
@@ -969,6 +1036,7 @@ def fit_model(
     spike_weight_mult: float,
     q_crossing_penalty: float,
     early_stop_metric: str,
+    quantile_monotonic: bool,
 ) -> Tuple[nn.Module, Dict[str, float]]:
     model = model.to(device)
 
@@ -1001,6 +1069,7 @@ def fit_model(
             spike_threshold,
             spike_weight_mult,
             q_crossing_penalty,
+            quantile_monotonic,
             clip_grad=clip_grad,
         )
         val_metrics = evaluate(
@@ -1017,6 +1086,7 @@ def fit_model(
             spike_threshold,
             spike_weight_mult,
             q_crossing_penalty,
+            quantile_monotonic,
         )
         scheduler.step(val_metrics["loss"])
 
@@ -1027,6 +1097,8 @@ def fit_model(
             best_val_metrics = val_metrics
 
         loss_desc = "QuantileLoss(q=0.25,0.50,0.75)"
+        if quantile_monotonic:
+            loss_desc += " [monotonic]"
         if valid_loss_fn is not None:
             loss_desc += f" + ValidBCE(w={valid_loss_weight:.2f})"
         print(
@@ -1069,7 +1141,7 @@ def main():
     ap.add_argument(
         "--two_head_validity",
         type=int,
-        default=1,
+        default=0,
         help="use two-head model (validity + value) when mask_nan_y is enabled",
     )
     ap.add_argument(
@@ -1100,6 +1172,12 @@ def main():
         type=float,
         default=1.0,
         help="penalty weight to discourage quantile crossing",
+    )
+    ap.add_argument(
+        "--quantile_monotonic",
+        type=int,
+        default=1,
+        help="use monotonic parameterization for quantiles (m, d_lo, d_hi)",
     )
     ap.add_argument(
         "--early_stop_metric",
@@ -1261,6 +1339,10 @@ def main():
         device.startswith("cuda") and torch.cuda.is_available() and bool(args.amp_bf16)
     )
     label_mode_for_activation = args.label_mode if use_parquet else None
+    quantile_monotonic = bool(args.quantile_monotonic)
+    if quantile_monotonic and args.q_crossing_penalty > 0:
+        print("[info] quantile_monotonic=1 -> disabling q_crossing_penalty.")
+        args.q_crossing_penalty = 0.0
 
     results: Dict[str, Dict[str, Dict[str, float]]] = {}
 
@@ -1386,6 +1468,8 @@ def main():
             print(f"label_mode={args.label_mode}")
         if use_sigmoid and isinstance(QuantileLoss(), QuantileLoss):
             print("[warn] Sigmoid with QuantileLoss can saturate gradients near 0/1.")
+        if quantile_monotonic:
+            print("[info] quantiles use monotonic parameterization (m, d_lo, d_hi).")
         print("model cfg:", asdict(cfg))
         print("variants:", variants)
         print()
@@ -1430,6 +1514,7 @@ def main():
                 spike_weight_mult=args.spike_weight_mult,
                 q_crossing_penalty=args.q_crossing_penalty,
                 early_stop_metric=args.early_stop_metric,
+                quantile_monotonic=quantile_monotonic,
             )
 
             # test
@@ -1448,6 +1533,7 @@ def main():
                 spike_threshold,
                 args.spike_weight_mult,
                 args.q_crossing_penalty,
+                quantile_monotonic,
             )
 
             print(f"\nBest VAL for {variant}: {best_val_metrics}")
@@ -1462,6 +1548,7 @@ def main():
                     label_mode_for_activation,
                     use_sigmoid,
                     use_amp,
+                    quantile_monotonic,
                 )
                 if preds.numel() > 0:
                     pred_q = split_quantile_preds(
