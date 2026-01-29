@@ -997,15 +997,16 @@ def plot_mfe_mae_labels(
     )
 
 
-def plot_bars_to_exhaustion(
+def plot_exhaustion_progress(
     df: pd.DataFrame,
     *,
     close_col: str = "close",
-    exhaustion_col: str = "bars_to_exhaustion",
+    progress_long_col: str = "exhaustion_progress_long",
+    progress_short_col: str = "exhaustion_progress_short",
     save_path: str | None = None,
 ) -> None:
     """
-    Plot close price with a subplot showing bars-to-exhaustion values.
+    Plot close price with a subplot showing exhaustion progress (0..1).
     """
     df = _tail_df(df)
     fig, (ax_price, ax_bar) = plt.subplots(
@@ -1013,29 +1014,41 @@ def plot_bars_to_exhaustion(
     )
 
     date_index = df.index
-    pos = np.arange(len(df))
-    close_y = df[close_col].to_numpy()
+    pos, open_y, high_y, low_y, close_y = _extract_ohlc(df)
 
-    ax_price.plot(pos, close_y, color="#1f77b4", linewidth=1.6, label="Close")
+    _plot_candles(ax_price, pos, open_y, high_y, low_y, close_y)
     ax_price.set_ylabel("Close Price")
-    ax_price.legend(loc="upper left")
-    ax_price.set_title("Close with Bars-to-Exhaustion")
+    ax_price.set_title("Close with Exhaustion Progress")
 
-    if exhaustion_col not in df.columns:
-        raise KeyError(f"Missing required column: {exhaustion_col}")
-    exhaustion = df[exhaustion_col].to_numpy(dtype=float)
-    exhaustion_plot = np.where(np.isfinite(exhaustion), exhaustion, 0.0)
+    if progress_long_col not in df.columns or progress_short_col not in df.columns:
+        missing = [c for c in (progress_long_col, progress_short_col) if c not in df.columns]
+        raise KeyError(f"Missing required column(s): {', '.join(missing)}")
 
+    prog_long = df[progress_long_col].to_numpy(dtype=float)
+    prog_short = df[progress_short_col].to_numpy(dtype=float)
+
+    long_plot = np.where(np.isfinite(prog_long), prog_long, 0.0)
+    short_plot = np.where(np.isfinite(prog_short), prog_short, 0.0)
+    width = 0.4
     ax_bar.bar(
-        pos,
-        exhaustion_plot,
-        color="#7B1FA2",
-        width=0.8,
+        pos - width / 2,
+        long_plot,
+        color="#2E7D32",
+        width=width,
         alpha=0.7,
-        label="bars_to_exhaustion",
+        label="exhaustion_progress_long",
     )
-    ax_bar.set_ylabel("Bars")
-    ax_bar.legend(loc="upper left")
+    ax_bar.bar(
+        pos + width / 2,
+        short_plot,
+        color="#C62828",
+        width=width,
+        alpha=0.7,
+        label="exhaustion_progress_short",
+    )
+    ax_bar.set_ylabel("Progress")
+    ax_bar.set_ylim(0.0, 1.0)
+    ax_bar.legend(loc="upper left", ncol=2)
 
     tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
     _apply_time_ticks(ax_bar, tick_positions, tick_labels)
@@ -1043,7 +1056,7 @@ def plot_bars_to_exhaustion(
 
     _finalize_plot(
         fig,
-        suptitle="Bars-to-Exhaustion - Last Year",
+        suptitle="Exhaustion Progress - Last Year",
         suptitle_y=1.02,
         top=0.92,
         save_path=save_path,
@@ -1057,7 +1070,7 @@ _LABEL_PLOTTERS = {
     "swing_state_machine": plot_swing_state_machine_signals,
     "all_labels": plot_all_labels,
     "mfe_mae": plot_mfe_mae_labels,
-    "bars_to_exhaustion": plot_bars_to_exhaustion,
+    "bars_to_exhaustion": plot_exhaustion_progress,
 }
 
 

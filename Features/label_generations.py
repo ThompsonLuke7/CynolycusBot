@@ -736,6 +736,13 @@ def add_bars_to_exhaustion_label(
 
     df[label_col] = y
     df[censored_col] = pd.Series(cens, index=df.index).astype("Int64")
+    cols = ["exhaustion_progress_long", "exhaustion_progress_short"]
+    print(df[cols].tail(200).describe())
+    print("nonzero long:", (df[cols[0]].tail(200).fillna(0) > 0).sum())
+    print("nonzero short:", (df[cols[1]].tail(200).fillna(0) > 0).sum())
+    print("nan long:", df[cols[0]].tail(200).isna().sum())
+    print("nan short:", df[cols[1]].tail(200).isna().sum())
+
     return df
 
 

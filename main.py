@@ -95,7 +95,7 @@ def parse_args():
         "--refresh-data",
         dest="refresh_data",
         action="store_true",
-        default=True,
+        default=False,
         help="Fetch latest data from Alpaca before running (default: True).",
     )
     parser.add_argument(
@@ -265,6 +265,9 @@ if __name__ == "__main__":
             if "mfe_mae" in canonical_plot_types:
                 df = add_mfe_mae_labels(df)
             if "bars_to_exhaustion" in canonical_plot_types:
+                # bars_to_exhaustion masks to leg direction by default; ensure leg labels exist
+                if "leg_up_label" not in df.columns or "leg_down_label" not in df.columns:
+                    df = add_atr_leg_segmentation_labels(df)
                 df = add_bars_to_exhaustion_label(df)
 
         save_paths = None

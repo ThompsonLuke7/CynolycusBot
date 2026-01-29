@@ -425,6 +425,36 @@ class QuantileLoss(nn.Module):
         return torch.mean(torch.stack(losses, dim=0), dim=0)
 
 
+def quantile_loss_components(
+    pred: torch.Tensor,
+    tgt: torch.Tensor,
+    quantiles: tuple[float, ...],
+    mask: Optional[torch.Tensor] = None,
+    weight: Optional[torch.Tensor] = None,
+) -> Dict[str, float]:
+    err = tgt - pred
+    out: Dict[str, float] = {}
+    for q in quantiles:
+        loss_el = torch.maximum((q - 1) * err, q * err)
+        if weight is not None:
+            loss_el = loss_el * weight
+        if mask is not None:
+            if mask.sum().item() == 0:
+                out[f"q{int(q*100):02d}"] = float("nan")
+                continue
+            loss_el = loss_el[mask]
+            denom = weight[mask].sum() if weight is not None else mask.sum()
+        else:
+            denom = weight.sum() if weight is not None else torch.tensor(
+                loss_el.numel(), device=loss_el.device
+            )
+        denom_val = float(denom.item()) if torch.is_tensor(denom) else float(denom)
+        out[f"q{int(q*100):02d}"] = (
+            float((loss_el.sum() / denom).item()) if denom_val > 0 else float("nan")
+        )
+    return out
+
+
 def extract_pred_dict_output(
     preds: Dict[int, torch.Tensor] | torch.Tensor, pred_horizon: int
 ) -> torch.Tensor:
@@ -648,6 +678,8 @@ def evaluate(
     valid_bce_sum = 0.0
     valid_acc_sum = 0.0
     valid_batches = 0
+    q_sums = {25: 0.0, 50: 0.0, 75: 0.0}
+    q_counts = {25: 0, 50: 0, 75: 0}
 
     preds_all = []
     tgts_all = []
@@ -680,6 +712,17 @@ def evaluate(
         total_loss += loss.item() * denom_val
         n += denom_val
 
+        if isinstance(loss_fn, QuantileLoss):
+            q_vals = quantile_loss_components(
+                pred, y, loss_fn.quantiles, mask=mask, weight=weight
+            )
+            for key, val in q_vals.items():
+                q_key = int(key[1:])
+                if math.isnan(val):
+                    continue
+                q_sums[q_key] += val
+                q_counts[q_key] += 1
+
         preds_all.append(pred.detach().cpu())
         tgts_all.append(y.detach().cpu())
         if mask_nan_y:
@@ -697,6 +740,11 @@ def evaluate(
     if valid_loss_fn is not None and mask_nan_y and valid_batches > 0:
         metrics["valid_bce"] = valid_bce_sum / valid_batches
         metrics["valid_acc"] = valid_acc_sum / valid_batches
+    if isinstance(loss_fn, QuantileLoss):
+        for q_key in (25, 50, 75):
+            metrics[f"q{q_key:02d}"] = (
+                q_sums[q_key] / q_counts[q_key] if q_counts[q_key] > 0 else float("nan")
+            )
     metrics["loss"] = total_loss / max(n, 1)
     return metrics
 
