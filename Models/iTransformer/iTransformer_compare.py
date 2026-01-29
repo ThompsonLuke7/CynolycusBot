@@ -1210,16 +1210,22 @@ def main():
             print(f"\nBest VAL for {variant}: {best_val_metrics}")
             print(f"TEST for {variant}: {test_metrics}")
 
-            results[side][variant] = {
-                "val_loss": float(best_val_metrics.get("loss", float("nan"))),
-                "val_mse": float(best_val_metrics.get("mse", float("nan"))),
-                "val_mae": float(best_val_metrics.get("mae", float("nan"))),
-                "val_r2": float(best_val_metrics.get("r2", float("nan"))),
-                "test_loss": float(test_metrics["loss"]),
-                "test_mse": float(test_metrics["mse"]),
-                "test_mae": float(test_metrics["mae"]),
-                "test_r2": float(test_metrics["r2"]),
-            }
+        results[side][variant] = {
+            "val_loss": float(best_val_metrics.get("loss", float("nan"))),
+            "val_mse": float(best_val_metrics.get("mse", float("nan"))),
+            "val_mae": float(best_val_metrics.get("mae", float("nan"))),
+            "val_r2": float(best_val_metrics.get("r2", float("nan"))),
+            "val_q25": float(best_val_metrics.get("q25", float("nan"))),
+            "val_q50": float(best_val_metrics.get("q50", float("nan"))),
+            "val_q75": float(best_val_metrics.get("q75", float("nan"))),
+            "test_loss": float(test_metrics["loss"]),
+            "test_mse": float(test_metrics["mse"]),
+            "test_mae": float(test_metrics["mae"]),
+            "test_r2": float(test_metrics["r2"]),
+            "test_q25": float(test_metrics.get("q25", float("nan"))),
+            "test_q50": float(test_metrics.get("q50", float("nan"))),
+            "test_q75": float(test_metrics.get("q75", float("nan"))),
+        }
 
             # free GPU memory before next variant
             del model, loss_fn
@@ -1230,7 +1236,17 @@ def main():
             "\n\n=== Summary (lower is better for loss/mse/mae; higher is better for r2) "
             f"| side={side} ==="
         )
-        header = ["variant", "val_loss", "test_loss", "test_mse", "test_mae", "test_r2"]
+        header = [
+            "variant",
+            "val_loss",
+            "test_loss",
+            "test_mse",
+            "test_mae",
+            "test_r2",
+            "test_q25",
+            "test_q50",
+            "test_q75",
+        ]
         print(" | ".join(f"{h:>10s}" for h in header))
         print("-" * (len(header) * 13))
 
@@ -1242,12 +1258,15 @@ def main():
                         f"{v:>10s}",
                         f"{r['val_loss']:10.6f}",
                         f"{r['test_loss']:10.6f}",
-                        f"{r['test_mse']:10.6f}",
-                        f"{r['test_mae']:10.6f}",
-                        f"{r['test_r2']:10.6f}" if not math.isnan(r["test_r2"]) else f"{'nan':>10s}",
-                    ]
-                )
+                    f"{r['test_mse']:10.6f}",
+                    f"{r['test_mae']:10.6f}",
+                    f"{r['test_r2']:10.6f}" if not math.isnan(r["test_r2"]) else f"{'nan':>10s}",
+                    f"{r['test_q25']:10.6f}" if not math.isnan(r["test_q25"]) else f"{'nan':>10s}",
+                    f"{r['test_q50']:10.6f}" if not math.isnan(r["test_q50"]) else f"{'nan':>10s}",
+                    f"{r['test_q75']:10.6f}" if not math.isnan(r["test_q75"]) else f"{'nan':>10s}",
+                ]
             )
+        )
 
         best = min(results[side].items(), key=lambda kv: kv[1]["test_loss"])
         print(
