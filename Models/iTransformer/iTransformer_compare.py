@@ -141,6 +141,7 @@ class ForecastWindowDataset(Dataset):
         split: str,                 # "train" | "val" | "test"
         split_index: SplitIndex,
         target_offset: Optional[int] = None,
+        pad_to_multiple: Optional[int] = None,
         device: Optional[str] = None,
     ):
         assert X.ndim == 2, "X must be (N, C)"
@@ -159,9 +160,17 @@ class ForecastWindowDataset(Dataset):
         self.target_offset = pred_horizon if target_offset is None else int(target_offset)
         if self.target_offset < 0:
             raise ValueError("target_offset must be >= 0")
+        self.pad_to_multiple = int(pad_to_multiple) if pad_to_multiple else None
         self.device = device
 
         N = X.shape[0]
+
+        # compute internal lookback for 2D padding if requested
+        self.internal_lookback = lookback_len
+        if self.pad_to_multiple and lookback_len % self.pad_to_multiple != 0:
+            self.internal_lookback = (
+                (lookback_len // self.pad_to_multiple) + 1
+            ) * self.pad_to_multiple
 
         # valid t must have enough left history AND enough future for y[t+target_offset ...]
         t_min = lookback_len - 1
@@ -192,6 +201,9 @@ class ForecastWindowDataset(Dataset):
         t = int(self.targets[idx])
 
         x_win = self.X[t - self.lookback_len + 1 : t + 1]  # (lookback, C)
+        if self.internal_lookback > self.lookback_len:
+            pad = self.internal_lookback - self.lookback_len
+            x_win = np.pad(x_win, ((pad, 0), (0, 0)), mode="edge")
         y_start = t + self.target_offset
         y_fut = self.y[y_start : y_start + self.pred_horizon]  # (pred_horizon, D)
 
@@ -383,6 +395,16 @@ def maybe_apply_output_activation(
     return pred
 
 
+def quantile_crossing_penalty(
+    pred: torch.Tensor, d: int, quantiles: tuple[float, ...]
+) -> torch.Tensor:
+    pred_q = split_quantile_preds(pred, d, quantiles)
+    penalty = 0.0
+    for i in range(len(quantiles) - 1):
+        penalty = penalty + torch.relu(pred_q[..., i] - pred_q[..., i + 1]).mean()
+    return penalty
+
+
 def masked_loss(
     pred: torch.Tensor,
     tgt: torch.Tensor,
@@ -513,10 +535,10 @@ def plot_test_quantiles(
 def quantile_calibration_metrics(
     y_true: np.ndarray, pred_q: np.ndarray
 ) -> Dict[str, float]:
-    y = y_true[..., 0, 0] if y_true.ndim == 4 else y_true[..., 0]
-    q25 = pred_q[..., 0, 0, 0] if pred_q.ndim == 4 else pred_q[..., 0]
-    q50 = pred_q[..., 0, 0, 1] if pred_q.ndim == 4 else pred_q[..., 1]
-    q75 = pred_q[..., 0, 0, 2] if pred_q.ndim == 4 else pred_q[..., 2]
+    y = y_true.reshape(-1)
+    q25 = pred_q[..., 0].reshape(-1)
+    q50 = pred_q[..., 1].reshape(-1)
+    q75 = pred_q[..., 2].reshape(-1)
 
     mask = np.isfinite(y) & np.isfinite(q25) & np.isfinite(q50) & np.isfinite(q75)
     if not np.any(mask):
@@ -782,6 +804,7 @@ def train_one_epoch(
     valid_loss_weight: float,
     spike_threshold: Optional[float],
     spike_weight_mult: float,
+    q_crossing_penalty: float,
     clip_grad: float = 1.0,
 ) -> float:
     model.train()
@@ -802,6 +825,10 @@ def train_one_epoch(
                 thresh = torch.tensor(spike_threshold, device=y.device, dtype=y.dtype)
                 weight = torch.where(y >= thresh, spike_weight_mult, 1.0).to(y.dtype)
             loss, denom_val = masked_loss(pred, y, mask, loss_fn, weight)
+            if isinstance(loss_fn, QuantileLoss) and q_crossing_penalty > 0:
+                loss = loss + q_crossing_penalty * quantile_crossing_penalty(
+                    pred, y.shape[-1], loss_fn.quantiles
+                )
             if valid_logits is not None and mask is not None and valid_loss_fn is not None:
                 valid_target = mask.to(dtype=valid_logits.dtype)
                 loss = loss + valid_loss_weight * masked_bce_with_logits(
@@ -835,6 +862,7 @@ def evaluate(
     valid_loss_fn: Optional[nn.Module],
     spike_threshold: Optional[float],
     spike_weight_mult: float,
+    q_crossing_penalty: float,
 ) -> Dict[str, float]:
     model.eval()
     total_loss = 0.0
@@ -862,6 +890,10 @@ def evaluate(
             thresh = torch.tensor(spike_threshold, device=y.device, dtype=y.dtype)
             weight = torch.where(y >= thresh, spike_weight_mult, 1.0).to(y.dtype)
         loss, denom_val = masked_loss(pred, y, mask, loss_fn, weight)
+        if isinstance(loss_fn, QuantileLoss) and q_crossing_penalty > 0:
+            loss = loss + q_crossing_penalty * quantile_crossing_penalty(
+                pred, y.shape[-1], loss_fn.quantiles
+            )
         if valid_logits is not None and mask is not None and valid_loss_fn is not None:
             valid_target = mask.to(dtype=valid_logits.dtype)
             valid_bce = masked_bce_with_logits(valid_logits, valid_target, mask).item()
@@ -935,6 +967,8 @@ def fit_model(
     valid_loss_weight: float,
     spike_threshold: Optional[float],
     spike_weight_mult: float,
+    q_crossing_penalty: float,
+    early_stop_metric: str,
 ) -> Tuple[nn.Module, Dict[str, float]]:
     model = model.to(device)
 
@@ -966,6 +1000,7 @@ def fit_model(
             valid_loss_weight,
             spike_threshold,
             spike_weight_mult,
+            q_crossing_penalty,
             clip_grad=clip_grad,
         )
         val_metrics = evaluate(
@@ -981,11 +1016,13 @@ def fit_model(
             valid_loss_fn,
             spike_threshold,
             spike_weight_mult,
+            q_crossing_penalty,
         )
         scheduler.step(val_metrics["loss"])
 
-        if val_metrics["loss"] < best_val:
-            best_val = val_metrics["loss"]
+        monitor = val_metrics.get(early_stop_metric, val_metrics["loss"])
+        if monitor < best_val:
+            best_val = monitor
             best_state = copy.deepcopy(model.state_dict())
             best_val_metrics = val_metrics
 
@@ -998,7 +1035,7 @@ def fit_model(
             )
         )
 
-        if stopper.step(val_metrics["loss"]):
+        if stopper.step(monitor):
             break
 
     if best_state is not None:
@@ -1058,6 +1095,24 @@ def main():
         "--plot_test_n", type=int, default=300, help="max points to plot from test"
     )
     ap.add_argument("--plot_dir", type=str, default=None, help="override plot output dir")
+    ap.add_argument(
+        "--q_crossing_penalty",
+        type=float,
+        default=1.0,
+        help="penalty weight to discourage quantile crossing",
+    )
+    ap.add_argument(
+        "--early_stop_metric",
+        type=str,
+        default="q50",
+        help="metric key to monitor for early stopping (e.g., mse or q50)",
+    )
+    ap.add_argument(
+        "--pad_2d",
+        type=int,
+        default=1,
+        help="pad lookback for 2D variant to be divisible by num_time_tokens",
+    )
 
     ap.add_argument("--lookback_len", type=int, default=96)
     ap.add_argument("--pred_horizon", type=int, default=1)
@@ -1195,7 +1250,7 @@ def main():
     if "2d" in variants:
         if args.num_time_tokens <= 0:
             raise ValueError("--num_time_tokens must be > 0 for 2d variant")
-        if args.lookback_len % args.num_time_tokens != 0:
+        if args.lookback_len % args.num_time_tokens != 0 and not bool(args.pad_2d):
             print(
                 f"[warn] lookback_len={args.lookback_len} not divisible by num_time_tokens={args.num_time_tokens}.\n"
                 "       2D variant may still run, but patching may be uneven."
@@ -1275,6 +1330,7 @@ def main():
             q75 = float(np.quantile(y_train, 0.75))
             print(f"[info] train quantiles: q50={q50:.6f} q75={q75:.6f}")
 
+        pad_multiple = args.num_time_tokens if ("2d" in variants and bool(args.pad_2d)) else None
         ds_train = ForecastWindowDataset(
             X,
             y_side,
@@ -1283,6 +1339,7 @@ def main():
             "train",
             split_idx,
             target_offset=target_offset,
+            pad_to_multiple=pad_multiple,
         )
         ds_val = ForecastWindowDataset(
             X,
@@ -1292,6 +1349,7 @@ def main():
             "val",
             split_idx,
             target_offset=target_offset,
+            pad_to_multiple=pad_multiple,
         )
         ds_test = ForecastWindowDataset(
             X,
@@ -1301,6 +1359,7 @@ def main():
             "test",
             split_idx,
             target_offset=target_offset,
+            pad_to_multiple=pad_multiple,
         )
 
         train_loader = DataLoader(
@@ -1325,6 +1384,8 @@ def main():
         print(f"splits: train_end={train_end}, val_end={val_end}, test_end={N}")
         if use_parquet:
             print(f"label_mode={args.label_mode}")
+        if use_sigmoid and isinstance(QuantileLoss(), QuantileLoss):
+            print("[warn] Sigmoid with QuantileLoss can saturate gradients near 0/1.")
         print("model cfg:", asdict(cfg))
         print("variants:", variants)
         print()
@@ -1367,6 +1428,8 @@ def main():
                 valid_loss_weight=args.valid_loss_weight,
                 spike_threshold=spike_threshold,
                 spike_weight_mult=args.spike_weight_mult,
+                q_crossing_penalty=args.q_crossing_penalty,
+                early_stop_metric=args.early_stop_metric,
             )
 
             # test
@@ -1384,6 +1447,7 @@ def main():
                 nn.BCEWithLogitsLoss(reduction="none") if use_valid_head else None,
                 spike_threshold,
                 args.spike_weight_mult,
+                args.q_crossing_penalty,
             )
 
             print(f"\nBest VAL for {variant}: {best_val_metrics}")
