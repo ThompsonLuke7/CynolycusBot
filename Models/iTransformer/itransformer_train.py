@@ -80,6 +80,7 @@ def evaluate(
     device="cpu",
     cont_weight_alpha: float = 1.0,
     cont_weight_max: float = 0.0,
+    cont_weight_power: float = 1.0,
 ):
     model.eval()
     total_loss = 0.0
@@ -95,7 +96,7 @@ def evaluate(
 
     def _cont_weights(y_tensor: torch.Tensor) -> torch.Tensor:
         y_clamped = torch.clamp(y_tensor, 0.0, 1.0)
-        w = 1.0 + cont_weight_alpha * y_clamped
+        w = 1.0 + cont_weight_alpha * torch.pow(y_clamped, cont_weight_power)
         if cont_weight_max and cont_weight_max > 0:
             w = torch.clamp(w, max=cont_weight_max)
         return w
@@ -120,7 +121,7 @@ def evaluate(
         else:
             yt = y.view_as(out)
             if (
-                label_mode == "continuation"
+                label_mode in {"continuation", "exhaustion"}
                 and isinstance(loss_fn, nn.SmoothL1Loss)
                 and loss_fn.reduction == "none"
             ):
@@ -352,7 +353,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--cont_weight_alpha",
         type=float,
-        default=1.0,
+        default=2.0,
         help="continuation loss weight scale (w = 1 + alpha * y)",
     )
     ap.add_argument(
@@ -360,6 +361,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="cap continuation weights (0 disables cap)",
+    )
+    ap.add_argument(
+        "--cont_weight_power",
+        type=float,
+        default=2.0,
+        help="power curve for continuation/exhaustion weights (w = 1 + alpha * y^p)",
     )
 
     # GA flags
@@ -436,7 +443,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         if task == "regression":
             y_mu = y_train.mean(axis=0, keepdims=True)
             y_std = y_train.std(axis=0, keepdims=True) + 1e-8
-            if args.label_mode == "continuation":
+            if args.label_mode in {"continuation", "exhaustion"}:
                 y_scaled = y_raw
                 y_mu = None
                 y_std = None
@@ -534,17 +541,10 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         elif task == "multiclass":
             loss_fn = nn.CrossEntropyLoss()
         else:
-            if args.label_mode == "continuation":
+            if args.label_mode in {"continuation", "exhaustion"}:
                 loss_fn = nn.SmoothL1Loss(reduction="none")
-            elif args.label_mode == "mae":
-                quantiles = (0.9,)
-                loss_fn = QuantileLoss(quantiles=quantiles)
-            elif args.label_mode in {"mfe", "mfe_mae"}:
-                quantiles = (0.7, 0.9)
-                loss_fn = QuantileLoss(quantiles=quantiles)
             else:
-                quantiles = (0.25, 0.5, 0.75)
-                loss_fn = QuantileLoss(quantiles=quantiles)
+                loss_fn = nn.SmoothL1Loss()
 
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -572,9 +572,14 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                     loss = loss_fn(out, target)
                 else:
                     target = yb.view_as(out)
-                    if args.label_mode == "continuation" and isinstance(loss_fn, nn.SmoothL1Loss):
+                    if args.label_mode in {"continuation", "exhaustion"} and isinstance(
+                        loss_fn, nn.SmoothL1Loss
+                    ):
                         loss_el = loss_fn(out, target)
-                        w = 1.0 + args.cont_weight_alpha * torch.clamp(target, 0.0, 1.0)
+                        y_clamped = torch.clamp(target, 0.0, 1.0)
+                        w = 1.0 + args.cont_weight_alpha * torch.pow(
+                            y_clamped, args.cont_weight_power
+                        )
                         if args.cont_weight_max and args.cont_weight_max > 0:
                             w = torch.clamp(w, max=args.cont_weight_max)
                         loss = (loss_el * w).mean()
@@ -600,6 +605,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                 device=device,
                 cont_weight_alpha=args.cont_weight_alpha,
                 cont_weight_max=args.cont_weight_max,
+                cont_weight_power=args.cont_weight_power,
             )
             sched.step(val_metrics["loss"])
 
@@ -630,6 +636,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             device=device,
             cont_weight_alpha=args.cont_weight_alpha,
             cont_weight_max=args.cont_weight_max,
+            cont_weight_power=args.cont_weight_power,
         )
         val_metrics = evaluate(
             model,
@@ -642,6 +649,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             device=device,
             cont_weight_alpha=args.cont_weight_alpha,
             cont_weight_max=args.cont_weight_max,
+            cont_weight_power=args.cont_weight_power,
         )
         test_metrics = evaluate(
             model,
@@ -654,6 +662,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             device=device,
             cont_weight_alpha=args.cont_weight_alpha,
             cont_weight_max=args.cont_weight_max,
+            cont_weight_power=args.cont_weight_power,
         )
         print(f"{side.upper()} TRAIN: {train_metrics}")
         print(f"{side.upper()} VAL: {val_metrics}")
