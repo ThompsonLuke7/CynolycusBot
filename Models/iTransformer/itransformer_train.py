@@ -68,7 +68,19 @@ def _quantile_loss_sums(
 
 
 @torch.no_grad()
-def evaluate(model, loader, loss_fn, task: str, y_mu=None, y_std=None, device="cpu"):
+def evaluate(
+    model,
+    loader,
+    loss_fn,
+    task: str,
+    *,
+    label_mode: str | None = None,
+    y_mu=None,
+    y_std=None,
+    device="cpu",
+    cont_weight_alpha: float = 1.0,
+    cont_weight_max: float = 0.0,
+):
     model.eval()
     total_loss = 0.0
     n = 0
@@ -80,6 +92,13 @@ def evaluate(model, loader, loss_fn, task: str, y_mu=None, y_std=None, device="c
     if task == "regression" and isinstance(loss_fn, QuantileLoss):
         q_sums = {f"q{int(q * 100):02d}": 0.0 for q in loss_fn.quantiles}
         q_counts = {f"q{int(q * 100):02d}": 0 for q in loss_fn.quantiles}
+
+    def _cont_weights(y_tensor: torch.Tensor) -> torch.Tensor:
+        y_clamped = torch.clamp(y_tensor, 0.0, 1.0)
+        w = 1.0 + cont_weight_alpha * y_clamped
+        if cont_weight_max and cont_weight_max > 0:
+            w = torch.clamp(w, max=cont_weight_max)
+        return w
 
     for x, y, _ in loader:
         x = x.to(device)
@@ -100,7 +119,16 @@ def evaluate(model, loader, loss_fn, task: str, y_mu=None, y_std=None, device="c
             total += yb.numel()
         else:
             yt = y.view_as(out)
-            loss = loss_fn(out, yt)
+            if (
+                label_mode == "continuation"
+                and isinstance(loss_fn, nn.SmoothL1Loss)
+                and loss_fn.reduction == "none"
+            ):
+                loss_el = loss_fn(out, yt)
+                weights = _cont_weights(yt)
+                loss = (loss_el * weights).mean()
+            else:
+                loss = loss_fn(out, yt)
             if q_sums is not None and q_counts is not None:
                 q_parts = _quantile_loss_sums(out, yt, loss_fn.quantiles)
                 for key, (s, c) in q_parts.items():
@@ -304,8 +332,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--sides", type=str, default="long,short")
 
     ap.add_argument("--seq_len", type=int, default=64)
-    ap.add_argument("--train_frac", type=float, default=0.8)
-    ap.add_argument("--val_frac", type=float, default=0.1)
+    ap.add_argument("--train_frac", type=float, default=0.75)
+    ap.add_argument("--val_frac", type=float, default=0.15)
 
     ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--n_heads", type=int, default=4)
@@ -314,13 +342,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--use_var_embedding", action="store_true")
 
-    ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--batch_size", type=int, default=512)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-2)
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--patience", type=int, default=8)
     ap.add_argument("--clip", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--cont_weight_alpha",
+        type=float,
+        default=1.0,
+        help="continuation loss weight scale (w = 1 + alpha * y)",
+    )
+    ap.add_argument(
+        "--cont_weight_max",
+        type=float,
+        default=0.0,
+        help="cap continuation weights (0 disables cap)",
+    )
 
     # GA flags
     ap.add_argument("--use_ga", action="store_true")
@@ -396,7 +436,12 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         if task == "regression":
             y_mu = y_train.mean(axis=0, keepdims=True)
             y_std = y_train.std(axis=0, keepdims=True) + 1e-8
-            y_scaled = (y_raw - y_mu) / y_std
+            if args.label_mode == "continuation":
+                y_scaled = y_raw
+                y_mu = None
+                y_std = None
+            else:
+                y_scaled = (y_raw - y_mu) / y_std
         else:
             y_scaled = y_raw
 
@@ -489,13 +534,17 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         elif task == "multiclass":
             loss_fn = nn.CrossEntropyLoss()
         else:
-            if args.label_mode == "mae":
+            if args.label_mode == "continuation":
+                loss_fn = nn.SmoothL1Loss(reduction="none")
+            elif args.label_mode == "mae":
                 quantiles = (0.9,)
+                loss_fn = QuantileLoss(quantiles=quantiles)
             elif args.label_mode in {"mfe", "mfe_mae"}:
                 quantiles = (0.7, 0.9)
+                loss_fn = QuantileLoss(quantiles=quantiles)
             else:
                 quantiles = (0.25, 0.5, 0.75)
-            loss_fn = QuantileLoss(quantiles=quantiles)
+                loss_fn = QuantileLoss(quantiles=quantiles)
 
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -523,7 +572,14 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                     loss = loss_fn(out, target)
                 else:
                     target = yb.view_as(out)
-                    loss = loss_fn(out, target)
+                    if args.label_mode == "continuation" and isinstance(loss_fn, nn.SmoothL1Loss):
+                        loss_el = loss_fn(out, target)
+                        w = 1.0 + args.cont_weight_alpha * torch.clamp(target, 0.0, 1.0)
+                        if args.cont_weight_max and args.cont_weight_max > 0:
+                            w = torch.clamp(w, max=args.cont_weight_max)
+                        loss = (loss_el * w).mean()
+                    else:
+                        loss = loss_fn(out, target)
                 loss.backward()
                 if args.clip is not None and args.clip > 0:
                     nn.utils.clip_grad_norm_(model.parameters(), args.clip)
@@ -538,9 +594,12 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                 dl_val,
                 loss_fn,
                 task,
+                label_mode=args.label_mode,
                 y_mu=torch.tensor(y_mu).to(device) if y_mu is not None else None,
                 y_std=torch.tensor(y_std).to(device) if y_std is not None else None,
                 device=device,
+                cont_weight_alpha=args.cont_weight_alpha,
+                cont_weight_max=args.cont_weight_max,
             )
             sched.step(val_metrics["loss"])
 
@@ -565,27 +624,36 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             dl_train_eval,
             loss_fn,
             task,
+            label_mode=args.label_mode,
             y_mu=y_mu_t,
             y_std=y_std_t,
             device=device,
+            cont_weight_alpha=args.cont_weight_alpha,
+            cont_weight_max=args.cont_weight_max,
         )
         val_metrics = evaluate(
             model,
             dl_val,
             loss_fn,
             task,
+            label_mode=args.label_mode,
             y_mu=y_mu_t,
             y_std=y_std_t,
             device=device,
+            cont_weight_alpha=args.cont_weight_alpha,
+            cont_weight_max=args.cont_weight_max,
         )
         test_metrics = evaluate(
             model,
             dl_test,
             loss_fn,
             task,
+            label_mode=args.label_mode,
             y_mu=y_mu_t,
             y_std=y_std_t,
             device=device,
+            cont_weight_alpha=args.cont_weight_alpha,
+            cont_weight_max=args.cont_weight_max,
         )
         print(f"{side.upper()} TRAIN: {train_metrics}")
         print(f"{side.upper()} VAL: {val_metrics}")
