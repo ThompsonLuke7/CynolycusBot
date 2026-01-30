@@ -26,6 +26,8 @@ def _plot_regression_inference(
     preds: np.ndarray,
     actual: np.ndarray,
     *,
+    peak_probs: np.ndarray | None = None,
+    peak_threshold: float | None = None,
     title: str,
     save_path: Path,
 ) -> None:
@@ -42,13 +44,17 @@ def _plot_regression_inference(
     has_ohlc = all(c in plot_df.columns for c in ("open", "high", "low", "close"))
     close_y = plot_df["close"].to_numpy() if "close" in plot_df.columns else None
 
-    fig, (ax_price, ax_pred) = plt.subplots(
-        2,
+    nrows = 3 if peak_probs is not None else 2
+    height_ratios = [2.2, 1.0, 0.9] if peak_probs is not None else [2.2, 1.0]
+    fig, axes = plt.subplots(
+        nrows,
         1,
-        figsize=(18, 8),
+        figsize=(18, 9 if peak_probs is not None else 8),
         sharex=True,
-        gridspec_kw={"height_ratios": [2.2, 1]},
+        gridspec_kw={"height_ratios": height_ratios},
     )
+    ax_price = axes[0]
+    ax_pred = axes[1]
 
     if has_ohlc:
         open_y = plot_df["open"].to_numpy()
@@ -107,6 +113,18 @@ def _plot_regression_inference(
     ax_pred.set_ylabel("Target")
     ax_pred.legend(loc="upper right")
 
+    if peak_probs is not None:
+        ax_peak = axes[2]
+        peak_probs = np.asarray(peak_probs).reshape(-1)
+        peak_threshold = 0.8 if peak_threshold is None else float(peak_threshold)
+        peak_true = (actual >= peak_threshold).astype(float)
+        ax_peak.plot(pos, peak_probs, color="#7E57C2", linewidth=1.4, label="Peak prob")
+        ax_peak.plot(pos, peak_true, color="#455A64", linewidth=1.0, alpha=0.7, label="Peak true")
+        ax_peak.axhline(peak_threshold, color="#9E9E9E", linestyle="--", linewidth=1.0)
+        ax_peak.set_ylabel("Peak")
+        ax_peak.set_ylim(-0.05, 1.05)
+        ax_peak.legend(loc="upper right")
+
     plot_index = plot_df.index if isinstance(plot_df.index, pd.DatetimeIndex) else None
     if plot_index is not None:
         dates = pd.Series(plot_index)
@@ -119,7 +137,7 @@ def _plot_regression_inference(
             tick_labels = tick_labels[::step]
         ax_pred.set_xticks(tick_positions)
         ax_pred.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
-    ax_pred.set_xlabel("Session")
+    axes[-1].set_xlabel("Session")
 
     plt.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,9 +154,11 @@ def _plot_side(
     plot_df: pd.DataFrame,
     ticker: str,
     label_mode: str,
+    peak_threshold: float | None = None,
 ) -> None:
     test_pred = result.get("test_pred")
     test_true = result.get("test_true")
+    test_peak_prob = result.get("test_peak_prob")
     if test_pred is None or test_true is None:
         print(f"Skip plotting for {side}: missing predictions.")
         return
@@ -174,6 +194,8 @@ def _plot_side(
             plot_df,
             test_pred,
             test_true,
+            peak_probs=test_peak_prob,
+            peak_threshold=peak_threshold,
             title=f"{ticker} | iTransformer {side.upper()}",
             save_path=save_path,
         )
@@ -228,6 +250,7 @@ def main() -> None:
             plot_df=plot_df,
             ticker=args.ticker,
             label_mode=args.label_mode,
+            peak_threshold=getattr(args, "peak_event_threshold", None),
         )
 
 

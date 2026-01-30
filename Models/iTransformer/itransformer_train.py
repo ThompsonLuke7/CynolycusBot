@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ga_itransformer import GAITransformerFeatureSelector
@@ -67,6 +68,23 @@ def _quantile_loss_sums(
     return out
 
 
+def _focal_bce_with_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
+) -> torch.Tensor:
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    probs = torch.sigmoid(logits)
+    p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
+    loss = bce * torch.pow(1.0 - p_t, gamma)
+    if alpha is not None:
+        alpha_t = alpha * targets + (1.0 - alpha) * (1.0 - targets)
+        loss = alpha_t * loss
+    return loss.mean()
+
+
 @torch.no_grad()
 def evaluate(
     model,
@@ -83,6 +101,7 @@ def evaluate(
     cont_weight_power: float = 1.0,
     peak_frac: float = 0.9,
     peak_f1_threshold: float = 0.8,
+    peak_prob_threshold: float = 0.5,
 ):
     model.eval()
     total_loss = 0.0
@@ -96,6 +115,7 @@ def evaluate(
     q_counts: dict[str, int] | None = None
     collect_preds: list[np.ndarray] | None = None
     collect_targets: list[np.ndarray] | None = None
+    collect_peak_probs: list[np.ndarray] | None = None
     compute_peak_metrics = task == "regression" and label_mode in {"continuation", "exhaustion"}
     if task == "regression" and isinstance(loss_fn, QuantileLoss):
         q_sums = {f"q{int(q * 100):02d}": 0.0 for q in loss_fn.quantiles}
@@ -103,6 +123,7 @@ def evaluate(
     if compute_peak_metrics:
         collect_preds = []
         collect_targets = []
+        collect_peak_probs = []
 
     def _cont_weights(y_tensor: torch.Tensor) -> torch.Tensor:
         y_clamped = torch.clamp(y_tensor, 0.0, 1.0)
@@ -115,6 +136,12 @@ def evaluate(
         x = x.to(device)
         y = y.to(device)
         out = model(x)
+        peak_logits = None
+        if isinstance(out, (tuple, list)):
+            if len(out) >= 2:
+                out, peak_logits = out[0], out[1]
+            else:
+                out = out[0]
         if task == "binary":
             yb = y.view(-1, 1)
             loss = loss_fn(out, yb)
@@ -146,6 +173,8 @@ def evaluate(
             if compute_peak_metrics and collect_preds is not None and collect_targets is not None:
                 collect_preds.append(out.detach().cpu().numpy())
                 collect_targets.append(yt.detach().cpu().numpy())
+                if collect_peak_probs is not None and peak_logits is not None:
+                    collect_peak_probs.append(torch.sigmoid(peak_logits).detach().cpu().numpy())
             if q_sums is not None and q_counts is not None:
                 q_parts = _quantile_loss_sums(out, yt, loss_fn.quantiles)
                 for key, (s, c) in q_parts.items():
@@ -176,6 +205,9 @@ def evaluate(
         if compute_peak_metrics and collect_preds is not None and collect_targets is not None:
             preds = np.concatenate(collect_preds, axis=0).reshape(-1)
             targets = np.concatenate(collect_targets, axis=0).reshape(-1)
+            peak_probs = None
+            if collect_peak_probs:
+                peak_probs = np.concatenate(collect_peak_probs, axis=0).reshape(-1)
             if targets.size:
                 peak_cut = float(np.quantile(targets, peak_frac))
                 peak_mask = targets >= peak_cut
@@ -186,7 +218,10 @@ def evaluate(
                 else:
                     metrics["top_decile_mae"] = float("nan")
                 true_pos = targets >= peak_f1_threshold
-                pred_pos = preds >= peak_f1_threshold
+                if peak_probs is not None:
+                    pred_pos = peak_probs >= peak_prob_threshold
+                else:
+                    pred_pos = preds >= peak_f1_threshold
                 tp = int(np.sum(true_pos & pred_pos))
                 fp = int(np.sum(~true_pos & pred_pos))
                 fn = int(np.sum(true_pos & ~pred_pos))
@@ -197,22 +232,51 @@ def evaluate(
                     f1 = 2.0 * precision * recall / (precision + recall)
                 metrics["peak_f1"] = float(f1)
                 metrics["neg_peak_f1"] = float(-f1)
+                if peak_probs is not None:
+                    reg_pred_pos = preds >= peak_f1_threshold
+                    reg_tp = int(np.sum(true_pos & reg_pred_pos))
+                    reg_fp = int(np.sum(~true_pos & reg_pred_pos))
+                    reg_fn = int(np.sum(true_pos & ~reg_pred_pos))
+                    reg_prec = reg_tp / (reg_tp + reg_fp) if (reg_tp + reg_fp) > 0 else 0.0
+                    reg_rec = reg_tp / (reg_tp + reg_fn) if (reg_tp + reg_fn) > 0 else 0.0
+                    reg_f1 = 0.0
+                    if (reg_prec + reg_rec) > 0:
+                        reg_f1 = 2.0 * reg_prec * reg_rec / (reg_prec + reg_rec)
+                    metrics["reg_peak_f1"] = float(reg_f1)
     return metrics
 
 
 @torch.no_grad()
-def predict_on_loader(model, loader, device="cpu") -> tuple[np.ndarray, np.ndarray]:
+def predict_on_loader(
+    model, loader, device="cpu"
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     model.eval()
     preds = []
     targets = []
+    peak_probs = []
     for x, y, _ in loader:
         x = x.to(device)
         out = model(x)
+        peak_logits = None
+        if isinstance(out, (tuple, list)):
+            if len(out) >= 2:
+                out, peak_logits = out[0], out[1]
+            else:
+                out = out[0]
         preds.append(out.detach().cpu().numpy())
         targets.append(y.detach().cpu().numpy())
+        if peak_logits is not None:
+            peak_probs.append(torch.sigmoid(peak_logits).detach().cpu().numpy())
     if not preds:
-        return np.empty((0, 1), dtype=np.float32), np.empty((0, 1), dtype=np.float32)
-    return np.concatenate(preds, axis=0), np.concatenate(targets, axis=0)
+        return (
+            np.empty((0, 1), dtype=np.float32),
+            np.empty((0, 1), dtype=np.float32),
+            None,
+        )
+    peak_out = None
+    if peak_probs:
+        peak_out = np.concatenate(peak_probs, axis=0)
+    return np.concatenate(preds, axis=0), np.concatenate(targets, axis=0), peak_out
 
 
 def _resolve_repo_root() -> Path:
@@ -425,8 +489,56 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--peak_f1_threshold",
         type=float,
-        default=0.6,
+        default=0.8,
         help="threshold for peak F1 on continuation/exhaustion labels",
+    )
+    ap.add_argument(
+        "--peak_prob_threshold",
+        type=float,
+        default=0.5,
+        help="probability threshold for peak head F1 (if enabled)",
+    )
+    ap.add_argument(
+        "--peak_head",
+        action="store_true",
+        help="add peak-event classification head for continuation/exhaustion",
+    )
+    ap.add_argument(
+        "--peak_event_threshold",
+        type=float,
+        default=0.8,
+        help="y threshold for peak event label (1[y >= threshold])",
+    )
+    ap.add_argument(
+        "--peak_loss",
+        type=str,
+        default="bce",
+        choices=["bce", "focal"],
+        help="loss for peak head (bce or focal)",
+    )
+    ap.add_argument(
+        "--peak_loss_weight",
+        type=float,
+        default=1.0,
+        help="weight for peak head loss (added to regression loss)",
+    )
+    ap.add_argument(
+        "--peak_pos_weight",
+        type=float,
+        default=0.0,
+        help="positive class weight for peak loss (0 disables)",
+    )
+    ap.add_argument(
+        "--peak_focal_gamma",
+        type=float,
+        default=2.0,
+        help="gamma for focal BCE peak loss",
+    )
+    ap.add_argument(
+        "--peak_focal_alpha",
+        type=float,
+        default=0.25,
+        help="alpha for focal BCE peak loss",
     )
     ap.add_argument(
         "--monitor_metric",
@@ -521,6 +633,15 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         output_activation = None
         if task == "regression" and args.label_mode in {"continuation", "exhaustion"}:
             output_activation = "sigmoid"
+        use_peak_head = bool(args.peak_head) and (
+            task == "regression" and args.label_mode in {"continuation", "exhaustion"}
+        )
+        if args.peak_head and not use_peak_head:
+            print("[warn] --peak_head only applies to continuation/exhaustion regression.")
+        if use_peak_head and args.peak_event_threshold != args.peak_f1_threshold:
+            print(
+                "[warn] peak_event_threshold != peak_f1_threshold; labels use peak_event_threshold."
+            )
 
         feature_mask = None
         ga_score = None
@@ -600,6 +721,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             use_var_embedding=args.use_var_embedding,
             out_dim=out_dim,
             output_activation=output_activation,
+            peak_head=use_peak_head,
         ).to(device)
 
         if task == "binary":
@@ -611,6 +733,12 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                 loss_fn = nn.SmoothL1Loss(reduction="none", beta=args.huber_beta)
             else:
                 loss_fn = nn.SmoothL1Loss(beta=args.huber_beta)
+        peak_loss_fn = None
+        if use_peak_head and args.peak_loss == "bce":
+            pos_weight = None
+            if args.peak_pos_weight and args.peak_pos_weight > 0:
+                pos_weight = torch.tensor([args.peak_pos_weight], device=device)
+            peak_loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -638,6 +766,12 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                 yb = yb.to(device)
                 opt.zero_grad(set_to_none=True)
                 out = model(x)
+                peak_logits = None
+                if use_peak_head and isinstance(out, (tuple, list)):
+                    if len(out) >= 2:
+                        out, peak_logits = out[0], out[1]
+                    else:
+                        out = out[0]
                 if task == "binary":
                     target = yb.view(-1, 1)
                     loss = loss_fn(out, target)
@@ -656,9 +790,24 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                         )
                         if args.cont_weight_max and args.cont_weight_max > 0:
                             w = torch.clamp(w, max=args.cont_weight_max)
-                        loss = (loss_el * w).mean()
+                        reg_loss = (loss_el * w).mean()
                     else:
-                        loss = loss_fn(out, target)
+                        reg_loss = loss_fn(out, target)
+                    loss = reg_loss
+                    if use_peak_head and peak_logits is not None:
+                        peak_target = (target >= args.peak_event_threshold).float()
+                        if args.peak_loss == "focal":
+                            peak_loss = _focal_bce_with_logits(
+                                peak_logits,
+                                peak_target,
+                                alpha=args.peak_focal_alpha,
+                                gamma=args.peak_focal_gamma,
+                            )
+                        else:
+                            if peak_loss_fn is None:
+                                raise RuntimeError("peak_loss_fn was not initialized.")
+                            peak_loss = peak_loss_fn(peak_logits, peak_target)
+                        loss = loss + args.peak_loss_weight * peak_loss
                 loss.backward()
                 if args.clip is not None and args.clip > 0:
                     nn.utils.clip_grad_norm_(model.parameters(), args.clip)
@@ -682,6 +831,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                 cont_weight_power=args.cont_weight_power,
                 peak_frac=args.peak_frac,
                 peak_f1_threshold=args.peak_f1_threshold,
+                peak_prob_threshold=args.peak_prob_threshold,
             )
             sched.step(val_metrics["loss"])
 
@@ -716,6 +866,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             cont_weight_power=args.cont_weight_power,
             peak_frac=args.peak_frac,
             peak_f1_threshold=args.peak_f1_threshold,
+            peak_prob_threshold=args.peak_prob_threshold,
         )
         val_metrics = evaluate(
             model,
@@ -731,6 +882,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             cont_weight_power=args.cont_weight_power,
             peak_frac=args.peak_frac,
             peak_f1_threshold=args.peak_f1_threshold,
+            peak_prob_threshold=args.peak_prob_threshold,
         )
         test_metrics = evaluate(
             model,
@@ -746,16 +898,18 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             cont_weight_power=args.cont_weight_power,
             peak_frac=args.peak_frac,
             peak_f1_threshold=args.peak_f1_threshold,
+            peak_prob_threshold=args.peak_prob_threshold,
         )
         print(f"{side.upper()} TRAIN: {train_metrics}")
         print(f"{side.upper()} VAL: {val_metrics}")
         print(f"{side.upper()} TEST: {test_metrics}")
 
         preds = targets = None
+        peak_probs = None
         test_indices = None
         preds_out = targets_out = None
         if return_predictions:
-            preds, targets = predict_on_loader(model, dl_test, device=device)
+            preds, targets, peak_probs = predict_on_loader(model, dl_test, device=device)
             test_indices = ds_test.targets.copy()
             if task == "binary":
                 probs = 1.0 / (1.0 + np.exp(-preds))
@@ -784,6 +938,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                     "test_true": targets_out,
                 }
             )
+            if peak_probs is not None:
+                results[side]["test_peak_prob"] = peak_probs
 
         # Save model + meta
         model_dir = REPO_ROOT / "Data" / "models" / "itransformer"
@@ -817,6 +973,15 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             "test_metrics": test_metrics,
             "output_activation": output_activation,
             "monitor_metric": monitor_key,
+            "peak_head": bool(use_peak_head),
+            "peak_event_threshold": float(args.peak_event_threshold),
+            "peak_loss": args.peak_loss,
+            "peak_loss_weight": float(args.peak_loss_weight),
+            "peak_pos_weight": float(args.peak_pos_weight),
+            "peak_focal_gamma": float(args.peak_focal_gamma),
+            "peak_focal_alpha": float(args.peak_focal_alpha),
+            "peak_prob_threshold": float(args.peak_prob_threshold),
+            "peak_f1_threshold": float(args.peak_f1_threshold),
         }
         meta_path = model_dir / f"{slug}_{args.dataset_name}_{args.label_mode}_{side}_seq{args.seq_len}_meta.json"
         meta_path.write_text(json.dumps(meta, indent=2))
