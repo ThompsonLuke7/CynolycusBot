@@ -368,6 +368,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=2.0,
         help="power curve for continuation/exhaustion weights (w = 1 + alpha * y^p)",
     )
+    ap.add_argument(
+        "--huber_beta",
+        type=float,
+        default=1.0,
+        help="SmoothL1/Huber beta (lower = more L1-like, higher = more L2-like)",
+    )
 
     # GA flags
     ap.add_argument("--use_ga", action="store_true")
@@ -542,9 +548,9 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             loss_fn = nn.CrossEntropyLoss()
         else:
             if args.label_mode in {"continuation", "exhaustion"}:
-                loss_fn = nn.SmoothL1Loss(reduction="none")
+                loss_fn = nn.SmoothL1Loss(reduction="none", beta=args.huber_beta)
             else:
-                loss_fn = nn.SmoothL1Loss()
+                loss_fn = nn.SmoothL1Loss(beta=args.huber_beta)
 
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
