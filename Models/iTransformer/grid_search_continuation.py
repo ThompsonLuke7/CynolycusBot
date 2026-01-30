@@ -25,7 +25,7 @@ def _parse_float_list(value: str) -> list[float]:
 def main() -> None:
     base = build_arg_parser()
     parser = argparse.ArgumentParser(parents=[base], add_help=True, conflict_handler="resolve")
-    parser.set_defaults(label_mode="continuation", monitor_metric="wmae")
+    parser.set_defaults(label_mode="continuation", monitor_metric="top_decile_mae")
     parser.add_argument(
         "--alpha_grid",
         type=str,
@@ -86,10 +86,19 @@ def main() -> None:
                 "beta": beta,
                 "train_loss": train_metrics.get("loss"),
                 "train_wmae": train_metrics.get("wmae"),
+                "train_top_decile_mae": train_metrics.get("top_decile_mae"),
+                "train_peak_f1": train_metrics.get("peak_f1"),
+                "train_neg_peak_f1": train_metrics.get("neg_peak_f1"),
                 "val_loss": val_metrics.get("loss"),
                 "val_wmae": val_metrics.get("wmae"),
+                "val_top_decile_mae": val_metrics.get("top_decile_mae"),
+                "val_peak_f1": val_metrics.get("peak_f1"),
+                "val_neg_peak_f1": val_metrics.get("neg_peak_f1"),
                 "test_loss": test_metrics.get("loss"),
                 "test_wmae": test_metrics.get("wmae"),
+                "test_top_decile_mae": test_metrics.get("top_decile_mae"),
+                "test_peak_f1": test_metrics.get("peak_f1"),
+                "test_neg_peak_f1": test_metrics.get("neg_peak_f1"),
             }
             rows.append(row)
 
@@ -98,8 +107,12 @@ def main() -> None:
         return
 
     df = pd.DataFrame(rows)
-    df = df.sort_values(["side", "val_wmae"], ascending=[True, True])
-    print("\n[grid] top results by side (val_wmae)")
+    sort_metric = f"val_{args.monitor_metric}"
+    sort_ascending = True
+    if args.monitor_metric.endswith("f1") and not args.monitor_metric.startswith("neg_"):
+        sort_ascending = False
+    df = df.sort_values(["side", sort_metric], ascending=[True, sort_ascending])
+    print(f"\n[grid] top results by side ({sort_metric})")
     for side in df["side"].unique():
         top = df[df["side"] == side].head(5)
         print(f"\n{side.upper()}")

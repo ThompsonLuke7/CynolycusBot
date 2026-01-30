@@ -81,6 +81,8 @@ def evaluate(
     cont_weight_alpha: float = 1.0,
     cont_weight_max: float = 0.0,
     cont_weight_power: float = 1.0,
+    peak_frac: float = 0.9,
+    peak_f1_threshold: float = 0.8,
 ):
     model.eval()
     total_loss = 0.0
@@ -92,9 +94,15 @@ def evaluate(
     wmae_den = 0.0
     q_sums: dict[str, float] | None = None
     q_counts: dict[str, int] | None = None
+    collect_preds: list[np.ndarray] | None = None
+    collect_targets: list[np.ndarray] | None = None
+    compute_peak_metrics = task == "regression" and label_mode in {"continuation", "exhaustion"}
     if task == "regression" and isinstance(loss_fn, QuantileLoss):
         q_sums = {f"q{int(q * 100):02d}": 0.0 for q in loss_fn.quantiles}
         q_counts = {f"q{int(q * 100):02d}": 0 for q in loss_fn.quantiles}
+    if compute_peak_metrics:
+        collect_preds = []
+        collect_targets = []
 
     def _cont_weights(y_tensor: torch.Tensor) -> torch.Tensor:
         y_clamped = torch.clamp(y_tensor, 0.0, 1.0)
@@ -135,6 +143,9 @@ def evaluate(
                 wmae_den += float(weights.sum().item())
             else:
                 loss = loss_fn(out, yt)
+            if compute_peak_metrics and collect_preds is not None and collect_targets is not None:
+                collect_preds.append(out.detach().cpu().numpy())
+                collect_targets.append(yt.detach().cpu().numpy())
             if q_sums is not None and q_counts is not None:
                 q_parts = _quantile_loss_sums(out, yt, loss_fn.quantiles)
                 for key, (s, c) in q_parts.items():
@@ -162,6 +173,30 @@ def evaluate(
                 metrics[key] = q_sums[key] / max(q_counts[key], 1)
         if wmae_den > 0:
             metrics["wmae"] = wmae_sum / wmae_den
+        if compute_peak_metrics and collect_preds is not None and collect_targets is not None:
+            preds = np.concatenate(collect_preds, axis=0).reshape(-1)
+            targets = np.concatenate(collect_targets, axis=0).reshape(-1)
+            if targets.size:
+                peak_cut = float(np.quantile(targets, peak_frac))
+                peak_mask = targets >= peak_cut
+                if np.any(peak_mask):
+                    metrics["top_decile_mae"] = float(
+                        np.mean(np.abs(preds[peak_mask] - targets[peak_mask]))
+                    )
+                else:
+                    metrics["top_decile_mae"] = float("nan")
+                true_pos = targets >= peak_f1_threshold
+                pred_pos = preds >= peak_f1_threshold
+                tp = int(np.sum(true_pos & pred_pos))
+                fp = int(np.sum(~true_pos & pred_pos))
+                fn = int(np.sum(true_pos & ~pred_pos))
+                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                f1 = 0.0
+                if (precision + recall) > 0:
+                    f1 = 2.0 * precision * recall / (precision + recall)
+                metrics["peak_f1"] = float(f1)
+                metrics["neg_peak_f1"] = float(-f1)
     return metrics
 
 
@@ -382,9 +417,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="SmoothL1/Huber beta (lower = more L1-like, higher = more L2-like)",
     )
     ap.add_argument(
+        "--peak_frac",
+        type=float,
+        default=0.9,
+        help="quantile cutoff for peak MAE (e.g., 0.9 = top decile)",
+    )
+    ap.add_argument(
+        "--peak_f1_threshold",
+        type=float,
+        default=0.6,
+        help="threshold for peak F1 on continuation/exhaustion labels",
+    )
+    ap.add_argument(
         "--monitor_metric",
         type=str,
-        default="loss",
+        default="auto",
         help="metric to monitor for early stopping (e.g., loss, wmae). Use auto for label-aware default.",
     )
 
@@ -575,7 +622,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         best_val = float("inf")
         if str(args.monitor_metric).lower() == "auto":
             monitor_key = (
-                "wmae"
+                "top_decile_mae"
                 if (task == "regression" and args.label_mode in {"continuation", "exhaustion"})
                 else "loss"
             )
@@ -633,6 +680,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                 cont_weight_alpha=args.cont_weight_alpha,
                 cont_weight_max=args.cont_weight_max,
                 cont_weight_power=args.cont_weight_power,
+                peak_frac=args.peak_frac,
+                peak_f1_threshold=args.peak_f1_threshold,
             )
             sched.step(val_metrics["loss"])
 
@@ -665,6 +714,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             cont_weight_alpha=args.cont_weight_alpha,
             cont_weight_max=args.cont_weight_max,
             cont_weight_power=args.cont_weight_power,
+            peak_frac=args.peak_frac,
+            peak_f1_threshold=args.peak_f1_threshold,
         )
         val_metrics = evaluate(
             model,
@@ -678,6 +729,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             cont_weight_alpha=args.cont_weight_alpha,
             cont_weight_max=args.cont_weight_max,
             cont_weight_power=args.cont_weight_power,
+            peak_frac=args.peak_frac,
+            peak_f1_threshold=args.peak_f1_threshold,
         )
         test_metrics = evaluate(
             model,
@@ -691,6 +744,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             cont_weight_alpha=args.cont_weight_alpha,
             cont_weight_max=args.cont_weight_max,
             cont_weight_power=args.cont_weight_power,
+            peak_frac=args.peak_frac,
+            peak_f1_threshold=args.peak_f1_threshold,
         )
         print(f"{side.upper()} TRAIN: {train_metrics}")
         print(f"{side.upper()} VAL: {val_metrics}")
