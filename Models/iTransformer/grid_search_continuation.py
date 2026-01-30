@@ -24,7 +24,7 @@ def _parse_float_list(value: str) -> list[float]:
 
 def main() -> None:
     base = build_arg_parser()
-    parser = argparse.ArgumentParser(parents=[base], add_help=True)
+    parser = argparse.ArgumentParser(parents=[base], add_help=True, conflict_handler="resolve")
     parser.set_defaults(label_mode="continuation", monitor_metric="wmae")
     parser.add_argument(
         "--alpha_grid",
