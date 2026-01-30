@@ -4,7 +4,7 @@ import argparse
 import pandas as pd
 
 from Data.plots.plots import get_default_plot_path as _get_default_plot_path
-from Data.plots.plots import plot_continuation_signals
+from Data.plots.plots import plot_continuation_strength
 from Data.retrieve_data import normalize_ticker
 
 
@@ -52,12 +52,8 @@ def main() -> None:
     ap.add_argument("--ticker", type=str, default="$SPY")
     ap.add_argument("--dataset", type=str, default="15min")
     ap.add_argument("--save_path", type=str, default=None)
-    ap.add_argument("--long_col", type=str, default="long_cont_label")
-    ap.add_argument("--short_col", type=str, default="short_cont_label")
-    ap.add_argument("--cont_col", type=str, default="atr_cont_label")
-    ap.add_argument("--show_pivots", action="store_true")
-    ap.add_argument("--pivot_down_col", type=str, default="pivot_down")
-    ap.add_argument("--pivot_up_col", type=str, default="pivot_up")
+    ap.add_argument("--long_col", type=str, default="cont_strength_long")
+    ap.add_argument("--short_col", type=str, default="cont_strength_short")
     ap.add_argument("--tail", type=int, default=200)
     ap.add_argument("--no_y_labels", action="store_true")
     args = ap.parse_args()
@@ -88,14 +84,10 @@ def main() -> None:
     data_dir = _resolve_repo_root() / "Data" / "processed" / slug
     save_path = args.save_path or get_default_plot_path(args.ticker, data_dir)
 
-    plot_continuation_signals(
+    plot_continuation_strength(
         df,
-        long_cont_col=args.long_col,
-        short_cont_col=args.short_col,
-        cont_label_col=args.cont_col,
-        show_pivots=args.show_pivots,
-        pivot_down_col=args.pivot_down_col,
-        pivot_up_col=args.pivot_up_col,
+        strength_long_col=args.long_col,
+        strength_short_col=args.short_col,
         tail=args.tail,
         save_path=save_path,
     )

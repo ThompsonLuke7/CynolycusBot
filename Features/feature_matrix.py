@@ -399,13 +399,10 @@ def clean_feature_matrix(
                 f.write(col + "\n")
 
         features_dir = resolved_output_dir / "features"
-        labels_dir = resolved_output_dir / "labels"
         features_dir.mkdir(parents=True, exist_ok=True)
-        labels_dir.mkdir(parents=True, exist_ok=True)
         with open(features_dir / f"{dataset_name}_features.txt", "w") as f:
             for col in feature_cols:
                 f.write(col + "\n")
-        labels_df.to_parquet(labels_dir / f"{dataset_name}_labels.parquet", index=False)
 
     return cleaned, feature_df, feature_cols
 

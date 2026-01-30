@@ -8,11 +8,11 @@ LightGBM: Pivots, MFE, MAE
 Regression:
     Quantile Loss(0.25, 0.5, 0.75)
     Continuation ^
-    Bars to Exhaustion ^
+    Bars to Exhaustion ^ FORGET FOR NOW 1/30/26
     MFE 0.7 0.9
     MAE 0.9
 Classification
     Binary Cross Entropy (Log Loss)
     Pivots
-    Cross Entrop
+    Cross Entropy
     Leg Segmentation (MultiClass)

@@ -1063,6 +1063,98 @@ def plot_exhaustion_progress(
     )
 
 
+def plot_continuation_strength(
+    df: pd.DataFrame,
+    *,
+    close_col: str = "close",
+    strength_long_col: str = "cont_strength_long",
+    strength_short_col: str = "cont_strength_short",
+    tail: int | None = _PLOT_TAIL_BARS,
+    save_path: str | None = None,
+) -> None:
+    """
+    Plot close price with a subplot showing continuation strength (0..1).
+    """
+    df = _tail_df(df, tail=tail)
+    fig, (ax_price, ax_bar) = plt.subplots(
+        2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [2.2, 1]}
+    )
+
+    date_index = df.index
+    pos, open_y, high_y, low_y, close_y = _extract_ohlc(df)
+
+    _plot_candles(ax_price, pos, open_y, high_y, low_y, close_y)
+    ax_price.set_ylabel("Close Price")
+    ax_price.set_title("Close with Continuation Strength")
+
+    if strength_long_col not in df.columns or strength_short_col not in df.columns:
+        missing = [
+            c for c in (strength_long_col, strength_short_col) if c not in df.columns
+        ]
+        raise KeyError(f"Missing required column(s): {', '.join(missing)}")
+
+    cont_long = df[strength_long_col].to_numpy(dtype=float)
+    cont_short = df[strength_short_col].to_numpy(dtype=float)
+
+    def _print_stats(label: str, arr: np.ndarray) -> None:
+        total = arr.size
+        finite = arr[np.isfinite(arr)]
+        nan_pct = 100.0 * (1.0 - (finite.size / max(total, 1)))
+        if finite.size == 0:
+            print(f"[continuation] {label}: n={total}, nan%={nan_pct:.2f}, no finite values")
+            return
+        pct0 = float(np.mean(finite == 0.0) * 100.0)
+        pct1 = float(np.mean(finite == 1.0) * 100.0)
+        p25 = float(np.percentile(finite, 25))
+        p50 = float(np.percentile(finite, 50))
+        p75 = float(np.percentile(finite, 75))
+        print(
+            f"[continuation] {label}: n={total}, nan%={nan_pct:.2f}, "
+            f"mean={float(np.mean(finite)):.4f}, std={float(np.std(finite)):.4f}, "
+            f"min={float(np.min(finite)):.4f}, p25={p25:.4f}, "
+            f"median={p50:.4f}, p75={p75:.4f}, max={float(np.max(finite)):.4f}, "
+            f"pct0={pct0:.2f}, pct1={pct1:.2f}"
+        )
+
+    _print_stats(strength_long_col, cont_long)
+    _print_stats(strength_short_col, cont_short)
+
+    long_plot = np.where(np.isfinite(cont_long), cont_long, 0.0)
+    short_plot = np.where(np.isfinite(cont_short), cont_short, 0.0)
+    width = 0.4
+    ax_bar.bar(
+        pos - width / 2,
+        long_plot,
+        color="#7CB342",
+        width=width,
+        alpha=0.7,
+        label=strength_long_col,
+    )
+    ax_bar.bar(
+        pos + width / 2,
+        short_plot,
+        color="#F9A825",
+        width=width,
+        alpha=0.7,
+        label=strength_short_col,
+    )
+    ax_bar.set_ylabel("Strength")
+    ax_bar.set_ylim(0.0, 1.0)
+    ax_bar.legend(loc="upper left", ncol=2)
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax_bar, tick_positions, tick_labels)
+    _draw_day_lines([ax_price, ax_bar], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="Continuation Strength - Last Year",
+        suptitle_y=1.02,
+        top=0.92,
+        save_path=save_path,
+    )
+
+
 _LABEL_PLOTTERS = {
     "atr_swing": plot_atr_swing_signals,
     "leg_segmentation": plot_leg_segmentation_signals,
@@ -1071,6 +1163,7 @@ _LABEL_PLOTTERS = {
     "all_labels": plot_all_labels,
     "mfe_mae": plot_mfe_mae_labels,
     "bars_to_exhaustion": plot_exhaustion_progress,
+    "continuation_strength": plot_continuation_strength,
 }
 
 
