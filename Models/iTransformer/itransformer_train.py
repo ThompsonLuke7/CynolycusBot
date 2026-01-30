@@ -88,6 +88,8 @@ def evaluate(
     mae_real = 0.0
     correct = 0
     total = 0
+    wmae_sum = 0.0
+    wmae_den = 0.0
     q_sums: dict[str, float] | None = None
     q_counts: dict[str, int] | None = None
     if task == "regression" and isinstance(loss_fn, QuantileLoss):
@@ -128,6 +130,9 @@ def evaluate(
                 loss_el = loss_fn(out, yt)
                 weights = _cont_weights(yt)
                 loss = (loss_el * weights).mean()
+                err = torch.abs(out - yt)
+                wmae_sum += float((err * weights).sum().item())
+                wmae_den += float(weights.sum().item())
             else:
                 loss = loss_fn(out, yt)
             if q_sums is not None and q_counts is not None:
@@ -155,6 +160,8 @@ def evaluate(
         if q_sums is not None and q_counts is not None:
             for key in q_sums:
                 metrics[key] = q_sums[key] / max(q_counts[key], 1)
+        if wmae_den > 0:
+            metrics["wmae"] = wmae_sum / wmae_den
     return metrics
 
 
@@ -374,6 +381,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="SmoothL1/Huber beta (lower = more L1-like, higher = more L2-like)",
     )
+    ap.add_argument(
+        "--monitor_metric",
+        type=str,
+        default="loss",
+        help="metric to monitor for early stopping (e.g., loss, wmae). Use auto for label-aware default.",
+    )
 
     # GA flags
     ap.add_argument("--use_ga", action="store_true")
@@ -560,6 +573,14 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         stopper = EarlyStopper(patience=args.patience, min_delta=0.0)
         best_state = None
         best_val = float("inf")
+        if str(args.monitor_metric).lower() == "auto":
+            monitor_key = (
+                "wmae"
+                if (task == "regression" and args.label_mode in {"continuation", "exhaustion"})
+                else "loss"
+            )
+        else:
+            monitor_key = args.monitor_metric
 
         for epoch in range(1, args.epochs + 1):
             model.train()
@@ -615,14 +636,15 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             )
             sched.step(val_metrics["loss"])
 
-            if val_metrics["loss"] < best_val:
-                best_val = val_metrics["loss"]
+            monitor_val = float(val_metrics.get(monitor_key, val_metrics["loss"]))
+            if monitor_val < best_val:
+                best_val = monitor_val
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
             print(f"{side.upper()} Epoch {epoch:03d} | train_loss={train_loss:.6f} | val={val_metrics}")
 
-            if stopper.step(val_metrics["loss"]):
-                print(f"{side.upper()} Early stop at epoch {epoch}, best_val={best_val:.6f}")
+            if stopper.step(monitor_val):
+                print(f"{side.upper()} Early stop at epoch {epoch}, best_{monitor_key}={best_val:.6f}")
                 break
 
         if best_state is not None:
@@ -676,6 +698,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
 
         preds = targets = None
         test_indices = None
+        preds_out = targets_out = None
         if return_predictions:
             preds, targets = predict_on_loader(model, dl_test, device=device)
             test_indices = ds_test.targets.copy()
@@ -689,14 +712,23 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                 if y_mu is not None and y_std is not None:
                     preds_out = preds_out * y_std + y_mu
                     targets_out = targets_out * y_std + y_mu
-            results[side] = {
-                "test_metrics": test_metrics,
-                "test_indices": test_indices,
-                "test_pred": preds_out,
-                "test_true": targets_out,
-                "feature_mask": feature_mask,
-                "ga_best_score": ga_score,
-            }
+
+        results[side] = {
+            "train_metrics": train_metrics,
+            "val_metrics": val_metrics,
+            "test_metrics": test_metrics,
+            "feature_mask": feature_mask,
+            "ga_best_score": ga_score,
+            "monitor_metric": monitor_key,
+        }
+        if return_predictions:
+            results[side].update(
+                {
+                    "test_indices": test_indices,
+                    "test_pred": preds_out,
+                    "test_true": targets_out,
+                }
+            )
 
         # Save model + meta
         model_dir = REPO_ROOT / "Data" / "models" / "itransformer"
@@ -729,6 +761,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             "val_metrics": val_metrics,
             "test_metrics": test_metrics,
             "output_activation": output_activation,
+            "monitor_metric": monitor_key,
         }
         meta_path = model_dir / f"{slug}_{args.dataset_name}_{args.label_mode}_{side}_seq{args.seq_len}_meta.json"
         meta_path.write_text(json.dumps(meta, indent=2))
