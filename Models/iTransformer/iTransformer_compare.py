@@ -320,6 +320,26 @@ def load_parquet_labels(
     return y_long, y_short, long_col, short_col
 
 
+def load_parquet_pivots(
+    y_path: str, pivot_long_col: Optional[str], pivot_short_col: Optional[str]
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    if not pivot_long_col and not pivot_short_col:
+        return None, None
+    cols = [c for c in [pivot_long_col, pivot_short_col] if c]
+    df = pd.read_parquet(y_path, columns=cols)
+    piv_long = None
+    piv_short = None
+    if pivot_long_col:
+        if pivot_long_col not in df.columns:
+            raise KeyError(f"Missing pivot_long_col in {y_path}: {pivot_long_col}")
+        piv_long = df[pivot_long_col].to_numpy()
+    if pivot_short_col:
+        if pivot_short_col not in df.columns:
+            raise KeyError(f"Missing pivot_short_col in {y_path}: {pivot_short_col}")
+        piv_short = df[pivot_short_col].to_numpy()
+    return piv_long, piv_short
+
+
 def _summarize_array(arr: np.ndarray) -> Dict[str, float]:
     flat = arr.reshape(-1)
     total = flat.size
@@ -357,6 +377,73 @@ def print_label_stats(name: str, arr: np.ndarray, fill_value: float) -> None:
         f"min={raw_stats['min']:.6f}, max={raw_stats['max']:.6f}, "
         f"zero%={raw_stats['zero_pct']:.2f}, zero_after_fill%={filled_zero_pct:.2f}"
     )
+
+
+def _finite_1d(arr: np.ndarray) -> np.ndarray:
+    flat = arr.reshape(-1)
+    return flat[np.isfinite(flat)]
+
+
+def _pct_at_value(arr: np.ndarray, value: float, tol: float = 1e-6) -> float:
+    finite = _finite_1d(arr)
+    if finite.size == 0:
+        return float("nan")
+    return float(np.mean(np.abs(finite - value) <= tol) * 100.0)
+
+
+def print_label_sanity(name: str, arr: np.ndarray, cap_value: float) -> None:
+    finite = _finite_1d(arr)
+    if finite.size == 0:
+        print(f"{name}: no finite labels")
+        return
+    mean = float(np.mean(finite))
+    median = float(np.median(finite))
+    pct_cap = _pct_at_value(finite, cap_value)
+    pct_zero = _pct_at_value(finite, 0.0)
+    print(
+        f"{name}: mean={mean:.6f}, median={median:.6f}, "
+        f"pct_at_cap({cap_value:.4f})={pct_cap:.2f}, pct_at_zero={pct_zero:.2f}"
+    )
+
+
+def pivot_window_mask(pivot_flags: np.ndarray, window: int) -> np.ndarray:
+    flat = pivot_flags.reshape(-1)
+    if flat.size == 0:
+        return flat.astype(bool)
+    mask = np.zeros_like(flat, dtype=bool)
+    pivot_idx = np.flatnonzero(flat.astype(bool))
+    if pivot_idx.size == 0:
+        return mask
+    win = max(int(window), 0)
+    for idx in pivot_idx:
+        end = min(flat.size, idx + win + 1)
+        mask[idx:end] = True
+    return mask
+
+
+def print_pivot_window_stats(
+    name: str, arr: np.ndarray, pivot_flags: np.ndarray, window: int, cap_value: float
+) -> None:
+    finite = _finite_1d(arr)
+    if finite.size == 0:
+        print(f"{name}: no finite labels for pivot stats")
+        return
+    mask = pivot_window_mask(pivot_flags, window)
+    if mask.size != arr.reshape(-1).size:
+        print(f"{name}: pivot mask shape mismatch; skipping pivot stats")
+        return
+    mask_flat = mask.reshape(-1)
+    y_flat = arr.reshape(-1)
+    y_after = y_flat[mask_flat]
+    y_later = y_flat[~mask_flat]
+    if y_after.size == 0:
+        print(f"{name}: no samples within {window} bars after pivot")
+    else:
+        print_label_sanity(f"{name} (<= {window} bars after pivot)", y_after, cap_value)
+    if y_later.size == 0:
+        print(f"{name}: no samples outside pivot window")
+    else:
+        print_label_sanity(f"{name} (outside pivot window)", y_later, cap_value)
 
 
 # -----------------------------
@@ -509,6 +596,57 @@ def infer_plot_dir(y_parquet: str) -> Path:
         if part.lower() == "processed" and i + 1 < len(parts):
             return Path(*parts[: i + 2]) / "plots"
     return Path("Data") / "plots"
+
+
+def plot_label_hist(
+    y: np.ndarray, save_path: Path, bins: int = 50, cap_value: Optional[float] = None
+) -> None:
+    flat = _finite_1d(y)
+    if flat.size == 0:
+        print(f"[warn] No finite labels for histogram: {save_path.name}")
+        return
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.hist(flat, bins=bins, color="#607D8B", alpha=0.85)
+    if cap_value is not None:
+        ax.axvline(cap_value, color="#D32F2F", linewidth=1.4, label=f"cap={cap_value:.3f}")
+        ax.legend(loc="upper right")
+    ax.set_title("Label histogram")
+    ax.set_xlabel("label value")
+    ax.set_ylabel("count")
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path)
+    plt.close(fig)
+
+
+def plot_label_segment(
+    y: np.ndarray, save_path: Path, segment_len: int = 200, start_idx: Optional[int] = None
+) -> None:
+    flat = y.reshape(-1)
+    n = flat.size
+    if n == 0:
+        print(f"[warn] No labels for segment plot: {save_path.name}")
+        return
+    seg_len = int(segment_len)
+    if seg_len <= 0:
+        print("[warn] segment_len must be > 0")
+        return
+    if start_idx is None:
+        start = max(0, n - seg_len)
+    else:
+        start = max(0, min(int(start_idx), n - seg_len))
+    end = min(n, start + seg_len)
+    seg = flat[start:end]
+    x = np.arange(start, end)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(x, seg, color="#1565C0", linewidth=1.2)
+    ax.set_title(f"Label segment [{start}:{end}]")
+    ax.set_xlabel("index")
+    ax.set_ylabel("label value")
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path)
+    plt.close(fig)
 
 
 def plot_test_quantiles(
@@ -1133,6 +1271,72 @@ def main():
     ap.add_argument("--short_label_col", type=str, default=None, help="override short label column")
     ap.add_argument("--fill_nan_y", type=float, default=0.0, help="fill value for NaNs in labels")
     ap.add_argument(
+        "--label_sanity",
+        type=int,
+        default=0,
+        help="print label distribution sanity checks (percent at cap/zero, mean, median)",
+    )
+    ap.add_argument(
+        "--label_cap_value",
+        type=float,
+        default=0.95,
+        help="cap value used to check saturation (e.g., 0.95 for exhaustion)",
+    )
+    ap.add_argument(
+        "--label_hist",
+        type=int,
+        default=0,
+        help="plot label histogram to png",
+    )
+    ap.add_argument(
+        "--label_hist_bins",
+        type=int,
+        default=50,
+        help="bins for label histogram",
+    )
+    ap.add_argument(
+        "--label_segment",
+        type=int,
+        default=0,
+        help="plot a label segment to png",
+    )
+    ap.add_argument(
+        "--label_segment_len",
+        type=int,
+        default=200,
+        help="length of label segment plot",
+    )
+    ap.add_argument(
+        "--label_segment_start",
+        type=int,
+        default=None,
+        help="start index for label segment (default: last N points)",
+    )
+    ap.add_argument(
+        "--label_sanity_only",
+        type=int,
+        default=0,
+        help="run label sanity checks and exit before training",
+    )
+    ap.add_argument(
+        "--pivot_long_col",
+        type=str,
+        default=None,
+        help="optional parquet column for long pivot flags (nonzero treated as pivot)",
+    )
+    ap.add_argument(
+        "--pivot_short_col",
+        type=str,
+        default=None,
+        help="optional parquet column for short pivot flags (nonzero treated as pivot)",
+    )
+    ap.add_argument(
+        "--pivot_window",
+        type=int,
+        default=5,
+        help="window (bars) after pivot to compute conditional label stats",
+    )
+    ap.add_argument(
         "--mask_nan_y",
         type=int,
         default=1,
@@ -1275,6 +1479,68 @@ def main():
         print(f"[info] Loaded X parquet with {X.shape[1]} features.")
         print_label_stats(f"[labels] long ({long_col})", y_long_raw, args.fill_nan_y)
         print_label_stats(f"[labels] short ({short_col})", y_short_raw, args.fill_nan_y)
+        if args.label_sanity:
+            print_label_sanity(f"[sanity] long ({long_col})", y_long_raw, args.label_cap_value)
+            print_label_sanity(f"[sanity] short ({short_col})", y_short_raw, args.label_cap_value)
+        piv_long, piv_short = load_parquet_pivots(
+            args.y_parquet, args.pivot_long_col, args.pivot_short_col
+        )
+        if args.label_sanity and (piv_long is not None or piv_short is not None):
+            if piv_long is not None:
+                print_pivot_window_stats(
+                    f"[sanity] long ({long_col})",
+                    y_long_raw,
+                    piv_long,
+                    args.pivot_window,
+                    args.label_cap_value,
+                )
+            if piv_short is not None:
+                print_pivot_window_stats(
+                    f"[sanity] short ({short_col})",
+                    y_short_raw,
+                    piv_short,
+                    args.pivot_window,
+                    args.label_cap_value,
+                )
+        if args.label_hist or args.label_segment:
+            label_plot_dir = (
+                Path(args.plot_dir)
+                if args.plot_dir
+                else infer_plot_dir(args.y_parquet)
+            )
+            if args.label_hist:
+                plot_label_hist(
+                    y_long_raw,
+                    label_plot_dir
+                    / f"label_hist_{args.label_mode}_long.png",
+                    bins=args.label_hist_bins,
+                    cap_value=args.label_cap_value,
+                )
+                plot_label_hist(
+                    y_short_raw,
+                    label_plot_dir
+                    / f"label_hist_{args.label_mode}_short.png",
+                    bins=args.label_hist_bins,
+                    cap_value=args.label_cap_value,
+                )
+            if args.label_segment:
+                plot_label_segment(
+                    y_long_raw,
+                    label_plot_dir
+                    / f"label_segment_{args.label_mode}_long.png",
+                    segment_len=args.label_segment_len,
+                    start_idx=args.label_segment_start,
+                )
+                plot_label_segment(
+                    y_short_raw,
+                    label_plot_dir
+                    / f"label_segment_{args.label_mode}_short.png",
+                    segment_len=args.label_segment_len,
+                    start_idx=args.label_segment_start,
+                )
+        if args.label_sanity_only:
+            print("[info] label_sanity_only=1 -> exiting before training.")
+            return
         sides = parse_comma_list(args.sides) or ["long", "short"]
         bad_sides = [s for s in sides if s not in {"long", "short"}]
         if bad_sides:

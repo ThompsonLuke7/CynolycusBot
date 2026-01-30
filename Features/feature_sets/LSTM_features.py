@@ -274,16 +274,6 @@ def add_leg_structure_features(
     flip = df[flip_col].fillna(0).astype(int)
     df["swing_leg_count"] = flip.cumsum().astype(int)
     df["time_since_pivot"] = df[bars_col]
-
-    close = df[close_col].astype(float)
-    pivot_price = close.where(flip == 1)
-    last_pivot_price = pivot_price.ffill()
-    prev_pivot_price = last_pivot_price.shift(1).ffill()
-
-    current_leg_move = (close - last_pivot_price).abs()
-    prev_leg_move = (last_pivot_price - prev_pivot_price).abs()
-    df["leg_extension_ratio"] = current_leg_move / prev_leg_move.replace(0, np.nan)
-    df["leg_extension_ratio"] = df["leg_extension_ratio"].replace([np.inf, -np.inf], np.nan)
     return df
 
 

@@ -6,9 +6,9 @@ PatchTST: Leg Segmentation
 LightGBM: Pivots, MFE, MAE
 
 Regression:
-    Quantile(0.25, 0.5, 0.75)
+    Quantile Loss(0.25, 0.5, 0.75)
     Continuation ^
-    Bars to Exhaustion 0.3 0.5 0.8
+    Bars to Exhaustion ^
     MFE 0.7 0.9
     MAE 0.9
 Classification

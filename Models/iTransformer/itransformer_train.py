@@ -56,6 +56,17 @@ class QuantileLoss(nn.Module):
         return torch.mean(torch.stack(losses, dim=0))
 
 
+def _quantile_loss_sums(
+    pred: torch.Tensor, target: torch.Tensor, quantiles: tuple[float, ...]
+) -> dict[str, tuple[float, int]]:
+    err = target - pred
+    out: dict[str, tuple[float, int]] = {}
+    for q in quantiles:
+        loss_el = torch.maximum((q - 1) * err, q * err)
+        out[f"q{int(q * 100):02d}"] = (loss_el.sum().item(), loss_el.numel())
+    return out
+
+
 @torch.no_grad()
 def evaluate(model, loader, loss_fn, task: str, y_mu=None, y_std=None, device="cpu"):
     model.eval()
@@ -64,6 +75,11 @@ def evaluate(model, loader, loss_fn, task: str, y_mu=None, y_std=None, device="c
     mae_real = 0.0
     correct = 0
     total = 0
+    q_sums: dict[str, float] | None = None
+    q_counts: dict[str, int] | None = None
+    if task == "regression" and isinstance(loss_fn, QuantileLoss):
+        q_sums = {f"q{int(q * 100):02d}": 0.0 for q in loss_fn.quantiles}
+        q_counts = {f"q{int(q * 100):02d}": 0 for q in loss_fn.quantiles}
 
     for x, y, _ in loader:
         x = x.to(device)
@@ -85,6 +101,11 @@ def evaluate(model, loader, loss_fn, task: str, y_mu=None, y_std=None, device="c
         else:
             yt = y.view_as(out)
             loss = loss_fn(out, yt)
+            if q_sums is not None and q_counts is not None:
+                q_parts = _quantile_loss_sums(out, yt, loss_fn.quantiles)
+                for key, (s, c) in q_parts.items():
+                    q_sums[key] += s
+                    q_counts[key] += c
             if y_mu is not None and y_std is not None:
                 pred_real = out * y_std + y_mu
                 y_real = yt * y_std + y_mu
@@ -102,6 +123,9 @@ def evaluate(model, loader, loss_fn, task: str, y_mu=None, y_std=None, device="c
     else:
         if y_mu is not None and y_std is not None:
             metrics["mae_real"] = mae_real / max(n, 1)
+        if q_sums is not None and q_counts is not None:
+            for key in q_sums:
+                metrics[key] = q_sums[key] / max(q_counts[key], 1)
     return metrics
 
 
@@ -440,6 +464,9 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         dl_train = DataLoader(
             ds_train, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=0
         )
+        dl_train_eval = DataLoader(
+            ds_train, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=0
+        )
         dl_val = DataLoader(ds_val, batch_size=args.batch_size, shuffle=False, num_workers=0)
         dl_test = DataLoader(ds_test, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
@@ -462,7 +489,13 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         elif task == "multiclass":
             loss_fn = nn.CrossEntropyLoss()
         else:
-            loss_fn = QuantileLoss()
+            if args.label_mode == "mae":
+                quantiles = (0.9,)
+            elif args.label_mode in {"mfe", "mfe_mae"}:
+                quantiles = (0.7, 0.9)
+            else:
+                quantiles = (0.25, 0.5, 0.75)
+            loss_fn = QuantileLoss(quantiles=quantiles)
 
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -524,15 +557,38 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         if best_state is not None:
             model.load_state_dict(best_state)
 
+        y_mu_t = torch.tensor(y_mu).to(device) if y_mu is not None else None
+        y_std_t = torch.tensor(y_std).to(device) if y_std is not None else None
+
+        train_metrics = evaluate(
+            model,
+            dl_train_eval,
+            loss_fn,
+            task,
+            y_mu=y_mu_t,
+            y_std=y_std_t,
+            device=device,
+        )
+        val_metrics = evaluate(
+            model,
+            dl_val,
+            loss_fn,
+            task,
+            y_mu=y_mu_t,
+            y_std=y_std_t,
+            device=device,
+        )
         test_metrics = evaluate(
             model,
             dl_test,
             loss_fn,
             task,
-            y_mu=torch.tensor(y_mu).to(device) if y_mu is not None else None,
-            y_std=torch.tensor(y_std).to(device) if y_std is not None else None,
+            y_mu=y_mu_t,
+            y_std=y_std_t,
             device=device,
         )
+        print(f"{side.upper()} TRAIN: {train_metrics}")
+        print(f"{side.upper()} VAL: {val_metrics}")
         print(f"{side.upper()} TEST: {test_metrics}")
 
         preds = targets = None
@@ -586,6 +642,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             "train_end": int(split_idx.train_end),
             "val_end": int(split_idx.val_end),
             "task": task,
+            "train_metrics": train_metrics,
+            "val_metrics": val_metrics,
             "test_metrics": test_metrics,
             "output_activation": output_activation,
         }
