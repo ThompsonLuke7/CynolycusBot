@@ -105,6 +105,27 @@ def _difference_loss_batch(
     return level + alpha * delta
 
 
+def _huber_difference_loss_batch(
+    y_hat: torch.Tensor,
+    y_true: torch.Tensor,
+    *,
+    delta: float = 1.0,
+    alpha: float = 0.5,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    if y_hat.dim() == 1:
+        y_hat = y_hat.unsqueeze(-1)
+    if y_true.dim() == 1:
+        y_true = y_true.unsqueeze(-1)
+    if y_hat.size(0) < 2:
+        return torch.zeros((), device=y_hat.device)
+    level = F.huber_loss(y_hat, y_true, delta=delta, reduction=reduction)
+    dy_hat = y_hat[1:] - y_hat[:-1]
+    dy_true = y_true[1:] - y_true[:-1]
+    diff = F.huber_loss(dy_hat, dy_true, delta=delta, reduction=reduction)
+    return level + alpha * diff
+
+
 @torch.no_grad()
 def evaluate(
     model,
@@ -124,6 +145,8 @@ def evaluate(
     peak_prob_threshold: float = 0.5,
     diff_loss_weight: float = 0.0,
     diff_loss_alpha: float = 1.0,
+    diff_loss_type: str = "mse",
+    diff_loss_delta: float = 1.0,
 ):
     model.eval()
     total_loss = 0.0
@@ -193,9 +216,20 @@ def evaluate(
             else:
                 loss = loss_fn(out, yt)
             if diff_loss_weight > 0 and task == "regression":
-                loss = loss + diff_loss_weight * _difference_loss_batch(
-                    out, yt, alpha=diff_loss_alpha
-                )
+                if diff_loss_type == "huber":
+                    diff_loss = _huber_difference_loss_batch(
+                        out,
+                        yt,
+                        delta=diff_loss_delta,
+                        alpha=diff_loss_alpha,
+                    )
+                else:
+                    diff_loss = _difference_loss_batch(
+                        out,
+                        yt,
+                        alpha=diff_loss_alpha,
+                    )
+                loss = loss + diff_loss_weight * diff_loss
             if compute_peak_metrics and collect_preds is not None and collect_targets is not None:
                 collect_preds.append(out.detach().cpu().numpy())
                 collect_targets.append(yt.detach().cpu().numpy())
@@ -584,6 +618,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="alpha for difference loss (level + alpha * delta)",
     )
+    ap.add_argument(
+        "--diff_loss_type",
+        type=str,
+        default="mse",
+        choices=["mse", "huber"],
+        help="difference loss type (mse or huber)",
+    )
+    ap.add_argument(
+        "--diff_loss_delta",
+        type=float,
+        default=1.0,
+        help="delta for huber difference loss",
+    )
 
     # GA flags
     ap.add_argument("--use_ga", action="store_true")
@@ -841,9 +888,17 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                         reg_loss = loss_fn(out, target)
                     loss = reg_loss
                     if args.diff_loss_weight > 0 and task == "regression":
-                        diff_loss = _difference_loss_batch(
-                            out, target, alpha=args.diff_loss_alpha
-                        )
+                        if args.diff_loss_type == "huber":
+                            diff_loss = _huber_difference_loss_batch(
+                                out,
+                                target,
+                                delta=args.diff_loss_delta,
+                                alpha=args.diff_loss_alpha,
+                            )
+                        else:
+                            diff_loss = _difference_loss_batch(
+                                out, target, alpha=args.diff_loss_alpha
+                            )
                         loss = loss + args.diff_loss_weight * diff_loss
                     if use_peak_head and peak_logits is not None:
                         peak_target = (target >= args.peak_event_threshold).float()
@@ -885,6 +940,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                 peak_prob_threshold=args.peak_prob_threshold,
                 diff_loss_weight=args.diff_loss_weight,
                 diff_loss_alpha=args.diff_loss_alpha,
+                diff_loss_type=args.diff_loss_type,
+                diff_loss_delta=args.diff_loss_delta,
             )
             sched.step(val_metrics["loss"])
 
@@ -922,6 +979,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             peak_prob_threshold=args.peak_prob_threshold,
             diff_loss_weight=args.diff_loss_weight,
             diff_loss_alpha=args.diff_loss_alpha,
+            diff_loss_type=args.diff_loss_type,
+            diff_loss_delta=args.diff_loss_delta,
         )
         val_metrics = evaluate(
             model,
@@ -940,6 +999,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             peak_prob_threshold=args.peak_prob_threshold,
             diff_loss_weight=args.diff_loss_weight,
             diff_loss_alpha=args.diff_loss_alpha,
+            diff_loss_type=args.diff_loss_type,
+            diff_loss_delta=args.diff_loss_delta,
         )
         test_metrics = evaluate(
             model,
@@ -958,6 +1019,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             peak_prob_threshold=args.peak_prob_threshold,
             diff_loss_weight=args.diff_loss_weight,
             diff_loss_alpha=args.diff_loss_alpha,
+            diff_loss_type=args.diff_loss_type,
+            diff_loss_delta=args.diff_loss_delta,
         )
         print(f"{side.upper()} TRAIN: {train_metrics}")
         print(f"{side.upper()} VAL: {val_metrics}")
@@ -1044,6 +1107,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             "diff_loss_weight": float(args.diff_loss_weight),
             "diff_loss_alpha": float(args.diff_loss_alpha),
             "train_shuffle": bool(train_shuffle),
+            "diff_loss_type": args.diff_loss_type,
+            "diff_loss_delta": float(args.diff_loss_delta),
         }
         meta_path = model_dir / f"{slug}_{args.dataset_name}_{args.label_mode}_{side}_seq{args.seq_len}_meta.json"
         meta_path.write_text(json.dumps(meta, indent=2))
