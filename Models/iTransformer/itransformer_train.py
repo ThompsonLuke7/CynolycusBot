@@ -85,6 +85,26 @@ def _focal_bce_with_logits(
     return loss.mean()
 
 
+def _difference_loss_batch(
+    y_hat: torch.Tensor,
+    y_true: torch.Tensor,
+    *,
+    alpha: float = 1.0,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    if y_hat.dim() == 1:
+        y_hat = y_hat.unsqueeze(-1)
+    if y_true.dim() == 1:
+        y_true = y_true.unsqueeze(-1)
+    if y_hat.size(0) < 2:
+        return torch.zeros((), device=y_hat.device)
+    level = F.mse_loss(y_hat, y_true, reduction=reduction)
+    dy_hat = y_hat[1:] - y_hat[:-1]
+    dy_true = y_true[1:] - y_true[:-1]
+    delta = F.mse_loss(dy_hat, dy_true, reduction=reduction)
+    return level + alpha * delta
+
+
 @torch.no_grad()
 def evaluate(
     model,
@@ -102,6 +122,8 @@ def evaluate(
     peak_frac: float = 0.9,
     peak_f1_threshold: float = 0.8,
     peak_prob_threshold: float = 0.5,
+    diff_loss_weight: float = 0.0,
+    diff_loss_alpha: float = 1.0,
 ):
     model.eval()
     total_loss = 0.0
@@ -170,6 +192,10 @@ def evaluate(
                 wmae_den += float(weights.sum().item())
             else:
                 loss = loss_fn(out, yt)
+            if diff_loss_weight > 0 and task == "regression":
+                loss = loss + diff_loss_weight * _difference_loss_batch(
+                    out, yt, alpha=diff_loss_alpha
+                )
             if compute_peak_metrics and collect_preds is not None and collect_targets is not None:
                 collect_preds.append(out.detach().cpu().numpy())
                 collect_targets.append(yt.detach().cpu().numpy())
@@ -546,6 +572,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="auto",
         help="metric to monitor for early stopping (e.g., loss, wmae). Use auto for label-aware default.",
     )
+    ap.add_argument(
+        "--diff_loss_weight",
+        type=float,
+        default=0.0,
+        help="weight for temporal difference loss (0 disables)",
+    )
+    ap.add_argument(
+        "--diff_loss_alpha",
+        type=float,
+        default=1.0,
+        help="alpha for difference loss (level + alpha * delta)",
+    )
+    ap.add_argument(
+        "--diff_loss_keep_shuffle",
+        action="store_true",
+        help="keep train shuffle even when using difference loss",
+    )
 
     # GA flags
     ap.add_argument("--use_ga", action="store_true")
@@ -700,8 +743,20 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         ds_val = WindowedTimeSeries(X_masked, y_scaled, args.seq_len, "val", split_idx)
         ds_test = WindowedTimeSeries(X_masked, y_scaled, args.seq_len, "test", split_idx)
 
+        train_shuffle = True
+        if args.diff_loss_weight > 0 and task == "regression":
+            if args.diff_loss_keep_shuffle:
+                print("[warn] diff_loss with shuffled batches may be noisy.")
+            else:
+                train_shuffle = False
+                print("[info] diff_loss enabled: disabling train shuffle for ordered deltas.")
+
         dl_train = DataLoader(
-            ds_train, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=0
+            ds_train,
+            batch_size=args.batch_size,
+            shuffle=train_shuffle,
+            drop_last=True,
+            num_workers=0,
         )
         dl_train_eval = DataLoader(
             ds_train, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=0
@@ -794,6 +849,11 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                     else:
                         reg_loss = loss_fn(out, target)
                     loss = reg_loss
+                    if args.diff_loss_weight > 0 and task == "regression":
+                        diff_loss = _difference_loss_batch(
+                            out, target, alpha=args.diff_loss_alpha
+                        )
+                        loss = loss + args.diff_loss_weight * diff_loss
                     if use_peak_head and peak_logits is not None:
                         peak_target = (target >= args.peak_event_threshold).float()
                         if args.peak_loss == "focal":
@@ -832,6 +892,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
                 peak_frac=args.peak_frac,
                 peak_f1_threshold=args.peak_f1_threshold,
                 peak_prob_threshold=args.peak_prob_threshold,
+                diff_loss_weight=args.diff_loss_weight,
+                diff_loss_alpha=args.diff_loss_alpha,
             )
             sched.step(val_metrics["loss"])
 
@@ -867,6 +929,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             peak_frac=args.peak_frac,
             peak_f1_threshold=args.peak_f1_threshold,
             peak_prob_threshold=args.peak_prob_threshold,
+            diff_loss_weight=args.diff_loss_weight,
+            diff_loss_alpha=args.diff_loss_alpha,
         )
         val_metrics = evaluate(
             model,
@@ -883,6 +947,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             peak_frac=args.peak_frac,
             peak_f1_threshold=args.peak_f1_threshold,
             peak_prob_threshold=args.peak_prob_threshold,
+            diff_loss_weight=args.diff_loss_weight,
+            diff_loss_alpha=args.diff_loss_alpha,
         )
         test_metrics = evaluate(
             model,
@@ -899,6 +965,8 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             peak_frac=args.peak_frac,
             peak_f1_threshold=args.peak_f1_threshold,
             peak_prob_threshold=args.peak_prob_threshold,
+            diff_loss_weight=args.diff_loss_weight,
+            diff_loss_alpha=args.diff_loss_alpha,
         )
         print(f"{side.upper()} TRAIN: {train_metrics}")
         print(f"{side.upper()} VAL: {val_metrics}")
@@ -982,6 +1050,9 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             "peak_focal_alpha": float(args.peak_focal_alpha),
             "peak_prob_threshold": float(args.peak_prob_threshold),
             "peak_f1_threshold": float(args.peak_f1_threshold),
+            "diff_loss_weight": float(args.diff_loss_weight),
+            "diff_loss_alpha": float(args.diff_loss_alpha),
+            "diff_loss_keep_shuffle": bool(args.diff_loss_keep_shuffle),
         }
         meta_path = model_dir / f"{slug}_{args.dataset_name}_{args.label_mode}_{side}_seq{args.seq_len}_meta.json"
         meta_path.write_text(json.dumps(meta, indent=2))
