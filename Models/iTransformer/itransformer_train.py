@@ -584,11 +584,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="alpha for difference loss (level + alpha * delta)",
     )
-    ap.add_argument(
-        "--diff_loss_keep_shuffle",
-        action="store_true",
-        help="keep train shuffle even when using difference loss",
-    )
 
     # GA flags
     ap.add_argument("--use_ga", action="store_true")
@@ -743,13 +738,9 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
         ds_val = WindowedTimeSeries(X_masked, y_scaled, args.seq_len, "val", split_idx)
         ds_test = WindowedTimeSeries(X_masked, y_scaled, args.seq_len, "test", split_idx)
 
-        train_shuffle = True
+        train_shuffle = False
         if args.diff_loss_weight > 0 and task == "regression":
-            if args.diff_loss_keep_shuffle:
-                print("[warn] diff_loss with shuffled batches may be noisy.")
-            else:
-                train_shuffle = False
-                print("[info] diff_loss enabled: disabling train shuffle for ordered deltas.")
+            print("[info] diff_loss enabled: train shuffle is disabled for ordered deltas.")
 
         dl_train = DataLoader(
             ds_train,
@@ -1052,7 +1043,7 @@ def run_training(args: argparse.Namespace, *, return_predictions: bool = False) 
             "peak_f1_threshold": float(args.peak_f1_threshold),
             "diff_loss_weight": float(args.diff_loss_weight),
             "diff_loss_alpha": float(args.diff_loss_alpha),
-            "diff_loss_keep_shuffle": bool(args.diff_loss_keep_shuffle),
+            "train_shuffle": bool(train_shuffle),
         }
         meta_path = model_dir / f"{slug}_{args.dataset_name}_{args.label_mode}_{side}_seq{args.seq_len}_meta.json"
         meta_path.write_text(json.dumps(meta, indent=2))
