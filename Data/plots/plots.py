@@ -1874,6 +1874,8 @@ def plot_model_inference(
             marker_offset = np.nanmax(high_y[valid_mask]) * 0.002
         long_y = low_y - marker_offset * 0.6
         short_y = high_y + marker_offset * 0.6
+        long_actual_y = low_y - marker_offset * 1.2
+        short_actual_y = high_y + marker_offset * 1.2
     elif close_y is not None:
         ax_price.plot(pos, close_y, color="#1f77b4", linewidth=1.6, label="Close")
         clean_close = close_y[valid_mask]
@@ -1882,6 +1884,8 @@ def plot_model_inference(
             marker_offset = np.nanmax(clean_close) * 0.002
         long_y = close_y - marker_offset * 2
         short_y = close_y + marker_offset * 2
+        long_actual_y = close_y - marker_offset * 3
+        short_actual_y = close_y + marker_offset * 3
 
     if long_probs is not None:
         long_mask = (long_probs >= threshold) & valid_mask
@@ -1913,7 +1917,7 @@ def plot_model_inference(
         if long_actual_mask.any():
             ax_price.scatter(
                 pos[long_actual_mask],
-                long_y[long_actual_mask],
+                long_actual_y[long_actual_mask],
                 facecolors="none",
                 edgecolors="#0D47A1",
                 linewidths=1.4,
@@ -1928,7 +1932,7 @@ def plot_model_inference(
         if short_actual_mask.any():
             ax_price.scatter(
                 pos[short_actual_mask],
-                short_y[short_actual_mask],
+                short_actual_y[short_actual_mask],
                 facecolors="none",
                 edgecolors="#EF6C00",
                 linewidths=1.4,

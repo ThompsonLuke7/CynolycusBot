@@ -311,6 +311,30 @@ def _fit_xgb_with_selector(
     return selector, model
 
 
+def _print_label_stats(y: np.ndarray, name: str) -> None:
+    total = int(y.size)
+    pos = int((y == 1).sum())
+    neg = total - pos
+    pct = 100.0 * pos / max(total, 1)
+    print(f"[GA-XGB] {name}: n={total}, pos={pos} ({pct:.2f}%), neg={neg}")
+
+
+def _summarize_probs(probs: np.ndarray, name: str) -> None:
+    if probs.size == 0:
+        print(f"[GA-XGB] {name}: empty")
+        return
+    p = probs[np.isfinite(probs)]
+    if p.size == 0:
+        print(f"[GA-XGB] {name}: no finite values")
+        return
+    qs = np.quantile(p, [0.01, 0.1, 0.5, 0.9, 0.99])
+    print(
+        f"[GA-XGB] {name}: mean={float(np.mean(p)):.4f}, "
+        f"p01={qs[0]:.4f}, p10={qs[1]:.4f}, p50={qs[2]:.4f}, "
+        f"p90={qs[3]:.4f}, p99={qs[4]:.4f}"
+    )
+
+
 def walk_forward_oof_probs(
     *,
     X_train: np.ndarray,
@@ -495,6 +519,8 @@ def main() -> None:
         "Split sizes: "
         f"train+val={train_val_idx.size}, test={test_idx.size}"
     )
+    _print_label_stats(y_long_train, "LONG labels (train+val)")
+    _print_label_stats(y_short_train, "SHORT labels (train+val)")
 
     long_oof = walk_forward_oof_probs(
         X_train=X_train,
@@ -531,6 +557,11 @@ def main() -> None:
         xgb_params=short_params,
         update_scale_pos_weight=cfg.update_scale_pos_weight,
     )
+
+    _summarize_probs(long_oof, "LONG OOF probs")
+    _summarize_probs(short_oof, "SHORT OOF probs")
+    _summarize_probs(long_test, "LONG test probs")
+    _summarize_probs(short_test, "SHORT test probs")
 
     n_total = X.shape[0]
     long_full = np.full(n_total, np.nan, dtype=np.float32)
