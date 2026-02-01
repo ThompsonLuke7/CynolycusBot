@@ -21,6 +21,16 @@ if str(REPO_ROOT) not in sys.path:
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    confusion_matrix,
+    f1_score,
+    log_loss,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 
 from Data.load_data import (
     get_ticker_processed_base_dir,
@@ -335,6 +345,56 @@ def _summarize_probs(probs: np.ndarray, name: str) -> None:
     )
 
 
+def _print_binary_metrics(
+    y_true: np.ndarray,
+    probs: np.ndarray,
+    *,
+    name: str,
+    threshold: float = 0.5,
+) -> None:
+    if probs.size == 0:
+        print(f"[GA-XGB] {name}: empty")
+        return
+    mask = np.isfinite(probs)
+    y = y_true[mask]
+    p = probs[mask]
+    if y.size == 0:
+        print(f"[GA-XGB] {name}: no finite values")
+        return
+
+    pred = (p >= threshold).astype(int)
+    acc = accuracy_score(y, pred)
+    prec = precision_score(y, pred, zero_division=0)
+    rec = recall_score(y, pred, zero_division=0)
+    f1 = f1_score(y, pred, zero_division=0)
+    try:
+        auc = roc_auc_score(y, p) if len(np.unique(y)) > 1 else float("nan")
+    except ValueError:
+        auc = float("nan")
+    try:
+        ap = average_precision_score(y, p) if len(np.unique(y)) > 1 else float("nan")
+    except ValueError:
+        ap = float("nan")
+    try:
+        ll = log_loss(y, p, labels=[0, 1])
+    except ValueError:
+        ll = float("nan")
+    if len(np.unique(y)) > 1:
+        tn, fp, fn, tp = confusion_matrix(y, pred, labels=[0, 1]).ravel()
+    else:
+        tn = int((y == 0).sum())
+        tp = int((y == 1).sum())
+        fp = 0
+        fn = 0
+
+    print(
+        f"[GA-XGB] {name} (thr={threshold:.2f}): "
+        f"acc={acc:.4f}, prec={prec:.4f}, rec={rec:.4f}, f1={f1:.4f}, "
+        f"auc={auc:.4f}, ap={ap:.4f}, logloss={ll:.4f}, "
+        f"tp={tp}, fp={fp}, tn={tn}, fn={fn}"
+    )
+
+
 def walk_forward_oof_probs(
     *,
     X_train: np.ndarray,
@@ -521,6 +581,10 @@ def main() -> None:
     )
     _print_label_stats(y_long_train, "LONG labels (train+val)")
     _print_label_stats(y_short_train, "SHORT labels (train+val)")
+    print(
+        f"[GA-XGB] XGBoost objective={long_params.get('objective', 'binary:logistic')} "
+        f"eval_metric={long_params.get('eval_metric', 'logloss')}"
+    )
 
     long_oof = walk_forward_oof_probs(
         X_train=X_train,
@@ -562,6 +626,18 @@ def main() -> None:
     _summarize_probs(short_oof, "SHORT OOF probs")
     _summarize_probs(long_test, "LONG test probs")
     _summarize_probs(short_test, "SHORT test probs")
+    _print_binary_metrics(
+        y_long_train, long_oof, name="LONG OOF metrics"
+    )
+    _print_binary_metrics(
+        y_short_train, short_oof, name="SHORT OOF metrics"
+    )
+    _print_binary_metrics(
+        y_long[test_idx], long_test, name="LONG test metrics"
+    )
+    _print_binary_metrics(
+        y_short[test_idx], short_test, name="SHORT test metrics"
+    )
 
     n_total = X.shape[0]
     long_full = np.full(n_total, np.nan, dtype=np.float32)
