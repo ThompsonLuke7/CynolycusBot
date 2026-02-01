@@ -16,6 +16,10 @@ class AgentFeatureConfig:
     ticker: str = "$SPY"
     dataset_name: str = "15min"
     model_name: str = "ga_xgboost"
+    pivot_label_dir: str = "pivots"
+    tb_label_dir: str = "tb"
+    include_pivot_probs: bool = True
+    include_tb_probs: bool = True
     tz: str | None = "America/New_York"
     session_open: str = "09:30"
     session_close: str = "16:00"
@@ -97,25 +101,36 @@ def _load_prob_series(
     side: str,
     column: str,
     target_index: pd.DatetimeIndex,
+    label_dir: str | None = None,
+    fallback_to_root: bool = True,
 ) -> pd.Series:
-    probs_dir = model_root / side.lower() / "probs"
-    parquet_path = probs_dir / f"{column.split('_full')[0]}_probs.parquet"
-    npy_path = probs_dir / f"{column}.npy"
+    probs_root = model_root / side.lower() / "probs"
+    probe_dirs = []
+    if label_dir:
+        probe_dirs.append(probs_root / label_dir)
+    if fallback_to_root or not label_dir:
+        probe_dirs.append(probs_root)
 
-    if parquet_path.exists():
-        df = pd.read_parquet(parquet_path)
-        if column not in df.columns:
-            raise KeyError(f"Missing {column} in {parquet_path}")
-        return df[column].reindex(target_index)
+    for probs_dir in probe_dirs:
+        parquet_path = probs_dir / f"{column.split('_full')[0]}_probs.parquet"
+        npy_path = probs_dir / f"{column}.npy"
 
-    if not npy_path.exists():
-        raise FileNotFoundError(f"Missing {parquet_path} and {npy_path}")
-    arr = np.load(npy_path)
-    if arr.shape[0] != len(target_index):
-        raise ValueError(
-            f"{npy_path.name} length {arr.shape[0]} does not match data length {len(target_index)}"
-        )
-    return pd.Series(arr, index=target_index, name=column)
+        if parquet_path.exists():
+            df = pd.read_parquet(parquet_path)
+            if column not in df.columns:
+                raise KeyError(f"Missing {column} in {parquet_path}")
+            return df[column].reindex(target_index)
+
+        if npy_path.exists():
+            arr = np.load(npy_path)
+            if arr.shape[0] != len(target_index):
+                raise ValueError(
+                    f"{npy_path.name} length {arr.shape[0]} does not match data length {len(target_index)}"
+                )
+            return pd.Series(arr, index=target_index, name=column)
+
+    searched = ", ".join(str(d) for d in probe_dirs)
+    raise FileNotFoundError(f"Missing probs for {side} ({column}) in: {searched}")
 
 
 def _compute_prior_day_high(df: pd.DataFrame) -> pd.Series:
@@ -149,23 +164,46 @@ def build_agent_feature_matrix(
         / cfg.dataset_name
     )
 
-    p_long = _load_prob_series(
-        model_root=model_root,
-        side="long",
-        column="p_long_full",
-        target_index=df.index,
-    )
-    p_short = _load_prob_series(
-        model_root=model_root,
-        side="short",
-        column="p_short_full",
-        target_index=df.index,
-    )
+    if cfg.include_pivot_probs:
+        p_long = _load_prob_series(
+            model_root=model_root,
+            side="long",
+            column="p_long_full",
+            target_index=df.index,
+            label_dir=cfg.pivot_label_dir,
+        )
+        p_short = _load_prob_series(
+            model_root=model_root,
+            side="short",
+            column="p_short_full",
+            target_index=df.index,
+            label_dir=cfg.pivot_label_dir,
+        )
 
-    df["p_pivot_long"] = p_long
-    df["p_pivot_short"] = p_short
-    df = _add_pivot_features(df, "p_pivot_long")
-    df = _add_pivot_features(df, "p_pivot_short")
+        df["p_pivot_long"] = p_long
+        df["p_pivot_short"] = p_short
+        df = _add_pivot_features(df, "p_pivot_long")
+        df = _add_pivot_features(df, "p_pivot_short")
+
+    if cfg.include_tb_probs:
+        tb_long = _load_prob_series(
+            model_root=model_root,
+            side="long",
+            column="p_long_full",
+            target_index=df.index,
+            label_dir=cfg.tb_label_dir,
+        )
+        tb_short = _load_prob_series(
+            model_root=model_root,
+            side="short",
+            column="p_short_full",
+            target_index=df.index,
+            label_dir=cfg.tb_label_dir,
+        )
+        df["p_tb_long"] = tb_long
+        df["p_tb_short"] = tb_short
+        df = _add_pivot_features(df, "p_tb_long")
+        df = _add_pivot_features(df, "p_tb_short")
 
     sin_time, cos_time = _compute_time_sin_cos(
         df.index, tz=cfg.tz, session_open=cfg.session_open, session_close=cfg.session_close
@@ -203,16 +241,6 @@ def build_agent_feature_matrix(
         "low",
         "close",
         "volume",
-        "p_pivot_long",
-        "p_pivot_long_lag1",
-        "p_pivot_long_lag2",
-        "p_pivot_long_max_last_4",
-        "p_pivot_long_delta_1",
-        "p_pivot_short",
-        "p_pivot_short_lag1",
-        "p_pivot_short_lag2",
-        "p_pivot_short_max_last_4",
-        "p_pivot_short_delta_1",
         "sin_time_of_day",
         "cos_time_of_day",
         "atr_pct",
@@ -220,6 +248,36 @@ def build_agent_feature_matrix(
         "dist_to_pdh",
         "trend_strength",
     ]
+    if cfg.include_pivot_probs:
+        cols.extend(
+            [
+                "p_pivot_long",
+                "p_pivot_long_lag1",
+                "p_pivot_long_lag2",
+                "p_pivot_long_max_last_4",
+                "p_pivot_long_delta_1",
+                "p_pivot_short",
+                "p_pivot_short_lag1",
+                "p_pivot_short_lag2",
+                "p_pivot_short_max_last_4",
+                "p_pivot_short_delta_1",
+            ]
+        )
+    if cfg.include_tb_probs:
+        cols.extend(
+            [
+                "p_tb_long",
+                "p_tb_long_lag1",
+                "p_tb_long_lag2",
+                "p_tb_long_max_last_4",
+                "p_tb_long_delta_1",
+                "p_tb_short",
+                "p_tb_short_lag1",
+                "p_tb_short_lag2",
+                "p_tb_short_max_last_4",
+                "p_tb_short_delta_1",
+            ]
+        )
 
     if cfg.include_state_placeholders:
         cols.extend(
