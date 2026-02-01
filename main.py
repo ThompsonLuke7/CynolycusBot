@@ -21,6 +21,7 @@ from Features.label_generations import (
     add_bars_to_exhaustion_label,
     add_mfe_mae_labels,
     add_pivot_swing_state_machine,
+    add_triple_barrier_labels_atr,
 )
 from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
 from Features.feature_matrix import build_feature_matrices, build_feature_matrix, clean_feature_matrix
@@ -151,6 +152,23 @@ def parse_args():
             "Use comma-separated values or 'all'."
         ),
     )
+    parser.add_argument(
+        "--plot-random-window",
+        action="store_true",
+        help="Pick a random window of bars for plots instead of the tail.",
+    )
+    parser.add_argument(
+        "--plot-window",
+        type=int,
+        default=200,
+        help="Number of bars to plot (default: 200).",
+    )
+    parser.add_argument(
+        "--plot-seed",
+        type=int,
+        default=None,
+        help="Optional RNG seed for random plot windows.",
+    )
     return parser.parse_args()
 
 
@@ -241,6 +259,8 @@ if __name__ == "__main__":
                 key = "mfe_mae"
             elif key == "exhaustion":
                 key = "bars_to_exhaustion"
+            elif key in {"tb", "triple", "triple_barrier"}:
+                key = "triple_barrier"
             canonical_plot_types.add(key)
 
         if "all" in canonical_plot_types or "all_labels" in canonical_plot_types:
@@ -274,6 +294,8 @@ if __name__ == "__main__":
                 if "leg_up_label" not in df.columns or "leg_down_label" not in df.columns:
                     df = add_atr_leg_segmentation_labels(df)
                 df = add_bars_to_exhaustion_label(df)
+            if "triple_barrier" in canonical_plot_types:
+                df = add_triple_barrier_labels_atr(df)
 
         save_paths = None
         if args.save_plot_path:
@@ -286,6 +308,9 @@ if __name__ == "__main__":
             df,
             plot_types=args.plot_type,
             save_paths=save_paths,
+            tail=args.plot_window,
+            random_window=args.plot_random_window,
+            seed=args.plot_seed,
             ticker=args.ticker,
             data_dir=data_dir,
         )

@@ -167,6 +167,126 @@ def add_atr_pivot_swing_labels(
     return df
 
 
+# ----------------------------------------------------------------------
+# 2) Triple Barrier label (ATR-based)
+# ----------------------------------------------------------------------
+
+
+def add_triple_barrier_labels_atr(
+    df,
+    close_col="close",
+    high_col="high",
+    low_col="low",
+    open_col="open",
+    atr_col="atr",          # must exist on 15m
+    atr_length=14,
+    atr_warm_start=True,
+    chop_atr_mult=0.5,
+    k_up=2,
+    k_dn=2,
+    max_holding=10,
+    base_label_col="tb_label",
+):
+    """
+    ATR-based triple barrier with conservative handling for ambiguous bars and
+    time-expiry exits.
+    """
+    if atr_col not in df.columns:
+        df[atr_col] = ta.atr(df[high_col], df[low_col], df[close_col], length=atr_length)
+    close = df[close_col].to_numpy(float)
+    high  = df[high_col].to_numpy(float)
+    low   = df[low_col].to_numpy(float)
+    open_ = None
+    if open_col in df.columns:
+        open_ = df[open_col].to_numpy(float)
+    atr   = df[atr_col].to_numpy(float, copy=True)
+    if atr_warm_start:
+        finite_idx = np.where(np.isfinite(atr))[0]
+        if finite_idx.size:
+            first_valid = int(finite_idx[0])
+            if first_valid > 0:
+                atr[:first_valid] = atr[first_valid]
+
+    n = len(df)
+    labels = np.zeros(n, dtype=float)
+    entry_price = np.full(n, np.nan)
+    exit_price = np.full(n, np.nan)
+    holding_bars = np.full(n, np.nan)
+    realized_ret = np.full(n, np.nan)
+
+    for i in range(n):
+        ep = close[i]
+        if np.isnan(ep) or np.isnan(atr[i]) or atr[i] <= 0:
+            continue
+
+        upper = ep + k_up * atr[i]
+        lower = ep - k_dn * atr[i]
+
+        entry_price[i] = ep
+
+        hit_label = 0.0
+        hit_exit = ep
+        hit_bars = 0
+
+        for j in range(i + 1, min(i + 1 + max_holding, n)):
+            hit_upper = high[j] >= upper
+            hit_lower = low[j] <= lower
+
+            if hit_upper and not hit_lower:
+                hit_label = 1.0
+                hit_exit = upper
+                if open_ is not None and open_[j] > upper:
+                    hit_exit = open_[j]
+                hit_bars = j - i
+                break
+            if hit_lower and not hit_upper:
+                hit_label = -1.0
+                hit_exit = lower
+                if open_ is not None and open_[j] < lower:
+                    hit_exit = open_[j]
+                hit_bars = j - i
+                break
+            if hit_upper and hit_lower:
+                hit_label = -1.0
+                hit_exit = lower
+                if open_ is not None and open_[j] < lower:
+                    hit_exit = open_[j]
+                hit_bars = j - i
+                break
+        else:
+            last_idx = min(i + max_holding, n - 1)
+            hit_exit = close[last_idx]
+            hit_bars = last_idx - i
+            if np.isfinite(hit_exit):
+                diff = hit_exit - ep
+                if (
+                    chop_atr_mult is not None
+                    and chop_atr_mult > 0
+                    and np.isfinite(atr[i])
+                    and abs(diff) <= chop_atr_mult * atr[i]
+                ):
+                    hit_label = 0.0
+                elif diff > 0:
+                    hit_label = 1.0
+                elif diff < 0:
+                    hit_label = -1.0
+
+        labels[i] = hit_label
+        exit_price[i] = hit_exit
+        holding_bars[i] = hit_bars
+        realized_ret[i] = (hit_exit / ep - 1.0) if ep != 0 else np.nan
+
+    df[base_label_col] = labels
+    df["tb_entry_price"] = entry_price
+    df["tb_exit_price"] = exit_price
+    df["tb_holding_bars"] = holding_bars
+    df["tb_realized_return"] = realized_ret
+    df["tb_long_label"] = (df[base_label_col] == 1.0).astype("Int64")
+    df["tb_short_label"] = (df[base_label_col] == -1.0).astype("Int64")
+    return df
+
+
+
 def add_atr_leg_segmentation_labels(
     df: pd.DataFrame,
     high_col: str = "high",
@@ -736,12 +856,6 @@ def add_bars_to_exhaustion_label(
 
     df[label_col] = y
     df[censored_col] = pd.Series(cens, index=df.index).astype("Int64")
-    cols = ["exhaustion_progress_long", "exhaustion_progress_short"]
-    print(df[cols].tail(200).describe())
-    print("nonzero long:", (df[cols[0]].tail(200).fillna(0) > 0).sum())
-    print("nonzero short:", (df[cols[1]].tail(200).fillna(0) > 0).sum())
-    print("nan long:", df[cols[0]].tail(200).isna().sum())
-    print("nan short:", df[cols[1]].tail(200).isna().sum())
 
     return df
 
@@ -1131,6 +1245,7 @@ def add_all_labels(
     leg_state_kwargs: dict | None = None,
     swing_state_decay_kwargs: dict | None = None,
     swing_state_machine_kwargs: dict | None = None,
+    triple_barrier_kwargs: dict | None = None,
     continuation_kwargs: dict | None = None,
     mfe_mae_kwargs: dict | None = None,
     bars_to_exhaustion_kwargs: dict | None = None,
@@ -1151,18 +1266,22 @@ def add_all_labels(
 
     atr_pivot_kwargs = atr_pivot_kwargs or {}
     leg_state_kwargs = leg_state_kwargs or {}
+    triple_barrier_kwargs = triple_barrier_kwargs or {}
     continuation_kwargs = continuation_kwargs or {}
     mfe_mae_kwargs = mfe_mae_kwargs or {}
     bars_to_exhaustion_kwargs = bars_to_exhaustion_kwargs or {}
 
     if label_horizon is not None:
         continuation_kwargs.setdefault("max_holding", label_horizon)
+        triple_barrier_kwargs.setdefault("max_holding", label_horizon)
         mfe_mae_kwargs.setdefault("horizon", label_horizon)
         bars_to_exhaustion_kwargs.setdefault("max_bars", label_horizon)
 
     df = add_atr_pivot_swing_labels(df, **atr_pivot_kwargs)
     if leg_state_kwargs is not None:
         df = add_atr_leg_segmentation_labels(df, **leg_state_kwargs)
+    if triple_barrier_kwargs is not None:
+        df = add_triple_barrier_labels_atr(df, **triple_barrier_kwargs)
 
     if swing_state_decay_kwargs is not None:
         df = add_pivot_swing_state_probabilities(df, **swing_state_decay_kwargs)
@@ -1191,6 +1310,7 @@ def add_all_labels_on_timeframe(
     leg_state_kwargs: dict | None = None,
     swing_state_decay_kwargs: dict | None = None,
     swing_state_machine_kwargs: dict | None = None,
+    triple_barrier_kwargs: dict | None = None,
     continuation_kwargs: dict | None = None,
     mfe_mae_kwargs: dict | None = None,
     bars_to_exhaustion_kwargs: dict | None = None,
@@ -1220,6 +1340,7 @@ def add_all_labels_on_timeframe(
         leg_state_kwargs=leg_state_kwargs,
         swing_state_decay_kwargs=swing_state_decay_kwargs,
         swing_state_machine_kwargs=swing_state_machine_kwargs,
+        triple_barrier_kwargs=triple_barrier_kwargs,
         continuation_kwargs=continuation_kwargs,
         mfe_mae_kwargs=mfe_mae_kwargs,
         bars_to_exhaustion_kwargs=bars_to_exhaustion_kwargs,

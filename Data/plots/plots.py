@@ -21,6 +21,7 @@ DEFAULT_LABEL_PLOT_TYPES = [
     "leg_segmentation",
     "continuation",
     "swing_state_machine",
+    "triple_barrier",
     "all_labels",
 ]
 
@@ -32,6 +33,8 @@ _PLOT_TYPE_ALIASES = {
     "mfe": "mfe_mae",
     "mae": "mfe_mae",
     "exhaustion": "bars_to_exhaustion",
+    "tb": "triple_barrier",
+    "triple": "triple_barrier",
 }
 
 _LABEL_PLOT_FILES = {
@@ -39,6 +42,7 @@ _LABEL_PLOT_FILES = {
     "leg_segmentation": "leg_segmentation_plot.png",
     "continuation": "continuation_plot.png",
     "swing_state_machine": "swing_state_machine_plot.png",
+    "triple_barrier": "triple_barrier_plot.png",
     "all_labels": "all_labels_plot.png",
     "mfe_mae": "mfe_mae_plot.png",
     "bars_to_exhaustion": "bars_to_exhaustion_plot.png",
@@ -78,10 +82,22 @@ def _normalize_plot_type(plot_type: str) -> str:
     return key
 
 
-def _tail_df(df: pd.DataFrame, tail: int | None = _PLOT_TAIL_BARS) -> pd.DataFrame:
-    if tail is None or tail <= 0 or len(df) <= tail:
+def _select_plot_window(
+    df: pd.DataFrame,
+    *,
+    window: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
+) -> pd.DataFrame:
+    if window is None or window <= 0 or len(df) <= window:
         return df
-    return df.tail(tail)
+    if not random_window:
+        return df.tail(window)
+    rng = np.random.default_rng(seed)
+    max_start = len(df) - window
+    start = int(rng.integers(0, max_start + 1))
+    end = start + window
+    return df.iloc[start:end]
 
 
 def _extract_ohlc(
@@ -218,12 +234,19 @@ def _finalize_plot(
     plt.show()
 
 
-def plot_atr_swing_signals(df: pd.DataFrame, save_path: str | None = None) -> None:
+def plot_atr_swing_signals(
+    df: pd.DataFrame,
+    *,
+    tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
+    save_path: str | None = None,
+) -> None:
     """
     Plot OHLC candles with ATR swing labels from label generation.
     Uses compressed x positions to avoid gaps from non-trading days.
     """
-    df = _tail_df(df)
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
     fig, ax = plt.subplots(figsize=(18, 6))
 
     date_index = df.index
@@ -338,13 +361,15 @@ def plot_continuation_signals(
     pivot_down_col: str = "pivot_down",
     pivot_up_col: str = "pivot_up",
     tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
     save_path: str | None = None,
 ) -> None:
     """
     Plot OHLC candles with continuation labels only.
     Uses compressed x positions to avoid gaps from non-trading days.
     """
-    df = _tail_df(df, tail=tail)
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
     fig, ax = plt.subplots(figsize=(18, 6))
 
     date_index = df.index
@@ -442,13 +467,18 @@ def plot_continuation_signals(
 
 
 def plot_leg_segmentation_signals(
-    df: pd.DataFrame, save_path: str | None = None
+    df: pd.DataFrame,
+    *,
+    tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
+    save_path: str | None = None,
 ) -> None:
     """
     Plot OHLC candles with ATR leg-state labels and pivot markers.
     Uses compressed x positions to avoid gaps from non-trading days.
     """
-    df = _tail_df(df)
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
     fig, ax = plt.subplots(figsize=(18, 6))
 
     date_index = df.index
@@ -582,13 +612,16 @@ def plot_swing_state_machine_signals(
     short_state_col: str = "p_short_state_gate",
     long_pending_col: str = "p_long_pending",
     short_pending_col: str = "p_short_pending",
+    tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
     save_path: str | None = None,
 ) -> None:
     """
     Plot OHLC candles with swing state-machine labels.
     Uses compressed x positions to avoid gaps from non-trading days.
     """
-    df = _tail_df(df)
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
     fig, ax = plt.subplots(figsize=(18, 6))
 
     date_index = df.index
@@ -600,6 +633,7 @@ def plot_swing_state_machine_signals(
 
     long_color = "#2E7D32"
     short_color = "#C62828"
+    chop_color = "#757575"
     pending_long_color = "#43A047"
     pending_short_color = "#D32F2F"
 
@@ -712,13 +746,16 @@ def plot_all_labels(
     leg_label_col: str = "atr_leg_label",
     leg_up_col: str = "leg_up_label",
     leg_down_col: str = "leg_down_label",
+    tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
     save_path: str | None = None,
 ) -> None:
     """
     Plot candles with pivot, state machine, continuation labels, plus a leg-state subplot.
     Uses compressed x positions to avoid gaps from non-trading days.
     """
-    df = _tail_df(df)
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
     fig, (ax, ax_leg) = plt.subplots(
         2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
     )
@@ -931,12 +968,15 @@ def plot_mfe_mae_labels(
     close_col: str = "close",
     mfe_col: str = "mfe_up_atr",
     mae_col: str = "mae_down_atr",
+    tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
     save_path: str | None = None,
 ) -> None:
     """
     Plot close price with a subplot showing MFE (up) and MAE (down) bars.
     """
-    df = _tail_df(df)
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
     fig, (ax_price, ax_bar) = plt.subplots(
         2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [2.2, 1]}
     )
@@ -1003,12 +1043,15 @@ def plot_exhaustion_progress(
     close_col: str = "close",
     progress_long_col: str = "exhaustion_progress_long",
     progress_short_col: str = "exhaustion_progress_short",
+    tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
     save_path: str | None = None,
 ) -> None:
     """
     Plot close price with a subplot showing exhaustion progress (0..1).
     """
-    df = _tail_df(df)
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
     fig, (ax_price, ax_bar) = plt.subplots(
         2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [2.2, 1]}
     )
@@ -1070,12 +1113,14 @@ def plot_continuation_strength(
     strength_long_col: str = "cont_strength_long",
     strength_short_col: str = "cont_strength_short",
     tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
     save_path: str | None = None,
 ) -> None:
     """
     Plot close price with a subplot showing continuation strength (0..1).
     """
-    df = _tail_df(df, tail=tail)
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
     fig, (ax_price, ax_bar) = plt.subplots(
         2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [2.2, 1]}
     )
@@ -1155,11 +1200,103 @@ def plot_continuation_strength(
     )
 
 
+def plot_triple_barrier_signals(
+    df: pd.DataFrame,
+    *,
+    label_col: str = "tb_label",
+    tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
+    save_path: str | None = None,
+) -> None:
+    """
+    Plot OHLC candles with triple barrier labels (+1/-1).
+    """
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
+    fig, ax = plt.subplots(figsize=(18, 6))
+
+    date_index = df.index
+    pos, open_y, high_y, low_y, close_y = _extract_ohlc(df)
+
+    marker_offset = _compute_marker_offset(df, high_y, low_y)
+    up_offset = marker_offset * 0.6
+    down_offset = marker_offset * 0.6
+
+    long_color = "#2E7D32"
+    short_color = "#C62828"
+
+    _plot_candles(ax, pos, open_y, high_y, low_y, close_y)
+
+    if label_col not in df.columns:
+        raise KeyError(f"Missing required column: {label_col}")
+
+    labels = df[label_col].fillna(0).to_numpy(dtype=float)
+    mask_pos = labels >= 0.5
+    mask_neg = labels <= -0.5
+    mask_zero = ~(mask_pos | mask_neg)
+
+    if mask_pos.any():
+        ax.scatter(
+            pos[mask_pos],
+            close_y[mask_pos] + up_offset,
+            color=long_color,
+            marker="^",
+            s=42,
+            label=f"{label_col} = +1",
+            alpha=0.9,
+            zorder=2,
+        )
+    if mask_neg.any():
+        ax.scatter(
+            pos[mask_neg],
+            close_y[mask_neg] - down_offset,
+            color=short_color,
+            marker="v",
+            s=42,
+            label=f"{label_col} = -1",
+            alpha=0.9,
+            zorder=2,
+        )
+    if mask_zero.any():
+        ax.scatter(
+            pos[mask_zero],
+            close_y[mask_zero],
+            color="#757575",
+            marker="o",
+            s=28,
+            label=f"{label_col} = 0",
+            alpha=0.7,
+            zorder=1.9,
+        )
+
+    bar_label = _infer_bar_label(date_index)
+    title = (
+        f"{bar_label} | bars: {len(df)} | +1: {int(mask_pos.sum())} | -1: {int(mask_neg.sum())}"
+    )
+    ax.set_title(title, fontsize=14)
+    ax.set_ylabel("Close Price")
+    ax.legend(loc="upper left", fontsize=11, ncol=3)
+    ax.set_xlabel("Date")
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax, tick_positions, tick_labels)
+    _draw_day_lines([ax], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="Close Price with Triple Barrier Labels",
+        suptitle_y=1.02,
+        top=0.93,
+        save_path=save_path,
+    )
+
+
 _LABEL_PLOTTERS = {
     "atr_swing": plot_atr_swing_signals,
     "leg_segmentation": plot_leg_segmentation_signals,
     "continuation": plot_continuation_signals,
     "swing_state_machine": plot_swing_state_machine_signals,
+    "triple_barrier": plot_triple_barrier_signals,
     "all_labels": plot_all_labels,
     "mfe_mae": plot_mfe_mae_labels,
     "bars_to_exhaustion": plot_exhaustion_progress,
@@ -1173,6 +1310,9 @@ def plot_selected_label_plots(
     plot_types: Iterable[str] | str | None = None,
     save_paths: Mapping[str, str | Path] | None = None,
     plot_kwargs: Mapping[str, Mapping[str, object]] | None = None,
+    tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
     ticker: str | None = None,
     data_dir: Path | None = None,
 ) -> None:
@@ -1211,6 +1351,12 @@ def plot_selected_label_plots(
     for plot_type in resolved:
         plotter = _LABEL_PLOTTERS[plot_type]
         kwargs = dict(normalized_plot_kwargs.get(plot_type, {}))
+        if "tail" not in kwargs:
+            kwargs["tail"] = tail
+        if "random_window" not in kwargs:
+            kwargs["random_window"] = random_window
+        if "seed" not in kwargs:
+            kwargs["seed"] = seed
         if "save_path" not in kwargs:
             if plot_type in normalized_save_paths:
                 kwargs["save_path"] = normalized_save_paths[plot_type]

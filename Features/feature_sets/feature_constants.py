@@ -17,6 +17,14 @@ SWING_LABEL_COLUMNS = [
     "atr_exit_price",
     "atr_holding_bars",
     "atr_realized_return",
+    # Triple barrier labels
+    "tb_label",
+    "tb_entry_price",
+    "tb_exit_price",
+    "tb_holding_bars",
+    "tb_realized_return",
+    "tb_long_label",
+    "tb_short_label",
     # Continuation labels
     "atr_cont_label",
     "long_cont_label",

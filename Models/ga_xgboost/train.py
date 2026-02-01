@@ -28,6 +28,7 @@ from Data.load_data import (
     get_ticker_processed_stats_dir,
 )
 from Data.retrieve_data import normalize_ticker
+from Data.plots.plots import get_default_model_inference_plot_path, plot_model_inference
 from Features.feature_scaling import apply_scaler_from_stats
 from Models.ga_xgboost.ga_xgboost import GAXGBoostFeatureSelector
 
@@ -115,7 +116,7 @@ def load_dataset(
     x_filename: str,
     label_mode: str,
     apply_scaler: bool,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, pd.Index | None]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, pd.DataFrame | None]:
     clean = normalize_ticker(ticker)
     processed_dir = get_ticker_processed_base_dir(clean)
     dataset_dir = processed_dir / "datasets" / dataset_name
@@ -140,26 +141,40 @@ def load_dataset(
 
     if label_mode == "swing":
         long_col, short_col = "long_swing_label", "short_swing_label"
+        missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
+        if missing_cols:
+            raise KeyError(
+                f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
+            )
+        y_long = y_df[long_col].to_numpy(dtype=np.int64)
+        y_short = y_df[short_col].to_numpy(dtype=np.int64)
     elif label_mode == "leg":
         long_col, short_col = "leg_up_label", "leg_down_label"
+        missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
+        if missing_cols:
+            raise KeyError(
+                f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
+            )
+        y_long = y_df[long_col].to_numpy(dtype=np.int64)
+        y_short = y_df[short_col].to_numpy(dtype=np.int64)
+    elif label_mode in {"triple_barrier", "tb"}:
+        long_col, short_col = "tb_long_label", "tb_short_label"
+        missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
+        if missing_cols:
+            raise KeyError(
+                f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
+            )
+        y_long = y_df[long_col].to_numpy(dtype=np.int64)
+        y_short = y_df[short_col].to_numpy(dtype=np.int64)
     else:
         raise ValueError(f"Unknown label_mode: {label_mode}")
 
-    missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
-    if missing_cols:
-        raise KeyError(
-            f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
-        )
-
-    y_long = y_df[long_col].to_numpy(dtype=np.int64)
-    y_short = y_df[short_col].to_numpy(dtype=np.int64)
-
     plot_path = dataset_dir / "plot_frame.parquet"
-    plot_index = None
+    plot_df = None
     if plot_path.exists():
-        plot_index = pd.read_parquet(plot_path).index
+        plot_df = pd.read_parquet(plot_path)
 
-    return X, y_long, y_short, plot_index
+    return X, y_long, y_short, plot_df
 
 
 def _load_split_indices(
@@ -411,16 +426,27 @@ def main() -> None:
         action="store_true",
         help="Re-run GA feature selection on the train split to refresh masks/params.",
     )
+    parser.add_argument(
+        "--label-mode",
+        type=str,
+        default=None,
+        choices=["swing", "leg", "triple_barrier", "tb"],
+        help="Label mode to use (default: swing).",
+    )
     args = parser.parse_args()
 
-    cfg = TrainConfig(refresh_masks=bool(args.refresh_masks))
-    X, y_long, y_short, plot_index = load_dataset(
+    cfg = TrainConfig(
+        refresh_masks=bool(args.refresh_masks),
+        label_mode=args.label_mode or TrainConfig.label_mode,
+    )
+    X, y_long, y_short, plot_df = load_dataset(
         ticker=cfg.ticker,
         dataset_name=cfg.dataset_name,
         x_filename=cfg.x_filename,
         label_mode=cfg.label_mode,
         apply_scaler=cfg.apply_scaler,
     )
+    plot_index = plot_df.index if plot_df is not None else None
 
     splits = _load_split_indices(cfg.ticker, cfg.dataset_name, cfg.x_filename)
     train_idx = np.sort(splits["train"])
@@ -438,9 +464,10 @@ def main() -> None:
         "label_mode": cfg.label_mode,
     }
 
-    X_train = X[train_idx]
-    y_long_train = y_long[train_idx]
-    y_short_train = y_short[train_idx]
+    train_val_idx = np.sort(np.concatenate([train_idx, val_idx]))
+    X_train = X[train_val_idx]
+    y_long_train = y_long[train_val_idx]
+    y_short_train = y_short[train_val_idx]
     X_test = X[test_idx]
 
     need_refresh = cfg.refresh_masks
@@ -466,7 +493,7 @@ def main() -> None:
 
     print(
         "Split sizes: "
-        f"train={train_idx.size}, val={val_idx.size}, test={test_idx.size}"
+        f"train+val={train_val_idx.size}, test={test_idx.size}"
     )
 
     long_oof = walk_forward_oof_probs(
@@ -508,8 +535,8 @@ def main() -> None:
     n_total = X.shape[0]
     long_full = np.full(n_total, np.nan, dtype=np.float32)
     short_full = np.full(n_total, np.nan, dtype=np.float32)
-    long_full[train_idx] = long_oof
-    short_full[train_idx] = short_oof
+    long_full[train_val_idx] = long_oof
+    short_full[train_val_idx] = short_oof
     if long_test.size:
         long_full[test_idx] = long_test
     if short_test.size:
@@ -522,7 +549,7 @@ def main() -> None:
         train_oof=long_oof,
         test_probs=long_test,
         full_probs=long_full,
-        train_idx=train_idx,
+        train_idx=train_val_idx,
         test_idx=test_idx,
         index=plot_index,
     )
@@ -532,7 +559,7 @@ def main() -> None:
         train_oof=short_oof,
         test_probs=short_test,
         full_probs=short_full,
-        train_idx=train_idx,
+        train_idx=train_val_idx,
         test_idx=test_idx,
         index=plot_index,
     )
@@ -544,6 +571,37 @@ def main() -> None:
             "OOF gap detected (early bars without prior data). "
             f"long={missing_long}, short={missing_short}"
         )
+    if plot_df is not None:
+        test_df = plot_df.iloc[test_idx]
+        y_long_test = y_long[test_idx]
+        y_short_test = y_short[test_idx]
+        tail = 200
+        if len(test_df) > tail:
+            test_df = test_df.tail(tail)
+            long_test_tail = long_test[-tail:]
+            short_test_tail = short_test[-tail:]
+            y_long_test = y_long_test[-tail:]
+            y_short_test = y_short_test[-tail:]
+        else:
+            long_test_tail = long_test
+            short_test_tail = short_test
+
+        save_path = get_default_model_inference_plot_path(
+            cfg.ticker, f"ga_xgb_{cfg.label_mode}_test"
+        )
+        plot_model_inference(
+            test_df,
+            long_test_tail if long_test_tail.size else None,
+            short_test_tail if short_test_tail.size else None,
+            long_actual=y_long_test if y_long_test.size else None,
+            short_actual=y_short_test if y_short_test.size else None,
+            long_label_name="LONG",
+            short_label_name="SHORT",
+            threshold=0.5,
+            title=f"{normalize_ticker(cfg.ticker)} | GA-XGB {cfg.label_mode} (test tail)",
+            save_path=str(save_path),
+        )
+
     print(f"Saved OOF/test/full probability arrays under {probs_root}")
 
 

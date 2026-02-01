@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta
 
+from Features.label_generations import add_triple_barrier_labels_atr
+
 
 # ----------------------------------------------------------------------
 # 1) Simple next-day direction label
@@ -110,96 +112,4 @@ def add_pullback_entry_labels(
     return df
 
 
-# ----------------------------------------------------------------------
-# 4) Triple Barrier label (pure price-based, no pivots required)
-# ----------------------------------------------------------------------
-def add_triple_barrier_labels(
-    df: pd.DataFrame,
-    close_col: str = "close",
-    high_col: str = "high",
-    low_col: str = "low",
-    up_pct: float = 0.03,
-    down_pct: float = 0.02,
-    max_holding: int = 20,
-    base_label_col: str = "tb_label",
-) -> pd.DataFrame:
-    """
-    Triple barrier label at each bar.
-
-    For each index i:
-        entry = close[i]
-        upper = entry * (1 + up_pct)
-        lower = entry * (1 - down_pct)
-
-        Look ahead up to max_holding bars:
-          - if high[j] >= upper before low[j] <= lower -> +1
-          - if low[j] <= lower before high[j] >= upper -> -1
-          - if neither hit -> 0
-
-    Adds columns:
-        base_label_col       - {-1, 0, +1}
-        tb_entry_price
-        tb_exit_price
-        tb_holding_bars
-        tb_realized_return
-    """
-    close = df[close_col].to_numpy(dtype=float)
-    high = df[high_col].to_numpy(dtype=float)
-    low = df[low_col].to_numpy(dtype=float)
-
-    n = len(df)
-
-    labels = np.zeros(n, dtype=float)
-    entry_price = np.full(n, np.nan)
-    exit_price = np.full(n, np.nan)
-    holding_bars = np.full(n, np.nan)
-    realized_ret = np.full(n, np.nan)
-
-    for i in range(n):
-        ep = close[i]
-        if np.isnan(ep):
-            continue
-
-        upper = ep * (1.0 + up_pct)
-        lower = ep * (1.0 - down_pct)
-
-        entry_price[i] = ep
-
-        hit_label = 0.0
-        hit_exit = ep
-        hit_bars = 0
-
-        for j in range(i + 1, min(i + 1 + max_holding, n)):
-            # check barriers
-            hit_upper = high[j] >= upper
-            hit_lower = low[j] <= lower
-
-            if hit_upper and not hit_lower:
-                hit_label = 1.0
-                hit_exit = upper
-                hit_bars = j - i
-                break
-            elif hit_lower and not hit_upper:
-                hit_label = -1.0
-                hit_exit = lower
-                hit_bars = j - i
-                break
-            elif hit_upper and hit_lower:
-                # tie-breaker: you can choose a rule; here we go neutral
-                hit_label = 0.0
-                hit_exit = ep
-                hit_bars = j - i
-                break
-
-        labels[i] = hit_label
-        exit_price[i] = hit_exit
-        holding_bars[i] = hit_bars
-        realized_ret[i] = (hit_exit / ep - 1.0) if ep != 0 else np.nan
-
-    df[base_label_col] = labels
-    df["tb_entry_price"] = entry_price
-    df["tb_exit_price"] = exit_price
-    df["tb_holding_bars"] = holding_bars
-    df["tb_realized_return"] = realized_ret
-
-    return df
+# Triple barrier label moved to Features/label_generations.py (kept import for compatibility).

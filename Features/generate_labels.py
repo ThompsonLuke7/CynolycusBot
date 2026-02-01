@@ -29,6 +29,39 @@ def _load_plot_frame(path: Path) -> pd.DataFrame:
     return df
 
 
+def _print_triple_barrier_stats(df: pd.DataFrame) -> None:
+    if "tb_label" not in df.columns:
+        print("[labels] tb_label: missing")
+        return
+    s = df["tb_label"]
+    total = len(s)
+    nan_count = int(s.isna().sum())
+    valid = s.dropna().to_numpy(dtype=float)
+    if valid.size == 0:
+        print(f"[labels] tb_label: n={total}, nan={nan_count}, no valid values")
+        return
+    pos = int((valid > 0.5).sum())
+    neg = int((valid < -0.5).sum())
+    zero = int(valid.size - pos - neg)
+    print(
+        "[labels] tb_label: "
+        f"n={total}, nan={nan_count}, +1={pos}, -1={neg}, 0={zero}"
+    )
+
+
+def _print_pivot_stats(df: pd.DataFrame) -> None:
+    pivot_cols = ["pivot_up", "pivot_down", "super_pivot_up", "super_pivot_down"]
+    present = [c for c in pivot_cols if c in df.columns]
+    if not present:
+        print("[labels] pivots: missing")
+        return
+    stats = []
+    for col in present:
+        count = int((df[col].fillna(0).astype(int) == 1).sum())
+        stats.append(f"{col}={count}")
+    print("[labels] pivots: " + ", ".join(stats))
+
+
 def generate_labels(
     *,
     ticker: str,
@@ -42,6 +75,9 @@ def generate_labels(
 
     df = add_fractal_pivots(df)
     df = add_all_labels(df)
+
+    _print_triple_barrier_stats(df)
+    _print_pivot_stats(df)
 
     label_cols = _collect_label_columns(df)
     if not label_cols:
