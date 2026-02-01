@@ -56,6 +56,7 @@ class TrainConfig:
     update_scale_pos_weight: bool = False
     output_dirname: str = "probs"
     refresh_masks: bool = False
+    super_pivot_weight: float = 1.0
 
 
 def load_feature_names(ticker: str, dataset_name: str, x_filename: str) -> list[str] | None:
@@ -126,7 +127,15 @@ def load_dataset(
     x_filename: str,
     label_mode: str,
     apply_scaler: bool,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, pd.DataFrame | None]:
+    super_pivot_weight: float = 1.0,
+) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    pd.DataFrame | None,
+    np.ndarray | None,
+    np.ndarray | None,
+]:
     clean = normalize_ticker(ticker)
     processed_dir = get_ticker_processed_base_dir(clean)
     dataset_dir = processed_dir / "datasets" / dataset_name
@@ -149,6 +158,9 @@ def load_dataset(
     X = X_df.to_numpy(dtype=np.float32)
     y_df = pd.read_parquet(y_path)
 
+    sample_weight_long = None
+    sample_weight_short = None
+
     if label_mode == "swing":
         long_col, short_col = "long_swing_label", "short_swing_label"
         missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
@@ -167,6 +179,37 @@ def load_dataset(
             )
         y_long = y_df[long_col].to_numpy(dtype=np.int64)
         y_short = y_df[short_col].to_numpy(dtype=np.int64)
+    elif label_mode in {"pivot", "pivots"}:
+        long_col, short_col = "pivot_down", "pivot_up"
+        missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
+        if missing_cols:
+            raise KeyError(
+                f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
+            )
+        y_long = y_df[long_col].fillna(0).to_numpy(dtype=np.int64)
+        y_short = y_df[short_col].fillna(0).to_numpy(dtype=np.int64)
+
+        if super_pivot_weight != 1.0:
+            super_long_col, super_short_col = "super_pivot_down", "super_pivot_up"
+            missing_supers = [
+                c for c in (super_long_col, super_short_col) if c not in y_df.columns
+            ]
+            if missing_supers:
+                print(
+                    "[GA-XGB] super_pivot_weight requested but missing columns: "
+                    + ", ".join(missing_supers)
+                )
+            else:
+                sample_weight_long = np.ones_like(y_long, dtype=np.float32)
+                sample_weight_short = np.ones_like(y_short, dtype=np.float32)
+                super_long = (
+                    y_df[super_long_col].fillna(0).astype(int).to_numpy() == 1
+                )
+                super_short = (
+                    y_df[super_short_col].fillna(0).astype(int).to_numpy() == 1
+                )
+                sample_weight_long[super_long] = float(super_pivot_weight)
+                sample_weight_short[super_short] = float(super_pivot_weight)
     elif label_mode in {"triple_barrier", "tb"}:
         long_col, short_col = "tb_long_label", "tb_short_label"
         missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
@@ -184,7 +227,7 @@ def load_dataset(
     if plot_path.exists():
         plot_df = pd.read_parquet(plot_path)
 
-    return X, y_long, y_short, plot_df
+    return X, y_long, y_short, plot_df, sample_weight_long, sample_weight_short
 
 
 def _load_split_indices(
@@ -233,6 +276,7 @@ def _train_ga_selector(
     y_train: np.ndarray,
     *,
     xgb_params: dict,
+    sample_weight: np.ndarray | None = None,
 ) -> GAXGBoostFeatureSelector:
     selector = GAXGBoostFeatureSelector(
         population_size=24,
@@ -248,7 +292,7 @@ def _train_ga_selector(
         selection="tournament",
         tournament_k=3,
     )
-    selector.fit(X_train, y_train)
+    selector.fit(X_train, y_train, sample_weight=sample_weight)
     return selector
 
 
@@ -257,6 +301,8 @@ def refresh_masks_and_params(
     X_train: np.ndarray,
     y_long_train: np.ndarray,
     y_short_train: np.ndarray,
+    w_long_train: np.ndarray | None,
+    w_short_train: np.ndarray | None,
     model_root: Path,
     feature_names: list[str] | None,
     metadata: dict,
@@ -270,10 +316,16 @@ def refresh_masks_and_params(
 
     print("Refreshing GA-XGB masks/params on train split only...")
     long_selector = _train_ga_selector(
-        X_train, y_long_train, xgb_params=_side_params(y_long_train)
+        X_train,
+        y_long_train,
+        xgb_params=_side_params(y_long_train),
+        sample_weight=w_long_train,
     )
     short_selector = _train_ga_selector(
-        X_train, y_short_train, xgb_params=_side_params(y_short_train)
+        X_train,
+        y_short_train,
+        xgb_params=_side_params(y_short_train),
+        sample_weight=w_short_train,
     )
 
     save_selector_artifacts(
@@ -315,9 +367,10 @@ def _fit_xgb_with_selector(
     X_train: np.ndarray,
     y_train: np.ndarray,
     xgb_params: dict,
+    sample_weight: np.ndarray | None = None,
 ) -> tuple[GAXGBoostFeatureSelector, object]:
     selector = GAXGBoostFeatureSelector(xgb_params=xgb_params)
-    model = selector._fit_xgb(X_train, y_train)
+    model = selector._fit_xgb(X_train, y_train, sample_weight=sample_weight)
     return selector, model
 
 
@@ -404,10 +457,13 @@ def walk_forward_oof_probs(
     n_folds: int,
     initial_train_size: int | None,
     update_scale_pos_weight: bool,
+    sample_weight: np.ndarray | None = None,
 ) -> np.ndarray:
     train_end = X_train.shape[0]
     if train_end <= 1:
         raise ValueError("Not enough samples for OOF training.")
+    if sample_weight is not None and sample_weight.shape[0] != train_end:
+        raise ValueError("sample_weight must match X_train length.")
     if n_folds < 1:
         raise ValueError("n_folds must be >= 1")
 
@@ -435,7 +491,10 @@ def walk_forward_oof_probs(
         params = _maybe_update_scale_pos_weight(
             xgb_params, y_fit, enabled=update_scale_pos_weight
         )
-        selector, model = _fit_xgb_with_selector(X_fit, y_fit, params)
+        w_fit = None if sample_weight is None else sample_weight[:fold_start]
+        selector, model = _fit_xgb_with_selector(
+            X_fit, y_fit, params, sample_weight=w_fit
+        )
 
         X_pred = X_train[fold_start:fold_end][:, mask]
         use_gpu = selector._use_gpu is True
@@ -454,16 +513,21 @@ def train_final_and_predict_test(
     mask: np.ndarray,
     xgb_params: dict,
     update_scale_pos_weight: bool,
+    sample_weight: np.ndarray | None = None,
 ) -> np.ndarray:
     if X_test.size == 0:
         return np.empty((0,), dtype=np.float32)
+    if sample_weight is not None and sample_weight.shape[0] != X_train.shape[0]:
+        raise ValueError("sample_weight must match X_train length.")
 
     X_fit = X_train[:, mask]
     y_fit = y_train
     params = _maybe_update_scale_pos_weight(
         xgb_params, y_fit, enabled=update_scale_pos_weight
     )
-    selector, model = _fit_xgb_with_selector(X_fit, y_fit, params)
+    selector, model = _fit_xgb_with_selector(
+        X_fit, y_fit, params, sample_weight=sample_weight
+    )
 
     X_test = X_test[:, mask]
     use_gpu = selector._use_gpu is True
@@ -514,21 +578,29 @@ def main() -> None:
         "--label-mode",
         type=str,
         default=None,
-        choices=["swing", "leg", "triple_barrier", "tb"],
+        choices=["swing", "leg", "triple_barrier", "tb", "pivot", "pivots"],
         help="Label mode to use (default: swing).",
+    )
+    parser.add_argument(
+        "--super-pivot-weight",
+        type=float,
+        default=TrainConfig.super_pivot_weight,
+        help="Sample-weight multiplier for super pivot events (pivot mode only).",
     )
     args = parser.parse_args()
 
     cfg = TrainConfig(
         refresh_masks=bool(args.refresh_masks),
         label_mode=args.label_mode or TrainConfig.label_mode,
+        super_pivot_weight=float(args.super_pivot_weight),
     )
-    X, y_long, y_short, plot_df = load_dataset(
+    X, y_long, y_short, plot_df, w_long, w_short = load_dataset(
         ticker=cfg.ticker,
         dataset_name=cfg.dataset_name,
         x_filename=cfg.x_filename,
         label_mode=cfg.label_mode,
         apply_scaler=cfg.apply_scaler,
+        super_pivot_weight=cfg.super_pivot_weight,
     )
     plot_index = plot_df.index if plot_df is not None else None
 
@@ -546,12 +618,15 @@ def main() -> None:
         "ticker": cfg.ticker,
         "dataset_name": cfg.dataset_name,
         "label_mode": cfg.label_mode,
+        "super_pivot_weight": cfg.super_pivot_weight,
     }
 
     train_val_idx = np.sort(np.concatenate([train_idx, val_idx]))
     X_train = X[train_val_idx]
     y_long_train = y_long[train_val_idx]
     y_short_train = y_short[train_val_idx]
+    w_long_train = w_long[train_val_idx] if w_long is not None else None
+    w_short_train = w_short[train_val_idx] if w_short is not None else None
     X_test = X[test_idx]
 
     need_refresh = cfg.refresh_masks
@@ -567,6 +642,8 @@ def main() -> None:
             X_train=X_train,
             y_long_train=y_long_train,
             y_short_train=y_short_train,
+            w_long_train=w_long_train,
+            w_short_train=w_short_train,
             model_root=model_dataset_root,
             feature_names=feature_names,
             metadata=common_meta,
@@ -581,6 +658,14 @@ def main() -> None:
     )
     _print_label_stats(y_long_train, "LONG labels (train+val)")
     _print_label_stats(y_short_train, "SHORT labels (train+val)")
+    if cfg.label_mode in {"pivot", "pivots"} and cfg.super_pivot_weight != 1.0:
+        if w_long_train is not None and w_short_train is not None:
+            long_super = int((w_long_train > 1.0).sum())
+            short_super = int((w_short_train > 1.0).sum())
+            print(
+                f"[GA-XGB] super_pivot_weight={cfg.super_pivot_weight:g} "
+                f"(long super={long_super}, short super={short_super})"
+            )
     print(
         f"[GA-XGB] XGBoost objective={long_params.get('objective', 'binary:logistic')} "
         f"eval_metric={long_params.get('eval_metric', 'logloss')}"
@@ -594,6 +679,7 @@ def main() -> None:
         n_folds=cfg.n_folds,
         initial_train_size=cfg.initial_train_size,
         update_scale_pos_weight=cfg.update_scale_pos_weight,
+        sample_weight=w_long_train,
     )
     short_oof = walk_forward_oof_probs(
         X_train=X_train,
@@ -603,6 +689,7 @@ def main() -> None:
         n_folds=cfg.n_folds,
         initial_train_size=cfg.initial_train_size,
         update_scale_pos_weight=cfg.update_scale_pos_weight,
+        sample_weight=w_short_train,
     )
 
     long_test = train_final_and_predict_test(
@@ -612,6 +699,7 @@ def main() -> None:
         mask=long_mask,
         xgb_params=long_params,
         update_scale_pos_weight=cfg.update_scale_pos_weight,
+        sample_weight=w_long_train,
     )
     short_test = train_final_and_predict_test(
         X_train=X_train,
@@ -620,6 +708,7 @@ def main() -> None:
         mask=short_mask,
         xgb_params=short_params,
         update_scale_pos_weight=cfg.update_scale_pos_weight,
+        sample_weight=w_short_train,
     )
 
     _summarize_probs(long_oof, "LONG OOF probs")
@@ -650,8 +739,13 @@ def main() -> None:
         short_full[test_idx] = short_test
 
     probs_root = model_dataset_root
+    label_dir = cfg.label_mode.lower()
+    if label_dir in {"triple_barrier", "tb"}:
+        label_dir = "tb"
+    elif label_dir in {"pivot", "pivots"}:
+        label_dir = "pivots"
     _save_series(
-        output_dir=probs_root / "long" / cfg.output_dirname,
+        output_dir=probs_root / "long" / cfg.output_dirname / label_dir,
         prefix="p_long",
         train_oof=long_oof,
         test_probs=long_test,
@@ -661,7 +755,7 @@ def main() -> None:
         index=plot_index,
     )
     _save_series(
-        output_dir=probs_root / "short" / cfg.output_dirname,
+        output_dir=probs_root / "short" / cfg.output_dirname / label_dir,
         prefix="p_short",
         train_oof=short_oof,
         test_probs=short_test,

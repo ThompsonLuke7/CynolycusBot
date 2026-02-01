@@ -60,7 +60,13 @@ class GAXGBoostFeatureSelector:
 
     # ---------- Public API ----------
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "GAXGBoostFeatureSelector":
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        *,
+        sample_weight: np.ndarray | None = None,
+    ) -> "GAXGBoostFeatureSelector":
         """
         Run GA to select an optimal feature subset and train final XGB model
         on all training data using that subset.
@@ -73,6 +79,12 @@ class GAXGBoostFeatureSelector:
 
         X_train, X_val = X[:split_idx], X[split_idx:]
         y_train, y_val = y[:split_idx], y[split_idx:]
+        w_train = w_val = None
+        if sample_weight is not None:
+            if sample_weight.shape[0] != n_samples:
+                raise ValueError("sample_weight must match X length.")
+            w_train = sample_weight[:split_idx]
+            w_val = sample_weight[split_idx:]
 
 
         n_features = X.shape[1]
@@ -89,7 +101,15 @@ class GAXGBoostFeatureSelector:
 
             # Evaluate fitness (validation accuracy) of each chromosome
             for i, mask in enumerate(population):
-                fitness[i] = self._evaluate_chromosome(mask, X_train, y_train, X_val, y_val)
+                fitness[i] = self._evaluate_chromosome(
+                    mask,
+                    X_train,
+                    y_train,
+                    X_val,
+                    y_val,
+                    w_train=w_train,
+                    w_val=w_val,
+                )
 
             # Track global best
             gen_best_idx = int(np.argmax(fitness))
@@ -147,7 +167,7 @@ class GAXGBoostFeatureSelector:
 
         # Train final XGB on full data using selected features
         X_selected = X[:, self.best_mask_.astype(bool)]
-        self.xgb_model_ = self._fit_xgb(X_selected, y)
+        self.xgb_model_ = self._fit_xgb(X_selected, y, sample_weight=sample_weight)
 
         return self
 
@@ -221,6 +241,9 @@ class GAXGBoostFeatureSelector:
         y_train: np.ndarray,
         X_val: np.ndarray,
         y_val: np.ndarray,
+        *,
+        w_train: np.ndarray | None = None,
+        w_val: np.ndarray | None = None,
     ) -> float:
         """Train XGB on selected features and return validation fitness."""
         if not mask.any():
@@ -233,9 +256,9 @@ class GAXGBoostFeatureSelector:
         X_tr = X_train[:, selected]
         X_v = X_val[:, selected]
 
-        model = self._fit_xgb(X_tr, y_train)
+        model = self._fit_xgb(X_tr, y_train, sample_weight=w_train)
         use_gpu = self._use_gpu is True
-        dval = self._make_dmatrix(X_v, y=None, use_gpu=use_gpu)
+        dval = self._make_dmatrix(X_v, y=None, use_gpu=use_gpu, weight=w_val)
         y_prob = model.predict(dval)
         y_pred = (self._to_numpy(y_prob) >= 0.5).astype(np.int64)
         base = f1_score(y_val, y_pred, pos_label=1)
@@ -273,14 +296,20 @@ class GAXGBoostFeatureSelector:
         pop[mutation_mask] = 1 - pop[mutation_mask]
         return pop
 
-    def _fit_xgb(self, X: np.ndarray, y: np.ndarray) -> xgb.Booster:
+    def _fit_xgb(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        *,
+        sample_weight: np.ndarray | None = None,
+    ) -> xgb.Booster:
         """
         Train XGB with GPU when available; fall back to CPU once if GPU fails.
         """
         use_gpu = True if self._use_gpu is None else self._use_gpu
         if use_gpu:
             gpu_params, num_boost_round = self._xgb_params_for_mode(use_gpu=True)
-            dtrain = self._make_dmatrix(X, y=y, use_gpu=True)
+            dtrain = self._make_dmatrix(X, y=y, use_gpu=True, weight=sample_weight)
             try:
                 model = xgb.train(gpu_params, dtrain, num_boost_round=num_boost_round)
                 self._use_gpu = True
@@ -293,7 +322,7 @@ class GAXGBoostFeatureSelector:
                 self._use_gpu = False
 
         cpu_params, num_boost_round = self._xgb_params_for_mode(use_gpu=False)
-        dtrain = self._make_dmatrix(X, y=y, use_gpu=False)
+        dtrain = self._make_dmatrix(X, y=y, use_gpu=False, weight=sample_weight)
         model = xgb.train(cpu_params, dtrain, num_boost_round=num_boost_round)
         self._maybe_print_device(use_gpu=False, params=cpu_params)
         return model
@@ -381,13 +410,15 @@ class GAXGBoostFeatureSelector:
         y: Optional[np.ndarray],
         *,
         use_gpu: bool,
+        weight: Optional[np.ndarray] = None,
     ) -> xgb.DMatrix:
         data = self._to_device_array(X, use_gpu=use_gpu)
         label = None if y is None else self._to_device_array(y, use_gpu=use_gpu)
+        w = None if weight is None else self._to_device_array(weight, use_gpu=use_gpu)
         nthread = self.xgb_params.get("n_jobs")
         if nthread is not None:
-            return xgb.DMatrix(data=data, label=label, nthread=nthread)
-        return xgb.DMatrix(data=data, label=label)
+            return xgb.DMatrix(data=data, label=label, weight=w, nthread=nthread)
+        return xgb.DMatrix(data=data, label=label, weight=w)
 
     def _to_device_array(self, array: np.ndarray, *, use_gpu: bool):
         if use_gpu and cp is not None:
