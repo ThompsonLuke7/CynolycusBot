@@ -110,6 +110,7 @@ def _run_ga_xgb(
     split_root: Path,
     stats_root: Path,
     model_root: Path,
+    full_fit: bool,
 ) -> None:
     cmd = [sys.executable, str(REPO_ROOT / "Models" / "ga_xgboost" / "train.py")]
     cmd += ["--label-mode", label_mode]
@@ -117,6 +118,8 @@ def _run_ga_xgb(
     cmd += ["--split-root", str(split_root)]
     cmd += ["--stats-root", str(stats_root)]
     cmd += ["--model-root", str(model_root)]
+    if full_fit:
+        cmd.append("--full-fit")
     if refresh_masks:
         cmd.append("--refresh-masks")
     _run_cmd(cmd)
@@ -308,6 +311,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--refresh-masks", action="store_true")
     parser.add_argument("--skip-ga", action="store_true")
     parser.add_argument(
+        "--full-fit-ga",
+        action="store_true",
+        help="Train GA-XGB masks on the full dataset for live inference.",
+    )
+    parser.add_argument(
         "--ga-model-root",
         default="Data/models/ga_xgboost/15min",
         help="Root folder with trained GA-XGB models (long/short).",
@@ -392,32 +400,53 @@ def main() -> None:
 
     label_dirs = [s.strip() for s in args.ga_label_dirs.split(",") if s.strip()]
     if not args.skip_ga:
-        print("[inference_pipeline] Running GA-XGB inference using existing models...")
-        ga_model_root = Path(args.ga_model_root)
-        if not ga_model_root.exists():
-            raise SystemExit(f"Missing GA-XGB model root: {ga_model_root}")
-        feature_root = (
-            Path(args.ga_feature_root)
-            if args.ga_feature_root
-            else get_ticker_processed_base_dir(normalize_ticker(ticker))
-        )
-        feature_list_path = (
-            feature_root
-            / "datasets"
-            / dataset_name
-            / f"features_X_{dataset_name}_tree.txt"
-        )
-        plot_frame_path = processed_root / "datasets" / dataset_name / "plot_frame.parquet"
-        _run_ga_xgb_inference(
-            processed_root=processed_root,
-            dataset_name=dataset_name,
-            x_filename=f"X_{dataset_name}_tree.parquet",
-            plot_frame_path=plot_frame_path,
-            feature_list_path=feature_list_path,
-            model_root=ga_model_root,
-            label_dirs=label_dirs,
-            output_model_root=model_root,
-        )
+        if args.full_fit_ga:
+            print("[inference_pipeline] Training GA-XGB full-fit masks...")
+            _run_ga_xgb(
+                label_mode="pivot",
+                refresh_masks=args.refresh_masks,
+                processed_root=processed_root,
+                split_root=split_root,
+                stats_root=stats_root,
+                model_root=model_root,
+                full_fit=True,
+            )
+            _run_ga_xgb(
+                label_mode="tb",
+                refresh_masks=args.refresh_masks,
+                processed_root=processed_root,
+                split_root=split_root,
+                stats_root=stats_root,
+                model_root=model_root,
+                full_fit=True,
+            )
+        else:
+            print("[inference_pipeline] Running GA-XGB inference using existing models...")
+            ga_model_root = Path(args.ga_model_root)
+            if not ga_model_root.exists():
+                raise SystemExit(f"Missing GA-XGB model root: {ga_model_root}")
+            feature_root = (
+                Path(args.ga_feature_root)
+                if args.ga_feature_root
+                else get_ticker_processed_base_dir(normalize_ticker(ticker))
+            )
+            feature_list_path = (
+                feature_root
+                / "datasets"
+                / dataset_name
+                / f"features_X_{dataset_name}_tree.txt"
+            )
+            plot_frame_path = processed_root / "datasets" / dataset_name / "plot_frame.parquet"
+            _run_ga_xgb_inference(
+                processed_root=processed_root,
+                dataset_name=dataset_name,
+                x_filename=f"X_{dataset_name}_tree.parquet",
+                plot_frame_path=plot_frame_path,
+                feature_list_path=feature_list_path,
+                model_root=ga_model_root,
+                label_dirs=label_dirs,
+                output_model_root=model_root,
+            )
 
     print("[inference_pipeline] Building agent matrix...")
     agent_csv = _write_agent_matrix_csv(

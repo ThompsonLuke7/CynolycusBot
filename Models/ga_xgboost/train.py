@@ -281,6 +281,13 @@ def _load_split_indices(
     )
 
 
+def _full_split_indices(n: int) -> dict[str, np.ndarray]:
+    if n <= 0:
+        raise ValueError("No samples available.")
+    all_idx = np.arange(n)
+    return {"train": all_idx, "val": np.array([], dtype=int), "test": np.array([], dtype=int)}
+
+
 def load_model_artifacts(
     model_root: Path,
     side: str,
@@ -351,6 +358,7 @@ def refresh_masks_and_params(
     feature_names: list[str] | None,
     metadata: dict,
     label_dir: str | None = None,
+    full_fit: bool = False,
 ) -> tuple[np.ndarray, dict, np.ndarray, dict]:
     def _side_params(y_train: np.ndarray) -> dict:
         base = GAXGBoostFeatureSelector().xgb_params.copy()
@@ -360,18 +368,51 @@ def refresh_masks_and_params(
         return base
 
     print("Refreshing GA-XGB masks/params on train split only...")
-    long_selector = _train_ga_selector(
-        X_train,
-        y_long_train,
-        xgb_params=_side_params(y_long_train),
-        sample_weight=w_long_train,
-    )
-    short_selector = _train_ga_selector(
-        X_train,
-        y_short_train,
-        xgb_params=_side_params(y_short_train),
-        sample_weight=w_short_train,
-    )
+    if full_fit:
+        long_selector = GAXGBoostFeatureSelector(
+            population_size=24,
+            generations=60,
+            crossover_rate=0.6,
+            mutation_rate=0.005,
+            val_size=0.0,
+            random_state=42,
+            xgb_params=_side_params(y_long_train),
+            fitness_metric="f1_penalized",
+            feature_penalty=0.0015,
+            max_features=80,
+            selection="tournament",
+            tournament_k=3,
+        )
+        long_selector.fit(X_train, y_long_train, sample_weight=w_long_train)
+
+        short_selector = GAXGBoostFeatureSelector(
+            population_size=24,
+            generations=60,
+            crossover_rate=0.6,
+            mutation_rate=0.005,
+            val_size=0.0,
+            random_state=42,
+            xgb_params=_side_params(y_short_train),
+            fitness_metric="f1_penalized",
+            feature_penalty=0.0015,
+            max_features=80,
+            selection="tournament",
+            tournament_k=3,
+        )
+        short_selector.fit(X_train, y_short_train, sample_weight=w_short_train)
+    else:
+        long_selector = _train_ga_selector(
+            X_train,
+            y_long_train,
+            xgb_params=_side_params(y_long_train),
+            sample_weight=w_long_train,
+        )
+        short_selector = _train_ga_selector(
+            X_train,
+            y_short_train,
+            xgb_params=_side_params(y_short_train),
+            sample_weight=w_short_train,
+        )
 
     save_selector_artifacts(
         long_selector,
@@ -658,6 +699,11 @@ def main() -> None:
         default=None,
         help="Override model output root (will create <model_dirname>/<dataset>).",
     )
+    parser.add_argument(
+        "--full-fit",
+        action="store_true",
+        help="Train GA-XGB on the full dataset (no holdout).",
+    )
     args = parser.parse_args()
 
     cfg = TrainConfig(
@@ -694,12 +740,15 @@ def main() -> None:
     )
     plot_index = plot_df.index if plot_df is not None else None
 
-    splits = _load_split_indices(
-        cfg.ticker,
-        cfg.dataset_name,
-        cfg.x_filename,
-        split_root=split_root,
-    )
+    if args.full_fit:
+        splits = _full_split_indices(X.shape[0])
+    else:
+        splits = _load_split_indices(
+            cfg.ticker,
+            cfg.dataset_name,
+            cfg.x_filename,
+            split_root=split_root,
+        )
     train_idx = np.sort(splits["train"])
     val_idx = np.sort(splits["val"])
     test_idx = np.sort(splits["test"])
@@ -731,7 +780,10 @@ def main() -> None:
     y_short_train = y_short[train_val_idx]
     w_long_train = w_long[train_val_idx] if w_long is not None else None
     w_short_train = w_short[train_val_idx] if w_short is not None else None
-    X_test = X[test_idx]
+    if args.full_fit:
+        X_test = np.empty((0, X.shape[1]), dtype=X.dtype)
+    else:
+        X_test = X[test_idx]
 
     need_refresh = cfg.refresh_masks
     if not need_refresh:
@@ -756,6 +808,7 @@ def main() -> None:
             feature_names=feature_names,
             metadata=common_meta,
             label_dir=artifact_label_dir,
+            full_fit=args.full_fit,
         )
 
     if long_mask.size != X.shape[1] or short_mask.size != X.shape[1]:
@@ -780,72 +833,101 @@ def main() -> None:
         f"eval_metric={long_params.get('eval_metric', 'logloss')}"
     )
 
-    long_oof = walk_forward_oof_probs(
-        X_train=X_train,
-        y_train=y_long_train,
-        mask=long_mask,
-        xgb_params=long_params,
-        n_folds=cfg.n_folds,
-        initial_train_size=cfg.initial_train_size,
-        update_scale_pos_weight=cfg.update_scale_pos_weight,
-        sample_weight=w_long_train,
-    )
-    short_oof = walk_forward_oof_probs(
-        X_train=X_train,
-        y_train=y_short_train,
-        mask=short_mask,
-        xgb_params=short_params,
-        n_folds=cfg.n_folds,
-        initial_train_size=cfg.initial_train_size,
-        update_scale_pos_weight=cfg.update_scale_pos_weight,
-        sample_weight=w_short_train,
-    )
+    if args.full_fit:
+        long_oof = np.full(train_val_idx.size, np.nan, dtype=np.float32)
+        short_oof = np.full(train_val_idx.size, np.nan, dtype=np.float32)
+        long_test = np.empty((0,), dtype=np.float32)
+        short_test = np.empty((0,), dtype=np.float32)
+    else:
+        long_oof = walk_forward_oof_probs(
+            X_train=X_train,
+            y_train=y_long_train,
+            mask=long_mask,
+            xgb_params=long_params,
+            n_folds=cfg.n_folds,
+            initial_train_size=cfg.initial_train_size,
+            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            sample_weight=w_long_train,
+        )
+        short_oof = walk_forward_oof_probs(
+            X_train=X_train,
+            y_train=y_short_train,
+            mask=short_mask,
+            xgb_params=short_params,
+            n_folds=cfg.n_folds,
+            initial_train_size=cfg.initial_train_size,
+            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            sample_weight=w_short_train,
+        )
 
-    long_test = train_final_and_predict_test(
-        X_train=X_train,
-        y_train=y_long_train,
-        X_test=X_test,
-        mask=long_mask,
-        xgb_params=long_params,
-        update_scale_pos_weight=cfg.update_scale_pos_weight,
-        sample_weight=w_long_train,
-    )
-    short_test = train_final_and_predict_test(
-        X_train=X_train,
-        y_train=y_short_train,
-        X_test=X_test,
-        mask=short_mask,
-        xgb_params=short_params,
-        update_scale_pos_weight=cfg.update_scale_pos_weight,
-        sample_weight=w_short_train,
-    )
+        long_test = train_final_and_predict_test(
+            X_train=X_train,
+            y_train=y_long_train,
+            X_test=X_test,
+            mask=long_mask,
+            xgb_params=long_params,
+            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            sample_weight=w_long_train,
+        )
+        short_test = train_final_and_predict_test(
+            X_train=X_train,
+            y_train=y_short_train,
+            X_test=X_test,
+            mask=short_mask,
+            xgb_params=short_params,
+            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            sample_weight=w_short_train,
+        )
 
     _summarize_probs(long_oof, "LONG OOF probs")
     _summarize_probs(short_oof, "SHORT OOF probs")
     _summarize_probs(long_test, "LONG test probs")
     _summarize_probs(short_test, "SHORT test probs")
-    _print_binary_metrics(
-        y_long_train, long_oof, name="LONG OOF metrics"
-    )
-    _print_binary_metrics(
-        y_short_train, short_oof, name="SHORT OOF metrics"
-    )
-    _print_binary_metrics(
-        y_long[test_idx], long_test, name="LONG test metrics"
-    )
-    _print_binary_metrics(
-        y_short[test_idx], short_test, name="SHORT test metrics"
-    )
+    if not args.full_fit:
+        _print_binary_metrics(
+            y_long_train, long_oof, name="LONG OOF metrics"
+        )
+        _print_binary_metrics(
+            y_short_train, short_oof, name="SHORT OOF metrics"
+        )
+        _print_binary_metrics(
+            y_long[test_idx], long_test, name="LONG test metrics"
+        )
+        _print_binary_metrics(
+            y_short[test_idx], short_test, name="SHORT test metrics"
+        )
 
     n_total = X.shape[0]
-    long_full = np.full(n_total, np.nan, dtype=np.float32)
-    short_full = np.full(n_total, np.nan, dtype=np.float32)
-    long_full[train_val_idx] = long_oof
-    short_full[train_val_idx] = short_oof
-    if long_test.size:
-        long_full[test_idx] = long_test
-    if short_test.size:
-        short_full[test_idx] = short_test
+    if args.full_fit:
+        long_full = train_final_and_predict_test(
+            X_train=X_train,
+            y_train=y_long_train,
+            X_test=X_train,
+            mask=long_mask,
+            xgb_params=long_params,
+            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            sample_weight=w_long_train,
+        )
+        short_full = train_final_and_predict_test(
+            X_train=X_train,
+            y_train=y_short_train,
+            X_test=X_train,
+            mask=short_mask,
+            xgb_params=short_params,
+            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            sample_weight=w_short_train,
+        )
+        if long_full.size != n_total or short_full.size != n_total:
+            raise ValueError("Full-fit predictions do not match dataset length.")
+    else:
+        long_full = np.full(n_total, np.nan, dtype=np.float32)
+        short_full = np.full(n_total, np.nan, dtype=np.float32)
+        long_full[train_val_idx] = long_oof
+        short_full[train_val_idx] = short_oof
+        if long_test.size:
+            long_full[test_idx] = long_test
+        if short_test.size:
+            short_full[test_idx] = short_test
 
     probs_root = model_dataset_root
     label_dir = label_dir_probs
@@ -872,12 +954,12 @@ def main() -> None:
 
     missing_long = int(np.isnan(long_oof).sum())
     missing_short = int(np.isnan(short_oof).sum())
-    if missing_long or missing_short:
+    if not args.full_fit and (missing_long or missing_short):
         print(
             "OOF gap detected (early bars without prior data). "
             f"long={missing_long}, short={missing_short}"
         )
-    if plot_df is not None:
+    if plot_df is not None and not args.full_fit:
         test_df = plot_df.iloc[test_idx]
         y_long_test = y_long[test_idx]
         y_short_test = y_short[test_idx]
