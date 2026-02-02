@@ -1,0 +1,15 @@
+numpy
+pandas
+pyarrow
+pandas_ta
+scikit-learn
+xgboost
+torch
+tqdm
+vmdpy
+alpaca-py
+matplotlib
+scipy
+yfinance
+gymnasium
+regex
