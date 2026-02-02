@@ -16,6 +16,8 @@ class AgentFeatureConfig:
     ticker: str = "$SPY"
     dataset_name: str = "15min"
     model_name: str = "ga_xgboost"
+    processed_root: str | Path | None = None
+    model_root: str | Path | None = None
     pivot_label_dir: str = "pivots"
     tb_label_dir: str = "tb"
     include_pivot_probs: bool = True
@@ -83,9 +85,13 @@ def _load_plot_frame(
     *,
     ticker: str,
     dataset_name: str,
+    processed_root: Path | None = None,
 ) -> pd.DataFrame:
-    clean = normalize_ticker(ticker)
-    dataset_dir = get_ticker_processed_base_dir(clean) / "datasets" / dataset_name
+    if processed_root is None:
+        clean = normalize_ticker(ticker)
+        dataset_dir = get_ticker_processed_base_dir(clean) / "datasets" / dataset_name
+    else:
+        dataset_dir = processed_root / "datasets" / dataset_name
     plot_path = dataset_dir / "plot_frame.parquet"
     if not plot_path.exists():
         raise FileNotFoundError(f"Missing plot_frame.parquet in {dataset_dir}")
@@ -153,16 +159,24 @@ def build_agent_feature_matrix(
     config: AgentFeatureConfig | None = None,
 ) -> pd.DataFrame:
     cfg = config or AgentFeatureConfig()
-    plot_df = _load_plot_frame(ticker=cfg.ticker, dataset_name=cfg.dataset_name)
+    processed_root = Path(cfg.processed_root) if cfg.processed_root else None
+    plot_df = _load_plot_frame(
+        ticker=cfg.ticker,
+        dataset_name=cfg.dataset_name,
+        processed_root=processed_root,
+    )
     df = plot_df.copy()
 
-    model_root = (
-        Path(__file__).resolve().parents[1]
-        / "Data"
-        / "models"
-        / cfg.model_name
-        / cfg.dataset_name
-    )
+    if cfg.model_root is not None:
+        model_root = Path(cfg.model_root)
+    else:
+        model_root = (
+            Path(__file__).resolve().parents[1]
+            / "Data"
+            / "models"
+            / cfg.model_name
+            / cfg.dataset_name
+        )
 
     if cfg.include_pivot_probs:
         p_long = _load_prob_series(
@@ -226,6 +240,10 @@ def build_agent_feature_matrix(
     df["timestamp"] = df.index
     df["day_id"] = pd.Series(df.index.normalize()).factorize()[0]
 
+    close = df["close"].replace(0, np.nan).astype(float)
+    for lag in (1, 2, 4, 8, 16):
+        df[f"ret_{lag}"] = close.pct_change(lag)
+
     if cfg.include_state_placeholders:
         df["current_position"] = 0.0
         df["time_in_position"] = 0.0
@@ -247,6 +265,11 @@ def build_agent_feature_matrix(
         "dist_to_vwap",
         "dist_to_pdh",
         "trend_strength",
+        "ret_1",
+        "ret_2",
+        "ret_4",
+        "ret_8",
+        "ret_16",
     ]
     if cfg.include_pivot_probs:
         cols.extend(

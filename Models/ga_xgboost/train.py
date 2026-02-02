@@ -57,10 +57,23 @@ class TrainConfig:
     output_dirname: str = "probs"
     refresh_masks: bool = False
     super_pivot_weight: float = 1.0
+    processed_root: str | None = None
+    split_root: str | None = None
+    stats_root: str | None = None
+    model_root: str | None = None
 
 
-def load_feature_names(ticker: str, dataset_name: str, x_filename: str) -> list[str] | None:
-    dataset_dir = get_ticker_processed_base_dir(ticker) / "datasets" / dataset_name
+def load_feature_names(
+    ticker: str,
+    dataset_name: str,
+    x_filename: str,
+    *,
+    processed_root: Path | None = None,
+) -> list[str] | None:
+    if processed_root is None:
+        dataset_dir = get_ticker_processed_base_dir(ticker) / "datasets" / dataset_name
+    else:
+        dataset_dir = processed_root / "datasets" / dataset_name
     features_path = dataset_dir / f"features_{Path(x_filename).stem}.txt"
     if not features_path.exists():
         return None
@@ -74,11 +87,14 @@ def save_selector_artifacts(
     *,
     feature_names: list[str] | None = None,
     metadata: dict | None = None,
+    label_dir: str | None = None,
 ) -> Path:
     if selector.xgb_model_ is None or selector.best_mask_ is None:
         raise RuntimeError("Model must be fit before saving artifacts.")
 
     side_dir = output_dir / side_name.lower()
+    if label_dir:
+        side_dir = side_dir / "probs" / label_dir
     side_dir.mkdir(parents=True, exist_ok=True)
 
     model = selector.xgb_model_
@@ -128,6 +144,8 @@ def load_dataset(
     label_mode: str,
     apply_scaler: bool,
     super_pivot_weight: float = 1.0,
+    processed_root: Path | None = None,
+    stats_root: Path | None = None,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -137,7 +155,10 @@ def load_dataset(
     np.ndarray | None,
 ]:
     clean = normalize_ticker(ticker)
-    processed_dir = get_ticker_processed_base_dir(clean)
+    if processed_root is None:
+        processed_dir = get_ticker_processed_base_dir(clean)
+    else:
+        processed_dir = processed_root
     dataset_dir = processed_dir / "datasets" / dataset_name
     x_path = dataset_dir / x_filename
     y_path = dataset_dir / "y.parquet"
@@ -146,7 +167,7 @@ def load_dataset(
 
     X_df = pd.read_parquet(x_path)
     if apply_scaler:
-        stats_dir = get_ticker_processed_stats_dir(clean)
+        stats_dir = stats_root if stats_root is not None else get_ticker_processed_stats_dir(clean)
         stats = _load_norm_stats(stats_dir, dataset_name, x_filename)
         if stats:
             X_df = apply_scaler_from_stats(X_df, stats)
@@ -234,9 +255,11 @@ def _load_split_indices(
     ticker: str,
     dataset_name: str,
     x_filename: str,
+    *,
+    split_root: Path | None = None,
 ) -> dict[str, np.ndarray]:
     clean = normalize_ticker(ticker)
-    split_root = get_ticker_processed_split_dir(clean)
+    split_root = split_root if split_root is not None else get_ticker_processed_split_dir(clean)
     x_stem = Path(x_filename).stem
     split_dirs = [
         split_root / dataset_name / x_stem,
@@ -258,12 +281,33 @@ def _load_split_indices(
     )
 
 
-def load_model_artifacts(model_root: Path, side: str) -> tuple[np.ndarray, dict]:
-    side_dir = model_root / side.lower()
+def load_model_artifacts(
+    model_root: Path,
+    side: str,
+    *,
+    label_dir: str | None = None,
+) -> tuple[np.ndarray, dict]:
+    candidates = []
+    base_side = model_root / side.lower()
+    if label_dir:
+        candidates.append(base_side / "probs" / label_dir)
+    candidates.append(base_side)
+
+    side_dir = None
+    for candidate in candidates:
+        mask_path = candidate / "best_mask.npy"
+        meta_path = candidate / "meta.json"
+        if mask_path.exists() and meta_path.exists():
+            side_dir = candidate
+            break
+
+    if side_dir is None:
+        raise FileNotFoundError(
+            f"Missing artifacts under {', '.join(str(c) for c in candidates)}"
+        )
+
     mask_path = side_dir / "best_mask.npy"
     meta_path = side_dir / "meta.json"
-    if not mask_path.exists() or not meta_path.exists():
-        raise FileNotFoundError(f"Missing artifacts under {side_dir}")
 
     mask = np.load(mask_path).astype(bool)
     meta = json.loads(meta_path.read_text())
@@ -306,6 +350,7 @@ def refresh_masks_and_params(
     model_root: Path,
     feature_names: list[str] | None,
     metadata: dict,
+    label_dir: str | None = None,
 ) -> tuple[np.ndarray, dict, np.ndarray, dict]:
     def _side_params(y_train: np.ndarray) -> dict:
         base = GAXGBoostFeatureSelector().xgb_params.copy()
@@ -334,6 +379,7 @@ def refresh_masks_and_params(
         "long",
         feature_names=feature_names,
         metadata=metadata,
+        label_dir=label_dir,
     )
     save_selector_artifacts(
         short_selector,
@@ -341,6 +387,7 @@ def refresh_masks_and_params(
         "short",
         feature_names=feature_names,
         metadata=metadata,
+        label_dir=label_dir,
     )
 
     long_mask = long_selector.best_mask_.astype(bool)
@@ -587,13 +634,54 @@ def main() -> None:
         default=TrainConfig.super_pivot_weight,
         help="Sample-weight multiplier for super pivot events (pivot mode only).",
     )
+    parser.add_argument(
+        "--processed-root",
+        type=str,
+        default=None,
+        help="Override processed data root (contains datasets/).",
+    )
+    parser.add_argument(
+        "--split-root",
+        type=str,
+        default=None,
+        help="Override split root (contains <dataset>/<x_stem>/train_idx.npy).",
+    )
+    parser.add_argument(
+        "--stats-root",
+        type=str,
+        default=None,
+        help="Override stats root (contains norm_stats_*.json).",
+    )
+    parser.add_argument(
+        "--model-root",
+        type=str,
+        default=None,
+        help="Override model output root (will create <model_dirname>/<dataset>).",
+    )
     args = parser.parse_args()
 
     cfg = TrainConfig(
         refresh_masks=bool(args.refresh_masks),
         label_mode=args.label_mode or TrainConfig.label_mode,
         super_pivot_weight=float(args.super_pivot_weight),
+        processed_root=args.processed_root,
+        split_root=args.split_root,
+        stats_root=args.stats_root,
+        model_root=args.model_root,
     )
+    label_dir_probs = cfg.label_mode.lower()
+    if label_dir_probs in {"triple_barrier", "tb"}:
+        label_dir_probs = "tb"
+    elif label_dir_probs in {"pivot", "pivots"}:
+        label_dir_probs = "pivots"
+    artifact_label_dir = (
+        label_dir_probs if label_dir_probs in {"pivots", "tb"} else None
+    )
+    processed_root = Path(cfg.processed_root) if cfg.processed_root else None
+    split_root = Path(cfg.split_root) if cfg.split_root else None
+    stats_root = Path(cfg.stats_root) if cfg.stats_root else None
+    model_root_override = Path(cfg.model_root) if cfg.model_root else None
+
     X, y_long, y_short, plot_df, w_long, w_short = load_dataset(
         ticker=cfg.ticker,
         dataset_name=cfg.dataset_name,
@@ -601,19 +689,35 @@ def main() -> None:
         label_mode=cfg.label_mode,
         apply_scaler=cfg.apply_scaler,
         super_pivot_weight=cfg.super_pivot_weight,
+        processed_root=processed_root,
+        stats_root=stats_root,
     )
     plot_index = plot_df.index if plot_df is not None else None
 
-    splits = _load_split_indices(cfg.ticker, cfg.dataset_name, cfg.x_filename)
+    splits = _load_split_indices(
+        cfg.ticker,
+        cfg.dataset_name,
+        cfg.x_filename,
+        split_root=split_root,
+    )
     train_idx = np.sort(splits["train"])
     val_idx = np.sort(splits["val"])
     test_idx = np.sort(splits["test"])
     if train_idx.size < 2:
         raise ValueError("Not enough training samples for OOF.")
 
-    model_root = REPO_ROOT / "Data" / "models" / cfg.model_dirname
+    if model_root_override is None:
+        model_root = REPO_ROOT / "Data" / "models"
+    else:
+        model_root = model_root_override
+    model_root = model_root / cfg.model_dirname
     model_dataset_root = model_root / cfg.dataset_name
-    feature_names = load_feature_names(cfg.ticker, cfg.dataset_name, cfg.x_filename)
+    feature_names = load_feature_names(
+        cfg.ticker,
+        cfg.dataset_name,
+        cfg.x_filename,
+        processed_root=processed_root,
+    )
     common_meta = {
         "ticker": cfg.ticker,
         "dataset_name": cfg.dataset_name,
@@ -632,8 +736,12 @@ def main() -> None:
     need_refresh = cfg.refresh_masks
     if not need_refresh:
         try:
-            long_mask, long_params = load_model_artifacts(model_dataset_root, "long")
-            short_mask, short_params = load_model_artifacts(model_dataset_root, "short")
+            long_mask, long_params = load_model_artifacts(
+                model_dataset_root, "long", label_dir=artifact_label_dir
+            )
+            short_mask, short_params = load_model_artifacts(
+                model_dataset_root, "short", label_dir=artifact_label_dir
+            )
         except FileNotFoundError:
             need_refresh = True
 
@@ -647,6 +755,7 @@ def main() -> None:
             model_root=model_dataset_root,
             feature_names=feature_names,
             metadata=common_meta,
+            label_dir=artifact_label_dir,
         )
 
     if long_mask.size != X.shape[1] or short_mask.size != X.shape[1]:
@@ -739,11 +848,7 @@ def main() -> None:
         short_full[test_idx] = short_test
 
     probs_root = model_dataset_root
-    label_dir = cfg.label_mode.lower()
-    if label_dir in {"triple_barrier", "tb"}:
-        label_dir = "tb"
-    elif label_dir in {"pivot", "pivots"}:
-        label_dir = "pivots"
+    label_dir = label_dir_probs
     _save_series(
         output_dir=probs_root / "long" / cfg.output_dirname / label_dir,
         prefix="p_long",

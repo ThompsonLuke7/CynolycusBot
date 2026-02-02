@@ -16,6 +16,7 @@ from training_pipeline import (
     load_tree_split_indices,
     split_agent_matrix,
 )
+from Data.retrieve_data import normalize_ticker
 from Agent.env import TradingEnv
 from Agent.train import train_ppo
 from Agent.eval import evaluate_policy, evaluate_policy_with_trace
@@ -101,6 +102,20 @@ def _plot_actions(trace, output_path):
         has_ohlc = np.isfinite(ohlc_vals).any()
     close = plot_df["close"].astype(float)
 
+    prob_cols = []
+    if "p_pivot_long" in plot_df.columns:
+        prob_cols.append(("p_pivot_long", "#1565C0", "p_pivot_long"))
+    if "p_pivot_short" in plot_df.columns:
+        prob_cols.append(("p_pivot_short", "#EF6C00", "p_pivot_short"))
+    if "p_tb_long" in plot_df.columns:
+        prob_cols.append(("p_tb_long", "#2E7D32", "p_tb_long"))
+    if "p_tb_short" in plot_df.columns:
+        prob_cols.append(("p_tb_short", "#C62828", "p_tb_short"))
+    has_probs = False
+    if prob_cols:
+        prob_vals = plot_df[[c[0] for c in prob_cols]].to_numpy(dtype=float)
+        has_probs = np.isfinite(prob_vals).any()
+
     if "did_trade" in plot_df.columns:
         trade_mask = plot_df["did_trade"].astype(bool).to_numpy()
     else:
@@ -108,7 +123,17 @@ def _plot_actions(trace, output_path):
     longs = trade_mask & (plot_df["action"].to_numpy() == 1)
     shorts = trade_mask & (plot_df["action"].to_numpy() == 2)
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    if has_probs:
+        fig, (ax, ax_prob) = plt.subplots(
+            2,
+            1,
+            figsize=(12, 8),
+            sharex=True,
+            gridspec_kw={"height_ratios": [2.2, 1]},
+        )
+    else:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax_prob = None
     if has_ohlc:
         open_y = plot_df["open"].to_numpy(dtype=float)
         high_y = plot_df["high"].to_numpy(dtype=float)
@@ -133,18 +158,42 @@ def _plot_actions(trace, output_path):
             step = int(np.ceil(len(tick_positions) / 25))
             tick_positions = tick_positions[::step]
             tick_labels = tick_labels[::step]
-        ax.set_xticks(tick_positions)
-        ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
-        ax.set_xlabel("Date")
+        if ax_prob is not None:
+            ax.tick_params(labelbottom=False)
+            ax_prob.set_xticks(tick_positions)
+            ax_prob.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+            ax_prob.set_xlabel("Date")
+        else:
+            ax.set_xticks(tick_positions)
+            ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+            ax.set_xlabel("Date")
     else:
         ax.plot(ts, close, label="SPY close", linewidth=1.5)
         ax.scatter(ts[longs], close[longs], c="green", s=18, label="Long", marker="^")
         ax.scatter(ts[shorts], close[shorts], c="red", s=18, label="Short", marker="v")
-        ax.set_xlabel("Time")
+        if ax_prob is not None:
+            ax_prob.set_xlabel("Time")
+        else:
+            ax.set_xlabel("Time")
 
     ax.set_title("SPY Candles with Agent Actions (Test Set)")
     ax.set_ylabel("Price")
     ax.legend()
+
+    if ax_prob is not None and has_probs:
+        for col, color, label in prob_cols:
+            if col in plot_df.columns:
+                ax_prob.plot(
+                    pos if has_ohlc else ts,
+                    plot_df[col].to_numpy(dtype=float),
+                    color=color,
+                    linewidth=1.2,
+                    label=label,
+                )
+        ax_prob.set_ylim(0, 1.02)
+        ax_prob.set_ylabel("Prob")
+        ax_prob.legend(loc="upper left")
+
     plt.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=150)
@@ -284,7 +333,15 @@ def main():
         print(f"DCA down-days final equity: {dca_final:,.2f} (PnL: {dca_pnl:,.2f})")
         print(f"DCA tranche size per down day: {tranche:,.2f}")
 
-    output_path = Path("Data") / "plots" / "agent_actions_vs_price.png"
+    ticker_slug = normalize_ticker(cfg.ticker).lower()
+    output_path = (
+        Path("Data")
+        / "models"
+        / "agent"
+        / cfg.dataset_name
+        / ticker_slug
+        / "agent_actions_vs_price.png"
+    )
     _plot_actions(trace, output_path)
 
 
