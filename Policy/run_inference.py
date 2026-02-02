@@ -24,7 +24,19 @@ REPO_ROOT = _resolve_repo_root()
 
 def _run_cmd(args: list[str]) -> None:
     print(f"[run_inference] Running: {' '.join(args)}")
-    subprocess.run(args, check=True)
+    proc = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line, end="")
+    ret = proc.wait()
+    if ret != 0:
+        raise subprocess.CalledProcessError(ret, args)
 
 
 def _artifacts_exist(model_root: Path, label_dirs: list[str]) -> bool:

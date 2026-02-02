@@ -66,7 +66,19 @@ def _dataset_name_from_label_timeframe(label_timeframe: str) -> str:
 
 def _run_cmd(args: list[str]) -> None:
     print(f"[inference_pipeline] Running: {' '.join(args)}")
-    subprocess.run(args, check=True)
+    proc = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line, end="")
+    ret = proc.wait()
+    if ret != 0:
+        raise subprocess.CalledProcessError(ret, args)
 
 
 def _build_processed_from_raw(
