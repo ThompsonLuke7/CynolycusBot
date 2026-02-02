@@ -346,11 +346,6 @@ def main() -> None:
         )
         _train_df, _val_df, test_df = split_agent_matrix(df, splits, verbose=True)
 
-    drop_base = {"timestamp", "day_id", "open", "high", "low", "close", "volume"}
-    feature_cols = [c for c in df.columns if c not in drop_base]
-    if cfg.drop_na and not test_df.empty:
-        test_df = test_df.dropna(subset=feature_cols)
-
     if args.plot_only:
         trace_path = Path(args.trace_in)
         if not trace_path.exists():
@@ -362,6 +357,21 @@ def main() -> None:
             raise SystemExit(f"Missing model file: {model_path}")
 
         ckpt = torch.load(model_path, map_location="cpu")
+        drop_base = {"timestamp", "day_id", "open", "high", "low", "close", "volume"}
+        ckpt_feature_cols = ckpt.get("feature_cols")
+        if ckpt_feature_cols:
+            feature_cols = list(ckpt_feature_cols)
+            missing = [c for c in feature_cols if c not in df.columns]
+            if missing:
+                raise ValueError(
+                    "Missing required feature columns from data: "
+                    + ", ".join(missing)
+                )
+        else:
+            feature_cols = [c for c in df.columns if c not in drop_base]
+        if cfg.drop_na and not test_df.empty:
+            test_df = test_df.dropna(subset=feature_cols)
+
         model = ActorCritic(obs_dim=ckpt["obs_dim"], n_actions=ckpt.get("n_actions", 3))
         model.load_state_dict(ckpt["state_dict"])
         model.eval()
