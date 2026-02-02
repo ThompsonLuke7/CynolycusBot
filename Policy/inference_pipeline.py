@@ -31,22 +31,25 @@ def _normalize_label_timeframe(label_timeframe: str) -> str:
     tf = label_timeframe.strip().lower()
     if tf.endswith("min"):
         minutes = int(tf.replace("min", "") or "1")
-        return f"{minutes}T"
+        return f"{minutes}min"
+    if tf.endswith("t"):
+        minutes = int(tf[:-1] or "1")
+        return f"{minutes}min"
     if tf.endswith("m"):
         minutes = int(tf.replace("m", "") or "1")
-        return f"{minutes}T"
+        return f"{minutes}min"
     if tf.endswith("hour"):
         hours = int(tf.replace("hour", "") or "1")
-        return f"{hours}H"
+        return f"{hours}h"
     if tf.endswith("h"):
         hours = int(tf.replace("h", "") or "1")
-        return f"{hours}H"
+        return f"{hours}h"
     if tf.endswith("day"):
         days = int(tf.replace("day", "") or "1")
-        return f"{days}D"
+        return f"{days}d"
     if tf.endswith("d"):
         days = int(tf.replace("d", "") or "1")
-        return f"{days}D"
+        return f"{days}d"
     return label_timeframe
 
 
@@ -76,10 +79,17 @@ def _build_processed_from_raw(
     save_processed: bool,
     processed_root: Path,
 ) -> None:
+    feature_timeframes = {
+        "30m": "30min",
+        "1h": "1h",
+        "4h": "4h",
+        "1d": "1d",
+    }
     model_dfs = build_feature_matrices(
         parquet_path=raw_parquet,
         ticker=ticker,
         label_timeframe=label_timeframe,
+        feature_timeframes=feature_timeframes,
         models=models,
     )
     align_index = None
