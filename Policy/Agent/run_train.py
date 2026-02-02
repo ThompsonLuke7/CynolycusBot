@@ -216,6 +216,7 @@ def main():
     if all_nan_cols:
         print(f"Dropping all-NaN feature columns: {all_nan_cols}")
         feature_cols = [c for c in feature_cols if c not in all_nan_cols]
+    print(f"Training features ({len(feature_cols)}): {feature_cols}")
     if cfg.drop_na:
         splits = filter_splits_for_non_nan(df, splits, feature_cols)
     train_df, _val_df, test_df = split_agent_matrix(df, splits, verbose=True)
