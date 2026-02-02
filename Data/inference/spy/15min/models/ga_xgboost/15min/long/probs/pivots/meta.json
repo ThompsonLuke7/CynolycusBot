@@ -1,0 +1,21 @@
+{
+  "side": "long",
+  "best_score": -0.0465,
+  "n_features": 963,
+  "selected_features": 31,
+  "xgb_params": {
+    "n_estimators": 100,
+    "max_depth": 3,
+    "learning_rate": 0.1,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "objective": "binary:logistic",
+    "eval_metric": "logloss",
+    "n_jobs": -1,
+    "scale_pos_weight": 11.647058823529411
+  },
+  "ticker": "$SPY",
+  "dataset_name": "15min",
+  "label_mode": "pivot",
+  "super_pivot_weight": 1.0
+}
