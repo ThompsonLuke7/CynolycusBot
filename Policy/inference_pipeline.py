@@ -283,6 +283,7 @@ def _run_agent_eval(
     plot_random_window: bool,
     plot_seed: int | None,
     plot_out: str | None,
+    trace_out: str | None = None,
 ) -> None:
     cmd = [
         sys.executable,
@@ -300,6 +301,8 @@ def _run_agent_eval(
         cmd += ["--plot-seed", str(plot_seed)]
     if plot_out:
         cmd += ["--plot-out", plot_out]
+    if trace_out:
+        cmd += ["--trace-out", trace_out]
     _run_cmd(cmd)
 
 
@@ -350,6 +353,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--plot-random-window", action="store_true")
     parser.add_argument("--plot-seed", type=int, default=None)
     parser.add_argument("--plot-out", default=None)
+    parser.add_argument("--trace-out", default=None)
     return parser.parse_args()
 
 
@@ -483,6 +487,9 @@ def main() -> None:
     if plot_out is None:
         plots_root.mkdir(parents=True, exist_ok=True)
         plot_out = str(plots_root / "agent_actions_vs_price.png")
+    trace_out = args.trace_out
+    if trace_out is None:
+        trace_out = str(inference_root / "agent" / "agent_trace.csv")
     _run_agent_eval(
         agent_csv=agent_csv,
         model_path=model_path,
@@ -490,6 +497,7 @@ def main() -> None:
         plot_random_window=args.plot_random_window,
         plot_seed=args.plot_seed,
         plot_out=plot_out,
+        trace_out=trace_out,
     )
 
 

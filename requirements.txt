@@ -13,3 +13,5 @@ scipy
 yfinance
 gymnasium
 regex
+TA-Lib
+numba
