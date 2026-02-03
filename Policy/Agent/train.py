@@ -72,7 +72,10 @@ def train_ppo(
 
         for _ in range(rollout_len):
             if is_vectorized:
-                actions, logp, val = model.act_batch(obs, dev)
+                actions_t, logp_t, val_t = model.act_batch(obs, dev)
+                actions = actions_t.detach().cpu().numpy().astype("int64")
+                logp = logp_t.detach().cpu().numpy().astype("float32")
+                val = val_t.detach().cpu().numpy().astype("float32")
                 next_obs, reward, done, _info = env.step(actions)
                 with torch.no_grad():
                     x_next = torch.as_tensor(next_obs, dtype=torch.float32, device=dev)
@@ -200,10 +203,8 @@ def train_ppo(
                 if mb.size == 0:
                     continue
 
-                logits, values = model(obs_t[mb])
-                dist = torch.distributions.Categorical(logits=logits)
-                logp = dist.log_prob(act_t[mb])
-                entropy = dist.entropy().mean()
+                logp, entropy, values = model.evaluate_actions(obs_t[mb], act_t[mb])
+                entropy = entropy.mean()
 
                 ratio = torch.exp(logp - logp_old_t[mb])
                 unclipped = ratio * adv_t[mb]

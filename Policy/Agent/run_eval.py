@@ -19,7 +19,7 @@ from training_pipeline import (
     split_agent_matrix,
 )
 from Data.retrieve_data import normalize_ticker
-from Agent.env import TradingEnv
+from Agent.env_config import make_trading_env
 from Agent.eval import evaluate_policy, evaluate_policy_with_trace
 from Agent.model import ActorCritic
 
@@ -321,6 +321,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--plot-out", default=None)
     parser.add_argument("--device", default=None, help="cuda/cpu (defaults to auto)")
+    parser.add_argument(
+        "--stochastic",
+        action="store_true",
+        help="Sample actions instead of using argmax.",
+    )
     return parser.parse_args()
 
 
@@ -346,6 +351,7 @@ def main() -> None:
         )
         _train_df, _val_df, test_df = split_agent_matrix(df, splits, verbose=True)
 
+    deterministic = not args.stochastic
     if args.plot_only:
         trace_path = Path(args.trace_in)
         if not trace_path.exists():
@@ -376,23 +382,9 @@ def main() -> None:
         model.load_state_dict(ckpt["state_dict"])
         model.eval()
 
-        test_env = TradingEnv(
+        test_env = make_trading_env(
             df=test_df,
             feature_cols=feature_cols,
-            add_time_features=False,
-            add_position_features=True,
-            commission_per_trade=0.00,
-            slippage_bps=0.5,
-            spread_bps=0.5,
-            flip_penalty_ret=0.0002,
-            trade_penalty_ret=0.0001,
-            hold_penalty_ret=0.0,
-            reward_on_exit=True,
-            reward_exit_bonus=False,
-            exit_pivot_bonus_ret=0.0,
-            force_flat_at_close=False,
-            allow_direct_flip=False,
-            seed=7,
         )
 
         device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -401,12 +393,12 @@ def main() -> None:
             model,
             n_days=len(test_env.day_starts),
             device=device,
-            deterministic=True,
+            deterministic=deterministic,
         )
         print(report)
         print("Avg pnl component:", report["pnl_component"].mean(), "Avg costs:", report["costs_component"].mean())
 
-        trace = evaluate_policy_with_trace(test_env, model, device=device, deterministic=True)
+        trace = evaluate_policy_with_trace(test_env, model, device=device, deterministic=deterministic)
         trace = _agent_equity_from_trace(trace, initial_cash=100_000.0)
         trace_path = Path(args.trace_out)
         trace_path.parent.mkdir(parents=True, exist_ok=True)

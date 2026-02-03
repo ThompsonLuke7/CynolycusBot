@@ -40,6 +40,7 @@ class TradingEnv:
         pivot_long_col: str = "p_pivot_long",
         pivot_short_col: str = "p_pivot_short",
         force_flat_at_close: bool = True,
+        carry_positions_across_days: bool = False,
         allow_direct_flip: bool = True,
         seed: int = 7,
     ):
@@ -77,6 +78,7 @@ class TradingEnv:
         self.pivot_long_col = str(pivot_long_col)
         self.pivot_short_col = str(pivot_short_col)
         self.force_flat_at_close = bool(force_flat_at_close)
+        self.carry_positions_across_days = bool(carry_positions_across_days)
         self.allow_direct_flip = bool(allow_direct_flip)
 
         self.rng = np.random.default_rng(seed)
@@ -158,11 +160,20 @@ class TradingEnv:
 
         self._i = int(self.day_starts[self._day_ptr])
 
-        self.position = 0
-        self.entry_price = np.nan
-        self.time_in_pos = 0
-        self.unrealized_pnl = 0.0
-        self.realized_pnl_today = 0.0
+        if not self.carry_positions_across_days:
+            self.position = 0
+            self.entry_price = np.nan
+            self.time_in_pos = 0
+            self.unrealized_pnl = 0.0
+            self.realized_pnl_today = 0.0
+        else:
+            self.realized_pnl_today = 0.0
+            if self.position != 0 and np.isfinite(self.entry_price):
+                price = float(self.df.loc[self._i, "close"])
+                self.unrealized_pnl = (price / self.entry_price - 1.0) * float(self.position)
+            else:
+                self.unrealized_pnl = 0.0
+                self.time_in_pos = 0
         return self._get_obs()
 
     def _trade_cost_ret(self, price: float) -> float:
