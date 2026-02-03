@@ -29,3 +29,16 @@ class ActorCritic(nn.Module):
         action = dist.sample()
         logp = dist.log_prob(action)
         return int(action.item()), float(logp.item()), float(value.item())
+
+    @torch.no_grad()
+    def act_batch(self, obs, device: torch.device):
+        x = torch.as_tensor(obs, dtype=torch.float32, device=device)
+        logits, value = self.forward(x)
+        dist = torch.distributions.Categorical(logits=logits)
+        actions = dist.sample()
+        logp = dist.log_prob(actions)
+        return (
+            actions.detach().cpu().numpy().astype("int64"),
+            logp.detach().cpu().numpy().astype("float32"),
+            value.detach().cpu().numpy().astype("float32"),
+        )

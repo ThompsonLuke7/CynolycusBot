@@ -61,7 +61,9 @@ def train_ppo(
         ]
     )
 
-    obs = env.reset(day_ptr=0)
+    n_envs = int(getattr(env, "n_envs", 1))
+    is_vectorized = n_envs > 1
+    obs = env.reset(day_ptr=0) if not is_vectorized else env.reset()
     steps_done = 0
 
     while steps_done < total_timesteps:
@@ -69,48 +71,106 @@ def train_ppo(
         rew_buf, done_buf, val_buf, next_val_buf = [], [], [], []
 
         for _ in range(rollout_len):
-            action, logp, val = model.act(obs, dev)
-            next_obs, reward, done, info = env.step(action)
+            if is_vectorized:
+                actions, logp, val = model.act_batch(obs, dev)
+                next_obs, reward, done, _info = env.step(actions)
+                with torch.no_grad():
+                    x_next = torch.as_tensor(next_obs, dtype=torch.float32, device=dev)
+                    _, v_next = model(x_next)
+                    v_next_f = v_next.detach().cpu().numpy().astype(np.float32)
 
-            with torch.no_grad():
-                x_next = torch.as_tensor(next_obs, dtype=torch.float32, device=dev).unsqueeze(0)
-                _, v_next = model(x_next)
-                v_next_f = float(v_next.item())
+                obs_buf.append(obs)
+                act_buf.append(actions)
+                logp_buf.append(logp)
+                rew_buf.append(reward)
+                done_buf.append(done)
+                val_buf.append(val)
+                next_val_buf.append(v_next_f)
 
-            obs_buf.append(obs)
-            act_buf.append(action)
-            logp_buf.append(logp)
-            rew_buf.append(reward)
-            done_buf.append(done)
-            val_buf.append(val)
-            next_val_buf.append(v_next_f)
+                obs = next_obs
+                steps_done += n_envs
+            else:
+                action, logp, val = model.act(obs, dev)
+                next_obs, reward, done, _info = env.step(action)
 
-            obs = next_obs
-            steps_done += 1
+                with torch.no_grad():
+                    x_next = torch.as_tensor(next_obs, dtype=torch.float32, device=dev).unsqueeze(0)
+                    _, v_next = model(x_next)
+                    v_next_f = float(v_next.item())
 
-            if done:
-                obs = env.reset()
+                obs_buf.append(obs)
+                act_buf.append(action)
+                logp_buf.append(logp)
+                rew_buf.append(reward)
+                done_buf.append(done)
+                val_buf.append(val)
+                next_val_buf.append(v_next_f)
+
+                obs = next_obs
+                steps_done += 1
+
+                if done:
+                    obs = env.reset()
 
             if steps_done >= total_timesteps:
                 break
 
-        obs_arr = np.asarray(obs_buf, dtype=np.float32)
-        act_arr = np.asarray(act_buf, dtype=np.int64)
-        logp_arr = np.asarray(logp_buf, dtype=np.float32)
-        rew_arr = np.asarray(rew_buf, dtype=np.float32)
-        done_arr = np.asarray(done_buf, dtype=np.float32)
-        val_arr = np.asarray(val_buf, dtype=np.float32)
-        next_val_arr = np.asarray(next_val_buf, dtype=np.float32)
+        if is_vectorized:
+            obs_arr = np.asarray(obs_buf, dtype=np.float32)
+            act_arr = np.asarray(act_buf, dtype=np.int64)
+            logp_arr = np.asarray(logp_buf, dtype=np.float32)
+            rew_arr = np.asarray(rew_buf, dtype=np.float32)
+            done_arr = np.asarray(done_buf, dtype=np.float32)
+            val_arr = np.asarray(val_buf, dtype=np.float32)
+            next_val_arr = np.asarray(next_val_buf, dtype=np.float32)
 
-        adv, ret = compute_gae(
-            rewards=rew_arr,
-            dones=done_arr,
-            values=val_arr,
-            next_values=next_val_arr,
-            gamma=gamma,
-            lam=gae_lambda,
-        )
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+            steps_collected = obs_arr.shape[0]
+            adv_arr = np.zeros_like(rew_arr, dtype=np.float32)
+            ret_arr = np.zeros_like(rew_arr, dtype=np.float32)
+            for i in range(n_envs):
+                adv_i, ret_i = compute_gae(
+                    rewards=rew_arr[:, i],
+                    dones=done_arr[:, i],
+                    values=val_arr[:, i],
+                    next_values=next_val_arr[:, i],
+                    gamma=gamma,
+                    lam=gae_lambda,
+                )
+                adv_arr[:, i] = adv_i
+                ret_arr[:, i] = ret_i
+
+            adv_flat = adv_arr.reshape(steps_collected * n_envs)
+            adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
+            ret_flat = ret_arr.reshape(steps_collected * n_envs)
+
+            obs_arr = obs_arr.reshape(steps_collected * n_envs, obs_arr.shape[-1])
+            act_arr = act_arr.reshape(steps_collected * n_envs)
+            logp_arr = logp_arr.reshape(steps_collected * n_envs)
+            rew_arr = rew_arr.reshape(steps_collected * n_envs)
+            done_arr = done_arr.reshape(steps_collected * n_envs)
+            val_arr = val_arr.reshape(steps_collected * n_envs)
+            next_val_arr = next_val_arr.reshape(steps_collected * n_envs)
+
+            adv = adv_flat.astype(np.float32)
+            ret = ret_flat.astype(np.float32)
+        else:
+            obs_arr = np.asarray(obs_buf, dtype=np.float32)
+            act_arr = np.asarray(act_buf, dtype=np.int64)
+            logp_arr = np.asarray(logp_buf, dtype=np.float32)
+            rew_arr = np.asarray(rew_buf, dtype=np.float32)
+            done_arr = np.asarray(done_buf, dtype=np.float32)
+            val_arr = np.asarray(val_buf, dtype=np.float32)
+            next_val_arr = np.asarray(next_val_buf, dtype=np.float32)
+
+            adv, ret = compute_gae(
+                rewards=rew_arr,
+                dones=done_arr,
+                values=val_arr,
+                next_values=next_val_arr,
+                gamma=gamma,
+                lam=gae_lambda,
+            )
+            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
         rollout = Rollout(
             obs=obs_arr,

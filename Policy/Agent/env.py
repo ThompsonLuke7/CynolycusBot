@@ -317,3 +317,72 @@ class TradingEnv:
         self._i += 1
         done = False
         return self._get_obs(), float(reward), done, info
+
+
+class VecTradingEnv:
+    """
+    Simple vectorized wrapper around multiple TradingEnv instances.
+
+    This runs envs in a synchronous loop (no multiprocessing) and auto-resets
+    environments that finish an episode.
+    """
+
+    def __init__(
+        self,
+        envs: list[TradingEnv],
+        *,
+        auto_reset: bool = True,
+        stagger_reset: bool = True,
+    ):
+        if not envs:
+            raise ValueError("VecTradingEnv requires at least one env.")
+        self.envs = envs
+        self.n_envs = len(envs)
+        self.auto_reset = bool(auto_reset)
+        self.stagger_reset = bool(stagger_reset)
+        self._did_initial_reset = False
+
+        obs_dim = envs[0].obs_dim
+        for env in envs[1:]:
+            if env.obs_dim != obs_dim:
+                raise ValueError("All envs must have the same obs_dim.")
+        self.obs_dim = obs_dim
+
+    def reset(self, day_ptrs: Optional[list[int]] = None) -> np.ndarray:
+        if day_ptrs is not None and len(day_ptrs) != self.n_envs:
+            raise ValueError("day_ptrs length must match number of envs.")
+
+        if day_ptrs is None and self.stagger_reset and not self._did_initial_reset:
+            base_days = len(self.envs[0].day_starts)
+            day_ptrs = [i % max(1, base_days) for i in range(self.n_envs)]
+            self._did_initial_reset = True
+
+        obs = []
+        for i, env in enumerate(self.envs):
+            if day_ptrs is None:
+                obs.append(env.reset())
+            else:
+                obs.append(env.reset(day_ptr=day_ptrs[i]))
+        return np.stack(obs, axis=0)
+
+    def step(
+        self, actions: np.ndarray | list[int]
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
+        if len(actions) != self.n_envs:
+            raise ValueError("Actions length must match number of envs.")
+
+        obs, rewards, dones, infos = [], [], [], []
+        for env, action in zip(self.envs, actions):
+            o, r, d, info = env.step(int(action))
+            if d and self.auto_reset:
+                o = env.reset()
+            obs.append(o)
+            rewards.append(r)
+            dones.append(d)
+            infos.append(info)
+        return (
+            np.stack(obs, axis=0),
+            np.asarray(rewards, dtype=np.float32),
+            np.asarray(dones, dtype=np.float32),
+            infos,
+        )

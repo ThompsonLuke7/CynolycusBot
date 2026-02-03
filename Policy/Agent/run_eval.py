@@ -390,7 +390,7 @@ def main() -> None:
             reward_on_exit=True,
             reward_exit_bonus=False,
             exit_pivot_bonus_ret=0.0,
-            force_flat_at_close=True,
+            force_flat_at_close=False,
             allow_direct_flip=False,
             seed=7,
         )

@@ -17,7 +17,7 @@ from training_pipeline import (
     split_agent_matrix,
 )
 from Data.retrieve_data import normalize_ticker
-from Agent.env import TradingEnv
+from Agent.env import TradingEnv, VecTradingEnv
 from Agent.train import train_ppo
 from Agent.eval import evaluate_policy, evaluate_policy_with_trace
 
@@ -227,28 +227,53 @@ def main():
             f"Top NaN counts:\n{nan_counts}"
         )
 
-    train_env = TradingEnv(
-        df=train_df,
-        feature_cols=feature_cols,
-        add_time_features=False,
-        add_position_features=True,
-        commission_per_trade=0.00,
-        slippage_bps=0.5,
-        spread_bps=0.5,
-        flip_penalty_ret=0.0002,
-        trade_penalty_ret=0.0001,
-        hold_penalty_ret=0.0,
-        reward_on_exit=True,
-        reward_exit_bonus=False,
-        exit_pivot_bonus_ret=0.0,
-        force_flat_at_close=True,
-        allow_direct_flip=False,
-        seed=7,
-    )
+    num_envs = 8
+    if num_envs > 1:
+        train_envs = [
+            TradingEnv(
+                df=train_df,
+                feature_cols=feature_cols,
+                add_time_features=False,
+                add_position_features=True,
+                commission_per_trade=0.00,
+                slippage_bps=0.5,
+                spread_bps=0.5,
+                flip_penalty_ret=0.0002,
+                trade_penalty_ret=0.0001,
+                hold_penalty_ret=0.0,
+                reward_on_exit=True,
+                reward_exit_bonus=False,
+                exit_pivot_bonus_ret=0.0,
+                force_flat_at_close=False,
+                allow_direct_flip=False,
+                seed=7 + i,
+            )
+            for i in range(num_envs)
+        ]
+        train_env = VecTradingEnv(train_envs, auto_reset=True, stagger_reset=True)
+    else:
+        train_env = TradingEnv(
+            df=train_df,
+            feature_cols=feature_cols,
+            add_time_features=False,
+            add_position_features=True,
+            commission_per_trade=0.00,
+            slippage_bps=0.5,
+            spread_bps=0.5,
+            flip_penalty_ret=0.0002,
+            trade_penalty_ret=0.0001,
+            hold_penalty_ret=0.0,
+            reward_on_exit=True,
+            reward_exit_bonus=False,
+            exit_pivot_bonus_ret=0.0,
+            force_flat_at_close=False,
+            allow_direct_flip=False,
+            seed=7,
+        )
 
     model = train_ppo(
         train_env,
-        total_timesteps=200_000,
+        total_timesteps=2_000_000,
         rollout_len=1024,
         train_epochs=5,
         minibatch_size=256,
@@ -284,7 +309,7 @@ def main():
         reward_on_exit=True,
         reward_exit_bonus=False,
         exit_pivot_bonus_ret=0.0,
-        force_flat_at_close=True,
+        force_flat_at_close=False,
         allow_direct_flip=False,
         seed=7,
     )
