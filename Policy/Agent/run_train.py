@@ -219,7 +219,9 @@ def main():
     print(f"Training features ({len(feature_cols)}): {feature_cols}")
     if cfg.drop_na:
         splits = filter_splits_for_non_nan(df, splits, feature_cols)
-    train_df, _val_df, test_df = split_agent_matrix(df, splits, verbose=True)
+    train_df, val_df, test_df = split_agent_matrix(df, splits, verbose=True)
+    if not val_df.empty:
+        train_df = pd.concat([train_df, val_df], axis=0, ignore_index=True)
     if train_df.empty or test_df.empty:
         nan_counts = df[feature_cols].isna().sum().sort_values(ascending=False).head(10)
         raise ValueError(
