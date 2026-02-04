@@ -8,7 +8,7 @@ from typing import Optional
 import pandas as pd
 from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from .config import AlpacaConfig
@@ -159,6 +159,56 @@ def fetch_intraday_spy(
         adjustment=adjustment,
         save_path=save_path,
     )
+
+
+def fetch_latest_quote(
+    *,
+    ticker: str = "SPY",
+    feed: DataFeed = DataFeed.IEX,
+    as_dataframe: bool = True,
+) -> pd.DataFrame | dict:
+    """
+    Fetch the latest quote for a ticker (bid/ask).
+    """
+    clean_ticker = normalize_ticker(ticker)
+    cfg = AlpacaConfig.from_env()
+    client = StockHistoricalDataClient(
+        api_key=cfg.key_id,
+        secret_key=cfg.secret_key,
+    )
+    request = StockLatestQuoteRequest(symbol_or_symbols=clean_ticker, feed=feed)
+    resp = client.get_stock_latest_quote(request)
+
+    quote = None
+    if isinstance(resp, dict):
+        quote = resp.get(clean_ticker) or resp.get(clean_ticker.upper())
+    else:
+        quote = resp
+
+    if quote is None:
+        raise ValueError("No quote returned from Alpaca.")
+
+    payload = {
+        "symbol": getattr(quote, "symbol", clean_ticker),
+        "timestamp": getattr(quote, "timestamp", None),
+        "bid_price": getattr(quote, "bid_price", None),
+        "ask_price": getattr(quote, "ask_price", None),
+        "bid_size": getattr(quote, "bid_size", None),
+        "ask_size": getattr(quote, "ask_size", None),
+        "bid_exchange": getattr(quote, "bid_exchange", None),
+        "ask_exchange": getattr(quote, "ask_exchange", None),
+    }
+    if not as_dataframe:
+        return payload
+    return pd.DataFrame([payload])
+
+
+def fetch_latest_quote_spy(
+    *,
+    feed: DataFeed = DataFeed.IEX,
+    as_dataframe: bool = True,
+) -> pd.DataFrame | dict:
+    return fetch_latest_quote(ticker="SPY", feed=feed, as_dataframe=as_dataframe)
 
 
 if __name__ == "__main__":

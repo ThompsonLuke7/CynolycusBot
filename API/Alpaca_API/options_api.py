@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+import json
+import os
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+from .config import AlpacaConfig
+
+
+@dataclass(frozen=True)
+class OptionsClientConfig:
+    trading_base_url: str
+    data_base_url: str
+    timeout_sec: int = 30
+
+    @classmethod
+    def from_env(cls) -> "OptionsClientConfig":
+        trading = (
+            os.getenv("APCA_API_BASE_URL")
+            or os.getenv("ALPACA_TRADING_API_BASE_URL")
+            or "https://paper-api.alpaca.markets"
+        )
+        data = os.getenv("ALPACA_DATA_API_BASE_URL") or "https://data.alpaca.markets"
+        return cls(trading_base_url=trading, data_base_url=data)
+
+
+class AlpacaOptionsClient:
+    """
+    Minimal REST client for Alpaca Options API.
+
+    Core endpoints:
+      - GET /v2/options/contracts
+      - GET /v2/options/quotes
+      - POST /v2/orders (with option symbol)
+    """
+
+    def __init__(
+        self,
+        *,
+        env_file: str | None = ".env",
+        trading_base_url: str | None = None,
+        data_base_url: str | None = None,
+        timeout_sec: int = 30,
+    ) -> None:
+        cfg = AlpacaConfig.from_env(env_file)
+        defaults = OptionsClientConfig.from_env()
+        self._key = cfg.key_id
+        self._secret = cfg.secret_key
+        self._trading_base = (trading_base_url or defaults.trading_base_url).rstrip("/")
+        self._data_base = (data_base_url or defaults.data_base_url).rstrip("/")
+        self._timeout = int(timeout_sec)
+
+    @staticmethod
+    def format_option_symbol(
+        *,
+        underlying: str,
+        expiration: str,
+        call_put: str,
+        strike: float,
+    ) -> str:
+        """
+        Format OCC-style option symbol (e.g., SPY240216C00475000).
+
+        expiration: YYYYMMDD or YYMMDD (string)
+        call_put: "C" or "P"
+        strike: strike price (e.g., 475.0)
+        """
+        u = underlying.strip().upper()
+        exp = expiration.strip()
+        if len(exp) == 8:
+            exp = exp[2:]
+        cp = call_put.strip().upper()
+        strike_int = int(round(float(strike) * 1000))
+        return f"{u}{exp}{cp}{strike_int:08d}"
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json_body: Mapping[str, Any] | None = None,
+    ) -> Any:
+        if params:
+            query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+            url = f"{url}?{query}"
+        data = None
+        headers = {
+            "APCA-API-KEY-ID": self._key,
+            "APCA-API-SECRET-KEY": self._secret,
+        }
+        if json_body is not None:
+            data = json.dumps(json_body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+
+        req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            if not raw:
+                return None
+            return json.loads(raw)
+
+    def get_option_contracts(self, **params: Any) -> Any:
+        """
+        GET /v2/options/contracts
+
+        Example params:
+          underlying_symbol="SPY", expiration_date="2024-02-16",
+          type="call", strike_price_gte=470, strike_price_lte=480
+        """
+        url = f"{self._trading_base}/v2/options/contracts"
+        return self._request("GET", url, params=params)
+
+    def get_option_quotes(self, **params: Any) -> Any:
+        """
+        GET /v2/options/quotes
+
+        Example params:
+          symbols="SPY240216C00475000" or symbol_or_symbols="..."
+        """
+        url = f"{self._data_base}/v2/options/quotes"
+        return self._request("GET", url, params=params)
+
+    def submit_option_order(
+        self,
+        *,
+        symbol: str,
+        qty: int,
+        side: str,
+        order_type: str = "market",
+        time_in_force: str = "day",
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+    ) -> Any:
+        """
+        POST /v2/orders with an option symbol.
+        """
+        url = f"{self._trading_base}/v2/orders"
+        payload = {
+            "symbol": symbol,
+            "qty": int(qty),
+            "side": side,
+            "type": order_type,
+            "time_in_force": time_in_force,
+        }
+        if limit_price is not None:
+            payload["limit_price"] = float(limit_price)
+        if stop_price is not None:
+            payload["stop_price"] = float(stop_price)
+        return self._request("POST", url, json_body=payload)
