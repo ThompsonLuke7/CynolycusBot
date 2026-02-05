@@ -70,9 +70,11 @@ def fetch_intraday(
     start: dt.datetime | str,
     end: dt.datetime | str | None = None,
     timeframe: str = "1Min",
-    limit: int = 100000,
+    limit: int = 100_000,
     adjustment: str = "raw",
     save_path: Optional[str] = None,
+    paginate: bool = True,
+    max_pages: int | None = None,
 ) -> pd.DataFrame:
     """
     Fetch intraday bars using Alpaca's official SDK (alpaca-py).
@@ -82,9 +84,11 @@ def fetch_intraday(
         start: ISO string or datetime for the beginning (inclusive).
         end: ISO string or datetime for the end (exclusive). If None, defaults to now.
         timeframe: e.g., "1Min", "5Min", "15Min", "1Hour", "1Day".
-        limit: maximum bars to request (SDK handles pagination internally).
+        limit: maximum bars to request per page.
         adjustment: "raw", "split", or "all".
         save_path: optional path (csv/parquet) to persist results.
+        paginate: if True, follow next_page_token until exhausted.
+        max_pages: optional page cap to avoid overly large downloads.
     """
     clean_ticker = normalize_ticker(ticker)
     cfg = AlpacaConfig.from_env()
@@ -97,26 +101,64 @@ def fetch_intraday(
     start_dt = _parse_time(start)
     end_dt = _parse_time(end) if end is not None else dt.datetime.now(dt.timezone.utc)
 
-    request = StockBarsRequest(
-        symbol_or_symbols=clean_ticker,
-        timeframe=tf,
-        start=start_dt,
-        end=end_dt,
-        limit=limit,
-        adjustment=Adjustment(adjustment),
-        feed=DataFeed.IEX,
-    )
+    def _next_token(resp) -> str | None:
+        token = getattr(resp, "next_page_token", None)
+        if token:
+            return token
+        if isinstance(resp, dict):
+            return resp.get("next_page_token")
+        return None
 
-    bars = client.get_stock_bars(request)
-    df = bars.df
-    if df is None or df.empty:
+    dfs: list[pd.DataFrame] = []
+    page_token = None
+    seen_tokens: set[str] = set()
+    pages = 0
+
+    while True:
+        request = StockBarsRequest(
+            symbol_or_symbols=clean_ticker,
+            timeframe=tf,
+            start=start_dt,
+            end=end_dt,
+            limit=limit,
+            adjustment=Adjustment(adjustment),
+            feed=DataFeed.IEX,
+            page_token=page_token,
+        )
+
+        bars = client.get_stock_bars(request)
+        df_page = bars.df
+        if df_page is not None and not df_page.empty:
+            # For single symbol the index is a MultiIndex; flatten to plain DataFrame.
+            df_page = df_page.reset_index()
+            if "symbol" in df_page.columns:
+                df_page = df_page[df_page["symbol"] == clean_ticker]
+            dfs.append(df_page)
+
+        pages += 1
+        if not paginate:
+            break
+        token = _next_token(bars)
+        if not token:
+            break
+        if token in seen_tokens:
+            break
+        seen_tokens.add(token)
+        page_token = token
+        if max_pages is not None and pages >= max_pages:
+            break
+
+    if not dfs:
         return pd.DataFrame()
 
-    # For single symbol the index is a MultiIndex; flatten to plain DataFrame.
-    df = df.reset_index()
+    df = pd.concat(dfs, axis=0, ignore_index=True)
     if "symbol" in df.columns:
         df = df[df["symbol"] == clean_ticker]
-    df = df.sort_values("timestamp").reset_index(drop=True)
+    df = (
+        df.sort_values("timestamp")
+        .drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+        .reset_index(drop=True)
+    )
     if "timestamp" in df.columns:
         ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         ny = ts.dt.tz_convert("America/New_York")
@@ -222,6 +264,17 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=10000)
     parser.add_argument("--adjustment", type=str, default="raw")
     parser.add_argument("--save_path", type=str, default=None)
+    parser.add_argument(
+        "--also-1m",
+        action="store_true",
+        help="Also fetch/save 1-minute bars for the same date range.",
+    )
+    parser.add_argument(
+        "--save-1m-path",
+        type=str,
+        default=None,
+        help="Optional path to save 1-minute bars (csv/parquet).",
+    )
     args = parser.parse_args()
 
     now_utc = dt.datetime.now(dt.timezone.utc)
@@ -240,3 +293,15 @@ if __name__ == "__main__":
     )
 
     print(df.tail())
+
+    if args.also_1m and args.timeframe.lower() not in ("1min", "1m", "1minute"):
+        df_1m = fetch_intraday(
+            ticker=args.ticker,
+            start=start,
+            end=end,
+            timeframe="1Min",
+            limit=args.limit,
+            adjustment=args.adjustment,
+            save_path=args.save_1m_path,
+        )
+        print(df_1m.tail())

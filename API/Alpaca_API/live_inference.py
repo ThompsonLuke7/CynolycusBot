@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import contextlib
+import io
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -188,22 +190,27 @@ def build_agent_feature_frame_from_15m(
         df = _add_pivot_features(df, "p_tb_long")
         df = _add_pivot_features(df, "p_tb_short")
 
+    def _quiet_ta(fn, *args, **kwargs):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            return fn(*args, **kwargs)
+
     sin_time, cos_time = _compute_time_sin_cos(
         df.index, tz=tz, session_open=session_open, session_close=session_close
     )
     df["sin_time_of_day"] = sin_time
     df["cos_time_of_day"] = cos_time
 
-    atr = _series_from_ta(df.ta.atr(length=14, append=False))
+    atr = _series_from_ta(_quiet_ta(df.ta.atr, length=14, append=False))
     df["atr_pct"] = atr / df["close"].replace(0, np.nan)
 
-    vwap = _series_from_ta(df.ta.vwap(append=False, anchor="D"))
+    vwap = _series_from_ta(_quiet_ta(df.ta.vwap, append=False, anchor="D"))
     df["dist_to_vwap"] = (df["close"] - vwap) / df["close"].replace(0, np.nan)
 
     pdh = _compute_prior_day_high(df)
     df["dist_to_pdh"] = df["close"] - pdh
 
-    adx_df = df.ta.adx(length=14, append=False)
+    adx_df = _quiet_ta(df.ta.adx, length=14, append=False)
     df["trend_strength"] = _series_from_ta(adx_df, prefix="ADX")
 
     df["timestamp"] = df.index
@@ -443,8 +450,17 @@ class LivePPOAgent:
         self._resample_closed = resample_closed
         self._label_timeframe_rule = label_timeframe_rule
 
-        self._model = ActorCritic(obs_dim=self._obs_dim, n_actions=self._n_actions)
-        self._model.load_state_dict(ckpt["state_dict"])
+        state_dict = ckpt["state_dict"]
+        has_head_mlps = any(
+            k.startswith("policy_mlp.") or k.startswith("value_mlp.")
+            for k in state_dict
+        )
+        self._model = ActorCritic(
+            obs_dim=self._obs_dim,
+            n_actions=self._n_actions,
+            head_mlp=has_head_mlps,
+        )
+        self._model.load_state_dict(state_dict)
         self._model.to(self._device)
         self._model.eval()
 

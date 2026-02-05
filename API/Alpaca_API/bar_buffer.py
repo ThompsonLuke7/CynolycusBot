@@ -30,7 +30,22 @@ class BarRingBuffer:
             self.append(bar)
 
     def append(self, bar: dict) -> None:
-        self._buf.append(bar)
+        if "timestamp" not in bar:
+            raise ValueError("bar is missing required 'timestamp' field.")
+        ts = pd.to_datetime(bar["timestamp"], utc=True, errors="coerce")
+        if pd.isna(ts):
+            return
+        new_bar = dict(bar)
+        new_bar["timestamp"] = ts
+
+        # If we already have a bar for this timestamp, replace it (keep latest).
+        for idx in range(len(self._buf) - 1, -1, -1):
+            existing = self._buf[idx]
+            if existing.get("timestamp") == ts:
+                self._buf[idx] = new_bar
+                return
+
+        self._buf.append(new_bar)
 
     def to_dataframe(self) -> pd.DataFrame:
         """
@@ -47,6 +62,6 @@ class BarRingBuffer:
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         df = df.dropna(subset=["timestamp"])
-        df = df.sort_values("timestamp")
+        df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
         df = df.set_index("timestamp")
         return df

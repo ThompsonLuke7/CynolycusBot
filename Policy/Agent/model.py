@@ -4,23 +4,34 @@ import torch.nn as nn
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int, n_actions: int = 3, hidden: int = 128):
+    def __init__(
+        self,
+        obs_dim: int,
+        n_actions: int = 3,
+        hidden: int = 128,
+        head_mlp: bool = True,
+    ):
         super().__init__()
         self.obs_dim = int(obs_dim)
+        self.head_mlp = bool(head_mlp)
         self.shared = nn.Sequential(
             nn.Linear(self.obs_dim, hidden),
             nn.Tanh(),
             nn.Linear(hidden, hidden),
             nn.Tanh(),
         )
-        self.policy_mlp = nn.Sequential(
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
-        )
-        self.value_mlp = nn.Sequential(
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
-        )
+        if self.head_mlp:
+            self.policy_mlp = nn.Sequential(
+                nn.Linear(hidden, hidden),
+                nn.Tanh(),
+            )
+            self.value_mlp = nn.Sequential(
+                nn.Linear(hidden, hidden),
+                nn.Tanh(),
+            )
+        else:
+            self.policy_mlp = nn.Identity()
+            self.value_mlp = nn.Identity()
         self.policy_head = nn.Linear(hidden, n_actions)
         self.value_head = nn.Linear(hidden, 1)
         self._init_weights()
@@ -30,14 +41,16 @@ class ActorCritic(nn.Module):
             if isinstance(module, nn.Linear):
                 nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain("tanh"))
                 nn.init.zeros_(module.bias)
-        for module in self.policy_mlp:
-            if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain("tanh"))
-                nn.init.zeros_(module.bias)
-        for module in self.value_mlp:
-            if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain("tanh"))
-                nn.init.zeros_(module.bias)
+        if isinstance(self.policy_mlp, nn.Sequential):
+            for module in self.policy_mlp:
+                if isinstance(module, nn.Linear):
+                    nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain("tanh"))
+                    nn.init.zeros_(module.bias)
+        if isinstance(self.value_mlp, nn.Sequential):
+            for module in self.value_mlp:
+                if isinstance(module, nn.Linear):
+                    nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain("tanh"))
+                    nn.init.zeros_(module.bias)
         nn.init.orthogonal_(self.policy_head.weight, gain=0.01)
         nn.init.zeros_(self.policy_head.bias)
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)

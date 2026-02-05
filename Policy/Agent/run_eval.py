@@ -378,8 +378,17 @@ def main() -> None:
         if cfg.drop_na and not test_df.empty:
             test_df = test_df.dropna(subset=feature_cols)
 
-        model = ActorCritic(obs_dim=ckpt["obs_dim"], n_actions=ckpt.get("n_actions", 3))
-        model.load_state_dict(ckpt["state_dict"])
+        state_dict = ckpt["state_dict"]
+        has_head_mlps = any(
+            k.startswith("policy_mlp.") or k.startswith("value_mlp.")
+            for k in state_dict
+        )
+        model = ActorCritic(
+            obs_dim=ckpt["obs_dim"],
+            n_actions=ckpt.get("n_actions", 3),
+            head_mlp=has_head_mlps,
+        )
+        model.load_state_dict(state_dict)
         model.eval()
 
         test_env = make_trading_env(

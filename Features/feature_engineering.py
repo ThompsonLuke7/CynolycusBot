@@ -271,12 +271,8 @@ def main(
         df = load_ticker_parquet(clean_ticker, parquet_path=raw_parquet_path)
         if multi_timeframes:
             df = ensure_time_index(df, tz=tz)
-        print(df.head())
-        print(df.info())
-
         # Add ALL pandas_ta indicators except statistics & performance
-        df = add_all_pandasta_indicators(df, verbose=True)
-        print(df.head())
+        df = add_all_pandasta_indicators(df, verbose=False)
         # Drop NaNs introduced by indicators
         # 1) Drop columns that are completely NaN
         df = df.dropna(axis=1, how="all")

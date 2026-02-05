@@ -29,16 +29,16 @@ def _resolve_device(device: str, verbose: bool) -> torch.device:
 
 def train_ppo(
     env: TradingEnv,
-    total_timesteps: int = 200_000,
+    total_timesteps: int = 2_000_000,
     rollout_len: int = 2048,
-    gamma: float = 0.99,
+    gamma: float = 0.995,
     gae_lambda: float = 0.95,
     clip_ratio: float = 0.2,
     pi_lr: float = 3e-4,
     vf_lr: float = 1e-3,
     train_epochs: int = 10,
     minibatch_size: int = 256,
-    entropy_coef: float = 0.01,
+    entropy_coef: float = 0.003,
     value_coef: float = 0.5,
     max_grad_norm: float = 0.5,
     device: str = "cuda",
@@ -56,7 +56,9 @@ def train_ppo(
     optimizer = optim.Adam(
         [
             {"params": model.shared.parameters(), "lr": pi_lr},
+            {"params": model.policy_mlp.parameters(), "lr": pi_lr},
             {"params": model.policy_head.parameters(), "lr": pi_lr},
+            {"params": model.value_mlp.parameters(), "lr": vf_lr},
             {"params": model.value_head.parameters(), "lr": vf_lr},
         ]
     )

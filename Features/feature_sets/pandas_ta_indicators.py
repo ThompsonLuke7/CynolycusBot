@@ -31,7 +31,7 @@ def prepare_ohlcv_columns(df: pd.DataFrame) -> pd.DataFrame:
 def add_all_pandasta_indicators(
     df: pd.DataFrame,
     exclude_indicators: Optional[Iterable[str]] = None,
-    verbose: bool = True,
+    verbose: bool = False,
 ) -> pd.DataFrame:
     """
     Add *all* pandas_ta indicators to the DataFrame via df.ta.<indicator>(append=True),

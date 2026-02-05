@@ -8,10 +8,12 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+import pandas as pd
 from alpaca.data.enums import DataFeed
 
 from .bar_aggregator import OhlcvAggregator
 from .bar_buffer import BarRingBuffer
+from .fetch_intraday import fetch_intraday
 from .live_inference import LiveInferenceEngine, LivePPOAgent
 from .live_stream import AlpacaBarStreamer
 
@@ -46,6 +48,12 @@ class LiveBarProcessor:
                 label=self._agg_label,
             )
         return self._aggregators[symbol]
+
+    def prefill(self, symbol: str, bars: list[dict]) -> None:
+        if not bars:
+            return
+        buffer = self._get_buffer(symbol)
+        buffer.extend(bars)
 
     def handle_bar(self, bar: dict) -> None:
         symbol = str(bar.get("symbol", ""))
@@ -88,6 +96,90 @@ def _make_15m_handler(
     return _handler
 
 
+def _load_prefill_frame(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing prefill file: {path}")
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        df = pd.read_parquet(path)
+    elif suffix == ".csv":
+        df = pd.read_csv(path)
+    else:
+        raise ValueError("Prefill file must be .csv or .parquet")
+
+    if "timestamp" not in df.columns:
+        if isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index().rename(columns={df.index.name or "index": "timestamp"})
+        else:
+            raise ValueError("Prefill data must include a timestamp column or DatetimeIndex.")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df = df.dropna(subset=["timestamp"])
+    return df
+
+
+def _prefill_buffers(
+    *,
+    processor: LiveBarProcessor,
+    df: pd.DataFrame,
+    symbols: list[str],
+    tail: int | None,
+) -> None:
+    required = ["timestamp", "open", "high", "low", "close", "volume"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Prefill data missing required columns: {missing}")
+
+    df = df.copy()
+    if "symbol" not in df.columns:
+        if len(symbols) != 1:
+            raise ValueError("Prefill data missing symbol column; use single --symbols or add symbol column.")
+        df["symbol"] = symbols[0]
+    df["symbol"] = df["symbol"].astype(str).str.upper()
+
+    df = df[df["symbol"].isin(symbols)]
+    if df.empty:
+        print("[live] Prefill skipped: no matching symbols in prefill data.")
+        return
+
+    df = df.sort_values("timestamp")
+    for symbol in symbols:
+        sym_df = df[df["symbol"] == symbol]
+        if sym_df.empty:
+            continue
+        if tail is not None:
+            sym_df = sym_df.tail(int(tail))
+        bars = sym_df[required + ["symbol"]].to_dict("records")
+        processor.prefill(symbol, bars)
+        print(f"[live] Prefilled {len(bars):,} bars for {symbol}.")
+
+
+def _prefill_from_alpaca(
+    *,
+    processor: LiveBarProcessor,
+    symbols: list[str],
+    start: str,
+    tail: int | None,
+) -> None:
+    for symbol in symbols:
+        df = fetch_intraday(
+            ticker=symbol,
+            start=start,
+            timeframe="1Min",
+            limit=100000,
+            save_path=None,
+        )
+        if df is None or df.empty:
+            print(f"[live] Prefill skipped: no historical bars for {symbol}.")
+            continue
+        _prefill_buffers(
+            processor=processor,
+            df=df,
+            symbols=[symbol],
+            tail=tail,
+        )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Stream 1m bars from Alpaca and aggregate into 15m candles."
@@ -119,6 +211,27 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ga-pivot-label-dir", default="pivots", help="Label dir for pivot GA-XGB models.")
     parser.add_argument("--ga-tb-label-dir", default="tb", help="Label dir for TB GA-XGB models.")
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
+    parser.add_argument(
+        "--prefill-path",
+        default=None,
+        help="Optional CSV/Parquet path to prefill the 1m buffer for warm start.",
+    )
+    parser.add_argument(
+        "--prefill-start",
+        default="2026-01-21",
+        help="Fetch historical 1m bars from Alpaca starting at this date/time (UTC).",
+    )
+    parser.add_argument(
+        "--no-prefill-fetch",
+        action="store_true",
+        help="Disable automatic historical prefill fetch (unless --prefill-path is provided).",
+    )
+    parser.add_argument(
+        "--prefill-tail",
+        type=int,
+        default=None,
+        help="If set, only use the most recent N rows per symbol from the prefill file.",
+    )
     return parser.parse_args()
 
 
@@ -197,6 +310,28 @@ def main() -> None:
         on_1m=on_1m,
         on_15m_close=on_15m,
     )
+    if args.prefill_path:
+        prefill_df = _load_prefill_frame(Path(args.prefill_path))
+        if args.prefill_tail and args.prefill_tail > args.buffer_size:
+            print("[live] Warning: prefill-tail exceeds buffer-size; oldest rows will be dropped.")
+        _prefill_buffers(
+            processor=processor,
+            df=prefill_df,
+            symbols=symbols,
+            tail=args.prefill_tail,
+        )
+    elif args.prefill_start and not args.no_prefill_fetch:
+        if args.prefill_tail and args.prefill_tail > args.buffer_size:
+            print("[live] Warning: prefill-tail exceeds buffer-size; oldest rows will be dropped.")
+        try:
+            _prefill_from_alpaca(
+                processor=processor,
+                symbols=symbols,
+                start=args.prefill_start,
+                tail=args.prefill_tail,
+            )
+        except Exception as exc:
+            print(f"[live] Prefill fetch failed: {exc}")
 
     streamer = AlpacaBarStreamer(
         symbols=symbols,

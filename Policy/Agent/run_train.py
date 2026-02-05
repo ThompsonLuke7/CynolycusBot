@@ -1,4 +1,5 @@
 from pathlib import Path
+import argparse
 import sys
 from regex import F
 import numpy as np
@@ -203,13 +204,16 @@ def _plot_actions(trace, output_path):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Train PPO agent.")
+    parser.add_argument(
+        "--train-full",
+        action="store_true",
+        help="Train on the full dataset without train/val/test splits.",
+    )
+    args = parser.parse_args()
+
     cfg = PipelineConfig(drop_na=True)
     df = build_agent_training_matrix(cfg, save_parquet=True)
-    splits = load_tree_split_indices(
-        ticker=cfg.ticker,
-        dataset_name=cfg.dataset_name,
-        x_filename=cfg.x_filename,
-    )
 
     drop_base = {"timestamp", "day_id", "open", "high", "low", "close", "volume"}
     feature_cols = [c for c in df.columns if c not in drop_base]
@@ -218,17 +222,30 @@ def main():
         print(f"Dropping all-NaN feature columns: {all_nan_cols}")
         feature_cols = [c for c in feature_cols if c not in all_nan_cols]
     print(f"Training features ({len(feature_cols)}): {feature_cols}")
-    if cfg.drop_na:
-        splits = filter_splits_for_non_nan(df, splits, feature_cols)
-    train_df, val_df, test_df = split_agent_matrix(df, splits, verbose=True)
-    if not val_df.empty:
-        train_df = pd.concat([train_df, val_df], axis=0, ignore_index=True)
-    if train_df.empty or test_df.empty:
-        nan_counts = df[feature_cols].isna().sum().sort_values(ascending=False).head(10)
-        raise ValueError(
-            "Train/Test split is empty after NaN filtering. "
-            f"Top NaN counts:\n{nan_counts}"
+    if args.train_full:
+        train_df = df
+        if cfg.drop_na and not train_df.empty:
+            train_df = train_df.dropna(subset=feature_cols)
+        val_df = df.iloc[0:0].copy()
+        test_df = df.iloc[0:0].copy()
+        print(f"[run_train] Training on full dataset: {len(train_df):,} rows")
+    else:
+        splits = load_tree_split_indices(
+            ticker=cfg.ticker,
+            dataset_name=cfg.dataset_name,
+            x_filename=cfg.x_filename,
         )
+        if cfg.drop_na:
+            splits = filter_splits_for_non_nan(df, splits, feature_cols)
+        train_df, val_df, test_df = split_agent_matrix(df, splits, verbose=True)
+        if not val_df.empty:
+            train_df = pd.concat([train_df, val_df], axis=0, ignore_index=True)
+        if train_df.empty or test_df.empty:
+            nan_counts = df[feature_cols].isna().sum().sort_values(ascending=False).head(10)
+            raise ValueError(
+                "Train/Test split is empty after NaN filtering. "
+                f"Top NaN counts:\n{nan_counts}"
+            )
 
     num_envs = 8
     if num_envs > 1:
@@ -272,6 +289,10 @@ def main():
         model_path,
     )
     print(f"Saved model to {model_path}")
+
+    if args.train_full:
+        print("[run_train] Skipping evaluation because --train-full is set.")
+        return
 
     test_env = make_trading_env(
         df=test_df,
