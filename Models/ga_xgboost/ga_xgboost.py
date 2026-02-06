@@ -42,13 +42,17 @@ class GAXGBoostFeatureSelector:
     tournament_k: int = 3
     random_state: Optional[int] = 42
     xgb_params: Dict[str, Any] = field(default_factory=lambda: {
-        "n_estimators": 100,
+        "n_estimators": 2000,
         "max_depth": 3,
-        "learning_rate": 0.1,
+        "learning_rate": 0.03,
         "subsample": 0.8,
-        "colsample_bytree": 0.8,
+        "colsample_bytree": 0.7,
         "objective": "binary:logistic",
         "eval_metric": ["logloss", "aucpr"],
+        "min_child_weight": 5,
+        "gamma": 0.0,
+        "reg_lambda": 2.0,
+        "reg_alpha": 0.0,
         "n_jobs": -1,
     })
 

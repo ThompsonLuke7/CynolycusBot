@@ -53,7 +53,7 @@ class TrainConfig:
     n_folds: int = 5
     initial_train_size: int | None = None
     apply_scaler: bool = False
-    update_scale_pos_weight: bool = False
+    update_scale_pos_weight: bool = True
     output_dirname: str = "probs"
     refresh_masks: bool = False
     super_pivot_weight: float = 2.0
@@ -348,12 +348,16 @@ def refresh_masks_and_params(
     metadata: dict,
     label_dir: str | None = None,
     full_fit: bool = False,
+    scale_pos_weight: bool = True,
 ) -> tuple[np.ndarray, dict, np.ndarray, dict]:
     def _side_params(y_train: np.ndarray) -> dict:
         base = GAXGBoostFeatureSelector().xgb_params.copy()
-        pos = int((y_train == 1).sum())
-        neg = int((y_train == 0).sum())
-        base["scale_pos_weight"] = neg / max(pos, 1)
+        if scale_pos_weight:
+            pos = int((y_train == 1).sum())
+            neg = int((y_train == 0).sum())
+            base["scale_pos_weight"] = neg / max(pos, 1)
+        else:
+            base["scale_pos_weight"] = 1.0
         return base
 
     print("Refreshing GA-XGB masks/params on train split only...")
@@ -800,6 +804,10 @@ def main() -> None:
         except FileNotFoundError:
             need_refresh = True
 
+    scale_pos_weight = cfg.update_scale_pos_weight
+    if cfg.label_mode in {"triple_barrier", "tb"}:
+        scale_pos_weight = False
+
     if need_refresh:
         long_mask, long_params, short_mask, short_params = refresh_masks_and_params(
             X_train=X_train,
@@ -812,6 +820,7 @@ def main() -> None:
             metadata=common_meta,
             label_dir=artifact_label_dir,
             full_fit=args.full_fit,
+            scale_pos_weight=scale_pos_weight,
         )
 
     if long_mask.size != X.shape[1] or short_mask.size != X.shape[1]:
@@ -849,7 +858,7 @@ def main() -> None:
             xgb_params=long_params,
             n_folds=cfg.n_folds,
             initial_train_size=cfg.initial_train_size,
-            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_long_train,
         )
         short_oof = walk_forward_oof_probs(
@@ -859,7 +868,7 @@ def main() -> None:
             xgb_params=short_params,
             n_folds=cfg.n_folds,
             initial_train_size=cfg.initial_train_size,
-            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_short_train,
         )
 
@@ -869,7 +878,7 @@ def main() -> None:
             X_test=X_test,
             mask=long_mask,
             xgb_params=long_params,
-            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_long_train_only,
             eval_set=(X_val, y_long_val, w_long_val) if val_idx.size else None,
         )
@@ -879,7 +888,7 @@ def main() -> None:
             X_test=X_test,
             mask=short_mask,
             xgb_params=short_params,
-            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_short_train_only,
             eval_set=(X_val, y_short_val, w_short_val) if val_idx.size else None,
         )
@@ -910,7 +919,7 @@ def main() -> None:
             X_test=X_train,
             mask=long_mask,
             xgb_params=long_params,
-            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_long_train,
         )
         short_full = train_final_and_predict_test(
@@ -919,7 +928,7 @@ def main() -> None:
             X_test=X_train,
             mask=short_mask,
             xgb_params=short_params,
-            update_scale_pos_weight=cfg.update_scale_pos_weight,
+            update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_short_train,
         )
         if long_full.size != n_total or short_full.size != n_total:
