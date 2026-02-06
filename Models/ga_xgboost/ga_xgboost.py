@@ -22,19 +22,21 @@ class GAXGBoostFeatureSelector:
 
     GA details are based on Yun et al. 2021:
       - Chromosome = binary mask over features
-      - Population size = 8
-      - Generations = 30
-      - Crossover rate = 0.5
-      - Mutation rate = 0.375
-      - Fitness = configurable (default: positive-class F1) with optional sparsity penalty
+      - Population size = 32
+      - Generations = 60
+      - Crossover rate = 0.6
+      - Mutation rate = 0.005
+      - Fitness = configurable (default: f1_penalized) with optional sparsity penalty
     """
-    population_size: int = 8
-    generations: int = 30
-    crossover_rate: float = 0.5
+    population_size: int = 32
+    generations: int = 60
+    crossover_rate: float = 0.6
     mutation_rate: float = 0.005  # per-bit mutation probability
-    val_size: float = 0.15          # portion of given data used as validation
-    fitness_metric: str = "f1"      # "f1" | "f1_penalized"
-    feature_penalty: float = 0.001  # penalty per selected feature when using f1_penalized
+    val_size: float = 0.10           # portion of given data used as validation
+    fitness_metric: str = "f1_penalized"  # "f1" | "f1_penalized"
+    feature_penalty: float = 0.0015  # penalty per selected feature when using f1_penalized
+    early_stopping_rounds: Optional[int] = 50
+    max_boost_round: int = 2000
     max_features: Optional[int] = 80  # hard cap; None disables
     selection: str = "tournament"   # "tournament" | "roulette"
     tournament_k: int = 3
@@ -46,7 +48,7 @@ class GAXGBoostFeatureSelector:
         "subsample": 0.8,
         "colsample_bytree": 0.8,
         "objective": "binary:logistic",
-        "eval_metric": "logloss",
+        "eval_metric": ["logloss", "aucpr"],
         "n_jobs": -1,
     })
 
@@ -57,6 +59,7 @@ class GAXGBoostFeatureSelector:
     _use_gpu: Optional[bool] = field(init=False, default=None)
     _last_printed_device: Optional[bool] = field(init=False, default=None)
     _gpu_error_printed: bool = field(init=False, default=False)
+    _has_val_split: bool = field(init=False, default=False)
 
     # ---------- Public API ----------
 
@@ -76,15 +79,26 @@ class GAXGBoostFeatureSelector:
         # Chronological split: first chunk = train, later chunk = validation
         n_samples = X.shape[0]
         split_idx = int(n_samples * (1.0 - self.val_size))
-
-        X_train, X_val = X[:split_idx], X[split_idx:]
-        y_train, y_val = y[:split_idx], y[split_idx:]
         w_train = w_val = None
-        if sample_weight is not None:
-            if sample_weight.shape[0] != n_samples:
-                raise ValueError("sample_weight must match X length.")
-            w_train = sample_weight[:split_idx]
-            w_val = sample_weight[split_idx:]
+        self._has_val_split = 0 < split_idx < n_samples
+
+        if not self._has_val_split:
+            # No explicit validation split; score on train to avoid empty val.
+            X_train, X_val = X, X
+            y_train, y_val = y, y
+            if sample_weight is not None:
+                if sample_weight.shape[0] != n_samples:
+                    raise ValueError("sample_weight must match X length.")
+                w_train = sample_weight
+                w_val = sample_weight
+        else:
+            X_train, X_val = X[:split_idx], X[split_idx:]
+            y_train, y_val = y[:split_idx], y[split_idx:]
+            if sample_weight is not None:
+                if sample_weight.shape[0] != n_samples:
+                    raise ValueError("sample_weight must match X length.")
+                w_train = sample_weight[:split_idx]
+                w_val = sample_weight[split_idx:]
 
 
         n_features = X.shape[1]
@@ -256,7 +270,15 @@ class GAXGBoostFeatureSelector:
         X_tr = X_train[:, selected]
         X_v = X_val[:, selected]
 
-        model = self._fit_xgb(X_tr, y_train, sample_weight=w_train)
+        eval_set = None
+        if self._has_val_split and X_val.shape[0] > 0:
+            eval_set = (X_v, y_val, w_val)
+        model = self._fit_xgb(
+            X_tr,
+            y_train,
+            sample_weight=w_train,
+            eval_set=eval_set,
+        )
         use_gpu = self._use_gpu is True
         dval = self._make_dmatrix(X_v, y=None, use_gpu=use_gpu, weight=w_val)
         y_prob = model.predict(dval)
@@ -302,16 +324,42 @@ class GAXGBoostFeatureSelector:
         y: np.ndarray,
         *,
         sample_weight: np.ndarray | None = None,
+        eval_set: tuple[np.ndarray, np.ndarray, np.ndarray | None] | None = None,
+        num_boost_round_override: int | None = None,
     ) -> xgb.Booster:
         """
         Train XGB with GPU when available; fall back to CPU once if GPU fails.
         """
+        use_early_stopping = (
+            eval_set is not None
+            and self.early_stopping_rounds is not None
+            and int(self.early_stopping_rounds) > 0
+        )
         use_gpu = True if self._use_gpu is None else self._use_gpu
         if use_gpu:
             gpu_params, num_boost_round = self._xgb_params_for_mode(use_gpu=True)
+            if use_early_stopping and self.max_boost_round:
+                num_boost_round = int(self.max_boost_round)
+            if num_boost_round_override is not None:
+                num_boost_round = int(num_boost_round_override)
             dtrain = self._make_dmatrix(X, y=y, use_gpu=True, weight=sample_weight)
+            evals = None
+            early_stopping = None
+            if use_early_stopping:
+                X_val, y_val, w_val = eval_set
+                if X_val.shape[0] > 0:
+                    dval = self._make_dmatrix(X_val, y=y_val, use_gpu=True, weight=w_val)
+                    evals = [(dval, "val")]
+                    early_stopping = int(self.early_stopping_rounds)
             try:
-                model = xgb.train(gpu_params, dtrain, num_boost_round=num_boost_round)
+                model = xgb.train(
+                    gpu_params,
+                    dtrain,
+                    num_boost_round=num_boost_round,
+                    evals=evals,
+                    early_stopping_rounds=early_stopping,
+                    verbose_eval=False,
+                )
                 self._use_gpu = True
                 self._maybe_print_device(use_gpu=True, params=gpu_params)
                 return model
@@ -322,8 +370,27 @@ class GAXGBoostFeatureSelector:
                 self._use_gpu = False
 
         cpu_params, num_boost_round = self._xgb_params_for_mode(use_gpu=False)
+        if use_early_stopping and self.max_boost_round:
+            num_boost_round = int(self.max_boost_round)
+        if num_boost_round_override is not None:
+            num_boost_round = int(num_boost_round_override)
         dtrain = self._make_dmatrix(X, y=y, use_gpu=False, weight=sample_weight)
-        model = xgb.train(cpu_params, dtrain, num_boost_round=num_boost_round)
+        evals = None
+        early_stopping = None
+        if use_early_stopping:
+            X_val, y_val, w_val = eval_set
+            if X_val.shape[0] > 0:
+                dval = self._make_dmatrix(X_val, y=y_val, use_gpu=False, weight=w_val)
+                evals = [(dval, "val")]
+                early_stopping = int(self.early_stopping_rounds)
+        model = xgb.train(
+            cpu_params,
+            dtrain,
+            num_boost_round=num_boost_round,
+            evals=evals,
+            early_stopping_rounds=early_stopping,
+            verbose_eval=False,
+        )
         self._maybe_print_device(use_gpu=False, params=cpu_params)
         return model
 

@@ -120,6 +120,30 @@ def _align_htf_features(
     return aligned.dropna(axis=1, how="all")
 
 
+def _add_lstm_features_for_tree(
+    df: pd.DataFrame,
+    *,
+    include_time_features: bool,
+    tz: str | None,
+) -> pd.DataFrame:
+    base_cols = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
+    if len(base_cols) < 5:
+        return df
+
+    base = df[base_cols].copy()
+    time_kwargs = {"tz": tz} if tz is not None else None
+    lstm_df = add_lstm_features(
+        base,
+        include_time_features=include_time_features,
+        time_kwargs=time_kwargs,
+    )
+
+    new_cols = [c for c in lstm_df.columns if c not in df.columns]
+    if not new_cols:
+        return df
+    return pd.concat([df, lstm_df[new_cols]], axis=1)
+
+
 def build_feature_matrix(
     parquet_path: str | Path,
     *,
@@ -163,6 +187,13 @@ def build_feature_matrix(
         verbose=verbose,
         model=model,
     )
+    model_key = (model or "tree").strip().lower()
+    if model_key == "tree":
+        df_15m = _add_lstm_features_for_tree(
+            df_15m,
+            include_time_features=True,
+            tz=tz,
+        )
     df_15m = add_fractal_pivots(df_15m, **pivot_kwargs)
     df_15m = add_all_labels(df_15m, **label_kwargs)
 
@@ -180,6 +211,12 @@ def build_feature_matrix(
             verbose=verbose,
             model=model,
         )
+        if model_key == "tree":
+            tf_df = _add_lstm_features_for_tree(
+                tf_df,
+                include_time_features=include_htf_date_features,
+                tz=tz,
+            )
         aligned = _align_htf_features(
             tf_df,
             base_index=df_15m.index,
@@ -259,6 +296,13 @@ def build_feature_matrices(
             verbose=verbose,
             model=model,
         )
+        model_key = (model or "tree").strip().lower()
+        if model_key == "tree":
+            f15 = _add_lstm_features_for_tree(
+                f15,
+                include_time_features=True,
+                tz=tz,
+            )
 
         # Attach labels (same for all models)
         f15 = pd.concat([f15, y_15m], axis=1)
@@ -275,6 +319,12 @@ def build_feature_matrices(
                 verbose=verbose,
                 model=model,
             )
+            if model_key == "tree":
+                tf_feat = _add_lstm_features_for_tree(
+                    tf_feat,
+                    include_time_features=include_htf_date_features,
+                    tz=tz,
+                )
             aligned = _align_htf_features(
                 tf_feat,
                 base_index=f15.index,

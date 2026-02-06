@@ -218,7 +218,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--prefill-start",
-        default="2026-01-21",
+        default="2026-01-30",
         help="Fetch historical 1m bars from Alpaca starting at this date/time (UTC).",
     )
     parser.add_argument(

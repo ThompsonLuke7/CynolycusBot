@@ -56,7 +56,7 @@ class TrainConfig:
     update_scale_pos_weight: bool = False
     output_dirname: str = "probs"
     refresh_masks: bool = False
-    super_pivot_weight: float = 1.0
+    super_pivot_weight: float = 2.0
     processed_root: str | None = None
     split_root: str | None = None
     stats_root: str | None = None
@@ -330,18 +330,7 @@ def _train_ga_selector(
     sample_weight: np.ndarray | None = None,
 ) -> GAXGBoostFeatureSelector:
     selector = GAXGBoostFeatureSelector(
-        population_size=24,
-        generations=60,
-        crossover_rate=0.6,
-        mutation_rate=0.005,
-        val_size=0.15,
-        random_state=42,
         xgb_params=xgb_params,
-        fitness_metric="f1_penalized",
-        feature_penalty=0.0015,
-        max_features=80,
-        selection="tournament",
-        tournament_k=3,
     )
     selector.fit(X_train, y_train, sample_weight=sample_weight)
     return selector
@@ -370,34 +359,12 @@ def refresh_masks_and_params(
     print("Refreshing GA-XGB masks/params on train split only...")
     if full_fit:
         long_selector = GAXGBoostFeatureSelector(
-            population_size=24,
-            generations=60,
-            crossover_rate=0.6,
-            mutation_rate=0.005,
-            val_size=0.0,
-            random_state=42,
             xgb_params=_side_params(y_long_train),
-            fitness_metric="f1_penalized",
-            feature_penalty=0.0015,
-            max_features=80,
-            selection="tournament",
-            tournament_k=3,
         )
         long_selector.fit(X_train, y_long_train, sample_weight=w_long_train)
 
         short_selector = GAXGBoostFeatureSelector(
-            population_size=24,
-            generations=60,
-            crossover_rate=0.6,
-            mutation_rate=0.005,
-            val_size=0.0,
-            random_state=42,
             xgb_params=_side_params(y_short_train),
-            fitness_metric="f1_penalized",
-            feature_penalty=0.0015,
-            max_features=80,
-            selection="tournament",
-            tournament_k=3,
         )
         short_selector.fit(X_train, y_short_train, sample_weight=w_short_train)
     else:
@@ -456,9 +423,15 @@ def _fit_xgb_with_selector(
     y_train: np.ndarray,
     xgb_params: dict,
     sample_weight: np.ndarray | None = None,
+    eval_set: tuple[np.ndarray, np.ndarray, np.ndarray | None] | None = None,
 ) -> tuple[GAXGBoostFeatureSelector, object]:
     selector = GAXGBoostFeatureSelector(xgb_params=xgb_params)
-    model = selector._fit_xgb(X_train, y_train, sample_weight=sample_weight)
+    model = selector._fit_xgb(
+        X_train,
+        y_train,
+        sample_weight=sample_weight,
+        eval_set=eval_set,
+    )
     return selector, model
 
 
@@ -602,6 +575,7 @@ def train_final_and_predict_test(
     xgb_params: dict,
     update_scale_pos_weight: bool,
     sample_weight: np.ndarray | None = None,
+    eval_set: tuple[np.ndarray, np.ndarray, np.ndarray | None] | None = None,
 ) -> np.ndarray:
     if X_test.size == 0:
         return np.empty((0,), dtype=np.float32)
@@ -613,8 +587,18 @@ def train_final_and_predict_test(
     params = _maybe_update_scale_pos_weight(
         xgb_params, y_fit, enabled=update_scale_pos_weight
     )
+    eval_selected = None
+    if eval_set is not None:
+        X_val, y_val, w_val = eval_set
+        if X_val.shape[0] > 0:
+            eval_selected = (X_val[:, mask], y_val, w_val)
+
     selector, model = _fit_xgb_with_selector(
-        X_fit, y_fit, params, sample_weight=sample_weight
+        X_fit,
+        y_fit,
+        params,
+        sample_weight=sample_weight,
+        eval_set=eval_selected,
     )
 
     X_test = X_test[:, mask]
@@ -780,6 +764,25 @@ def main() -> None:
     y_short_train = y_short[train_val_idx]
     w_long_train = w_long[train_val_idx] if w_long is not None else None
     w_short_train = w_short[train_val_idx] if w_short is not None else None
+
+    X_train_only = X[train_idx]
+    y_long_train_only = y_long[train_idx]
+    y_short_train_only = y_short[train_idx]
+    w_long_train_only = w_long[train_idx] if w_long is not None else None
+    w_short_train_only = w_short[train_idx] if w_short is not None else None
+
+    if val_idx.size:
+        X_val = X[val_idx]
+        y_long_val = y_long[val_idx]
+        y_short_val = y_short[val_idx]
+        w_long_val = w_long[val_idx] if w_long is not None else None
+        w_short_val = w_short[val_idx] if w_short is not None else None
+    else:
+        X_val = np.empty((0, X.shape[1]), dtype=X.dtype)
+        y_long_val = np.empty((0,), dtype=y_long.dtype)
+        y_short_val = np.empty((0,), dtype=y_short.dtype)
+        w_long_val = None
+        w_short_val = None
     if args.full_fit:
         X_test = np.empty((0, X.shape[1]), dtype=X.dtype)
     else:
@@ -861,22 +864,24 @@ def main() -> None:
         )
 
         long_test = train_final_and_predict_test(
-            X_train=X_train,
-            y_train=y_long_train,
+            X_train=X_train_only,
+            y_train=y_long_train_only,
             X_test=X_test,
             mask=long_mask,
             xgb_params=long_params,
             update_scale_pos_weight=cfg.update_scale_pos_weight,
-            sample_weight=w_long_train,
+            sample_weight=w_long_train_only,
+            eval_set=(X_val, y_long_val, w_long_val) if val_idx.size else None,
         )
         short_test = train_final_and_predict_test(
-            X_train=X_train,
-            y_train=y_short_train,
+            X_train=X_train_only,
+            y_train=y_short_train_only,
             X_test=X_test,
             mask=short_mask,
             xgb_params=short_params,
             update_scale_pos_weight=cfg.update_scale_pos_weight,
-            sample_weight=w_short_train,
+            sample_weight=w_short_train_only,
+            eval_set=(X_val, y_short_val, w_short_val) if val_idx.size else None,
         )
 
     _summarize_probs(long_oof, "LONG OOF probs")

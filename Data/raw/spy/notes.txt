@@ -1,1 +1,7 @@
-train data is from 2021-01-01 to 2026-01-30
+train data is from 2021-01-01 to 2026-01-29 (inclusive)
+*  Data\raw\spy\2021_to_now_1m_train.parquet
+*  Data\raw\spy\2021_to_now_15m_train.parquet
+
+inference data has a buffer starting from 2026-1-30 onwards
+*  inference_buffer_1m.parquet
+*  inference_buffer_15min.parquet
