@@ -87,6 +87,62 @@ class TradingEnv:
         self.df["ret_next"] = self.df["close"].shift(-1) / self.df["close"] - 1.0
         self.df["is_last_of_day"] = self.df["day_id"].shift(-1) != self.df["day_id"]
 
+        # Precompute dense arrays for fast per-step access.
+        self._close = self.df["close"].to_numpy(dtype=np.float64, copy=False)
+        self._ret_next = self.df["ret_next"].to_numpy(dtype=np.float64, copy=False)
+        self._is_last_of_day = self.df["is_last_of_day"].to_numpy(dtype=bool, copy=False)
+
+        if self.feature_cols is not None:
+            self._feature_matrix = self.df.loc[:, self.feature_cols].to_numpy(
+                dtype=np.float32, copy=False
+            )
+        else:
+            if self.feature_array_col not in self.df.columns:
+                raise ValueError(f"Provide feature_cols or df['{self.feature_array_col}']")
+            raw_arrays = self.df[self.feature_array_col].to_list()
+            if not raw_arrays:
+                raise ValueError("Empty feature array column.")
+            first = np.asarray(raw_arrays[0], dtype=np.float32)
+            if first.ndim != 1:
+                raise ValueError("features must be 1D")
+            base_dim = int(first.shape[0])
+            rows: list[np.ndarray] = [first]
+            for arr in raw_arrays[1:]:
+                vec = np.asarray(arr, dtype=np.float32)
+                if vec.ndim != 1 or int(vec.shape[0]) != base_dim:
+                    raise ValueError("All feature vectors must be 1D and same length.")
+                rows.append(vec)
+            self._feature_matrix = np.stack(rows, axis=0)
+
+        self._base_dim = int(self._feature_matrix.shape[1])
+
+        if self.add_time_features:
+            ts = self.df["timestamp"]
+            minutes = (
+                ts.dt.hour.to_numpy(dtype=np.float32, copy=False) * 60.0
+                + ts.dt.minute.to_numpy(dtype=np.float32, copy=False)
+            )
+            angle = (2.0 * math.pi * minutes) / 1440.0
+            self._time_sin = np.sin(angle).astype(np.float32, copy=False)
+            self._time_cos = np.cos(angle).astype(np.float32, copy=False)
+        else:
+            self._time_sin = np.empty((0,), dtype=np.float32)
+            self._time_cos = np.empty((0,), dtype=np.float32)
+
+        if self.pivot_long_col in self.df.columns:
+            self._pivot_long = self.df[self.pivot_long_col].to_numpy(
+                dtype=np.float64, copy=False
+            )
+        else:
+            self._pivot_long = np.zeros(len(self.df), dtype=np.float64)
+
+        if self.pivot_short_col in self.df.columns:
+            self._pivot_short = self.df[self.pivot_short_col].to_numpy(
+                dtype=np.float64, copy=False
+            )
+        else:
+            self._pivot_short = np.zeros(len(self.df), dtype=np.float64)
+
         self.day_starts = self.df.index[self.df["day_id"].shift(1) != self.df["day_id"]].to_list()
         if len(self.day_starts) == 0:
             raise ValueError("No day boundaries found. Ensure 'day_id' changes across days.")
@@ -103,51 +159,35 @@ class TradingEnv:
         self.obs_dim = self._compute_obs_dim()
 
     def _compute_obs_dim(self) -> int:
-        if self.feature_cols is not None:
-            base_dim = len(self.feature_cols)
-        else:
-            if self.feature_array_col not in self.df.columns:
-                raise ValueError(f"Provide feature_cols or df['{self.feature_array_col}']")
-            first = self.df[self.feature_array_col].dropna().iloc[0]
-            base_dim = int(np.asarray(first).shape[0])
-
         extra = 0
         if self.add_time_features:
             extra += 2
         if self.add_position_features:
             extra += 4
-        return base_dim + extra
+        return self._base_dim + extra
 
     def _get_base_features(self, idx: int) -> np.ndarray:
-        if self.feature_cols is not None:
-            return self.df.loc[idx, self.feature_cols].to_numpy(dtype=np.float32)
-        arr = np.asarray(self.df.loc[idx, self.feature_array_col], dtype=np.float32)
-        if arr.ndim != 1:
-            raise ValueError("features must be 1D")
-        return arr
+        return self._feature_matrix[idx]
 
     def _get_obs(self) -> np.ndarray:
         feats = self._get_base_features(self._i)
-        parts = [feats]
+        obs = np.empty(self.obs_dim, dtype=np.float32)
+        cursor = 0
+        obs[cursor : cursor + self._base_dim] = feats
+        cursor += self._base_dim
 
         if self.add_time_features:
-            s, c = sincos_time_of_day(self.df.loc[self._i, "timestamp"])
-            parts.append(np.array([s, c], dtype=np.float32))
+            obs[cursor] = self._time_sin[self._i]
+            obs[cursor + 1] = self._time_cos[self._i]
+            cursor += 2
 
         if self.add_position_features:
-            parts.append(
-                np.array(
-                    [
-                        float(self.position),
-                        float(self.time_in_pos),
-                        float(self.unrealized_pnl),
-                        float(self.realized_pnl_today),
-                    ],
-                    dtype=np.float32,
-                )
-            )
+            obs[cursor] = float(self.position)
+            obs[cursor + 1] = float(self.time_in_pos)
+            obs[cursor + 2] = float(self.unrealized_pnl)
+            obs[cursor + 3] = float(self.realized_pnl_today)
+            cursor += 4
 
-        obs = np.concatenate(parts, axis=0).astype(np.float32)
         if obs.shape[0] != self.obs_dim:
             raise RuntimeError(f"Obs dim mismatch: got {obs.shape[0]} expected {self.obs_dim}")
         return obs
@@ -169,7 +209,7 @@ class TradingEnv:
         else:
             self.realized_pnl_today = 0.0
             if self.position != 0 and np.isfinite(self.entry_price):
-                price = float(self.df.loc[self._i, "close"])
+                price = float(self._close[self._i])
                 self.unrealized_pnl = (price / self.entry_price - 1.0) * float(self.position)
             else:
                 self.unrealized_pnl = 0.0
@@ -191,12 +231,12 @@ class TradingEnv:
         prev_pos = self.position
         desired_pos = 0 if action == 0 else (1 if action == 1 else -1)
 
-        price = float(self.df.loc[self._i, "close"])
-        ret_next = float(self.df.loc[self._i, "ret_next"])
+        price = float(self._close[self._i])
+        ret_next = float(self._ret_next[self._i])
         ret_next_missing = not np.isfinite(ret_next)
         if ret_next_missing:
             ret_next = 0.0
-        is_last = bool(self.df.loc[self._i, "is_last_of_day"])
+        is_last = bool(self._is_last_of_day[self._i])
 
         reward_costs = 0.0
         reward_pnl = 0.0
@@ -207,15 +247,15 @@ class TradingEnv:
             desired_pos = 0
             flipped = False
 
-        did_trade = desired_pos != prev_pos
+        trade_units = abs(desired_pos - prev_pos)
+        did_trade = trade_units > 0
         if desired_pos != self.position:
-            reward_costs += self._trade_cost_ret(price)
-
-            if flipped:
+            # Cost scales with position change size:
+            # 0 = hold, 1 = enter/exit, 2 = direct flip.
+            leg_cost = self._trade_cost_ret(price) + self.trade_penalty_ret
+            reward_costs += float(trade_units) * leg_cost
+            if trade_units == 2:
                 reward_costs += self.flip_penalty_ret
-                reward_costs += self.trade_penalty_ret * 2.0
-            else:
-                reward_costs += self.trade_penalty_ret
 
             # realize approximate pnl on exit
             if self.position != 0 and np.isfinite(self.entry_price):
@@ -225,17 +265,9 @@ class TradingEnv:
                     reward_pnl += move
                 if self.exit_pivot_bonus_ret:
                     if self.position > 0:
-                        pivot_val = (
-                            float(self.df.loc[self._i, self.pivot_short_col])
-                            if self.pivot_short_col in self.df.columns
-                            else 0.0
-                        )
+                        pivot_val = float(self._pivot_short[self._i])
                     else:
-                        pivot_val = (
-                            float(self.df.loc[self._i, self.pivot_long_col])
-                            if self.pivot_long_col in self.df.columns
-                            else 0.0
-                        )
+                        pivot_val = float(self._pivot_long[self._i])
                     if np.isfinite(pivot_val):
                         reward_pivot_bonus = self.exit_pivot_bonus_ret * pivot_val
                         reward_pnl += reward_pivot_bonus
@@ -295,17 +327,9 @@ class TradingEnv:
                         reward_pnl += move
                     if self.exit_pivot_bonus_ret:
                         if self.position > 0:
-                            pivot_val = (
-                                float(self.df.loc[self._i, self.pivot_short_col])
-                                if self.pivot_short_col in self.df.columns
-                                else 0.0
-                            )
+                            pivot_val = float(self._pivot_short[self._i])
                         else:
-                            pivot_val = (
-                                float(self.df.loc[self._i, self.pivot_long_col])
-                                if self.pivot_long_col in self.df.columns
-                                else 0.0
-                            )
+                            pivot_val = float(self._pivot_long[self._i])
                         if np.isfinite(pivot_val):
                             reward_pivot_bonus = self.exit_pivot_bonus_ret * pivot_val
                             reward_pnl += reward_pivot_bonus

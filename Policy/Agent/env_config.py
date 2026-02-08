@@ -21,7 +21,7 @@ class TradingEnvConfig:
     exit_pivot_bonus_ret: float = 0.0
     force_flat_at_close: bool = False
     carry_positions_across_days: bool = True
-    allow_direct_flip: bool = False
+    allow_direct_flip: bool = True
     seed: int = 7
 
 

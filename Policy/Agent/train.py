@@ -1,5 +1,6 @@
 from __future__ import annotations
 import numpy as np
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,6 +8,19 @@ import torch.optim as optim
 from Agent.env import TradingEnv
 from Agent.model import ActorCritic
 from Agent.buffer import Rollout, compute_gae
+
+
+def _format_duration(seconds: float) -> str:
+    if not np.isfinite(seconds) or seconds < 0:
+        return "unknown"
+    total = int(round(seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m > 0:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
 
 
 def _resolve_device(device: str, verbose: bool) -> torch.device:
@@ -67,6 +81,7 @@ def train_ppo(
     is_vectorized = n_envs > 1
     obs = env.reset(day_ptr=0) if not is_vectorized else env.reset()
     steps_done = 0
+    train_start = time.perf_counter()
 
     while steps_done < total_timesteps:
         obs_buf, act_buf, logp_buf = [], [], []
@@ -222,10 +237,20 @@ def train_ppo(
                 optimizer.step()
 
         if verbose:
+            now = time.perf_counter()
+            elapsed = max(now - train_start, 1e-9)
+            speed = steps_done / elapsed
+            remaining_steps = max(int(total_timesteps) - int(steps_done), 0)
+            eta = (remaining_steps / speed) if speed > 0 else float("inf")
+            progress_pct = 100.0 * min(steps_done, total_timesteps) / max(total_timesteps, 1)
             print(
                 f"steps={steps_done:,} "
+                f"({progress_pct:.2f}%) "
                 f"rollout_avg_reward={float(np.mean(rollout.rewards)):.6f} "
-                f"avg|r|={float(np.mean(np.abs(rollout.rewards))):.6f}"
+                f"avg|r|={float(np.mean(np.abs(rollout.rewards))):.6f} "
+                f"sps={speed:,.1f} "
+                f"elapsed={_format_duration(elapsed)} "
+                f"eta={_format_duration(eta)}"
             )
 
     return model

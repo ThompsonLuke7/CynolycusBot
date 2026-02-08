@@ -218,7 +218,15 @@ def main():
         action="store_false",
         help="Use train/val/test splits and run holdout evaluation.",
     )
+    parser.add_argument(
+        "--reward-mode",
+        type=str,
+        choices=["exit", "mtm"],
+        default="mtm",
+        help="Reward mode: 'exit' (realized PnL on close) or 'mtm' (mark-to-market each bar).",
+    )
     args = parser.parse_args()
+    reward_on_exit = args.reward_mode == "exit"
 
     cfg = PipelineConfig(drop_na=True)
     df = build_agent_training_matrix(cfg, save_parquet=True)
@@ -255,13 +263,14 @@ def main():
                 f"Top NaN counts:\n{nan_counts}"
             )
 
-    num_envs = 8
+    num_envs = 12
     if num_envs > 1:
         train_envs = [
             make_trading_env(
                 df=train_df,
                 feature_cols=feature_cols,
                 carry_positions_across_days=True,
+                reward_on_exit=reward_on_exit,
                 seed=7 + i,
             )
             for i in range(num_envs)
@@ -272,6 +281,7 @@ def main():
             df=train_df,
             feature_cols=feature_cols,
             carry_positions_across_days=True,
+            reward_on_exit=reward_on_exit,
         )
 
     model = train_ppo(
@@ -306,6 +316,7 @@ def main():
         df=test_df,
         feature_cols=feature_cols,
         carry_positions_across_days=True,
+        reward_on_exit=reward_on_exit,
     )
 
     eval_device = "cuda" if torch.cuda.is_available() else "cpu"
