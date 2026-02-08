@@ -1,0 +1,28 @@
+{
+  "side": "long",
+  "best_score": 0.473505039193729,
+  "n_features": 1458,
+  "selected_features": 80,
+  "xgb_params": {
+    "n_estimators": 2000,
+    "max_depth": 3,
+    "learning_rate": 0.03,
+    "subsample": 0.8,
+    "colsample_bytree": 0.7,
+    "objective": "binary:logistic",
+    "eval_metric": [
+      "logloss",
+      "aucpr"
+    ],
+    "min_child_weight": 5,
+    "gamma": 0.0,
+    "reg_lambda": 2.0,
+    "reg_alpha": 0.0,
+    "n_jobs": -1,
+    "scale_pos_weight": 9.96679091833277
+  },
+  "ticker": "$SPY",
+  "dataset_name": "15min",
+  "label_mode": "pivot",
+  "super_pivot_weight": 2.0
+}
