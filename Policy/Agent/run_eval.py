@@ -116,10 +116,11 @@ def _plot_actions(
         exit_long = np.zeros_like(entry_long, dtype=bool)
         exit_short = np.zeros_like(entry_short, dtype=bool)
     else:
-        entry_long = (prev_pos == 0) & (pos_now == 1)
-        entry_short = (prev_pos == 0) & (pos_now == -1)
-        exit_long = (prev_pos == 1) & (pos_now == 0)
-        exit_short = (prev_pos == -1) & (pos_now == 0)
+        # Transition-based markers handle direct flips correctly.
+        entry_long = (pos_now == 1) & (prev_pos != 1)
+        entry_short = (pos_now == -1) & (prev_pos != -1)
+        exit_long = (prev_pos == 1) & (pos_now != 1)
+        exit_short = (prev_pos == -1) & (pos_now != -1)
 
     prob_cols = []
     if "p_pivot_long" in plot_df.columns:
