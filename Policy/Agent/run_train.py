@@ -207,8 +207,16 @@ def main():
     parser = argparse.ArgumentParser(description="Train PPO agent.")
     parser.add_argument(
         "--train-full",
+        dest="train_full",
         action="store_true",
-        help="Train on the full dataset without train/val/test splits.",
+        default=True,
+        help="Train on the full dataset without train/val/test splits (default).",
+    )
+    parser.add_argument(
+        "--use-splits",
+        dest="train_full",
+        action="store_false",
+        help="Use train/val/test splits and run holdout evaluation.",
     )
     args = parser.parse_args()
 
