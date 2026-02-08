@@ -117,7 +117,7 @@ def save_split_indices(
 def main(
     processed_dir: Path | None = None,
     dataset_name: str | None = None,
-    ticker: str = "$SPY",
+    ticker: str = "SPY",
     label_mode: str | None = None,
     train_frac: float = 0.75,
     val_frac: float = 0.15,
