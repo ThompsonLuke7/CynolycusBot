@@ -8,14 +8,16 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+import numpy as np
 import pandas as pd
 from alpaca.data.enums import DataFeed
 
-from .bar_aggregator import OhlcvAggregator
-from .bar_buffer import BarRingBuffer
-from .fetch_intraday import fetch_intraday
-from .live_inference import LiveInferenceEngine, LivePPOAgent
-from .live_stream import AlpacaBarStreamer
+from ..market_data.bar_aggregator import OhlcvAggregator
+from ..market_data.bar_buffer import BarRingBuffer
+from ..market_data.fetch_intraday import fetch_intraday
+from ..inference.live_inference import LiveInferenceEngine, LivePPOAgent
+from ..market_data.live_stream import AlpacaBarStreamer
+from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
 
 
 class LiveBarProcessor:
@@ -76,23 +78,58 @@ def _parse_feed(feed: str) -> DataFeed:
     return DataFeed.IEX
 
 
-def _print_1m(symbol: str, bar: dict, _buffer: BarRingBuffer) -> None:
-    ts = bar.get("timestamp")
-    print(f"{symbol} 1m: {ts} o={bar.get('open')} h={bar.get('high')} l={bar.get('low')} c={bar.get('close')} v={bar.get('volume')}")
+def _format_ts_local(ts: object, *, tz: str = "America/New_York") -> str:
+    if ts is None:
+        return "None"
+    try:
+        t = pd.to_datetime(ts, utc=True, errors="coerce")
+        if pd.isna(t):
+            return str(ts)
+        if tz:
+            t = t.tz_convert(tz)
+        return t.isoformat()
+    except Exception:
+        return str(ts)
+
+
+def _make_1m_handler(*, print_tz: str) -> Callable[[str, dict, BarRingBuffer], None]:
+    def _handler(symbol: str, bar: dict, _buffer: BarRingBuffer) -> None:
+        ts = _format_ts_local(bar.get("timestamp"), tz=print_tz)
+        print(
+            f"{symbol} 1m: {ts} o={bar.get('open')} h={bar.get('high')} "
+            f"l={bar.get('low')} c={bar.get('close')} v={bar.get('volume')}"
+        )
+    return _handler
 
 
 def _make_15m_handler(
     *,
     inference: LiveInferenceEngine,
     print_15m: bool,
+    print_tz: str,
+    order_policies: dict[str, OptionOrderPolicy] | None = None,
 ) -> Callable[[str, dict, BarRingBuffer], None]:
     def _handler(symbol: str, bar15: dict, buffer: BarRingBuffer) -> None:
         if print_15m:
-            ts = bar15.get("timestamp")
-            print(f"{symbol} 15m closed: {ts} o={bar15.get('open')} h={bar15.get('high')} l={bar15.get('low')} c={bar15.get('close')} v={bar15.get('volume')}")
+            ts = _format_ts_local(bar15.get("timestamp"), tz=print_tz)
+            print(
+                f"{symbol} 15m closed: {ts} o={bar15.get('open')} h={bar15.get('high')} "
+                f"l={bar15.get('low')} c={bar15.get('close')} v={bar15.get('volume')}"
+            )
+        if order_policies is not None and symbol in order_policies:
+            order_policies[symbol].on_15m_bar(closed_bar=bar15)
         action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
         if action is not None:
             print(f"{symbol} inference action: {action}")
+            if order_policies is not None and symbol in order_policies:
+                result = order_policies[symbol].on_decision(
+                    action=int(action),
+                    closed_bar=bar15,
+                    update_bar_state=False,
+                )
+                event = str(result.get("event", "unknown"))
+                if event not in {"hold", "no_change"}:
+                    print(f"{symbol} order_policy event={event} details={result}")
     return _handler
 
 
@@ -160,24 +197,177 @@ def _prefill_from_alpaca(
     symbols: list[str],
     start: str,
     tail: int | None,
+    split_dataset_name: str = "15min",
+    split_x_filename: str = "X_15min_tree.parquet",
+    prepend_split_test_warmup: bool = True,
 ) -> None:
     for symbol in symbols:
-        df = fetch_intraday(
+        fetched_df = fetch_intraday(
             ticker=symbol,
             start=start,
             timeframe="1Min",
             limit=100000,
             save_path=None,
         )
-        if df is None or df.empty:
+        frames: list[pd.DataFrame] = []
+        warmup_count = 0
+        if prepend_split_test_warmup:
+            warmup_df = _load_test_split_warmup_1m(
+                symbol=symbol,
+                dataset_name=split_dataset_name,
+                x_filename=split_x_filename,
+            )
+            if warmup_df is not None and not warmup_df.empty:
+                warmup_count = int(len(warmup_df))
+                frames.append(warmup_df)
+
+        if fetched_df is not None and not fetched_df.empty:
+            frames.append(_normalize_prefill_1m_frame(fetched_df, symbol=symbol))
+
+        if not frames:
             print(f"[live] Prefill skipped: no historical bars for {symbol}.")
             continue
+
+        combined = pd.concat(frames, axis=0, ignore_index=True)
+        combined["timestamp"] = pd.to_datetime(combined["timestamp"], utc=True, errors="coerce")
+        combined = combined.dropna(subset=["timestamp"])
+        combined = combined.sort_values("timestamp")
+        combined = combined.drop_duplicates(subset=["symbol", "timestamp"], keep="first")
+
         _prefill_buffers(
             processor=processor,
-            df=df,
+            df=combined,
             symbols=[symbol],
             tail=tail,
         )
+        fetched_count = 0 if fetched_df is None or fetched_df.empty else int(len(fetched_df))
+        print(
+            f"[live] Prefill source breakdown for {symbol}: "
+            f"split_test_warmup={warmup_count:,}, alpaca_fetch={fetched_count:,}"
+        )
+
+
+def _normalize_prefill_1m_frame(df: pd.DataFrame, *, symbol: str) -> pd.DataFrame:
+    out = df.copy()
+    if "timestamp" not in out.columns:
+        if isinstance(out.index, pd.DatetimeIndex):
+            out = out.reset_index().rename(columns={out.index.name or "index": "timestamp"})
+        else:
+            raise ValueError("Prefill source frame must have 'timestamp' column or DatetimeIndex.")
+
+    rename_map = {
+        "Date": "timestamp",
+        "date": "timestamp",
+        "Datetime": "timestamp",
+        "datetime": "timestamp",
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume",
+    }
+    out = out.rename(columns=rename_map)
+    required = ["timestamp", "open", "high", "low", "close", "volume"]
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in prefill source: {missing}")
+
+    out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True, errors="coerce")
+    out = out.dropna(subset=["timestamp"])
+    if "symbol" not in out.columns:
+        out["symbol"] = symbol
+    out["symbol"] = out["symbol"].astype(str).str.upper()
+    return out[["timestamp", "open", "high", "low", "close", "volume", "symbol"]]
+
+
+def _resolve_split_test_idx_path(*, split_root: Path, dataset_name: str, x_filename: str) -> Path | None:
+    x_stem = Path(x_filename).stem
+    candidates = [
+        split_root / dataset_name / x_stem / "test_idx.npy",
+        split_root / dataset_name / "test_idx.npy",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _load_test_split_warmup_1m(
+    *,
+    symbol: str,
+    dataset_name: str,
+    x_filename: str,
+) -> pd.DataFrame | None:
+    try:
+        from Data.load_data import (
+            get_ticker_processed_base_dir,
+            get_ticker_processed_split_dir,
+            get_ticker_raw_dir,
+        )
+        from Data.retrieve_data import normalize_ticker
+
+        clean = normalize_ticker(symbol)
+        processed_root = get_ticker_processed_base_dir(clean)
+        split_root = get_ticker_processed_split_dir(clean)
+        test_idx_path = _resolve_split_test_idx_path(
+            split_root=split_root,
+            dataset_name=dataset_name,
+            x_filename=x_filename,
+        )
+        if test_idx_path is None:
+            return None
+
+        plot_frame_path = processed_root / "datasets" / dataset_name / "plot_frame.parquet"
+        if not plot_frame_path.exists():
+            return None
+        plot_df = pd.read_parquet(plot_frame_path)
+        if not isinstance(plot_df.index, pd.DatetimeIndex):
+            return None
+
+        test_idx = np.load(test_idx_path).astype(int)
+        if test_idx.size == 0:
+            return None
+        test_idx = test_idx[(test_idx >= 0) & (test_idx < len(plot_df))]
+        if test_idx.size == 0:
+            return None
+
+        test_idx = np.sort(test_idx)
+        ts_index = pd.DatetimeIndex(plot_df.index)
+        start_15 = ts_index[int(test_idx[0])]
+        end_15 = ts_index[int(test_idx[-1])]
+        if start_15.tz is None:
+            start_15 = start_15.tz_localize("UTC")
+        if end_15.tz is None:
+            end_15 = end_15.tz_localize("UTC")
+
+        # 15m labels are bar starts; extend end by one 15m interval to capture full bar.
+        start_utc = start_15.tz_convert("UTC")
+        end_utc = (end_15 + pd.Timedelta(minutes=15)).tz_convert("UTC")
+
+        raw_dir = get_ticker_raw_dir(clean)
+        slug = clean.lower()
+        candidates = [
+            raw_dir / "1m_train.parquet",
+            raw_dir / "train.parquet",
+            raw_dir / f"{slug}_intraday_1min.parquet",
+        ]
+        raw_path = next((p for p in candidates if p.exists()), None)
+        if raw_path is None:
+            return None
+
+        raw_df = pd.read_parquet(raw_path)
+        raw_df = _normalize_prefill_1m_frame(raw_df, symbol=clean)
+        raw_df = raw_df[
+            (raw_df["timestamp"] >= start_utc)
+            & (raw_df["timestamp"] <= end_utc)
+        ]
+        if raw_df.empty:
+            return None
+
+        raw_df = raw_df.sort_values("timestamp")
+        return raw_df
+    except Exception:
+        return None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -208,6 +398,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ga-model-root", default="Data/models/ga_xgboost/15min", help="GA-XGB model root.")
     parser.add_argument("--ga-feature-list", default=None, help="Path to GA-XGB feature list txt.")
     parser.add_argument("--ga-dataset-name", default="15min", help="Dataset name for GA-XGB feature list fallback.")
+    parser.add_argument(
+        "--split-x-filename",
+        default="X_15min_tree.parquet",
+        help="Feature filename stem used to locate split indices for test warmup preload.",
+    )
     parser.add_argument("--ga-pivot-label-dir", default="pivots", help="Label dir for pivot GA-XGB models.")
     parser.add_argument("--ga-tb-label-dir", default="tb", help="Label dir for TB GA-XGB models.")
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
@@ -231,6 +426,48 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="If set, only use the most recent N rows per symbol from the prefill file.",
+    )
+    parser.add_argument(
+        "--enable-option-orders",
+        action="store_true",
+        help="Enable option order policy execution on each 15m inference action.",
+    )
+    parser.add_argument(
+        "--no-startup-sync",
+        action="store_true",
+        help="Disable startup broker sync of open option positions into policy state.",
+    )
+    parser.add_argument(
+        "--option-order-qty",
+        type=int,
+        default=1,
+        help="Quantity for option orders sent by order policy.",
+    )
+    parser.add_argument(
+        "--option-atr-mult",
+        type=float,
+        default=1.0,
+        help="ATR multiplier for target strike distance (default 1.0 ATR).",
+    )
+    parser.add_argument(
+        "--option-dte-cutoff",
+        default="14:00",
+        help="Local HH:MM cutoff; before cutoff use 0DTE, otherwise 1DTE.",
+    )
+    parser.add_argument(
+        "--simulate-orders",
+        action="store_true",
+        help="Do not submit to Alpaca; print intended order payloads only.",
+    )
+    parser.add_argument(
+        "--option-no-close-on-flat",
+        action="store_true",
+        help="Do not auto close open option when agent action goes flat.",
+    )
+    parser.add_argument(
+        "--option-no-close-on-flip",
+        action="store_true",
+        help="Do not auto close existing option before flipping side.",
     )
     return parser.parse_args()
 
@@ -300,8 +537,39 @@ def main() -> None:
         assume_tz=args.assume_tz,
     )
 
-    on_1m = _print_1m if args.print_1m else None
-    on_15m = _make_15m_handler(inference=inference, print_15m=args.print_15m)
+    order_policies: dict[str, OptionOrderPolicy] | None = None
+    if args.enable_option_orders:
+        order_policies = {}
+        for symbol in symbols:
+            cfg = OptionOrderPolicyConfig(
+                underlying=symbol,
+                env_file=args.env_file,
+                tz_name=args.tz or "America/New_York",
+                atr_multiplier=float(args.option_atr_mult),
+                dte_cutoff_hhmm=args.option_dte_cutoff,
+                qty=int(args.option_order_qty),
+                close_on_flat=not args.option_no_close_on_flat,
+                close_on_flip=not args.option_no_close_on_flip,
+                submit_orders=not args.simulate_orders,
+            )
+            order_policies[symbol] = OptionOrderPolicy(cfg)
+        mode = "SIMULATED" if args.simulate_orders else "LIVE"
+        print(f"[live] Option order policy enabled ({mode}) for symbols: {', '.join(symbols)}")
+        if not args.no_startup_sync:
+            for symbol in symbols:
+                try:
+                    sync_result = order_policies[symbol].sync_from_broker()
+                    print(f"[live] Startup sync {symbol}: {sync_result}")
+                except Exception as exc:
+                    print(f"[live] Startup sync {symbol} failed: {exc}")
+
+    on_1m = _make_1m_handler(print_tz=args.tz or "America/New_York") if args.print_1m else None
+    on_15m = _make_15m_handler(
+        inference=inference,
+        print_15m=args.print_15m,
+        print_tz=args.tz or "America/New_York",
+        order_policies=order_policies,
+    )
 
     processor = LiveBarProcessor(
         interval_minutes=args.interval,
@@ -329,6 +597,9 @@ def main() -> None:
                 symbols=symbols,
                 start=args.prefill_start,
                 tail=args.prefill_tail,
+                split_dataset_name=args.ga_dataset_name,
+                split_x_filename=args.split_x_filename,
+                prepend_split_test_warmup=True,
             )
         except Exception as exc:
             print(f"[live] Prefill fetch failed: {exc}")

@@ -4,7 +4,7 @@ import argparse
 import json
 from typing import Any
 
-from .options_api import AlpacaOptionsClient
+from ..options.options_api import AlpacaOptionsClient
 
 
 def _print_json(payload: Any) -> None:

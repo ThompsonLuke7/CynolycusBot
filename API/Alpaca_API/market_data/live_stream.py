@@ -9,7 +9,7 @@ from alpaca.data.enums import DataFeed
 from alpaca.data.live import StockDataStream
 from alpaca.data.models import Bar
 
-from .config import AlpacaConfig
+from ..core.config import AlpacaConfig
 
 BarCallback = Callable[[dict], None]
 

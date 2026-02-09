@@ -7,7 +7,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .config import AlpacaConfig
+from ..core.config import AlpacaConfig
 
 
 @dataclass(frozen=True)
@@ -112,6 +112,25 @@ class AlpacaOptionsClient:
           type="call", strike_price_gte=470, strike_price_lte=480
         """
         url = f"{self._trading_base}/v2/options/contracts"
+        return self._request("GET", url, params=params)
+
+    def get_positions(self, **params: Any) -> Any:
+        """
+        GET /v2/positions
+
+        Optional params are passed through as query params.
+        """
+        url = f"{self._trading_base}/v2/positions"
+        return self._request("GET", url, params=params)
+
+    def get_orders(self, **params: Any) -> Any:
+        """
+        GET /v2/orders
+
+        Example params:
+          status="open", limit=100, direction="desc"
+        """
+        url = f"{self._trading_base}/v2/orders"
         return self._request("GET", url, params=params)
 
     def get_option_quotes(self, **params: Any) -> Any:

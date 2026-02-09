@@ -2,7 +2,7 @@ import argparse
 import datetime as dt
 import math
 
-from API.Alpaca_API.fetch_intraday import fetch_intraday
+from API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
 from Data.load_data import (
     ensure_ticker_dirs,
     get_ticker_data_dir,

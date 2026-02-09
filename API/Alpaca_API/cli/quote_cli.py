@@ -5,7 +5,7 @@ import json
 
 from alpaca.data.enums import DataFeed
 
-from .fetch_intraday import fetch_latest_quote
+from ..market_data.fetch_intraday import fetch_latest_quote
 
 
 def _parse_args() -> argparse.Namespace:

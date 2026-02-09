@@ -11,7 +11,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-from .config import AlpacaConfig
+from ..core.config import AlpacaConfig
 from Data.load_data import get_ticker_raw_dir
 from Data.retrieve_data import normalize_ticker
 

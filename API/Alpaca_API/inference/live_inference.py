@@ -5,6 +5,7 @@ import contextlib
 import io
 from pathlib import Path
 from typing import Callable, Optional
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,17 @@ def _resolve_device(device: str) -> torch.device:
             return torch.device("mps")
         return torch.device("cpu")
     return torch.device(device)
+
+
+@contextlib.contextmanager
+def _quiet_feature_ops() -> None:
+    """
+    Suppress noisy indicator/progress output during live/replay feature builds.
+    """
+    sink = io.StringIO()
+    with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink), warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        yield
 
 
 def build_15m(
@@ -105,39 +117,40 @@ def build_tree_feature_frame_from_1m(
 
     feature_timeframes = feature_timeframes or DEFAULT_FEATURE_TIMEFRAMES
 
-    df_15m = resample_ohlcv(
-        df, label_timeframe, label=resample_label, closed=resample_closed
-    )
-    if df_15m.empty:
-        return pd.DataFrame()
+    with _quiet_feature_ops():
+        df_15m = resample_ohlcv(
+            df, label_timeframe, label=resample_label, closed=resample_closed
+        )
+        if df_15m.empty:
+            return pd.DataFrame()
 
-    f15 = _add_feature_set(
-        df_15m,
-        include_custom=include_custom,
-        include_date_features=include_date_features,
-        verbose=False,
-        model="tree",
-    )
-
-    frames = [f15]
-    for tf_label, tf_rule in feature_timeframes.items():
-        tf_df = resample_ohlcv(df, tf_rule, label=resample_label, closed=resample_closed)
-        if tf_df.empty:
-            continue
-        tf_feat = _add_feature_set(
-            tf_df,
+        f15 = _add_feature_set(
+            df_15m,
             include_custom=include_custom,
-            include_date_features=include_htf_date_features,
+            include_date_features=include_date_features,
             verbose=False,
             model="tree",
         )
-        aligned = _align_htf_features(
-            tf_feat,
-            base_index=f15.index,
-            suffix=tf_label,
-            shift_bars=shift_htf_bars,
-        )
-        frames.append(aligned)
+
+        frames = [f15]
+        for tf_label, tf_rule in feature_timeframes.items():
+            tf_df = resample_ohlcv(df, tf_rule, label=resample_label, closed=resample_closed)
+            if tf_df.empty:
+                continue
+            tf_feat = _add_feature_set(
+                tf_df,
+                include_custom=include_custom,
+                include_date_features=include_htf_date_features,
+                verbose=False,
+                model="tree",
+            )
+            aligned = _align_htf_features(
+                tf_feat,
+                base_index=f15.index,
+                suffix=tf_label,
+                shift_bars=shift_htf_bars,
+            )
+            frames.append(aligned)
 
     return pd.concat(frames, axis=1)
 

@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from .live_inference import LiveInferenceEngine, LivePPOAgent
-from .live_runner import LiveBarProcessor
+from ..inference.live_inference import LiveInferenceEngine, LivePPOAgent
+from .live_runner import LiveBarProcessor, _format_ts_local, _load_test_split_warmup_1m
+from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
 
 
 def _load_history(path: Path, *, assume_tz: str = "UTC") -> pd.DataFrame:
@@ -52,18 +53,35 @@ def _apply_regular_hours(df: pd.DataFrame, *, tz: str = "America/New_York") -> p
     return df.loc[regular_mask].copy()
 
 
-def _make_15m_handler(*, inference: LiveInferenceEngine, print_15m: bool):
+def _make_15m_handler(
+    *,
+    inference: LiveInferenceEngine,
+    print_15m: bool,
+    print_tz: str,
+    order_policies: dict[str, OptionOrderPolicy] | None = None,
+):
     def _handler(symbol: str, bar15: dict, buffer) -> None:
         if print_15m:
-            ts = bar15.get("timestamp")
+            ts = _format_ts_local(bar15.get("timestamp"), tz=print_tz)
             print(
                 f"{symbol} 15m closed: {ts} "
                 f"o={bar15.get('open')} h={bar15.get('high')} "
                 f"l={bar15.get('low')} c={bar15.get('close')} v={bar15.get('volume')}"
             )
+        if order_policies is not None and symbol in order_policies:
+            order_policies[symbol].on_15m_bar(closed_bar=bar15)
         action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
         if action is not None:
             print(f"{symbol} inference action: {action}")
+            if order_policies is not None and symbol in order_policies:
+                result = order_policies[symbol].on_decision(
+                    action=int(action),
+                    closed_bar=bar15,
+                    update_bar_state=False,
+                )
+                event = str(result.get("event", "unknown"))
+                if event not in {"hold", "no_change"}:
+                    print(f"{symbol} order_policy event={event} details={result}")
 
     return _handler
 
@@ -102,8 +120,57 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--session-close", default="16:00", help="Session close for time features.")
     parser.add_argument("--ga-model-root", default="Data/models/ga_xgboost/15min", help="GA-XGB model root.")
     parser.add_argument("--ga-feature-list", default=None, help="Path to GA-XGB feature list txt.")
+    parser.add_argument("--ga-dataset-name", default="15min", help="Dataset name for split-warmup lookup.")
+    parser.add_argument(
+        "--split-x-filename",
+        default="X_15min_tree.parquet",
+        help="Feature filename stem used to locate split indices for test warmup preload.",
+    )
     parser.add_argument("--ga-pivot-label-dir", default="pivots", help="Label dir for pivot GA-XGB models.")
     parser.add_argument("--ga-tb-label-dir", default="tb", help="Label dir for TB GA-XGB models.")
+    parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
+    parser.add_argument(
+        "--enable-option-orders",
+        action="store_true",
+        help="Enable option order policy execution on each 15m inference action.",
+    )
+    parser.add_argument(
+        "--option-order-qty",
+        type=int,
+        default=1,
+        help="Quantity for option orders sent by order policy.",
+    )
+    parser.add_argument(
+        "--option-atr-mult",
+        type=float,
+        default=1.0,
+        help="ATR multiplier for target strike distance (default 1.0 ATR).",
+    )
+    parser.add_argument(
+        "--option-dte-cutoff",
+        default="14:00",
+        help="Local HH:MM cutoff; before cutoff use 0DTE, otherwise 1DTE.",
+    )
+    parser.add_argument(
+        "--simulate-orders",
+        action="store_true",
+        help="Do not submit to Alpaca; print intended order payloads only.",
+    )
+    parser.add_argument(
+        "--option-no-close-on-flat",
+        action="store_true",
+        help="Do not auto close open option when agent action goes flat.",
+    )
+    parser.add_argument(
+        "--option-no-close-on-flip",
+        action="store_true",
+        help="Do not auto close existing option before flipping side.",
+    )
+    parser.add_argument(
+        "--no-prepend-split-test-warmup",
+        action="store_true",
+        help="Disable prepending test-split 1m warmup bars before replay data.",
+    )
     return parser.parse_args()
 
 
@@ -128,6 +195,34 @@ def main() -> None:
     if args.end:
         end = pd.to_datetime(args.end, utc=True, errors="coerce")
         df = df[df["timestamp"] <= end]
+
+    if not args.no_prepend_split_test_warmup:
+        warm_frames = []
+        for symbol in symbols:
+            warm_df = _load_test_split_warmup_1m(
+                symbol=symbol,
+                dataset_name=args.ga_dataset_name,
+                x_filename=args.split_x_filename,
+            )
+            if warm_df is None or warm_df.empty:
+                continue
+            if args.regular_only:
+                warm_df = _apply_regular_hours(warm_df, tz=args.tz)
+            warm_frames.append(warm_df)
+        if warm_frames:
+            warmup = pd.concat(warm_frames, axis=0, ignore_index=True)
+            df = pd.concat([warmup, df], axis=0, ignore_index=True)
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            df = df.dropna(subset=["timestamp"])
+            df = df.sort_values("timestamp")
+            # Prefer bars from explicit replay file when timestamps overlap.
+            df = df.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+            print(
+                f"[replay] Prepended split-test warmup bars: {len(warmup):,} "
+                f"(combined rows: {len(df):,})"
+            )
+        else:
+            print("[replay] Split-test warmup not found; replaying provided data only.")
 
     required = ["timestamp", "open", "high", "low", "close", "volume", "symbol"]
     missing = [c for c in required if c not in df.columns]
@@ -168,15 +263,40 @@ def main() -> None:
         assume_tz=args.assume_tz,
     )
 
+    order_policies: dict[str, OptionOrderPolicy] | None = None
+    if args.enable_option_orders:
+        order_policies = {}
+        for symbol in symbols:
+            cfg = OptionOrderPolicyConfig(
+                underlying=symbol,
+                env_file=args.env_file,
+                tz_name=args.tz or "America/New_York",
+                atr_multiplier=float(args.option_atr_mult),
+                dte_cutoff_hhmm=args.option_dte_cutoff,
+                qty=int(args.option_order_qty),
+                close_on_flat=not args.option_no_close_on_flat,
+                close_on_flip=not args.option_no_close_on_flip,
+                submit_orders=not args.simulate_orders,
+            )
+            order_policies[symbol] = OptionOrderPolicy(cfg)
+        mode = "SIMULATED" if args.simulate_orders else "LIVE"
+        print(f"[replay] Option order policy enabled ({mode}) for symbols: {', '.join(symbols)}")
+
     processor = LiveBarProcessor(
         interval_minutes=15,
         buffer_size=args.buffer_size,
         agg_label=args.resample_label,
         on_1m=(lambda symbol, bar, _buf: print(
-            f"{symbol} 1m: {bar.get('timestamp')} o={bar.get('open')} "
-            f"h={bar.get('high')} l={bar.get('low')} c={bar.get('close')} v={bar.get('volume')}"
+            f"{symbol} 1m: {_format_ts_local(bar.get('timestamp'), tz=args.tz or 'America/New_York')} "
+            f"o={bar.get('open')} h={bar.get('high')} l={bar.get('low')} "
+            f"c={bar.get('close')} v={bar.get('volume')}"
         )) if args.print_1m else None,
-        on_15m_close=_make_15m_handler(inference=inference, print_15m=args.print_15m),
+        on_15m_close=_make_15m_handler(
+            inference=inference,
+            print_15m=args.print_15m,
+            print_tz=args.tz or "America/New_York",
+            order_policies=order_policies,
+        ),
     )
 
     count = 0
