@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 import math
 import re
+import time as time_mod
 from zoneinfo import ZoneInfo
 
 from API.Alpaca_API.options.options_api import AlpacaOptionsClient
@@ -50,6 +51,11 @@ class OptionOrderPolicyConfig:
     close_on_flip: bool = True
     submit_orders: bool = True
     long_options_only: bool = True
+    verify_submitted_orders: bool = True
+    verify_timeout_sec: float = 15.0
+    verify_poll_sec: float = 0.75
+    resubmit_on_terminal_fail: bool = True
+    max_resubmit_attempts: int = 1
 
 
 class OptionOrderPolicy:
@@ -228,6 +234,150 @@ class OptionOrderPolicy:
             return [x for x in resp if isinstance(x, dict)]
         return []
 
+    @staticmethod
+    def _status_key(status: Any) -> str:
+        return str(status or "").strip().lower()
+
+    @staticmethod
+    def _order_is_success(status: Any) -> bool:
+        return OptionOrderPolicy._status_key(status) in {"filled", "partially_filled"}
+
+    @staticmethod
+    def _order_is_terminal_fail(status: Any) -> bool:
+        return OptionOrderPolicy._status_key(status) in {
+            "canceled",
+            "cancelled",
+            "expired",
+            "rejected",
+            "failed",
+            "suspended",
+        }
+
+    def _has_open_long_position(self, *, symbol: str) -> bool:
+        try:
+            resp = self._client.get_positions()
+            positions = self._extract_positions(resp)
+        except Exception:
+            return False
+
+        target = str(symbol).strip().upper()
+        for p in positions:
+            sym = str(p.get("symbol", "")).strip().upper()
+            if sym != target:
+                continue
+            side_raw = str(p.get("side", "")).strip().lower()
+            qty_val = _as_float(p.get("qty"))
+            if self.cfg.long_options_only:
+                if side_raw == "short":
+                    continue
+                if side_raw == "long":
+                    return True
+                if math.isfinite(qty_val) and qty_val > 0:
+                    return True
+                continue
+            if side_raw in {"long", "short"}:
+                return True
+            if math.isfinite(qty_val) and abs(qty_val) > 0.0:
+                return True
+        return False
+
+    def _verify_order_submission(
+        self,
+        *,
+        submitted_resp: dict[str, Any],
+        symbol: str,
+        intent: str,
+        logger: Callable[[str], None],
+    ) -> dict[str, Any]:
+        order_id = str(submitted_resp.get("id", "")).strip()
+        last = submitted_resp
+        status = self._status_key(last.get("status"))
+        timeout_sec = max(1.0, float(self.cfg.verify_timeout_sec))
+        poll_sec = max(0.2, float(self.cfg.verify_poll_sec))
+        deadline = time_mod.monotonic() + timeout_sec
+
+        if self._order_is_success(status):
+            return {
+                "verified": True,
+                "status": status,
+                "order_id": order_id,
+                "via": "submit_response",
+                "retryable": False,
+                "order": last,
+            }
+        if self._order_is_terminal_fail(status):
+            return {
+                "verified": False,
+                "status": status,
+                "order_id": order_id,
+                "via": "submit_response",
+                "retryable": True,
+                "order": last,
+            }
+
+        while time_mod.monotonic() < deadline and order_id:
+            time_mod.sleep(poll_sec)
+            try:
+                current = self._client.get_order(order_id)
+                if isinstance(current, dict):
+                    last = current
+                    status = self._status_key(current.get("status"))
+            except Exception as exc:
+                logger(f"[order_policy] verify poll warning order_id={order_id}: {exc}")
+                continue
+
+            if self._order_is_success(status):
+                return {
+                    "verified": True,
+                    "status": status,
+                    "order_id": order_id,
+                    "via": "order_poll",
+                    "retryable": False,
+                    "order": last,
+                }
+            if self._order_is_terminal_fail(status):
+                return {
+                    "verified": False,
+                    "status": status,
+                    "order_id": order_id,
+                    "via": "order_poll",
+                    "retryable": True,
+                    "order": last,
+                }
+
+        # Timeout fallback: reconcile with actual positions to reduce false negatives.
+        try:
+            has_pos = self._has_open_long_position(symbol=symbol)
+            if intent == "open" and has_pos:
+                return {
+                    "verified": True,
+                    "status": status or "unknown",
+                    "order_id": order_id,
+                    "via": "positions_reconcile",
+                    "retryable": False,
+                    "order": last,
+                }
+            if intent == "close" and not has_pos:
+                return {
+                    "verified": True,
+                    "status": status or "unknown",
+                    "order_id": order_id,
+                    "via": "positions_reconcile",
+                    "retryable": False,
+                    "order": last,
+                }
+        except Exception:
+            pass
+
+        return {
+            "verified": False,
+            "status": status or "unknown",
+            "order_id": order_id,
+            "via": "timeout",
+            "retryable": False,
+            "order": last,
+        }
+
     def _select_contract(
         self,
         *,
@@ -312,26 +462,168 @@ class OptionOrderPolicy:
             }
             logger(f"[order_policy] SIMULATED ORDER {payload}")
             return {"simulated": True, "payload": payload}
+        max_attempts = max(0, int(self.cfg.max_resubmit_attempts))
+        attempts = max_attempts + 1
+        last_verify: dict[str, Any] | None = None
+        for attempt in range(1, attempts + 1):
+            resp = self._client.submit_option_order(
+                symbol=symbol,
+                qty=order_qty,
+                side=side_key,
+                order_type=self.cfg.order_type,
+                time_in_force=self.cfg.time_in_force,
+            )
+            status = self._status_key(resp.get("status") if isinstance(resp, dict) else None)
+            oid = str(resp.get("id", "")).strip() if isinstance(resp, dict) else ""
+            logger(
+                "[order_policy] ORDER SUBMITTED "
+                f"intent={intent_key} side={side_key} qty={order_qty} symbol={symbol} "
+                f"order_id={oid or 'n/a'} status={status or 'n/a'} attempt={attempt}/{attempts}"
+            )
 
-        resp = self._client.submit_option_order(
-            symbol=symbol,
-            qty=order_qty,
-            side=side_key,
-            order_type=self.cfg.order_type,
-            time_in_force=self.cfg.time_in_force,
-        )
-        logger(
-            "[order_policy] ORDER SUBMITTED "
-            f"intent={intent_key} side={side_key} qty={order_qty} symbol={symbol}"
-        )
+            verify_result: dict[str, Any] | None = None
+            if self.cfg.verify_submitted_orders:
+                verify_result = self._verify_order_submission(
+                    submitted_resp=resp if isinstance(resp, dict) else {},
+                    symbol=symbol,
+                    intent=intent_key,
+                    logger=logger,
+                )
+                last_verify = verify_result
+                if verify_result.get("verified"):
+                    logger(
+                        "[order_policy] ORDER VERIFIED "
+                        f"intent={intent_key} symbol={symbol} "
+                        f"status={verify_result.get('status')} via={verify_result.get('via')}"
+                    )
+                    return {
+                        "simulated": False,
+                        "intent": intent_key,
+                        "response": resp,
+                        "verification": verify_result,
+                        "side": side_key,
+                        "qty": order_qty,
+                        "symbol": symbol,
+                    }
+
+                retryable = bool(verify_result.get("retryable"))
+                can_retry = (
+                    self.cfg.resubmit_on_terminal_fail
+                    and retryable
+                    and attempt < attempts
+                )
+                logger(
+                    "[order_policy] ORDER NOT VERIFIED "
+                    f"intent={intent_key} symbol={symbol} "
+                    f"status={verify_result.get('status')} via={verify_result.get('via')} "
+                    f"retrying={can_retry}"
+                )
+                if can_retry:
+                    continue
+
+                raise RuntimeError(
+                    "order_not_verified:"
+                    f" intent={intent_key} symbol={symbol} status={verify_result.get('status')} "
+                    f"via={verify_result.get('via')} order_id={verify_result.get('order_id')}"
+                )
+
+            return {
+                "simulated": False,
+                "intent": intent_key,
+                "response": resp,
+                "side": side_key,
+                "qty": order_qty,
+                "symbol": symbol,
+            }
+
+        raise RuntimeError(f"order_submit_failed intent={intent_key} symbol={symbol} verify={last_verify}")
+
+    def snapshot_state(self) -> dict[str, Any]:
+        """
+        Return a lightweight policy state snapshot for monitoring UIs.
+        """
+        atr = self._compute_atr()
         return {
-            "simulated": False,
-            "intent": intent_key,
-            "response": resp,
-            "side": side_key,
-            "qty": order_qty,
-            "symbol": symbol,
+            "underlying": self.cfg.underlying,
+            "position": int(self._pos),
+            "open_symbol": self._open_symbol,
+            "atr": float(atr) if math.isfinite(atr) else None,
+            "bars_15m": int(len(self._bars_15m)),
+            "submit_orders": bool(self.cfg.submit_orders),
+            "qty": int(self.cfg.qty),
         }
+
+    def snapshot_broker_state(self, *, orders_limit: int = 20) -> dict[str, Any]:
+        """
+        Pull current broker-side open positions and recent orders for this underlying.
+        """
+        under = self.cfg.underlying.strip().upper()
+        out: dict[str, Any] = {
+            "underlying": under,
+            "positions": [],
+            "recent_orders": [],
+            "ok": True,
+        }
+        try:
+            pos_resp = self._client.get_positions()
+            positions = self._extract_positions(pos_resp)
+            filtered_positions: list[dict[str, Any]] = []
+            for p in positions:
+                symbol = str(p.get("symbol", "")).strip().upper()
+                if not symbol.startswith(under):
+                    continue
+                qty_val = _as_float(p.get("qty"))
+                avg_entry = _as_float(p.get("avg_entry_price"))
+                market_value = _as_float(p.get("market_value"))
+                unrealized = _as_float(p.get("unrealized_pl"))
+                filtered_positions.append(
+                    {
+                        "symbol": symbol,
+                        "side": str(p.get("side", "")).strip().lower() or None,
+                        "qty": qty_val if math.isfinite(qty_val) else None,
+                        "avg_entry_price": avg_entry if math.isfinite(avg_entry) else None,
+                        "market_value": market_value if math.isfinite(market_value) else None,
+                        "unrealized_pl": unrealized if math.isfinite(unrealized) else None,
+                    }
+                )
+            out["positions"] = filtered_positions
+        except Exception as exc:
+            out["ok"] = False
+            out["positions_error"] = str(exc)
+
+        try:
+            limit = max(1, int(orders_limit))
+            ord_resp = self._client.get_orders(status="all", limit=limit, direction="desc")
+            orders: list[dict[str, Any]] = []
+            if isinstance(ord_resp, list):
+                raw_orders = [x for x in ord_resp if isinstance(x, dict)]
+            elif isinstance(ord_resp, dict):
+                data = ord_resp.get("orders")
+                raw_orders = [x for x in data if isinstance(x, dict)] if isinstance(data, list) else []
+            else:
+                raw_orders = []
+            for o in raw_orders:
+                symbol = str(o.get("symbol", "")).strip().upper()
+                if not symbol.startswith(under):
+                    continue
+                orders.append(
+                    {
+                        "id": str(o.get("id", "")).strip() or None,
+                        "symbol": symbol,
+                        "side": str(o.get("side", "")).strip().lower() or None,
+                        "status": str(o.get("status", "")).strip().lower() or None,
+                        "qty": str(o.get("qty", "")).strip() or None,
+                        "filled_qty": str(o.get("filled_qty", "")).strip() or None,
+                        "filled_avg_price": str(o.get("filled_avg_price", "")).strip() or None,
+                        "submitted_at": str(o.get("submitted_at", "")).strip() or None,
+                        "filled_at": str(o.get("filled_at", "")).strip() or None,
+                    }
+                )
+            out["recent_orders"] = orders
+        except Exception as exc:
+            out["ok"] = False
+            out["orders_error"] = str(exc)
+        return out
 
     def on_decision(
         self,

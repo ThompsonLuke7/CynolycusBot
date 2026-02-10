@@ -22,6 +22,12 @@ class TradingEnvConfig:
     force_flat_at_close: bool = False
     carry_positions_across_days: bool = True
     allow_direct_flip: bool = True
+    use_convex_reward: bool = False
+    convex_k1: float = 1.0
+    convex_k2: float = 0.5
+    convex_theta: float = 0.01
+    convex_mfe_thresholds: tuple[float, ...] = (1.0, 2.0, 3.0)
+    convex_mfe_bonuses: tuple[float, ...] = (0.1, 0.2, 0.3)
     seed: int = 7
 
 

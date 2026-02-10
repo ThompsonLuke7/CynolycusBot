@@ -372,6 +372,43 @@ class LiveGAXGBPredictor:
         dmat = xgb.DMatrix(x_sel)
         return float(model.predict(dmat)[0])
 
+    def _predict_many(
+        self,
+        x_mat: np.ndarray,
+        mask: np.ndarray,
+        model: xgb.Booster,
+    ) -> np.ndarray:
+        if mask.size != x_mat.shape[1]:
+            raise ValueError("Mask length does not match feature matrix width.")
+        x_sel = x_mat[:, mask]
+        dmat = xgb.DMatrix(x_sel)
+        return model.predict(dmat).astype(np.float32, copy=False)
+
+    def predict_frame(self, x_df: pd.DataFrame) -> pd.DataFrame:
+        if x_df.empty:
+            return pd.DataFrame(index=x_df.index)
+
+        x_aligned = x_df.reindex(columns=self._feature_list)
+        x_mat = x_aligned.to_numpy(dtype=np.float32)
+        if x_mat.ndim != 2:
+            x_mat = np.atleast_2d(x_mat)
+
+        out: dict[str, np.ndarray] = {}
+        if self._include_pivot and self._pivot_long and self._pivot_short:
+            mask, model = self._pivot_long
+            out["p_pivot_long"] = self._predict_many(x_mat, mask, model)
+            mask, model = self._pivot_short
+            out["p_pivot_short"] = self._predict_many(x_mat, mask, model)
+        if self._include_tb and self._tb_long and self._tb_short:
+            mask, model = self._tb_long
+            out["p_tb_long"] = self._predict_many(x_mat, mask, model)
+            mask, model = self._tb_short
+            out["p_tb_short"] = self._predict_many(x_mat, mask, model)
+
+        if not out:
+            return pd.DataFrame(index=x_aligned.index)
+        return pd.DataFrame(out, index=x_aligned.index)
+
     def predict_row(
         self,
         x_df: pd.DataFrame,
@@ -381,29 +418,14 @@ class LiveGAXGBPredictor:
         if x_df.empty:
             return {}
 
-        x_aligned = x_df.reindex(columns=self._feature_list)
-
-        if target_ts is not None and target_ts in x_aligned.index:
-            row = x_aligned.loc[target_ts]
-            if isinstance(row, pd.DataFrame):
-                row = row.iloc[-1]
+        if target_ts is not None and target_ts in x_df.index:
+            row_df = x_df.loc[[target_ts]]
         else:
-            row = x_aligned.iloc[-1]
-
-        x_row = row.to_numpy(dtype=np.float32)
-
-        out: dict[str, float] = {}
-        if self._include_pivot and self._pivot_long and self._pivot_short:
-            mask, model = self._pivot_long
-            out["p_pivot_long"] = self._predict_one(x_row, mask, model)
-            mask, model = self._pivot_short
-            out["p_pivot_short"] = self._predict_one(x_row, mask, model)
-        if self._include_tb and self._tb_long and self._tb_short:
-            mask, model = self._tb_long
-            out["p_tb_long"] = self._predict_one(x_row, mask, model)
-            mask, model = self._tb_short
-            out["p_tb_short"] = self._predict_one(x_row, mask, model)
-        return out
+            row_df = x_df.tail(1)
+        pred = self.predict_frame(row_df)
+        if pred.empty:
+            return {}
+        return {k: float(v) for k, v in pred.iloc[-1].to_dict().items()}
 
 
 @dataclass
@@ -436,6 +458,8 @@ class LivePPOAgent:
         ga_feature_list_path: str | None = None,
         ga_pivot_label_dir: str = "pivots",
         ga_tb_label_dir: str = "tb",
+        ga_probs_frame: pd.DataFrame | None = None,
+        ga_probs_mode: str = "xgb",
         resample_label: str = "left",
         resample_closed: str = "left",
         label_timeframe_rule: str = "15min",
@@ -462,6 +486,10 @@ class LivePPOAgent:
         self._resample_label = resample_label
         self._resample_closed = resample_closed
         self._label_timeframe_rule = label_timeframe_rule
+        self._ga_probs_frame = ga_probs_frame
+        self._ga_probs_mode = str(ga_probs_mode or "xgb").strip().lower()
+        self._warned_ga_frame = False
+        self._last_probs: dict[str, float | None] | None = None
 
         state_dict = ckpt["state_dict"]
         has_head_mlps = any(
@@ -492,6 +520,42 @@ class LivePPOAgent:
                 pivot_label_dir=ga_pivot_label_dir,
                 tb_label_dir=ga_tb_label_dir,
             )
+
+    def _apply_ga_probs_frame(self, df_15m: pd.DataFrame) -> pd.DataFrame:
+        frame = self._ga_probs_frame
+        if frame is None or frame.empty:
+            return df_15m
+        df = df_15m.copy()
+        idx = frame.index
+        if not isinstance(idx, pd.DatetimeIndex):
+            return df
+        base = frame
+        if idx.tz is None:
+            base = base.copy()
+            base.index = base.index.tz_localize(self._assume_tz)
+        if self._tz is not None:
+            base = base.copy()
+            base.index = base.index.tz_convert(self._tz)
+        aligned = base.reindex(df.index)
+        if aligned.empty and not self._warned_ga_frame:
+            print("[live] GA prob frame had no overlapping timestamps with replay bars.")
+            self._warned_ga_frame = True
+            return df
+        cols = [c for c in ("p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short") if c in aligned.columns]
+        if not cols:
+            return df
+        for col in cols:
+            if self._ga_probs_mode == "frame":
+                df[col] = aligned[col].astype(float)
+            else:
+                # Hybrid: fill missing only.
+                if col in df.columns:
+                    df[col] = df[col].fillna(aligned[col].astype(float))
+                else:
+                    df[col] = aligned[col].astype(float)
+            if col in df.columns:
+                df[col] = df[col].fillna(self._fill_missing_prob)
+        return df
 
     def _infer_extra_flags(self) -> tuple[bool, bool]:
         extra = self._obs_dim - len(self._feature_cols)
@@ -560,6 +624,16 @@ class LivePPOAgent:
             raise RuntimeError(f"Obs dim mismatch: got {obs.shape[0]} expected {self._obs_dim}")
         return obs
 
+    def _mark_to_market(self, price: float) -> None:
+        if self._state.position != 0 and np.isfinite(self._state.entry_price):
+            self._state.unrealized_pnl = (
+                price / self._state.entry_price - 1.0
+            ) * float(self._state.position)
+        else:
+            self._state.unrealized_pnl = 0.0
+            if self._state.position == 0:
+                self._state.time_in_pos = 0
+
     def _select_row(self, df: pd.DataFrame, target_ts: pd.Timestamp | None) -> pd.Series:
         if target_ts is not None:
             ts = self._normalize_ts(pd.to_datetime(target_ts, utc=True, errors="coerce"))
@@ -576,8 +650,10 @@ class LivePPOAgent:
         df_15m: pd.DataFrame,
         target_ts: pd.Timestamp | None,
     ) -> pd.DataFrame:
+        if self._ga_probs_mode == "frame" and self._ga_probs_frame is not None:
+            return self._apply_ga_probs_frame(df_15m)
         if self._ga_predictor is None:
-            return df_15m
+            return self._apply_ga_probs_frame(df_15m)
 
         try:
             norm_target = None
@@ -595,22 +671,21 @@ class LivePPOAgent:
             )
             if x_tree.empty:
                 return df_15m
-            probs = self._ga_predictor.predict_row(x_tree, target_ts=norm_target)
-            if not probs:
+            probs_df = self._ga_predictor.predict_frame(x_tree)
+            if probs_df.empty:
                 return df_15m
             df = df_15m.copy()
-            target_idx = self._resolve_target_index(df, norm_target)
-            for key, val in probs.items():
-                df.loc[target_idx, key] = float(val)
+            for key in probs_df.columns:
+                df[key] = probs_df[key].reindex(df.index)
             for col in ("p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short"):
                 if col in df.columns:
                     df[col] = df[col].fillna(self._fill_missing_prob)
-            return df
+            return self._apply_ga_probs_frame(df)
         except Exception as exc:
             if not self._warned_ga_error:
                 print(f"[live] GA-XGB inference failed: {exc}")
                 self._warned_ga_error = True
-            return df_15m
+            return self._apply_ga_probs_frame(df_15m)
 
     def act(
         self,
@@ -648,6 +723,15 @@ class LivePPOAgent:
 
         row_full = self._select_row(feat_df, target_ts)
         price = float(row_full.get("close", np.nan))
+        self._last_probs = {
+            "p_pivot_long": float(row_full.get("p_pivot_long", np.nan)),
+            "p_pivot_short": float(row_full.get("p_pivot_short", np.nan)),
+            "p_tb_long": float(row_full.get("p_tb_long", np.nan)),
+            "p_tb_short": float(row_full.get("p_tb_short", np.nan)),
+        }
+        for key, val in list(self._last_probs.items()):
+            if not np.isfinite(val):
+                self._last_probs[key] = None
         row = row_full.reindex(self._feature_cols)
         if self._skip_on_nan and row.isna().any():
             return None
@@ -663,6 +747,8 @@ class LivePPOAgent:
             return None
 
         self._update_day_state(ts, price)
+        # Align observation state with current bar before action selection.
+        self._mark_to_market(price)
         obs = self._build_obs(features, ts)
         x = torch.as_tensor(obs, dtype=torch.float32, device=self._device).unsqueeze(0)
         logits, _ = self._model(x)
@@ -692,13 +778,29 @@ class LivePPOAgent:
             self._state.position = desired_pos
 
         if self._state.position != 0 and np.isfinite(self._state.entry_price):
-            self._state.unrealized_pnl = (
-                price / self._state.entry_price - 1.0
-            ) * float(self._state.position)
             self._state.time_in_pos += 1
         else:
             self._state.unrealized_pnl = 0.0
             self._state.time_in_pos = 0
+
+    def snapshot_state(self) -> dict[str, object]:
+        """
+        Return a JSON-safe snapshot of the internal live position state.
+        """
+        last_day = self._state.last_session_day
+        entry = self._state.entry_price
+        return {
+            "position": int(self._state.position),
+            "entry_price": float(entry) if np.isfinite(entry) else None,
+            "time_in_position": int(self._state.time_in_pos),
+            "realized_pnl_today": float(self._state.realized_pnl_today),
+            "unrealized_pnl": float(self._state.unrealized_pnl),
+            "last_session_day": last_day.isoformat() if isinstance(last_day, pd.Timestamp) else None,
+            "last_probs": self._last_probs,
+        }
+
+    def last_probs(self) -> dict[str, float | None] | None:
+        return self._last_probs
 
 
 class LiveInferenceEngine:

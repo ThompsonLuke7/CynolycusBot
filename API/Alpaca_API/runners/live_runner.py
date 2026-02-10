@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import math
 import queue as queue_mod
 import signal
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -180,15 +182,19 @@ def _prefill_buffers(
         return
 
     df = df.sort_values("timestamp")
+    effective_tail = int(tail) if tail is not None else int(processor._buffer_size)
     for symbol in symbols:
         sym_df = df[df["symbol"] == symbol]
         if sym_df.empty:
             continue
-        if tail is not None:
-            sym_df = sym_df.tail(int(tail))
+        if effective_tail > 0:
+            sym_df = sym_df.tail(effective_tail)
         bars = sym_df[required + ["symbol"]].to_dict("records")
         processor.prefill(symbol, bars)
-        print(f"[live] Prefilled {len(bars):,} bars for {symbol}.")
+        print(
+            f"[live] Prefilled {len(bars):,} bars for {symbol} "
+            f"(cap={effective_tail:,})."
+        )
 
 
 def _prefill_from_alpaca(
@@ -201,6 +207,7 @@ def _prefill_from_alpaca(
     split_x_filename: str = "X_15min_tree.parquet",
     prepend_split_test_warmup: bool = True,
 ) -> None:
+    effective_tail = int(tail) if tail is not None else int(processor._buffer_size)
     for symbol in symbols:
         fetched_df = fetch_intraday(
             ticker=symbol,
@@ -210,7 +217,8 @@ def _prefill_from_alpaca(
             save_path=None,
         )
         frames: list[pd.DataFrame] = []
-        warmup_count = 0
+        raw_warmup_count = 0
+        used_warmup_count = 0
         if prepend_split_test_warmup:
             warmup_df = _load_test_split_warmup_1m(
                 symbol=symbol,
@@ -218,11 +226,21 @@ def _prefill_from_alpaca(
                 x_filename=split_x_filename,
             )
             if warmup_df is not None and not warmup_df.empty:
-                warmup_count = int(len(warmup_df))
+                raw_warmup_count = int(len(warmup_df))
+                if effective_tail > 0:
+                    warmup_df = warmup_df.tail(effective_tail)
+                used_warmup_count = int(len(warmup_df))
                 frames.append(warmup_df)
 
+        raw_fetched_count = 0
+        used_fetched_count = 0
         if fetched_df is not None and not fetched_df.empty:
-            frames.append(_normalize_prefill_1m_frame(fetched_df, symbol=symbol))
+            raw_fetched_count = int(len(fetched_df))
+            fetched_df = _normalize_prefill_1m_frame(fetched_df, symbol=symbol)
+            if effective_tail > 0:
+                fetched_df = fetched_df.tail(effective_tail)
+            used_fetched_count = int(len(fetched_df))
+            frames.append(fetched_df)
 
         if not frames:
             print(f"[live] Prefill skipped: no historical bars for {symbol}.")
@@ -233,17 +251,21 @@ def _prefill_from_alpaca(
         combined = combined.dropna(subset=["timestamp"])
         combined = combined.sort_values("timestamp")
         combined = combined.drop_duplicates(subset=["symbol", "timestamp"], keep="first")
+        if effective_tail > 0:
+            combined = combined.tail(effective_tail)
+        used_combined_count = int(len(combined))
 
         _prefill_buffers(
             processor=processor,
             df=combined,
             symbols=[symbol],
-            tail=tail,
+            tail=effective_tail,
         )
-        fetched_count = 0 if fetched_df is None or fetched_df.empty else int(len(fetched_df))
         print(
             f"[live] Prefill source breakdown for {symbol}: "
-            f"split_test_warmup={warmup_count:,}, alpaca_fetch={fetched_count:,}"
+            f"split_test_warmup(raw={raw_warmup_count:,}, used={used_warmup_count:,}), "
+            f"alpaca_fetch(raw={raw_fetched_count:,}, used={used_fetched_count:,}), "
+            f"combined_used={used_combined_count:,}, cap={effective_tail:,}"
         )
 
 
@@ -278,6 +300,141 @@ def _normalize_prefill_1m_frame(df: pd.DataFrame, *, symbol: str) -> pd.DataFram
         out["symbol"] = symbol
     out["symbol"] = out["symbol"].astype(str).str.upper()
     return out[["timestamp", "open", "high", "low", "close", "volume", "symbol"]]
+
+
+def _warmup_order_policies_from_prefill(
+    *,
+    processor: LiveBarProcessor,
+    order_policies: dict[str, OptionOrderPolicy],
+    symbols: list[str],
+) -> dict[str, dict]:
+    """
+    Seed option-policy ATR state from prefilled 1m history so orders can be
+    evaluated on the first live actionable bar.
+    """
+    latest_closed_by_symbol: dict[str, dict] = {}
+    for symbol in symbols:
+        policy = order_policies.get(symbol)
+        buffer = processor._buffers.get(symbol)
+        if policy is None or buffer is None:
+            continue
+
+        df = buffer.to_dataframe()
+        if df is None or df.empty:
+            continue
+
+        # BarRingBuffer.to_dataframe() returns timestamp as index, so materialize
+        # it as a column for deterministic warmup processing.
+        if "timestamp" not in df.columns:
+            df = df.reset_index()
+
+        required = {"timestamp", "open", "high", "low", "close", "volume"}
+        if not required.issubset(df.columns):
+            continue
+
+        sym_df = df.sort_values("timestamp")
+        agg = OhlcvAggregator(
+            interval_minutes=processor._interval_minutes,
+            label=processor._agg_label,
+        )
+        closed_count = 0
+        last_atr = float("nan")
+        last_closed: dict | None = None
+        for row in sym_df.itertuples(index=False):
+            ts = getattr(row, "timestamp", None)
+            if ts is None:
+                continue
+            if not isinstance(ts, datetime):
+                ts = pd.to_datetime(ts, utc=True, errors="coerce")
+                if pd.isna(ts):
+                    continue
+            bar = {
+                "timestamp": ts,
+                "open": float(getattr(row, "open")),
+                "high": float(getattr(row, "high")),
+                "low": float(getattr(row, "low")),
+                "close": float(getattr(row, "close")),
+                "volume": float(getattr(row, "volume")),
+                "symbol": symbol,
+            }
+            closed, _current = agg.update(bar)
+            if closed:
+                last_closed = closed
+                last_atr = policy.on_15m_bar(closed_bar=closed)
+                closed_count += 1
+
+        if closed_count == 0:
+            print(f"[live] Prefill ATR warmup for {symbol}: no completed 15m bars.")
+            continue
+        if last_closed is not None:
+            latest_closed_by_symbol[symbol] = last_closed
+
+        ready = math.isfinite(last_atr)
+        print(
+            f"[live] Prefill ATR warmup for {symbol}: "
+            f"seeded_15m_bars={closed_count:,}, atr_ready={ready}, atr={last_atr}"
+        )
+    return latest_closed_by_symbol
+
+
+def _run_startup_catchup_decision(
+    *,
+    processor: LiveBarProcessor,
+    inference: LiveInferenceEngine,
+    order_policies: dict[str, OptionOrderPolicy],
+    latest_closed_by_symbol: dict[str, dict],
+    symbols: list[str],
+    print_tz: str,
+    max_age_min: int,
+) -> None:
+    now_utc = pd.Timestamp.now(tz="UTC")
+    for symbol in symbols:
+        bar15 = latest_closed_by_symbol.get(symbol)
+        if not bar15:
+            print(f"[live] Startup catch-up {symbol}: skipped (no completed 15m bar).")
+            continue
+
+        ts = pd.to_datetime(bar15.get("timestamp"), utc=True, errors="coerce")
+        if pd.isna(ts):
+            print(f"[live] Startup catch-up {symbol}: skipped (invalid bar timestamp).")
+            continue
+
+        if max_age_min > 0:
+            age_min = float((now_utc - ts).total_seconds() / 60.0)
+            if age_min > float(max_age_min):
+                print(
+                    f"[live] Startup catch-up {symbol}: skipped (latest 15m bar age "
+                    f"{age_min:.1f}m > {max_age_min}m)."
+                )
+                continue
+
+        buffer = processor._buffers.get(symbol)
+        if buffer is None:
+            print(f"[live] Startup catch-up {symbol}: skipped (no prefilled buffer).")
+            continue
+
+        df_1m = buffer.to_dataframe()
+        if df_1m.empty:
+            print(f"[live] Startup catch-up {symbol}: skipped (empty prefilled buffer).")
+            continue
+
+        action = inference.on_15m_close(df_1m=df_1m, closed_bar=bar15)
+        if action is None:
+            print(f"[live] Startup catch-up {symbol}: no action (insufficient features/bars).")
+            continue
+
+        print(
+            f"[live] Startup catch-up {symbol}: ts={_format_ts_local(ts, tz=print_tz)} "
+            f"action={int(action)}"
+        )
+        result = order_policies[symbol].on_decision(
+            action=int(action),
+            closed_bar=bar15,
+            update_bar_state=False,
+        )
+        event = str(result.get("event", "unknown"))
+        if event not in {"hold", "no_change"}:
+            print(f"[live] Startup catch-up {symbol} order_policy event={event} details={result}")
 
 
 def _resolve_split_test_idx_path(*, split_root: Path, dataset_name: str, x_filename: str) -> Path | None:
@@ -425,7 +582,7 @@ def _parse_args() -> argparse.Namespace:
         "--prefill-tail",
         type=int,
         default=None,
-        help="If set, only use the most recent N rows per symbol from the prefill file.",
+        help="If set, use the most recent N rows per symbol; otherwise defaults to --buffer-size.",
     )
     parser.add_argument(
         "--enable-option-orders",
@@ -468,6 +625,17 @@ def _parse_args() -> argparse.Namespace:
         "--option-no-close-on-flip",
         action="store_true",
         help="Do not auto close existing option before flipping side.",
+    )
+    parser.add_argument(
+        "--startup-catchup-order",
+        action="store_true",
+        help="On startup, evaluate the latest completed 15m bar from prefill and place any missed order immediately.",
+    )
+    parser.add_argument(
+        "--startup-catchup-max-age-min",
+        type=int,
+        default=120,
+        help="Skip startup catch-up if latest completed 15m bar is older than this many minutes (<=0 disables age guard).",
     )
     return parser.parse_args()
 
@@ -603,6 +771,23 @@ def main() -> None:
             )
         except Exception as exc:
             print(f"[live] Prefill fetch failed: {exc}")
+    latest_closed_by_symbol: dict[str, dict] = {}
+    if order_policies:
+        latest_closed_by_symbol = _warmup_order_policies_from_prefill(
+            processor=processor,
+            order_policies=order_policies,
+            symbols=symbols,
+        )
+        if args.startup_catchup_order:
+            _run_startup_catchup_decision(
+                processor=processor,
+                inference=inference,
+                order_policies=order_policies,
+                latest_closed_by_symbol=latest_closed_by_symbol,
+                symbols=symbols,
+                print_tz=args.tz or "America/New_York",
+                max_age_min=int(args.startup_catchup_max_age_min),
+            )
 
     streamer = AlpacaBarStreamer(
         symbols=symbols,

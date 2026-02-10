@@ -42,6 +42,12 @@ class TradingEnv:
         force_flat_at_close: bool = True,
         carry_positions_across_days: bool = False,
         allow_direct_flip: bool = True,
+        use_convex_reward: bool = False,
+        convex_k1: float = 1.0,
+        convex_k2: float = 0.5,
+        convex_theta: float = 0.01,
+        convex_mfe_thresholds: Tuple[float, ...] = (1.0, 2.0, 3.0),
+        convex_mfe_bonuses: Tuple[float, ...] = (0.1, 0.2, 0.3),
         seed: int = 7,
     ):
         self.df = df.copy()
@@ -80,6 +86,19 @@ class TradingEnv:
         self.force_flat_at_close = bool(force_flat_at_close)
         self.carry_positions_across_days = bool(carry_positions_across_days)
         self.allow_direct_flip = bool(allow_direct_flip)
+        self.use_convex_reward = bool(use_convex_reward)
+        self.convex_k1 = float(convex_k1)
+        self.convex_k2 = float(convex_k2)
+        self.convex_theta = float(convex_theta)
+        self.convex_mfe_thresholds = tuple(float(x) for x in convex_mfe_thresholds)
+        if not self.convex_mfe_thresholds:
+            self.convex_mfe_thresholds = ()
+        raw_bonuses = list(float(x) for x in convex_mfe_bonuses)
+        if not raw_bonuses and self.convex_mfe_thresholds:
+            raw_bonuses = [0.0 for _ in self.convex_mfe_thresholds]
+        if len(raw_bonuses) < len(self.convex_mfe_thresholds):
+            raw_bonuses.extend([raw_bonuses[-1] if raw_bonuses else 0.0] * (len(self.convex_mfe_thresholds) - len(raw_bonuses)))
+        self.convex_mfe_bonuses = tuple(raw_bonuses[: len(self.convex_mfe_thresholds)])
 
         self.rng = np.random.default_rng(seed)
 
@@ -91,6 +110,10 @@ class TradingEnv:
         self._close = self.df["close"].to_numpy(dtype=np.float64, copy=False)
         self._ret_next = self.df["ret_next"].to_numpy(dtype=np.float64, copy=False)
         self._is_last_of_day = self.df["is_last_of_day"].to_numpy(dtype=bool, copy=False)
+        self._high = self.df["high"].to_numpy(dtype=np.float64, copy=False) if "high" in self.df.columns else self._close
+        self._low = self.df["low"].to_numpy(dtype=np.float64, copy=False) if "low" in self.df.columns else self._close
+        self._atr = self.df["atr"].to_numpy(dtype=np.float64, copy=False) if "atr" in self.df.columns else None
+        self._atr_pct = self.df["atr_pct"].to_numpy(dtype=np.float64, copy=False) if "atr_pct" in self.df.columns else None
 
         if self.feature_cols is not None:
             self._feature_matrix = self.df.loc[:, self.feature_cols].to_numpy(
@@ -155,6 +178,8 @@ class TradingEnv:
         self.time_in_pos = 0
         self.unrealized_pnl = 0.0
         self.realized_pnl_today = 0.0
+        self._mfe_max_atr = 0.0
+        self._mfe_awarded: set[int] = set()
 
         self.obs_dim = self._compute_obs_dim()
 
@@ -206,6 +231,8 @@ class TradingEnv:
             self.time_in_pos = 0
             self.unrealized_pnl = 0.0
             self.realized_pnl_today = 0.0
+            self._mfe_max_atr = 0.0
+            self._mfe_awarded.clear()
         else:
             self.realized_pnl_today = 0.0
             if self.position != 0 and np.isfinite(self.entry_price):
@@ -214,6 +241,8 @@ class TradingEnv:
             else:
                 self.unrealized_pnl = 0.0
                 self.time_in_pos = 0
+                self._mfe_max_atr = 0.0
+                self._mfe_awarded.clear()
         return self._get_obs()
 
     def _trade_cost_ret(self, price: float) -> float:
@@ -241,6 +270,10 @@ class TradingEnv:
         reward_costs = 0.0
         reward_pnl = 0.0
         reward_pivot_bonus = 0.0
+        reward_convex = 0.0
+        convex_term = 0.0
+        mfe_bonus = 0.0
+        mfe_atr = None
         flipped = (self.position == 1 and desired_pos == -1) or (self.position == -1 and desired_pos == 1)
         blocked_flip = flipped and not self.allow_direct_flip
         if blocked_flip:
@@ -261,7 +294,7 @@ class TradingEnv:
             if self.position != 0 and np.isfinite(self.entry_price):
                 move = (price / self.entry_price - 1.0) * float(self.position)
                 self.realized_pnl_today += move
-                if self.reward_on_exit or self.reward_exit_bonus:
+                if (self.reward_on_exit or self.reward_exit_bonus) and not self.use_convex_reward:
                     reward_pnl += move
                 if self.exit_pivot_bonus_ret:
                     if self.position > 0:
@@ -270,7 +303,8 @@ class TradingEnv:
                         pivot_val = float(self._pivot_long[self._i])
                     if np.isfinite(pivot_val):
                         reward_pivot_bonus = self.exit_pivot_bonus_ret * pivot_val
-                        reward_pnl += reward_pivot_bonus
+                        if not self.use_convex_reward:
+                            reward_pnl += reward_pivot_bonus
 
             if desired_pos != 0:
                 self.entry_price = price
@@ -280,9 +314,43 @@ class TradingEnv:
                 self.time_in_pos = 0
 
             self.position = desired_pos
+            self._mfe_max_atr = 0.0
+            self._mfe_awarded.clear()
 
+        if self.use_convex_reward:
+            r = ret_next
+            delta_s = price * ret_next
+            atr = np.nan
+            if self._atr is not None:
+                atr = float(self._atr[self._i])
+            elif self._atr_pct is not None:
+                atr = float(self._atr_pct[self._i]) * price
+            if not np.isfinite(atr) or atr <= 0.0:
+                atr = np.nan
+            if np.isfinite(atr) and atr > 0.0:
+                convex_term = (delta_s / atr) ** 2
+            reward_convex = (float(self.position) * self.convex_k1 * r) + (abs(self.position) * self.convex_k2 * convex_term)
+            reward_convex -= self.convex_theta * abs(self.position)
+            reward_pnl = reward_convex
+            if self.position != 0 and np.isfinite(atr) and np.isfinite(self.entry_price):
+                high = float(self._high[self._i])
+                low = float(self._low[self._i])
+                if np.isfinite(high) and np.isfinite(low):
+                    if self.position > 0:
+                        mfe_atr = (high - self.entry_price) / atr
+                    else:
+                        mfe_atr = (self.entry_price - low) / atr
+                    if np.isfinite(mfe_atr):
+                        if mfe_atr > self._mfe_max_atr:
+                            self._mfe_max_atr = float(mfe_atr)
+                        for idx, th in enumerate(self.convex_mfe_thresholds):
+                            if idx not in self._mfe_awarded and self._mfe_max_atr >= th:
+                                bonus = self.convex_mfe_bonuses[idx]
+                                mfe_bonus += bonus
+                                self._mfe_awarded.add(idx)
+            reward_pnl += mfe_bonus
         # pnl reward for holding through next bar (only in mark-to-market mode)
-        if not self.reward_on_exit:
+        elif not self.reward_on_exit:
             reward_pnl = float(self.position) * ret_next
 
         if self.position != 0 and np.isfinite(self.entry_price):
@@ -307,6 +375,10 @@ class TradingEnv:
             "reward_pnl": reward_pnl,
             "reward_costs": reward_costs,
             "reward_pivot_bonus": reward_pivot_bonus,
+            "reward_convex": reward_convex if self.use_convex_reward else None,
+            "convex_term": convex_term if self.use_convex_reward else None,
+            "mfe_atr": float(mfe_atr) if mfe_atr is not None and np.isfinite(mfe_atr) else None,
+            "mfe_bonus": mfe_bonus if self.use_convex_reward else None,
             "realized_pnl_today": self.realized_pnl_today,
             "unrealized_pnl": self.unrealized_pnl,
             "flip_blocked": blocked_flip,
@@ -323,7 +395,7 @@ class TradingEnv:
                 if np.isfinite(self.entry_price):
                     move = (price / self.entry_price - 1.0) * float(self.position)
                     self.realized_pnl_today += move
-                    if self.reward_on_exit or self.reward_exit_bonus:
+                    if (self.reward_on_exit or self.reward_exit_bonus) and not self.use_convex_reward:
                         reward_pnl += move
                     if self.exit_pivot_bonus_ret:
                         if self.position > 0:
@@ -332,7 +404,8 @@ class TradingEnv:
                             pivot_val = float(self._pivot_long[self._i])
                         if np.isfinite(pivot_val):
                             reward_pivot_bonus = self.exit_pivot_bonus_ret * pivot_val
-                            reward_pnl += reward_pivot_bonus
+                            if not self.use_convex_reward:
+                                reward_pnl += reward_pivot_bonus
 
                 self.position = 0
                 self.entry_price = np.nan
@@ -342,6 +415,10 @@ class TradingEnv:
                 info["reward_pnl"] = reward_pnl
                 info["reward_costs"] = reward_costs
                 info["reward_pivot_bonus"] = reward_pivot_bonus
+                info["reward_convex"] = reward_convex if self.use_convex_reward else None
+                info["convex_term"] = convex_term if self.use_convex_reward else None
+                info["mfe_atr"] = float(mfe_atr) if mfe_atr is not None and np.isfinite(mfe_atr) else None
+                info["mfe_bonus"] = mfe_bonus if self.use_convex_reward else None
                 info["pos"] = self.position
                 info["realized_pnl_today"] = self.realized_pnl_today
                 info["unrealized_pnl"] = self.unrealized_pnl

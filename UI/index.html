@@ -1,0 +1,873 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cynolycus Live Dashboard</title>
+  <style>
+    :root {
+      --bg: #08131f;
+      --panel: #0f1f31;
+      --panel-2: #122941;
+      --text: #d7e4f7;
+      --muted: #90a5c2;
+      --good: #2ccf7a;
+      --bad: #f05c52;
+      --accent: #4cb8ff;
+      --gold: #f0b04f;
+      --line: #1f3a56;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI Variable", "Bahnschrift", "Trebuchet MS", sans-serif;
+      background: radial-gradient(1200px 700px at 10% 0%, #173455 0%, var(--bg) 45%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .page {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 18px 18px 28px;
+      display: grid;
+      gap: 14px;
+    }
+    .top {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: center;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.35rem;
+      letter-spacing: 0.4px;
+      font-weight: 700;
+    }
+    .status {
+      font-size: 0.82rem;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #173452;
+      color: #c7ddfa;
+      border: 1px solid #2d5783;
+      white-space: nowrap;
+    }
+    .status.running { background: #123a2c; border-color: #2b8f65; color: #cef6e3; }
+    .status.error { background: #4a1f20; border-color: #a84648; color: #ffd8d8; }
+
+    .card {
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
+      gap: 8px;
+      align-items: end;
+    }
+    .field {
+      display: grid;
+      gap: 4px;
+    }
+    .field label {
+      font-size: 0.73rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    input, select {
+      width: 100%;
+      background: #0a1725;
+      border: 1px solid #2b4868;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px;
+    }
+    .checks {
+      grid-column: 1 / span 5;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 6px 10px;
+      padding-bottom: 2px;
+      font-size: 0.86rem;
+      color: var(--muted);
+    }
+    .checks label {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      line-height: 1.15;
+      min-width: 0;
+      word-break: break-word;
+    }
+    .checks input[type="checkbox"] {
+      margin-top: 1px;
+      width: 14px;
+      height: 14px;
+      flex: 0 0 auto;
+    }
+    .btns {
+      grid-column: 6;
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    button {
+      border: 1px solid #3f6694;
+      background: #153153;
+      color: #e5f1ff;
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:hover { filter: brightness(1.08); }
+    button.stop { background: #4b1f23; border-color: #8e3f48; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 2.1fr 1fr;
+      gap: 12px;
+    }
+    .chart-wrap { height: 650px; }
+    canvas { width: 100%; height: 100%; background: #0a1725; border-radius: 8px; border: 1px solid #233e5b; }
+    .meta {
+      display: grid;
+      gap: 8px;
+      font-family: "Consolas", "Cascadia Code", monospace;
+      font-size: 0.84rem;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      padding: 6px 8px;
+      border: 1px solid #2a4767;
+      border-radius: 8px;
+      background: #0b1b2b;
+    }
+    .kv span:last-child { color: #f2f7ff; }
+    .logs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .list {
+      max-height: 260px;
+      overflow: auto;
+      border: 1px solid #284665;
+      border-radius: 8px;
+      background: #091624;
+      padding: 8px;
+      font-family: "Consolas", "Cascadia Code", monospace;
+      font-size: 0.78rem;
+      white-space: pre-wrap;
+    }
+    .line { padding: 4px 0; border-bottom: 1px solid #1a324c; }
+    .line:last-child { border-bottom: 0; }
+    .up { color: var(--good); }
+    .down { color: var(--bad); }
+    @media (max-width: 980px) {
+      .controls { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+      .checks { grid-column: 1 / -1; }
+      .btns { grid-column: 1 / -1; justify-content: flex-start; }
+      .grid { grid-template-columns: 1fr; }
+      .logs { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="top">
+      <h1>Live / Replay Runner Dashboard</h1>
+      <div id="statusBadge" class="status">idle</div>
+    </div>
+
+    <div class="card">
+      <div class="controls">
+        <div class="field"><label>Mode</label><select id="runnerMode"><option value="live">Live</option><option value="replay">Replay</option></select></div>
+        <div class="field"><label>Symbols</label><input id="symbols" value="SPY" /></div>
+        <div class="field"><label>Feed</label><select id="feed"><option value="IEX">IEX</option><option value="SIP">SIP</option></select></div>
+        <div class="field"><label>Interval (min)</label><input id="interval" type="number" value="15" min="1" /></div>
+        <div class="field"><label>Model Path</label><input id="modelPath" value="Data/outputs/agent/ppo_model.pt" /></div>
+        <div class="field"><label>Live Prefill Start</label><input id="prefillStart" value="2026-01-30" /></div>
+        <div class="field"><label>Env File</label><input id="envFile" value=".env" /></div>
+        <div class="field"><label>Replay Data Path</label><input id="replayDataPath" value="Data/raw/spy/inference_buffer_1m.parquet" /></div>
+        <div class="field"><label>Replay Start</label><input id="replayStart" placeholder="optional ISO datetime" /></div>
+        <div class="field"><label>Replay End</label><input id="replayEnd" placeholder="optional ISO datetime" /></div>
+        <div class="field"><label>Replay Sleep (sec)</label><input id="replaySleep" type="number" step="0.01" min="0" value="0.0" /></div>
+        <div class="field"><label>Replay Max Bars</label><input id="replayMaxBars" type="number" min="1" placeholder="all" /></div>
+        <div class="checks">
+          <label><input id="enableOrders" type="checkbox" /> Option Orders</label>
+          <label><input id="simulateOrders" type="checkbox" checked /> Simulate</label>
+          <label><input id="noAgent" type="checkbox" /> No Agent</label>
+          <label><input id="replayRegularOnly" type="checkbox" /> Replay RTH Only</label>
+          <label><input id="replayNoWarmup" type="checkbox" /> Replay No Warmup</label>
+        </div>
+        <div class="btns">
+          <button id="refreshBtn">Refresh</button>
+          <button id="startBtn">Start</button>
+          <button id="stopBtn" class="stop">Stop</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;">
+          <div style="font-weight:700;">Price Buffer</div>
+          <select id="symbolSelect"></select>
+        </div>
+        <div class="chart-wrap"><canvas id="chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div style="font-weight:700;padding-bottom:8px;">Agent / Position State</div>
+        <div id="meta" class="meta"></div>
+        <div style="font-weight:700;padding:12px 0 8px;">Broker Positions / Orders</div>
+        <div id="brokerPanel" class="list"></div>
+      </div>
+    </div>
+
+    <div class="logs">
+      <div class="card">
+        <div style="font-weight:700;padding-bottom:8px;">Trade Events</div>
+        <div id="tradeList" class="list"></div>
+      </div>
+      <div class="card">
+        <div style="font-weight:700;padding-bottom:8px;">Live Log</div>
+        <div id="logList" class="list"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const state = { running: false, status_message: "idle", symbols: [], bars_1m: {}, bars_15m: {}, last_actions: {}, action_events: [], policy_state: {}, broker_state: {}, trade_events: [], logs: [], agent_state: null };
+    let eventSource = null;
+    const MAX_POINTS = 900;
+
+    const statusBadge = document.getElementById("statusBadge");
+    const symbolSelect = document.getElementById("symbolSelect");
+    const chart = document.getElementById("chart");
+    const metaEl = document.getElementById("meta");
+    const brokerPanel = document.getElementById("brokerPanel");
+    const tradeList = document.getElementById("tradeList");
+    const logList = document.getElementById("logList");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+
+    function applyModeUi() {
+      const mode = document.getElementById("runnerMode").value;
+      const replay = mode === "replay";
+      const simulate = document.getElementById("simulateOrders");
+      if (replay) simulate.checked = true;
+      simulate.disabled = replay;
+      document.getElementById("feed").disabled = replay;
+      document.getElementById("prefillStart").disabled = replay;
+      const replayIds = ["replayDataPath", "replayStart", "replayEnd", "replaySleep", "replayMaxBars", "replayRegularOnly", "replayNoWarmup"];
+      replayIds.forEach((id) => { document.getElementById(id).disabled = !replay; });
+    }
+
+    function updateStatus(text, mode = "idle") {
+      statusBadge.textContent = text;
+      statusBadge.className = `status ${mode}`;
+    }
+
+    async function api(path, method = "GET", payload = null) {
+      let res;
+      try {
+        res = await fetch(path, {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body: payload ? JSON.stringify(payload) : undefined
+        });
+      } catch (err) {
+        return { ok: false, status: 0, error: String(err) };
+      }
+
+      let body = null;
+      let text = "";
+      try {
+        body = await res.json();
+      } catch (_err) {
+        try { text = await res.text(); } catch (__err) { text = ""; }
+      }
+
+      if (!res.ok) {
+        const err = (body && (body.error || body.message)) || text || `HTTP ${res.status}`;
+        return { ok: false, status: res.status, error: err, data: body };
+      }
+
+      if (body && typeof body === "object" && body.ok === false) {
+        return { ok: false, status: res.status, error: body.error || "request failed", data: body };
+      }
+      return { ok: true, status: res.status, data: body, state: body?.state };
+    }
+
+    function pushLimited(bucket, symbol, item) {
+      if (!bucket[symbol]) bucket[symbol] = [];
+      bucket[symbol].push(item);
+      if (bucket[symbol].length > MAX_POINTS) bucket[symbol] = bucket[symbol].slice(-MAX_POINTS);
+    }
+
+    function syncSymbolSelect() {
+      const symbols = state.symbols || [];
+      if (!symbols.length) return;
+      const prev = symbolSelect.value;
+      symbolSelect.innerHTML = symbols.map(s => `<option value="${s}">${s}</option>`).join("");
+      if (symbols.includes(prev)) symbolSelect.value = prev;
+    }
+
+    function renderMeta() {
+      const sym = symbolSelect.value || state.symbols?.[0] || "SPY";
+      const action = state.last_actions?.[sym];
+      const pol = state.policy_state?.[sym] || {};
+      const brk = state.broker_state?.[sym] || {};
+      const ag = state.agent_state || {};
+      const recentActs = (state.action_events || []).filter((x) => x && x.symbol === sym).slice(-120);
+      const c0 = recentActs.filter((x) => Number(x.action) === 0).length;
+      const c1 = recentActs.filter((x) => Number(x.action) === 1).length;
+      const c2 = recentActs.filter((x) => Number(x.action) === 2).length;
+      const rows = [
+        ["Symbol", sym],
+        ["Last Action", action ? String(action.action) : "-"],
+        ["Action Time", action ? String(action.timestamp || "-") : "-"],
+        ["Action Mix (0/1/2)", `${c0}/${c1}/${c2}`],
+        ["Policy Pos", pol.position ?? "-"],
+        ["Open Contract", pol.open_symbol || "-"],
+        ["Policy ATR", pol.atr ?? "-"],
+        ["Agent Pos", ag.position ?? "-"],
+        ["Entry Price", ag.entry_price ?? "-"],
+        ["Unrealized PnL", ag.unrealized_pnl ?? "-"],
+        ["Realized Today", ag.realized_pnl_today ?? "-"],
+        ["Broker Positions", (brk.positions || []).length],
+        ["Recent Orders", (brk.recent_orders || []).length]
+      ];
+      metaEl.innerHTML = rows.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("");
+    }
+
+    function renderTrades() {
+      const items = (state.trade_events || []).slice(-80).reverse();
+      tradeList.innerHTML = items.map(x => {
+        const ev = x?.result?.event || "n/a";
+        const cls = ev === "enter" || ev === "flip" ? "up" : (ev === "error" ? "down" : "");
+        return `<div class="line ${cls}">${x.timestamp || ""} ${x.symbol || ""} ${ev} ${JSON.stringify(x.result || {})}</div>`;
+      }).join("");
+    }
+
+    function renderBroker() {
+      const sym = symbolSelect.value || state.symbols?.[0] || "SPY";
+      const snap = state.broker_state?.[sym] || {};
+      const pos = snap.positions || [];
+      const orders = snap.recent_orders || [];
+      const chunks = [];
+      if (!pos.length) chunks.push(`<div class="line">positions: none</div>`);
+      else {
+        pos.forEach(p => {
+          chunks.push(`<div class="line up">pos ${p.symbol || ""} qty=${p.qty ?? "-"} side=${p.side || "-"} uPnL=${p.unrealized_pl ?? "-"}</div>`);
+        });
+      }
+      if (!orders.length) chunks.push(`<div class="line">orders: none</div>`);
+      else {
+        orders.slice(0, 10).forEach(o => {
+          const cls = (o.status === "filled" || o.status === "partially_filled") ? "up" : (o.status === "rejected" || o.status === "canceled" ? "down" : "");
+          chunks.push(`<div class="line ${cls}">ord ${o.symbol || ""} ${o.side || "-"} qty=${o.qty || "-"} status=${o.status || "-"} filled=${o.filled_qty || "-"}</div>`);
+        });
+      }
+      brokerPanel.innerHTML = chunks.join("");
+    }
+
+    function renderLogs() {
+      const items = (state.logs || []).slice(-120).reverse();
+      logList.innerHTML = items.map(x => `<div class="line">${x.symbol || "SYSTEM"} ${x.message || ""}</div>`).join("");
+    }
+
+    function fmtPrice(x) {
+      return Number.isFinite(x) ? x.toFixed(2) : "-";
+    }
+
+    function fmtTickTime(dateObj, spanMs) {
+      if (!(dateObj instanceof Date) || Number.isNaN(dateObj.getTime())) return "";
+      if (spanMs > 24 * 60 * 60 * 1000) {
+        return `${String(dateObj.getMonth() + 1).padStart(2, "0")}/${String(dateObj.getDate()).padStart(2, "0")} ${String(dateObj.getHours()).padStart(2, "0")}:${String(dateObj.getMinutes()).padStart(2, "0")}`;
+      }
+      return `${String(dateObj.getHours()).padStart(2, "0")}:${String(dateObj.getMinutes()).padStart(2, "0")}`;
+    }
+
+    function nearestIndexByTime(series, targetMs) {
+      let bestIdx = 0;
+      let bestDiff = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < series.length; i += 1) {
+        const d = Math.abs(series[i].t.getTime() - targetMs);
+        if (d < bestDiff) {
+          bestDiff = d;
+          bestIdx = i;
+        }
+      }
+      return bestIdx;
+    }
+
+    function renderChart() {
+      const sym = symbolSelect.value || state.symbols?.[0];
+      const one = (state.bars_1m?.[sym] || []).slice(-220).map((x) => ({
+        t: new Date(x.timestamp),
+        open: Number(x.open),
+        high: Number(x.high),
+        low: Number(x.low),
+        close: Number(x.close)
+      })).filter((x) => Number.isFinite(x.open) && Number.isFinite(x.high) && Number.isFinite(x.low) && Number.isFinite(x.close) && !Number.isNaN(x.t.getTime()));
+      const fifteen = (state.bars_15m?.[sym] || []).slice(-140).map((x) => ({
+        t: new Date(x.timestamp),
+        open: Number(x.open),
+        high: Number(x.high),
+        low: Number(x.low),
+        close: Number(x.close)
+      })).filter((x) => Number.isFinite(x.open) && Number.isFinite(x.high) && Number.isFinite(x.low) && Number.isFinite(x.close) && !Number.isNaN(x.t.getTime()));
+      const probs = (state.bars_15m?.[sym] || []).slice(-140).map((x) => ({
+        t: new Date(x.timestamp),
+        p_pivot_long: Number(x.p_pivot_long),
+        p_pivot_short: Number(x.p_pivot_short),
+        p_tb_long: Number(x.p_tb_long),
+        p_tb_short: Number(x.p_tb_short)
+      })).filter((x) => !Number.isNaN(x.t.getTime()));
+
+      const ctx = chart.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const w = chart.clientWidth;
+      const h = chart.clientHeight;
+      chart.width = Math.floor(w * dpr);
+      chart.height = Math.floor(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#0a1725";
+      ctx.fillRect(0, 0, w, h);
+
+      if (!one.length && !fifteen.length) return;
+
+      const left = 58;
+      const right = 12;
+      const top = 14;
+      const bottom = 28;
+      const gap = 24;
+      const plotW = Math.max(1, w - left - right);
+      const totalH = Math.max(1, h - top - bottom - gap * 2);
+      const pane1H = Math.max(1, totalH * 0.45);
+      const pane2H = Math.max(1, totalH * 0.35);
+      const pane3H = Math.max(1, totalH - pane1H - pane2H);
+      const pane1Y = top;
+      const pane2Y = top + pane1H + gap;
+      const pane3Y = pane2Y + pane2H + gap;
+
+      function drawPane(series, y0, paneHeight, label, showXAxis) {
+        if (!series.length) {
+          ctx.fillStyle = "#8ca6c5";
+          ctx.font = "12px Consolas, monospace";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "top";
+          ctx.fillText(`${label}: waiting for bars`, left + 6, y0 + 6);
+          return null;
+        }
+        let minP = Math.min(...series.map((x) => x.low));
+        let maxP = Math.max(...series.map((x) => x.high));
+        if (Math.abs(maxP - minP) < 1e-9) {
+          maxP += 0.5;
+          minP -= 0.5;
+        }
+        const yPad = (maxP - minP) * 0.08;
+        maxP += yPad;
+        minP -= yPad;
+        const toY = (p) => y0 + ((maxP - p) / (maxP - minP)) * paneHeight;
+        const toX = (idx) => left + ((idx + 0.5) / Math.max(1, series.length)) * plotW;
+
+        ctx.strokeStyle = "#214160";
+        ctx.lineWidth = 1;
+        ctx.font = "11px Consolas, monospace";
+        ctx.fillStyle = "#8ca6c5";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        const yTicks = 4;
+        for (let i = 0; i < yTicks; i += 1) {
+          const frac = i / (yTicks - 1);
+          const y = y0 + frac * paneHeight;
+          const p = maxP - frac * (maxP - minP);
+          ctx.beginPath();
+          ctx.moveTo(left, y);
+          ctx.lineTo(w - right, y);
+          ctx.stroke();
+          ctx.fillText(fmtPrice(p), left - 6, y);
+        }
+
+        ctx.strokeStyle = "#3b5676";
+        ctx.beginPath();
+        ctx.moveTo(left, y0);
+        ctx.lineTo(left, y0 + paneHeight);
+        ctx.lineTo(w - right, y0 + paneHeight);
+        ctx.stroke();
+
+        const spacing = plotW / Math.max(1, series.length);
+        const bodyW = Math.max(1, Math.min(10, spacing * 0.72));
+        series.forEach((c, i) => {
+          const x = toX(i);
+          const yH = toY(c.high);
+          const yL = toY(c.low);
+          const yO = toY(c.open);
+          const yC = toY(c.close);
+          const up = c.close >= c.open;
+          const color = up ? "#2ccf7a" : "#f05c52";
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x, yH);
+          ctx.lineTo(x, yL);
+          ctx.stroke();
+          const topY = Math.min(yO, yC);
+          const bodyH = Math.max(1, Math.abs(yC - yO));
+          ctx.fillStyle = color;
+          ctx.fillRect(x - bodyW / 2, topY, bodyW, bodyH);
+        });
+
+        ctx.fillStyle = "#9ec7ef";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.font = "11px Consolas, monospace";
+        ctx.fillText(label, left + 6, y0 + 2);
+
+        if (showXAxis) {
+          const minTs = series[0].t.getTime();
+          const maxTs = series[series.length - 1].t.getTime();
+          const spanMs = Math.max(1, maxTs - minTs);
+          const xTicks = 6;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "top";
+          for (let i = 0; i < xTicks; i += 1) {
+            const frac = i / (xTicks - 1);
+            const idx = Math.round(frac * (series.length - 1));
+            const x = toX(idx);
+            const t = series[idx].t;
+            ctx.beginPath();
+            ctx.moveTo(x, y0 + paneHeight);
+            ctx.lineTo(x, y0 + paneHeight + 4);
+            ctx.strokeStyle = "#365272";
+            ctx.stroke();
+            ctx.fillStyle = "#8ca6c5";
+            ctx.fillText(fmtTickTime(t, spanMs), x, y0 + paneHeight + 6);
+          }
+        }
+        return { series, toX, toY, y0, paneHeight };
+      }
+
+      const pane1 = drawPane(one, pane1Y, pane1H, "Top: 1m candles", false);
+      const pane2 = drawPane(fifteen, pane2Y, pane2H, "Middle: 15m candles", false);
+
+      function drawProbPane(series, y0, paneHeight, label) {
+        if (!series.length) {
+          ctx.fillStyle = "#8ca6c5";
+          ctx.font = "12px Consolas, monospace";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "top";
+          ctx.fillText(`${label}: waiting for probs`, left + 6, y0 + 6);
+          return null;
+        }
+        const toY = (p) => y0 + (1 - p) * paneHeight;
+        const toX = (idx) => left + ((idx + 0.5) / Math.max(1, series.length)) * plotW;
+
+        ctx.strokeStyle = "#214160";
+        ctx.lineWidth = 1;
+        ctx.font = "11px Consolas, monospace";
+        ctx.fillStyle = "#8ca6c5";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        const yTicks = 3;
+        for (let i = 0; i < yTicks; i += 1) {
+          const frac = i / (yTicks - 1);
+          const y = y0 + frac * paneHeight;
+          const p = 1 - frac;
+          ctx.beginPath();
+          ctx.moveTo(left, y);
+          ctx.lineTo(w - right, y);
+          ctx.stroke();
+          ctx.fillText(p.toFixed(1), left - 6, y);
+        }
+
+        ctx.strokeStyle = "#3b5676";
+        ctx.beginPath();
+        ctx.moveTo(left, y0);
+        ctx.lineTo(left, y0 + paneHeight);
+        ctx.lineTo(w - right, y0 + paneHeight);
+        ctx.stroke();
+
+        const colors = {
+          p_pivot_long: "#3b82f6",
+          p_pivot_short: "#f59e0b",
+          p_tb_long: "#10b981",
+          p_tb_short: "#ef4444"
+        };
+        const keys = ["p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short"];
+        keys.forEach((key) => {
+          ctx.strokeStyle = colors[key];
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          let started = false;
+          series.forEach((row, i) => {
+            const v = row[key];
+            if (!Number.isFinite(v)) return;
+            const x = toX(i);
+            const y = toY(Math.max(0, Math.min(1, v)));
+            if (!started) {
+              ctx.moveTo(x, y);
+              started = true;
+            } else {
+              ctx.lineTo(x, y);
+            }
+          });
+          ctx.stroke();
+        });
+
+        ctx.fillStyle = "#9ec7ef";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.font = "11px Consolas, monospace";
+        ctx.fillText(label, left + 6, y0 + 2);
+
+        const minTs = series[0].t.getTime();
+        const maxTs = series[series.length - 1].t.getTime();
+        const spanMs = Math.max(1, maxTs - minTs);
+        const xTicks = 6;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        for (let i = 0; i < xTicks; i += 1) {
+          const frac = i / (xTicks - 1);
+          const idx = Math.round(frac * (series.length - 1));
+          const x = toX(idx);
+          const t = series[idx].t;
+          ctx.beginPath();
+          ctx.moveTo(x, y0 + paneHeight);
+          ctx.lineTo(x, y0 + paneHeight + 4);
+          ctx.strokeStyle = "#365272";
+          ctx.stroke();
+          ctx.fillStyle = "#8ca6c5";
+          ctx.fillText(fmtTickTime(t, spanMs), x, y0 + paneHeight + 6);
+        }
+
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        let legendX = left + 6;
+        const legendY = y0 + 16;
+        keys.forEach((key) => {
+          ctx.fillStyle = colors[key];
+          ctx.fillRect(legendX, legendY + 2, 10, 3);
+          ctx.fillStyle = "#8ca6c5";
+          ctx.fillText(key, legendX + 14, legendY - 2);
+          legendX += 120;
+        });
+        return { series, toX, toY, y0, paneHeight };
+      }
+
+      const pane3 = drawProbPane(probs, pane3Y, pane3H, "Bottom: 15m probs");
+
+      const actionsAll = (state.action_events || [])
+        .filter((a) => a && a.symbol === sym && a.timestamp)
+        .slice(-300)
+        .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      const actions = [];
+      for (let i = 0; i < actionsAll.length; i += 1) {
+        const cur = actionsAll[i];
+        const prev = i > 0 ? actionsAll[i - 1] : null;
+        if (!prev || Number(cur.action) !== Number(prev.action)) actions.push(cur);
+      }
+
+      function drawActionMarkers(pane) {
+        if (!pane || !pane.series.length) return;
+        const firstTs = pane.series[0].t.getTime();
+        const lastTs = pane.series[pane.series.length - 1].t.getTime();
+        actions.forEach((a) => {
+          const t = new Date(a.timestamp);
+          const tms = t.getTime();
+          if (Number.isNaN(tms)) return;
+          if (tms < firstTs || tms > lastTs) return;
+          const idx = nearestIndexByTime(pane.series, tms);
+          const x = pane.toX(idx);
+          const act = Number(a.action);
+          const color = act === 1 ? "#2ccf7a" : (act === 2 ? "#f05c52" : "#b7c3d1");
+
+          ctx.save();
+          ctx.setLineDash([4, 3]);
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x, pane.y0 + 14);
+          ctx.lineTo(x, pane.y0 + pane.paneHeight);
+          ctx.stroke();
+          ctx.restore();
+
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(x, pane.y0 + 4);
+          ctx.lineTo(x - 4, pane.y0 + 12);
+          ctx.lineTo(x + 4, pane.y0 + 12);
+          ctx.closePath();
+          ctx.fill();
+        });
+      }
+
+      drawActionMarkers(pane1);
+      drawActionMarkers(pane2);
+
+      // Shared marker legend.
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.font = "11px Consolas, monospace";
+      ctx.fillStyle = "#b7c3d1";
+      ctx.fillText("Markers show action changes: gray=flat(0), green=long(1), red=short(2)", left + 6, top - 12);
+    }
+
+    function renderAll() {
+      const running = !!(state.running || state.session_alive);
+      syncSymbolSelect();
+      renderMeta();
+      renderBroker();
+      renderTrades();
+      renderLogs();
+      renderChart();
+      startBtn.disabled = running;
+      stopBtn.disabled = !running;
+      if (state.last_error) updateStatus(`error: ${state.last_error}`, "error");
+      else updateStatus(state.status_message || (running ? "running" : "idle"), running ? "running" : "idle");
+    }
+
+    function applySnapshot(snap) {
+      Object.assign(state, snap || {});
+      if (snap && typeof snap.ui_build === "undefined") {
+        state.last_error = "outdated dashboard server detected; restart python -m UI.live_dashboard";
+        state.status_message = "server restart required";
+      }
+      renderAll();
+    }
+
+    function attachEvents() {
+      if (eventSource) eventSource.close();
+      eventSource = new EventSource("/api/events");
+      eventSource.onmessage = (msg) => {
+        const evt = JSON.parse(msg.data);
+        const p = evt.payload || {};
+        if (evt.type === "hello") { applySnapshot(p); return; }
+        if (evt.type === "state_sync" && p.state) { applySnapshot(p.state); return; }
+        if (evt.type === "status") {
+          if (typeof p.running === "boolean") state.running = p.running;
+          if (p.message) state.status_message = p.message;
+          if (p.running) state.last_error = null;
+          if (p.error) state.last_error = p.error;
+          if (p.message) state.logs = [...(state.logs || []), { symbol: "SYSTEM", message: p.message }].slice(-400);
+        } else if (evt.type === "bar_1m") {
+          state.symbols = state.symbols?.length ? state.symbols : [p.symbol];
+          pushLimited(state.bars_1m, p.symbol, p.bar);
+        } else if (evt.type === "bar_15m") {
+          pushLimited(state.bars_15m, p.symbol, p.bar);
+        } else if (evt.type === "action") {
+          state.last_actions = state.last_actions || {};
+          state.last_actions[p.symbol] = { action: p.action, timestamp: p.timestamp, close: p.close };
+          state.action_events = state.action_events || [];
+          state.action_events.push({ symbol: p.symbol, action: p.action, timestamp: p.timestamp, close: p.close });
+          if (state.action_events.length > 5000) state.action_events = state.action_events.slice(-5000);
+          if (p.agent_state) state.agent_state = p.agent_state;
+        } else if (evt.type === "order_policy") {
+          state.policy_state = state.policy_state || {};
+          state.policy_state[p.symbol] = p.policy_state;
+          if (p.broker_state) {
+            state.broker_state = state.broker_state || {};
+            state.broker_state[p.symbol] = p.broker_state;
+          }
+          const ev = p?.result?.event || "";
+          if (ev && ev !== "hold" && ev !== "no_change") {
+            state.trade_events = [...(state.trade_events || []), p].slice(-400);
+          }
+        } else if (evt.type === "trade_event") {
+          const ev = p?.result?.event || "";
+          if (ev) state.trade_events = [...(state.trade_events || []), p].slice(-400);
+        } else if (evt.type === "broker_state") {
+          state.broker_state = state.broker_state || {};
+          state.broker_state[p.symbol] = p.state;
+        } else if (evt.type === "log") {
+          state.logs = [...(state.logs || []), p].slice(-400);
+        } else if (evt.type === "agent_state" && p.state) {
+          state.agent_state = p.state;
+        } else if (evt.type === "startup_sync") {
+          state.logs = [...(state.logs || []), { symbol: p.symbol || "SYSTEM", message: `startup_sync ${JSON.stringify(p.result || {})}` }].slice(-400);
+        }
+        renderAll();
+      };
+    }
+
+    function currentPayload() {
+      const replayMaxRaw = document.getElementById("replayMaxBars").value;
+      return {
+        runner_mode: document.getElementById("runnerMode").value,
+        symbols: document.getElementById("symbols").value,
+        feed: document.getElementById("feed").value,
+        interval: Number(document.getElementById("interval").value),
+        model_path: document.getElementById("modelPath").value,
+        prefill_start: document.getElementById("prefillStart").value,
+        replay_data_path: document.getElementById("replayDataPath").value,
+        replay_start: document.getElementById("replayStart").value || null,
+        replay_end: document.getElementById("replayEnd").value || null,
+        replay_sleep: Number(document.getElementById("replaySleep").value || 0),
+        replay_max_bars: replayMaxRaw ? Number(replayMaxRaw) : null,
+        replay_regular_only: document.getElementById("replayRegularOnly").checked,
+        replay_no_prepend_split_test_warmup: document.getElementById("replayNoWarmup").checked,
+        env_file: document.getElementById("envFile").value,
+        enable_option_orders: document.getElementById("enableOrders").checked,
+        simulate_orders: document.getElementById("simulateOrders").checked,
+        no_agent: document.getElementById("noAgent").checked
+      };
+    }
+
+    document.getElementById("startBtn").addEventListener("click", async () => {
+      const out = await api("/api/start", "POST", currentPayload());
+      if (!out.ok) {
+        state.last_error = `start failed (${out.status}): ${out.error || "unknown"}`;
+        state.status_message = "start failed";
+        renderAll();
+        return;
+      }
+      applySnapshot(out.state || out.data?.state || out.data);
+    });
+    document.getElementById("stopBtn").addEventListener("click", async () => {
+      const out = await api("/api/stop", "POST", {});
+      if (!out.ok) {
+        state.last_error = `stop failed (${out.status}): ${out.error || "unknown"}`;
+        state.status_message = "stop failed";
+        renderAll();
+        return;
+      }
+      applySnapshot(out.state || out.data?.state || out.data);
+    });
+    document.getElementById("refreshBtn").addEventListener("click", async () => {
+      const out = await api("/api/state");
+      if (!out.ok) {
+        state.last_error = `refresh failed (${out.status}): ${out.error || "unknown"}`;
+        state.status_message = "refresh failed";
+        renderAll();
+        return;
+      }
+      applySnapshot(out.data);
+    });
+    symbolSelect.addEventListener("change", renderAll);
+    document.getElementById("runnerMode").addEventListener("change", applyModeUi);
+    window.addEventListener("resize", renderChart);
+
+    (async function init() {
+      const out = await api("/api/state");
+      if (out.ok) applySnapshot(out.data);
+      else {
+        state.last_error = `init failed (${out.status}): ${out.error || "unknown"}`;
+        state.status_message = "init failed";
+        renderAll();
+      }
+      applyModeUi();
+      attachEvents();
+    })();
+  </script>
+</body>
+</html>

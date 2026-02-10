@@ -133,6 +133,16 @@ class AlpacaOptionsClient:
         url = f"{self._trading_base}/v2/orders"
         return self._request("GET", url, params=params)
 
+    def get_order(self, order_id: str) -> Any:
+        """
+        GET /v2/orders/{order_id}
+        """
+        oid = str(order_id).strip()
+        if not oid:
+            raise ValueError("order_id is required")
+        url = f"{self._trading_base}/v2/orders/{oid}"
+        return self._request("GET", url)
+
     def get_option_quotes(self, **params: Any) -> Any:
         """
         GET /v2/options/quotes

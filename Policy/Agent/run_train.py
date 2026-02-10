@@ -221,12 +221,36 @@ def main():
     parser.add_argument(
         "--reward-mode",
         type=str,
-        choices=["exit", "mtm"],
-        default="mtm",
-        help="Reward mode: 'exit' (realized PnL on close) or 'mtm' (mark-to-market each bar).",
+        choices=["exit", "mtm", "convex"],
+        default="convex",
+        help="Reward mode: 'exit' (realized PnL on close), 'mtm' (mark-to-market each bar), or 'convex'.",
+    )
+    parser.add_argument("--convex-k1", type=float, default=1.0)
+    parser.add_argument("--convex-k2", type=float, default=0.5)
+    parser.add_argument("--convex-theta", type=float, default=0.01)
+    parser.add_argument(
+        "--convex-mfe-thresholds",
+        type=str,
+        default="1,2,3",
+        help="Comma-separated MFE ATR thresholds for bonus (e.g. '1,2,3').",
+    )
+    parser.add_argument(
+        "--convex-mfe-bonuses",
+        type=str,
+        default="0.1,0.2,0.3",
+        help="Comma-separated bonuses aligned to thresholds (e.g. '0.1,0.2,0.3').",
     )
     args = parser.parse_args()
     reward_on_exit = args.reward_mode == "exit"
+    use_convex_reward = args.reward_mode == "convex"
+    if use_convex_reward:
+        reward_on_exit = False
+
+    def _parse_floats(raw: str) -> list[float]:
+        return [float(x.strip()) for x in str(raw).split(",") if x.strip()]
+
+    convex_thresholds = _parse_floats(args.convex_mfe_thresholds)
+    convex_bonuses = _parse_floats(args.convex_mfe_bonuses)
 
     cfg = PipelineConfig(drop_na=True)
     df = build_agent_training_matrix(cfg, save_parquet=True)
@@ -271,6 +295,12 @@ def main():
                 feature_cols=feature_cols,
                 carry_positions_across_days=True,
                 reward_on_exit=reward_on_exit,
+                use_convex_reward=use_convex_reward,
+                convex_k1=args.convex_k1,
+                convex_k2=args.convex_k2,
+                convex_theta=args.convex_theta,
+                convex_mfe_thresholds=tuple(convex_thresholds),
+                convex_mfe_bonuses=tuple(convex_bonuses),
                 seed=7 + i,
             )
             for i in range(num_envs)
@@ -282,6 +312,12 @@ def main():
             feature_cols=feature_cols,
             carry_positions_across_days=True,
             reward_on_exit=reward_on_exit,
+            use_convex_reward=use_convex_reward,
+            convex_k1=args.convex_k1,
+            convex_k2=args.convex_k2,
+            convex_theta=args.convex_theta,
+            convex_mfe_thresholds=tuple(convex_thresholds),
+            convex_mfe_bonuses=tuple(convex_bonuses),
         )
 
     model = train_ppo(
@@ -317,6 +353,12 @@ def main():
         feature_cols=feature_cols,
         carry_positions_across_days=True,
         reward_on_exit=reward_on_exit,
+        use_convex_reward=use_convex_reward,
+        convex_k1=args.convex_k1,
+        convex_k2=args.convex_k2,
+        convex_theta=args.convex_theta,
+        convex_mfe_thresholds=tuple(convex_thresholds),
+        convex_mfe_bonuses=tuple(convex_bonuses),
     )
 
     eval_device = "cuda" if torch.cuda.is_available() else "cpu"
