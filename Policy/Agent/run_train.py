@@ -1,7 +1,6 @@
 from pathlib import Path
 import argparse
 import sys
-from regex import F
 import numpy as np
 import pandas as pd
 import torch
@@ -118,12 +117,22 @@ def _plot_actions(trace, output_path):
         prob_vals = plot_df[[c[0] for c in prob_cols]].to_numpy(dtype=float)
         has_probs = np.isfinite(prob_vals).any()
 
-    if "did_trade" in plot_df.columns:
-        trade_mask = plot_df["did_trade"].astype(bool).to_numpy()
+    eps = 1e-3
+    pos_now = plot_df["position"].to_numpy(dtype=float) if "position" in plot_df.columns else None
+    prev_pos = plot_df["prev_pos"].to_numpy(dtype=float) if "prev_pos" in plot_df.columns else None
+    if pos_now is not None and prev_pos is not None:
+        longs = (pos_now > eps) & (prev_pos <= eps)
+        shorts = (pos_now < -eps) & (prev_pos >= -eps)
     else:
-        trade_mask = plot_df["action"].ne(plot_df["action"].shift(1)).fillna(False).to_numpy()
-    longs = trade_mask & (plot_df["action"].to_numpy() == 1)
-    shorts = trade_mask & (plot_df["action"].to_numpy() == 2)
+        actions = plot_df["action"].to_numpy(dtype=float)
+        prev_actions = np.roll(actions, 1)
+        prev_actions[0] = 0.0
+        if np.nanmax(np.abs(actions)) > 1.5:
+            longs = (actions == 1.0) & (prev_actions != 1.0)
+            shorts = (actions == 2.0) & (prev_actions != 2.0)
+        else:
+            longs = (actions > eps) & (prev_actions <= eps)
+            shorts = (actions < -eps) & (prev_actions >= -eps)
 
     if has_probs:
         fig, (ax, ax_prob) = plt.subplots(
@@ -336,7 +345,12 @@ def main():
         {
             "state_dict": model.state_dict(),
             "obs_dim": train_env.obs_dim,
-            "n_actions": 3,
+            "n_actions": 1,
+            "action_type": "continuous_tanh",
+            "action_dim": 1,
+            "action_low": -1.0,
+            "action_high": 1.0,
+            "action_deadband": 1e-3,
             "feature_cols": feature_cols,
             "config": cfg.__dict__,
         },

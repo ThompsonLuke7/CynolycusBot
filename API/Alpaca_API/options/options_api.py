@@ -143,6 +143,13 @@ class AlpacaOptionsClient:
         url = f"{self._trading_base}/v2/orders/{oid}"
         return self._request("GET", url)
 
+    def get_account(self) -> Any:
+        """
+        GET /v2/account
+        """
+        url = f"{self._trading_base}/v2/account"
+        return self._request("GET", url)
+
     def get_option_quotes(self, **params: Any) -> Any:
         """
         GET /v2/options/quotes

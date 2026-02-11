@@ -107,20 +107,29 @@ def _plot_actions(
         has_ohlc = np.isfinite(ohlc_vals).any()
     close = plot_df["close"].astype(float)
 
-    prev_pos = plot_df["prev_pos"].to_numpy(dtype=int) if "prev_pos" in plot_df.columns else None
-    pos_now = plot_df["position"].to_numpy(dtype=int) if "position" in plot_df.columns else None
+    eps = 1e-3
+    prev_pos = plot_df["prev_pos"].to_numpy(dtype=float) if "prev_pos" in plot_df.columns else None
+    pos_now = plot_df["position"].to_numpy(dtype=float) if "position" in plot_df.columns else None
     if prev_pos is None or pos_now is None:
-        trade_mask = plot_df["action"].ne(plot_df["action"].shift(1)).fillna(False).to_numpy()
-        entry_long = trade_mask & (plot_df["action"].to_numpy() == 1)
-        entry_short = trade_mask & (plot_df["action"].to_numpy() == 2)
-        exit_long = np.zeros_like(entry_long, dtype=bool)
-        exit_short = np.zeros_like(entry_short, dtype=bool)
+        actions = plot_df["action"].to_numpy(dtype=float)
+        prev_actions = np.roll(actions, 1)
+        prev_actions[0] = 0.0
+        if np.nanmax(np.abs(actions)) > 1.5:
+            entry_long = (actions == 1.0) & (prev_actions != 1.0)
+            entry_short = (actions == 2.0) & (prev_actions != 2.0)
+            exit_long = (prev_actions == 1.0) & (actions != 1.0)
+            exit_short = (prev_actions == 2.0) & (actions != 2.0)
+        else:
+            entry_long = (actions > eps) & (prev_actions <= eps)
+            entry_short = (actions < -eps) & (prev_actions >= -eps)
+            exit_long = (prev_actions > eps) & (actions <= eps)
+            exit_short = (prev_actions < -eps) & (actions >= -eps)
     else:
         # Transition-based markers handle direct flips correctly.
-        entry_long = (pos_now == 1) & (prev_pos != 1)
-        entry_short = (pos_now == -1) & (prev_pos != -1)
-        exit_long = (prev_pos == 1) & (pos_now != 1)
-        exit_short = (prev_pos == -1) & (pos_now != -1)
+        entry_long = (pos_now > eps) & (prev_pos <= eps)
+        entry_short = (pos_now < -eps) & (prev_pos >= -eps)
+        exit_long = (prev_pos > eps) & (pos_now <= eps)
+        exit_short = (prev_pos < -eps) & (pos_now >= -eps)
 
     prob_cols = []
     if "p_pivot_long" in plot_df.columns:
@@ -233,23 +242,24 @@ def _plot_actions(
 
 
 def _trade_stats_from_trace(trace: pd.DataFrame) -> pd.DataFrame:
+    eps = 1e-3
     trades = []
     in_trade = False
-    entry_pos = 0
+    entry_pos = 0.0
     entry_price = 0.0
     entry_time = None
     acc_costs = 0.0
     bars = 0
 
     for _, row in trace.iterrows():
-        pos = int(row.get("position", 0))
-        prev_pos = int(row.get("prev_pos", 0))
+        pos = float(row.get("position", 0.0))
+        prev_pos = float(row.get("prev_pos", 0.0))
         price = float(row.get("close", 0.0))
         ts = row.get("timestamp")
         cost = float(row.get("reward_costs", 0.0)) + float(row.get("forced_flat_cost", 0.0))
 
         if not in_trade:
-            if prev_pos == 0 and pos != 0:
+            if abs(prev_pos) <= eps and abs(pos) > eps:
                 in_trade = True
                 entry_pos = pos
                 entry_price = price
@@ -259,7 +269,7 @@ def _trade_stats_from_trace(trace: pd.DataFrame) -> pd.DataFrame:
             continue
 
         # Flip: close old trade and open new on same bar.
-        if prev_pos != 0 and pos != 0 and pos != entry_pos:
+        if abs(prev_pos) > eps and abs(pos) > eps and (prev_pos * pos < 0.0):
             exit_cost = cost * 0.5
             acc_costs += exit_cost
             trade_ret = entry_pos * (price / entry_price - 1.0)
@@ -268,7 +278,8 @@ def _trade_stats_from_trace(trace: pd.DataFrame) -> pd.DataFrame:
                 {
                     "entry_time": entry_time,
                     "exit_time": ts,
-                    "side": entry_pos,
+                    "side": float(np.sign(entry_pos)),
+                    "entry_exposure": float(entry_pos),
                     "bars": bars,
                     "gross_ret": trade_ret,
                     "net_ret": net_ret,
@@ -283,17 +294,18 @@ def _trade_stats_from_trace(trace: pd.DataFrame) -> pd.DataFrame:
             continue
 
         acc_costs += cost
-        if pos == entry_pos and pos != 0:
+        if abs(pos) > eps:
             bars += 1
 
-        if pos == 0 and prev_pos != 0:
+        if abs(pos) <= eps and abs(prev_pos) > eps:
             trade_ret = entry_pos * (price / entry_price - 1.0)
             net_ret = trade_ret - acc_costs
             trades.append(
                 {
                     "entry_time": entry_time,
                     "exit_time": ts,
-                    "side": entry_pos,
+                    "side": float(np.sign(entry_pos)),
+                    "entry_exposure": float(entry_pos),
                     "bars": bars,
                     "gross_ret": trade_ret,
                     "net_ret": net_ret,
@@ -325,7 +337,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stochastic",
         action="store_true",
-        help="Sample actions instead of using argmax.",
+        help="Sample actions instead of deterministic mean action.",
     )
     return parser.parse_args()
 
@@ -384,9 +396,12 @@ def main() -> None:
             k.startswith("policy_mlp.") or k.startswith("value_mlp.")
             for k in state_dict
         )
+        action_type = str(ckpt.get("action_type", "discrete"))
         model = ActorCritic(
             obs_dim=ckpt["obs_dim"],
             n_actions=ckpt.get("n_actions", 3),
+            action_type=action_type,
+            action_dim=int(ckpt.get("action_dim", 1)),
             head_mlp=has_head_mlps,
         )
         model.load_state_dict(state_dict)
@@ -431,7 +446,9 @@ def main() -> None:
                 trace = trace.drop(columns=[merge_col])
 
     if not args.plot_only and "prev_pos" in trace.columns:
-        by_prev = trace.groupby("prev_pos")["reward_pnl"].mean()
+        prev = pd.to_numeric(trace["prev_pos"], errors="coerce").fillna(0.0)
+        prev_bucket = np.where(prev > 1e-3, 1, np.where(prev < -1e-3, -1, 0))
+        by_prev = trace.assign(prev_side=prev_bucket).groupby("prev_side")["reward_pnl"].mean()
         print("Mean reward_pnl by prev_pos:")
         print(by_prev)
 

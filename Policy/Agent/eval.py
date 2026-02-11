@@ -19,12 +19,23 @@ def _resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
-def _policy_action(model: ActorCritic, x: torch.Tensor, deterministic: bool) -> int:
-    logits, _ = model(x)
+def _policy_action(model: ActorCritic, x: torch.Tensor, deterministic: bool) -> float:
+    policy_out, _ = model(x)
+    if getattr(model, "continuous_action", False):
+        if deterministic:
+            action_t = torch.tanh(policy_out)
+        else:
+            action_t, _logp, _entropy = model._sample_continuous(  # noqa: SLF001
+                policy_out,
+                deterministic=False,
+            )
+        return float(action_t.squeeze().item())
     if deterministic:
-        return int(torch.argmax(logits, dim=-1).item())
-    dist = torch.distributions.Categorical(logits=logits)
-    return int(dist.sample().item())
+        act = int(torch.argmax(policy_out, dim=-1).item())
+        return 0.0 if act == 0 else (1.0 if act == 1 else -1.0)
+    dist = torch.distributions.Categorical(logits=policy_out)
+    act = int(dist.sample().item())
+    return 0.0 if act == 0 else (1.0 if act == 1 else -1.0)
 
 
 @torch.no_grad()
@@ -35,6 +46,7 @@ def evaluate_policy(
     device: str = "auto",
     deterministic: bool = True,
 ) -> pd.DataFrame:
+    eps = 1e-3
     dev = _resolve_device(device)
     prev_training = model.training
     prev_device = next(model.parameters()).device
@@ -69,13 +81,13 @@ def evaluate_policy(
                     total_trades += 1
 
                 total_steps += 1
-                pos = int(info.get("pos", 0))
-                prev_pos = int(info.get("prev_pos", 0))
-                if pos != 0:
+                pos = float(info.get("pos", 0.0))
+                prev_pos = float(info.get("prev_pos", 0.0))
+                if abs(pos) > eps:
                     steps_in_pos += 1
 
-                if pos != 0:
-                    if prev_pos == 0 or pos != prev_pos:
+                if abs(pos) > eps:
+                    if abs(prev_pos) <= eps or (prev_pos * pos < 0.0):
                         if current_hold > 0:
                             hold_lengths.append(current_hold)
                         current_hold = 1
@@ -165,8 +177,8 @@ def evaluate_policy_with_trace(
                     "timestamp": ts,
                     "close": close,
                     "action": action,
-                    "position": int(info.get("pos", 0)),
-                    "prev_pos": int(info.get("prev_pos", 0)),
+                    "position": float(info.get("pos", 0.0)),
+                    "prev_pos": float(info.get("prev_pos", 0.0)),
                     "did_trade": bool(info.get("did_trade", False)),
                     "did_flip": bool(info.get("did_flip", False)),
                     "reward": float(reward),

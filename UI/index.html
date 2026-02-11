@@ -313,8 +313,13 @@
     }
 
     function syncSymbolSelect() {
-      const symbols = state.symbols || [];
-      if (!symbols.length) return;
+      const symbols = (state.symbols && state.symbols.length)
+        ? state.symbols
+        : (Array.isArray(state.config?.symbols) ? state.config.symbols : []);
+      if (!symbols.length) {
+        symbolSelect.innerHTML = `<option value="SPY">SPY</option>`;
+        return;
+      }
       const prev = symbolSelect.value;
       symbolSelect.innerHTML = symbols.map(s => `<option value="${s}">${s}</option>`).join("");
       if (symbols.includes(prev)) symbolSelect.value = prev;

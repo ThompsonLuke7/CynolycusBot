@@ -430,7 +430,7 @@ class LiveGAXGBPredictor:
 
 @dataclass
 class _PositionState:
-    position: int = 0
+    position: float = 0.0
     entry_price: float = np.nan
     time_in_pos: int = 0
     realized_pnl_today: float = 0.0
@@ -471,7 +471,17 @@ class LivePPOAgent:
 
         self._feature_cols = list(feature_cols)
         self._obs_dim = int(ckpt["obs_dim"])
+        self._action_type = str(ckpt.get("action_type", "discrete")).strip().lower()
+        self._continuous_action = self._action_type in {
+            "continuous",
+            "continuous_tanh",
+            "gaussian_tanh",
+        }
         self._n_actions = int(ckpt.get("n_actions", 3))
+        self._action_dim = int(ckpt.get("action_dim", 1))
+        self._action_low = float(ckpt.get("action_low", -1.0))
+        self._action_high = float(ckpt.get("action_high", 1.0))
+        self._action_deadband = max(0.0, float(ckpt.get("action_deadband", 1e-3)))
         self._deterministic = bool(deterministic)
         self._device = _resolve_device(device)
         self._tz = tz
@@ -499,6 +509,8 @@ class LivePPOAgent:
         self._model = ActorCritic(
             obs_dim=self._obs_dim,
             n_actions=self._n_actions,
+            action_type=self._action_type,
+            action_dim=self._action_dim,
             head_mlp=has_head_mlps,
         )
         self._model.load_state_dict(state_dict)
@@ -578,6 +590,28 @@ class LivePPOAgent:
             ts = ts.tz_convert(self._tz)
         return ts
 
+    def _is_flat(self, pos: float) -> bool:
+        return abs(float(pos)) <= self._action_deadband
+
+    def _action_to_exposure(self, action: float) -> float:
+        if self._continuous_action:
+            try:
+                out = float(action)
+            except (TypeError, ValueError):
+                out = 0.0
+            if not np.isfinite(out):
+                out = 0.0
+            out = float(np.clip(out, self._action_low, self._action_high))
+            if abs(out) <= self._action_deadband:
+                return 0.0
+            return out
+        # Backward compatibility for discrete checkpoints.
+        try:
+            act = int(action)
+        except (TypeError, ValueError):
+            act = 0
+        return 0.0 if act == 0 else (1.0 if act == 1 else -1.0)
+
     def _resolve_target_index(self, df: pd.DataFrame, target_ts: pd.Timestamp | None) -> pd.Timestamp:
         if target_ts is not None:
             ts = self._normalize_ts(pd.to_datetime(target_ts, utc=True, errors="coerce"))
@@ -593,13 +627,13 @@ class LivePPOAgent:
         if day != self._state.last_session_day:
             self._state.last_session_day = day
             self._state.realized_pnl_today = 0.0
-            if self._state.position != 0 and np.isfinite(self._state.entry_price):
+            if (not self._is_flat(self._state.position)) and np.isfinite(self._state.entry_price):
                 self._state.unrealized_pnl = (
                     price / self._state.entry_price - 1.0
                 ) * float(self._state.position)
             else:
                 self._state.unrealized_pnl = 0.0
-                if self._state.position == 0:
+                if self._is_flat(self._state.position):
                     self._state.time_in_pos = 0
 
     def _build_obs(self, features: np.ndarray, ts: pd.Timestamp) -> np.ndarray:
@@ -625,13 +659,13 @@ class LivePPOAgent:
         return obs
 
     def _mark_to_market(self, price: float) -> None:
-        if self._state.position != 0 and np.isfinite(self._state.entry_price):
+        if (not self._is_flat(self._state.position)) and np.isfinite(self._state.entry_price):
             self._state.unrealized_pnl = (
                 price / self._state.entry_price - 1.0
             ) * float(self._state.position)
         else:
             self._state.unrealized_pnl = 0.0
-            if self._state.position == 0:
+            if self._is_flat(self._state.position):
                 self._state.time_in_pos = 0
 
     def _select_row(self, df: pd.DataFrame, target_ts: pd.Timestamp | None) -> pd.Series:
@@ -693,7 +727,7 @@ class LivePPOAgent:
         df_1m: pd.DataFrame,
         df_15m: pd.DataFrame,
         target_ts: pd.Timestamp | None = None,
-    ) -> Optional[int]:
+    ) -> Optional[float]:
         if df_15m.empty or len(df_15m) < self._min_15m_bars:
             return None
 
@@ -751,33 +785,61 @@ class LivePPOAgent:
         self._mark_to_market(price)
         obs = self._build_obs(features, ts)
         x = torch.as_tensor(obs, dtype=torch.float32, device=self._device).unsqueeze(0)
-        logits, _ = self._model(x)
-        if self._deterministic:
-            action = int(torch.argmax(logits, dim=-1).item())
+        policy_out, _ = self._model(x)
+        if self._continuous_action:
+            if self._deterministic:
+                action_t = torch.tanh(policy_out)
+            else:
+                action_t, _logp, _entropy = self._model._sample_continuous(  # noqa: SLF001
+                    policy_out,
+                    deterministic=False,
+                )
+            action = float(action_t.squeeze().item())
         else:
-            dist = torch.distributions.Categorical(logits=logits)
-            action = int(dist.sample().item())
+            if self._deterministic:
+                class_action = int(torch.argmax(policy_out, dim=-1).item())
+            else:
+                dist = torch.distributions.Categorical(logits=policy_out)
+                class_action = int(dist.sample().item())
+            action = self._action_to_exposure(float(class_action))
 
         self._apply_action(action, price)
         return action
 
-    def _apply_action(self, action: int, price: float) -> None:
-        desired_pos = 0 if action == 0 else (1 if action == 1 else -1)
-        if desired_pos != self._state.position:
-            if self._state.position != 0 and np.isfinite(self._state.entry_price):
-                move = (price / self._state.entry_price - 1.0) * float(self._state.position)
-                self._state.realized_pnl_today += move
+    def _apply_action(self, action: float, price: float) -> None:
+        prev_pos = float(self._state.position)
+        desired_pos = self._action_to_exposure(action)
+        trade_units = abs(desired_pos - prev_pos)
 
-            if desired_pos != 0:
-                self._state.entry_price = price
-                self._state.time_in_pos = 0
-            else:
+        if trade_units > self._action_deadband:
+            if (not self._is_flat(prev_pos)) and np.isfinite(self._state.entry_price):
+                same_sign = prev_pos * desired_pos > 0.0
+                prev_abs = abs(prev_pos)
+                desired_abs = abs(desired_pos)
+                closed_units = max(0.0, prev_abs - desired_abs) if same_sign else prev_abs
+                if closed_units > self._action_deadband:
+                    move_per_unit = (price / self._state.entry_price - 1.0) * float(np.sign(prev_pos))
+                    self._state.realized_pnl_today += move_per_unit * closed_units
+
+            if self._is_flat(desired_pos):
+                self._state.position = 0.0
                 self._state.entry_price = np.nan
                 self._state.time_in_pos = 0
+            else:
+                if self._is_flat(prev_pos) or (prev_pos * desired_pos <= 0.0) or (not np.isfinite(self._state.entry_price)):
+                    self._state.entry_price = price
+                    self._state.time_in_pos = 0
+                else:
+                    prev_abs = abs(prev_pos)
+                    desired_abs = abs(desired_pos)
+                    if desired_abs > prev_abs + self._action_deadband:
+                        add_units = desired_abs - prev_abs
+                        self._state.entry_price = (
+                            (prev_abs * float(self._state.entry_price)) + (add_units * price)
+                        ) / max(desired_abs, 1e-12)
+                self._state.position = desired_pos
 
-            self._state.position = desired_pos
-
-        if self._state.position != 0 and np.isfinite(self._state.entry_price):
+        if (not self._is_flat(self._state.position)) and np.isfinite(self._state.entry_price):
             self._state.time_in_pos += 1
         else:
             self._state.unrealized_pnl = 0.0
@@ -790,7 +852,7 @@ class LivePPOAgent:
         last_day = self._state.last_session_day
         entry = self._state.entry_price
         return {
-            "position": int(self._state.position),
+            "position": float(self._state.position),
             "entry_price": float(entry) if np.isfinite(entry) else None,
             "time_in_position": int(self._state.time_in_pos),
             "realized_pnl_today": float(self._state.realized_pnl_today),

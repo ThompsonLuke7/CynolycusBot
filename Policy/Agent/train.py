@@ -65,7 +65,12 @@ def train_ppo(
     np.random.seed(seed)
     dev = _resolve_device(device, verbose)
 
-    model = ActorCritic(obs_dim=env.obs_dim, n_actions=3, hidden=128).to(dev)
+    model = ActorCritic(
+        obs_dim=env.obs_dim,
+        action_type="continuous_tanh",
+        action_dim=1,
+        hidden=128,
+    ).to(dev)
     model.train()
     optimizer = optim.Adam(
         [
@@ -90,7 +95,9 @@ def train_ppo(
         for _ in range(rollout_len):
             if is_vectorized:
                 actions_t, logp_t, val_t = model.act_batch(obs, dev)
-                actions = actions_t.detach().cpu().numpy().astype("int64")
+                actions = actions_t.detach().cpu().numpy().astype("float32")
+                if actions.ndim == 2 and actions.shape[-1] == 1:
+                    actions = actions[:, 0]
                 logp = logp_t.detach().cpu().numpy().astype("float32")
                 val = val_t.detach().cpu().numpy().astype("float32")
                 next_obs, reward, done, _info = env.step(actions)
@@ -137,7 +144,7 @@ def train_ppo(
 
         if is_vectorized:
             obs_arr = np.asarray(obs_buf, dtype=np.float32)
-            act_arr = np.asarray(act_buf, dtype=np.int64)
+            act_arr = np.asarray(act_buf, dtype=np.float32)
             logp_arr = np.asarray(logp_buf, dtype=np.float32)
             rew_arr = np.asarray(rew_buf, dtype=np.float32)
             done_arr = np.asarray(done_buf, dtype=np.float32)
@@ -175,7 +182,7 @@ def train_ppo(
             ret = ret_flat.astype(np.float32)
         else:
             obs_arr = np.asarray(obs_buf, dtype=np.float32)
-            act_arr = np.asarray(act_buf, dtype=np.int64)
+            act_arr = np.asarray(act_buf, dtype=np.float32)
             logp_arr = np.asarray(logp_buf, dtype=np.float32)
             rew_arr = np.asarray(rew_buf, dtype=np.float32)
             done_arr = np.asarray(done_buf, dtype=np.float32)
@@ -208,7 +215,7 @@ def train_ppo(
         idxs = np.arange(n)
 
         obs_t = torch.as_tensor(rollout.obs, dtype=torch.float32, device=dev)
-        act_t = torch.as_tensor(rollout.actions, dtype=torch.int64, device=dev)
+        act_t = torch.as_tensor(rollout.actions, dtype=torch.float32, device=dev)
         logp_old_t = torch.as_tensor(rollout.logp_old, dtype=torch.float32, device=dev)
         adv_t = torch.as_tensor(rollout.advantages, dtype=torch.float32, device=dev)
         ret_t = torch.as_tensor(rollout.returns, dtype=torch.float32, device=dev)

@@ -56,14 +56,26 @@ class OptionOrderPolicyConfig:
     verify_poll_sec: float = 0.75
     resubmit_on_terminal_fail: bool = True
     max_resubmit_attempts: int = 1
+    action_deadband: float = 0.05
+    ema_alpha: float = 0.85
+    rebalance_deadband: float = 0.10
+    max_step_contracts: int = 2
+    price_mode: str = "ask"  # ask|mid|bid|last|mark
+    max_contracts_fallback: int = 1
+    max_contracts_cap: int = 0  # <=0 disables hard cap
 
 
 class OptionOrderPolicy:
     """
-    Maps agent target-position actions (0 flat, 1 long, 2 short) to option orders:
+    Maps agent target exposure actions in [-1, 1] to option orders:
       - long  -> buy call
       - short -> buy put
       - flat  -> optional sell-to-close
+    Continuous execution:
+      - smooth action with EMA
+      - apply deadband on action changes
+      - map exposure magnitude to target contracts
+      - trade only signed delta with per-step cap
     """
 
     def __init__(self, config: OptionOrderPolicyConfig) -> None:
@@ -73,8 +85,11 @@ class OptionOrderPolicy:
         self._client = AlpacaOptionsClient(env_file=config.env_file)
 
         self._pos = 0
+        self._signed_contracts = 0
         self._open_symbol: str | None = None
         self._bars_15m: list[tuple[float, float, float]] = []
+        self._action_ema: float | None = None
+        self._action_effective: float = 0.0
 
     def _to_local_ts(self, ts: Any) -> datetime:
         dt = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts))
@@ -147,6 +162,132 @@ class OptionOrderPolicy:
             return None
         return m.group(2)
 
+    @staticmethod
+    def _extract_buying_power(resp: Any) -> float:
+        if not isinstance(resp, dict):
+            return float("nan")
+        for key in ("buying_power", "non_marginable_buying_power", "regt_buying_power"):
+            val = _as_float(resp.get(key))
+            if math.isfinite(val) and val > 0.0:
+                return val
+        return float("nan")
+
+    @staticmethod
+    def _extract_quotes(resp: Any, *, symbol: str) -> list[dict[str, Any]]:
+        sym = str(symbol).strip().upper()
+        if isinstance(resp, dict):
+            # Common format: {"quotes": {"SYMBOL": [{...}]}}
+            quotes_obj = resp.get("quotes")
+            if isinstance(quotes_obj, dict):
+                for key, value in quotes_obj.items():
+                    if str(key).strip().upper() != sym:
+                        continue
+                    if isinstance(value, list):
+                        return [q for q in value if isinstance(q, dict)]
+                    if isinstance(value, dict):
+                        return [value]
+            if isinstance(quotes_obj, list):
+                return [
+                    q for q in quotes_obj
+                    if isinstance(q, dict) and str(q.get("symbol", "")).strip().upper() == sym
+                ]
+            # Alternate wrappers.
+            for key in ("data",):
+                value = resp.get(key)
+                if isinstance(value, list):
+                    return [
+                        q for q in value
+                        if isinstance(q, dict) and str(q.get("symbol", "")).strip().upper() == sym
+                    ]
+                if isinstance(value, dict):
+                    maybe = value.get(sym) or value.get(sym.lower()) or value.get(sym.upper())
+                    if isinstance(maybe, list):
+                        return [q for q in maybe if isinstance(q, dict)]
+                    if isinstance(maybe, dict):
+                        return [maybe]
+        if isinstance(resp, list):
+            return [
+                q for q in resp
+                if isinstance(q, dict) and str(q.get("symbol", "")).strip().upper() == sym
+            ]
+        return []
+
+    @staticmethod
+    def _quote_price(quote: dict[str, Any], *, mode: str) -> float:
+        mode_key = str(mode or "ask").strip().lower()
+        ask = _as_float(
+            quote.get("ask_price", quote.get("ap", quote.get("ask")))
+        )
+        bid = _as_float(
+            quote.get("bid_price", quote.get("bp", quote.get("bid")))
+        )
+        last = _as_float(quote.get("last_price", quote.get("lp")))
+        mark = _as_float(quote.get("mark_price", quote.get("mark")))
+        if mode_key == "bid":
+            return bid
+        if mode_key == "last":
+            return last
+        if mode_key == "mark":
+            return mark if math.isfinite(mark) else (0.5 * (bid + ask) if math.isfinite(bid) and math.isfinite(ask) else float("nan"))
+        if mode_key == "mid":
+            if math.isfinite(bid) and math.isfinite(ask):
+                return 0.5 * (bid + ask)
+            if math.isfinite(mark):
+                return mark
+            if math.isfinite(last):
+                return last
+            return ask if math.isfinite(ask) else bid
+        # conservative default: ask
+        if math.isfinite(ask):
+            return ask
+        if math.isfinite(mark):
+            return mark
+        if math.isfinite(last):
+            return last
+        if math.isfinite(bid):
+            return bid
+        return float("nan")
+
+    def _get_buying_power(self) -> float:
+        try:
+            resp = self._client.get_account()
+        except Exception:
+            return float("nan")
+        return self._extract_buying_power(resp)
+
+    def _get_contract_price(self, *, symbol: str, logger: Callable[[str], None]) -> float:
+        try:
+            resp = self._client.get_option_quotes(symbols=symbol, limit=1)
+            quotes = self._extract_quotes(resp, symbol=symbol)
+            if not quotes:
+                return float("nan")
+            # Use the most recent quote if timestamps are present.
+            quote = quotes[-1]
+            return self._quote_price(quote, mode=self.cfg.price_mode)
+        except Exception as exc:
+            logger(f"[order_policy] quote fetch failed symbol={symbol}: {exc}")
+            return float("nan")
+
+    def _contracts_max_for_symbol(self, *, symbol: str, logger: Callable[[str], None]) -> tuple[int, float, float]:
+        price = self._get_contract_price(symbol=symbol, logger=logger)
+        bp = self._get_buying_power()
+        max_ct = 0
+        if math.isfinite(bp) and bp > 0.0 and math.isfinite(price) and price > 0.0:
+            max_ct = int(math.floor(bp / (price * 100.0)))
+        if max_ct <= 0:
+            max_ct = max(0, int(self.cfg.max_contracts_fallback))
+        if self.cfg.max_contracts_cap and int(self.cfg.max_contracts_cap) > 0:
+            max_ct = min(max_ct, int(self.cfg.max_contracts_cap))
+        return max_ct, bp, price
+
+    def _smooth_action(self, action: float) -> float:
+        alpha = min(max(float(self.cfg.ema_alpha), 0.0), 0.9999)
+        if self._action_ema is None or not math.isfinite(self._action_ema):
+            self._action_ema = float(action)
+        else:
+            self._action_ema = alpha * float(self._action_ema) + (1.0 - alpha) * float(action)
+        return float(self._action_ema)
+
     def sync_from_broker(self, *, logger: Callable[[str], None] = print) -> dict[str, Any]:
         """
         Seed in-memory position state from Alpaca open positions for this underlying.
@@ -188,11 +329,13 @@ class OptionOrderPolicy:
 
             if not candidates:
                 self._pos = 0
+                self._signed_contracts = 0
                 self._open_symbol = None
                 logger(f"[order_policy] Startup sync: no open {under} long option positions found.")
                 return {
                     "synced": True,
                     "position": 0,
+                    "signed_contracts": 0,
                     "symbol": None,
                     "ignored_short_positions": ignored_short_count,
                 }
@@ -200,6 +343,7 @@ class OptionOrderPolicy:
             candidates.sort(key=lambda x: x[0], reverse=True)
             qty_abs, pos_sign, symbol, _avg_entry = candidates[0]
             self._pos = int(1 if pos_sign > 0 else -1)
+            self._signed_contracts = int(round(qty_abs)) * self._pos
             self._open_symbol = symbol
 
             if len(candidates) > 1:
@@ -209,11 +353,12 @@ class OptionOrderPolicy:
                 )
             logger(
                 f"[order_policy] Startup sync: restored pos={self._pos} symbol={symbol} "
-                f"qty={qty_abs:g}"
+                f"qty={qty_abs:g} signed_contracts={self._signed_contracts}"
             )
             return {
                 "synced": True,
                 "position": self._pos,
+                "signed_contracts": self._signed_contracts,
                 "symbol": symbol,
                 "qty": qty_abs,
                 "multiple_positions": len(candidates) > 1,
@@ -546,11 +691,15 @@ class OptionOrderPolicy:
         return {
             "underlying": self.cfg.underlying,
             "position": int(self._pos),
+            "signed_contracts": int(self._signed_contracts),
             "open_symbol": self._open_symbol,
             "atr": float(atr) if math.isfinite(atr) else None,
             "bars_15m": int(len(self._bars_15m)),
             "submit_orders": bool(self.cfg.submit_orders),
             "qty": int(self.cfg.qty),
+            "price_mode": str(self.cfg.price_mode),
+            "action_ema": float(self._action_ema) if self._action_ema is not None and math.isfinite(self._action_ema) else None,
+            "action_effective": float(self._action_effective),
         }
 
     def snapshot_broker_state(self, *, orders_limit: int = 20) -> dict[str, Any]:
@@ -628,7 +777,7 @@ class OptionOrderPolicy:
     def on_decision(
         self,
         *,
-        action: int,
+        action: float,
         closed_bar: dict[str, Any],
         logger: Callable[[str], None] = print,
         update_bar_state: bool = True,
@@ -637,95 +786,232 @@ class OptionOrderPolicy:
         Process one 15m close + PPO action.
 
         Returns a dict with an `event` key:
-          hold | no_change | enter | flip | flat | error
+          hold | enter | rebalance | flip | flat | error
         """
         try:
-            act = int(action)
-            if act not in (0, 1, 2):
+            raw_action = _as_float(action)
+            if not math.isfinite(raw_action):
                 return {"event": "error", "reason": f"invalid_action:{action}"}
+            act = max(-1.0, min(1.0, float(raw_action)))
+            smooth_action = self._smooth_action(act)
+            prev_effective = float(self._action_effective)
+            rebalance_deadband = max(0.0, float(self.cfg.rebalance_deadband))
+            smoothed_change_applied = abs(smooth_action - prev_effective) >= rebalance_deadband
+            effective_action = smooth_action if smoothed_change_applied else prev_effective
+            self._action_effective = float(effective_action)
 
-            desired_pos = 0 if act == 0 else (1 if act == 1 else -1)
+            deadband = max(0.0, float(self.cfg.action_deadband))
+            desired_pos = 0 if abs(effective_action) <= deadband else (1 if effective_action > 0.0 else -1)
             local_ts = self._to_local_ts(closed_bar.get("timestamp"))
             close = _as_float(closed_bar.get("close"))
             atr = self._update_bar_state(closed_bar) if update_bar_state else self._compute_atr()
 
             if not math.isfinite(close):
                 return {"event": "error", "reason": "invalid_close"}
+            current_signed = int(self._signed_contracts)
+            current_pos = 1 if current_signed > 0 else (-1 if current_signed < 0 else 0)
 
-            if desired_pos == self._pos:
-                return {"event": "hold", "pos": self._pos, "close": close, "atr": atr}
+            flat_blocked = False
+            flip_blocked = False
+            if desired_pos == 0 and current_signed != 0 and not self.cfg.close_on_flat:
+                flat_blocked = True
+                desired_pos = current_pos
+            if desired_pos != 0 and current_signed != 0 and desired_pos != current_pos and not self.cfg.close_on_flip:
+                flip_blocked = True
+                desired_pos = current_pos
 
-            # Optional close on flat.
-            if desired_pos == 0:
-                if self._pos != 0 and self._open_symbol and self.cfg.close_on_flat:
+            option_type: str | None = None
+            strike_target: float | None = None
+            expiration: date | None = None
+            contract_symbol: str | None = None
+            picked_strike: float | None = None
+            contracts_max = 0
+            buying_power = float("nan")
+            contract_price = float("nan")
+            target_signed = 0
+
+            if desired_pos != 0:
+                if desired_pos == current_pos and self._open_symbol:
+                    contract_symbol = self._open_symbol
+                else:
+                    if not math.isfinite(atr) or atr <= 0.0:
+                        return {"event": "error", "reason": "atr_unavailable", "close": close, "atr": atr}
+                    option_type = "call" if desired_pos > 0 else "put"
+                    strike_target = (
+                        close + self.cfg.atr_multiplier * atr
+                        if desired_pos > 0
+                        else close - self.cfg.atr_multiplier * atr
+                    )
+                    expiration = self._resolve_expiration(local_ts)
+                    contract_symbol, picked_strike = self._select_contract(
+                        option_type=option_type,
+                        expiration=expiration,
+                        target_strike=strike_target,
+                        atr=atr,
+                    )
+
+                if not contract_symbol:
+                    return {"event": "error", "reason": "missing_contract_symbol"}
+
+                contracts_max, buying_power, contract_price = self._contracts_max_for_symbol(
+                    symbol=contract_symbol,
+                    logger=logger,
+                )
+                target_abs = int(round(abs(effective_action) * max(0, contracts_max)))
+                target_signed = int(desired_pos * target_abs)
+            else:
+                buying_power = self._get_buying_power()
+                target_signed = 0
+
+            delta = int(target_signed - current_signed)
+            step_cap = int(self.cfg.max_step_contracts)
+            if step_cap > 0:
+                step_delta = max(-step_cap, min(step_cap, delta))
+            else:
+                step_delta = delta
+            step_target = int(current_signed + step_delta)
+            step_pos = 1 if step_target > 0 else (-1 if step_target < 0 else 0)
+
+            if step_target == current_signed:
+                return {
+                    "event": "hold",
+                    "pos": current_pos,
+                    "signed_contracts": current_signed,
+                    "target_signed_contracts": target_signed,
+                    "step_target_signed_contracts": step_target,
+                    "exposure_raw": act,
+                    "exposure_smooth": smooth_action,
+                    "exposure_effective": effective_action,
+                    "smoothed_change_applied": smoothed_change_applied,
+                    "contracts_max": contracts_max,
+                    "buying_power": buying_power if math.isfinite(buying_power) else None,
+                    "contract_price": contract_price if math.isfinite(contract_price) else None,
+                    "contract": contract_symbol or self._open_symbol,
+                    "close": close,
+                    "atr": atr,
+                    "flat_blocked": flat_blocked,
+                    "flip_blocked": flip_blocked,
+                }
+
+            orders: list[dict[str, Any]] = []
+            old_symbol = self._open_symbol
+
+            # Leg 1: close/reduce existing side.
+            if current_signed != 0 and (step_pos != current_pos or abs(step_target) < abs(current_signed)):
+                if not self._open_symbol:
+                    return {"event": "error", "reason": "missing_open_symbol_for_close"}
+                close_qty = (
+                    abs(current_signed)
+                    if step_pos != current_pos
+                    else abs(current_signed) - abs(step_target)
+                )
+                if close_qty > 0:
                     close_resp = self._submit_order(
                         symbol=self._open_symbol,
                         side="sell",
                         intent="close",
+                        qty=close_qty,
                         logger=logger,
                     )
-                    old_symbol = self._open_symbol
+                    orders.append(
+                        {
+                            "type": "close",
+                            "symbol": self._open_symbol,
+                            "qty": close_qty,
+                            "response": close_resp,
+                        }
+                    )
+                if step_pos != current_pos:
                     self._open_symbol = None
-                    self._pos = 0
-                    return {
-                        "event": "flat",
-                        "closed_symbol": old_symbol,
-                        "close_order": close_resp,
-                        "close": close,
-                        "atr": atr,
-                    }
-                self._pos = 0
+
+            # Leg 2: open/increase desired side.
+            if step_target != 0 and (step_pos != current_pos or abs(step_target) > abs(current_signed)):
+                if step_pos == current_pos and self._open_symbol:
+                    open_symbol = self._open_symbol
+                    open_qty = abs(step_target) - abs(current_signed)
+                else:
+                    if not contract_symbol:
+                        if not math.isfinite(atr) or atr <= 0.0:
+                            return {"event": "error", "reason": "atr_unavailable", "close": close, "atr": atr}
+                        option_type = "call" if step_pos > 0 else "put"
+                        strike_target = (
+                            close + self.cfg.atr_multiplier * atr
+                            if step_pos > 0
+                            else close - self.cfg.atr_multiplier * atr
+                        )
+                        expiration = self._resolve_expiration(local_ts)
+                        contract_symbol, picked_strike = self._select_contract(
+                            option_type=option_type,
+                            expiration=expiration,
+                            target_strike=strike_target,
+                            atr=atr,
+                        )
+                    open_symbol = contract_symbol
+                    open_qty = abs(step_target) if step_pos != current_pos else max(0, abs(step_target) - abs(current_signed))
+
+                if not open_symbol:
+                    return {"event": "error", "reason": "missing_open_symbol_for_open"}
+
+                if open_qty > 0:
+                    open_resp = self._submit_order(
+                        symbol=open_symbol,
+                        side="buy",
+                        intent="open",
+                        qty=open_qty,
+                        logger=logger,
+                    )
+                    orders.append(
+                        {
+                            "type": "open",
+                            "symbol": open_symbol,
+                            "qty": open_qty,
+                            "response": open_resp,
+                        }
+                    )
+                self._open_symbol = open_symbol
+
+            self._signed_contracts = int(step_target)
+            self._pos = 1 if self._signed_contracts > 0 else (-1 if self._signed_contracts < 0 else 0)
+            if self._signed_contracts == 0:
                 self._open_symbol = None
-                return {"event": "no_change", "pos": 0, "close": close, "atr": atr}
 
-            # desired_pos is +/-1 here.
-            if not math.isfinite(atr) or atr <= 0.0:
-                return {"event": "error", "reason": "atr_unavailable", "close": close, "atr": atr}
-
-            event = "enter"
-            flip_close_resp: dict[str, Any] | None = None
-            if self._pos != 0 and self._pos != desired_pos:
+            if current_signed == 0 and self._signed_contracts != 0:
+                event = "enter"
+            elif self._signed_contracts == 0:
+                event = "flat"
+            elif current_pos != 0 and self._pos != current_pos:
                 event = "flip"
-                if self._open_symbol and self.cfg.close_on_flip:
-                    flip_close_resp = self._submit_order(
-                        symbol=self._open_symbol,
-                        side="sell",
-                        intent="close",
-                        logger=logger,
-                    )
-                    self._open_symbol = None
-                self._pos = 0
-
-            option_type = "call" if desired_pos > 0 else "put"
-            strike_target = close + self.cfg.atr_multiplier * atr if desired_pos > 0 else close - self.cfg.atr_multiplier * atr
-            expiration = self._resolve_expiration(local_ts)
-            contract_symbol, picked_strike = self._select_contract(
-                option_type=option_type,
-                expiration=expiration,
-                target_strike=strike_target,
-                atr=atr,
-            )
-            open_resp = self._submit_order(
-                symbol=contract_symbol,
-                side="buy",
-                intent="open",
-                logger=logger,
-            )
-            self._open_symbol = contract_symbol
-            self._pos = desired_pos
+            else:
+                event = "rebalance"
 
             return {
                 "event": event,
                 "pos": self._pos,
-                "contract": contract_symbol,
-                "option_type": option_type,
-                "expiration": expiration.isoformat(),
-                "target_strike": strike_target,
-                "picked_strike": picked_strike,
-                "atr": atr,
+                "signed_contracts": self._signed_contracts,
+                "prev_signed_contracts": current_signed,
+                "target_signed_contracts": target_signed,
+                "step_target_signed_contracts": step_target,
+                "delta_signed_contracts": delta,
+                "step_delta_signed_contracts": step_delta,
+                "exposure_raw": act,
+                "exposure_smooth": smooth_action,
+                "exposure_effective": effective_action,
+                "smoothed_change_applied": smoothed_change_applied,
+                "contracts_max": int(contracts_max),
+                "buying_power": buying_power if math.isfinite(buying_power) else None,
+                "contract_price": contract_price if math.isfinite(contract_price) else None,
+                "contract": self._open_symbol,
+                "selected_contract": contract_symbol,
+                "selected_option_type": option_type,
+                "expiration": expiration.isoformat() if isinstance(expiration, date) else None,
+                "target_strike": strike_target if strike_target is not None and math.isfinite(strike_target) else None,
+                "picked_strike": picked_strike if picked_strike is not None and math.isfinite(picked_strike) else None,
+                "orders": orders,
+                "closed_symbol": old_symbol if self._open_symbol != old_symbol else None,
                 "close": close,
-                "flip_close_order": flip_close_resp,
-                "open_order": open_resp,
+                "atr": atr,
+                "flat_blocked": flat_blocked,
+                "flip_blocked": flip_blocked,
             }
         except Exception as exc:
             return {"event": "error", "reason": str(exc)}

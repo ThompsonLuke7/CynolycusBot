@@ -17,7 +17,8 @@ class TradingEnv:
       reset() -> obs
       step(action) -> obs, reward, done, info
 
-    Actions: 0=FLAT, 1=LONG, 2=SHORT
+    Actions: continuous signed exposure in [-1, +1]
+      +1.0 = max long, 0.0 = flat, -1.0 = max short
     Episode: one trading day (requires df['day_id'])
     """
 
@@ -48,6 +49,7 @@ class TradingEnv:
         convex_theta: float = 0.01,
         convex_mfe_thresholds: Tuple[float, ...] = (1.0, 2.0, 3.0),
         convex_mfe_bonuses: Tuple[float, ...] = (0.1, 0.2, 0.3),
+        action_deadband: float = 1e-3,
         seed: int = 7,
     ):
         self.df = df.copy()
@@ -91,6 +93,7 @@ class TradingEnv:
         self.convex_k2 = float(convex_k2)
         self.convex_theta = float(convex_theta)
         self.convex_mfe_thresholds = tuple(float(x) for x in convex_mfe_thresholds)
+        self.action_deadband = max(0.0, float(action_deadband))
         if not self.convex_mfe_thresholds:
             self.convex_mfe_thresholds = ()
         raw_bonuses = list(float(x) for x in convex_mfe_bonuses)
@@ -173,7 +176,7 @@ class TradingEnv:
         self._day_ptr = -1
         self._i = 0
 
-        self.position = 0
+        self.position = 0.0
         self.entry_price = np.nan
         self.time_in_pos = 0
         self.unrealized_pnl = 0.0
@@ -226,7 +229,7 @@ class TradingEnv:
         self._i = int(self.day_starts[self._day_ptr])
 
         if not self.carry_positions_across_days:
-            self.position = 0
+            self.position = 0.0
             self.entry_price = np.nan
             self.time_in_pos = 0
             self.unrealized_pnl = 0.0
@@ -235,7 +238,7 @@ class TradingEnv:
             self._mfe_awarded.clear()
         else:
             self.realized_pnl_today = 0.0
-            if self.position != 0 and np.isfinite(self.entry_price):
+            if (not self._is_flat(self.position)) and np.isfinite(self.entry_price):
                 price = float(self._close[self._i])
                 self.unrealized_pnl = (price / self.entry_price - 1.0) * float(self.position)
             else:
@@ -251,14 +254,20 @@ class TradingEnv:
         commission_ret = (self.commission_per_trade / price) if price else 0.0
         return commission_ret + bps_cost
 
+    def _is_flat(self, pos: float) -> bool:
+        return abs(float(pos)) <= self.action_deadband
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
-        action = int(action)
-        if action not in (0, 1, 2):
-            raise ValueError("action must be 0,1,2")
+    def step(self, action: float) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
+        try:
+            action_f = float(action)
+        except (TypeError, ValueError):
+            action_f = 0.0
+        if not np.isfinite(action_f):
+            action_f = 0.0
+        action_f = float(np.clip(action_f, -1.0, 1.0))
 
         prev_pos = self.position
-        desired_pos = 0 if action == 0 else (1 if action == 1 else -1)
+        desired_pos = 0.0 if abs(action_f) <= self.action_deadband else action_f
 
         price = float(self._close[self._i])
         ret_next = float(self._ret_next[self._i])
@@ -274,48 +283,70 @@ class TradingEnv:
         convex_term = 0.0
         mfe_bonus = 0.0
         mfe_atr = None
-        flipped = (self.position == 1 and desired_pos == -1) or (self.position == -1 and desired_pos == 1)
+        flipped = (
+            (not self._is_flat(self.position))
+            and (not self._is_flat(desired_pos))
+            and (self.position * desired_pos < 0.0)
+        )
         blocked_flip = flipped and not self.allow_direct_flip
         if blocked_flip:
-            desired_pos = 0
+            desired_pos = 0.0
             flipped = False
 
         trade_units = abs(desired_pos - prev_pos)
-        did_trade = trade_units > 0
-        if desired_pos != self.position:
+        did_trade = trade_units > self.action_deadband
+        if did_trade:
             # Cost scales with position change size:
-            # 0 = hold, 1 = enter/exit, 2 = direct flip.
+            # 0 = hold, 1 = full enter/exit, 2 = full direct flip.
             leg_cost = self._trade_cost_ret(price) + self.trade_penalty_ret
             reward_costs += float(trade_units) * leg_cost
-            if trade_units == 2:
+            if flipped:
                 reward_costs += self.flip_penalty_ret
 
-            # realize approximate pnl on exit
-            if self.position != 0 and np.isfinite(self.entry_price):
-                move = (price / self.entry_price - 1.0) * float(self.position)
-                self.realized_pnl_today += move
+            # Realize PnL on the reduced/closed fraction of existing exposure.
+            if (not self._is_flat(prev_pos)) and np.isfinite(self.entry_price):
+                same_sign = prev_pos * desired_pos > 0.0
+                prev_abs = abs(prev_pos)
+                desired_abs = abs(desired_pos)
+                closed_units = max(0.0, prev_abs - desired_abs) if same_sign else prev_abs
+                if closed_units > self.action_deadband:
+                    move_per_unit = (price / self.entry_price - 1.0) * float(np.sign(prev_pos))
+                    move = move_per_unit * closed_units
+                    self.realized_pnl_today += move
+                else:
+                    move = 0.0
                 if (self.reward_on_exit or self.reward_exit_bonus) and not self.use_convex_reward:
                     reward_pnl += move
                 if self.exit_pivot_bonus_ret:
-                    if self.position > 0:
+                    if prev_pos > 0:
                         pivot_val = float(self._pivot_short[self._i])
                     else:
                         pivot_val = float(self._pivot_long[self._i])
                     if np.isfinite(pivot_val):
-                        reward_pivot_bonus = self.exit_pivot_bonus_ret * pivot_val
+                        scale = closed_units if closed_units > self.action_deadband else 0.0
+                        reward_pivot_bonus = self.exit_pivot_bonus_ret * pivot_val * scale
                         if not self.use_convex_reward:
                             reward_pnl += reward_pivot_bonus
 
-            if desired_pos != 0:
-                self.entry_price = price
-                self.time_in_pos = 0
-            else:
+            if self._is_flat(desired_pos):
                 self.entry_price = np.nan
                 self.time_in_pos = 0
-
-            self.position = desired_pos
-            self._mfe_max_atr = 0.0
-            self._mfe_awarded.clear()
+                self.position = 0.0
+            else:
+                if self._is_flat(prev_pos) or (prev_pos * desired_pos <= 0.0) or (not np.isfinite(self.entry_price)):
+                    self.entry_price = price
+                    self.time_in_pos = 0
+                    self._mfe_max_atr = 0.0
+                    self._mfe_awarded.clear()
+                else:
+                    prev_abs = abs(prev_pos)
+                    desired_abs = abs(desired_pos)
+                    if desired_abs > prev_abs + self.action_deadband:
+                        add_units = desired_abs - prev_abs
+                        self.entry_price = (
+                            (prev_abs * float(self.entry_price)) + (add_units * price)
+                        ) / max(desired_abs, 1e-12)
+                self.position = desired_pos
 
         if self.use_convex_reward:
             r = ret_next
@@ -332,7 +363,7 @@ class TradingEnv:
             reward_convex = (float(self.position) * self.convex_k1 * r) + (abs(self.position) * self.convex_k2 * convex_term)
             reward_convex -= self.convex_theta * abs(self.position)
             reward_pnl = reward_convex
-            if self.position != 0 and np.isfinite(atr) and np.isfinite(self.entry_price):
+            if (not self._is_flat(self.position)) and np.isfinite(atr) and np.isfinite(self.entry_price):
                 high = float(self._high[self._i])
                 low = float(self._low[self._i])
                 if np.isfinite(high) and np.isfinite(low):
@@ -353,7 +384,7 @@ class TradingEnv:
         elif not self.reward_on_exit:
             reward_pnl = float(self.position) * ret_next
 
-        if self.position != 0 and np.isfinite(self.entry_price):
+        if (not self._is_flat(self.position)) and np.isfinite(self.entry_price):
             next_price = price * (1.0 + ret_next)
             self.unrealized_pnl = (next_price / self.entry_price - 1.0) * float(self.position)
             self.time_in_pos += 1
@@ -361,11 +392,12 @@ class TradingEnv:
             self.unrealized_pnl = 0.0
             self.time_in_pos = 0
 
-        hold_penalty = self.hold_penalty_ret if self.position != 0 else 0.0
+        hold_penalty = self.hold_penalty_ret * abs(self.position)
         reward = reward_pnl - reward_costs - hold_penalty
 
         info: Dict[str, Any] = {
             "price": price,
+            "action": action_f,
             "ret_next": ret_next,
             "ret_next_missing": ret_next_missing,
             "pos": self.position,
@@ -385,11 +417,12 @@ class TradingEnv:
         }
 
         if is_last or (self._i >= len(self.df) - 2):
-            if self.force_flat_at_close and self.position != 0:
-                exit_cost = self._trade_cost_ret(price)
+            if self.force_flat_at_close and (not self._is_flat(self.position)):
+                close_units = abs(self.position)
+                exit_cost = self._trade_cost_ret(price) * close_units
                 reward_costs += exit_cost
                 if self.trade_penalty_ret:
-                    reward_costs += self.trade_penalty_ret
+                    reward_costs += self.trade_penalty_ret * close_units
                 info["forced_flat_cost"] = exit_cost
 
                 if np.isfinite(self.entry_price):
@@ -403,11 +436,11 @@ class TradingEnv:
                         else:
                             pivot_val = float(self._pivot_long[self._i])
                         if np.isfinite(pivot_val):
-                            reward_pivot_bonus = self.exit_pivot_bonus_ret * pivot_val
+                            reward_pivot_bonus = self.exit_pivot_bonus_ret * pivot_val * close_units
                             if not self.use_convex_reward:
                                 reward_pnl += reward_pivot_bonus
 
-                self.position = 0
+                self.position = 0.0
                 self.entry_price = np.nan
                 self.unrealized_pnl = 0.0
                 self.time_in_pos = 0
@@ -478,14 +511,19 @@ class VecTradingEnv:
         return np.stack(obs, axis=0)
 
     def step(
-        self, actions: np.ndarray | list[int]
+        self, actions: np.ndarray | list[float]
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
         if len(actions) != self.n_envs:
             raise ValueError("Actions length must match number of envs.")
 
         obs, rewards, dones, infos = [], [], [], []
         for env, action in zip(self.envs, actions):
-            o, r, d, info = env.step(int(action))
+            if isinstance(action, (list, tuple, np.ndarray)):
+                arr = np.asarray(action, dtype=np.float32).reshape(-1)
+                action_value = float(arr[0]) if arr.size else 0.0
+            else:
+                action_value = float(action)
+            o, r, d, info = env.step(action_value)
             if d and self.auto_reset:
                 o = env.reset()
             obs.append(o)

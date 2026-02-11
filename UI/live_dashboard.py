@@ -880,12 +880,48 @@ class LiveSession:
             ga_feature_list = self._resolve_ga_feature_list(cfg)
             ga_probs_frame = _load_agent_matrix_probs(symbol=symbols[0], dataset_name=cfg.ga_dataset_name)
             ga_probs_mode = "frame" if ga_probs_frame is not None else "xgb"
+
             if ga_probs_frame is not None:
+                # If the frame doesn't overlap the replay time range, fall back to XGB.
+                try:
+                    frame_idx = ga_probs_frame.index
+                    if isinstance(frame_idx, pd.DatetimeIndex):
+                        ts_min = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").min()
+                        ts_max = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").max()
+                        if pd.notna(ts_min) and pd.notna(ts_max):
+                            if frame_idx.tz is None:
+                                frame_min = frame_idx.min().tz_localize("UTC")
+                                frame_max = frame_idx.max().tz_localize("UTC")
+                            else:
+                                frame_min = frame_idx.min().tz_convert("UTC")
+                                frame_max = frame_idx.max().tz_convert("UTC")
+                            if frame_max < ts_min or frame_min > ts_max:
+                                ga_probs_frame = None
+                                ga_probs_mode = "xgb"
+                                self._emit(
+                                    "log",
+                                    {
+                                        "symbol": "SYSTEM",
+                                        "message": "[replay] agent_matrix probs out of range; falling back to XGB.",
+                                    },
+                                )
+                    if ga_probs_frame is not None:
+                        self._emit(
+                            "log",
+                            {
+                                "symbol": "SYSTEM",
+                                "message": "[replay] using agent_matrix probabilities for PPO features.",
+                            },
+                        )
+                except Exception:
+                    pass
+
+            if ga_probs_frame is None and ga_feature_list is None and not cfg.no_pivot_probs and not cfg.no_tb_probs:
                 self._emit(
                     "log",
                     {
                         "symbol": "SYSTEM",
-                        "message": "[replay] using agent_matrix probabilities for PPO features.",
+                        "message": "[replay] GA-XGB feature list missing; pivot/TB probs will be zeros.",
                     },
                 )
             agent = LivePPOAgent(

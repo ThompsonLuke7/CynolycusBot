@@ -122,10 +122,10 @@ def _make_15m_handler(
             order_policies[symbol].on_15m_bar(closed_bar=bar15)
         action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
         if action is not None:
-            print(f"{symbol} inference action: {action}")
+            print(f"{symbol} inference action: {float(action):+.4f}")
             if order_policies is not None and symbol in order_policies:
                 result = order_policies[symbol].on_decision(
-                    action=int(action),
+                    action=float(action),
                     closed_bar=bar15,
                     update_bar_state=False,
                 )
@@ -425,10 +425,10 @@ def _run_startup_catchup_decision(
 
         print(
             f"[live] Startup catch-up {symbol}: ts={_format_ts_local(ts, tz=print_tz)} "
-            f"action={int(action)}"
+            f"action={float(action):+.4f}"
         )
         result = order_policies[symbol].on_decision(
-            action=int(action),
+            action=float(action),
             closed_bar=bar15,
             update_bar_state=False,
         )
@@ -544,7 +544,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--assume-tz", default="UTC", help="Assume timezone for naive timestamps.")
     parser.add_argument("--model-path", default="Data/outputs/agent/ppo_model.pt", help="PPO model checkpoint.")
     parser.add_argument("--no-agent", action="store_true", help="Disable PPO inference.")
-    parser.add_argument("--stochastic", action="store_true", help="Sample actions (default is argmax).")
+    parser.add_argument("--stochastic", action="store_true", help="Sample actions from policy (default is deterministic mean).")
     parser.add_argument("--device", default="auto", help="Device for inference (auto/cpu/cuda/mps).")
     parser.add_argument("--min-15m-bars", type=int, default=20, help="Minimum 15m bars before inference.")
     parser.add_argument("--no-pivot-probs", action="store_true", help="Disable pivot probability features.")
@@ -598,7 +598,37 @@ def _parse_args() -> argparse.Namespace:
         "--option-order-qty",
         type=int,
         default=1,
-        help="Quantity for option orders sent by order policy.",
+        help="Fallback max contracts when account/quote sizing is unavailable.",
+    )
+    parser.add_argument(
+        "--option-price-mode",
+        default="ask",
+        choices=["ask", "mid", "bid", "last", "mark"],
+        help="Price input for sizing max contracts (ask is conservative, mid for sim).",
+    )
+    parser.add_argument(
+        "--option-action-ema-alpha",
+        type=float,
+        default=0.85,
+        help="EMA alpha for action smoothing (higher = smoother).",
+    )
+    parser.add_argument(
+        "--option-rebalance-deadband",
+        type=float,
+        default=0.10,
+        help="Ignore action changes smaller than this after smoothing.",
+    )
+    parser.add_argument(
+        "--option-max-step-contracts",
+        type=int,
+        default=2,
+        help="Max absolute signed-contract change per decision step.",
+    )
+    parser.add_argument(
+        "--option-max-contracts-cap",
+        type=int,
+        default=0,
+        help="Optional hard cap on max contracts (<=0 disables cap).",
     )
     parser.add_argument(
         "--option-atr-mult",
@@ -719,6 +749,12 @@ def main() -> None:
                 close_on_flat=not args.option_no_close_on_flat,
                 close_on_flip=not args.option_no_close_on_flip,
                 submit_orders=not args.simulate_orders,
+                ema_alpha=float(args.option_action_ema_alpha),
+                rebalance_deadband=float(args.option_rebalance_deadband),
+                max_step_contracts=int(args.option_max_step_contracts),
+                price_mode=str(args.option_price_mode),
+                max_contracts_fallback=int(args.option_order_qty),
+                max_contracts_cap=int(args.option_max_contracts_cap),
             )
             order_policies[symbol] = OptionOrderPolicy(cfg)
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
