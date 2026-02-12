@@ -24,6 +24,68 @@ from Agent.eval import evaluate_policy, evaluate_policy_with_trace
 from Agent.model import ActorCritic
 
 
+def _normalize_env_overrides(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, object] = {}
+    allowed = {
+        "add_time_features",
+        "add_position_features",
+        "commission_per_trade",
+        "slippage_bps",
+        "spread_bps",
+        "flip_penalty_ret",
+        "trade_penalty_ret",
+        "hold_penalty_ret",
+        "reward_on_exit",
+        "reward_exit_bonus",
+        "exit_pivot_bonus_ret",
+        "force_flat_at_close",
+        "carry_positions_across_days",
+        "allow_direct_flip",
+        "use_convex_reward",
+        "convex_k1",
+        "convex_k2",
+        "convex_theta",
+        "convex_pivot_k",
+        "convex_mfe_thresholds",
+        "convex_mfe_bonuses",
+        "action_deadband",
+        "seed",
+    }
+    for key in allowed:
+        if key in raw:
+            out[key] = raw[key]
+    return out
+
+
+def _is_continuous_action_type(action_type: str) -> bool:
+    val = str(action_type or "").strip().lower()
+    return val in {"continuous", "continuous_tanh", "gaussian_tanh"}
+
+
+def _load_eval_frame(path_like: str | None) -> pd.DataFrame | None:
+    if not path_like:
+        return None
+    data_path = Path(path_like)
+    if not data_path.exists():
+        raise SystemExit(f"Missing eval data file: {data_path}")
+    suffix = data_path.suffix.lower()
+    if suffix in {".parquet", ".pq"}:
+        df = pd.read_parquet(data_path)
+    elif suffix == ".csv":
+        df = pd.read_csv(data_path)
+    else:
+        raise SystemExit(
+            f"Unsupported eval data extension '{suffix}'. Use .csv or .parquet."
+        )
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    if "day_id" not in df.columns and "timestamp" in df.columns:
+        df["day_id"] = pd.Series(df["timestamp"].dt.normalize()).factorize()[0]
+    return df
+
+
 def _agent_equity_from_trace(trace: pd.DataFrame, initial_cash: float) -> pd.DataFrame:
     equity = float(initial_cash)
     equity_series = []
@@ -332,6 +394,16 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional CSV path for evaluation data (uses full file as test set).",
     )
+    parser.add_argument(
+        "--data-parquet",
+        default=None,
+        help="Optional parquet path for evaluation data (uses full file as test set).",
+    )
+    parser.add_argument(
+        "--data-path",
+        default=None,
+        help="Optional evaluation data path (.csv or .parquet). Overrides --data-csv/--data-parquet.",
+    )
     parser.add_argument("--plot-out", default=None)
     parser.add_argument("--device", default=None, help="cuda/cpu (defaults to auto)")
     parser.add_argument(
@@ -345,16 +417,11 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     cfg = PipelineConfig(drop_na=True)
-    if args.data_csv:
-        data_path = Path(args.data_csv)
-        if not data_path.exists():
-            raise SystemExit(f"Missing data CSV: {data_path}")
-        df = pd.read_csv(data_path)
-        if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        if "day_id" not in df.columns and "timestamp" in df.columns:
-            df["day_id"] = pd.Series(df["timestamp"].dt.normalize()).factorize()[0]
-        test_df = df
+    explicit_data_path = args.data_path or args.data_parquet or args.data_csv
+    loaded_df = _load_eval_frame(explicit_data_path)
+    if loaded_df is not None:
+        df = loaded_df
+        test_df = loaded_df
     else:
         df = build_agent_training_matrix(cfg, save_parquet=False)
         splits = load_tree_split_indices(
@@ -397,6 +464,13 @@ def main() -> None:
             for k in state_dict
         )
         action_type = str(ckpt.get("action_type", "discrete"))
+        reward_mode = str(ckpt.get("reward_mode", "unknown"))
+        env_overrides = _normalize_env_overrides(ckpt.get("env_overrides"))
+        if not env_overrides and reward_mode in {"exit", "mtm", "convex"}:
+            env_overrides = {
+                "reward_on_exit": reward_mode == "exit",
+                "use_convex_reward": reward_mode == "convex",
+            }
         model = ActorCritic(
             obs_dim=ckpt["obs_dim"],
             n_actions=ckpt.get("n_actions", 3),
@@ -410,6 +484,13 @@ def main() -> None:
         test_env = make_trading_env(
             df=test_df,
             feature_cols=feature_cols,
+            **env_overrides,
+        )
+        print(
+            "[run_eval] Eval environment:",
+            f"reward_mode={reward_mode}",
+            f"use_convex={bool(getattr(test_env, 'use_convex_reward', False))}",
+            f"continuous_action={_is_continuous_action_type(action_type)}",
         )
 
         device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -445,7 +526,93 @@ def main() -> None:
                 trace[col] = trace[col].fillna(trace[merge_col])
                 trace = trace.drop(columns=[merge_col])
 
-    if not args.plot_only and "prev_pos" in trace.columns:
+    use_convex_reward = bool(getattr(test_env, "use_convex_reward", False)) if not args.plot_only else False
+    continuous_action = _is_continuous_action_type(action_type) if not args.plot_only else False
+
+    if not args.plot_only and continuous_action and "position" in trace.columns:
+        pos_series = pd.to_numeric(trace["position"], errors="coerce").fillna(0.0)
+        dpos = pos_series.diff().abs().fillna(0.0)
+        eps = 1e-3
+        print(
+            "Exposure stats:",
+            f"mean_abs={float(pos_series.abs().mean()):.4f}",
+            f"p95_abs={float(pos_series.abs().quantile(0.95)):.4f}",
+            f"flat_rate={(pos_series.abs() <= eps).mean():.2%}",
+            f"mean_turnover={float(dpos.mean()):.4f}",
+            f"p95_turnover={float(dpos.quantile(0.95)):.4f}",
+        )
+
+    if not args.plot_only and use_convex_reward:
+        convex = (
+            pd.to_numeric(trace["reward_convex"], errors="coerce")
+            if "reward_convex" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        term = (
+            pd.to_numeric(trace["convex_term"], errors="coerce")
+            if "convex_term" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        mfe_atr = (
+            pd.to_numeric(trace["mfe_atr"], errors="coerce")
+            if "mfe_atr" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        mfe_bonus = (
+            pd.to_numeric(trace["mfe_bonus"], errors="coerce")
+            if "mfe_bonus" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        pivot_anchor = (
+            pd.to_numeric(trace["reward_pivot_anchor"], errors="coerce")
+            if "reward_pivot_anchor" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        reward_total = (
+            pd.to_numeric(trace["reward"], errors="coerce")
+            if "reward" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        reward_pnl = (
+            pd.to_numeric(trace["reward_pnl"], errors="coerce")
+            if "reward_pnl" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        reward_costs = (
+            pd.to_numeric(trace["reward_costs"], errors="coerce")
+            if "reward_costs" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        bonus_hits = int((mfe_bonus.fillna(0.0) > 0).sum()) if not mfe_bonus.empty else 0
+        pos = (
+            pd.to_numeric(trace["position"], errors="coerce").fillna(0.0)
+            if "position" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        up_capture = 0.0
+        down_capture = 0.0
+        if "ret_next" in trace.columns and not pos.empty:
+            retn = pd.to_numeric(trace["ret_next"], errors="coerce").fillna(0.0)
+            pnl_dir = (pos * retn).dropna()
+            if not pnl_dir.empty:
+                up_capture = float(pnl_dir[pnl_dir > 0].mean()) if (pnl_dir > 0).any() else 0.0
+                down_capture = float(pnl_dir[pnl_dir < 0].mean()) if (pnl_dir < 0).any() else 0.0
+        print(
+            "Convex stats:",
+            f"mean_reward={float(reward_total.dropna().mean()) if reward_total.notna().any() else 0.0:.6f}",
+            f"mean_reward_pnl={float(reward_pnl.dropna().mean()) if reward_pnl.notna().any() else 0.0:.6f}",
+            f"mean_costs={float(reward_costs.dropna().mean()) if reward_costs.notna().any() else 0.0:.6f}",
+            f"mean_reward_convex={float(convex.dropna().mean()) if convex.notna().any() else 0.0:.6f}",
+            f"mean_convex_term={float(term.dropna().mean()) if term.notna().any() else 0.0:.6f}",
+            f"mean_pivot_anchor={float(pivot_anchor.dropna().mean()) if pivot_anchor.notna().any() else 0.0:.6f}",
+            f"mean_mfe_atr={float(mfe_atr.dropna().mean()) if mfe_atr.notna().any() else 0.0:.4f}",
+            f"total_mfe_bonus={float(mfe_bonus.dropna().sum()) if mfe_bonus.notna().any() else 0.0:.6f}",
+            f"mfe_bonus_hits={bonus_hits}",
+            f"mean_up_capture={up_capture:.6f}",
+            f"mean_down_capture={down_capture:.6f}",
+        )
+
+    if not args.plot_only and (not use_convex_reward) and "prev_pos" in trace.columns:
         prev = pd.to_numeric(trace["prev_pos"], errors="coerce").fillna(0.0)
         prev_bucket = np.where(prev > 1e-3, 1, np.where(prev < -1e-3, -1, 0))
         by_prev = trace.assign(prev_side=prev_bucket).groupby("prev_side")["reward_pnl"].mean()

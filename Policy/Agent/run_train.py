@@ -235,8 +235,32 @@ def main():
         help="Reward mode: 'exit' (realized PnL on close), 'mtm' (mark-to-market each bar), or 'convex'.",
     )
     parser.add_argument("--convex-k1", type=float, default=1.0)
-    parser.add_argument("--convex-k2", type=float, default=0.5)
-    parser.add_argument("--convex-theta", type=float, default=0.01)
+    parser.add_argument("--convex-k2", type=float, default=0.05)
+    parser.add_argument("--convex-theta", type=float, default=0.03)
+    parser.add_argument(
+        "--convex-pivot-k",
+        type=float,
+        default=0.0015,
+        help="Directional anchor toward pivot edge (p_pivot_long - p_pivot_short).",
+    )
+    parser.add_argument(
+        "--convex-hold-penalty",
+        type=float,
+        default=0.0002,
+        help="Per-bar exposure penalty used in convex mode to reduce over-holding.",
+    )
+    parser.add_argument(
+        "--action-deadband",
+        type=float,
+        default=1e-3,
+        help="Base action deadband (kept at legacy default for non-convex modes).",
+    )
+    parser.add_argument(
+        "--convex-action-deadband",
+        type=float,
+        default=0.05,
+        help="Action deadband used in convex mode to reduce churn.",
+    )
     parser.add_argument(
         "--convex-mfe-thresholds",
         type=str,
@@ -246,7 +270,7 @@ def main():
     parser.add_argument(
         "--convex-mfe-bonuses",
         type=str,
-        default="0.1,0.2,0.3",
+        default="0.001,0.002,0.003",
         help="Comma-separated bonuses aligned to thresholds (e.g. '0.1,0.2,0.3').",
     )
     args = parser.parse_args()
@@ -260,6 +284,11 @@ def main():
 
     convex_thresholds = _parse_floats(args.convex_mfe_thresholds)
     convex_bonuses = _parse_floats(args.convex_mfe_bonuses)
+    action_deadband = (
+        float(args.convex_action_deadband)
+        if use_convex_reward
+        else float(args.action_deadband)
+    )
 
     cfg = PipelineConfig(drop_na=True)
     df = build_agent_training_matrix(cfg, save_parquet=True)
@@ -297,6 +326,8 @@ def main():
             )
 
     num_envs = 12
+    hold_penalty = float(args.convex_hold_penalty) if use_convex_reward else 0.0
+
     if num_envs > 1:
         train_envs = [
             make_trading_env(
@@ -308,6 +339,9 @@ def main():
                 convex_k1=args.convex_k1,
                 convex_k2=args.convex_k2,
                 convex_theta=args.convex_theta,
+                convex_pivot_k=args.convex_pivot_k,
+                hold_penalty_ret=hold_penalty,
+                action_deadband=action_deadband,
                 convex_mfe_thresholds=tuple(convex_thresholds),
                 convex_mfe_bonuses=tuple(convex_bonuses),
                 seed=7 + i,
@@ -325,6 +359,9 @@ def main():
             convex_k1=args.convex_k1,
             convex_k2=args.convex_k2,
             convex_theta=args.convex_theta,
+            convex_pivot_k=args.convex_pivot_k,
+            hold_penalty_ret=hold_penalty,
+            action_deadband=action_deadband,
             convex_mfe_thresholds=tuple(convex_thresholds),
             convex_mfe_bonuses=tuple(convex_bonuses),
         )
@@ -350,9 +387,23 @@ def main():
             "action_dim": 1,
             "action_low": -1.0,
             "action_high": 1.0,
-            "action_deadband": 1e-3,
+            "action_deadband": float(action_deadband),
             "feature_cols": feature_cols,
             "config": cfg.__dict__,
+            "reward_mode": str(args.reward_mode),
+            "env_overrides": {
+                "carry_positions_across_days": True,
+                "reward_on_exit": bool(reward_on_exit),
+                "use_convex_reward": bool(use_convex_reward),
+                "convex_k1": float(args.convex_k1),
+                "convex_k2": float(args.convex_k2),
+                "convex_theta": float(args.convex_theta),
+                "convex_pivot_k": float(args.convex_pivot_k),
+                "hold_penalty_ret": float(hold_penalty),
+                "action_deadband": float(action_deadband),
+                "convex_mfe_thresholds": tuple(float(x) for x in convex_thresholds),
+                "convex_mfe_bonuses": tuple(float(x) for x in convex_bonuses),
+            },
         },
         model_path,
     )
@@ -371,6 +422,9 @@ def main():
         convex_k1=args.convex_k1,
         convex_k2=args.convex_k2,
         convex_theta=args.convex_theta,
+        convex_pivot_k=args.convex_pivot_k,
+        hold_penalty_ret=hold_penalty,
+        action_deadband=action_deadband,
         convex_mfe_thresholds=tuple(convex_thresholds),
         convex_mfe_bonuses=tuple(convex_bonuses),
     )

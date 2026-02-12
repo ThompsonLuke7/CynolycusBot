@@ -47,6 +47,7 @@ class TradingEnv:
         convex_k1: float = 1.0,
         convex_k2: float = 0.5,
         convex_theta: float = 0.01,
+        convex_pivot_k: float = 0.0,
         convex_mfe_thresholds: Tuple[float, ...] = (1.0, 2.0, 3.0),
         convex_mfe_bonuses: Tuple[float, ...] = (0.1, 0.2, 0.3),
         action_deadband: float = 1e-3,
@@ -92,6 +93,7 @@ class TradingEnv:
         self.convex_k1 = float(convex_k1)
         self.convex_k2 = float(convex_k2)
         self.convex_theta = float(convex_theta)
+        self.convex_pivot_k = float(convex_pivot_k)
         self.convex_mfe_thresholds = tuple(float(x) for x in convex_mfe_thresholds)
         self.action_deadband = max(0.0, float(action_deadband))
         if not self.convex_mfe_thresholds:
@@ -281,6 +283,7 @@ class TradingEnv:
         reward_pivot_bonus = 0.0
         reward_convex = 0.0
         convex_term = 0.0
+        pivot_anchor = 0.0
         mfe_bonus = 0.0
         mfe_atr = None
         flipped = (
@@ -361,6 +364,11 @@ class TradingEnv:
             if np.isfinite(atr) and atr > 0.0:
                 convex_term = (delta_s / atr) ** 2
             reward_convex = (float(self.position) * self.convex_k1 * r) + (abs(self.position) * self.convex_k2 * convex_term)
+            # Pivot-anchor term rewards directional alignment with pivot edge.
+            pivot_edge = float(self._pivot_long[self._i]) - float(self._pivot_short[self._i])
+            if np.isfinite(pivot_edge):
+                pivot_anchor = self.convex_pivot_k * float(self.position) * pivot_edge
+                reward_convex += pivot_anchor
             reward_convex -= self.convex_theta * abs(self.position)
             reward_pnl = reward_convex
             if (not self._is_flat(self.position)) and np.isfinite(atr) and np.isfinite(self.entry_price):
@@ -409,6 +417,7 @@ class TradingEnv:
             "reward_pivot_bonus": reward_pivot_bonus,
             "reward_convex": reward_convex if self.use_convex_reward else None,
             "convex_term": convex_term if self.use_convex_reward else None,
+            "reward_pivot_anchor": pivot_anchor if self.use_convex_reward else None,
             "mfe_atr": float(mfe_atr) if mfe_atr is not None and np.isfinite(mfe_atr) else None,
             "mfe_bonus": mfe_bonus if self.use_convex_reward else None,
             "realized_pnl_today": self.realized_pnl_today,
@@ -450,6 +459,7 @@ class TradingEnv:
                 info["reward_pivot_bonus"] = reward_pivot_bonus
                 info["reward_convex"] = reward_convex if self.use_convex_reward else None
                 info["convex_term"] = convex_term if self.use_convex_reward else None
+                info["reward_pivot_anchor"] = pivot_anchor if self.use_convex_reward else None
                 info["mfe_atr"] = float(mfe_atr) if mfe_atr is not None and np.isfinite(mfe_atr) else None
                 info["mfe_bonus"] = mfe_bonus if self.use_convex_reward else None
                 info["pos"] = self.position

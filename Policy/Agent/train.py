@@ -77,6 +77,7 @@ def train_ppo(
             {"params": model.shared.parameters(), "lr": pi_lr},
             {"params": model.policy_mlp.parameters(), "lr": pi_lr},
             {"params": model.policy_head.parameters(), "lr": pi_lr},
+            {"params": [model.policy_log_std], "lr": pi_lr},
             {"params": model.value_mlp.parameters(), "lr": vf_lr},
             {"params": model.value_head.parameters(), "lr": vf_lr},
         ]

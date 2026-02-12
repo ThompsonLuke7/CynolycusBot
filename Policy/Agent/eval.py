@@ -184,6 +184,32 @@ def evaluate_policy_with_trace(
                     "reward": float(reward),
                     "reward_pnl": float(info.get("reward_pnl", 0.0)),
                     "reward_costs": float(info.get("reward_costs", 0.0)),
+                    "reward_pivot_bonus": float(info.get("reward_pivot_bonus", 0.0)),
+                    "reward_convex": (
+                        float(info.get("reward_convex"))
+                        if info.get("reward_convex") is not None
+                        else np.nan
+                    ),
+                    "reward_pivot_anchor": (
+                        float(info.get("reward_pivot_anchor"))
+                        if info.get("reward_pivot_anchor") is not None
+                        else np.nan
+                    ),
+                    "convex_term": (
+                        float(info.get("convex_term"))
+                        if info.get("convex_term") is not None
+                        else np.nan
+                    ),
+                    "mfe_atr": (
+                        float(info.get("mfe_atr"))
+                        if info.get("mfe_atr") is not None
+                        else np.nan
+                    ),
+                    "mfe_bonus": (
+                        float(info.get("mfe_bonus"))
+                        if info.get("mfe_bonus") is not None
+                        else np.nan
+                    ),
                     "forced_flat_cost": float(info.get("forced_flat_cost", 0.0)),
                 }
                 if has_ohlc:

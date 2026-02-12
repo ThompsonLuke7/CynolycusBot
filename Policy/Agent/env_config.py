@@ -26,6 +26,7 @@ class TradingEnvConfig:
     convex_k1: float = 1.0
     convex_k2: float = 0.5
     convex_theta: float = 0.01
+    convex_pivot_k: float = 0.0
     convex_mfe_thresholds: tuple[float, ...] = (1.0, 2.0, 3.0)
     convex_mfe_bonuses: tuple[float, ...] = (0.1, 0.2, 0.3)
     action_deadband: float = 1e-3
