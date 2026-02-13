@@ -20,7 +20,7 @@ from training_pipeline import (
 )
 from Data.retrieve_data import normalize_ticker
 from Agent.env_config import make_trading_env
-from Agent.eval import evaluate_policy, evaluate_policy_with_trace
+from Agent.eval import evaluate_loss_metrics, evaluate_policy, evaluate_policy_with_trace
 from Agent.model import ActorCritic
 
 
@@ -503,8 +503,34 @@ def main() -> None:
         )
         print(report)
         print("Avg pnl component:", report["pnl_component"].mean(), "Avg costs:", report["costs_component"].mean())
+        eval_loss_env = make_trading_env(
+            df=test_df,
+            feature_cols=feature_cols,
+            **env_overrides,
+        )
+        eval_loss = evaluate_loss_metrics(
+            eval_loss_env,
+            model,
+            device=device,
+            deterministic=deterministic,
+        )
+        print(
+            "Eval loss metrics:",
+            f"actor={eval_loss.get('eval_loss_actor', float('nan')):.6f}",
+            f"value={eval_loss.get('eval_loss_value', float('nan')):.6f}",
+            f"entropy={eval_loss.get('eval_entropy', float('nan')):.6f}",
+            f"avg_reward={eval_loss.get('eval_avg_reward', float('nan')):.6f}",
+            f"avg_abs_reward={eval_loss.get('eval_avg_abs_reward', float('nan')):.6f}",
+        )
 
-        trace = evaluate_policy_with_trace(test_env, model, device=device, deterministic=deterministic)
+        # Use a fresh env for trace generation so carry/state from the summary pass
+        # cannot leak into plotted/recorded behavior.
+        trace_env = make_trading_env(
+            df=test_df,
+            feature_cols=feature_cols,
+            **env_overrides,
+        )
+        trace = evaluate_policy_with_trace(trace_env, model, device=device, deterministic=deterministic)
         trace = _agent_equity_from_trace(trace, initial_cash=100_000.0)
         trace_path = Path(args.trace_out)
         trace_path.parent.mkdir(parents=True, exist_ok=True)

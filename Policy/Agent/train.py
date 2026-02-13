@@ -58,7 +58,8 @@ def train_ppo(
     device: str = "cuda",
     seed: int = 7,
     verbose: bool = True,
-) -> ActorCritic:
+    return_history: bool = False,
+) -> ActorCritic | tuple[ActorCritic, list[dict[str, float]]]:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -88,10 +89,17 @@ def train_ppo(
     obs = env.reset(day_ptr=0) if not is_vectorized else env.reset()
     steps_done = 0
     train_start = time.perf_counter()
+    history: list[dict[str, float]] = []
 
     while steps_done < total_timesteps:
         obs_buf, act_buf, logp_buf = [], [], []
         rew_buf, done_buf, val_buf, next_val_buf = [], [], [], []
+        loss_total_hist: list[float] = []
+        loss_pi_hist: list[float] = []
+        loss_v_hist: list[float] = []
+        entropy_hist: list[float] = []
+        approx_kl_hist: list[float] = []
+        clipfrac_hist: list[float] = []
 
         for _ in range(rollout_len):
             if is_vectorized:
@@ -244,6 +252,16 @@ def train_ppo(
                 nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 optimizer.step()
 
+                with torch.no_grad():
+                    approx_kl = (logp_old_t[mb] - logp).mean()
+                    clipfrac = (torch.abs(ratio - 1.0) > clip_ratio).float().mean()
+                loss_total_hist.append(float(loss.detach().item()))
+                loss_pi_hist.append(float(pi_loss.detach().item()))
+                loss_v_hist.append(float(v_loss.detach().item()))
+                entropy_hist.append(float(entropy.detach().item()))
+                approx_kl_hist.append(float(approx_kl.detach().item()))
+                clipfrac_hist.append(float(clipfrac.detach().item()))
+
         if verbose:
             now = time.perf_counter()
             elapsed = max(now - train_start, 1e-9)
@@ -251,14 +269,45 @@ def train_ppo(
             remaining_steps = max(int(total_timesteps) - int(steps_done), 0)
             eta = (remaining_steps / speed) if speed > 0 else float("inf")
             progress_pct = 100.0 * min(steps_done, total_timesteps) / max(total_timesteps, 1)
+            loss_total = float(np.mean(loss_total_hist)) if loss_total_hist else float("nan")
+            loss_pi = float(np.mean(loss_pi_hist)) if loss_pi_hist else float("nan")
+            loss_v = float(np.mean(loss_v_hist)) if loss_v_hist else float("nan")
+            entropy_avg = float(np.mean(entropy_hist)) if entropy_hist else float("nan")
+            approx_kl_avg = float(np.mean(approx_kl_hist)) if approx_kl_hist else float("nan")
+            clipfrac_avg = float(np.mean(clipfrac_hist)) if clipfrac_hist else float("nan")
+            rollout_avg_reward = float(np.mean(rollout.rewards))
+            rollout_avg_abs_reward = float(np.mean(np.abs(rollout.rewards)))
+            history.append(
+                {
+                    "steps": float(steps_done),
+                    "progress_pct": float(progress_pct),
+                    "rollout_avg_reward": rollout_avg_reward,
+                    "rollout_avg_abs_reward": rollout_avg_abs_reward,
+                    "loss_total": loss_total,
+                    "loss_pi": loss_pi,
+                    "loss_v": loss_v,
+                    "entropy": entropy_avg,
+                    "approx_kl": approx_kl_avg,
+                    "clipfrac": clipfrac_avg,
+                    "sps": float(speed),
+                }
+            )
             print(
                 f"steps={steps_done:,} "
                 f"({progress_pct:.2f}%) "
-                f"rollout_avg_reward={float(np.mean(rollout.rewards)):.6f} "
-                f"avg|r|={float(np.mean(np.abs(rollout.rewards))):.6f} "
+                f"rollout_avg_reward={rollout_avg_reward:.6f} "
+                f"avg|r|={rollout_avg_abs_reward:.6f} "
+                f"loss={loss_total:.6f} "
+                f"pi={loss_pi:.6f} "
+                f"v={loss_v:.6f} "
+                f"ent={entropy_avg:.6f} "
+                f"kl={approx_kl_avg:.6f} "
+                f"clipfrac={clipfrac_avg:.3f} "
                 f"sps={speed:,.1f} "
                 f"elapsed={_format_duration(elapsed)} "
                 f"eta={_format_duration(eta)}"
             )
 
+    if return_history:
+        return model, history
     return model

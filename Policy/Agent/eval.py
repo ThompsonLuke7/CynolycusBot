@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from Agent.buffer import compute_gae
 from Agent.env import TradingEnv
 from Agent.model import ActorCritic
 
@@ -232,3 +233,115 @@ def evaluate_policy_with_trace(
             model.train()
 
     return pd.DataFrame(rows)
+
+
+@torch.no_grad()
+def evaluate_loss_metrics(
+    env: TradingEnv,
+    model: ActorCritic,
+    *,
+    gamma: float = 0.995,
+    gae_lambda: float = 0.95,
+    device: str = "auto",
+    deterministic: bool = True,
+) -> dict[str, float]:
+    dev = _resolve_device(device)
+    prev_training = model.training
+    prev_device = next(model.parameters()).device
+    moved = prev_device != dev
+    if moved:
+        model = model.to(dev)
+    model.eval()
+
+    rewards: list[float] = []
+    dones: list[float] = []
+    values: list[float] = []
+    next_values: list[float] = []
+    logps: list[float] = []
+    entropies: list[float] = []
+
+    try:
+        for d in range(len(env.day_starts)):
+            obs = env.reset(day_ptr=d)
+            done = False
+            while not done:
+                x = torch.as_tensor(obs, dtype=torch.float32, device=dev).unsqueeze(0)
+                policy_out, value_t = model(x)
+                if getattr(model, "continuous_action", False):
+                    if deterministic:
+                        action_t = torch.tanh(policy_out)
+                    else:
+                        action_t, _logp_tmp, _ent_tmp = model._sample_continuous(  # noqa: SLF001
+                            policy_out,
+                            deterministic=False,
+                        )
+                    logp_t, entropy_t = model._continuous_logp_entropy(  # noqa: SLF001
+                        policy_out,
+                        action_t,
+                    )
+                    action = float(action_t.squeeze().item())
+                else:
+                    dist = torch.distributions.Categorical(logits=policy_out)
+                    if deterministic:
+                        action_idx = torch.argmax(policy_out, dim=-1)
+                    else:
+                        action_idx = dist.sample()
+                    logp_t = dist.log_prob(action_idx)
+                    entropy_t = dist.entropy()
+                    a = int(action_idx.item())
+                    action = 0.0 if a == 0 else (1.0 if a == 1 else -1.0)
+
+                next_obs, reward, done, _info = env.step(action)
+                x_next = torch.as_tensor(next_obs, dtype=torch.float32, device=dev).unsqueeze(0)
+                _next_policy, next_value_t = model(x_next)
+
+                rewards.append(float(reward))
+                dones.append(float(done))
+                values.append(float(value_t.squeeze().item()))
+                next_values.append(float(next_value_t.squeeze().item()))
+                logps.append(float(logp_t.squeeze().item()))
+                entropies.append(float(entropy_t.squeeze().item()))
+                obs = next_obs
+    finally:
+        if moved:
+            model = model.to(prev_device)
+        if prev_training:
+            model.train()
+
+    if not rewards:
+        return {
+            "eval_loss_actor": float("nan"),
+            "eval_loss_value": float("nan"),
+            "eval_entropy": float("nan"),
+            "eval_avg_reward": float("nan"),
+            "eval_avg_abs_reward": float("nan"),
+        }
+
+    rew_arr = np.asarray(rewards, dtype=np.float32)
+    done_arr = np.asarray(dones, dtype=np.float32)
+    val_arr = np.asarray(values, dtype=np.float32)
+    next_val_arr = np.asarray(next_values, dtype=np.float32)
+    adv, ret = compute_gae(
+        rewards=rew_arr,
+        dones=done_arr,
+        values=val_arr,
+        next_values=next_val_arr,
+        gamma=float(gamma),
+        lam=float(gae_lambda),
+    )
+    adv_norm = (adv - adv.mean()) / (adv.std() + 1e-8)
+    logp_arr = np.asarray(logps, dtype=np.float32)
+    ent_arr = np.asarray(entropies, dtype=np.float32)
+
+    actor_loss = -float(np.mean(logp_arr * adv_norm))
+    value_loss = float(np.mean((val_arr - ret) ** 2))
+    entropy = float(np.mean(ent_arr))
+    avg_reward = float(np.mean(rew_arr))
+    avg_abs_reward = float(np.mean(np.abs(rew_arr)))
+    return {
+        "eval_loss_actor": actor_loss,
+        "eval_loss_value": value_loss,
+        "eval_entropy": entropy,
+        "eval_avg_reward": avg_reward,
+        "eval_avg_abs_reward": avg_abs_reward,
+    }

@@ -20,7 +20,7 @@ from Data.retrieve_data import normalize_ticker
 from Agent.env import VecTradingEnv
 from Agent.env_config import make_trading_env
 from Agent.train import train_ppo
-from Agent.eval import evaluate_policy, evaluate_policy_with_trace
+from Agent.eval import evaluate_loss_metrics, evaluate_policy, evaluate_policy_with_trace
 
 
 def _daily_first_last(df):
@@ -212,6 +212,49 @@ def _plot_actions(trace, output_path):
     print(f"Saved action plot to {output_path}")
 
 
+def _plot_training_history(history_df: pd.DataFrame, output_path: Path) -> None:
+    if history_df.empty:
+        print("Training metrics plot skipped: no history rows.")
+        return
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"Training metrics plot skipped: {exc}")
+        return
+
+    x = history_df["steps"].to_numpy(dtype=float)
+    fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    for col, label, color in (
+        ("loss_total", "loss_total", "#1f77b4"),
+        ("loss_pi", "loss_pi", "#2ca02c"),
+        ("loss_v", "loss_v", "#d62728"),
+    ):
+        if col in history_df.columns:
+            y = pd.to_numeric(history_df[col], errors="coerce").to_numpy(dtype=float)
+            ax0.plot(x, y, label=label, linewidth=1.2, color=color)
+    ax0.set_ylabel("Loss")
+    ax0.set_title("PPO Training Losses by Update")
+    ax0.legend(loc="best")
+
+    for col, label, color in (
+        ("approx_kl", "approx_kl", "#9467bd"),
+        ("clipfrac", "clipfrac", "#ff7f0e"),
+        ("entropy", "entropy", "#8c564b"),
+    ):
+        if col in history_df.columns:
+            y = pd.to_numeric(history_df[col], errors="coerce").to_numpy(dtype=float)
+            ax1.plot(x, y, label=label, linewidth=1.2, color=color)
+    ax1.set_xlabel("Environment Steps")
+    ax1.set_ylabel("Metric")
+    ax1.legend(loc="best")
+
+    plt.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    print(f"Saved training metrics plot to {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train PPO agent.")
     parser.add_argument(
@@ -234,6 +277,26 @@ def main():
         default="convex",
         help="Reward mode: 'exit' (realized PnL on close), 'mtm' (mark-to-market each bar), or 'convex'.",
     )
+    parser.add_argument("--total-timesteps", type=int, default=2_000_000)
+    parser.add_argument("--rollout-len", type=int, default=1024)
+    parser.add_argument("--gamma", type=float, default=0.995)
+    parser.add_argument("--gae-lambda", type=float, default=0.95)
+    parser.add_argument("--clip-ratio", type=float, default=0.2)
+    parser.add_argument("--pi-lr", type=float, default=3e-4)
+    parser.add_argument("--vf-lr", type=float, default=1e-3)
+    parser.add_argument("--train-epochs", type=int, default=5)
+    parser.add_argument("--minibatch-size", type=int, default=256)
+    parser.add_argument("--entropy-coef", type=float, default=0.003)
+    parser.add_argument("--value-coef", type=float, default=0.5)
+    parser.add_argument("--max-grad-norm", type=float, default=0.5)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Training device: auto/cuda/cpu/mps.",
+    )
+    parser.add_argument("--num-envs", type=int, default=12)
     parser.add_argument("--convex-k1", type=float, default=1.0)
     parser.add_argument("--convex-k2", type=float, default=0.05)
     parser.add_argument("--convex-theta", type=float, default=0.03)
@@ -258,7 +321,7 @@ def main():
     parser.add_argument(
         "--convex-action-deadband",
         type=float,
-        default=0.05,
+        default=0.01,
         help="Action deadband used in convex mode to reduce churn.",
     )
     parser.add_argument(
@@ -325,7 +388,7 @@ def main():
                 f"Top NaN counts:\n{nan_counts}"
             )
 
-    num_envs = 12
+    num_envs = max(1, int(args.num_envs))
     hold_penalty = float(args.convex_hold_penalty) if use_convex_reward else 0.0
 
     if num_envs > 1:
@@ -366,17 +429,34 @@ def main():
             convex_mfe_bonuses=tuple(convex_bonuses),
         )
 
-    model = train_ppo(
+    model, train_history = train_ppo(
         train_env,
-        total_timesteps=2_000_000,
-        rollout_len=1024,
-        train_epochs=5,
-        minibatch_size=256,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        total_timesteps=int(args.total_timesteps),
+        rollout_len=int(args.rollout_len),
+        gamma=float(args.gamma),
+        gae_lambda=float(args.gae_lambda),
+        clip_ratio=float(args.clip_ratio),
+        pi_lr=float(args.pi_lr),
+        vf_lr=float(args.vf_lr),
+        train_epochs=int(args.train_epochs),
+        minibatch_size=int(args.minibatch_size),
+        entropy_coef=float(args.entropy_coef),
+        value_coef=float(args.value_coef),
+        max_grad_norm=float(args.max_grad_norm),
+        device=str(args.device),
+        seed=int(args.seed),
         verbose=True,
+        return_history=True,
     )
     output_dir = Path("Data") / "outputs" / "agent"
     output_dir.mkdir(parents=True, exist_ok=True)
+    history_df = pd.DataFrame(train_history)
+    history_csv_path = output_dir / "ppo_train_metrics.csv"
+    history_df.to_csv(history_csv_path, index=False)
+    print(f"Saved training metrics to {history_csv_path}")
+    history_plot_path = output_dir / "ppo_train_metrics.png"
+    _plot_training_history(history_df, history_plot_path)
+
     model_path = output_dir / "ppo_model.pt"
     torch.save(
         {
@@ -439,12 +519,60 @@ def main():
     )
     print(report)
     print("Avg pnl component:", report["pnl_component"].mean(), "Avg costs:", report["costs_component"].mean())
+    eval_loss_env = make_trading_env(
+        df=test_df,
+        feature_cols=feature_cols,
+        carry_positions_across_days=True,
+        reward_on_exit=reward_on_exit,
+        use_convex_reward=use_convex_reward,
+        convex_k1=args.convex_k1,
+        convex_k2=args.convex_k2,
+        convex_theta=args.convex_theta,
+        convex_pivot_k=args.convex_pivot_k,
+        hold_penalty_ret=hold_penalty,
+        action_deadband=action_deadband,
+        convex_mfe_thresholds=tuple(convex_thresholds),
+        convex_mfe_bonuses=tuple(convex_bonuses),
+    )
+    eval_loss = evaluate_loss_metrics(
+        eval_loss_env,
+        model,
+        gamma=float(args.gamma),
+        gae_lambda=float(args.gae_lambda),
+        device=eval_device,
+        deterministic=True,
+    )
+    print(
+        "Eval loss metrics:",
+        f"actor={eval_loss.get('eval_loss_actor', float('nan')):.6f}",
+        f"value={eval_loss.get('eval_loss_value', float('nan')):.6f}",
+        f"entropy={eval_loss.get('eval_entropy', float('nan')):.6f}",
+        f"avg_reward={eval_loss.get('eval_avg_reward', float('nan')):.6f}",
+        f"avg_abs_reward={eval_loss.get('eval_avg_abs_reward', float('nan')):.6f}",
+    )
 
     initial_cash = 100_000.0
     baseline_mode = "intraday"  # "intraday", "buy_hold", or "none"
     include_dca = False
 
-    trace = evaluate_policy_with_trace(test_env, model, device=eval_device, deterministic=True)
+    # Use a fresh env for trace generation so carry/state from the summary pass
+    # cannot leak into plotted/recorded behavior.
+    trace_env = make_trading_env(
+        df=test_df,
+        feature_cols=feature_cols,
+        carry_positions_across_days=True,
+        reward_on_exit=reward_on_exit,
+        use_convex_reward=use_convex_reward,
+        convex_k1=args.convex_k1,
+        convex_k2=args.convex_k2,
+        convex_theta=args.convex_theta,
+        convex_pivot_k=args.convex_pivot_k,
+        hold_penalty_ret=hold_penalty,
+        action_deadband=action_deadband,
+        convex_mfe_thresholds=tuple(convex_thresholds),
+        convex_mfe_bonuses=tuple(convex_bonuses),
+    )
+    trace = evaluate_policy_with_trace(trace_env, model, device=eval_device, deterministic=True)
     trace = _agent_equity_from_trace(trace, initial_cash=initial_cash)
     trace_path = output_dir / "agent_trace.csv"
     trace.to_csv(trace_path, index=False)
