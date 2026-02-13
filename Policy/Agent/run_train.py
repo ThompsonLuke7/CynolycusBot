@@ -356,31 +356,61 @@ def main():
         help="Policy action head: hybrid direction+magnitude (recommended) or single continuous exposure.",
     )
     parser.add_argument("--convex-k1", type=float, default=1.0)
-    parser.add_argument("--convex-k2", type=float, default=0.01)
-    parser.add_argument("--convex-theta", type=float, default=0.04)
+    parser.add_argument("--convex-k2", type=float, default=0.15)
+    parser.add_argument("--convex-theta", type=float, default=0.00005)
     parser.add_argument(
         "--convex-pivot-k",
         type=float,
-        default=0.02,
+        default=0.01,
         help="Directional anchor toward pivot edge (p_pivot_long - p_pivot_short).",
     )
     parser.add_argument(
         "--convex-hold-penalty",
         type=float,
-        default=0.0003,
+        default=0.00002,
         help="Per-bar exposure penalty used in convex mode to reduce over-holding.",
     )
     parser.add_argument(
         "--dir-switch-penalty-ret",
         type=float,
-        default=0.0005,
+        default=0.00005,
         help="Penalty when direction flips directly long<->short.",
     )
     parser.add_argument(
         "--size-change-penalty-ret",
         type=float,
-        default=0.0001,
+        default=0.00001,
         help="Penalty scaled by |abs(pos_t)-abs(pos_t-1)|.",
+    )
+    parser.add_argument(
+        "--commission-per-trade",
+        type=float,
+        default=0.0,
+        help="Per-trade commission in return units via price normalization.",
+    )
+    parser.add_argument(
+        "--slippage-bps",
+        type=float,
+        default=0.1,
+        help="Slippage basis points per trade leg.",
+    )
+    parser.add_argument(
+        "--spread-bps",
+        type=float,
+        default=0.1,
+        help="Spread basis points per trade leg.",
+    )
+    parser.add_argument(
+        "--trade-penalty-ret",
+        type=float,
+        default=0.00002,
+        help="Additional per-trade penalty in return units.",
+    )
+    parser.add_argument(
+        "--flip-penalty-ret",
+        type=float,
+        default=0.00005,
+        help="Extra penalty when flipping direction directly.",
     )
     parser.add_argument(
         "--action-deadband",
@@ -391,7 +421,7 @@ def main():
     parser.add_argument(
         "--convex-action-deadband",
         type=float,
-        default=0.005,
+        default=0.0005,
         help="Action deadband used in convex mode to reduce churn.",
     )
     parser.add_argument(
@@ -466,6 +496,11 @@ def main():
         "carry_positions_across_days": True,
         "reward_on_exit": reward_on_exit,
         "use_convex_reward": use_convex_reward,
+        "commission_per_trade": float(args.commission_per_trade),
+        "slippage_bps": float(args.slippage_bps),
+        "spread_bps": float(args.spread_bps),
+        "trade_penalty_ret": float(args.trade_penalty_ret),
+        "flip_penalty_ret": float(args.flip_penalty_ret),
         "convex_k1": args.convex_k1,
         "convex_k2": args.convex_k2,
         "convex_theta": args.convex_theta,
@@ -543,6 +578,11 @@ def main():
                 "carry_positions_across_days": True,
                 "reward_on_exit": bool(reward_on_exit),
                 "use_convex_reward": bool(use_convex_reward),
+                "commission_per_trade": float(args.commission_per_trade),
+                "slippage_bps": float(args.slippage_bps),
+                "spread_bps": float(args.spread_bps),
+                "trade_penalty_ret": float(args.trade_penalty_ret),
+                "flip_penalty_ret": float(args.flip_penalty_ret),
                 "convex_k1": float(args.convex_k1),
                 "convex_k2": float(args.convex_k2),
                 "convex_theta": float(args.convex_theta),

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict, replace
+from dataclasses import dataclass, asdict, fields, replace
 from typing import Any
 
 from Agent.env import TradingEnv
@@ -46,5 +46,7 @@ def make_trading_env(
 ) -> TradingEnv:
     cfg = config or TradingEnvConfig()
     if overrides:
-        cfg = replace(cfg, **overrides)
+        valid = {f.name for f in fields(TradingEnvConfig)}
+        filtered = {k: v for k, v in overrides.items() if k in valid}
+        cfg = replace(cfg, **filtered)
     return TradingEnv(df=df, feature_cols=feature_cols, **asdict(cfg))
