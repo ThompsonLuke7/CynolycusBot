@@ -20,8 +20,33 @@ def _resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
-def _policy_action(model: ActorCritic, x: torch.Tensor, deterministic: bool) -> float:
+def _policy_decision(
+    model: ActorCritic,
+    x: torch.Tensor,
+    deterministic: bool,
+) -> tuple[float, int | None, float | None]:
     policy_out, _ = model(x)
+    if getattr(model, "hybrid_action", False):
+        if deterministic:
+            dir_logits = policy_out[:, :3]
+            mag_mean = policy_out[:, 3:4]
+            dir_idx_t = torch.argmax(dir_logits, dim=-1)
+            mag_t = torch.sigmoid(mag_mean)
+            dir_sign = model._dir_idx_to_sign(dir_idx_t)  # noqa: SLF001
+            exposure_t = dir_sign * mag_t.squeeze(-1)
+            action_t = torch.stack(
+                [exposure_t, dir_idx_t.to(dtype=torch.float32), mag_t.squeeze(-1)],
+                dim=-1,
+            )
+        else:
+            action_t, _logp, _entropy = model._sample_hybrid(  # noqa: SLF001
+                policy_out,
+                deterministic=False,
+            )
+        exposure = float(action_t[:, 0].squeeze().item())
+        dir_idx = int(action_t[:, 1].round().clamp(min=0, max=2).squeeze().item())
+        mag = float(action_t[:, 2].squeeze().item())
+        return exposure, dir_idx, mag
     if getattr(model, "continuous_action", False):
         if deterministic:
             action_t = torch.tanh(policy_out)
@@ -30,13 +55,18 @@ def _policy_action(model: ActorCritic, x: torch.Tensor, deterministic: bool) -> 
                 policy_out,
                 deterministic=False,
             )
-        return float(action_t.squeeze().item())
+        return float(action_t.squeeze().item()), None, None
     if deterministic:
         act = int(torch.argmax(policy_out, dim=-1).item())
-        return 0.0 if act == 0 else (1.0 if act == 1 else -1.0)
+        return 0.0 if act == 0 else (1.0 if act == 1 else -1.0), act, None
     dist = torch.distributions.Categorical(logits=policy_out)
     act = int(dist.sample().item())
-    return 0.0 if act == 0 else (1.0 if act == 1 else -1.0)
+    return 0.0 if act == 0 else (1.0 if act == 1 else -1.0), act, None
+
+
+def _policy_action(model: ActorCritic, x: torch.Tensor, deterministic: bool) -> float:
+    action, _dir_idx, _mag = _policy_decision(model, x, deterministic)
+    return action
 
 
 @torch.no_grad()
@@ -170,7 +200,7 @@ def evaluate_policy_with_trace(
                     else None
                 )
                 x = torch.as_tensor(obs, dtype=torch.float32, device=dev).unsqueeze(0)
-                action = _policy_action(model, x, deterministic)
+                action, action_dir_idx, action_mag = _policy_decision(model, x, deterministic)
 
                 obs, reward, done, info = env.step(action)
                 row = {
@@ -178,6 +208,8 @@ def evaluate_policy_with_trace(
                     "timestamp": ts,
                     "close": close,
                     "action": action,
+                    "action_dir_idx": action_dir_idx if action_dir_idx is not None else np.nan,
+                    "action_mag": action_mag if action_mag is not None else np.nan,
                     "position": float(info.get("pos", 0.0)),
                     "prev_pos": float(info.get("prev_pos", 0.0)),
                     "did_trade": bool(info.get("did_trade", False)),
@@ -191,6 +223,16 @@ def evaluate_policy_with_trace(
                         if info.get("reward_convex") is not None
                         else np.nan
                     ),
+                    "reward_convex_linear": (
+                        float(info.get("reward_convex_linear"))
+                        if info.get("reward_convex_linear") is not None
+                        else np.nan
+                    ),
+                    "reward_convex_bonus": (
+                        float(info.get("reward_convex_bonus"))
+                        if info.get("reward_convex_bonus") is not None
+                        else np.nan
+                    ),
                     "reward_pivot_anchor": (
                         float(info.get("reward_pivot_anchor"))
                         if info.get("reward_pivot_anchor") is not None
@@ -199,6 +241,11 @@ def evaluate_policy_with_trace(
                     "convex_term": (
                         float(info.get("convex_term"))
                         if info.get("convex_term") is not None
+                        else np.nan
+                    ),
+                    "convex_atr_scale": (
+                        float(info.get("convex_atr_scale"))
+                        if info.get("convex_atr_scale") is not None
                         else np.nan
                     ),
                     "mfe_atr": (
@@ -211,6 +258,10 @@ def evaluate_policy_with_trace(
                         if info.get("mfe_bonus") is not None
                         else np.nan
                     ),
+                    "reward_switch_penalty": float(info.get("reward_switch_penalty", 0.0)),
+                    "reward_size_penalty": float(info.get("reward_size_penalty", 0.0)),
+                    "did_dir_switch": bool(info.get("did_dir_switch", False)),
+                    "size_delta": float(info.get("size_delta", 0.0)),
                     "forced_flat_cost": float(info.get("forced_flat_cost", 0.0)),
                 }
                 if has_ohlc:
@@ -267,7 +318,29 @@ def evaluate_loss_metrics(
             while not done:
                 x = torch.as_tensor(obs, dtype=torch.float32, device=dev).unsqueeze(0)
                 policy_out, value_t = model(x)
-                if getattr(model, "continuous_action", False):
+                if getattr(model, "hybrid_action", False):
+                    if deterministic:
+                        dir_logits = policy_out[:, :3]
+                        mag_mean = policy_out[:, 3:4]
+                        dir_idx_t = torch.argmax(dir_logits, dim=-1)
+                        mag_t = torch.sigmoid(mag_mean)
+                        dir_sign = model._dir_idx_to_sign(dir_idx_t)  # noqa: SLF001
+                        exposure_t = dir_sign * mag_t.squeeze(-1)
+                        action_t = torch.stack(
+                            [exposure_t, dir_idx_t.to(dtype=torch.float32), mag_t.squeeze(-1)],
+                            dim=-1,
+                        )
+                    else:
+                        action_t, _logp_tmp, _ent_tmp = model._sample_hybrid(  # noqa: SLF001
+                            policy_out,
+                            deterministic=False,
+                        )
+                    logp_t, entropy_t = model._hybrid_logp_entropy(  # noqa: SLF001
+                        policy_out,
+                        action_t,
+                    )
+                    action = float(action_t[:, 0].squeeze().item())
+                elif getattr(model, "continuous_action", False):
                     if deterministic:
                         action_t = torch.tanh(policy_out)
                     else:

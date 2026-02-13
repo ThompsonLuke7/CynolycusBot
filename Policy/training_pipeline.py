@@ -4,7 +4,9 @@ Training pipeline skeleton.
 
 from __future__ import annotations
 
+import io
 import sys
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +44,7 @@ def build_agent_training_matrix(
     cfg: PipelineConfig | None = None,
     *,
     save_parquet: bool = False,
+    verbose: bool = False,
 ) -> pd.DataFrame:
     config = cfg or PipelineConfig()
     agent_cfg = AgentFeatureConfig(
@@ -52,7 +55,12 @@ def build_agent_training_matrix(
         drop_na=False,
         include_state_placeholders=config.include_state_placeholders,
     )
-    df = build_agent_feature_matrix(config=agent_cfg)
+    if verbose:
+        df = build_agent_feature_matrix(config=agent_cfg)
+    else:
+        # Silence noisy debug printouts from lower-level feature builders.
+        with io.StringIO() as _buf, redirect_stdout(_buf):
+            df = build_agent_feature_matrix(config=agent_cfg)
     if save_parquet:
         clean = normalize_ticker(config.ticker).lower()
         out_dir = (

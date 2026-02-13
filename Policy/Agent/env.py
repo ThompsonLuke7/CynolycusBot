@@ -48,9 +48,14 @@ class TradingEnv:
         convex_k2: float = 0.5,
         convex_theta: float = 0.01,
         convex_pivot_k: float = 0.0,
+        # Legacy args retained for checkpoint/env override compatibility.
+        convex_directional_bonus_only: bool = True,
+        convex_wrong_side_scale: float = 0.0,
         convex_mfe_thresholds: Tuple[float, ...] = (1.0, 2.0, 3.0),
         convex_mfe_bonuses: Tuple[float, ...] = (0.1, 0.2, 0.3),
         action_deadband: float = 1e-3,
+        dir_switch_penalty_ret: float = 0.0,
+        size_change_penalty_ret: float = 0.0,
         seed: int = 7,
     ):
         self.df = df.copy()
@@ -94,8 +99,12 @@ class TradingEnv:
         self.convex_k2 = float(convex_k2)
         self.convex_theta = float(convex_theta)
         self.convex_pivot_k = float(convex_pivot_k)
+        self._legacy_convex_directional_bonus_only = bool(convex_directional_bonus_only)
+        self._legacy_convex_wrong_side_scale = float(convex_wrong_side_scale)
         self.convex_mfe_thresholds = tuple(float(x) for x in convex_mfe_thresholds)
         self.action_deadband = max(0.0, float(action_deadband))
+        self.dir_switch_penalty_ret = max(0.0, float(dir_switch_penalty_ret))
+        self.size_change_penalty_ret = max(0.0, float(size_change_penalty_ret))
         if not self.convex_mfe_thresholds:
             self.convex_mfe_thresholds = ()
         raw_bonuses = list(float(x) for x in convex_mfe_bonuses)
@@ -282,9 +291,14 @@ class TradingEnv:
         reward_pnl = 0.0
         reward_pivot_bonus = 0.0
         reward_convex = 0.0
+        reward_convex_linear = 0.0
+        reward_convex_bonus = 0.0
         convex_term = 0.0
+        atr_scale = np.nan
         pivot_anchor = 0.0
         mfe_bonus = 0.0
+        switch_penalty = 0.0
+        size_penalty = 0.0
         mfe_atr = None
         flipped = (
             (not self._is_flat(self.position))
@@ -298,6 +312,14 @@ class TradingEnv:
 
         trade_units = abs(desired_pos - prev_pos)
         did_trade = trade_units > self.action_deadband
+        prev_dir = 0 if self._is_flat(prev_pos) else int(np.sign(prev_pos))
+        new_dir = 0 if self._is_flat(desired_pos) else int(np.sign(desired_pos))
+        did_dir_switch = (prev_dir != 0) and (new_dir != 0) and (prev_dir != new_dir)
+        size_delta = abs(abs(desired_pos) - abs(prev_pos))
+        if did_dir_switch and self.dir_switch_penalty_ret > 0.0:
+            switch_penalty = self.dir_switch_penalty_ret
+        if self.size_change_penalty_ret > 0.0 and size_delta > self.action_deadband:
+            size_penalty = self.size_change_penalty_ret * size_delta
         if did_trade:
             # Cost scales with position change size:
             # 0 = hold, 1 = full enter/exit, 2 = full direct flip.
@@ -361,9 +383,13 @@ class TradingEnv:
                 atr = float(self._atr_pct[self._i]) * price
             if not np.isfinite(atr) or atr <= 0.0:
                 atr = np.nan
-            if np.isfinite(atr) and atr > 0.0:
-                convex_term = (delta_s / atr) ** 2
-            reward_convex = (float(self.position) * self.convex_k1 * r) + (abs(self.position) * self.convex_k2 * convex_term)
+            if np.isfinite(atr) and atr > 0.0 and price > 0.0:
+                atr_scale = max(atr / price, 1e-6)
+                convex_term = (abs(r) * abs(r)) / atr_scale
+            pos_ret = float(self.position) * r
+            reward_convex_linear = pos_ret * self.convex_k1
+            reward_convex_bonus = float(self.position) * self.convex_k2 * (r * abs(r)) / max(atr_scale, 1e-6) if np.isfinite(atr_scale) else 0.0
+            reward_convex = reward_convex_linear + reward_convex_bonus
             # Pivot-anchor term rewards directional alignment with pivot edge.
             pivot_edge = float(self._pivot_long[self._i]) - float(self._pivot_short[self._i])
             if np.isfinite(pivot_edge):
@@ -401,7 +427,7 @@ class TradingEnv:
             self.time_in_pos = 0
 
         hold_penalty = self.hold_penalty_ret * abs(self.position)
-        reward = reward_pnl - reward_costs - hold_penalty
+        reward = reward_pnl - reward_costs - hold_penalty - switch_penalty - size_penalty
 
         info: Dict[str, Any] = {
             "price": price,
@@ -416,10 +442,17 @@ class TradingEnv:
             "reward_costs": reward_costs,
             "reward_pivot_bonus": reward_pivot_bonus,
             "reward_convex": reward_convex if self.use_convex_reward else None,
+            "reward_convex_linear": reward_convex_linear if self.use_convex_reward else None,
+            "reward_convex_bonus": reward_convex_bonus if self.use_convex_reward else None,
             "convex_term": convex_term if self.use_convex_reward else None,
+            "convex_atr_scale": float(atr_scale) if self.use_convex_reward and np.isfinite(atr_scale) else None,
             "reward_pivot_anchor": pivot_anchor if self.use_convex_reward else None,
             "mfe_atr": float(mfe_atr) if mfe_atr is not None and np.isfinite(mfe_atr) else None,
             "mfe_bonus": mfe_bonus if self.use_convex_reward else None,
+            "reward_switch_penalty": switch_penalty,
+            "reward_size_penalty": size_penalty,
+            "did_dir_switch": did_dir_switch,
+            "size_delta": size_delta,
             "realized_pnl_today": self.realized_pnl_today,
             "unrealized_pnl": self.unrealized_pnl,
             "flip_blocked": blocked_flip,
@@ -453,12 +486,15 @@ class TradingEnv:
                 self.entry_price = np.nan
                 self.unrealized_pnl = 0.0
                 self.time_in_pos = 0
-                reward = reward_pnl - reward_costs - hold_penalty
+                reward = reward_pnl - reward_costs - hold_penalty - switch_penalty - size_penalty
                 info["reward_pnl"] = reward_pnl
                 info["reward_costs"] = reward_costs
                 info["reward_pivot_bonus"] = reward_pivot_bonus
                 info["reward_convex"] = reward_convex if self.use_convex_reward else None
+                info["reward_convex_linear"] = reward_convex_linear if self.use_convex_reward else None
+                info["reward_convex_bonus"] = reward_convex_bonus if self.use_convex_reward else None
                 info["convex_term"] = convex_term if self.use_convex_reward else None
+                info["convex_atr_scale"] = float(atr_scale) if self.use_convex_reward and np.isfinite(atr_scale) else None
                 info["reward_pivot_anchor"] = pivot_anchor if self.use_convex_reward else None
                 info["mfe_atr"] = float(mfe_atr) if mfe_atr is not None and np.isfinite(mfe_atr) else None
                 info["mfe_bonus"] = mfe_bonus if self.use_convex_reward else None

@@ -472,11 +472,12 @@ class LivePPOAgent:
         self._feature_cols = list(feature_cols)
         self._obs_dim = int(ckpt["obs_dim"])
         self._action_type = str(ckpt.get("action_type", "discrete")).strip().lower()
+        self._hybrid_action = self._action_type in {"hybrid", "hybrid_dir_mag"}
         self._continuous_action = self._action_type in {
             "continuous",
             "continuous_tanh",
             "gaussian_tanh",
-        }
+        } or self._hybrid_action
         self._n_actions = int(ckpt.get("n_actions", 3))
         self._action_dim = int(ckpt.get("action_dim", 1))
         self._action_low = float(ckpt.get("action_low", -1.0))
@@ -594,6 +595,21 @@ class LivePPOAgent:
         return abs(float(pos)) <= self._action_deadband
 
     def _action_to_exposure(self, action: float) -> float:
+        if self._hybrid_action:
+            if isinstance(action, (list, tuple, np.ndarray)):
+                arr = np.asarray(action, dtype=np.float32).reshape(-1)
+                out = float(arr[0]) if arr.size else 0.0
+            else:
+                try:
+                    out = float(action)
+                except (TypeError, ValueError):
+                    out = 0.0
+            if not np.isfinite(out):
+                out = 0.0
+            out = float(np.clip(out, self._action_low, self._action_high))
+            if abs(out) <= self._action_deadband:
+                return 0.0
+            return out
         if self._continuous_action:
             try:
                 out = float(action)
@@ -786,7 +802,19 @@ class LivePPOAgent:
         obs = self._build_obs(features, ts)
         x = torch.as_tensor(obs, dtype=torch.float32, device=self._device).unsqueeze(0)
         policy_out, _ = self._model(x)
-        if self._continuous_action:
+        if self._hybrid_action:
+            if self._deterministic:
+                action_t, _logp, _entropy = self._model._sample_hybrid(  # noqa: SLF001
+                    policy_out,
+                    deterministic=True,
+                )
+            else:
+                action_t, _logp, _entropy = self._model._sample_hybrid(  # noqa: SLF001
+                    policy_out,
+                    deterministic=False,
+                )
+            action = float(action_t[:, 0].squeeze().item())
+        elif self._continuous_action:
             if self._deterministic:
                 action_t = torch.tanh(policy_out)
             else:

@@ -48,9 +48,13 @@ def _normalize_env_overrides(raw: object) -> dict[str, object]:
         "convex_k2",
         "convex_theta",
         "convex_pivot_k",
+        "convex_directional_bonus_only",
+        "convex_wrong_side_scale",
         "convex_mfe_thresholds",
         "convex_mfe_bonuses",
         "action_deadband",
+        "dir_switch_penalty_ret",
+        "size_change_penalty_ret",
         "seed",
     }
     for key in allowed:
@@ -61,7 +65,13 @@ def _normalize_env_overrides(raw: object) -> dict[str, object]:
 
 def _is_continuous_action_type(action_type: str) -> bool:
     val = str(action_type or "").strip().lower()
-    return val in {"continuous", "continuous_tanh", "gaussian_tanh"}
+    return val in {
+        "continuous",
+        "continuous_tanh",
+        "gaussian_tanh",
+        "hybrid",
+        "hybrid_dir_mag",
+    }
 
 
 def _load_eval_frame(path_like: str | None) -> pd.DataFrame | None:
@@ -207,7 +217,22 @@ def _plot_actions(
         prob_vals = plot_df[[c[0] for c in prob_cols]].to_numpy(dtype=float)
         has_probs = np.isfinite(prob_vals).any()
 
-    if has_probs:
+    has_heads = False
+    if ("action_dir_idx" in plot_df.columns) or ("action_mag" in plot_df.columns):
+        head_cols = [c for c in ("action_dir_idx", "action_mag") if c in plot_df.columns]
+        if head_cols:
+            head_vals = plot_df[head_cols].to_numpy(dtype=float)
+            has_heads = np.isfinite(head_vals).any()
+
+    if has_probs and has_heads:
+        fig, (ax_price, ax_prob, ax_heads) = plt.subplots(
+            3,
+            1,
+            figsize=(12, 9),
+            sharex=True,
+            gridspec_kw={"height_ratios": [2.2, 1, 0.9]},
+        )
+    elif has_probs:
         fig, (ax_price, ax_prob) = plt.subplots(
             2,
             1,
@@ -215,9 +240,20 @@ def _plot_actions(
             sharex=True,
             gridspec_kw={"height_ratios": [2.2, 1]},
         )
+        ax_heads = None
+    elif has_heads:
+        fig, (ax_price, ax_heads) = plt.subplots(
+            2,
+            1,
+            figsize=(12, 7),
+            sharex=True,
+            gridspec_kw={"height_ratios": [2.2, 0.9]},
+        )
+        ax_prob = None
     else:
         fig, ax_price = plt.subplots(figsize=(12, 6))
         ax_prob = None
+        ax_heads = None
 
     if has_ohlc:
         open_y = plot_df["open"].to_numpy(dtype=float)
@@ -259,11 +295,12 @@ def _plot_actions(
             step = int(np.ceil(len(tick_positions) / 25))
             tick_positions = tick_positions[::step]
             tick_labels = tick_labels[::step]
-        if ax_prob is not None:
+        bottom_ax = ax_heads if ax_heads is not None else ax_prob
+        if bottom_ax is not None:
             ax_price.tick_params(labelbottom=False)
-            ax_prob.set_xticks(tick_positions)
-            ax_prob.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
-            ax_prob.set_xlabel("Date")
+            bottom_ax.set_xticks(tick_positions)
+            bottom_ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+            bottom_ax.set_xlabel("Date")
         else:
             ax_price.set_xticks(tick_positions)
             ax_price.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
@@ -296,6 +333,30 @@ def _plot_actions(
         ax_prob.set_ylim(0, 1.02)
         ax_prob.set_ylabel("Prob")
         ax_prob.legend(loc="upper left")
+
+    if ax_heads is not None and has_heads:
+        if "action_dir_idx" in plot_df.columns:
+            dir_idx = pd.to_numeric(plot_df["action_dir_idx"], errors="coerce").to_numpy(dtype=float)
+            dir_sign = np.full_like(dir_idx, np.nan, dtype=float)
+            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 1.0), 1.0, dir_sign)
+            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 2.0), -1.0, dir_sign)
+            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 0.0), 0.0, dir_sign)
+        else:
+            actions = pd.to_numeric(plot_df["action"], errors="coerce").to_numpy(dtype=float)
+            dir_sign = np.where(np.abs(actions) <= eps, 0.0, np.sign(actions))
+        if "action_mag" in plot_df.columns:
+            mag = pd.to_numeric(plot_df["action_mag"], errors="coerce").to_numpy(dtype=float)
+        else:
+            mag = np.clip(np.abs(pd.to_numeric(plot_df["action"], errors="coerce").to_numpy(dtype=float)), 0.0, 1.0)
+
+        x_axis = pos if has_ohlc else ts
+        ax_heads.step(x_axis, dir_sign, where="post", color="#8E24AA", linewidth=1.2, label="dir_sign (-1/0/+1)")
+        ax_heads.plot(x_axis, mag, color="#00897B", linewidth=1.2, label="magnitude (0..1)")
+        ax_heads.axhline(0.0, color="#777777", linewidth=0.8, alpha=0.7)
+        ax_heads.set_ylim(-1.05, 1.05)
+        ax_heads.set_yticks([-1.0, 0.0, 1.0])
+        ax_heads.set_ylabel("Head")
+        ax_heads.legend(loc="upper left")
     plt.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=150)
@@ -574,9 +635,24 @@ def main() -> None:
             if "reward_convex" in trace.columns
             else pd.Series(dtype=float)
         )
+        convex_linear = (
+            pd.to_numeric(trace["reward_convex_linear"], errors="coerce")
+            if "reward_convex_linear" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        convex_bonus = (
+            pd.to_numeric(trace["reward_convex_bonus"], errors="coerce")
+            if "reward_convex_bonus" in trace.columns
+            else pd.Series(dtype=float)
+        )
         term = (
             pd.to_numeric(trace["convex_term"], errors="coerce")
             if "convex_term" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        convex_atr_scale = (
+            pd.to_numeric(trace["convex_atr_scale"], errors="coerce")
+            if "convex_atr_scale" in trace.columns
             else pd.Series(dtype=float)
         )
         mfe_atr = (
@@ -609,6 +685,16 @@ def main() -> None:
             if "reward_costs" in trace.columns
             else pd.Series(dtype=float)
         )
+        switch_pen = (
+            pd.to_numeric(trace["reward_switch_penalty"], errors="coerce")
+            if "reward_switch_penalty" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        size_pen = (
+            pd.to_numeric(trace["reward_size_penalty"], errors="coerce")
+            if "reward_size_penalty" in trace.columns
+            else pd.Series(dtype=float)
+        )
         bonus_hits = int((mfe_bonus.fillna(0.0) > 0).sum()) if not mfe_bonus.empty else 0
         pos = (
             pd.to_numeric(trace["position"], errors="coerce").fillna(0.0)
@@ -629,8 +715,13 @@ def main() -> None:
             f"mean_reward_pnl={float(reward_pnl.dropna().mean()) if reward_pnl.notna().any() else 0.0:.6f}",
             f"mean_costs={float(reward_costs.dropna().mean()) if reward_costs.notna().any() else 0.0:.6f}",
             f"mean_reward_convex={float(convex.dropna().mean()) if convex.notna().any() else 0.0:.6f}",
+            f"mean_reward_convex_linear={float(convex_linear.dropna().mean()) if convex_linear.notna().any() else 0.0:.6f}",
+            f"mean_reward_convex_bonus={float(convex_bonus.dropna().mean()) if convex_bonus.notna().any() else 0.0:.6f}",
             f"mean_convex_term={float(term.dropna().mean()) if term.notna().any() else 0.0:.6f}",
+            f"mean_convex_atr_scale={float(convex_atr_scale.dropna().mean()) if convex_atr_scale.notna().any() else 0.0:.6f}",
             f"mean_pivot_anchor={float(pivot_anchor.dropna().mean()) if pivot_anchor.notna().any() else 0.0:.6f}",
+            f"mean_switch_penalty={float(switch_pen.dropna().mean()) if switch_pen.notna().any() else 0.0:.6f}",
+            f"mean_size_penalty={float(size_pen.dropna().mean()) if size_pen.notna().any() else 0.0:.6f}",
             f"mean_mfe_atr={float(mfe_atr.dropna().mean()) if mfe_atr.notna().any() else 0.0:.4f}",
             f"total_mfe_bonus={float(mfe_bonus.dropna().sum()) if mfe_bonus.notna().any() else 0.0:.6f}",
             f"mfe_bonus_hits={bonus_hits}",

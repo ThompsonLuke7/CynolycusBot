@@ -134,7 +134,22 @@ def _plot_actions(trace, output_path):
             longs = (actions > eps) & (prev_actions <= eps)
             shorts = (actions < -eps) & (prev_actions >= -eps)
 
-    if has_probs:
+    has_heads = False
+    if ("action_dir_idx" in plot_df.columns) or ("action_mag" in plot_df.columns):
+        head_cols = [c for c in ("action_dir_idx", "action_mag") if c in plot_df.columns]
+        if head_cols:
+            head_vals = plot_df[head_cols].to_numpy(dtype=float)
+            has_heads = np.isfinite(head_vals).any()
+
+    if has_probs and has_heads:
+        fig, (ax, ax_prob, ax_heads) = plt.subplots(
+            3,
+            1,
+            figsize=(12, 9),
+            sharex=True,
+            gridspec_kw={"height_ratios": [2.2, 1, 0.9]},
+        )
+    elif has_probs:
         fig, (ax, ax_prob) = plt.subplots(
             2,
             1,
@@ -142,9 +157,20 @@ def _plot_actions(trace, output_path):
             sharex=True,
             gridspec_kw={"height_ratios": [2.2, 1]},
         )
+        ax_heads = None
+    elif has_heads:
+        fig, (ax, ax_heads) = plt.subplots(
+            2,
+            1,
+            figsize=(12, 7),
+            sharex=True,
+            gridspec_kw={"height_ratios": [2.2, 0.9]},
+        )
+        ax_prob = None
     else:
         fig, ax = plt.subplots(figsize=(12, 6))
         ax_prob = None
+        ax_heads = None
     if has_ohlc:
         open_y = plot_df["open"].to_numpy(dtype=float)
         high_y = plot_df["high"].to_numpy(dtype=float)
@@ -169,11 +195,12 @@ def _plot_actions(trace, output_path):
             step = int(np.ceil(len(tick_positions) / 25))
             tick_positions = tick_positions[::step]
             tick_labels = tick_labels[::step]
-        if ax_prob is not None:
+        bottom_ax = ax_heads if ax_heads is not None else ax_prob
+        if bottom_ax is not None:
             ax.tick_params(labelbottom=False)
-            ax_prob.set_xticks(tick_positions)
-            ax_prob.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
-            ax_prob.set_xlabel("Date")
+            bottom_ax.set_xticks(tick_positions)
+            bottom_ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+            bottom_ax.set_xlabel("Date")
         else:
             ax.set_xticks(tick_positions)
             ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
@@ -204,6 +231,30 @@ def _plot_actions(trace, output_path):
         ax_prob.set_ylim(0, 1.02)
         ax_prob.set_ylabel("Prob")
         ax_prob.legend(loc="upper left")
+
+    if ax_heads is not None and has_heads:
+        if "action_dir_idx" in plot_df.columns:
+            dir_idx = pd.to_numeric(plot_df["action_dir_idx"], errors="coerce").to_numpy(dtype=float)
+            dir_sign = np.full_like(dir_idx, np.nan, dtype=float)
+            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 1.0), 1.0, dir_sign)
+            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 2.0), -1.0, dir_sign)
+            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 0.0), 0.0, dir_sign)
+        else:
+            actions = pd.to_numeric(plot_df["action"], errors="coerce").to_numpy(dtype=float)
+            dir_sign = np.where(np.abs(actions) <= eps, 0.0, np.sign(actions))
+        if "action_mag" in plot_df.columns:
+            mag = pd.to_numeric(plot_df["action_mag"], errors="coerce").to_numpy(dtype=float)
+        else:
+            mag = np.clip(np.abs(pd.to_numeric(plot_df["action"], errors="coerce").to_numpy(dtype=float)), 0.0, 1.0)
+
+        x_axis = pos if has_ohlc else ts
+        ax_heads.step(x_axis, dir_sign, where="post", color="#8E24AA", linewidth=1.2, label="dir_sign (-1/0/+1)")
+        ax_heads.plot(x_axis, mag, color="#00897B", linewidth=1.2, label="magnitude (0..1)")
+        ax_heads.axhline(0.0, color="#777777", linewidth=0.8, alpha=0.7)
+        ax_heads.set_ylim(-1.05, 1.05)
+        ax_heads.set_yticks([-1.0, 0.0, 1.0])
+        ax_heads.set_ylabel("Head")
+        ax_heads.legend(loc="upper left")
 
     plt.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -297,20 +348,39 @@ def main():
         help="Training device: auto/cuda/cpu/mps.",
     )
     parser.add_argument("--num-envs", type=int, default=12)
+    parser.add_argument(
+        "--policy-action-type",
+        type=str,
+        choices=["hybrid_dir_mag", "continuous_tanh"],
+        default="hybrid_dir_mag",
+        help="Policy action head: hybrid direction+magnitude (recommended) or single continuous exposure.",
+    )
     parser.add_argument("--convex-k1", type=float, default=1.0)
-    parser.add_argument("--convex-k2", type=float, default=0.05)
-    parser.add_argument("--convex-theta", type=float, default=0.03)
+    parser.add_argument("--convex-k2", type=float, default=0.01)
+    parser.add_argument("--convex-theta", type=float, default=0.04)
     parser.add_argument(
         "--convex-pivot-k",
         type=float,
-        default=0.0015,
+        default=0.02,
         help="Directional anchor toward pivot edge (p_pivot_long - p_pivot_short).",
     )
     parser.add_argument(
         "--convex-hold-penalty",
         type=float,
-        default=0.0002,
+        default=0.0003,
         help="Per-bar exposure penalty used in convex mode to reduce over-holding.",
+    )
+    parser.add_argument(
+        "--dir-switch-penalty-ret",
+        type=float,
+        default=0.0005,
+        help="Penalty when direction flips directly long<->short.",
+    )
+    parser.add_argument(
+        "--size-change-penalty-ret",
+        type=float,
+        default=0.0001,
+        help="Penalty scaled by |abs(pos_t)-abs(pos_t-1)|.",
     )
     parser.add_argument(
         "--action-deadband",
@@ -321,7 +391,7 @@ def main():
     parser.add_argument(
         "--convex-action-deadband",
         type=float,
-        default=0.01,
+        default=0.005,
         help="Action deadband used in convex mode to reduce churn.",
     )
     parser.add_argument(
@@ -390,24 +460,31 @@ def main():
 
     num_envs = max(1, int(args.num_envs))
     hold_penalty = float(args.convex_hold_penalty) if use_convex_reward else 0.0
+    dir_switch_penalty = float(args.dir_switch_penalty_ret) if use_convex_reward else 0.0
+    size_change_penalty = float(args.size_change_penalty_ret) if use_convex_reward else 0.0
+    env_kwargs = {
+        "carry_positions_across_days": True,
+        "reward_on_exit": reward_on_exit,
+        "use_convex_reward": use_convex_reward,
+        "convex_k1": args.convex_k1,
+        "convex_k2": args.convex_k2,
+        "convex_theta": args.convex_theta,
+        "convex_pivot_k": args.convex_pivot_k,
+        "dir_switch_penalty_ret": dir_switch_penalty,
+        "size_change_penalty_ret": size_change_penalty,
+        "hold_penalty_ret": hold_penalty,
+        "action_deadband": action_deadband,
+        "convex_mfe_thresholds": tuple(convex_thresholds),
+        "convex_mfe_bonuses": tuple(convex_bonuses),
+    }
 
     if num_envs > 1:
         train_envs = [
             make_trading_env(
                 df=train_df,
                 feature_cols=feature_cols,
-                carry_positions_across_days=True,
-                reward_on_exit=reward_on_exit,
-                use_convex_reward=use_convex_reward,
-                convex_k1=args.convex_k1,
-                convex_k2=args.convex_k2,
-                convex_theta=args.convex_theta,
-                convex_pivot_k=args.convex_pivot_k,
-                hold_penalty_ret=hold_penalty,
-                action_deadband=action_deadband,
-                convex_mfe_thresholds=tuple(convex_thresholds),
-                convex_mfe_bonuses=tuple(convex_bonuses),
                 seed=7 + i,
+                **env_kwargs,
             )
             for i in range(num_envs)
         ]
@@ -416,17 +493,7 @@ def main():
         train_env = make_trading_env(
             df=train_df,
             feature_cols=feature_cols,
-            carry_positions_across_days=True,
-            reward_on_exit=reward_on_exit,
-            use_convex_reward=use_convex_reward,
-            convex_k1=args.convex_k1,
-            convex_k2=args.convex_k2,
-            convex_theta=args.convex_theta,
-            convex_pivot_k=args.convex_pivot_k,
-            hold_penalty_ret=hold_penalty,
-            action_deadband=action_deadband,
-            convex_mfe_thresholds=tuple(convex_thresholds),
-            convex_mfe_bonuses=tuple(convex_bonuses),
+            **env_kwargs,
         )
 
     model, train_history = train_ppo(
@@ -443,6 +510,7 @@ def main():
         entropy_coef=float(args.entropy_coef),
         value_coef=float(args.value_coef),
         max_grad_norm=float(args.max_grad_norm),
+        action_type=str(args.policy_action_type),
         device=str(args.device),
         seed=int(args.seed),
         verbose=True,
@@ -462,9 +530,9 @@ def main():
         {
             "state_dict": model.state_dict(),
             "obs_dim": train_env.obs_dim,
-            "n_actions": 1,
-            "action_type": "continuous_tanh",
-            "action_dim": 1,
+            "n_actions": 3,
+            "action_type": str(args.policy_action_type),
+            "action_dim": int(getattr(model, "action_dim", 1)),
             "action_low": -1.0,
             "action_high": 1.0,
             "action_deadband": float(action_deadband),
@@ -479,6 +547,8 @@ def main():
                 "convex_k2": float(args.convex_k2),
                 "convex_theta": float(args.convex_theta),
                 "convex_pivot_k": float(args.convex_pivot_k),
+                "dir_switch_penalty_ret": float(dir_switch_penalty),
+                "size_change_penalty_ret": float(size_change_penalty),
                 "hold_penalty_ret": float(hold_penalty),
                 "action_deadband": float(action_deadband),
                 "convex_mfe_thresholds": tuple(float(x) for x in convex_thresholds),
@@ -496,17 +566,7 @@ def main():
     test_env = make_trading_env(
         df=test_df,
         feature_cols=feature_cols,
-        carry_positions_across_days=True,
-        reward_on_exit=reward_on_exit,
-        use_convex_reward=use_convex_reward,
-        convex_k1=args.convex_k1,
-        convex_k2=args.convex_k2,
-        convex_theta=args.convex_theta,
-        convex_pivot_k=args.convex_pivot_k,
-        hold_penalty_ret=hold_penalty,
-        action_deadband=action_deadband,
-        convex_mfe_thresholds=tuple(convex_thresholds),
-        convex_mfe_bonuses=tuple(convex_bonuses),
+        **env_kwargs,
     )
 
     eval_device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -522,17 +582,7 @@ def main():
     eval_loss_env = make_trading_env(
         df=test_df,
         feature_cols=feature_cols,
-        carry_positions_across_days=True,
-        reward_on_exit=reward_on_exit,
-        use_convex_reward=use_convex_reward,
-        convex_k1=args.convex_k1,
-        convex_k2=args.convex_k2,
-        convex_theta=args.convex_theta,
-        convex_pivot_k=args.convex_pivot_k,
-        hold_penalty_ret=hold_penalty,
-        action_deadband=action_deadband,
-        convex_mfe_thresholds=tuple(convex_thresholds),
-        convex_mfe_bonuses=tuple(convex_bonuses),
+        **env_kwargs,
     )
     eval_loss = evaluate_loss_metrics(
         eval_loss_env,
@@ -560,17 +610,7 @@ def main():
     trace_env = make_trading_env(
         df=test_df,
         feature_cols=feature_cols,
-        carry_positions_across_days=True,
-        reward_on_exit=reward_on_exit,
-        use_convex_reward=use_convex_reward,
-        convex_k1=args.convex_k1,
-        convex_k2=args.convex_k2,
-        convex_theta=args.convex_theta,
-        convex_pivot_k=args.convex_pivot_k,
-        hold_penalty_ret=hold_penalty,
-        action_deadband=action_deadband,
-        convex_mfe_thresholds=tuple(convex_thresholds),
-        convex_mfe_bonuses=tuple(convex_bonuses),
+        **env_kwargs,
     )
     trace = evaluate_policy_with_trace(trace_env, model, device=eval_device, deterministic=True)
     trace = _agent_equity_from_trace(trace, initial_cash=initial_cash)

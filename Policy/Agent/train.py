@@ -55,6 +55,7 @@ def train_ppo(
     entropy_coef: float = 0.003,
     value_coef: float = 0.5,
     max_grad_norm: float = 0.5,
+    action_type: str = "hybrid_dir_mag",
     device: str = "cuda",
     seed: int = 7,
     verbose: bool = True,
@@ -68,21 +69,21 @@ def train_ppo(
 
     model = ActorCritic(
         obs_dim=env.obs_dim,
-        action_type="continuous_tanh",
+        action_type=action_type,
         action_dim=1,
         hidden=128,
     ).to(dev)
     model.train()
-    optimizer = optim.Adam(
-        [
-            {"params": model.shared.parameters(), "lr": pi_lr},
-            {"params": model.policy_mlp.parameters(), "lr": pi_lr},
-            {"params": model.policy_head.parameters(), "lr": pi_lr},
-            {"params": [model.policy_log_std], "lr": pi_lr},
-            {"params": model.value_mlp.parameters(), "lr": vf_lr},
-            {"params": model.value_head.parameters(), "lr": vf_lr},
-        ]
-    )
+    param_groups = [
+        {"params": model.shared.parameters(), "lr": pi_lr},
+        {"params": model.policy_mlp.parameters(), "lr": pi_lr},
+        {"params": model.policy_head.parameters(), "lr": pi_lr},
+        {"params": model.value_mlp.parameters(), "lr": vf_lr},
+        {"params": model.value_head.parameters(), "lr": vf_lr},
+    ]
+    if model.policy_log_std is not None:
+        param_groups.append({"params": [model.policy_log_std], "lr": pi_lr})
+    optimizer = optim.Adam(param_groups)
 
     n_envs = int(getattr(env, "n_envs", 1))
     is_vectorized = n_envs > 1
@@ -104,19 +105,29 @@ def train_ppo(
         for _ in range(rollout_len):
             if is_vectorized:
                 actions_t, logp_t, val_t = model.act_batch(obs, dev)
-                actions = actions_t.detach().cpu().numpy().astype("float32")
-                if actions.ndim == 2 and actions.shape[-1] == 1:
-                    actions = actions[:, 0]
+                actions_raw = actions_t.detach().cpu().numpy().astype("float32")
+                if model.hybrid_action:
+                    if actions_raw.ndim != 2 or actions_raw.shape[-1] < 3:
+                        raise RuntimeError(
+                            f"Hybrid actions must be [n_envs,3], got {actions_raw.shape}"
+                        )
+                    env_actions = actions_raw[:, 0]
+                    store_actions = actions_raw
+                else:
+                    env_actions = actions_raw
+                    if actions_raw.ndim == 2 and actions_raw.shape[-1] == 1:
+                        env_actions = actions_raw[:, 0]
+                    store_actions = env_actions
                 logp = logp_t.detach().cpu().numpy().astype("float32")
                 val = val_t.detach().cpu().numpy().astype("float32")
-                next_obs, reward, done, _info = env.step(actions)
+                next_obs, reward, done, _info = env.step(env_actions)
                 with torch.no_grad():
                     x_next = torch.as_tensor(next_obs, dtype=torch.float32, device=dev)
                     _, v_next = model(x_next)
                     v_next_f = v_next.detach().cpu().numpy().astype(np.float32)
 
                 obs_buf.append(obs)
-                act_buf.append(actions)
+                act_buf.append(store_actions)
                 logp_buf.append(logp)
                 rew_buf.append(reward)
                 done_buf.append(done)
@@ -127,7 +138,17 @@ def train_ppo(
                 steps_done += n_envs
             else:
                 action, logp, val = model.act(obs, dev)
-                next_obs, reward, done, _info = env.step(action)
+                store_action = action
+                env_action = action
+                if model.hybrid_action:
+                    action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
+                    env_action = float(action_arr[0]) if action_arr.size else 0.0
+                    store_action = action_arr
+                elif isinstance(action, (list, tuple, np.ndarray)):
+                    action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
+                    env_action = float(action_arr[0]) if action_arr.size else 0.0
+                    store_action = env_action
+                next_obs, reward, done, _info = env.step(env_action)
 
                 with torch.no_grad():
                     x_next = torch.as_tensor(next_obs, dtype=torch.float32, device=dev).unsqueeze(0)
@@ -135,7 +156,7 @@ def train_ppo(
                     v_next_f = float(v_next.item())
 
                 obs_buf.append(obs)
-                act_buf.append(action)
+                act_buf.append(store_action)
                 logp_buf.append(logp)
                 rew_buf.append(reward)
                 done_buf.append(done)
@@ -180,7 +201,10 @@ def train_ppo(
             ret_flat = ret_arr.reshape(steps_collected * n_envs)
 
             obs_arr = obs_arr.reshape(steps_collected * n_envs, obs_arr.shape[-1])
-            act_arr = act_arr.reshape(steps_collected * n_envs)
+            if model.hybrid_action:
+                act_arr = act_arr.reshape(steps_collected * n_envs, act_arr.shape[-1])
+            else:
+                act_arr = act_arr.reshape(steps_collected * n_envs)
             logp_arr = logp_arr.reshape(steps_collected * n_envs)
             rew_arr = rew_arr.reshape(steps_collected * n_envs)
             done_arr = done_arr.reshape(steps_collected * n_envs)
@@ -224,7 +248,10 @@ def train_ppo(
         idxs = np.arange(n)
 
         obs_t = torch.as_tensor(rollout.obs, dtype=torch.float32, device=dev)
-        act_t = torch.as_tensor(rollout.actions, dtype=torch.float32, device=dev)
+        if model.continuous_action or model.hybrid_action:
+            act_t = torch.as_tensor(rollout.actions, dtype=torch.float32, device=dev)
+        else:
+            act_t = torch.as_tensor(rollout.actions, dtype=torch.int64, device=dev)
         logp_old_t = torch.as_tensor(rollout.logp_old, dtype=torch.float32, device=dev)
         adv_t = torch.as_tensor(rollout.advantages, dtype=torch.float32, device=dev)
         ret_t = torch.as_tensor(rollout.returns, dtype=torch.float32, device=dev)
