@@ -485,6 +485,28 @@ def main():
 
     cfg = PipelineConfig(drop_na=True)
     df = build_agent_training_matrix(cfg, save_parquet=True)
+    vix_cols = [
+        c
+        for c in (
+            "vix_close",
+            "vix_ret_1",
+            "vix_ret_4",
+            "vix_ret_16",
+            "vix_range_pct",
+            "vix_atr_pct",
+            "vix_trend_ema_8_21",
+            "vix_z_20",
+            "vix_vol_of_vol_20",
+            "ret_1_x_vix",
+            "atr_pct_x_vix",
+        )
+        if c in df.columns
+    ]
+    if vix_cols and int(df[vix_cols].notna().sum().sum()) == 0:
+        print(
+            "[run_train] Warning: all VIX feature values are NaN. "
+            "Check VIX data availability/alignment."
+        )
 
     drop_base = {"timestamp", "day_id", "open", "high", "low", "close", "volume"}
     feature_cols = [c for c in df.columns if c not in drop_base]

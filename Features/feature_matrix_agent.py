@@ -7,7 +7,11 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta  # registers df.ta accessor
 
-from Data.load_data import get_ticker_processed_base_dir, load_ticker_parquet
+from Data.load_data import (
+    get_ticker_processed_base_dir,
+    load_ticker_csv,
+    load_ticker_parquet,
+)
 from Data.retrieve_data import normalize_ticker
 
 VIX_FEATURE_COLUMNS = [
@@ -48,6 +52,9 @@ class AgentFeatureConfig:
     vix_max_lag: str = "2h"
     vix_ffill_limit: int | None = 256
     vix_warn_on_missing: bool = True
+    vix_allow_daily_fallback: bool = True
+    vix_daily_symbol: str = "^VIX"
+    vix_daily_max_lag: str = "7d"
 
 
 def _series_from_ta(
@@ -187,50 +194,106 @@ def _load_align_vix_ohlcv(
     cfg: AgentFeatureConfig,
     target_index: pd.DatetimeIndex,
 ) -> pd.DataFrame:
-    if cfg.vix_parquet_path is not None:
-        vix_df = load_ticker_parquet(cfg.vix_ticker, parquet_path=cfg.vix_parquet_path)
-    else:
-        vix_df = load_ticker_parquet(cfg.vix_ticker)
-
-    if not isinstance(vix_df.index, pd.DatetimeIndex):
-        raise ValueError("VIX data must have a DatetimeIndex.")
-
-    vix_df = vix_df.sort_index()
-    if cfg.tz:
-        if vix_df.index.tz is None:
-            vix_df.index = vix_df.index.tz_localize(cfg.tz)
-        else:
-            vix_df.index = vix_df.index.tz_convert(cfg.tz)
-
-    if cfg.vix_resample_rule:
-        agg = {
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-        }
-        keep = [c for c in agg if c in vix_df.columns]
-        if "close" not in keep:
-            raise ValueError("VIX frame must include a close column.")
-        resample_agg = {k: v for k, v in agg.items() if k in keep}
-        vix_df = (
-            vix_df[keep]
-            .resample(cfg.vix_resample_rule, label="left", closed="left")
-            .agg(resample_agg)
+    def _align_frame(
+        source: pd.DataFrame,
+        *,
+        tolerance_text: str | None,
+        ffill_limit: int | None,
+    ) -> pd.DataFrame:
+        if not isinstance(source.index, pd.DatetimeIndex):
+            raise ValueError("VIX data must have a DatetimeIndex.")
+        out = source.sort_index()
+        if cfg.tz:
+            if out.index.tz is None:
+                out.index = out.index.tz_localize(cfg.tz)
+            else:
+                out.index = out.index.tz_convert(cfg.tz)
+        tolerance = pd.Timedelta(tolerance_text) if tolerance_text else None
+        return out.reindex(
+            target_index,
+            method="ffill",
+            limit=ffill_limit,
+            tolerance=tolerance,
         )
-        close_cols = [c for c in ("open", "high", "low", "close") if c in vix_df.columns]
-        if close_cols:
-            vix_df = vix_df.dropna(subset=close_cols)
 
-    tolerance = pd.Timedelta(cfg.vix_max_lag) if cfg.vix_max_lag else None
-    aligned = vix_df.reindex(
-        target_index,
-        method="ffill",
-        limit=cfg.vix_ffill_limit,
-        tolerance=tolerance,
+    vix_df: pd.DataFrame | None = None
+    intraday_error: Exception | None = None
+    try:
+        if cfg.vix_parquet_path is not None:
+            vix_df = load_ticker_parquet(cfg.vix_ticker, parquet_path=cfg.vix_parquet_path)
+        else:
+            vix_df = load_ticker_parquet(cfg.vix_ticker)
+    except Exception as exc:  # noqa: BLE001
+        intraday_error = exc
+
+    if vix_df is not None:
+        if cfg.vix_resample_rule:
+            agg = {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+            keep = [c for c in agg if c in vix_df.columns]
+            if "close" not in keep:
+                raise ValueError("VIX frame must include a close column.")
+            resample_agg = {k: v for k, v in agg.items() if k in keep}
+            vix_df = (
+                vix_df[keep]
+                .resample(cfg.vix_resample_rule, label="left", closed="left")
+                .agg(resample_agg)
+            )
+            close_cols = [c for c in ("open", "high", "low", "close") if c in vix_df.columns]
+            if close_cols:
+                vix_df = vix_df.dropna(subset=close_cols)
+        aligned_intraday = _align_frame(
+            vix_df,
+            tolerance_text=cfg.vix_max_lag,
+            ffill_limit=cfg.vix_ffill_limit,
+        )
+        close_valid = (
+            aligned_intraday["close"].notna().sum()
+            if "close" in aligned_intraday.columns
+            else 0
+        )
+        if close_valid > 0:
+            return aligned_intraday
+        intraday_error = ValueError(
+            "Aligned intraday VIX close has no valid rows after reindex."
+        )
+
+    if not cfg.vix_allow_daily_fallback:
+        if intraday_error is not None:
+            raise intraday_error
+        raise FileNotFoundError("Intraday VIX source unavailable.")
+
+    daily = load_ticker_csv(cfg.vix_daily_symbol)
+    keep_daily = [c for c in ("open", "high", "low", "close", "volume") if c in daily.columns]
+    if "close" not in keep_daily:
+        raise ValueError("Daily VIX fallback is missing close column.")
+    daily = daily[keep_daily]
+    aligned_daily = _align_frame(
+        daily,
+        tolerance_text=cfg.vix_daily_max_lag,
+        ffill_limit=None,
     )
-    return aligned
+    close_valid_daily = (
+        aligned_daily["close"].notna().sum()
+        if "close" in aligned_daily.columns
+        else 0
+    )
+    if close_valid_daily == 0:
+        if intraday_error is not None:
+            raise RuntimeError(
+                f"Intraday VIX failed ({intraday_error}); daily fallback also empty after align."
+            ) from intraday_error
+        raise RuntimeError("Daily VIX fallback produced no aligned rows.")
+    print(
+        f"[agent_matrix] Using daily VIX fallback ({cfg.vix_daily_symbol}) "
+        f"with max_lag={cfg.vix_daily_max_lag}."
+    )
+    return aligned_daily
 
 
 def _add_vix_feature_suite(

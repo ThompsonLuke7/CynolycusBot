@@ -58,9 +58,14 @@ def build_agent_training_matrix(
     if verbose:
         df = build_agent_feature_matrix(config=agent_cfg)
     else:
-        # Silence noisy debug printouts from lower-level feature builders.
+        # Silence noisy debug printouts from lower-level feature builders,
+        # but surface important warnings (e.g., missing/fallback data sources).
         with io.StringIO() as _buf, redirect_stdout(_buf):
             df = build_agent_feature_matrix(config=agent_cfg)
+        captured = _buf.getvalue()
+        for line in captured.splitlines():
+            if "[agent_matrix]" in line:
+                print(line)
     if save_parquet:
         clean = normalize_ticker(config.ticker).lower()
         out_dir = (
