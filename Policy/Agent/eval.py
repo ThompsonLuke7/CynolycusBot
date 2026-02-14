@@ -233,6 +233,11 @@ def evaluate_policy_with_trace(
                         if info.get("reward_convex_bonus") is not None
                         else np.nan
                     ),
+                    "reward_convex_risk_penalty": (
+                        float(info.get("reward_convex_risk_penalty"))
+                        if info.get("reward_convex_risk_penalty") is not None
+                        else np.nan
+                    ),
                     "reward_pivot_anchor": (
                         float(info.get("reward_pivot_anchor"))
                         if info.get("reward_pivot_anchor") is not None
@@ -248,6 +253,11 @@ def evaluate_policy_with_trace(
                         if info.get("convex_atr_scale") is not None
                         else np.nan
                     ),
+                    "convex_vol_proxy": (
+                        float(info.get("convex_vol_proxy"))
+                        if info.get("convex_vol_proxy") is not None
+                        else np.nan
+                    ),
                     "mfe_atr": (
                         float(info.get("mfe_atr"))
                         if info.get("mfe_atr") is not None
@@ -260,6 +270,9 @@ def evaluate_policy_with_trace(
                     ),
                     "reward_switch_penalty": float(info.get("reward_switch_penalty", 0.0)),
                     "reward_size_penalty": float(info.get("reward_size_penalty", 0.0)),
+                    "reward_saturation_penalty": float(
+                        info.get("reward_saturation_penalty", 0.0)
+                    ),
                     "did_dir_switch": bool(info.get("did_dir_switch", False)),
                     "size_delta": float(info.get("size_delta", 0.0)),
                     "forced_flat_cost": float(info.get("forced_flat_cost", 0.0)),

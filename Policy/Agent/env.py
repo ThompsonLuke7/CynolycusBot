@@ -48,6 +48,11 @@ class TradingEnv:
         convex_k2: float = 0.5,
         convex_theta: float = 0.01,
         convex_pivot_k: float = 0.0,
+        convex_risk_lambda: float = 0.0,
+        convex_bonus_cap: float = 0.0,
+        convex_bonus_scale: float = 1.0,
+        saturation_threshold: float = 0.9,
+        saturation_penalty_ret: float = 0.0,
         # Legacy args retained for checkpoint/env override compatibility.
         convex_directional_bonus_only: bool = True,
         convex_wrong_side_scale: float = 0.0,
@@ -99,6 +104,11 @@ class TradingEnv:
         self.convex_k2 = float(convex_k2)
         self.convex_theta = float(convex_theta)
         self.convex_pivot_k = float(convex_pivot_k)
+        self.convex_risk_lambda = max(0.0, float(convex_risk_lambda))
+        self.convex_bonus_cap = max(0.0, float(convex_bonus_cap))
+        self.convex_bonus_scale = float(convex_bonus_scale)
+        self.saturation_threshold = float(np.clip(saturation_threshold, 0.0, 1.0))
+        self.saturation_penalty_ret = max(0.0, float(saturation_penalty_ret))
         self._legacy_convex_directional_bonus_only = bool(convex_directional_bonus_only)
         self._legacy_convex_wrong_side_scale = float(convex_wrong_side_scale)
         self.convex_mfe_thresholds = tuple(float(x) for x in convex_mfe_thresholds)
@@ -293,8 +303,11 @@ class TradingEnv:
         reward_convex = 0.0
         reward_convex_linear = 0.0
         reward_convex_bonus = 0.0
+        reward_convex_risk_penalty = 0.0
+        reward_saturation_penalty = 0.0
         convex_term = 0.0
         atr_scale = np.nan
+        convex_vol_proxy = np.nan
         pivot_anchor = 0.0
         mfe_bonus = 0.0
         switch_penalty = 0.0
@@ -386,9 +399,22 @@ class TradingEnv:
             if np.isfinite(atr) and atr > 0.0 and price > 0.0:
                 atr_scale = max(atr / price, 1e-6)
                 convex_term = (abs(r) * abs(r)) / atr_scale
+            vol_proxy = float(atr_scale) if np.isfinite(atr_scale) else abs(r)
+            if (not np.isfinite(vol_proxy)) or vol_proxy <= 0.0:
+                vol_proxy = max(abs(r), 1e-6)
+            convex_vol_proxy = vol_proxy
             pos_ret = float(self.position) * r
             reward_convex_linear = pos_ret * self.convex_k1
-            reward_convex_bonus = float(self.position) * self.convex_k2 * (r * abs(r)) / max(atr_scale, 1e-6) if np.isfinite(atr_scale) else 0.0
+            bonus_raw = (
+                float(self.position) * self.convex_k2 * (r * abs(r)) / max(vol_proxy, 1e-6)
+            )
+            if self.convex_bonus_cap > 0.0:
+                reward_convex_bonus = self.convex_bonus_cap * math.tanh(
+                    bonus_raw / self.convex_bonus_cap
+                )
+            else:
+                reward_convex_bonus = bonus_raw
+            reward_convex_bonus *= self.convex_bonus_scale
             reward_convex = reward_convex_linear + reward_convex_bonus
             # Pivot-anchor term rewards directional alignment with pivot edge.
             pivot_edge = float(self._pivot_long[self._i]) - float(self._pivot_short[self._i])
@@ -396,6 +422,17 @@ class TradingEnv:
                 pivot_anchor = self.convex_pivot_k * float(self.position) * pivot_edge
                 reward_convex += pivot_anchor
             reward_convex -= self.convex_theta * abs(self.position)
+            if self.convex_risk_lambda > 0.0:
+                reward_convex_risk_penalty = (
+                    self.convex_risk_lambda * (abs(self.position) ** 2) * (vol_proxy ** 2)
+                )
+                reward_convex -= reward_convex_risk_penalty
+            pos_abs = abs(self.position)
+            if self.saturation_penalty_ret > 0.0 and pos_abs > self.saturation_threshold:
+                reward_saturation_penalty = self.saturation_penalty_ret * (
+                    pos_abs - self.saturation_threshold
+                )
+                reward_convex -= reward_saturation_penalty
             reward_pnl = reward_convex
             if (not self._is_flat(self.position)) and np.isfinite(atr) and np.isfinite(self.entry_price):
                 high = float(self._high[self._i])
@@ -444,9 +481,12 @@ class TradingEnv:
             "reward_convex": reward_convex if self.use_convex_reward else None,
             "reward_convex_linear": reward_convex_linear if self.use_convex_reward else None,
             "reward_convex_bonus": reward_convex_bonus if self.use_convex_reward else None,
+            "reward_convex_risk_penalty": reward_convex_risk_penalty if self.use_convex_reward else None,
             "convex_term": convex_term if self.use_convex_reward else None,
             "convex_atr_scale": float(atr_scale) if self.use_convex_reward and np.isfinite(atr_scale) else None,
+            "convex_vol_proxy": float(convex_vol_proxy) if self.use_convex_reward and np.isfinite(convex_vol_proxy) else None,
             "reward_pivot_anchor": pivot_anchor if self.use_convex_reward else None,
+            "reward_saturation_penalty": reward_saturation_penalty,
             "mfe_atr": float(mfe_atr) if mfe_atr is not None and np.isfinite(mfe_atr) else None,
             "mfe_bonus": mfe_bonus if self.use_convex_reward else None,
             "reward_switch_penalty": switch_penalty,
@@ -493,9 +533,18 @@ class TradingEnv:
                 info["reward_convex"] = reward_convex if self.use_convex_reward else None
                 info["reward_convex_linear"] = reward_convex_linear if self.use_convex_reward else None
                 info["reward_convex_bonus"] = reward_convex_bonus if self.use_convex_reward else None
+                info["reward_convex_risk_penalty"] = (
+                    reward_convex_risk_penalty if self.use_convex_reward else None
+                )
                 info["convex_term"] = convex_term if self.use_convex_reward else None
                 info["convex_atr_scale"] = float(atr_scale) if self.use_convex_reward and np.isfinite(atr_scale) else None
+                info["convex_vol_proxy"] = (
+                    float(convex_vol_proxy)
+                    if self.use_convex_reward and np.isfinite(convex_vol_proxy)
+                    else None
+                )
                 info["reward_pivot_anchor"] = pivot_anchor if self.use_convex_reward else None
+                info["reward_saturation_penalty"] = reward_saturation_penalty
                 info["mfe_atr"] = float(mfe_atr) if mfe_atr is not None and np.isfinite(mfe_atr) else None
                 info["mfe_bonus"] = mfe_bonus if self.use_convex_reward else None
                 info["pos"] = self.position

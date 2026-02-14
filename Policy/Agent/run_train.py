@@ -359,6 +359,24 @@ def main():
     parser.add_argument("--convex-k2", type=float, default=0.15)
     parser.add_argument("--convex-theta", type=float, default=0.00005)
     parser.add_argument(
+        "--convex-risk-lambda",
+        type=float,
+        default=100.0,
+        help="Risk term weight for -lambda * pos^2 * vol^2 (vol proxy from ATR scale).",
+    )
+    parser.add_argument(
+        "--convex-bonus-cap",
+        type=float,
+        default=0.0015,
+        help="Soft cap (tanh) for convex bonus contribution per bar. Set <=0 to disable.",
+    )
+    parser.add_argument(
+        "--convex-bonus-scale",
+        type=float,
+        default=1.0,
+        help="Global multiplier for convex bonus after capping.",
+    )
+    parser.add_argument(
         "--convex-pivot-k",
         type=float,
         default=0.01,
@@ -381,6 +399,18 @@ def main():
         type=float,
         default=0.00001,
         help="Penalty scaled by |abs(pos_t)-abs(pos_t-1)|.",
+    )
+    parser.add_argument(
+        "--saturation-threshold",
+        type=float,
+        default=0.90,
+        help="Start penalizing exposure magnitude when |pos| exceeds this threshold.",
+    )
+    parser.add_argument(
+        "--saturation-penalty-ret",
+        type=float,
+        default=0.0008,
+        help="Penalty slope on max(0, |pos|-saturation_threshold).",
     )
     parser.add_argument(
         "--commission-per-trade",
@@ -504,9 +534,14 @@ def main():
         "convex_k1": args.convex_k1,
         "convex_k2": args.convex_k2,
         "convex_theta": args.convex_theta,
+        "convex_risk_lambda": args.convex_risk_lambda,
+        "convex_bonus_cap": args.convex_bonus_cap,
+        "convex_bonus_scale": args.convex_bonus_scale,
         "convex_pivot_k": args.convex_pivot_k,
         "dir_switch_penalty_ret": dir_switch_penalty,
         "size_change_penalty_ret": size_change_penalty,
+        "saturation_threshold": args.saturation_threshold,
+        "saturation_penalty_ret": args.saturation_penalty_ret,
         "hold_penalty_ret": hold_penalty,
         "action_deadband": action_deadband,
         "convex_mfe_thresholds": tuple(convex_thresholds),
@@ -586,9 +621,14 @@ def main():
                 "convex_k1": float(args.convex_k1),
                 "convex_k2": float(args.convex_k2),
                 "convex_theta": float(args.convex_theta),
+                "convex_risk_lambda": float(args.convex_risk_lambda),
+                "convex_bonus_cap": float(args.convex_bonus_cap),
+                "convex_bonus_scale": float(args.convex_bonus_scale),
                 "convex_pivot_k": float(args.convex_pivot_k),
                 "dir_switch_penalty_ret": float(dir_switch_penalty),
                 "size_change_penalty_ret": float(size_change_penalty),
+                "saturation_threshold": float(args.saturation_threshold),
+                "saturation_penalty_ret": float(args.saturation_penalty_ret),
                 "hold_penalty_ret": float(hold_penalty),
                 "action_deadband": float(action_deadband),
                 "convex_mfe_thresholds": tuple(float(x) for x in convex_thresholds),

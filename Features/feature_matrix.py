@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Mapping
+from typing import Iterable, Mapping
 
+import numpy as np
 import pandas as pd
 
 from Data.load_data import get_ticker_processed_base_dir, load_ticker_parquet
@@ -43,6 +44,19 @@ PIVOT_LABEL_COLUMNS = (
     "super_pivot_up",
     "super_pivot_down",
 )
+VIX_SUITE_COLUMNS = [
+    "vix_close",
+    "vix_ret_1",
+    "vix_ret_4",
+    "vix_ret_16",
+    "vix_range_pct",
+    "vix_atr_pct",
+    "vix_trend_ema_8_21",
+    "vix_z_20",
+    "vix_vol_of_vol_20",
+    "ret_1_x_vix",
+    "atr_pct_x_vix",
+]
 
 
 def _normalize_timeframe_label(label_timeframe: str) -> str:
@@ -144,6 +158,100 @@ def _add_lstm_features_for_tree(
     return pd.concat([df, lstm_df[new_cols]], axis=1)
 
 
+def _ensure_vix_suite_cols(df: pd.DataFrame) -> pd.DataFrame:
+    for col in VIX_SUITE_COLUMNS:
+        if col not in df.columns:
+            df[col] = np.nan
+    return df
+
+
+def _load_vix_1m(
+    *,
+    vix_ticker: str,
+    vix_parquet_path: str | Path | None,
+    tz: str | None,
+) -> pd.DataFrame:
+    vix_df = load_ticker_parquet(vix_ticker, parquet_path=vix_parquet_path)
+    return ensure_time_index(vix_df, tz=tz)
+
+
+def _compute_vix_suite(
+    *,
+    base_df: pd.DataFrame,
+    vix_ohlcv: pd.DataFrame,
+) -> pd.DataFrame:
+    out = pd.DataFrame(index=base_df.index)
+
+    if vix_ohlcv.empty or "close" not in vix_ohlcv.columns:
+        for col in VIX_SUITE_COLUMNS:
+            out[col] = np.nan
+        return out
+
+    vix_close = pd.to_numeric(vix_ohlcv.get("close"), errors="coerce")
+    vix_high = pd.to_numeric(vix_ohlcv.get("high"), errors="coerce")
+    vix_low = pd.to_numeric(vix_ohlcv.get("low"), errors="coerce")
+
+    prev_close = vix_close.shift(1)
+    tr = pd.concat(
+        [
+            (vix_high - vix_low).abs(),
+            (vix_high - prev_close).abs(),
+            (vix_low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    vix_atr = tr.rolling(14, min_periods=1).mean()
+
+    out["vix_close"] = vix_close
+    out["vix_ret_1"] = vix_close.pct_change(1)
+    out["vix_ret_4"] = vix_close.pct_change(4)
+    out["vix_ret_16"] = vix_close.pct_change(16)
+    out["vix_range_pct"] = (vix_high - vix_low) / vix_close.replace(0, np.nan)
+    out["vix_atr_pct"] = vix_atr / vix_close.replace(0, np.nan)
+    out["vix_trend_ema_8_21"] = (
+        vix_close.ewm(span=8, adjust=False).mean()
+        - vix_close.ewm(span=21, adjust=False).mean()
+    ) / vix_close.replace(0, np.nan)
+    vix_mean_20 = vix_close.rolling(20, min_periods=20).mean()
+    vix_std_20 = vix_close.rolling(20, min_periods=20).std(ddof=0)
+    out["vix_z_20"] = (vix_close - vix_mean_20) / vix_std_20.replace(0, np.nan)
+    out["vix_vol_of_vol_20"] = out["vix_ret_1"].rolling(20, min_periods=20).std(ddof=0)
+
+    base_ret_1 = pd.to_numeric(base_df.get("ret_1"), errors="coerce")
+    base_atr_pct = pd.to_numeric(base_df.get("atr_pct"), errors="coerce")
+    out["ret_1_x_vix"] = base_ret_1 * vix_close
+    out["atr_pct_x_vix"] = base_atr_pct * vix_close
+    return out
+
+
+def _add_vix_suite_to_frame(
+    df: pd.DataFrame,
+    *,
+    vix_1m: pd.DataFrame | None,
+    timeframe_rule: str,
+    resample_label: str,
+    resample_closed: str,
+) -> pd.DataFrame:
+    out = df.copy()
+    if vix_1m is None or vix_1m.empty:
+        return _ensure_vix_suite_cols(out)
+
+    vix_tf = resample_ohlcv(
+        vix_1m,
+        timeframe_rule,
+        label=resample_label,
+        closed=resample_closed,
+    )
+    if vix_tf.empty:
+        return _ensure_vix_suite_cols(out)
+
+    vix_suite = _compute_vix_suite(base_df=out, vix_ohlcv=vix_tf)
+    vix_suite = vix_suite.reindex(out.index, method="ffill")
+    for col in VIX_SUITE_COLUMNS:
+        out[col] = vix_suite.get(col)
+    return out
+
+
 def build_feature_matrix(
     parquet_path: str | Path,
     *,
@@ -161,6 +269,10 @@ def build_feature_matrix(
     shift_htf_bars: int = 1,
     resample_label: str = "left",
     resample_closed: str = "left",
+    include_vix_features: bool = True,
+    vix_ticker: str = "$VIX",
+    vix_parquet_path: str | Path | None = None,
+    vix_warn_on_missing: bool = True,
 ) -> pd.DataFrame:
     """
     Build a 15m training matrix with labels on 15m only and HTF context features.
@@ -176,6 +288,18 @@ def build_feature_matrix(
 
     df_1m = load_ticker_parquet(ticker, parquet_path=parquet_path)
     df_1m = ensure_time_index(df_1m, tz=tz)
+    vix_1m: pd.DataFrame | None = None
+    if include_vix_features:
+        try:
+            vix_1m = _load_vix_1m(
+                vix_ticker=vix_ticker,
+                vix_parquet_path=vix_parquet_path,
+                tz=tz,
+            )
+        except Exception as exc:
+            if vix_warn_on_missing:
+                print(f"[feature_matrix] VIX suite unavailable: {exc}")
+            vix_1m = None
 
     df_15m = resample_ohlcv(
         df_1m, label_timeframe, label=resample_label, closed=resample_closed
@@ -193,6 +317,14 @@ def build_feature_matrix(
             df_15m,
             include_time_features=True,
             tz=tz,
+        )
+    if include_vix_features:
+        df_15m = _add_vix_suite_to_frame(
+            df_15m,
+            vix_1m=vix_1m,
+            timeframe_rule=label_timeframe,
+            resample_label=resample_label,
+            resample_closed=resample_closed,
         )
     df_15m = add_fractal_pivots(df_15m, **pivot_kwargs)
     df_15m = add_all_labels(df_15m, **label_kwargs)
@@ -217,6 +349,14 @@ def build_feature_matrix(
                 include_time_features=include_htf_date_features,
                 tz=tz,
             )
+        if include_vix_features:
+            tf_df = _add_vix_suite_to_frame(
+                tf_df,
+                vix_1m=vix_1m,
+                timeframe_rule=tf_rule,
+                resample_label=resample_label,
+                resample_closed=resample_closed,
+            )
         aligned = _align_htf_features(
             tf_df,
             base_index=df_15m.index,
@@ -230,8 +370,6 @@ def build_feature_matrix(
     out.attrs["ticker"] = ticker
     out.attrs["label_timeframe"] = label_timeframe
     return out
-
-from typing import Iterable
 
 def build_feature_matrices(
     parquet_path: str | Path,
@@ -250,6 +388,10 @@ def build_feature_matrices(
     shift_htf_bars: int = 1,
     resample_label: str = "left",
     resample_closed: str = "left",
+    include_vix_features: bool = True,
+    vix_ticker: str = "$VIX",
+    vix_parquet_path: str | Path | None = None,
+    vix_warn_on_missing: bool = True,
 ) -> dict[str, pd.DataFrame]:
     """
     Build multiple model-specific feature matrices in one pass.
@@ -264,6 +406,18 @@ def build_feature_matrices(
     # ---------- common: load + resample once ----------
     df_1m = load_ticker_parquet(ticker, parquet_path=parquet_path)
     df_1m = ensure_time_index(df_1m, tz=tz)
+    vix_1m: pd.DataFrame | None = None
+    if include_vix_features:
+        try:
+            vix_1m = _load_vix_1m(
+                vix_ticker=vix_ticker,
+                vix_parquet_path=vix_parquet_path,
+                tz=tz,
+            )
+        except Exception as exc:
+            if vix_warn_on_missing:
+                print(f"[feature_matrix] VIX suite unavailable: {exc}")
+            vix_1m = None
 
     df_15m_ohlcv = resample_ohlcv(
         df_1m, label_timeframe, label=resample_label, closed=resample_closed
@@ -303,6 +457,14 @@ def build_feature_matrices(
                 include_time_features=True,
                 tz=tz,
             )
+        if include_vix_features:
+            f15 = _add_vix_suite_to_frame(
+                f15,
+                vix_1m=vix_1m,
+                timeframe_rule=label_timeframe,
+                resample_label=resample_label,
+                resample_closed=resample_closed,
+            )
 
         # Attach labels (same for all models)
         f15 = pd.concat([f15, y_15m], axis=1)
@@ -324,6 +486,14 @@ def build_feature_matrices(
                     tf_feat,
                     include_time_features=include_htf_date_features,
                     tz=tz,
+                )
+            if include_vix_features:
+                tf_feat = _add_vix_suite_to_frame(
+                    tf_feat,
+                    vix_1m=vix_1m,
+                    timeframe_rule=feature_timeframes[tf_label],
+                    resample_label=resample_label,
+                    resample_closed=resample_closed,
                 )
             aligned = _align_htf_features(
                 tf_feat,

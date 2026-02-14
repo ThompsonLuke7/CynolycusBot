@@ -27,6 +27,11 @@ class TradingEnvConfig:
     convex_k2: float = 0.5
     convex_theta: float = 0.01
     convex_pivot_k: float = 0.0
+    convex_risk_lambda: float = 0.0
+    convex_bonus_cap: float = 0.0
+    convex_bonus_scale: float = 1.0
+    saturation_threshold: float = 0.9
+    saturation_penalty_ret: float = 0.0
     convex_directional_bonus_only: bool = True
     convex_wrong_side_scale: float = 0.0
     convex_mfe_thresholds: tuple[float, ...] = (1.0, 2.0, 3.0)

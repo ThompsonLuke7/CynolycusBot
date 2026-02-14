@@ -7,8 +7,22 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta  # registers df.ta accessor
 
-from Data.load_data import get_ticker_processed_base_dir
+from Data.load_data import get_ticker_processed_base_dir, load_ticker_parquet
 from Data.retrieve_data import normalize_ticker
+
+VIX_FEATURE_COLUMNS = [
+    "vix_close",
+    "vix_ret_1",
+    "vix_ret_4",
+    "vix_ret_16",
+    "vix_range_pct",
+    "vix_atr_pct",
+    "vix_trend_ema_8_21",
+    "vix_z_20",
+    "vix_vol_of_vol_20",
+    "ret_1_x_vix",
+    "atr_pct_x_vix",
+]
 
 
 @dataclass(frozen=True)
@@ -27,6 +41,13 @@ class AgentFeatureConfig:
     session_close: str = "16:00"
     drop_na: bool = False
     include_state_placeholders: bool = True
+    include_vix_features: bool = True
+    vix_ticker: str = "$VIX"
+    vix_parquet_path: str | Path | None = None
+    vix_resample_rule: str | None = None
+    vix_max_lag: str = "2h"
+    vix_ffill_limit: int | None = 256
+    vix_warn_on_missing: bool = True
 
 
 def _series_from_ta(
@@ -154,6 +175,103 @@ def _add_pivot_features(df: pd.DataFrame, base_col: str) -> pd.DataFrame:
     return df
 
 
+def _ensure_vix_feature_cols(df: pd.DataFrame) -> pd.DataFrame:
+    for col in VIX_FEATURE_COLUMNS:
+        if col not in df.columns:
+            df[col] = np.nan
+    return df
+
+
+def _load_align_vix_ohlcv(
+    *,
+    cfg: AgentFeatureConfig,
+    target_index: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    if cfg.vix_parquet_path is not None:
+        vix_df = load_ticker_parquet(cfg.vix_ticker, parquet_path=cfg.vix_parquet_path)
+    else:
+        vix_df = load_ticker_parquet(cfg.vix_ticker)
+
+    if not isinstance(vix_df.index, pd.DatetimeIndex):
+        raise ValueError("VIX data must have a DatetimeIndex.")
+
+    vix_df = vix_df.sort_index()
+    if cfg.tz:
+        if vix_df.index.tz is None:
+            vix_df.index = vix_df.index.tz_localize(cfg.tz)
+        else:
+            vix_df.index = vix_df.index.tz_convert(cfg.tz)
+
+    if cfg.vix_resample_rule:
+        agg = {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+        keep = [c for c in agg if c in vix_df.columns]
+        if "close" not in keep:
+            raise ValueError("VIX frame must include a close column.")
+        resample_agg = {k: v for k, v in agg.items() if k in keep}
+        vix_df = (
+            vix_df[keep]
+            .resample(cfg.vix_resample_rule, label="left", closed="left")
+            .agg(resample_agg)
+        )
+        close_cols = [c for c in ("open", "high", "low", "close") if c in vix_df.columns]
+        if close_cols:
+            vix_df = vix_df.dropna(subset=close_cols)
+
+    tolerance = pd.Timedelta(cfg.vix_max_lag) if cfg.vix_max_lag else None
+    aligned = vix_df.reindex(
+        target_index,
+        method="ffill",
+        limit=cfg.vix_ffill_limit,
+        tolerance=tolerance,
+    )
+    return aligned
+
+
+def _add_vix_feature_suite(
+    df: pd.DataFrame,
+    *,
+    vix_ohlcv: pd.DataFrame,
+) -> pd.DataFrame:
+    vix_close = pd.to_numeric(vix_ohlcv.get("close"), errors="coerce")
+    if vix_close is None:
+        raise ValueError("Aligned VIX frame is missing close.")
+    vix_high = pd.to_numeric(vix_ohlcv.get("high"), errors="coerce")
+    vix_low = pd.to_numeric(vix_ohlcv.get("low"), errors="coerce")
+
+    vix_ret_1 = vix_close.pct_change(1)
+    vix_ret_4 = vix_close.pct_change(4)
+    vix_ret_16 = vix_close.pct_change(16)
+    vix_range_pct = (vix_high - vix_low) / vix_close.replace(0, np.nan)
+    vix_atr_raw = _series_from_ta(vix_ohlcv.ta.atr(length=14, append=False))
+    vix_atr_pct = vix_atr_raw / vix_close.replace(0, np.nan)
+    vix_ema_8 = vix_close.ewm(span=8, adjust=False).mean()
+    vix_ema_21 = vix_close.ewm(span=21, adjust=False).mean()
+    vix_trend = (vix_ema_8 - vix_ema_21) / vix_close.replace(0, np.nan)
+    vix_mean_20 = vix_close.rolling(20, min_periods=20).mean()
+    vix_std_20 = vix_close.rolling(20, min_periods=20).std(ddof=0)
+    vix_z_20 = (vix_close - vix_mean_20) / vix_std_20.replace(0, np.nan)
+    vix_vol_of_vol_20 = vix_ret_1.rolling(20, min_periods=20).std(ddof=0)
+
+    df["vix_close"] = vix_close
+    df["vix_ret_1"] = vix_ret_1
+    df["vix_ret_4"] = vix_ret_4
+    df["vix_ret_16"] = vix_ret_16
+    df["vix_range_pct"] = vix_range_pct
+    df["vix_atr_pct"] = vix_atr_pct
+    df["vix_trend_ema_8_21"] = vix_trend
+    df["vix_z_20"] = vix_z_20
+    df["vix_vol_of_vol_20"] = vix_vol_of_vol_20
+    df["ret_1_x_vix"] = df["ret_1"] * vix_close
+    df["atr_pct_x_vix"] = df["atr_pct"] * vix_close
+    return df
+
+
 def build_agent_feature_matrix(
     *,
     config: AgentFeatureConfig | None = None,
@@ -244,6 +362,15 @@ def build_agent_feature_matrix(
     for lag in (1, 2, 4, 8, 16):
         df[f"ret_{lag}"] = close.pct_change(lag)
 
+    if cfg.include_vix_features:
+        try:
+            vix_ohlcv = _load_align_vix_ohlcv(cfg=cfg, target_index=df.index)
+            df = _add_vix_feature_suite(df, vix_ohlcv=vix_ohlcv)
+        except Exception as exc:
+            if cfg.vix_warn_on_missing:
+                print(f"[agent_matrix] VIX feature suite unavailable: {exc}")
+            df = _ensure_vix_feature_cols(df)
+
     if cfg.include_state_placeholders:
         df["current_position"] = 0.0
         df["time_in_position"] = 0.0
@@ -301,6 +428,8 @@ def build_agent_feature_matrix(
                 "p_tb_short_delta_1",
             ]
         )
+    if cfg.include_vix_features:
+        cols.extend(VIX_FEATURE_COLUMNS)
 
     if cfg.include_state_placeholders:
         cols.extend(

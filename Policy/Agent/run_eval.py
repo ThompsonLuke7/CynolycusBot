@@ -47,6 +47,9 @@ def _normalize_env_overrides(raw: object) -> dict[str, object]:
         "convex_k1",
         "convex_k2",
         "convex_theta",
+        "convex_risk_lambda",
+        "convex_bonus_cap",
+        "convex_bonus_scale",
         "convex_pivot_k",
         "convex_directional_bonus_only",
         "convex_wrong_side_scale",
@@ -55,6 +58,8 @@ def _normalize_env_overrides(raw: object) -> dict[str, object]:
         "action_deadband",
         "dir_switch_penalty_ret",
         "size_change_penalty_ret",
+        "saturation_threshold",
+        "saturation_penalty_ret",
         "seed",
     }
     for key in allowed:
@@ -628,6 +633,14 @@ def main() -> None:
             f"mean_turnover={float(dpos.mean()):.4f}",
             f"p95_turnover={float(dpos.quantile(0.95)):.4f}",
         )
+        if "ret_next" in trace.columns:
+            ret_next = pd.to_numeric(trace["ret_next"], errors="coerce").fillna(0.0)
+            signed_capture = pos_series * ret_next
+            corr = pos_series.abs().corr(signed_capture)
+            print(
+                "Magnitude usefulness:",
+                f"corr_abs_pos_vs_signed_capture={float(corr) if np.isfinite(corr) else float('nan'):.4f}",
+            )
 
     if not args.plot_only and use_convex_reward:
         convex = (
@@ -653,6 +666,11 @@ def main() -> None:
         convex_atr_scale = (
             pd.to_numeric(trace["convex_atr_scale"], errors="coerce")
             if "convex_atr_scale" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        convex_vol_proxy = (
+            pd.to_numeric(trace["convex_vol_proxy"], errors="coerce")
+            if "convex_vol_proxy" in trace.columns
             else pd.Series(dtype=float)
         )
         mfe_atr = (
@@ -695,6 +713,16 @@ def main() -> None:
             if "reward_size_penalty" in trace.columns
             else pd.Series(dtype=float)
         )
+        convex_risk_pen = (
+            pd.to_numeric(trace["reward_convex_risk_penalty"], errors="coerce")
+            if "reward_convex_risk_penalty" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        saturation_pen = (
+            pd.to_numeric(trace["reward_saturation_penalty"], errors="coerce")
+            if "reward_saturation_penalty" in trace.columns
+            else pd.Series(dtype=float)
+        )
         bonus_hits = int((mfe_bonus.fillna(0.0) > 0).sum()) if not mfe_bonus.empty else 0
         pos = (
             pd.to_numeric(trace["position"], errors="coerce").fillna(0.0)
@@ -719,9 +747,12 @@ def main() -> None:
             f"mean_reward_convex_bonus={float(convex_bonus.dropna().mean()) if convex_bonus.notna().any() else 0.0:.6f}",
             f"mean_convex_term={float(term.dropna().mean()) if term.notna().any() else 0.0:.6f}",
             f"mean_convex_atr_scale={float(convex_atr_scale.dropna().mean()) if convex_atr_scale.notna().any() else 0.0:.6f}",
+            f"mean_convex_vol_proxy={float(convex_vol_proxy.dropna().mean()) if convex_vol_proxy.notna().any() else 0.0:.6f}",
             f"mean_pivot_anchor={float(pivot_anchor.dropna().mean()) if pivot_anchor.notna().any() else 0.0:.6f}",
+            f"mean_convex_risk_penalty={float(convex_risk_pen.dropna().mean()) if convex_risk_pen.notna().any() else 0.0:.6f}",
             f"mean_switch_penalty={float(switch_pen.dropna().mean()) if switch_pen.notna().any() else 0.0:.6f}",
             f"mean_size_penalty={float(size_pen.dropna().mean()) if size_pen.notna().any() else 0.0:.6f}",
+            f"mean_saturation_penalty={float(saturation_pen.dropna().mean()) if saturation_pen.notna().any() else 0.0:.6f}",
             f"mean_mfe_atr={float(mfe_atr.dropna().mean()) if mfe_atr.notna().any() else 0.0:.4f}",
             f"total_mfe_bonus={float(mfe_bonus.dropna().sum()) if mfe_bonus.notna().any() else 0.0:.6f}",
             f"mfe_bonus_hits={bonus_hits}",

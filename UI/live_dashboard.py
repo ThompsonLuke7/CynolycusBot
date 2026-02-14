@@ -776,6 +776,82 @@ class LiveSession:
             return None
         return None
 
+    def _seed_15m_from_prefill(
+        self,
+        *,
+        cfg: SessionConfig,
+        processor: Any,
+        agent: Any | None,
+    ) -> None:
+        from API.Alpaca_API.inference.live_inference import build_15m
+
+        seeded_counts: dict[str, int] = {}
+        for symbol in cfg.symbols:
+            buffer = processor._buffers.get(symbol)
+            if buffer is None:
+                continue
+            df_1m = buffer.to_dataframe()
+            if df_1m is None or df_1m.empty:
+                continue
+
+            try:
+                df_15m = build_15m(
+                    df_1m,
+                    rule=f"{cfg.interval}min",
+                    label=cfg.resample_label,
+                    closed=cfg.resample_closed,
+                    tz=cfg.tz,
+                    assume_tz=cfg.assume_tz,
+                )
+            except Exception:
+                continue
+            if df_15m.empty:
+                continue
+
+            df_plot = df_15m
+            if agent is not None:
+                try:
+                    # Precompute display probabilities from prefill without
+                    # emitting actions/orders before live bars arrive.
+                    df_plot = agent._maybe_add_ga_probs(df_1m=df_1m, df_15m=df_15m, target_ts=None)  # noqa: SLF001
+                except Exception:
+                    df_plot = df_15m
+
+            if "timestamp" not in df_plot.columns:
+                df_plot = df_plot.reset_index().rename(columns={df_plot.index.name or "index": "timestamp"})
+            else:
+                df_plot = df_plot.reset_index(drop=True)
+            df_plot = df_plot.tail(self._store._max_bars)
+
+            count = 0
+            for row in df_plot.to_dict("records"):
+                bar = {
+                    "symbol": symbol,
+                    "timestamp": row.get("timestamp"),
+                    "open": row.get("open"),
+                    "high": row.get("high"),
+                    "low": row.get("low"),
+                    "close": row.get("close"),
+                    "volume": row.get("volume"),
+                }
+                for key in ("p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short"):
+                    if key in row:
+                        bar[key] = row.get(key)
+                self._store.add_15m_bar(symbol, bar)
+                count += 1
+
+            if count > 0:
+                seeded_counts[symbol] = count
+
+        if seeded_counts:
+            self._emit(
+                "log",
+                {
+                    "symbol": "SYSTEM",
+                    "message": f"[live] seeded 15m/prob history from prefill: {seeded_counts}",
+                },
+            )
+
     def _run_replay(self, *, cfg: SessionConfig, stop_event: threading.Event) -> None:
         symbols = cfg.symbols
         self._emit_status(running=True, message=f"replay loading {cfg.replay_data_path}")
@@ -1417,6 +1493,7 @@ class LiveSession:
                     "message": f"[live] prefill loaded bars: {seed_counts}",
                 },
             )
+            self._seed_15m_from_prefill(cfg=cfg, processor=processor, agent=agent)
             self._emit_state_sync()
 
             if order_policies:
