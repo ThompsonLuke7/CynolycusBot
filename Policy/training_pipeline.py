@@ -60,9 +60,10 @@ def build_agent_training_matrix(
     else:
         # Silence noisy debug printouts from lower-level feature builders,
         # but surface important warnings (e.g., missing/fallback data sources).
+        captured = ""
         with io.StringIO() as _buf, redirect_stdout(_buf):
             df = build_agent_feature_matrix(config=agent_cfg)
-        captured = _buf.getvalue()
+            captured = _buf.getvalue()
         for line in captured.splitlines():
             if "[agent_matrix]" in line:
                 print(line)
