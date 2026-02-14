@@ -328,7 +328,7 @@ def main():
         default="convex",
         help="Reward mode: 'exit' (realized PnL on close), 'mtm' (mark-to-market each bar), or 'convex'.",
     )
-    parser.add_argument("--total-timesteps", type=int, default=2_000_000)
+    parser.add_argument("--total-timesteps", type=int, default=2_500_000)
     parser.add_argument("--rollout-len", type=int, default=1024)
     parser.add_argument("--gamma", type=float, default=0.995)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
@@ -361,13 +361,13 @@ def main():
     parser.add_argument(
         "--convex-risk-lambda",
         type=float,
-        default=100.0,
+        default=0.0,
         help="Risk term weight for -lambda * pos^2 * vol^2 (vol proxy from ATR scale).",
     )
     parser.add_argument(
         "--convex-bonus-cap",
         type=float,
-        default=0.0015,
+        default=0.0,
         help="Soft cap (tanh) for convex bonus contribution per bar. Set <=0 to disable.",
     )
     parser.add_argument(
@@ -391,13 +391,13 @@ def main():
     parser.add_argument(
         "--dir-switch-penalty-ret",
         type=float,
-        default=0.00005,
+        default=0.00012,
         help="Penalty when direction flips directly long<->short.",
     )
     parser.add_argument(
         "--size-change-penalty-ret",
         type=float,
-        default=0.00001,
+        default=0.00003,
         help="Penalty scaled by |abs(pos_t)-abs(pos_t-1)|.",
     )
     parser.add_argument(
@@ -409,7 +409,7 @@ def main():
     parser.add_argument(
         "--saturation-penalty-ret",
         type=float,
-        default=0.0008,
+        default=0.0,
         help="Penalty slope on max(0, |pos|-saturation_threshold).",
     )
     parser.add_argument(
@@ -451,7 +451,7 @@ def main():
     parser.add_argument(
         "--convex-action-deadband",
         type=float,
-        default=0.0005,
+        default=0.001,
         help="Action deadband used in convex mode to reduce churn.",
     )
     parser.add_argument(

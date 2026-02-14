@@ -67,14 +67,14 @@ class OptionOrderPolicyConfig:
 
 class OptionOrderPolicy:
     """
-    Maps agent target exposure actions in [-1, 1] to option orders:
+    Maps agent direction actions in [-1, 0, 1] to option orders:
       - long  -> buy call
       - short -> buy put
       - flat  -> optional sell-to-close
-    Continuous execution:
-      - smooth action with EMA
-      - apply deadband on action changes
-      - map exposure magnitude to target contracts
+    Direction-only execution:
+      - convert action to signed direction via deadband
+      - ignore action magnitude for order sizing
+      - size by fixed qty (bounded by max-contract checks)
       - trade only signed delta with per-step cap
     """
 
@@ -255,7 +255,13 @@ class OptionOrderPolicy:
             return float("nan")
         return self._extract_buying_power(resp)
 
-    def _get_contract_price(self, *, symbol: str, logger: Callable[[str], None]) -> float:
+    def _get_contract_price(
+        self,
+        *,
+        symbol: str,
+        logger: Callable[[str], None],
+        mode: str | None = None,
+    ) -> float:
         try:
             resp = self._client.get_option_quotes(symbols=symbol, limit=1)
             quotes = self._extract_quotes(resp, symbol=symbol)
@@ -263,7 +269,8 @@ class OptionOrderPolicy:
                 return float("nan")
             # Use the most recent quote if timestamps are present.
             quote = quotes[-1]
-            return self._quote_price(quote, mode=self.cfg.price_mode)
+            price_mode = str(mode or self.cfg.price_mode)
+            return self._quote_price(quote, mode=price_mode)
         except Exception as exc:
             logger(f"[order_policy] quote fetch failed symbol={symbol}: {exc}")
             return float("nan")
@@ -596,14 +603,30 @@ class OptionOrderPolicy:
                 raise ValueError("long_options_only=True requires sell-to-close orders.")
 
         order_qty = int(qty if qty is not None else self.cfg.qty)
+        # Price ladder policy:
+        # - start at midpoint
+        # - +$0.01 per retry for opens (buy-to-open)
+        # - -$0.01 per retry for closes (sell-to-close)
+        base_limit = self._get_contract_price(symbol=symbol, logger=logger, mode="mid")
+        if not math.isfinite(base_limit) or base_limit <= 0.0:
+            fallback_mode = "ask" if intent_key == "open" else "bid"
+            base_limit = self._get_contract_price(symbol=symbol, logger=logger, mode=fallback_mode)
+        if not math.isfinite(base_limit) or base_limit <= 0.0:
+            raise RuntimeError(
+                f"no_quote_for_limit_pricing intent={intent_key} symbol={symbol}"
+            )
+        tick = 0.01
+
         if not self.cfg.submit_orders:
+            limit_price = round(float(base_limit), 2)
             payload = {
                 "symbol": symbol,
                 "qty": order_qty,
                 "side": side_key,
                 "intent": intent_key,
-                "type": self.cfg.order_type,
+                "type": "limit",
                 "time_in_force": self.cfg.time_in_force,
+                "limit_price": limit_price,
             }
             logger(f"[order_policy] SIMULATED ORDER {payload}")
             return {"simulated": True, "payload": payload}
@@ -611,19 +634,28 @@ class OptionOrderPolicy:
         attempts = max_attempts + 1
         last_verify: dict[str, Any] | None = None
         for attempt in range(1, attempts + 1):
+            offset = (attempt - 1) * tick
+            if intent_key == "open":
+                limit_price = base_limit + offset
+            else:
+                limit_price = max(tick, base_limit - offset)
+            limit_price = round(float(limit_price), 2)
+
             resp = self._client.submit_option_order(
                 symbol=symbol,
                 qty=order_qty,
                 side=side_key,
-                order_type=self.cfg.order_type,
+                order_type="limit",
                 time_in_force=self.cfg.time_in_force,
+                limit_price=limit_price,
             )
             status = self._status_key(resp.get("status") if isinstance(resp, dict) else None)
             oid = str(resp.get("id", "")).strip() if isinstance(resp, dict) else ""
             logger(
                 "[order_policy] ORDER SUBMITTED "
                 f"intent={intent_key} side={side_key} qty={order_qty} symbol={symbol} "
-                f"order_id={oid or 'n/a'} status={status or 'n/a'} attempt={attempt}/{attempts}"
+                f"order_id={oid or 'n/a'} status={status or 'n/a'} "
+                f"limit_price={limit_price:.2f} attempt={attempt}/{attempts}"
             )
 
             verify_result: dict[str, Any] | None = None
@@ -793,15 +825,17 @@ class OptionOrderPolicy:
             if not math.isfinite(raw_action):
                 return {"event": "error", "reason": f"invalid_action:{action}"}
             act = max(-1.0, min(1.0, float(raw_action)))
-            smooth_action = self._smooth_action(act)
-            prev_effective = float(self._action_effective)
-            rebalance_deadband = max(0.0, float(self.cfg.rebalance_deadband))
-            smoothed_change_applied = abs(smooth_action - prev_effective) >= rebalance_deadband
-            effective_action = smooth_action if smoothed_change_applied else prev_effective
-            self._action_effective = float(effective_action)
-
             deadband = max(0.0, float(self.cfg.action_deadband))
-            desired_pos = 0 if abs(effective_action) <= deadband else (1 if effective_action > 0.0 else -1)
+            desired_pos = 0 if abs(act) <= deadband else (1 if act > 0.0 else -1)
+            # Direction-only mode: ignore action magnitude for execution.
+            # Keep these fields for monitoring/debug compatibility.
+            smooth_action = float(desired_pos)
+            effective_action = float(desired_pos)
+            prev_effective = float(self._action_effective)
+            smoothed_change_applied = abs(effective_action - prev_effective) > 0.0
+            self._action_ema = smooth_action
+            self._action_effective = effective_action
+
             local_ts = self._to_local_ts(closed_bar.get("timestamp"))
             close = _as_float(closed_bar.get("close"))
             atr = self._update_bar_state(closed_bar) if update_bar_state else self._compute_atr()
@@ -857,7 +891,10 @@ class OptionOrderPolicy:
                     symbol=contract_symbol,
                     logger=logger,
                 )
-                target_abs = int(round(abs(effective_action) * max(0, contracts_max)))
+                # Size by fixed contract qty, not action magnitude.
+                target_abs = max(0, int(self.cfg.qty))
+                if contracts_max > 0:
+                    target_abs = min(target_abs, int(contracts_max))
                 target_signed = int(desired_pos * target_abs)
             else:
                 buying_power = self._get_buying_power()

@@ -46,14 +46,14 @@ class AgentFeatureConfig:
     drop_na: bool = False
     include_state_placeholders: bool = True
     include_vix_features: bool = True
-    vix_ticker: str = "$VIX"
+    vix_ticker: str = "VIXY"
     vix_parquet_path: str | Path | None = None
     vix_resample_rule: str | None = None
     vix_max_lag: str = "2h"
     vix_ffill_limit: int | None = 256
     vix_warn_on_missing: bool = True
     vix_allow_daily_fallback: bool = True
-    vix_daily_symbol: str = "^VIX"
+    vix_daily_symbol: str = "VIXY"
     vix_daily_max_lag: str = "7d"
 
 

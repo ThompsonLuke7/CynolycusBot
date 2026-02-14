@@ -389,7 +389,7 @@ def build_feature_matrices(
     resample_label: str = "left",
     resample_closed: str = "left",
     include_vix_features: bool = True,
-    vix_ticker: str = "$VIX",
+    vix_ticker: str = "VIXY",
     vix_parquet_path: str | Path | None = None,
     vix_warn_on_missing: bool = True,
 ) -> dict[str, pd.DataFrame]:
