@@ -47,7 +47,7 @@ class AgentFeatureConfig:
     include_state_placeholders: bool = True
     include_vix_features: bool = True
     vix_ticker: str = "VIXY"
-    vix_parquet_path: str | Path | None = None
+    vix_parquet_path: str | Path | None = "Data/raw/spy/vix_15min.parquet"
     vix_resample_rule: str | None = None
     vix_max_lag: str = "2h"
     vix_ffill_limit: int | None = 256
