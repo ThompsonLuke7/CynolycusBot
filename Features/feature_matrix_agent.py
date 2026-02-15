@@ -47,7 +47,12 @@ class AgentFeatureConfig:
     include_state_placeholders: bool = True
     include_vix_features: bool = True
     vix_ticker: str = "VIXY"
-    vix_parquet_path: str | Path | None = "Data/raw/spy/vix_15min.parquet"
+    vix_parquet_path: str | Path | None = "Data/raw/vix/vixy_15min.parquet"
+    vix_fetch_if_missing: bool = True
+    vix_fetch_timeframe: str = "15Min"
+    vix_fetch_limit: int = 100000
+    vix_fetch_start: str | None = None
+    vix_fetch_end: str | None = None
     vix_resample_rule: str | None = None
     vix_max_lag: str = "2h"
     vix_ffill_limit: int | None = 256
@@ -189,11 +194,57 @@ def _ensure_vix_feature_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _resolve_path(path_like: str | Path) -> Path:
+    p = Path(path_like)
+    if p.is_absolute():
+        return p
+    return _repo_root() / p
+
+
+def _infer_vix_fetch_start(
+    *,
+    target_index: pd.DatetimeIndex,
+    explicit_start: str | None,
+) -> str:
+    if explicit_start:
+        return str(explicit_start)
+    if len(target_index) == 0:
+        return "2021-01-01T00:00:00Z"
+    first_ts = pd.to_datetime(target_index.min(), utc=True, errors="coerce")
+    if pd.isna(first_ts):
+        return "2021-01-01T00:00:00Z"
+    start_ts = first_ts - pd.Timedelta(days=30)
+    return start_ts.isoformat().replace("+00:00", "Z")
+
+
+def _infer_vix_fetch_end(
+    *,
+    target_index: pd.DatetimeIndex,
+    explicit_end: str | None,
+) -> str | None:
+    if explicit_end:
+        return str(explicit_end)
+    if len(target_index) == 0:
+        return None
+    last_ts = pd.to_datetime(target_index.max(), utc=True, errors="coerce")
+    if pd.isna(last_ts):
+        return None
+    # Alpaca `end` is exclusive; add a tiny buffer so the final target bar is included.
+    end_ts = last_ts + pd.Timedelta(minutes=1)
+    return end_ts.isoformat().replace("+00:00", "Z")
+
+
 def _load_align_vix_ohlcv(
     *,
     cfg: AgentFeatureConfig,
     target_index: pd.DatetimeIndex,
 ) -> pd.DataFrame:
+    target_max = pd.to_datetime(target_index.max(), utc=True, errors="coerce")
+
     def _align_frame(
         source: pd.DataFrame,
         *,
@@ -208,6 +259,12 @@ def _load_align_vix_ohlcv(
                 out.index = out.index.tz_localize(cfg.tz)
             else:
                 out.index = out.index.tz_convert(cfg.tz)
+        # Strict no-lookahead: never use any source row later than the max target bar.
+        if not pd.isna(target_max):
+            cutoff = target_max
+            if out.index.tz is not None:
+                cutoff = cutoff.tz_convert(out.index.tz)
+            out = out.loc[out.index <= cutoff]
         tolerance = pd.Timedelta(tolerance_text) if tolerance_text else None
         return out.reindex(
             target_index,
@@ -218,9 +275,43 @@ def _load_align_vix_ohlcv(
 
     vix_df: pd.DataFrame | None = None
     intraday_error: Exception | None = None
+
+    preferred_path: Path | None = None
+    if cfg.vix_parquet_path is not None:
+        preferred_path = _resolve_path(cfg.vix_parquet_path)
+
+    if preferred_path is not None and not preferred_path.exists() and cfg.vix_fetch_if_missing:
+        try:
+            from API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
+
+            preferred_path.parent.mkdir(parents=True, exist_ok=True)
+            fetch_start = _infer_vix_fetch_start(
+                target_index=target_index,
+                explicit_start=cfg.vix_fetch_start,
+            )
+            fetch_end = _infer_vix_fetch_end(
+                target_index=target_index,
+                explicit_end=cfg.vix_fetch_end,
+            )
+            print(
+                f"[agent_matrix] Missing intraday VIX file at {preferred_path}; "
+                "fetching fresh data."
+            )
+            fetch_intraday(
+                ticker=cfg.vix_ticker,
+                start=fetch_start,
+                end=fetch_end,
+                timeframe=cfg.vix_fetch_timeframe,
+                limit=int(cfg.vix_fetch_limit),
+                adjustment="raw",
+                save_path=str(preferred_path),
+            )
+        except Exception as exc:  # noqa: BLE001
+            intraday_error = exc
+
     try:
-        if cfg.vix_parquet_path is not None:
-            vix_df = load_ticker_parquet(cfg.vix_ticker, parquet_path=cfg.vix_parquet_path)
+        if preferred_path is not None:
+            vix_df = load_ticker_parquet(cfg.vix_ticker, parquet_path=str(preferred_path))
         else:
             vix_df = load_ticker_parquet(cfg.vix_ticker)
     except Exception as exc:  # noqa: BLE001
