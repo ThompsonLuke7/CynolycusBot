@@ -64,6 +64,72 @@ def _dataset_name_from_label_timeframe(label_timeframe: str) -> str:
     return tf
 
 
+def _infer_vix_fetch_timeframe(label_timeframe: str) -> str:
+    tf = _normalize_label_timeframe(label_timeframe).lower()
+    if tf.endswith("min"):
+        n = int(tf.replace("min", "") or "1")
+        return f"{n}Min"
+    if tf.endswith("h"):
+        n = int(tf[:-1] or "1")
+        return f"{n}Hour"
+    return "15Min"
+
+
+def _infer_fetch_window_from_raw(raw_parquet: Path) -> tuple[str, str | None]:
+    try:
+        raw_df = pd.read_parquet(raw_parquet)
+        if "timestamp" in raw_df.columns:
+            ts = pd.to_datetime(raw_df["timestamp"], utc=True, errors="coerce")
+        else:
+            ts = pd.to_datetime(raw_df.index, utc=True, errors="coerce")
+        ts = ts[ts.notna()]
+        if len(ts) == 0:
+            return "2021-01-01T00:00:00Z", None
+        start_ts = ts.min() - pd.Timedelta(days=2)
+        end_ts = ts.max() + pd.Timedelta(days=1)
+        return (
+            start_ts.isoformat().replace("+00:00", "Z"),
+            end_ts.isoformat().replace("+00:00", "Z"),
+        )
+    except Exception:
+        return "2021-01-01T00:00:00Z", None
+
+
+def _ensure_vix_parquet(
+    *,
+    raw_parquet: Path,
+    vix_parquet_path: Path,
+    vix_ticker: str,
+    label_timeframe: str,
+    fetch_if_missing: bool,
+) -> None:
+    if vix_parquet_path.exists():
+        return
+    if not fetch_if_missing:
+        return
+    try:
+        from API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
+
+        tf = _infer_vix_fetch_timeframe(label_timeframe)
+        start, end = _infer_fetch_window_from_raw(raw_parquet)
+        vix_parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        print(
+            f"[inference_pipeline] Missing VIX parquet at {vix_parquet_path}; "
+            f"fetching {vix_ticker} {tf}..."
+        )
+        fetch_intraday(
+            ticker=vix_ticker,
+            start=start,
+            end=end,
+            timeframe=tf,
+            limit=100000,
+            adjustment="raw",
+            save_path=str(vix_parquet_path),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[inference_pipeline] VIX fetch skipped/failed: {exc}")
+
+
 def _run_cmd(args: list[str]) -> None:
     print(f"[inference_pipeline] Running: {' '.join(args)}")
     proc = subprocess.Popen(
@@ -90,6 +156,9 @@ def _build_processed_from_raw(
     models: tuple[str, ...],
     save_processed: bool,
     processed_root: Path,
+    vix_parquet_path: Path,
+    vix_ticker: str,
+    vix_fetch_if_missing: bool,
 ) -> None:
     feature_timeframes = {
         "30m": "30min",
@@ -97,12 +166,23 @@ def _build_processed_from_raw(
         "4h": "4h",
         "1d": "1d",
     }
+    _ensure_vix_parquet(
+        raw_parquet=raw_parquet,
+        vix_parquet_path=vix_parquet_path,
+        vix_ticker=vix_ticker,
+        label_timeframe=label_timeframe,
+        fetch_if_missing=vix_fetch_if_missing,
+    )
+
     model_dfs = build_feature_matrices(
         parquet_path=raw_parquet,
         ticker=ticker,
         label_timeframe=label_timeframe,
         feature_timeframes=feature_timeframes,
         models=models,
+        include_vix_features=True,
+        vix_ticker=vix_ticker,
+        vix_parquet_path=vix_parquet_path,
     )
     align_index = None
     first = True
@@ -268,8 +348,8 @@ def _write_agent_matrix_csv(
     output_root: Path,
     include_pivot_probs: bool,
     include_tb_probs: bool,
+    vix_parquet_path: Path,
 ) -> Path:
-    vix_parquet_path = "Data/raw/vix/vixy_15min.parquet"
     cfg = AgentFeatureConfig(
         ticker=ticker,
         dataset_name=dataset_name,
@@ -278,7 +358,7 @@ def _write_agent_matrix_csv(
         model_root=model_root,
         include_pivot_probs=include_pivot_probs,
         include_tb_probs=include_tb_probs,
-        vix_parquet_path=vix_parquet_path,
+        vix_parquet_path=str(vix_parquet_path),
     )
     df = build_agent_feature_matrix(config=cfg)
     out_dir = output_root / "agent"
@@ -368,6 +448,29 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--plot-seed", type=int, default=None)
     parser.add_argument("--plot-out", default=None)
     parser.add_argument("--trace-out", default=None)
+    parser.add_argument(
+        "--vix-parquet",
+        default="Data/raw/vix/vixy_15min_buffer.parquet",
+        help="Intraday VIX parquet path used by feature_matrix during inference.",
+    )
+    parser.add_argument(
+        "--vix-ticker",
+        default="VIXY",
+        help="Ticker used when fetching missing intraday VIX parquet.",
+    )
+    parser.add_argument(
+        "--vix-fetch-if-missing",
+        dest="vix_fetch_if_missing",
+        action="store_true",
+        default=True,
+        help="Auto-fetch intraday VIX data when --vix-parquet is missing (default).",
+    )
+    parser.add_argument(
+        "--no-vix-fetch",
+        dest="vix_fetch_if_missing",
+        action="store_false",
+        help="Do not auto-fetch intraday VIX data.",
+    )
     return parser.parse_args()
 
 
@@ -390,6 +493,9 @@ def main() -> None:
     plots_root = inference_root / "plots"
     for path in (processed_root, split_root, stats_root, model_root, plots_root):
         path.mkdir(parents=True, exist_ok=True)
+    vix_parquet_path = Path(args.vix_parquet)
+    if not vix_parquet_path.is_absolute():
+        vix_parquet_path = REPO_ROOT / vix_parquet_path
 
     model_list = tuple(m.strip() for m in args.models.split(",") if m.strip())
     if not model_list:
@@ -404,6 +510,9 @@ def main() -> None:
         models=model_list,
         save_processed=True,
         processed_root=processed_root,
+        vix_parquet_path=vix_parquet_path,
+        vix_ticker=args.vix_ticker,
+        vix_fetch_if_missing=bool(args.vix_fetch_if_missing),
     )
 
     print("[inference_pipeline] Building splits + scaler stats...")
@@ -486,6 +595,7 @@ def main() -> None:
         output_root=inference_root,
         include_pivot_probs="pivots" in label_dirs,
         include_tb_probs="tb" in label_dirs,
+        vix_parquet_path=vix_parquet_path,
     )
     print(f"[inference_pipeline] Agent matrix saved to {agent_csv}")
 

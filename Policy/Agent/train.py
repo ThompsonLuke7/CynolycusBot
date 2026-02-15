@@ -62,6 +62,7 @@ def train_ppo(
     verbose: bool = True,
     return_history: bool = False,
     checkpoint_every_steps: int = 0,
+    checkpoint_start_steps: int = 1_500_000,
     checkpoint_dir: str | None = None,
     checkpoint_prefix: str = "ppo_ckpt",
     checkpoint_payload: dict | None = None,
@@ -94,11 +95,13 @@ def train_ppo(
     is_vectorized = n_envs > 1
     obs = env.reset(day_ptr=0) if not is_vectorized else env.reset()
     steps_done = 0
-    next_checkpoint_step = (
-        int(checkpoint_every_steps)
-        if int(checkpoint_every_steps) > 0
-        else None
-    )
+    every_steps = int(checkpoint_every_steps)
+    start_steps = int(checkpoint_start_steps)
+    if every_steps > 0:
+        min_start = max(start_steps, every_steps)
+        next_checkpoint_step = ((min_start + every_steps - 1) // every_steps) * every_steps
+    else:
+        next_checkpoint_step = None
     train_start = time.perf_counter()
     history: list[dict[str, float]] = []
 
@@ -369,7 +372,7 @@ def train_ppo(
                 )
                 if verbose:
                     print(f"Saved checkpoint: {ckpt_path}")
-                next_checkpoint_step += int(checkpoint_every_steps)
+                next_checkpoint_step += every_steps
 
     if return_history:
         return model, history

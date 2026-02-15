@@ -22,3 +22,24 @@ Convex stats: mean_reward=0.002126 mean_reward_pnl=0.002194 mean_costs=0.000026 
 Trade stats: count=53 win_rate=79.25% median_ret=0.1005% avg_win=0.1934% avg_loss=-0.1303% trades_per_day=5.89
 Agent total return: 67.95% (equity: 167,952.00)
 Intraday Long final equity: 96,778.24 (Return: -3.22%)
+
+[run_eval] Eval environment: reward_mode=convex use_convex=True continuous_action=True
+Eval summary: total_trades=237 time_in_pos=99.58% avg_hold_len=4.78
+   day_ptr  pnl_component  costs_component  trades
+0        0       0.013762         0.000379      27
+1        1       0.052702         0.000497      26
+2        2       0.072809         0.000896      26
+3        3       0.118677         0.000851      27
+4        4       0.016488         0.000312      26
+5        5       0.052156         0.000510      27
+6        6       0.066772         0.000947      26
+7        7       0.051007         0.000839      26
+8        8       0.060809         0.000577      26
+Avg pnl component: 0.0561312064084312 Avg costs: 0.0006453224717246162
+Eval loss metrics: actor=-0.076433 value=0.000516 entropy=0.613965 avg_reward=0.002039 avg_abs_reward=0.002402
+Saved trace to /content/CynolycusBot/Data/inference/spy/15min/agent/agent_trace.csv
+Exposure stats: mean_abs=0.7491 p95_abs=0.9146 flat_rate=0.42% mean_turnover=0.3520 p95_turnover=1.5314
+Convex stats: mean_reward=0.002039 mean_reward_pnl=0.002105 mean_costs=0.000024 mean_reward_convex=0.001934 mean_reward_convex_linear=0.000303 mean_reward_convex_bonus=0.000088 mean_convex_term=0.001255 mean_convex_atr_scale=0.002221 mean_convex_vol_proxy=0.002221 mean_pivot_anchor=0.001580 mean_convex_risk_penalty=0.000000 mean_switch_penalty=0.000024 mean_size_penalty=0.000003 mean_saturation_penalty=0.000000 mean_mfe_atr=0.5919 total_mfe_bonus=0.041000 mfe_bonus_hits=26 mean_up_capture=0.000000 mean_down_capture=0.000000
+Trade stats: count=49 win_rate=75.51% median_ret=0.1247% avg_win=0.2114% avg_loss=-0.1328% trades_per_day=5.44
+Agent total return: 64.47% (equity: 164,467.03)
+Intraday Long final equity: 96,778.24 (Return: -3.22%)
