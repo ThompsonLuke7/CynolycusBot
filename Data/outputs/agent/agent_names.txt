@@ -1,0 +1,24 @@
+hank: OG Decent around 35% returns above mean: hank is the first model type: discrete desired position states [0,1,2] Reward is MTM
+anca: terrible returns -45% returns. first switch to sign + magnitude
+yaya: 66 % returns fixed thresholding and convex reward and costs
+dragon:
+[run_eval] Eval environment: reward_mode=convex use_convex=True continuous_action=True
+Eval summary: total_trades=239 time_in_pos=98.33% avg_hold_len=4.37
+   day_ptr  pnl_component  costs_component  trades
+0        0       0.019666         0.000511      26
+1        1       0.055237         0.000495      27
+2        2       0.074041         0.000922      27
+3        3       0.124943         0.000871      27
+4        4       0.021153         0.000511      27
+5        5       0.051114         0.000478      27
+6        6       0.073125         0.000959      26
+7        7       0.052871         0.000865      26
+8        8       0.054498         0.000586      26
+Avg pnl component: 0.05851667255885096 Avg costs: 0.0006887166563669841
+Eval loss metrics: actor=-0.177728 value=0.000321 entropy=0.356195 avg_reward=0.002126 avg_abs_reward=0.002403
+Saved trace to /content/CynolycusBot/Data/inference/spy/15min/agent/agent_trace.csv
+Exposure stats: mean_abs=0.7058 p95_abs=0.9491 flat_rate=1.67% mean_turnover=0.3876 p95_turnover=1.5346
+Convex stats: mean_reward=0.002126 mean_reward_pnl=0.002194 mean_costs=0.000026 mean_reward_convex=0.002011 mean_reward_convex_linear=0.000293 mean_reward_convex_bonus=0.000087 mean_convex_term=0.001255 mean_convex_atr_scale=0.002221 mean_convex_vol_proxy=0.002221 mean_pivot_anchor=0.001666 mean_convex_risk_penalty=0.000000 mean_switch_penalty=0.000024 mean_size_penalty=0.000004 mean_saturation_penalty=0.000000 mean_mfe_atr=0.5754 total_mfe_bonus=0.044000 mfe_bonus_hits=28 mean_up_capture=0.000000 mean_down_capture=0.000000
+Trade stats: count=53 win_rate=79.25% median_ret=0.1005% avg_win=0.1934% avg_loss=-0.1303% trades_per_day=5.89
+Agent total return: 67.95% (equity: 167,952.00)
+Intraday Long final equity: 96,778.24 (Return: -3.22%)

@@ -113,12 +113,18 @@ def _normalize_bar(bar: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _action_to_position(action: int) -> int:
-    if int(action) == 1:
-        return 1
-    if int(action) == 2:
+def _action_to_position(action: float | int, *, deadband: float = 0.0) -> int:
+    a = _coerce_float(action, float("nan"))
+    if not np.isfinite(a):
+        return 0
+    # Backward compatibility with legacy discrete actions {0,1,2}.
+    if abs(a - 2.0) < 1e-9:
         return -1
-    return 0
+    if abs(a - 1.0) < 1e-9:
+        return 1
+    if abs(a) <= max(0.0, float(deadband)):
+        return 0
+    return 1 if a > 0.0 else -1
 
 
 def _agent_action_event(prev_action: int | None, action: int) -> str | None:
@@ -420,7 +426,7 @@ class SessionConfig:
     startup_catchup_order: bool = False
     startup_catchup_max_age_min: int = 120
     replay_data_path: str = "Data/raw/spy/inference_buffer_1m.parquet"
-    replay_start: str | None = None
+    replay_start: str | None = "2026-01-30T00:00:00Z"
     replay_end: str | None = None
     replay_regular_only: bool = False
     replay_sleep: float = 0.0
@@ -480,7 +486,7 @@ class SessionConfig:
             startup_catchup_order=_coerce_bool(payload.get("startup_catchup_order"), False),
             startup_catchup_max_age_min=_coerce_int(payload.get("startup_catchup_max_age_min"), 120),
             replay_data_path=str(payload.get("replay_data_path", "Data/raw/spy/inference_buffer_1m.parquet")),
-            replay_start=payload.get("replay_start"),
+            replay_start=payload.get("replay_start", "2026-01-30T00:00:00Z"),
             replay_end=payload.get("replay_end"),
             replay_regular_only=_coerce_bool(payload.get("replay_regular_only"), False),
             replay_sleep=max(0.0, _coerce_float(payload.get("replay_sleep"), 0.0)),
@@ -548,6 +554,9 @@ class DashboardStore:
         self._action_events: deque = deque(maxlen=max_events * 6)
         self._trade_events: deque = deque(maxlen=max_events)
         self._log_events: deque = deque(maxlen=max_events)
+        self._realized_total: float = 0.0
+        self._realized_prev_day: str | None = None
+        self._realized_prev_today: float | None = None
 
     def start(self, config: SessionConfig) -> None:
         symbols = list(config.symbols)
@@ -568,6 +577,9 @@ class DashboardStore:
             self._action_events.clear()
             self._trade_events.clear()
             self._log_events.clear()
+            self._realized_total = 0.0
+            self._realized_prev_day = None
+            self._realized_prev_today = None
 
     def stop(self, *, error: str | None = None) -> None:
         with self._lock:
@@ -593,11 +605,23 @@ class DashboardStore:
         with self._lock:
             self._bars_15m.setdefault(symbol, deque(maxlen=self._max_bars)).append(payload)
 
-    def set_last_action(self, symbol: str, *, action: int, ts: Any, close: Any) -> None:
+    def set_last_action(
+        self,
+        symbol: str,
+        *,
+        action: float,
+        action_class: int | None,
+        ts: Any,
+        close: Any,
+    ) -> None:
         close_val = _coerce_float(close, float("nan"))
+        raw_val = _coerce_float(action, float("nan"))
+        cls_val = int(action_class) if action_class is not None else _action_to_position(raw_val)
         payload = {
             "symbol": symbol,
-            "action": int(action),
+            "action": cls_val,
+            "action_class": cls_val,
+            "action_raw": raw_val if np.isfinite(raw_val) else None,
             "timestamp": _ts_iso(ts),
             "close": close_val if np.isfinite(close_val) else None,
         }
@@ -607,7 +631,25 @@ class DashboardStore:
 
     def set_agent_state(self, state: dict[str, Any] | None) -> None:
         with self._lock:
-            self._agent_state = _json_safe(state) if state is not None else None
+            safe = _json_safe(state) if state is not None else None
+            if isinstance(safe, dict):
+                day = safe.get("last_session_day")
+                day_key = str(day) if day is not None else None
+                today_val = _coerce_float(safe.get("realized_pnl_today"), float("nan"))
+                if np.isfinite(today_val):
+                    if self._realized_prev_day is None:
+                        self._realized_prev_day = day_key
+                        self._realized_prev_today = 0.0
+                    elif day_key != self._realized_prev_day:
+                        self._realized_prev_day = day_key
+                        self._realized_prev_today = 0.0
+                    prev_today = float(self._realized_prev_today or 0.0)
+                    delta = float(today_val - prev_today)
+                    if np.isfinite(delta):
+                        self._realized_total += delta
+                    self._realized_prev_today = float(today_val)
+                safe["realized_pnl_total"] = float(self._realized_total)
+            self._agent_state = safe
 
     def set_policy_state(self, symbol: str, state: dict[str, Any] | None) -> None:
         if state is None:
@@ -881,7 +923,20 @@ class LiveSession:
             end = pd.to_datetime(cfg.replay_end, utc=True, errors="coerce")
             df = df[df["timestamp"] <= end]
 
-        if not cfg.replay_no_prepend_split_test_warmup:
+        prepend_replay_warmup = (
+            (not cfg.replay_no_prepend_split_test_warmup)
+            and (cfg.replay_start is None)
+        )
+        if not prepend_replay_warmup and cfg.replay_start and (not cfg.replay_no_prepend_split_test_warmup):
+            self._emit(
+                "log",
+                {
+                    "symbol": "SYSTEM",
+                    "message": "[replay] replay_start is set; split-test warmup prepend disabled to honor requested start.",
+                },
+            )
+
+        if prepend_replay_warmup:
             warm_frames: list[pd.DataFrame] = []
             for symbol in symbols:
                 warm_df = _load_test_split_warmup_1m(
@@ -1144,7 +1199,8 @@ class LiveSession:
                 self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar15)})
                 return
 
-            action_int = int(action)
+            action_raw = _coerce_float(action, float("nan"))
+            action_pos = _action_to_position(action_raw)
             prev_action = last_action_by_symbol.get(symbol)
             probs = agent.last_probs() if agent is not None else None
             bar_payload = dict(bar15)
@@ -1154,11 +1210,12 @@ class LiveSession:
             self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar_payload)})
             self._store.set_last_action(
                 symbol,
-                action=action_int,
+                action=action_raw,
+                action_class=action_pos,
                 ts=bar15.get("timestamp"),
                 close=bar15.get("close"),
             )
-            last_action_by_symbol[symbol] = action_int
+            last_action_by_symbol[symbol] = action_pos
             agent_state = agent.snapshot_state() if agent is not None else None
             if agent_state is not None:
                 self._store.set_agent_state(agent_state)
@@ -1166,7 +1223,9 @@ class LiveSession:
                 "action",
                 {
                     "symbol": symbol,
-                    "action": action_int,
+                    "action": action_pos,
+                    "action_class": action_pos,
+                    "action_raw": action_raw if np.isfinite(action_raw) else None,
                     "timestamp": _ts_iso(bar15.get("timestamp")),
                     "close": _coerce_float(bar15.get("close"), float("nan")),
                     "agent_state": agent_state,
@@ -1174,7 +1233,7 @@ class LiveSession:
             )
 
             if order_policies is None or symbol not in order_policies:
-                event_key = _agent_action_event(prev_action, action_int)
+                event_key = _agent_action_event(prev_action, action_pos)
                 if event_key is not None:
                     trade_payload = {
                         "symbol": symbol,
@@ -1183,7 +1242,8 @@ class LiveSession:
                             "event": event_key,
                             "source": "agent_action",
                             "prev_action": prev_action,
-                            "action": action_int,
+                            "action": action_pos,
+                            "action_raw": action_raw if np.isfinite(action_raw) else None,
                             "simulated": True,
                         },
                     }
@@ -1193,7 +1253,7 @@ class LiveSession:
 
             policy = order_policies[symbol]
             result = policy.on_decision(
-                action=action_int,
+                action=action_raw,
                 closed_bar=bar15,
                 update_bar_state=False,
                 logger=self._policy_logger(symbol),
@@ -1377,7 +1437,8 @@ class LiveSession:
                     self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar15)})
                     return
 
-                action_int = int(action)
+                action_raw = _coerce_float(action, float("nan"))
+                action_pos = _action_to_position(action_raw)
                 prev_action = last_action_by_symbol.get(symbol)
                 probs = agent.last_probs() if agent is not None else None
                 bar_payload = dict(bar15)
@@ -1387,11 +1448,12 @@ class LiveSession:
                 self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar_payload)})
                 self._store.set_last_action(
                     symbol,
-                    action=action_int,
+                    action=action_raw,
+                    action_class=action_pos,
                     ts=bar15.get("timestamp"),
                     close=bar15.get("close"),
                 )
-                last_action_by_symbol[symbol] = action_int
+                last_action_by_symbol[symbol] = action_pos
 
                 agent_state = agent.snapshot_state() if agent is not None else None
                 if agent_state is not None:
@@ -1400,7 +1462,9 @@ class LiveSession:
                     "action",
                     {
                         "symbol": symbol,
-                        "action": action_int,
+                        "action": action_pos,
+                        "action_class": action_pos,
+                        "action_raw": action_raw if np.isfinite(action_raw) else None,
                         "timestamp": _ts_iso(bar15.get("timestamp")),
                         "close": _coerce_float(bar15.get("close"), float("nan")),
                         "agent_state": agent_state,
@@ -1408,7 +1472,7 @@ class LiveSession:
                 )
 
                 if order_policies is None or symbol not in order_policies:
-                    event_key = _agent_action_event(prev_action, action_int)
+                    event_key = _agent_action_event(prev_action, action_pos)
                     if event_key is not None:
                         trade_payload = {
                             "symbol": symbol,
@@ -1417,7 +1481,8 @@ class LiveSession:
                                 "event": event_key,
                                 "source": "agent_action",
                                 "prev_action": prev_action,
-                                "action": action_int,
+                                "action": action_pos,
+                                "action_raw": action_raw if np.isfinite(action_raw) else None,
                                 "simulated": True,
                             },
                         }
@@ -1427,7 +1492,7 @@ class LiveSession:
 
                 policy = order_policies[symbol]
                 result = policy.on_decision(
-                    action=action_int,
+                    action=action_raw,
                     closed_bar=bar15,
                     update_bar_state=False,
                     logger=self._policy_logger(symbol),

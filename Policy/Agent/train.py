@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pathlib import Path
 import numpy as np
 import time
 import torch
@@ -52,7 +53,7 @@ def train_ppo(
     vf_lr: float = 1e-3,
     train_epochs: int = 10,
     minibatch_size: int = 256,
-    entropy_coef: float = 0.003,
+    entropy_coef: float = 0.004,
     value_coef: float = 0.5,
     max_grad_norm: float = 0.5,
     action_type: str = "hybrid_dir_mag",
@@ -60,6 +61,10 @@ def train_ppo(
     seed: int = 7,
     verbose: bool = True,
     return_history: bool = False,
+    checkpoint_every_steps: int = 0,
+    checkpoint_dir: str | None = None,
+    checkpoint_prefix: str = "ppo_ckpt",
+    checkpoint_payload: dict | None = None,
 ) -> ActorCritic | tuple[ActorCritic, list[dict[str, float]]]:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -89,6 +94,11 @@ def train_ppo(
     is_vectorized = n_envs > 1
     obs = env.reset(day_ptr=0) if not is_vectorized else env.reset()
     steps_done = 0
+    next_checkpoint_step = (
+        int(checkpoint_every_steps)
+        if int(checkpoint_every_steps) > 0
+        else None
+    )
     train_start = time.perf_counter()
     history: list[dict[str, float]] = []
 
@@ -334,6 +344,32 @@ def train_ppo(
                 f"elapsed={_format_duration(elapsed)} "
                 f"eta={_format_duration(eta)}"
             )
+
+        if next_checkpoint_step is not None and checkpoint_dir:
+            while steps_done >= next_checkpoint_step:
+                ckpt_dir = Path(checkpoint_dir)
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                ckpt_path = ckpt_dir / f"{checkpoint_prefix}_{next_checkpoint_step:09d}.pt"
+                payload = dict(checkpoint_payload or {})
+                payload.setdefault("obs_dim", env.obs_dim)
+                payload.setdefault("n_actions", 3)
+                payload.setdefault("action_type", action_type)
+                payload.setdefault("action_dim", int(getattr(model, "action_dim", 1)))
+                payload.setdefault("action_low", -1.0)
+                payload.setdefault("action_high", 1.0)
+                payload["checkpoint_steps"] = int(next_checkpoint_step)
+                if history:
+                    payload["checkpoint_last_metrics"] = history[-1]
+                torch.save(
+                    {
+                        "state_dict": model.state_dict(),
+                        **payload,
+                    },
+                    ckpt_path,
+                )
+                if verbose:
+                    print(f"Saved checkpoint: {ckpt_path}")
+                next_checkpoint_step += int(checkpoint_every_steps)
 
     if return_history:
         return model, history

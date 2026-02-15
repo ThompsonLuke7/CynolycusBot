@@ -341,7 +341,7 @@ def main():
     parser.add_argument("--vf-lr", type=float, default=1e-3)
     parser.add_argument("--train-epochs", type=int, default=5)
     parser.add_argument("--minibatch-size", type=int, default=256)
-    parser.add_argument("--entropy-coef", type=float, default=0.003)
+    parser.add_argument("--entropy-coef", type=float, default=0.004)
     parser.add_argument("--value-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=7)
@@ -352,6 +352,18 @@ def main():
         help="Training device: auto/cuda/cpu/mps.",
     )
     parser.add_argument("--num-envs", type=int, default=12)
+    parser.add_argument(
+        "--checkpoint-every-steps",
+        type=int,
+        default=250_000,
+        help="Autosave model checkpoints every N environment steps (<=0 disables).",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default="Data/outputs/agent/checkpoints",
+        help="Directory for autosaved PPO checkpoints.",
+    )
     parser.add_argument(
         "--policy-action-type",
         type=str,
@@ -577,7 +589,7 @@ def main():
     hold_penalty = float(args.convex_hold_penalty) if use_convex_reward else 0.0
     dir_switch_penalty = float(args.dir_switch_penalty_ret) if use_convex_reward else 0.0
     size_change_penalty = float(args.size_change_penalty_ret) if use_convex_reward else 0.0
-    env_kwargs = {
+    env_overrides = {
         "carry_positions_across_days": True,
         "reward_on_exit": reward_on_exit,
         "use_convex_reward": use_convex_reward,
@@ -602,6 +614,7 @@ def main():
         "convex_mfe_thresholds": tuple(convex_thresholds),
         "convex_mfe_bonuses": tuple(convex_bonuses),
     }
+    env_kwargs = dict(env_overrides)
 
     if num_envs > 1:
         train_envs = [
@@ -620,6 +633,24 @@ def main():
             feature_cols=feature_cols,
             **env_kwargs,
         )
+
+    output_dir = Path("Data") / "outputs" / "agent"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = Path(args.checkpoint_dir)
+    if not checkpoint_dir.is_absolute():
+        checkpoint_dir = (Path.cwd() / checkpoint_dir).resolve()
+    checkpoint_payload = {
+        "obs_dim": train_env.obs_dim,
+        "n_actions": 3,
+        "action_type": str(args.policy_action_type),
+        "action_low": -1.0,
+        "action_high": 1.0,
+        "action_deadband": float(action_deadband),
+        "feature_cols": feature_cols,
+        "config": cfg.__dict__,
+        "reward_mode": str(args.reward_mode),
+        "env_overrides": env_overrides,
+    }
 
     model, train_history = train_ppo(
         train_env,
@@ -640,9 +671,11 @@ def main():
         seed=int(args.seed),
         verbose=True,
         return_history=True,
+        checkpoint_every_steps=int(args.checkpoint_every_steps),
+        checkpoint_dir=str(checkpoint_dir),
+        checkpoint_prefix="ppo_model",
+        checkpoint_payload=checkpoint_payload,
     )
-    output_dir = Path("Data") / "outputs" / "agent"
-    output_dir.mkdir(parents=True, exist_ok=True)
     history_df = pd.DataFrame(train_history)
     history_csv_path = output_dir / "ppo_train_metrics.csv"
     history_df.to_csv(history_csv_path, index=False)
@@ -664,31 +697,7 @@ def main():
             "feature_cols": feature_cols,
             "config": cfg.__dict__,
             "reward_mode": str(args.reward_mode),
-            "env_overrides": {
-                "carry_positions_across_days": True,
-                "reward_on_exit": bool(reward_on_exit),
-                "use_convex_reward": bool(use_convex_reward),
-                "commission_per_trade": float(args.commission_per_trade),
-                "slippage_bps": float(args.slippage_bps),
-                "spread_bps": float(args.spread_bps),
-                "trade_penalty_ret": float(args.trade_penalty_ret),
-                "flip_penalty_ret": float(args.flip_penalty_ret),
-                "convex_k1": float(args.convex_k1),
-                "convex_k2": float(args.convex_k2),
-                "convex_theta": float(args.convex_theta),
-                "convex_risk_lambda": float(args.convex_risk_lambda),
-                "convex_bonus_cap": float(args.convex_bonus_cap),
-                "convex_bonus_scale": float(args.convex_bonus_scale),
-                "convex_pivot_k": float(args.convex_pivot_k),
-                "dir_switch_penalty_ret": float(dir_switch_penalty),
-                "size_change_penalty_ret": float(size_change_penalty),
-                "saturation_threshold": float(args.saturation_threshold),
-                "saturation_penalty_ret": float(args.saturation_penalty_ret),
-                "hold_penalty_ret": float(hold_penalty),
-                "action_deadband": float(action_deadband),
-                "convex_mfe_thresholds": tuple(float(x) for x in convex_thresholds),
-                "convex_mfe_bonuses": tuple(float(x) for x in convex_bonuses),
-            },
+            "env_overrides": env_overrides,
         },
         model_path,
     )

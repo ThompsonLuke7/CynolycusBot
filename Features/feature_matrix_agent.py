@@ -12,7 +12,7 @@ from Data.load_data import (
     load_ticker_csv,
     load_ticker_parquet,
 )
-from Data.retrieve_data import normalize_ticker
+from Data.retrieve_data import get_output_path, normalize_ticker, retrieve_data
 
 VIX_FEATURE_COLUMNS = [
     "vix_close",
@@ -56,6 +56,8 @@ class AgentFeatureConfig:
     vix_resample_rule: str | None = None
     vix_max_lag: str = "2h"
     vix_ffill_limit: int | None = 256
+    vix_min_coverage_ratio: float = 0.90
+    vix_refetch_if_low_coverage: bool = True
     vix_warn_on_missing: bool = True
     vix_allow_daily_fallback: bool = True
     vix_daily_symbol: str = "VIXY"
@@ -240,12 +242,26 @@ def _infer_vix_fetch_end(
     return end_ts.isoformat().replace("+00:00", "Z")
 
 
+def _infer_vix_daily_start(
+    *,
+    target_index: pd.DatetimeIndex,
+) -> str:
+    if len(target_index) == 0:
+        return "2015-01-01"
+    first_ts = pd.to_datetime(target_index.min(), utc=True, errors="coerce")
+    if pd.isna(first_ts):
+        return "2015-01-01"
+    # Keep some buffer for rolling features.
+    return (first_ts - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+
+
 def _load_align_vix_ohlcv(
     *,
     cfg: AgentFeatureConfig,
     target_index: pd.DatetimeIndex,
 ) -> pd.DataFrame:
     target_max = pd.to_datetime(target_index.max(), utc=True, errors="coerce")
+    required_coverage = float(np.clip(cfg.vix_min_coverage_ratio, 0.0, 1.0))
 
     def _align_frame(
         source: pd.DataFrame,
@@ -275,14 +291,40 @@ def _load_align_vix_ohlcv(
             tolerance=tolerance,
         )
 
-    vix_df: pd.DataFrame | None = None
-    intraday_error: Exception | None = None
+    def _coverage_ratio(frame: pd.DataFrame) -> float:
+        if len(target_index) == 0:
+            return 1.0
+        if "close" not in frame.columns:
+            return 0.0
+        return float(frame["close"].notna().mean())
 
-    preferred_path: Path | None = None
-    if cfg.vix_parquet_path is not None:
-        preferred_path = _resolve_path(cfg.vix_parquet_path)
+    def _prepare_intraday_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        out = frame
+        if cfg.vix_resample_rule:
+            agg = {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+            keep = [c for c in agg if c in out.columns]
+            if "close" not in keep:
+                raise ValueError("VIX frame must include a close column.")
+            resample_agg = {k: v for k, v in agg.items() if k in keep}
+            out = (
+                out[keep]
+                .resample(cfg.vix_resample_rule, label="left", closed="left")
+                .agg(resample_agg)
+            )
+            close_cols = [c for c in ("open", "high", "low", "close") if c in out.columns]
+            if close_cols:
+                out = out.dropna(subset=close_cols)
+        return out
 
-    if preferred_path is not None and not preferred_path.exists() and cfg.vix_fetch_if_missing:
+    def _fetch_to_preferred(reason: str) -> Exception | None:
+        if preferred_path is None or not cfg.vix_fetch_if_missing:
+            return RuntimeError(reason)
         try:
             from API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
 
@@ -296,8 +338,8 @@ def _load_align_vix_ohlcv(
                 explicit_end=cfg.vix_fetch_end,
             )
             print(
-                f"[agent_matrix] Missing intraday VIX file at {preferred_path}; "
-                "fetching fresh data."
+                f"[agent_matrix] Fetching intraday VIX ({cfg.vix_ticker}) "
+                f"to {preferred_path} because: {reason}"
             )
             fetched = fetch_intraday(
                 ticker=cfg.vix_ticker,
@@ -309,11 +351,39 @@ def _load_align_vix_ohlcv(
                 save_path=str(preferred_path),
             )
             if fetched is None or fetched.empty:
-                intraday_error = RuntimeError(
-                    "Intraday VIX fetch returned no rows."
-                )
+                return RuntimeError("Intraday VIX fetch returned no rows.")
+            return None
         except Exception as exc:  # noqa: BLE001
-            intraday_error = exc
+            return exc
+
+    def _refresh_daily_fallback(reason: str) -> Exception | None:
+        try:
+            start = _infer_vix_daily_start(target_index=target_index)
+            print(
+                f"[agent_matrix] Refreshing daily VIX ({cfg.vix_daily_symbol}) "
+                f"from {start} because: {reason}"
+            )
+            daily_df = retrieve_data(cfg.vix_daily_symbol, start=start, interval="1d")
+            if daily_df is None or daily_df.empty:
+                return RuntimeError("Daily VIX refresh returned no rows.")
+            out_path = get_output_path(cfg.vix_daily_symbol)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            daily_df.to_csv(out_path)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            return exc
+
+    vix_df: pd.DataFrame | None = None
+    intraday_error: Exception | None = None
+
+    preferred_path: Path | None = None
+    if cfg.vix_parquet_path is not None:
+        preferred_path = _resolve_path(cfg.vix_parquet_path)
+
+    if preferred_path is not None and not preferred_path.exists() and cfg.vix_fetch_if_missing:
+        intraday_error = _fetch_to_preferred(
+            f"missing intraday file at {preferred_path}"
+        )
 
     try:
         if preferred_path is not None:
@@ -329,40 +399,53 @@ def _load_align_vix_ohlcv(
             )
 
     if vix_df is not None:
-        if cfg.vix_resample_rule:
-            agg = {
-                "open": "first",
-                "high": "max",
-                "low": "min",
-                "close": "last",
-                "volume": "sum",
-            }
-            keep = [c for c in agg if c in vix_df.columns]
-            if "close" not in keep:
-                raise ValueError("VIX frame must include a close column.")
-            resample_agg = {k: v for k, v in agg.items() if k in keep}
-            vix_df = (
-                vix_df[keep]
-                .resample(cfg.vix_resample_rule, label="left", closed="left")
-                .agg(resample_agg)
-            )
-            close_cols = [c for c in ("open", "high", "low", "close") if c in vix_df.columns]
-            if close_cols:
-                vix_df = vix_df.dropna(subset=close_cols)
+        try:
+            vix_df = _prepare_intraday_frame(vix_df)
+        except Exception as exc:  # noqa: BLE001
+            intraday_error = exc
+            vix_df = None
+
+    if vix_df is not None:
         aligned_intraday = _align_frame(
             vix_df,
             tolerance_text=cfg.vix_max_lag,
             ffill_limit=cfg.vix_ffill_limit,
         )
-        close_valid = (
-            aligned_intraday["close"].notna().sum()
-            if "close" in aligned_intraday.columns
-            else 0
-        )
-        if close_valid > 0:
+        coverage = _coverage_ratio(aligned_intraday)
+        if cfg.vix_warn_on_missing:
+            print(f"[agent_matrix] Intraday VIX aligned coverage={coverage:.1%}")
+
+        if (
+            coverage < required_coverage
+            and preferred_path is not None
+            and cfg.vix_refetch_if_low_coverage
+            and cfg.vix_fetch_if_missing
+        ):
+            refetch_error = _fetch_to_preferred(
+                f"insufficient aligned coverage {coverage:.1%} (< {required_coverage:.1%})"
+            )
+            if refetch_error is None:
+                try:
+                    vix_df_refreshed = load_ticker_parquet(
+                        cfg.vix_ticker, parquet_path=str(preferred_path)
+                    )
+                    vix_df_refreshed = _prepare_intraday_frame(vix_df_refreshed)
+                    aligned_intraday = _align_frame(
+                        vix_df_refreshed,
+                        tolerance_text=cfg.vix_max_lag,
+                        ffill_limit=cfg.vix_ffill_limit,
+                    )
+                    coverage = _coverage_ratio(aligned_intraday)
+                except Exception as exc:  # noqa: BLE001
+                    intraday_error = exc
+            else:
+                intraday_error = refetch_error
+
+        if coverage >= required_coverage:
             return aligned_intraday
         intraday_error = ValueError(
-            "Aligned intraday VIX close has no valid rows after reindex."
+            "Aligned intraday VIX coverage too low after reindex "
+            f"({coverage:.1%} < {required_coverage:.1%})."
         )
 
     if not cfg.vix_allow_daily_fallback:
@@ -386,17 +469,38 @@ def _load_align_vix_ohlcv(
         tolerance_text=cfg.vix_daily_max_lag,
         ffill_limit=None,
     )
-    close_valid_daily = (
-        aligned_daily["close"].notna().sum()
-        if "close" in aligned_daily.columns
-        else 0
-    )
+    daily_coverage = _coverage_ratio(aligned_daily)
+    close_valid_daily = aligned_daily["close"].notna().sum() if "close" in aligned_daily.columns else 0
+    if (
+        daily_coverage < required_coverage
+        and cfg.vix_fetch_if_missing
+    ):
+        refresh_error = _refresh_daily_fallback(
+            f"daily aligned coverage {daily_coverage:.1%} (< {required_coverage:.1%})"
+        )
+        if refresh_error is None:
+            daily = load_ticker_csv(cfg.vix_daily_symbol)
+            keep_daily = [c for c in ("open", "high", "low", "close", "volume") if c in daily.columns]
+            if "close" not in keep_daily:
+                raise ValueError("Daily VIX fallback is missing close column after refresh.")
+            daily = daily[keep_daily]
+            aligned_daily = _align_frame(
+                daily,
+                tolerance_text=cfg.vix_daily_max_lag,
+                ffill_limit=None,
+            )
+            daily_coverage = _coverage_ratio(aligned_daily)
+            close_valid_daily = aligned_daily["close"].notna().sum() if "close" in aligned_daily.columns else 0
+        elif cfg.vix_warn_on_missing:
+            print(f"[agent_matrix] Daily VIX refresh failed: {refresh_error}")
     if close_valid_daily == 0:
         if intraday_error is not None:
             raise RuntimeError(
                 f"Intraday VIX failed ({intraday_error}); daily fallback also empty after align."
             ) from intraday_error
         raise RuntimeError("Daily VIX fallback produced no aligned rows.")
+    if cfg.vix_warn_on_missing:
+        print(f"[agent_matrix] Daily VIX aligned coverage={daily_coverage:.1%}")
     print(
         f"[agent_matrix] Using daily VIX fallback ({cfg.vix_daily_symbol}) "
         f"with max_lag={cfg.vix_daily_max_lag}."
