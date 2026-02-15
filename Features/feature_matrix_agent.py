@@ -518,12 +518,31 @@ def _add_vix_feature_suite(
         raise ValueError("Aligned VIX frame is missing close.")
     vix_high = pd.to_numeric(vix_ohlcv.get("high"), errors="coerce")
     vix_low = pd.to_numeric(vix_ohlcv.get("low"), errors="coerce")
+    if not isinstance(vix_close, pd.Series):
+        vix_close = pd.Series(np.nan, index=df.index, dtype=float)
+    if not isinstance(vix_high, pd.Series):
+        vix_high = pd.Series(np.nan, index=df.index, dtype=float)
+    if not isinstance(vix_low, pd.Series):
+        vix_low = pd.Series(np.nan, index=df.index, dtype=float)
+    vix_close = vix_close.reindex(df.index)
+    vix_high = vix_high.reindex(df.index)
+    vix_low = vix_low.reindex(df.index)
 
     vix_ret_1 = vix_close.pct_change(1)
     vix_ret_4 = vix_close.pct_change(4)
     vix_ret_16 = vix_close.pct_change(16)
     vix_range_pct = (vix_high - vix_low) / vix_close.replace(0, np.nan)
-    vix_atr_raw = _series_from_ta(vix_ohlcv.ta.atr(length=14, append=False))
+    # Use a direct ATR implementation to avoid TA statefulness turning nearly all rows NaN.
+    vix_prev_close = vix_close.shift(1)
+    vix_tr = pd.concat(
+        [
+            (vix_high - vix_low).abs(),
+            (vix_high - vix_prev_close).abs(),
+            (vix_low - vix_prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    vix_atr_raw = vix_tr.rolling(14, min_periods=14).mean()
     vix_atr_pct = vix_atr_raw / vix_close.replace(0, np.nan)
     vix_ema_8 = vix_close.ewm(span=8, adjust=False).mean()
     vix_ema_21 = vix_close.ewm(span=21, adjust=False).mean()

@@ -540,8 +540,29 @@ def main():
                 vix_features = [c for c in feature_cols if _is_vix_feature(c)]
                 non_vix_features = [c for c in feature_cols if not _is_vix_feature(c)]
                 if vix_features and non_vix_features:
+                    # First try dropping only severely sparse VIX features before dropping all VIX.
+                    vix_nan_share = train_df[vix_features].isna().mean().sort_values(ascending=False)
+                    sparse_vix = [c for c in vix_nan_share.index if float(vix_nan_share[c]) > 0.90]
+                    if sparse_vix:
+                        candidate_features = [c for c in feature_cols if c not in sparse_vix]
+                        candidate_complete = int(train_df[candidate_features].notna().all(axis=1).sum())
+                        if candidate_complete > 0:
+                            print(
+                                "[run_train] Warning: 0 complete rows with full VIX set. "
+                                "Dropping sparse VIX features only."
+                            )
+                            print(
+                                f"[run_train] Dropped sparse VIX features (>90% NaN): {sparse_vix}"
+                            )
+                            print(
+                                f"[run_train] Complete rows after sparse-VIX drop: {candidate_complete:,}"
+                            )
+                            feature_cols = candidate_features
+                            mask = train_df[feature_cols].notna().all(axis=1)
+                            complete_rows = int(mask.sum())
+                            print(f"Training features ({len(feature_cols)}): {feature_cols}")
                     non_vix_complete = int(train_df[non_vix_features].notna().all(axis=1).sum())
-                    if non_vix_complete > 0:
+                    if complete_rows == 0 and non_vix_complete > 0:
                         print(
                             "[run_train] Warning: 0 complete rows when combining base+VIX features. "
                             "Proceeding without VIX features for this run."

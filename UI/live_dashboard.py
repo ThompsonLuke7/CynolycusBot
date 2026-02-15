@@ -312,29 +312,50 @@ def _load_agent_matrix_probs(*, symbol: str, dataset_name: str) -> pd.DataFrame 
         from Data.retrieve_data import normalize_ticker
 
         clean = normalize_ticker(symbol).lower()
-        path = (
-            Path("Data")
-            / "models"
-            / "agent"
-            / dataset_name
-            / clean
-            / "agent_matrix.parquet"
-        )
-        if not path.exists():
+        prob_cols = ["p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short"]
+        candidates = [
+            Path("Data") / "inference" / clean / dataset_name / "agent" / "agent_matrix.parquet",
+            Path("Data") / "inference" / clean / dataset_name / "agent" / "agent_matrix.csv",
+            Path("Data") / "models" / "agent" / dataset_name / clean / "agent_matrix.parquet",
+            Path("Data") / "models" / "agent" / dataset_name / clean / "agent_matrix.csv",
+        ]
+
+        frames: list[pd.DataFrame] = []
+        loaded_paths: list[str] = []
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                if path.suffix.lower() == ".parquet":
+                    cols = pd.read_parquet(path, columns=None).columns.tolist()
+                    keep = [c for c in ["timestamp", *prob_cols] if c in cols]
+                    if "timestamp" not in keep:
+                        continue
+                    df = pd.read_parquet(path, columns=keep)
+                else:
+                    df = pd.read_csv(path, usecols=lambda c: c in {"timestamp", *prob_cols})
+                    if "timestamp" not in df.columns:
+                        continue
+                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+                df = df.dropna(subset=["timestamp"]).set_index("timestamp").sort_index()
+                have_any_prob = any(col in df.columns for col in prob_cols)
+                if not have_any_prob:
+                    continue
+                for col in prob_cols:
+                    if col not in df.columns:
+                        df[col] = np.nan
+                frames.append(df[prob_cols])
+                loaded_paths.append(str(path))
+            except Exception:
+                continue
+
+        if not frames:
             return None
-        df = pd.read_parquet(
-            path,
-            columns=[
-                "timestamp",
-                "p_pivot_long",
-                "p_pivot_short",
-                "p_tb_long",
-                "p_tb_short",
-            ],
-        )
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        df = df.dropna(subset=["timestamp"]).set_index("timestamp")
-        return df
+
+        merged = pd.concat(frames, axis=0).sort_index()
+        merged = merged[~merged.index.duplicated(keep="last")]
+        merged.attrs["source_paths"] = loaded_paths
+        return merged
     except Exception:
         return None
 
@@ -1010,7 +1031,31 @@ class LiveSession:
 
             ga_feature_list = self._resolve_ga_feature_list(cfg)
             ga_probs_frame = _load_agent_matrix_probs(symbol=symbols[0], dataset_name=cfg.ga_dataset_name)
-            ga_probs_mode = "frame" if ga_probs_frame is not None else "xgb"
+            if ga_probs_frame is not None and ga_feature_list:
+                ga_probs_mode = "hybrid"
+            elif ga_probs_frame is not None:
+                ga_probs_mode = "frame"
+            else:
+                ga_probs_mode = "xgb"
+            if ga_probs_frame is not None:
+                try:
+                    src = ga_probs_frame.attrs.get("source_paths", [])
+                    rng_min = ga_probs_frame.index.min()
+                    rng_max = ga_probs_frame.index.max()
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": (
+                                "[replay] loaded agent_matrix probs "
+                                f"(rows={len(ga_probs_frame):,}, "
+                                f"range={_ts_iso(rng_min)}..{_ts_iso(rng_max)}, "
+                                f"sources={len(src)})"
+                            ),
+                        },
+                    )
+                except Exception:
+                    pass
 
             if ga_probs_frame is not None:
                 # If the frame doesn't overlap the replay time range, fall back to XGB.
@@ -1041,7 +1086,7 @@ class LiveSession:
                             "log",
                             {
                                 "symbol": "SYSTEM",
-                                "message": "[replay] using agent_matrix probabilities for PPO features.",
+                                "message": f"[replay] using {ga_probs_mode} probability mode for PPO features.",
                             },
                         )
                 except Exception:
@@ -1073,6 +1118,7 @@ class LiveSession:
                 ga_tb_label_dir=cfg.ga_tb_label_dir,
                 ga_probs_frame=ga_probs_frame,
                 ga_probs_mode=ga_probs_mode,
+                require_probs=True,
                 resample_label=cfg.resample_label,
                 resample_closed=cfg.resample_closed,
                 label_timeframe_rule=f"{cfg.interval}min",
@@ -1365,6 +1411,7 @@ class LiveSession:
                     ga_feature_list_path=ga_feature_list,
                     ga_pivot_label_dir=cfg.ga_pivot_label_dir,
                     ga_tb_label_dir=cfg.ga_tb_label_dir,
+                    require_probs=True,
                     resample_label=cfg.resample_label,
                     resample_closed=cfg.resample_closed,
                     label_timeframe_rule=f"{cfg.interval}min",

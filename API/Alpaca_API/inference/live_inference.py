@@ -460,6 +460,7 @@ class LivePPOAgent:
         ga_tb_label_dir: str = "tb",
         ga_probs_frame: pd.DataFrame | None = None,
         ga_probs_mode: str = "xgb",
+        require_probs: bool = True,
         resample_label: str = "left",
         resample_closed: str = "left",
         label_timeframe_rule: str = "15min",
@@ -499,8 +500,10 @@ class LivePPOAgent:
         self._label_timeframe_rule = label_timeframe_rule
         self._ga_probs_frame = ga_probs_frame
         self._ga_probs_mode = str(ga_probs_mode or "xgb").strip().lower()
+        self._require_probs = bool(require_probs)
         self._warned_ga_frame = False
         self._last_probs: dict[str, float | None] | None = None
+        self._warned_missing_live_probs = False
 
         state_dict = ckpt["state_dict"]
         has_head_mlps = any(
@@ -561,11 +564,12 @@ class LivePPOAgent:
             if self._ga_probs_mode == "frame":
                 df[col] = aligned[col].astype(float)
             else:
-                # Hybrid: fill missing only.
+                # Hybrid: frame values override XGB where available.
+                aligned_col = aligned[col].astype(float)
                 if col in df.columns:
-                    df[col] = df[col].fillna(aligned[col].astype(float))
+                    df[col] = df[col].where(aligned_col.isna(), aligned_col)
                 else:
-                    df[col] = aligned[col].astype(float)
+                    df[col] = aligned_col
             if col in df.columns:
                 df[col] = df[col].fillna(self._fill_missing_prob)
         return df
@@ -782,6 +786,29 @@ class LivePPOAgent:
         for key, val in list(self._last_probs.items()):
             if not np.isfinite(val):
                 self._last_probs[key] = None
+
+        if self._require_probs:
+            missing_prob_keys: list[str] = []
+            if self._include_pivot_probs:
+                if self._last_probs.get("p_pivot_long") is None:
+                    missing_prob_keys.append("p_pivot_long")
+                if self._last_probs.get("p_pivot_short") is None:
+                    missing_prob_keys.append("p_pivot_short")
+            if self._include_tb_probs:
+                if self._last_probs.get("p_tb_long") is None:
+                    missing_prob_keys.append("p_tb_long")
+                if self._last_probs.get("p_tb_short") is None:
+                    missing_prob_keys.append("p_tb_short")
+            if missing_prob_keys:
+                if not self._warned_missing_live_probs:
+                    print(
+                        "[live] Skipping decision: missing required probs "
+                        f"for current bar: {sorted(set(missing_prob_keys))}"
+                    )
+                    self._warned_missing_live_probs = True
+                return None
+            self._warned_missing_live_probs = False
+
         row = row_full.reindex(self._feature_cols)
         if self._skip_on_nan and row.isna().any():
             return None
