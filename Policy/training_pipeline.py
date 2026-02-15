@@ -38,6 +38,7 @@ class PipelineConfig:
     x_filename: str = "X_15min_tree.parquet"
     drop_na: bool = False
     include_state_placeholders: bool = False
+    vix_parquet_path: str = "Data/raw/vix/vixy_15min.parquet"
 
 
 def build_agent_training_matrix(
@@ -51,6 +52,7 @@ def build_agent_training_matrix(
         ticker=config.ticker,
         dataset_name=config.dataset_name,
         model_name=config.model_name,
+        vix_parquet_path=config.vix_parquet_path,
         # Keep full matrix; handle NaN filtering at split-time to preserve indices.
         drop_na=False,
         include_state_placeholders=config.include_state_placeholders,

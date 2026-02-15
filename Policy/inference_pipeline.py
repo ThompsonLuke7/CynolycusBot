@@ -269,6 +269,7 @@ def _write_agent_matrix_csv(
     include_pivot_probs: bool,
     include_tb_probs: bool,
 ) -> Path:
+    vix_parquet_path = "Data/raw/vix/vixy_15min.parquet"
     cfg = AgentFeatureConfig(
         ticker=ticker,
         dataset_name=dataset_name,
@@ -277,6 +278,7 @@ def _write_agent_matrix_csv(
         model_root=model_root,
         include_pivot_probs=include_pivot_probs,
         include_tb_probs=include_tb_probs,
+        vix_parquet_path=vix_parquet_path,
     )
     df = build_agent_feature_matrix(config=cfg)
     out_dir = output_root / "agent"

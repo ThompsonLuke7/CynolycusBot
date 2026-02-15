@@ -200,6 +200,8 @@ def _repo_root() -> Path:
 
 def _resolve_path(path_like: str | Path) -> Path:
     p = Path(path_like)
+    if p.suffix == "":
+        p = p.with_suffix(".parquet")
     if p.is_absolute():
         return p
     return _repo_root() / p
