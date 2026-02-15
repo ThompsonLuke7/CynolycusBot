@@ -83,6 +83,10 @@ def _agent_equity_from_trace(trace, initial_cash):
     return trace
 
 
+def _is_vix_feature(col: str) -> bool:
+    return col.startswith("vix_") or col.endswith("_x_vix")
+
+
 def _plot_actions(trace, output_path):
     try:
         import matplotlib.pyplot as plt
@@ -518,7 +522,36 @@ def main():
     if args.train_full:
         train_df = df
         if cfg.drop_na and not train_df.empty:
-            train_df = train_df.dropna(subset=feature_cols)
+            mask = train_df[feature_cols].notna().all(axis=1)
+            complete_rows = int(mask.sum())
+            if complete_rows == 0:
+                vix_features = [c for c in feature_cols if _is_vix_feature(c)]
+                non_vix_features = [c for c in feature_cols if not _is_vix_feature(c)]
+                if vix_features and non_vix_features:
+                    non_vix_complete = int(train_df[non_vix_features].notna().all(axis=1).sum())
+                    if non_vix_complete > 0:
+                        print(
+                            "[run_train] Warning: 0 complete rows when combining base+VIX features. "
+                            "Proceeding without VIX features for this run."
+                        )
+                        print(
+                            f"[run_train] Complete rows with non-VIX features only: {non_vix_complete:,}"
+                        )
+                        feature_cols = non_vix_features
+                        mask = train_df[feature_cols].notna().all(axis=1)
+                        complete_rows = int(mask.sum())
+                        print(f"Training features ({len(feature_cols)}): {feature_cols}")
+            train_df = train_df.loc[mask].copy()
+            if train_df.empty:
+                nan_share = (
+                    df[feature_cols].isna().mean().sort_values(ascending=False).head(15)
+                )
+                raise ValueError(
+                    "No rows remain after NaN filtering on training features. "
+                    "This usually means non-overlapping feature coverage "
+                    "(for example, probs and VIX from different date windows). "
+                    f"Top NaN share by feature:\n{nan_share}"
+                )
         val_df = df.iloc[0:0].copy()
         test_df = df.iloc[0:0].copy()
         print(f"[run_train] Training on full dataset: {len(train_df):,} rows")
