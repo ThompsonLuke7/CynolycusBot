@@ -299,7 +299,7 @@ def _load_align_vix_ohlcv(
                 f"[agent_matrix] Missing intraday VIX file at {preferred_path}; "
                 "fetching fresh data."
             )
-            fetch_intraday(
+            fetched = fetch_intraday(
                 ticker=cfg.vix_ticker,
                 start=fetch_start,
                 end=fetch_end,
@@ -308,6 +308,10 @@ def _load_align_vix_ohlcv(
                 adjustment="raw",
                 save_path=str(preferred_path),
             )
+            if fetched is None or fetched.empty:
+                intraday_error = RuntimeError(
+                    "Intraday VIX fetch returned no rows."
+                )
         except Exception as exc:  # noqa: BLE001
             intraday_error = exc
 
@@ -317,7 +321,12 @@ def _load_align_vix_ohlcv(
         else:
             vix_df = load_ticker_parquet(cfg.vix_ticker)
     except Exception as exc:  # noqa: BLE001
-        intraday_error = exc
+        if intraday_error is None:
+            intraday_error = exc
+        else:
+            intraday_error = RuntimeError(
+                f"{intraday_error}; load_ticker_parquet failed: {exc}"
+            )
 
     if vix_df is not None:
         if cfg.vix_resample_rule:
@@ -360,6 +369,12 @@ def _load_align_vix_ohlcv(
         if intraday_error is not None:
             raise intraday_error
         raise FileNotFoundError("Intraday VIX source unavailable.")
+
+    if intraday_error is not None and cfg.vix_warn_on_missing:
+        print(
+            "[agent_matrix] Intraday VIX unavailable; falling back to daily source. "
+            f"Reason: {intraday_error}"
+        )
 
     daily = load_ticker_csv(cfg.vix_daily_symbol)
     keep_daily = [c for c in ("open", "high", "low", "close", "volume") if c in daily.columns]
