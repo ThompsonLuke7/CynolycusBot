@@ -57,6 +57,7 @@ def train_ppo(
     value_coef: float = 0.5,
     max_grad_norm: float = 0.5,
     action_type: str = "hybrid_dir_mag",
+    n_actions: int = 3,
     device: str = "cuda",
     seed: int = 7,
     verbose: bool = True,
@@ -75,6 +76,7 @@ def train_ppo(
 
     model = ActorCritic(
         obs_dim=env.obs_dim,
+        n_actions=int(n_actions),
         action_type=action_type,
         action_dim=1,
         hidden=128,

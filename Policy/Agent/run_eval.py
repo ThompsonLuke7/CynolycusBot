@@ -477,6 +477,17 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Sample actions instead of deterministic mean action.",
     )
+    parser.add_argument(
+        "--max-days",
+        type=int,
+        default=60,
+        help="Evaluate only the most recent N day_id groups (0 means full dataset).",
+    )
+    parser.add_argument(
+        "--skip-loss-metrics",
+        action="store_true",
+        help="Skip actor/value/entropy loss replay pass to speed up evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -498,6 +509,27 @@ def main() -> None:
         _train_df, _val_df, test_df = split_agent_matrix(df, splits, verbose=True)
 
     deterministic = not args.stochastic
+    if not args.plot_only and int(args.max_days) > 0 and not test_df.empty and "day_id" in test_df.columns:
+        ordered = test_df
+        if "timestamp" in ordered.columns:
+            ordered = ordered.sort_values("timestamp")
+        all_days = pd.Series(ordered["day_id"]).dropna().unique()
+        if len(all_days) > int(args.max_days):
+            keep_days = set(all_days[-int(args.max_days):])
+            test_df = test_df[test_df["day_id"].isin(keep_days)].copy()
+            if "timestamp" in test_df.columns:
+                test_df = test_df.sort_values("timestamp").reset_index(drop=True)
+            print(
+                "[run_eval] Limiting evaluation window:",
+                f"last_days={int(args.max_days)}",
+                f"total_days={len(all_days)}",
+            )
+    if not args.plot_only and not test_df.empty and "day_id" in test_df.columns:
+        print(
+            "[run_eval] Eval frame:",
+            f"rows={len(test_df):,}",
+            f"days={int(pd.Series(test_df['day_id']).nunique())}",
+        )
     if args.plot_only:
         trace_path = Path(args.trace_in)
         if not trace_path.exists():
@@ -569,25 +601,28 @@ def main() -> None:
         )
         print(report)
         print("Avg pnl component:", report["pnl_component"].mean(), "Avg costs:", report["costs_component"].mean())
-        eval_loss_env = make_trading_env(
-            df=test_df,
-            feature_cols=feature_cols,
-            **env_overrides,
-        )
-        eval_loss = evaluate_loss_metrics(
-            eval_loss_env,
-            model,
-            device=device,
-            deterministic=deterministic,
-        )
-        print(
-            "Eval loss metrics:",
-            f"actor={eval_loss.get('eval_loss_actor', float('nan')):.6f}",
-            f"value={eval_loss.get('eval_loss_value', float('nan')):.6f}",
-            f"entropy={eval_loss.get('eval_entropy', float('nan')):.6f}",
-            f"avg_reward={eval_loss.get('eval_avg_reward', float('nan')):.6f}",
-            f"avg_abs_reward={eval_loss.get('eval_avg_abs_reward', float('nan')):.6f}",
-        )
+        if args.skip_loss_metrics:
+            print("[run_eval] Skipping loss metrics (--skip-loss-metrics).")
+        else:
+            eval_loss_env = make_trading_env(
+                df=test_df,
+                feature_cols=feature_cols,
+                **env_overrides,
+            )
+            eval_loss = evaluate_loss_metrics(
+                eval_loss_env,
+                model,
+                device=device,
+                deterministic=deterministic,
+            )
+            print(
+                "Eval loss metrics:",
+                f"actor={eval_loss.get('eval_loss_actor', float('nan')):.6f}",
+                f"value={eval_loss.get('eval_loss_value', float('nan')):.6f}",
+                f"entropy={eval_loss.get('eval_entropy', float('nan')):.6f}",
+                f"avg_reward={eval_loss.get('eval_avg_reward', float('nan')):.6f}",
+                f"avg_abs_reward={eval_loss.get('eval_avg_abs_reward', float('nan')):.6f}",
+            )
 
         # Use a fresh env for trace generation so carry/state from the summary pass
         # cannot leak into plotted/recorded behavior.
