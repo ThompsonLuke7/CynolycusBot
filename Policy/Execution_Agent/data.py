@@ -176,6 +176,8 @@ def _compute_time_since_flip(df: pd.DataFrame) -> pd.Series:
 def align_htf_intent_to_1m(
     one_min_df: pd.DataFrame,
     htf_intent_df: pd.DataFrame,
+    *,
+    allow_exact_matches: bool = False,
 ) -> pd.DataFrame:
     left = one_min_df.sort_values("timestamp").copy()
     right = htf_intent_df.sort_values("timestamp").copy()
@@ -184,14 +186,22 @@ def align_htf_intent_to_1m(
         right,
         on="timestamp",
         direction="backward",
-        allow_exact_matches=True,
+        allow_exact_matches=bool(allow_exact_matches),
     )
     merged["htf_dir"] = pd.to_numeric(merged["htf_dir"], errors="coerce").fillna(0.0).clip(-1, 1)
     merged["htf_conf"] = pd.to_numeric(merged["htf_conf"], errors="coerce").fillna(0.0).clip(0.0, 1.0)
     merged["htf_atr_pct"] = pd.to_numeric(merged["htf_atr_pct"], errors="coerce")
     merged["htf_expected_edge"] = pd.to_numeric(merged["htf_expected_edge"], errors="coerce")
     merged["time_since_flip_min"] = _compute_time_since_flip(merged)
-    merged["htf_flip"] = merged["htf_dir"].ne(merged["htf_dir"].shift(1)).astype(np.int8)
+    prev_dir = merged["htf_dir"].shift(1).fillna(merged["htf_dir"])
+    merged["htf_flip"] = merged["htf_dir"].ne(prev_dir).astype(np.int8)
+    enter_event = (prev_dir == 0.0) & (merged["htf_dir"] != 0.0) & (merged["htf_flip"] == 1)
+    exit_or_switch_event = (prev_dir != 0.0) & (merged["htf_dir"] != prev_dir) & (merged["htf_flip"] == 1)
+    event_code = np.zeros(len(merged), dtype=np.int8)
+    event_code[enter_event.to_numpy()] = 1
+    event_code[exit_or_switch_event.to_numpy()] = -1
+    merged["event_just_flipped"] = merged["htf_flip"].astype(np.int8)
+    merged["event_type_code"] = pd.Series(event_code, index=merged.index).astype(np.float32)
     return merged
 
 
@@ -201,10 +211,11 @@ def build_execution_frame(
     raw_1m_path: str | Path,
     htf_intent_path: str | Path,
     tz: str | None = "America/New_York",
+    allow_exact_matches: bool = False,
 ) -> pd.DataFrame:
     one_min = load_1m_frame(ticker=ticker, raw_1m_path=raw_1m_path, tz=tz)
     htf = load_htf_intent_frame(htf_intent_path, tz=tz)
-    merged = align_htf_intent_to_1m(one_min, htf)
+    merged = align_htf_intent_to_1m(one_min, htf, allow_exact_matches=allow_exact_matches)
     merged = _compute_1m_features(merged)
     merged["ret_next"] = merged["close"].shift(-1) / merged["close"] - 1.0
     return merged
@@ -221,7 +232,9 @@ def default_execution_feature_cols(df: pd.DataFrame) -> list[str]:
         "volume",
         "ret_next",
         "oracle_enter",
+        "oracle_exit",
         "oracle_score",
+        "oracle_exit_score",
     }
     return [c for c in df.columns if c not in drop_cols and np.issubdtype(df[c].dtype, np.number)]
 
@@ -236,4 +249,3 @@ def ensure_numeric_non_nan(
         out[col] = pd.to_numeric(out[col], errors="coerce")
     mask = out[list(feature_cols)].notna().all(axis=1)
     return out.loc[mask].reset_index(drop=True)
-

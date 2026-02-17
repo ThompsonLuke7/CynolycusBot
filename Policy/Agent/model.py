@@ -13,6 +13,8 @@ class ActorCritic(nn.Module):
         log_std_init: float = -0.5,
         hidden: int = 128,
         head_mlp: bool = True,
+        use_layer_norm: bool = False,
+        dropout_p: float = 0.0,
     ):
         super().__init__()
         self.obs_dim = int(obs_dim)
@@ -29,20 +31,29 @@ class ActorCritic(nn.Module):
         else:
             self.action_dim = int(action_dim if self.continuous_action else n_actions)
         self.head_mlp = bool(head_mlp)
+        self.use_layer_norm = bool(use_layer_norm)
+        self.dropout_p = max(0.0, float(dropout_p))
+        hidden = int(hidden)
+
+        def _block(in_dim: int, out_dim: int) -> list[nn.Module]:
+            layers: list[nn.Module] = [nn.Linear(in_dim, out_dim)]
+            if self.use_layer_norm:
+                layers.append(nn.LayerNorm(out_dim))
+            layers.append(nn.Tanh())
+            if self.dropout_p > 0.0:
+                layers.append(nn.Dropout(p=self.dropout_p))
+            return layers
+
         self.shared = nn.Sequential(
-            nn.Linear(self.obs_dim, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
+            *_block(self.obs_dim, hidden),
+            *_block(hidden, hidden),
         )
         if self.head_mlp:
             self.policy_mlp = nn.Sequential(
-                nn.Linear(hidden, hidden),
-                nn.Tanh(),
+                *_block(hidden, hidden),
             )
             self.value_mlp = nn.Sequential(
-                nn.Linear(hidden, hidden),
-                nn.Tanh(),
+                *_block(hidden, hidden),
             )
         else:
             self.policy_mlp = nn.Identity()
@@ -60,20 +71,20 @@ class ActorCritic(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        for module in self.shared:
-            if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain("tanh"))
-                nn.init.zeros_(module.bias)
+        def _init_seq(seq: nn.Module) -> None:
+            for module in seq.modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain("tanh"))
+                    nn.init.zeros_(module.bias)
+                elif isinstance(module, nn.LayerNorm):
+                    nn.init.ones_(module.weight)
+                    nn.init.zeros_(module.bias)
+
+        _init_seq(self.shared)
         if isinstance(self.policy_mlp, nn.Sequential):
-            for module in self.policy_mlp:
-                if isinstance(module, nn.Linear):
-                    nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain("tanh"))
-                    nn.init.zeros_(module.bias)
+            _init_seq(self.policy_mlp)
         if isinstance(self.value_mlp, nn.Sequential):
-            for module in self.value_mlp:
-                if isinstance(module, nn.Linear):
-                    nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain("tanh"))
-                    nn.init.zeros_(module.bias)
+            _init_seq(self.value_mlp)
         nn.init.orthogonal_(self.policy_head.weight, gain=0.01)
         nn.init.zeros_(self.policy_head.bias)
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)

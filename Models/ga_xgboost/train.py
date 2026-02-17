@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Tuple
 
@@ -41,6 +41,7 @@ from Data.retrieve_data import normalize_ticker
 from Data.plots.plots import get_default_model_inference_plot_path, plot_model_inference
 from Features.feature_scaling import apply_scaler_from_stats
 from Models.ga_xgboost.ga_xgboost import GAXGBoostFeatureSelector
+from Policy.training_logging import log_training_run
 
 
 @dataclass(frozen=True)
@@ -293,7 +294,7 @@ def load_model_artifacts(
     side: str,
     *,
     label_dir: str | None = None,
-) -> tuple[np.ndarray, dict]:
+) -> tuple[np.ndarray, dict, dict]:
     candidates = []
     base_side = model_root / side.lower()
     if label_dir:
@@ -319,7 +320,7 @@ def load_model_artifacts(
     mask = np.load(mask_path).astype(bool)
     meta = json.loads(meta_path.read_text())
     xgb_params = dict(meta.get("xgb_params", {}))
-    return mask, xgb_params
+    return mask, xgb_params, meta
 
 
 def _train_ga_selector(
@@ -469,16 +470,16 @@ def _print_binary_metrics(
     *,
     name: str,
     threshold: float = 0.5,
-) -> None:
+) -> dict[str, float] | None:
     if probs.size == 0:
         print(f"[GA-XGB] {name}: empty")
-        return
+        return None
     mask = np.isfinite(probs)
     y = y_true[mask]
     p = probs[mask]
     if y.size == 0:
         print(f"[GA-XGB] {name}: no finite values")
-        return
+        return None
 
     pred = (p >= threshold).astype(int)
     acc = accuracy_score(y, pred)
@@ -511,6 +512,21 @@ def _print_binary_metrics(
         f"auc={auc:.4f}, ap={ap:.4f}, logloss={ll:.4f}, "
         f"tp={tp}, fp={fp}, tn={tn}, fn={fn}"
     )
+    return {
+        "n": float(y.size),
+        "threshold": float(threshold),
+        "accuracy": float(acc),
+        "precision": float(prec),
+        "recall": float(rec),
+        "f1": float(f1),
+        "auc": float(auc),
+        "average_precision": float(ap),
+        "logloss": float(ll),
+        "tp": float(tp),
+        "fp": float(fp),
+        "tn": float(tn),
+        "fn": float(fn),
+    }
 
 
 def walk_forward_oof_probs(
@@ -795,10 +811,10 @@ def main() -> None:
     need_refresh = cfg.refresh_masks
     if not need_refresh:
         try:
-            long_mask, long_params = load_model_artifacts(
+            load_model_artifacts(
                 model_dataset_root, "long", label_dir=artifact_label_dir
             )
-            short_mask, short_params = load_model_artifacts(
+            load_model_artifacts(
                 model_dataset_root, "short", label_dir=artifact_label_dir
             )
         except FileNotFoundError:
@@ -809,7 +825,7 @@ def main() -> None:
         scale_pos_weight = False
 
     if need_refresh:
-        long_mask, long_params, short_mask, short_params = refresh_masks_and_params(
+        refresh_masks_and_params(
             X_train=X_train,
             y_long_train=y_long_train,
             y_short_train=y_short_train,
@@ -822,6 +838,12 @@ def main() -> None:
             full_fit=args.full_fit,
             scale_pos_weight=scale_pos_weight,
         )
+    long_mask, long_params, long_meta = load_model_artifacts(
+        model_dataset_root, "long", label_dir=artifact_label_dir
+    )
+    short_mask, short_params, short_meta = load_model_artifacts(
+        model_dataset_root, "short", label_dir=artifact_label_dir
+    )
 
     if long_mask.size != X.shape[1] or short_mask.size != X.shape[1]:
         raise ValueError("Mask size does not match feature count.")
@@ -897,17 +919,23 @@ def main() -> None:
     _summarize_probs(short_oof, "SHORT OOF probs")
     _summarize_probs(long_test, "LONG test probs")
     _summarize_probs(short_test, "SHORT test probs")
+    long_oof_metrics: dict[str, float] | None = None
+    short_oof_metrics: dict[str, float] | None = None
+    long_test_metrics: dict[str, float] | None = None
+    short_test_metrics: dict[str, float] | None = None
+    long_full_train_metrics: dict[str, float] | None = None
+    short_full_train_metrics: dict[str, float] | None = None
     if not args.full_fit:
-        _print_binary_metrics(
+        long_oof_metrics = _print_binary_metrics(
             y_long_train, long_oof, name="LONG OOF metrics"
         )
-        _print_binary_metrics(
+        short_oof_metrics = _print_binary_metrics(
             y_short_train, short_oof, name="SHORT OOF metrics"
         )
-        _print_binary_metrics(
+        long_test_metrics = _print_binary_metrics(
             y_long[test_idx], long_test, name="LONG test metrics"
         )
-        _print_binary_metrics(
+        short_test_metrics = _print_binary_metrics(
             y_short[test_idx], short_test, name="SHORT test metrics"
         )
 
@@ -933,6 +961,16 @@ def main() -> None:
         )
         if long_full.size != n_total or short_full.size != n_total:
             raise ValueError("Full-fit predictions do not match dataset length.")
+        long_full_train_metrics = _print_binary_metrics(
+            y_long_train,
+            long_full,
+            name="LONG full-fit train metrics",
+        )
+        short_full_train_metrics = _print_binary_metrics(
+            y_short_train,
+            short_full,
+            name="SHORT full-fit train metrics",
+        )
     else:
         long_full = np.full(n_total, np.nan, dtype=np.float32)
         short_full = np.full(n_total, np.nan, dtype=np.float32)
@@ -1005,6 +1043,72 @@ def main() -> None:
         )
 
     print(f"Saved OOF/test/full probability arrays under {probs_root}")
+    hyperparams = {
+        **asdict(cfg),
+        **vars(args),
+        "scale_pos_weight_enabled": bool(scale_pos_weight),
+        "model_dataset_root": str(model_dataset_root),
+    }
+    train_metrics = (
+        {
+            "long_oof": long_oof_metrics,
+            "short_oof": short_oof_metrics,
+        }
+        if not args.full_fit
+        else {
+            "long_full_train": long_full_train_metrics,
+            "short_full_train": short_full_train_metrics,
+        }
+    )
+    validation_metrics = (
+        {
+            "long_test": long_test_metrics,
+            "short_test": short_test_metrics,
+            "test_rows": float(test_idx.size),
+            "val_rows": float(val_idx.size),
+        }
+        if not args.full_fit
+        else {"skipped": "--full-fit"}
+    )
+    best_validation_metrics = {
+        "long_selector_best_score": long_meta.get("best_score"),
+        "short_selector_best_score": short_meta.get("best_score"),
+    }
+    log_paths = log_training_run(
+        run_name="ga_xgboost_train",
+        output_dir=probs_root,
+        hyperparameters=hyperparams,
+        train_metrics=train_metrics,
+        validation_metrics=validation_metrics,
+        best_validation_metrics=best_validation_metrics,
+        artifacts={
+            "probs_root": str(probs_root),
+            "long_probs_dir": str(probs_root / "long" / cfg.output_dirname / label_dir),
+            "short_probs_dir": str(probs_root / "short" / cfg.output_dirname / label_dir),
+            "long_meta_path": str(
+                (model_dataset_root / "long" / "probs" / artifact_label_dir / "meta.json")
+                if artifact_label_dir
+                else (model_dataset_root / "long" / "meta.json")
+            ),
+            "short_meta_path": str(
+                (model_dataset_root / "short" / "probs" / artifact_label_dir / "meta.json")
+                if artifact_label_dir
+                else (model_dataset_root / "short" / "meta.json")
+            ),
+        },
+        extra={
+            "ticker": normalize_ticker(cfg.ticker),
+            "dataset_name": cfg.dataset_name,
+            "label_mode": cfg.label_mode,
+            "feature_count": int(X.shape[1]),
+            "train_rows": int(train_idx.size),
+            "val_rows": int(val_idx.size),
+            "test_rows": int(test_idx.size),
+            "oof_missing_long": int(np.isnan(long_oof).sum()),
+            "oof_missing_short": int(np.isnan(short_oof).sum()),
+        },
+    )
+    print(f"[GA-XGB] Saved training run summary: {log_paths['latest_path']}")
 
 
 if __name__ == "__main__":

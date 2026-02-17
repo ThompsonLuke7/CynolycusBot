@@ -72,6 +72,7 @@ def fetch_intraday(
     timeframe: str = "1Min",
     limit: int = 100_000,
     adjustment: str = "raw",
+    feed: DataFeed | str = DataFeed.IEX,
     save_path: Optional[str] = None,
     paginate: bool = True,
     max_pages: int | None = None,
@@ -86,6 +87,7 @@ def fetch_intraday(
         timeframe: e.g., "1Min", "5Min", "15Min", "1Hour", "1Day".
         limit: maximum bars to request per page.
         adjustment: "raw", "split", or "all".
+        feed: Alpaca feed ("IEX" or "SIP").
         save_path: optional path (csv/parquet) to persist results.
         paginate: if True, follow next_page_token until exhausted.
         max_pages: optional page cap to avoid overly large downloads.
@@ -100,6 +102,11 @@ def fetch_intraday(
     tf = _to_timeframe(timeframe)
     start_dt = _parse_time(start)
     end_dt = _parse_time(end) if end is not None else dt.datetime.now(dt.timezone.utc)
+    if isinstance(feed, DataFeed):
+        feed_enum = feed
+    else:
+        feed_key = str(feed).strip().upper()
+        feed_enum = DataFeed.SIP if feed_key == "SIP" else DataFeed.IEX
 
     def _next_token(resp) -> str | None:
         token = getattr(resp, "next_page_token", None)
@@ -122,7 +129,7 @@ def fetch_intraday(
             end=end_dt,
             limit=limit,
             adjustment=Adjustment(adjustment),
-            feed=DataFeed.IEX,
+            feed=feed_enum,
             page_token=page_token,
         )
 

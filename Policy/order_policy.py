@@ -49,6 +49,10 @@ class OptionOrderPolicyConfig:
     time_in_force: str = "day"
     close_on_flat: bool = True
     close_on_flip: bool = True
+    same_side_reentry_grace_bars: int = 1
+    opposite_confirm_bars: int = 2
+    opposite_min_abs_action: float = 0.10
+    opposite_min_prob_edge: float = 0.05
     submit_orders: bool = True
     long_options_only: bool = True
     verify_submitted_orders: bool = True
@@ -90,6 +94,10 @@ class OptionOrderPolicy:
         self._bars_15m: list[tuple[float, float, float]] = []
         self._action_ema: float | None = None
         self._action_effective: float = 0.0
+        self._pending_flat_side: int = 0
+        self._pending_flat_bars: int = 0
+        self._pending_opposite_side: int = 0
+        self._pending_opposite_bars: int = 0
 
     def _to_local_ts(self, ts: Any) -> datetime:
         dt = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts))
@@ -136,10 +144,42 @@ class OptionOrderPolicy:
             atr = ((n - 1) * atr + tr) / n
         return atr
 
+    @staticmethod
+    def _directional_prob_edge(*, closed_bar: dict[str, Any], desired_pos: int) -> float:
+        """
+        Compute directional confidence edge from available 15m probability columns.
+        Positive edge favors the desired side.
+        """
+        p_long_vals = [
+            _as_float(closed_bar.get("p_pivot_long")),
+            _as_float(closed_bar.get("p_tb_long")),
+        ]
+        p_short_vals = [
+            _as_float(closed_bar.get("p_pivot_short")),
+            _as_float(closed_bar.get("p_tb_short")),
+        ]
+        p_long = max((v for v in p_long_vals if math.isfinite(v)), default=float("nan"))
+        p_short = max((v for v in p_short_vals if math.isfinite(v)), default=float("nan"))
+        if not (math.isfinite(p_long) and math.isfinite(p_short)):
+            return float("nan")
+        edge = float(p_long - p_short)
+        return edge if int(desired_pos) > 0 else -edge
+
     def _resolve_expiration(self, local_ts: datetime) -> date:
         dte = 0 if local_ts.time() < self._cutoff else 1
         session_day = local_ts.date()
         return session_day if dte == 0 else _next_business_day(session_day, n=1)
+
+    def _sim_contract_symbol(
+        self,
+        *,
+        option_type: str,
+        expiration: date,
+        strike: float,
+    ) -> str:
+        cp = "C" if str(option_type).strip().lower() == "call" else "P"
+        strike_int = int(max(0, round(float(strike))))
+        return f".SIM_{self.cfg.underlying}_{expiration.strftime('%y%m%d')}_{cp}_{strike_int}"
 
     @staticmethod
     def _extract_positions(resp: Any) -> list[dict[str, Any]]:
@@ -276,6 +316,11 @@ class OptionOrderPolicy:
             return float("nan")
 
     def _contracts_max_for_symbol(self, *, symbol: str, logger: Callable[[str], None]) -> tuple[int, float, float]:
+        if not self.cfg.submit_orders:
+            max_ct = max(0, int(self.cfg.max_contracts_fallback))
+            if self.cfg.max_contracts_cap and int(self.cfg.max_contracts_cap) > 0:
+                max_ct = min(max_ct, int(self.cfg.max_contracts_cap))
+            return max_ct, float("nan"), float("nan")
         price = self._get_contract_price(symbol=symbol, logger=logger)
         bp = self._get_buying_power()
         max_ct = 0
@@ -338,6 +383,10 @@ class OptionOrderPolicy:
                 self._pos = 0
                 self._signed_contracts = 0
                 self._open_symbol = None
+                self._pending_flat_side = 0
+                self._pending_flat_bars = 0
+                self._pending_opposite_side = 0
+                self._pending_opposite_bars = 0
                 logger(f"[order_policy] Startup sync: no open {under} long option positions found.")
                 return {
                     "synced": True,
@@ -352,6 +401,10 @@ class OptionOrderPolicy:
             self._pos = int(1 if pos_sign > 0 else -1)
             self._signed_contracts = int(round(qty_abs)) * self._pos
             self._open_symbol = symbol
+            self._pending_flat_side = 0
+            self._pending_flat_bars = 0
+            self._pending_opposite_side = 0
+            self._pending_opposite_bars = 0
 
             if len(candidates) > 1:
                 logger(
@@ -611,6 +664,8 @@ class OptionOrderPolicy:
         if not math.isfinite(base_limit) or base_limit <= 0.0:
             fallback_mode = "ask" if intent_key == "open" else "bid"
             base_limit = self._get_contract_price(symbol=symbol, logger=logger, mode=fallback_mode)
+        if not self.cfg.submit_orders and (not math.isfinite(base_limit) or base_limit <= 0.0):
+            base_limit = 1.0
         if not math.isfinite(base_limit) or base_limit <= 0.0:
             raise RuntimeError(
                 f"no_quote_for_limit_pricing intent={intent_key} symbol={symbol}"
@@ -732,6 +787,14 @@ class OptionOrderPolicy:
             "price_mode": str(self.cfg.price_mode),
             "action_ema": float(self._action_ema) if self._action_ema is not None and math.isfinite(self._action_ema) else None,
             "action_effective": float(self._action_effective),
+            "pending_flat_side": int(self._pending_flat_side),
+            "pending_flat_bars": int(self._pending_flat_bars),
+            "same_side_reentry_grace_bars": int(self.cfg.same_side_reentry_grace_bars),
+            "pending_opposite_side": int(self._pending_opposite_side),
+            "pending_opposite_bars": int(self._pending_opposite_bars),
+            "opposite_confirm_bars": int(self.cfg.opposite_confirm_bars),
+            "opposite_min_abs_action": float(self.cfg.opposite_min_abs_action),
+            "opposite_min_prob_edge": float(self.cfg.opposite_min_prob_edge),
         }
 
     def snapshot_broker_state(self, *, orders_limit: int = 20) -> dict[str, Any]:
@@ -853,6 +916,71 @@ class OptionOrderPolicy:
             if desired_pos != 0 and current_signed != 0 and desired_pos != current_pos and not self.cfg.close_on_flip:
                 flip_blocked = True
                 desired_pos = current_pos
+            redundant_roundtrip_hold = False
+            same_side_reentry_grace_bars = max(0, int(self.cfg.same_side_reentry_grace_bars))
+            if current_signed == 0:
+                self._pending_flat_side = 0
+                self._pending_flat_bars = 0
+            elif desired_pos == current_pos:
+                self._pending_flat_side = 0
+                self._pending_flat_bars = 0
+            elif (
+                desired_pos == 0
+                and current_pos != 0
+                and same_side_reentry_grace_bars > 0
+                and self.cfg.close_on_flat
+            ):
+                if self._pending_flat_side != current_pos:
+                    self._pending_flat_side = int(current_pos)
+                    self._pending_flat_bars = 1
+                else:
+                    self._pending_flat_bars += 1
+                if self._pending_flat_bars <= same_side_reentry_grace_bars:
+                    redundant_roundtrip_hold = True
+                    desired_pos = current_pos
+                else:
+                    self._pending_flat_side = 0
+                    self._pending_flat_bars = 0
+            else:
+                self._pending_flat_side = 0
+                self._pending_flat_bars = 0
+
+            opposite_quality_blocked = False
+            opposite_confirmation_pending = False
+            opposite_prob_edge = float("nan")
+            opposite_confirm_bars = max(1, int(self.cfg.opposite_confirm_bars))
+            opposite_min_abs_action = max(0.0, float(self.cfg.opposite_min_abs_action))
+            opposite_min_prob_edge = max(0.0, float(self.cfg.opposite_min_prob_edge))
+            if current_signed == 0 or desired_pos == 0 or desired_pos == current_pos:
+                self._pending_opposite_side = 0
+                self._pending_opposite_bars = 0
+            else:
+                opposite_prob_edge = self._directional_prob_edge(
+                    closed_bar=closed_bar,
+                    desired_pos=desired_pos,
+                )
+                abs_quality_ok = abs(act) >= opposite_min_abs_action
+                prob_quality_ok = (
+                    opposite_min_prob_edge <= 0.0
+                    or (math.isfinite(opposite_prob_edge) and opposite_prob_edge >= opposite_min_prob_edge)
+                )
+                if not (abs_quality_ok and prob_quality_ok):
+                    opposite_quality_blocked = True
+                    desired_pos = current_pos
+                    self._pending_opposite_side = 0
+                    self._pending_opposite_bars = 0
+                else:
+                    if self._pending_opposite_side != desired_pos:
+                        self._pending_opposite_side = int(desired_pos)
+                        self._pending_opposite_bars = 1
+                    else:
+                        self._pending_opposite_bars += 1
+                    if self._pending_opposite_bars < opposite_confirm_bars:
+                        opposite_confirmation_pending = True
+                        desired_pos = current_pos
+                    else:
+                        self._pending_opposite_side = 0
+                        self._pending_opposite_bars = 0
 
             option_type: str | None = None
             strike_target: float | None = None
@@ -877,12 +1005,27 @@ class OptionOrderPolicy:
                         else close - self.cfg.atr_multiplier * atr
                     )
                     expiration = self._resolve_expiration(local_ts)
-                    contract_symbol, picked_strike = self._select_contract(
-                        option_type=option_type,
-                        expiration=expiration,
-                        target_strike=strike_target,
-                        atr=atr,
-                    )
+                    try:
+                        contract_symbol, picked_strike = self._select_contract(
+                            option_type=option_type,
+                            expiration=expiration,
+                            target_strike=strike_target,
+                            atr=atr,
+                        )
+                    except Exception as exc:
+                        if self.cfg.submit_orders:
+                            raise
+                        contract_symbol = self._sim_contract_symbol(
+                            option_type=option_type,
+                            expiration=expiration,
+                            strike=strike_target,
+                        )
+                        picked_strike = strike_target
+                        logger(
+                            "[order_policy] SIM fallback contract "
+                            f"type={option_type} exp={expiration.isoformat()} "
+                            f"strike={strike_target:.2f} reason={exc}"
+                        )
 
                 if not contract_symbol:
                     return {"event": "error", "reason": "missing_contract_symbol"}
@@ -928,6 +1071,20 @@ class OptionOrderPolicy:
                     "atr": atr,
                     "flat_blocked": flat_blocked,
                     "flip_blocked": flip_blocked,
+                    "redundant_roundtrip_hold": redundant_roundtrip_hold,
+                    "pending_flat_side": int(self._pending_flat_side),
+                    "pending_flat_bars": int(self._pending_flat_bars),
+                    "same_side_reentry_grace_bars": int(same_side_reentry_grace_bars),
+                    "opposite_quality_blocked": opposite_quality_blocked,
+                    "opposite_confirmation_pending": opposite_confirmation_pending,
+                    "opposite_prob_edge": (
+                        float(opposite_prob_edge) if math.isfinite(opposite_prob_edge) else None
+                    ),
+                    "pending_opposite_side": int(self._pending_opposite_side),
+                    "pending_opposite_bars": int(self._pending_opposite_bars),
+                    "opposite_confirm_bars": int(opposite_confirm_bars),
+                    "opposite_min_abs_action": float(opposite_min_abs_action),
+                    "opposite_min_prob_edge": float(opposite_min_prob_edge),
                 }
 
             orders: list[dict[str, Any]] = []
@@ -977,12 +1134,27 @@ class OptionOrderPolicy:
                             else close - self.cfg.atr_multiplier * atr
                         )
                         expiration = self._resolve_expiration(local_ts)
-                        contract_symbol, picked_strike = self._select_contract(
-                            option_type=option_type,
-                            expiration=expiration,
-                            target_strike=strike_target,
-                            atr=atr,
-                        )
+                        try:
+                            contract_symbol, picked_strike = self._select_contract(
+                                option_type=option_type,
+                                expiration=expiration,
+                                target_strike=strike_target,
+                                atr=atr,
+                            )
+                        except Exception as exc:
+                            if self.cfg.submit_orders:
+                                raise
+                            contract_symbol = self._sim_contract_symbol(
+                                option_type=option_type,
+                                expiration=expiration,
+                                strike=strike_target,
+                            )
+                            picked_strike = strike_target
+                            logger(
+                                "[order_policy] SIM fallback contract "
+                                f"type={option_type} exp={expiration.isoformat()} "
+                                f"strike={strike_target:.2f} reason={exc}"
+                            )
                     open_symbol = contract_symbol
                     open_qty = abs(step_target) if step_pos != current_pos else max(0, abs(step_target) - abs(current_signed))
 
@@ -1049,6 +1221,20 @@ class OptionOrderPolicy:
                 "atr": atr,
                 "flat_blocked": flat_blocked,
                 "flip_blocked": flip_blocked,
+                "redundant_roundtrip_hold": redundant_roundtrip_hold,
+                "pending_flat_side": int(self._pending_flat_side),
+                "pending_flat_bars": int(self._pending_flat_bars),
+                "same_side_reentry_grace_bars": int(same_side_reentry_grace_bars),
+                "opposite_quality_blocked": opposite_quality_blocked,
+                "opposite_confirmation_pending": opposite_confirmation_pending,
+                "opposite_prob_edge": (
+                    float(opposite_prob_edge) if math.isfinite(opposite_prob_edge) else None
+                ),
+                "pending_opposite_side": int(self._pending_opposite_side),
+                "pending_opposite_bars": int(self._pending_opposite_bars),
+                "opposite_confirm_bars": int(opposite_confirm_bars),
+                "opposite_min_abs_action": float(opposite_min_abs_action),
+                "opposite_min_prob_edge": float(opposite_min_prob_edge),
             }
         except Exception as exc:
             return {"event": "error", "reason": str(exc)}

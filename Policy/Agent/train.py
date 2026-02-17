@@ -9,6 +9,7 @@ import torch.optim as optim
 from Agent.env import TradingEnv
 from Agent.model import ActorCritic
 from Agent.buffer import Rollout, compute_gae
+from Agent.eval import evaluate_policy
 
 
 def _format_duration(seconds: float) -> str:
@@ -42,6 +43,33 @@ def _resolve_device(device: str, verbose: bool) -> torch.device:
     return torch.device(device)
 
 
+def _metric_from_eval_report(report, metric: str) -> float:
+    metric_key = str(metric or "pnl_net_mean").strip().lower()
+    if report is None or getattr(report, "empty", True):
+        return float("nan")
+    pnl = report.get("pnl_component")
+    costs = report.get("costs_component")
+    trades = report.get("trades")
+    if metric_key == "pnl_mean":
+        return float(np.mean(pnl)) if pnl is not None else float("nan")
+    if metric_key == "pnl_sum":
+        return float(np.sum(pnl)) if pnl is not None else float("nan")
+    if metric_key == "costs_mean":
+        return float(np.mean(costs)) if costs is not None else float("nan")
+    if metric_key == "trades_mean":
+        return float(np.mean(trades)) if trades is not None else float("nan")
+    if pnl is None or costs is None:
+        return float("nan")
+    net = np.asarray(pnl, dtype=np.float64) - np.asarray(costs, dtype=np.float64)
+    if metric_key == "pnl_net_sum":
+        return float(np.sum(net))
+    return float(np.mean(net))
+
+
+def _metric_is_minimize(metric: str) -> bool:
+    return str(metric or "").strip().lower() in {"costs_mean", "trades_mean"}
+
+
 def train_ppo(
     env: TradingEnv,
     total_timesteps: int = 2_000_000,
@@ -67,6 +95,20 @@ def train_ppo(
     checkpoint_dir: str | None = None,
     checkpoint_prefix: str = "ppo_ckpt",
     checkpoint_payload: dict | None = None,
+    hidden_size: int = 128,
+    policy_head_mlp: bool = True,
+    policy_layer_norm: bool = False,
+    policy_dropout_p: float = 0.0,
+    weight_decay: float = 0.0,
+    target_kl: float = 0.0,
+    eval_env: TradingEnv | None = None,
+    eval_every_updates: int = 0,
+    eval_n_days: int = 0,
+    early_stop_patience_updates: int = 0,
+    early_stop_metric: str = "pnl_net_mean",
+    early_stop_min_delta: float = 0.0,
+    early_stop_best_model_path: str | None = None,
+    restore_best_on_early_stop: bool = True,
 ) -> ActorCritic | tuple[ActorCritic, list[dict[str, float]]]:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -79,7 +121,10 @@ def train_ppo(
         n_actions=int(n_actions),
         action_type=action_type,
         action_dim=1,
-        hidden=128,
+        hidden=int(hidden_size),
+        head_mlp=bool(policy_head_mlp),
+        use_layer_norm=bool(policy_layer_norm),
+        dropout_p=float(policy_dropout_p),
     ).to(dev)
     model.train()
     param_groups = [
@@ -91,7 +136,7 @@ def train_ppo(
     ]
     if model.policy_log_std is not None:
         param_groups.append({"params": [model.policy_log_std], "lr": pi_lr})
-    optimizer = optim.Adam(param_groups)
+    optimizer = optim.Adam(param_groups, weight_decay=max(0.0, float(weight_decay)))
 
     n_envs = int(getattr(env, "n_envs", 1))
     is_vectorized = n_envs > 1
@@ -106,6 +151,24 @@ def train_ppo(
         next_checkpoint_step = None
     train_start = time.perf_counter()
     history: list[dict[str, float]] = []
+    update_idx = 0
+    target_kl_val = max(0.0, float(target_kl))
+    eval_every = max(0, int(eval_every_updates))
+    patience_updates = max(0, int(early_stop_patience_updates))
+    min_delta = max(0.0, float(early_stop_min_delta))
+    eval_metric_name = str(early_stop_metric or "pnl_net_mean").strip().lower()
+    best_metric: float | None = None
+    best_steps = 0
+    no_improve_updates = 0
+    best_state_dict: dict[str, torch.Tensor] | None = None
+    early_stop_triggered = False
+    best_model_path = (
+        Path(early_stop_best_model_path)
+        if early_stop_best_model_path and str(early_stop_best_model_path).strip()
+        else None
+    )
+    if best_model_path is not None and not best_model_path.is_absolute():
+        best_model_path = (Path.cwd() / best_model_path).resolve()
 
     while steps_done < total_timesteps:
         obs_buf, act_buf, logp_buf = [], [], []
@@ -116,6 +179,7 @@ def train_ppo(
         entropy_hist: list[float] = []
         approx_kl_hist: list[float] = []
         clipfrac_hist: list[float] = []
+        update_stopped_on_kl = False
 
         for _ in range(rollout_len):
             if is_vectorized:
@@ -297,43 +361,133 @@ def train_ppo(
                 with torch.no_grad():
                     approx_kl = (logp_old_t[mb] - logp).mean()
                     clipfrac = (torch.abs(ratio - 1.0) > clip_ratio).float().mean()
+                if target_kl_val > 0.0 and float(approx_kl.detach().item()) > target_kl_val:
+                    update_stopped_on_kl = True
                 loss_total_hist.append(float(loss.detach().item()))
                 loss_pi_hist.append(float(pi_loss.detach().item()))
                 loss_v_hist.append(float(v_loss.detach().item()))
                 entropy_hist.append(float(entropy.detach().item()))
                 approx_kl_hist.append(float(approx_kl.detach().item()))
                 clipfrac_hist.append(float(clipfrac.detach().item()))
+                if update_stopped_on_kl:
+                    break
+            if update_stopped_on_kl:
+                break
 
-        if verbose:
-            now = time.perf_counter()
-            elapsed = max(now - train_start, 1e-9)
-            speed = steps_done / elapsed
-            remaining_steps = max(int(total_timesteps) - int(steps_done), 0)
-            eta = (remaining_steps / speed) if speed > 0 else float("inf")
-            progress_pct = 100.0 * min(steps_done, total_timesteps) / max(total_timesteps, 1)
-            loss_total = float(np.mean(loss_total_hist)) if loss_total_hist else float("nan")
-            loss_pi = float(np.mean(loss_pi_hist)) if loss_pi_hist else float("nan")
-            loss_v = float(np.mean(loss_v_hist)) if loss_v_hist else float("nan")
-            entropy_avg = float(np.mean(entropy_hist)) if entropy_hist else float("nan")
-            approx_kl_avg = float(np.mean(approx_kl_hist)) if approx_kl_hist else float("nan")
-            clipfrac_avg = float(np.mean(clipfrac_hist)) if clipfrac_hist else float("nan")
-            rollout_avg_reward = float(np.mean(rollout.rewards))
-            rollout_avg_abs_reward = float(np.mean(np.abs(rollout.rewards)))
-            history.append(
-                {
-                    "steps": float(steps_done),
-                    "progress_pct": float(progress_pct),
-                    "rollout_avg_reward": rollout_avg_reward,
-                    "rollout_avg_abs_reward": rollout_avg_abs_reward,
-                    "loss_total": loss_total,
-                    "loss_pi": loss_pi,
-                    "loss_v": loss_v,
-                    "entropy": entropy_avg,
-                    "approx_kl": approx_kl_avg,
-                    "clipfrac": clipfrac_avg,
-                    "sps": float(speed),
-                }
+        update_idx += 1
+        eval_metric_val = float("nan")
+        did_eval = False
+        if (
+            eval_env is not None
+            and eval_every > 0
+            and int(len(getattr(eval_env, "day_starts", []))) > 0
+            and (update_idx % eval_every == 0)
+        ):
+            did_eval = True
+            n_days_eval = (
+                int(len(getattr(eval_env, "day_starts", [])))
+                if int(eval_n_days) <= 0
+                else min(int(eval_n_days), int(len(getattr(eval_env, "day_starts", []))))
             )
+            eval_report = evaluate_policy(
+                eval_env,
+                model,
+                n_days=max(1, int(n_days_eval)),
+                device=str(dev),
+                deterministic=True,
+            )
+            eval_metric_val = _metric_from_eval_report(eval_report, eval_metric_name)
+            if np.isfinite(eval_metric_val):
+                improve = False
+                if best_metric is None:
+                    improve = True
+                elif _metric_is_minimize(eval_metric_name):
+                    improve = eval_metric_val < (best_metric - min_delta)
+                else:
+                    improve = eval_metric_val > (best_metric + min_delta)
+                if improve:
+                    best_metric = float(eval_metric_val)
+                    best_steps = int(steps_done)
+                    no_improve_updates = 0
+                    if restore_best_on_early_stop:
+                        best_state_dict = {
+                            k: v.detach().cpu().clone()
+                            for k, v in model.state_dict().items()
+                        }
+                    if best_model_path is not None:
+                        best_model_path.parent.mkdir(parents=True, exist_ok=True)
+                        best_payload = dict(checkpoint_payload or {})
+                        best_payload.setdefault("obs_dim", env.obs_dim)
+                        best_payload.setdefault("n_actions", int(n_actions))
+                        best_payload.setdefault("action_type", action_type)
+                        best_payload.setdefault("action_dim", int(getattr(model, "action_dim", 1)))
+                        best_payload.setdefault("action_low", -1.0)
+                        best_payload.setdefault("action_high", 1.0)
+                        best_payload.setdefault("policy_hidden_size", int(hidden_size))
+                        best_payload.setdefault("policy_head_mlp", bool(policy_head_mlp))
+                        best_payload.setdefault("policy_layer_norm", bool(policy_layer_norm))
+                        best_payload.setdefault("policy_dropout_p", float(policy_dropout_p))
+                        best_payload["best_steps"] = int(steps_done)
+                        best_payload["best_metric_name"] = eval_metric_name
+                        best_payload["best_metric_value"] = float(eval_metric_val)
+                        torch.save(
+                            {
+                                "state_dict": model.state_dict(),
+                                **best_payload,
+                            },
+                            best_model_path,
+                        )
+                else:
+                    no_improve_updates += 1
+                    if patience_updates > 0 and no_improve_updates >= patience_updates:
+                        early_stop_triggered = True
+
+        now = time.perf_counter()
+        elapsed = max(now - train_start, 1e-9)
+        speed = steps_done / elapsed
+        remaining_steps = max(int(total_timesteps) - int(steps_done), 0)
+        eta = (remaining_steps / speed) if speed > 0 else float("inf")
+        progress_pct = 100.0 * min(steps_done, total_timesteps) / max(total_timesteps, 1)
+        loss_total = float(np.mean(loss_total_hist)) if loss_total_hist else float("nan")
+        loss_pi = float(np.mean(loss_pi_hist)) if loss_pi_hist else float("nan")
+        loss_v = float(np.mean(loss_v_hist)) if loss_v_hist else float("nan")
+        entropy_avg = float(np.mean(entropy_hist)) if entropy_hist else float("nan")
+        approx_kl_avg = float(np.mean(approx_kl_hist)) if approx_kl_hist else float("nan")
+        clipfrac_avg = float(np.mean(clipfrac_hist)) if clipfrac_hist else float("nan")
+        rollout_avg_reward = float(np.mean(rollout.rewards))
+        rollout_avg_abs_reward = float(np.mean(np.abs(rollout.rewards)))
+        history.append(
+            {
+                "steps": float(steps_done),
+                "progress_pct": float(progress_pct),
+                "rollout_avg_reward": rollout_avg_reward,
+                "rollout_avg_abs_reward": rollout_avg_abs_reward,
+                "loss_total": loss_total,
+                "loss_pi": loss_pi,
+                "loss_v": loss_v,
+                "entropy": entropy_avg,
+                "approx_kl": approx_kl_avg,
+                "clipfrac": clipfrac_avg,
+                "sps": float(speed),
+                "update_idx": float(update_idx),
+                "update_stopped_on_kl": float(1.0 if update_stopped_on_kl else 0.0),
+                "did_eval": float(1.0 if did_eval else 0.0),
+                "eval_metric": float(eval_metric_val) if np.isfinite(eval_metric_val) else float("nan"),
+                "best_eval_metric": float(best_metric) if best_metric is not None else float("nan"),
+                "no_improve_updates": float(no_improve_updates),
+            }
+        )
+        if verbose:
+            eval_txt = ""
+            if did_eval:
+                if np.isfinite(eval_metric_val):
+                    eval_txt = (
+                        f" eval[{eval_metric_name}]={eval_metric_val:.6f}"
+                        f" best={best_metric if best_metric is not None else float('nan'):.6f}"
+                        f" no_improve={no_improve_updates}"
+                    )
+                else:
+                    eval_txt = f" eval[{eval_metric_name}]=nan"
             print(
                 f"steps={steps_done:,} "
                 f"({progress_pct:.2f}%) "
@@ -348,6 +502,8 @@ def train_ppo(
                 f"sps={speed:,.1f} "
                 f"elapsed={_format_duration(elapsed)} "
                 f"eta={_format_duration(eta)}"
+                f"{' [kl-stop]' if update_stopped_on_kl else ''}"
+                f"{eval_txt}"
             )
 
         if next_checkpoint_step is not None and checkpoint_dir:
@@ -357,11 +513,15 @@ def train_ppo(
                 ckpt_path = ckpt_dir / f"{checkpoint_prefix}_{next_checkpoint_step:09d}.pt"
                 payload = dict(checkpoint_payload or {})
                 payload.setdefault("obs_dim", env.obs_dim)
-                payload.setdefault("n_actions", 3)
+                payload.setdefault("n_actions", int(n_actions))
                 payload.setdefault("action_type", action_type)
                 payload.setdefault("action_dim", int(getattr(model, "action_dim", 1)))
                 payload.setdefault("action_low", -1.0)
                 payload.setdefault("action_high", 1.0)
+                payload.setdefault("policy_hidden_size", int(hidden_size))
+                payload.setdefault("policy_head_mlp", bool(policy_head_mlp))
+                payload.setdefault("policy_layer_norm", bool(policy_layer_norm))
+                payload.setdefault("policy_dropout_p", float(policy_dropout_p))
                 payload["checkpoint_steps"] = int(next_checkpoint_step)
                 if history:
                     payload["checkpoint_last_metrics"] = history[-1]
@@ -375,6 +535,27 @@ def train_ppo(
                 if verbose:
                     print(f"Saved checkpoint: {ckpt_path}")
                 next_checkpoint_step += every_steps
+
+        if early_stop_triggered:
+            if verbose:
+                print(
+                    "[train_ppo] Early stopping triggered:",
+                    f"metric={eval_metric_name}",
+                    f"best_metric={best_metric if best_metric is not None else float('nan')}",
+                    f"best_steps={best_steps}",
+                    f"patience_updates={patience_updates}",
+                )
+            break
+
+    if early_stop_triggered and restore_best_on_early_stop and best_state_dict is not None:
+        model.load_state_dict(best_state_dict)
+        if verbose:
+            print(
+                "[train_ppo] Restored best model state from early-stop monitor:",
+                f"metric={eval_metric_name}",
+                f"best_metric={best_metric if best_metric is not None else float('nan')}",
+                f"best_steps={best_steps}",
+            )
 
     if return_history:
         return model, history

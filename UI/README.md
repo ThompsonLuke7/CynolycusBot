@@ -31,4 +31,10 @@ The UI streams:
 - option policy state
 - broker positions + recent orders (when option orders are enabled)
 
+Execution filter defaults:
+
+- entry confirmation: `1` consecutive 15m bar while flat
+- exit/flip confirmation: `2` consecutive 15m bars while in-position
+- if signal re-aligns with current position before confirmation, pending exit/flip is canceled
+
 Use `Stop` in the UI to stop the live session. Use `Ctrl+C` in the terminal to stop the dashboard server.

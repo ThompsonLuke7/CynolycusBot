@@ -8,11 +8,23 @@ import pandas as pd
 
 
 ACTION_WAIT = 0
-ACTION_ENTER = 1
-ACTION_SCALE_IN = 2
-ACTION_SCALE_OUT = 3
-ACTION_EXIT = 4
-N_EXEC_ACTIONS = 5
+ACTION_EXECUTE = 1
+N_EXEC_ACTIONS = 2
+
+# Backward-compat aliases kept for older imports/checkpoints.
+ACTION_ENTER = ACTION_EXECUTE
+ACTION_SCALE_IN = ACTION_EXECUTE
+ACTION_SCALE_OUT = ACTION_EXECUTE
+ACTION_EXIT = ACTION_EXECUTE
+
+EVENT_NONE = 0
+EVENT_ENTER = 1
+EVENT_EXIT = -1
+
+PENDING_NONE = 0
+PENDING_ENTER = 1
+PENDING_EXIT = 2
+PENDING_SWITCH = 3
 
 
 @dataclass(frozen=True)
@@ -31,7 +43,7 @@ class ExecutionEnvConfig:
     commission_per_unit_ret: float = 0.0
     trade_penalty_ret: float = 0.00002
     churn_penalty_ret: float = 0.00003
-    mae_penalty_lambda: float = 1.0
+    mae_penalty_lambda: float = 0.25
     low_conf_threshold: float = 0.35
     low_conf_penalty_lambda: float = 0.00015
 
@@ -44,8 +56,9 @@ class ExecutionEnvConfig:
 class DirectionGatedExecutionEnv:
     """
     1m execution env conditioned on frozen 15m intent.
-    Reward is relative to a dumb baseline:
-        reward = (agent_net - baseline_net) - MAE_pen - churn_pen - low_conf_pen.
+    Event-timing reward (on execute only) relative to naive immediate execution:
+        reward = (agent_event_net - baseline_event_net) - MAE_penalty.
+    Non-execute steps carry zero reward.
     """
 
     def __init__(
@@ -66,7 +79,7 @@ class DirectionGatedExecutionEnv:
         commission_per_unit_ret: float = 0.0,
         trade_penalty_ret: float = 0.00002,
         churn_penalty_ret: float = 0.00003,
-        mae_penalty_lambda: float = 1.0,
+        mae_penalty_lambda: float = 0.25,
         low_conf_threshold: float = 0.35,
         low_conf_penalty_lambda: float = 0.00015,
         episode_mode: str = "flip_window",
@@ -128,7 +141,7 @@ class DirectionGatedExecutionEnv:
         self._build_episodes()
 
         self._base_obs_dim = int(self._feature_matrix.shape[1])
-        self.obs_dim = self._base_obs_dim + (4 if self.add_position_features else 0)
+        self.obs_dim = self._base_obs_dim + (6 if self.add_position_features else 0)
         self._ep_ptr = -1
         self._i = 0
         self._ep_end = 0
@@ -150,7 +163,7 @@ class DirectionGatedExecutionEnv:
         ends: list[int] = []
         if self.episode_mode == "flip_window":
             htf_sign = np.sign(self._htf_dir)
-            flips = np.where((htf_sign != np.r_[htf_sign[0], htf_sign[:-1]]) & (htf_sign != 0))[0]
+            flips = np.where(htf_sign != np.r_[htf_sign[0], htf_sign[:-1]])[0]
             for f in flips:
                 s = int(f + self.flip_start_delay_min)
                 if s >= n - 1:
@@ -180,12 +193,175 @@ class DirectionGatedExecutionEnv:
         self.time_in_pos = 0
         self.realized_agent = 0.0
         self.realized_baseline = 0.0
+        self.pending_order = PENDING_NONE
+        self.pending_target_dir = 0
+        self.current_event_type = EVENT_NONE
+        self.event_started_at_idx = -1
+        self.event_prev_dir = 0
+        self.event_start_pos_units = 0
+        self.event_start_price = np.nan
+        self.event_target_dir = 0
 
     def _trade_cost(self, units_delta: int) -> float:
         if units_delta <= 0:
             return 0.0
         bps = (self.spread_bps + self.slippage_bps) / 10000.0
         return float(units_delta) * (bps + self.commission_per_unit_ret + self.trade_penalty_ret)
+
+    def _event_name(self, event_type: int) -> str:
+        if int(event_type) > 0:
+            return "ENTER_WINDOW"
+        if int(event_type) < 0:
+            return "EXIT_WINDOW"
+        return "NONE"
+
+    def _pending_name(self, pending: int) -> str:
+        if pending == PENDING_ENTER:
+            return "ENTER"
+        if pending == PENDING_EXIT:
+            return "EXIT"
+        if pending == PENDING_SWITCH:
+            return "SWITCH"
+        return "NONE"
+
+    def _event_spec_at_idx(self, idx: int) -> tuple[int, int, int, int]:
+        cur_dir = int(np.sign(self._htf_dir[idx]))
+        prev_dir = cur_dir if idx <= 0 else int(np.sign(self._htf_dir[idx - 1]))
+        if cur_dir == prev_dir:
+            return EVENT_NONE, PENDING_NONE, cur_dir, prev_dir
+        if prev_dir == 0 and cur_dir != 0:
+            return EVENT_ENTER, PENDING_ENTER, cur_dir, prev_dir
+        if prev_dir != 0 and cur_dir == 0:
+            return EVENT_EXIT, PENDING_EXIT, 0, prev_dir
+        return EVENT_EXIT, PENDING_SWITCH, cur_dir, prev_dir
+
+    def _segment_return(self, units: int, direction: int, start_idx: int, end_idx: int) -> float:
+        if units <= 0 or direction == 0 or end_idx <= start_idx:
+            return 0.0
+        p0 = float(self._close[start_idx])
+        p1 = float(self._close[end_idx])
+        if (not np.isfinite(p0)) or (not np.isfinite(p1)) or p0 <= 0.0:
+            return 0.0
+        return float(units) * float(direction) * (p1 / p0 - 1.0)
+
+    def _segment_mae(self, units: int, direction: int, start_idx: int, end_idx: int) -> float:
+        if units <= 0 or direction == 0 or end_idx <= start_idx:
+            return 0.0
+        p0 = float(self._close[start_idx])
+        if (not np.isfinite(p0)) or p0 <= 0.0:
+            return 0.0
+        lo = start_idx + 1
+        hi = min(end_idx + 1, len(self._low))
+        if hi <= lo:
+            return 0.0
+        if direction > 0:
+            adverse = np.maximum(0.0, (p0 - self._low[lo:hi]) / p0)
+        else:
+            adverse = np.maximum(0.0, (self._high[lo:hi] - p0) / p0)
+        if adverse.size == 0:
+            return 0.0
+        mae = float(np.nanmax(adverse))
+        if not np.isfinite(mae):
+            return 0.0
+        return mae * float(units)
+
+    def _timing_reward_vs_immediate(
+        self,
+        *,
+        event_start_idx: int,
+        exec_idx: int,
+        horizon_idx: int,
+        pending: int,
+        target_dir: int,
+        prev_dir: int,
+        prev_pos_units: int,
+    ) -> tuple[float, float, float, float, float]:
+        """
+        Returns:
+            agent_net, baseline_net, mae_penalty, agent_gross, baseline_gross
+        """
+        horizon_idx = int(max(exec_idx, min(horizon_idx, len(self._close) - 1)))
+        units_new = int(min(self.entry_units, self.max_units))
+        units_old = int(abs(prev_pos_units))
+        if pending == PENDING_ENTER:
+            agent_gross = self._segment_return(units_new, target_dir, exec_idx, horizon_idx)
+            baseline_gross = self._segment_return(units_new, target_dir, event_start_idx, horizon_idx)
+            agent_cost = self._trade_cost(units_new)
+            baseline_cost = self._trade_cost(units_new)
+            mae = self._segment_mae(units_new, target_dir, exec_idx, horizon_idx)
+        elif pending == PENDING_EXIT:
+            hold_dir = int(np.sign(prev_dir))
+            agent_gross = self._segment_return(units_old, hold_dir, event_start_idx, exec_idx)
+            baseline_gross = 0.0
+            agent_cost = self._trade_cost(units_old)
+            baseline_cost = self._trade_cost(units_old)
+            mae = self._segment_mae(units_old, hold_dir, event_start_idx, exec_idx)
+        elif pending == PENDING_SWITCH:
+            hold_dir = int(np.sign(prev_dir))
+            agent_gross = self._segment_return(units_old, hold_dir, event_start_idx, exec_idx)
+            agent_gross += self._segment_return(units_new, target_dir, exec_idx, horizon_idx)
+            baseline_gross = self._segment_return(units_new, target_dir, event_start_idx, horizon_idx)
+            agent_cost = self._trade_cost(units_old + units_new)
+            baseline_cost = self._trade_cost(units_old + units_new)
+            mae = self._segment_mae(units_old, hold_dir, event_start_idx, exec_idx)
+            mae += self._segment_mae(units_new, target_dir, exec_idx, horizon_idx)
+        else:
+            return 0.0, 0.0, 0.0, 0.0, 0.0
+
+        agent_net = agent_gross - agent_cost
+        baseline_net = baseline_gross - baseline_cost
+        mae_penalty = self.mae_penalty_lambda * mae
+        return agent_net, baseline_net, mae_penalty, agent_gross, baseline_gross
+
+    def _apply_pending_order(self, pending: int, target_dir: int) -> tuple[int, bool]:
+        prev = int(self.agent_pos_units)
+        pos = prev
+        if pending == PENDING_ENTER:
+            if prev == 0 and int(target_dir) != 0:
+                pos = int(target_dir) * min(self.entry_units, self.max_units)
+        elif pending == PENDING_EXIT:
+            pos = 0
+        elif pending == PENDING_SWITCH:
+            if int(target_dir) == 0:
+                pos = 0
+            else:
+                pos = int(target_dir) * min(self.entry_units, self.max_units)
+        self.agent_pos_units = int(pos)
+        traded_units = abs(int(self.agent_pos_units) - prev)
+        return traded_units, self.agent_pos_units != prev
+
+    def _update_agent_position_state(self, prev_agent: int, price: float) -> None:
+        new_agent = int(self.agent_pos_units)
+        if prev_agent == new_agent:
+            return
+        prev_abs = abs(int(prev_agent))
+        new_abs = abs(int(new_agent))
+        prev_sign = int(np.sign(prev_agent))
+        new_sign = int(np.sign(new_agent))
+
+        if prev_abs > 0 and np.isfinite(self.agent_entry_price) and float(self.agent_entry_price) > 0.0:
+            entry = float(self.agent_entry_price)
+            if new_abs == 0 or new_sign != prev_sign:
+                self.realized_agent += prev_sign * (price / entry - 1.0) * prev_abs
+            elif new_abs < prev_abs:
+                closed = prev_abs - new_abs
+                self.realized_agent += prev_sign * (price / entry - 1.0) * closed
+
+        if new_abs == 0:
+            self.agent_entry_price = np.nan
+            self.time_in_pos = 0
+            return
+
+        if prev_abs == 0 or new_sign != prev_sign:
+            self.agent_entry_price = price
+            self.time_in_pos = 0
+            return
+
+        if new_abs > prev_abs and np.isfinite(self.agent_entry_price):
+            add_units = new_abs - prev_abs
+            self.agent_entry_price = (
+                prev_abs * float(self.agent_entry_price) + add_units * price
+            ) / max(1, prev_abs + add_units)
 
     def _get_obs(self) -> np.ndarray:
         obs = np.empty(self.obs_dim, dtype=np.float32)
@@ -196,6 +372,8 @@ class DirectionGatedExecutionEnv:
             obs[cursor + 1] = float(self.baseline_pos_units / max(1, self.baseline_units))
             obs[cursor + 2] = float(np.tanh(self.unrealized * 100.0))
             obs[cursor + 3] = float(np.clip(self._time_since_flip[self._i] / 30.0, 0.0, 1.0))
+            obs[cursor + 4] = float(self.current_event_type)
+            obs[cursor + 5] = float(1.0 if self.pending_order != PENDING_NONE else 0.0)
         return obs
 
     def reset(self, day_ptr: int | None = None) -> np.ndarray:
@@ -207,47 +385,6 @@ class DirectionGatedExecutionEnv:
         self._ep_end = int(self._episode_ends[self._ep_ptr])
         self._reset_state()
         return self._get_obs()
-
-    def _apply_agent_action(
-        self,
-        action_idx: int,
-        desired_dir: int,
-        time_since_flip_min: float,
-    ) -> tuple[int, bool]:
-        prev = int(self.agent_pos_units)
-        pos = prev
-        if self.force_flat_on_dir_flip and desired_dir != 0 and pos != 0 and int(np.sign(pos)) != desired_dir:
-            pos = 0
-        abs_pos = abs(pos)
-        entry_window_ok = (
-            float(time_since_flip_min) >= float(self.entry_min_since_flip)
-            and float(time_since_flip_min) <= float(self.entry_max_since_flip)
-        )
-
-        if action_idx == ACTION_WAIT:
-            pass
-        elif action_idx == ACTION_ENTER:
-            if desired_dir != 0 and pos == 0 and entry_window_ok:
-                pos = desired_dir * min(self.entry_units, self.max_units)
-        elif action_idx == ACTION_SCALE_IN:
-            if desired_dir != 0 and entry_window_ok and (pos == 0 or int(np.sign(pos)) == desired_dir):
-                new_abs = min(self.max_units, abs_pos + 1)
-                pos = desired_dir * new_abs
-        elif action_idx == ACTION_SCALE_OUT:
-            if pos != 0:
-                new_abs = max(0, abs_pos - 1)
-                pos = int(np.sign(pos)) * new_abs
-        elif action_idx == ACTION_EXIT:
-            pos = 0
-
-        if desired_dir == 0 and action_idx in (ACTION_ENTER, ACTION_SCALE_IN):
-            pos = prev
-        if pos != 0 and desired_dir != 0 and int(np.sign(pos)) != desired_dir:
-            pos = prev
-
-        self.agent_pos_units = int(pos)
-        traded_units = abs(int(self.agent_pos_units) - prev)
-        return traded_units, self.agent_pos_units != prev
 
     def _apply_baseline(self, desired_dir: int) -> int:
         prev = int(self.baseline_pos_units)
@@ -267,50 +404,99 @@ class DirectionGatedExecutionEnv:
 
         prev_agent = int(self.agent_pos_units)
         prev_base = int(self.baseline_pos_units)
+        event_started = False
+        event_type_now, pending_now, target_dir_now, prev_dir_now = self._event_spec_at_idx(self._i)
+        if pending_now != PENDING_NONE:
+            self.pending_order = pending_now
+            self.pending_target_dir = int(target_dir_now)
+            self.current_event_type = int(event_type_now)
+            self.event_started_at_idx = int(self._i)
+            self.event_prev_dir = int(prev_dir_now)
+            self.event_start_pos_units = int(prev_agent)
+            self.event_start_price = float(price)
+            self.event_target_dir = int(target_dir_now)
+            event_started = True
 
-        agent_trade_units, did_trade = self._apply_agent_action(action_idx, desired_dir, time_since_flip)
+        active_event_type = int(self.current_event_type)
+        active_pending_name = self._pending_name(self.pending_order)
+        active_pending_target_dir = int(self.pending_target_dir)
+        in_window = (
+            float(time_since_flip) >= float(self.entry_min_since_flip)
+            and float(time_since_flip) <= float(self.entry_max_since_flip)
+        )
+        forced_execute = bool(
+            self.pending_order != PENDING_NONE
+            and float(time_since_flip) > float(self.entry_max_since_flip)
+        )
+        execute_intent = action_idx == ACTION_EXECUTE
+        execute_now = bool(
+            self.pending_order != PENDING_NONE
+            and ((execute_intent and in_window) or forced_execute)
+        )
+        reward_improvement = 0.0
+        agent_net = 0.0
+        base_net = 0.0
+        timing_mae_pen = 0.0
+        timing_agent_gross = 0.0
+        timing_base_gross = 0.0
+        pending_for_exec = int(self.pending_order)
+        target_for_exec = int(self.pending_target_dir)
+        event_start_idx = int(self.event_started_at_idx)
+        event_prev_dir = int(self.event_prev_dir)
+        event_prev_pos = int(self.event_start_pos_units)
+        if execute_now:
+            (
+                agent_net,
+                base_net,
+                timing_mae_pen,
+                timing_agent_gross,
+                timing_base_gross,
+            ) = self._timing_reward_vs_immediate(
+                event_start_idx=event_start_idx,
+                exec_idx=int(self._i),
+                horizon_idx=int(self._ep_end),
+                pending=pending_for_exec,
+                target_dir=target_for_exec,
+                prev_dir=event_prev_dir,
+                prev_pos_units=event_prev_pos,
+            )
+            reward_improvement = float(agent_net - base_net)
+            agent_trade_units, did_trade = self._apply_pending_order(
+                self.pending_order,
+                self.pending_target_dir,
+            )
+            self.pending_order = PENDING_NONE
+            self.pending_target_dir = 0
+            self.current_event_type = EVENT_NONE
+            self.event_started_at_idx = -1
+            self.event_prev_dir = 0
+            self.event_start_pos_units = int(self.agent_pos_units)
+            self.event_start_price = np.nan
+            self.event_target_dir = 0
+        else:
+            agent_trade_units, did_trade = 0, False
+
+        if self.force_flat_on_dir_flip and desired_dir != 0 and self.agent_pos_units != 0:
+            if int(np.sign(self.agent_pos_units)) != desired_dir:
+                prev_force = int(self.agent_pos_units)
+                self.agent_pos_units = 0
+                agent_trade_units += abs(prev_force)
+                did_trade = did_trade or (prev_force != 0)
+                self.pending_order = PENDING_NONE
+                self.pending_target_dir = 0
+                self.current_event_type = EVENT_NONE
+                self.event_started_at_idx = -1
+                self.event_prev_dir = 0
+                self.event_start_pos_units = int(self.agent_pos_units)
+                self.event_start_price = np.nan
+                self.event_target_dir = 0
+
         baseline_trade_units = self._apply_baseline(desired_dir)
-
-        if prev_agent == 0 and self.agent_pos_units != 0:
-            self.agent_entry_price = price
-        elif prev_agent != 0 and self.agent_pos_units == 0:
-            if np.isfinite(self.agent_entry_price) and self.agent_entry_price > 0:
-                signed = int(np.sign(prev_agent))
-                self.realized_agent += signed * (price / self.agent_entry_price - 1.0) * abs(prev_agent)
-            self.agent_entry_price = np.nan
-            self.time_in_pos = 0
-        elif prev_agent != 0 and self.agent_pos_units != 0 and np.sign(prev_agent) == np.sign(self.agent_pos_units):
-            if abs(self.agent_pos_units) > abs(prev_agent) and np.isfinite(self.agent_entry_price):
-                add_units = abs(self.agent_pos_units) - abs(prev_agent)
-                old_units = abs(prev_agent)
-                self.agent_entry_price = (
-                    old_units * float(self.agent_entry_price) + add_units * price
-                ) / max(1, old_units + add_units)
-
-        agent_cost = self._trade_cost(agent_trade_units)
-        base_cost = self._trade_cost(baseline_trade_units)
-        agent_gross = float(self.agent_pos_units) * ret_next
-        base_gross = float(self.baseline_pos_units) * ret_next
-        agent_net = agent_gross - agent_cost
-        base_net = base_gross - base_cost
-        improvement = agent_net - base_net
-
-        mae_pen = 0.0
-        if self.agent_pos_units != 0 and np.isfinite(self.agent_entry_price) and self.agent_entry_price > 0 and self._i + 1 < len(self.df):
-            entry = float(self.agent_entry_price)
-            high_n = float(self._high[self._i + 1])
-            low_n = float(self._low[self._i + 1])
-            if self.agent_pos_units > 0:
-                adverse = max(0.0, (entry - low_n) / entry)
-            else:
-                adverse = max(0.0, (high_n - entry) / entry)
-            mae_pen = self.mae_penalty_lambda * adverse * abs(self.agent_pos_units)
-
-        churn_pen = self.churn_penalty_ret * float(agent_trade_units)
+        self._update_agent_position_state(prev_agent, price)
+        mae_pen = float(timing_mae_pen if execute_now else 0.0)
+        churn_pen = 0.0
         low_conf_pen = 0.0
-        if self.agent_pos_units != 0 and htf_conf < self.low_conf_threshold:
-            low_conf_pen = self.low_conf_penalty_lambda * (self.low_conf_threshold - htf_conf) * abs(self.agent_pos_units)
-        reward = improvement - mae_pen - churn_pen - low_conf_pen
+        reward = float(reward_improvement - mae_pen) if execute_now else 0.0
 
         if self.agent_pos_units != 0 and np.isfinite(self.agent_entry_price) and self.agent_entry_price > 0:
             next_price = price * (1.0 + ret_next)
@@ -323,19 +509,29 @@ class DirectionGatedExecutionEnv:
         info = {
             "timestamp": self.df.loc[self._i, "timestamp"],
             "action_idx": action_idx,
+            "action_name": "EXECUTE" if action_idx == ACTION_EXECUTE else "WAIT",
             "did_trade": bool(did_trade),
+            "did_execute_event": bool(execute_now),
+            "forced_execute_event": bool(forced_execute and execute_now),
             "agent_pos_units": int(self.agent_pos_units),
             "baseline_pos_units": int(self.baseline_pos_units),
             "htf_dir": desired_dir,
             "htf_conf": htf_conf,
             "time_since_flip_min": time_since_flip,
+            "event_started": bool(event_started),
+            "event_type_code": active_event_type,
+            "event_type": self._event_name(active_event_type),
+            "pending_order": active_pending_name,
+            "pending_target_dir": active_pending_target_dir,
             "reward": float(reward),
-            "reward_improvement": float(improvement),
+            "reward_improvement": float(reward_improvement),
             "agent_net": float(agent_net),
             "baseline_net": float(base_net),
             "mae_penalty": float(mae_pen),
             "churn_penalty": float(churn_pen),
             "low_conf_penalty": float(low_conf_pen),
+            "timing_agent_gross": float(timing_agent_gross),
+            "timing_baseline_gross": float(timing_base_gross),
             "agent_trade_units": int(agent_trade_units),
             "baseline_trade_units": int(baseline_trade_units),
             "ret_next": float(ret_next),

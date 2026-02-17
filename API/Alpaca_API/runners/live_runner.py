@@ -17,8 +17,9 @@ from alpaca.data.enums import DataFeed
 from ..market_data.bar_aggregator import OhlcvAggregator
 from ..market_data.bar_buffer import BarRingBuffer
 from ..market_data.fetch_intraday import fetch_intraday
-from ..inference.live_inference import LiveInferenceEngine, LivePPOAgent
+from ..inference.live_inference import LiveInferenceEngine, LivePPOAgent, build_15m
 from ..market_data.live_stream import AlpacaBarStreamer
+from Policy.execution_latch import DirectionExecutionLatch
 from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
 
 
@@ -94,6 +95,22 @@ def _format_ts_local(ts: object, *, tz: str = "America/New_York") -> str:
         return str(ts)
 
 
+def _action_to_position(action: float | int, *, deadband: float = 0.0) -> int:
+    try:
+        a = float(action)
+    except (TypeError, ValueError):
+        return 0
+    if not np.isfinite(a):
+        return 0
+    if abs(a - 2.0) < 1e-9:
+        return -1
+    if abs(a - 1.0) < 1e-9:
+        return 1
+    if abs(a) <= max(0.0, float(deadband)):
+        return 0
+    return 1 if a > 0.0 else -1
+
+
 def _make_1m_handler(*, print_tz: str) -> Callable[[str, dict, BarRingBuffer], None]:
     def _handler(symbol: str, bar: dict, _buffer: BarRingBuffer) -> None:
         ts = _format_ts_local(bar.get("timestamp"), tz=print_tz)
@@ -109,6 +126,7 @@ def _make_15m_handler(
     inference: LiveInferenceEngine,
     print_15m: bool,
     print_tz: str,
+    execution_latches: dict[str, DirectionExecutionLatch],
     order_policies: dict[str, OptionOrderPolicy] | None = None,
 ) -> Callable[[str, dict, BarRingBuffer], None]:
     def _handler(symbol: str, bar15: dict, buffer: BarRingBuffer) -> None:
@@ -122,10 +140,17 @@ def _make_15m_handler(
             order_policies[symbol].on_15m_bar(closed_bar=bar15)
         action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
         if action is not None:
-            print(f"{symbol} inference action: {float(action):+.4f}")
+            raw_action = float(action)
+            raw_pos = _action_to_position(raw_action)
+            gate = execution_latches[symbol].step(raw_pos)
+            exec_pos = int(gate.executed_pos)
+            print(
+                f"{symbol} inference raw={raw_action:+.4f} raw_pos={raw_pos:+d} "
+                f"exec={exec_pos:+d} gate={gate.status}"
+            )
             if order_policies is not None and symbol in order_policies:
                 result = order_policies[symbol].on_decision(
-                    action=float(action),
+                    action=float(exec_pos),
                     closed_bar=bar15,
                     update_bar_state=False,
                 )
@@ -206,7 +231,9 @@ def _prefill_from_alpaca(
     split_dataset_name: str = "15min",
     split_x_filename: str = "X_15min_tree.parquet",
     prepend_split_test_warmup: bool = True,
+    feed: DataFeed = DataFeed.IEX,
 ) -> None:
+    feed_enum = feed if isinstance(feed, DataFeed) else _parse_feed(str(feed))
     effective_tail = int(tail) if tail is not None else int(processor._buffer_size)
     for symbol in symbols:
         fetched_df = fetch_intraday(
@@ -214,6 +241,7 @@ def _prefill_from_alpaca(
             start=start,
             timeframe="1Min",
             limit=100000,
+            feed=feed_enum,
             save_path=None,
         )
         frames: list[pd.DataFrame] = []
@@ -241,6 +269,23 @@ def _prefill_from_alpaca(
                 fetched_df = fetched_df.tail(effective_tail)
             used_fetched_count = int(len(fetched_df))
             frames.append(fetched_df)
+            last_fetch_ts = pd.to_datetime(
+                fetched_df["timestamp"],
+                utc=True,
+                errors="coerce",
+            ).max()
+            if pd.notna(last_fetch_ts):
+                now_ny = pd.Timestamp.now(tz="America/New_York")
+                last_fetch_ny = last_fetch_ts.tz_convert("America/New_York")
+                print(
+                    f"[live] Prefill {symbol}: latest fetched 1m bar="
+                    f"{last_fetch_ny.isoformat()} (feed={feed_enum.value})."
+                )
+                if last_fetch_ny.normalize() < now_ny.normalize():
+                    print(
+                        f"[live] Prefill {symbol}: no fetched bars on {now_ny.date()} yet; "
+                        "market may be closed/holiday or selected feed has no newer bars."
+                    )
 
         if not frames:
             print(f"[live] Prefill skipped: no historical bars for {symbol}.")
@@ -382,6 +427,7 @@ def _run_startup_catchup_decision(
     processor: LiveBarProcessor,
     inference: LiveInferenceEngine,
     order_policies: dict[str, OptionOrderPolicy],
+    execution_latches: dict[str, DirectionExecutionLatch] | None = None,
     latest_closed_by_symbol: dict[str, dict],
     symbols: list[str],
     print_tz: str,
@@ -423,18 +469,108 @@ def _run_startup_catchup_decision(
             print(f"[live] Startup catch-up {symbol}: no action (insufficient features/bars).")
             continue
 
+        action_raw = float(action)
+        action_pos = _action_to_position(action_raw)
+        gate_status = "disabled"
+        exec_pos = action_pos
+        if execution_latches is not None and symbol in execution_latches:
+            gate = execution_latches[symbol].step(action_pos)
+            exec_pos = int(gate.executed_pos)
+            gate_status = str(gate.status)
+
         print(
             f"[live] Startup catch-up {symbol}: ts={_format_ts_local(ts, tz=print_tz)} "
-            f"action={float(action):+.4f}"
+            f"raw_action={action_raw:+.4f} raw_pos={action_pos:+d} "
+            f"exec_pos={exec_pos:+d} gate={gate_status}"
         )
         result = order_policies[symbol].on_decision(
-            action=float(action),
+            action=float(exec_pos),
             closed_bar=bar15,
             update_bar_state=False,
         )
         event = str(result.get("event", "unknown"))
         if event not in {"hold", "no_change"}:
             print(f"[live] Startup catch-up {symbol} order_policy event={event} details={result}")
+
+
+def _replay_warmup_actions_from_prefill(
+    *,
+    processor: LiveBarProcessor,
+    inference: LiveInferenceEngine,
+    agent: LivePPOAgent | None,
+    execution_latches: dict[str, DirectionExecutionLatch],
+    symbols: list[str],
+    interval_minutes: int,
+    print_tz: str,
+) -> dict[str, int]:
+    if agent is None:
+        return {}
+    counts: dict[str, int] = {}
+    rule = str(getattr(inference, "_rule", f"{int(interval_minutes)}min"))
+    label = str(getattr(inference, "_label", "left"))
+    closed = str(getattr(inference, "_closed", "left"))
+    tz = getattr(inference, "_tz", None)
+    assume_tz = str(getattr(inference, "_assume_tz", "UTC"))
+
+    for symbol in symbols:
+        buffer = processor._buffers.get(symbol)
+        if buffer is None:
+            continue
+        df_1m = buffer.to_dataframe()
+        if df_1m is None or df_1m.empty:
+            continue
+        if not isinstance(df_1m.index, pd.DatetimeIndex):
+            if "timestamp" not in df_1m.columns:
+                continue
+            df_1m = df_1m.copy()
+            df_1m["timestamp"] = pd.to_datetime(df_1m["timestamp"], utc=True, errors="coerce")
+            df_1m = df_1m.dropna(subset=["timestamp"]).set_index("timestamp")
+        else:
+            df_1m = df_1m.copy()
+        if df_1m.index.tz is None:
+            df_1m.index = df_1m.index.tz_localize(assume_tz)
+        df_1m_utc = df_1m.sort_index().tz_convert("UTC")
+
+        try:
+            df_15m = build_15m(
+                df_1m_utc,
+                rule=rule,
+                label=label,
+                closed=closed,
+                tz=tz,
+                assume_tz=assume_tz,
+            )
+        except Exception:
+            continue
+        if df_15m.empty:
+            continue
+
+        action_count = 0
+        try:
+            records = agent.replay_warmup_actions(
+                df_1m=df_1m_utc,
+                df_15m=df_15m,
+                apply_ga_probs=True,
+            )
+        except Exception:
+            records = []
+        for rec in records:
+            ts = pd.to_datetime(rec.get("timestamp"), utc=True, errors="coerce")
+            if pd.isna(ts):
+                continue
+            raw_action = float(rec.get("action", 0.0))
+            raw_pos = _action_to_position(raw_action)
+            gate = execution_latches[symbol].step(raw_pos)
+            exec_pos = int(gate.executed_pos)
+            print(
+                f"[live] warmup {symbol} 15m={_format_ts_local(ts, tz=print_tz)} "
+                f"raw={raw_action:+.4f} raw_pos={raw_pos:+d} exec={exec_pos:+d} gate={gate.status}"
+            )
+            action_count += 1
+
+        if action_count > 0:
+            counts[symbol] = action_count
+    return counts
 
 
 def _resolve_split_test_idx_path(*, split_root: Path, dataset_name: str, x_filename: str) -> Path | None:
@@ -657,6 +793,18 @@ def _parse_args() -> argparse.Namespace:
         help="Do not auto close existing option before flipping side.",
     )
     parser.add_argument(
+        "--exec-entry-confirm-bars",
+        type=int,
+        default=1,
+        help="Consecutive bars required to confirm a new entry while flat.",
+    )
+    parser.add_argument(
+        "--exec-exit-confirm-bars",
+        type=int,
+        default=2,
+        help="Consecutive bars required to confirm exit/flip while in-position.",
+    )
+    parser.add_argument(
         "--startup-catchup-order",
         action="store_true",
         help="On startup, evaluate the latest completed 15m bar from prefill and place any missed order immediately.",
@@ -734,6 +882,14 @@ def main() -> None:
         tz=args.tz,
         assume_tz=args.assume_tz,
     )
+    execution_latches: dict[str, DirectionExecutionLatch] = {
+        symbol: DirectionExecutionLatch(
+            entry_confirm_bars=max(1, int(args.exec_entry_confirm_bars)),
+            exit_confirm_bars=max(1, int(args.exec_exit_confirm_bars)),
+            initial_position=0,
+        )
+        for symbol in symbols
+    }
 
     order_policies: dict[str, OptionOrderPolicy] | None = None
     if args.enable_option_orders:
@@ -763,6 +919,9 @@ def main() -> None:
             for symbol in symbols:
                 try:
                     sync_result = order_policies[symbol].sync_from_broker()
+                    execution_latches[symbol].set_position(
+                        order_policies[symbol].snapshot_state().get("position", 0)
+                    )
                     print(f"[live] Startup sync {symbol}: {sync_result}")
                 except Exception as exc:
                     print(f"[live] Startup sync {symbol} failed: {exc}")
@@ -772,6 +931,7 @@ def main() -> None:
         inference=inference,
         print_15m=args.print_15m,
         print_tz=args.tz or "America/New_York",
+        execution_latches=execution_latches,
         order_policies=order_policies,
     )
 
@@ -804,9 +964,24 @@ def main() -> None:
                 split_dataset_name=args.ga_dataset_name,
                 split_x_filename=args.split_x_filename,
                 prepend_split_test_warmup=True,
+                feed=feed,
             )
         except Exception as exc:
             print(f"[live] Prefill fetch failed: {exc}")
+    if not args.no_agent:
+        warmup_action_counts = _replay_warmup_actions_from_prefill(
+            processor=processor,
+            inference=inference,
+            agent=agent,
+            execution_latches=execution_latches,
+            symbols=symbols,
+            interval_minutes=int(args.interval),
+            print_tz=args.tz or "America/New_York",
+        )
+        if warmup_action_counts:
+            print(f"[live] Warmup action history replayed: {warmup_action_counts}")
+        else:
+            print("[live] Warmup action replay: no actionable 15m decisions from prefill.")
     latest_closed_by_symbol: dict[str, dict] = {}
     if order_policies:
         latest_closed_by_symbol = _warmup_order_policies_from_prefill(
@@ -819,6 +994,7 @@ def main() -> None:
                 processor=processor,
                 inference=inference,
                 order_policies=order_policies,
+                execution_latches=execution_latches,
                 latest_closed_by_symbol=latest_closed_by_symbol,
                 symbols=symbols,
                 print_tz=args.tz or "America/New_York",

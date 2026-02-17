@@ -13,32 +13,31 @@ if str(_POLICY_ROOT) not in sys.path:
 
 from Data.retrieve_data import normalize_ticker
 from Agent.train import train_ppo
+from training_logging import log_training_run
 from Execution_Agent.data import (
     build_execution_frame,
     default_execution_feature_cols,
     ensure_numeric_non_nan,
 )
 from Execution_Agent.env import (
-    ACTION_ENTER,
-    ACTION_EXIT,
-    ACTION_SCALE_IN,
-    ACTION_SCALE_OUT,
+    ACTION_EXECUTE,
     ACTION_WAIT,
     N_EXEC_ACTIONS,
     ExecutionEnvConfig,
     make_execution_env,
 )
 from Execution_Agent.eval import evaluate_policy_with_trace, summarize_trace
-from Execution_Agent.oracle import OracleConfig, build_oracle_entry_labels, train_oracle_sniper
+from Execution_Agent.oracle import (
+    OracleConfig,
+    build_oracle_event_labels,
+    train_oracle_sniper_walk_forward,
+)
 
 
 def _action_map() -> dict[int, str]:
     return {
         ACTION_WAIT: "WAIT",
-        ACTION_ENTER: "ENTER",
-        ACTION_SCALE_IN: "SCALE_IN",
-        ACTION_SCALE_OUT: "SCALE_OUT",
-        ACTION_EXIT: "EXIT",
+        ACTION_EXECUTE: "EXECUTE",
     }
 
 
@@ -58,6 +57,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--oracle-horizon-min", type=int, default=20)
     p.add_argument("--oracle-mae-weight", type=float, default=1.5)
     p.add_argument("--oracle-cost-ret", type=float, default=0.0002)
+    p.add_argument("--oracle-oof-folds", type=int, default=5)
+    p.add_argument("--oracle-oof-initial-size", type=int, default=0)
 
     p.add_argument("--total-timesteps", type=int, default=1_500_000)
     p.add_argument("--rollout-len", type=int, default=1024)
@@ -71,6 +72,23 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--entropy-coef", type=float, default=0.004)
     p.add_argument("--value-coef", type=float, default=0.5)
     p.add_argument("--max-grad-norm", type=float, default=0.5)
+    p.add_argument("--weight-decay", type=float, default=1e-6)
+    p.add_argument("--target-kl", type=float, default=0.015)
+    p.add_argument("--policy-hidden-size", type=int, default=128)
+    p.add_argument("--no-policy-head-mlp", action="store_true")
+    p.add_argument("--policy-layer-norm", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--policy-dropout-p", type=float, default=0.05)
+    p.add_argument("--eval-every-updates", type=int, default=5)
+    p.add_argument("--eval-n-days", type=int, default=0)
+    p.add_argument("--early-stop-patience-updates", type=int, default=8)
+    p.add_argument(
+        "--early-stop-metric",
+        type=str,
+        default="pnl_net_mean",
+        choices=["pnl_net_mean", "pnl_net_sum", "pnl_mean", "pnl_sum", "costs_mean", "trades_mean"],
+    )
+    p.add_argument("--early-stop-min-delta", type=float, default=0.0)
+    p.add_argument("--no-restore-best-on-early-stop", action="store_true")
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--device", default="auto")
 
@@ -93,7 +111,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--commission-per-unit-ret", type=float, default=0.0)
     p.add_argument("--trade-penalty-ret", type=float, default=0.00002)
     p.add_argument("--churn-penalty-ret", type=float, default=0.00003)
-    p.add_argument("--mae-penalty-lambda", type=float, default=1.0)
+    p.add_argument("--mae-penalty-lambda", type=float, default=0.25)
     p.add_argument("--low-conf-threshold", type=float, default=0.35)
     p.add_argument("--low-conf-penalty-lambda", type=float, default=0.00015)
     return p.parse_args()
@@ -122,6 +140,32 @@ def _build_env_cfg(args: argparse.Namespace) -> ExecutionEnvConfig:
     )
 
 
+def _extract_best_eval_metrics(
+    history_df: pd.DataFrame,
+    metric_name: str,
+) -> dict[str, float | str]:
+    if history_df.empty:
+        return {}
+    out: dict[str, float | str] = {"metric_name": str(metric_name)}
+    if "eval_metric" in history_df.columns:
+        eval_series = pd.to_numeric(history_df["eval_metric"], errors="coerce").dropna()
+        if not eval_series.empty:
+            out["final_eval_metric"] = float(eval_series.iloc[-1])
+    if "best_eval_metric" in history_df.columns:
+        best_series = pd.to_numeric(history_df["best_eval_metric"], errors="coerce").dropna()
+        if not best_series.empty:
+            best_val = float(best_series.iloc[-1])
+            out["best_eval_metric"] = best_val
+            matches = history_df.loc[
+                pd.to_numeric(history_df["best_eval_metric"], errors="coerce") == best_val
+            ]
+            if not matches.empty and "steps" in matches.columns:
+                out["best_eval_metric_steps"] = float(
+                    pd.to_numeric(matches["steps"], errors="coerce").iloc[0]
+                )
+    return out
+
+
 def main() -> None:
     args = _parse_args()
     output_dir = Path(args.output_dir)
@@ -133,30 +177,99 @@ def main() -> None:
         raw_1m_path=args.raw_1m_parquet,
         htf_intent_path=args.htf_intent_path,
         tz=args.tz,
+        allow_exact_matches=False,
     )
+    oracle_metrics: dict[str, float] = {}
+    oracle_artifacts: dict[str, str] = {}
 
     if not args.skip_oracle:
-        print("[execution_train] Building oracle entry labels...")
+        print("[execution_train] Building oracle event labels...")
         oracle_cfg = OracleConfig(
             max_wait_min=int(args.oracle_max_wait_min),
             horizon_min=int(args.oracle_horizon_min),
             mae_weight=float(args.oracle_mae_weight),
             cost_per_trade_ret=float(args.oracle_cost_ret),
         )
-        df = build_oracle_entry_labels(df, cfg=oracle_cfg)
+        df = build_oracle_event_labels(df, cfg=oracle_cfg)
         pre_oracle_features = default_execution_feature_cols(df)
-        pre_oracle_features = [c for c in pre_oracle_features if c not in {"oracle_enter", "oracle_score"}]
-        sniper_prob, metrics = train_oracle_sniper(
+        oof_init = int(args.oracle_oof_initial_size)
+        enter_oof, enter_full, enter_metrics = train_oracle_sniper_walk_forward(
             df,
             feature_cols=pre_oracle_features,
-            save_model_path=output_dir / "oracle_sniper_xgb.json",
+            label_col="oracle_enter",
+            n_folds=int(args.oracle_oof_folds),
+            initial_train_size=(None if oof_init <= 0 else oof_init),
+            random_seed=int(args.seed),
+            save_full_model_path=output_dir / "oracle_enter_xgb.json",
+            event_window_max_wait=int(args.oracle_max_wait_min),
         )
-        df["sniper_enter_prob"] = sniper_prob
-        print("[execution_train] Oracle metrics:", metrics)
+        exit_oof, exit_full, exit_metrics = train_oracle_sniper_walk_forward(
+            df,
+            feature_cols=pre_oracle_features,
+            label_col="oracle_exit",
+            n_folds=int(args.oracle_oof_folds),
+            initial_train_size=(None if oof_init <= 0 else oof_init),
+            random_seed=int(args.seed) + 101,
+            save_full_model_path=output_dir / "oracle_exit_xgb.json",
+            event_window_max_wait=int(args.oracle_max_wait_min),
+        )
+
+        # Use OOF predictions for RL features; warmup rows (no OOF) get causal priors.
+        enter_causal_prior = (
+            pd.to_numeric(df["oracle_enter"], errors="coerce").fillna(0.0).astype(float).expanding(min_periods=1).mean().shift(1).fillna(0.0)
+        )
+        exit_causal_prior = (
+            pd.to_numeric(df["oracle_exit"], errors="coerce").fillna(0.0).astype(float).expanding(min_periods=1).mean().shift(1).fillna(0.0)
+        )
+        sniper_enter_prob = (
+            pd.to_numeric(enter_oof, errors="coerce")
+            .astype(float)
+            .fillna(enter_causal_prior)
+            .clip(0.0, 1.0)
+        )
+        sniper_exit_prob = (
+            pd.to_numeric(exit_oof, errors="coerce")
+            .astype(float)
+            .fillna(exit_causal_prior)
+            .clip(0.0, 1.0)
+        )
+        df["sniper_enter_prob"] = sniper_enter_prob
+        df["sniper_exit_prob"] = sniper_exit_prob
+        oracle_probs_out = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(df["timestamp"], errors="coerce"),
+                "oracle_enter": pd.to_numeric(df["oracle_enter"], errors="coerce").fillna(0.0),
+                "oracle_exit": pd.to_numeric(df["oracle_exit"], errors="coerce").fillna(0.0),
+                "oracle_score": pd.to_numeric(df["oracle_score"], errors="coerce"),
+                "oracle_exit_score": pd.to_numeric(df["oracle_exit_score"], errors="coerce"),
+                "sniper_enter_prob_oof": pd.to_numeric(enter_oof, errors="coerce"),
+                "sniper_enter_prob_full": pd.to_numeric(enter_full, errors="coerce"),
+                "sniper_exit_prob_oof": pd.to_numeric(exit_oof, errors="coerce"),
+                "sniper_exit_prob_full": pd.to_numeric(exit_full, errors="coerce"),
+                "sniper_enter_prob": sniper_enter_prob,
+                "sniper_exit_prob": sniper_exit_prob,
+            }
+        )
+        oracle_probs_out.to_parquet(output_dir / "oracle_sniper_probs.parquet", index=False)
+        combined_metrics = {
+            **{f"enter_{k}": v for k, v in enter_metrics.items()},
+            **{f"exit_{k}": v for k, v in exit_metrics.items()},
+        }
+        oracle_metrics = combined_metrics
+        oracle_artifacts = {
+            "oracle_enter_model": str(output_dir / "oracle_enter_xgb.json"),
+            "oracle_exit_model": str(output_dir / "oracle_exit_xgb.json"),
+            "oracle_probs_parquet": str(output_dir / "oracle_sniper_probs.parquet"),
+        }
+        print("[execution_train] Oracle metrics:", combined_metrics)
     else:
         df["oracle_enter"] = 0
+        df["oracle_exit"] = 0
         df["oracle_score"] = 0.0
+        df["oracle_exit_score"] = 0.0
         df["sniper_enter_prob"] = 0.0
+        df["sniper_exit_prob"] = 0.0
+        oracle_metrics = {"oracle_skipped": 1.0}
 
     feature_cols = default_execution_feature_cols(df)
     if args.drop_na:
@@ -177,6 +290,18 @@ def main() -> None:
 
     env_cfg = _build_env_cfg(args)
     train_env = make_execution_env(df=train_df, feature_cols=feature_cols, config=env_cfg)
+    eval_env_for_es = None
+    if int(args.eval_every_updates) > 0:
+        if test_df.empty:
+            print(
+                "[execution_train] Early-stop eval requested but test split is empty; disabling eval monitor."
+            )
+        else:
+            eval_env_for_es = make_execution_env(
+                df=test_df,
+                feature_cols=feature_cols,
+                config=env_cfg,
+            )
 
     checkpoint_dir = Path(args.checkpoint_dir)
     if not checkpoint_dir.is_absolute():
@@ -215,9 +340,29 @@ def main() -> None:
             "env_overrides": env_cfg.__dict__,
             "ticker": normalize_ticker(args.ticker),
         },
+        hidden_size=int(args.policy_hidden_size),
+        policy_head_mlp=not bool(args.no_policy_head_mlp),
+        policy_layer_norm=bool(args.policy_layer_norm),
+        policy_dropout_p=float(args.policy_dropout_p),
+        weight_decay=float(args.weight_decay),
+        target_kl=float(args.target_kl),
+        eval_env=eval_env_for_es,
+        eval_every_updates=int(args.eval_every_updates),
+        eval_n_days=int(args.eval_n_days),
+        early_stop_patience_updates=int(args.early_stop_patience_updates),
+        early_stop_metric=str(args.early_stop_metric),
+        early_stop_min_delta=float(args.early_stop_min_delta),
+        early_stop_best_model_path=(
+            str(output_dir / "ppo_model_best.pt")
+            if int(args.eval_every_updates) > 0 and int(args.early_stop_patience_updates) > 0
+            else None
+        ),
+        restore_best_on_early_stop=not bool(args.no_restore_best_on_early_stop),
     )
 
-    pd.DataFrame(history).to_csv(output_dir / "ppo_train_metrics.csv", index=False)
+    history_df = pd.DataFrame(history)
+    history_csv_path = output_dir / "ppo_train_metrics.csv"
+    history_df.to_csv(history_csv_path, index=False)
     model_path = output_dir / "ppo_model.pt"
     torch.save(
         {
@@ -225,6 +370,13 @@ def main() -> None:
             "obs_dim": train_env.obs_dim,
             "n_actions": N_EXEC_ACTIONS,
             "action_type": "discrete",
+            "action_dim": int(getattr(model, "action_dim", 1)),
+            "action_low": -1.0,
+            "action_high": 1.0,
+            "policy_hidden_size": int(args.policy_hidden_size),
+            "policy_head_mlp": not bool(args.no_policy_head_mlp),
+            "policy_layer_norm": bool(args.policy_layer_norm),
+            "policy_dropout_p": float(args.policy_dropout_p),
             "feature_cols": feature_cols,
             "action_map": _action_map(),
             "env_overrides": env_cfg.__dict__,
@@ -244,11 +396,42 @@ def main() -> None:
     trace_out = output_dir / "execution_trace.csv"
     trace.to_csv(trace_out, index=False)
     print(f"[execution_train] Saved trace: {trace_out}")
-    print("[execution_train] Eval summary:", summarize_trace(trace))
+    trace_summary = summarize_trace(trace)
+    print("[execution_train] Eval summary:", trace_summary)
 
     matrix_out = output_dir / "execution_matrix.parquet"
     df.to_parquet(matrix_out, index=False)
     print(f"[execution_train] Saved matrix: {matrix_out}")
+    final_train_metrics = (
+        history_df.iloc[-1].to_dict() if not history_df.empty else {}
+    )
+    best_validation_metrics = _extract_best_eval_metrics(
+        history_df,
+        metric_name=str(args.early_stop_metric),
+    )
+    log_paths = log_training_run(
+        run_name="execution_agent_run_train",
+        output_dir=output_dir,
+        hyperparameters=vars(args),
+        train_metrics=final_train_metrics,
+        validation_metrics=trace_summary,
+        best_validation_metrics=best_validation_metrics,
+        artifacts={
+            "model_path": str(model_path),
+            "train_metrics_csv": str(history_csv_path),
+            "trace_csv": str(trace_out),
+            "execution_matrix_parquet": str(matrix_out),
+            **oracle_artifacts,
+        },
+        extra={
+            "ticker": normalize_ticker(args.ticker),
+            "feature_count": len(feature_cols),
+            "train_rows": int(len(train_df)),
+            "test_rows": int(len(test_df)),
+            **oracle_metrics,
+        },
+    )
+    print(f"[execution_train] Saved training run summary: {log_paths['latest_path']}")
 
 
 if __name__ == "__main__":

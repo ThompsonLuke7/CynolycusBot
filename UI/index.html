@@ -131,7 +131,9 @@
       display: grid;
       grid-template-columns: 2.1fr 1fr;
       gap: 12px;
+      align-items: start;
     }
+    .grid > .card { min-width: 0; }
     .chart-wrap { height: 650px; }
     canvas { width: 100%; height: 100%; background: #0a1725; border-radius: 8px; border: 1px solid #233e5b; }
     .meta {
@@ -152,12 +154,15 @@
     .kv span:last-child { color: #f2f7ff; }
     .logs {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 12px;
+      align-items: start;
     }
+    .logs > .card { min-width: 0; }
     .list {
       max-height: 260px;
-      overflow: auto;
+      overflow-x: auto;
+      overflow-y: auto;
       border: 1px solid #284665;
       border-radius: 8px;
       background: #091624;
@@ -165,8 +170,15 @@
       font-family: "Consolas", "Cascadia Code", monospace;
       font-size: 0.78rem;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
-    .line { padding: 4px 0; border-bottom: 1px solid #1a324c; }
+    .line {
+      padding: 4px 0;
+      border-bottom: 1px solid #1a324c;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
     .line:last-child { border-bottom: 0; }
     .up { color: var(--good); }
     .down { color: var(--bad); }
@@ -199,11 +211,13 @@
         <div class="field"><label>Replay Start</label><input id="replayStart" value="2026-01-30T00:00:00Z" placeholder="optional ISO datetime" /></div>
         <div class="field"><label>Replay End</label><input id="replayEnd" placeholder="optional ISO datetime" /></div>
         <div class="field"><label>Replay Sleep (sec)</label><input id="replaySleep" type="number" step="0.01" min="0" value="0.0" /></div>
+        <div class="field"><label>Flip Abs Min</label><input id="execFlipAbsThreshold" type="number" step="0.01" min="0" value="0.05" /></div>
         <div class="field"><label>Replay Max Bars</label><input id="replayMaxBars" type="number" min="1" placeholder="all" /></div>
         <div class="checks">
           <label><input id="enableOrders" type="checkbox" /> Option Orders</label>
           <label><input id="simulateOrders" type="checkbox" checked /> Simulate</label>
           <label><input id="noAgent" type="checkbox" /> No Agent</label>
+          <label><input id="evalParityMode" type="checkbox" /> Eval Parity Mode</label>
           <label><input id="replayRegularOnly" type="checkbox" /> Replay RTH Only</label>
           <label><input id="replayNoWarmup" type="checkbox" /> Replay No Warmup</label>
         </div>
@@ -245,6 +259,7 @@
 
   <script>
     const state = { running: false, status_message: "idle", symbols: [], bars_1m: {}, bars_15m: {}, last_actions: {}, action_events: [], policy_state: {}, broker_state: {}, trade_events: [], logs: [], agent_state: null };
+    const hover = { active: false, x: 0, y: 0 };
     let eventSource = null;
     const MAX_POINTS = 900;
 
@@ -312,6 +327,15 @@
       if (bucket[symbol].length > MAX_POINTS) bucket[symbol] = bucket[symbol].slice(-MAX_POINTS);
     }
 
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
     function syncSymbolSelect() {
       const symbols = (state.symbols && state.symbols.length)
         ? state.symbols
@@ -372,7 +396,9 @@
       tradeList.innerHTML = items.map(x => {
         const ev = x?.result?.event || "n/a";
         const cls = ev === "enter" || ev === "flip" ? "up" : (ev === "error" ? "down" : "");
-        return `<div class="line ${cls}">${x.timestamp || ""} ${x.symbol || ""} ${ev} ${JSON.stringify(x.result || {})}</div>`;
+        const full = JSON.stringify(x.result || {});
+        const compact = full.length > 320 ? `${full.slice(0, 320)} ...` : full;
+        return `<div class="line ${cls}" title="${escapeHtml(full)}">${escapeHtml(x.timestamp || "")} ${escapeHtml(x.symbol || "")} ${escapeHtml(ev)} ${escapeHtml(compact)}</div>`;
       }).join("");
     }
 
@@ -400,7 +426,12 @@
 
     function renderLogs() {
       const items = (state.logs || []).slice(-120).reverse();
-      logList.innerHTML = items.map(x => `<div class="line">${x.symbol || "SYSTEM"} ${x.message || ""}</div>`).join("");
+      logList.innerHTML = items.map(x => {
+        const symbol = x.symbol || "SYSTEM";
+        const msg = String(x.message || "");
+        const compact = msg.length > 240 ? `${msg.slice(0, 240)} ...` : msg;
+        return `<div class="line" title="${escapeHtml(msg)}">${escapeHtml(symbol)} ${escapeHtml(compact)}</div>`;
+      }).join("");
     }
 
     function fmtPrice(x) {
@@ -413,6 +444,11 @@
         return `${String(dateObj.getMonth() + 1).padStart(2, "0")}/${String(dateObj.getDate()).padStart(2, "0")} ${String(dateObj.getHours()).padStart(2, "0")}:${String(dateObj.getMinutes()).padStart(2, "0")}`;
       }
       return `${String(dateObj.getHours()).padStart(2, "0")}:${String(dateObj.getMinutes()).padStart(2, "0")}`;
+    }
+
+    function fmtHoverTime(dateObj) {
+      if (!(dateObj instanceof Date) || Number.isNaN(dateObj.getTime())) return "";
+      return `${String(dateObj.getMonth() + 1).padStart(2, "0")}/${String(dateObj.getDate()).padStart(2, "0")} ${String(dateObj.getHours()).padStart(2, "0")}:${String(dateObj.getMinutes()).padStart(2, "0")}`;
     }
 
     function nearestIndexByTime(series, targetMs) {
@@ -575,7 +611,8 @@
             ctx.fillText(fmtTickTime(t, spanMs), labelX, y0 + paneHeight + 6);
           }
         }
-        return { series, toX, toY, y0, paneHeight };
+        const fromY = (y) => maxP - ((y - y0) / paneHeight) * (maxP - minP);
+        return { series, toX, toY, fromY, y0, paneHeight };
       }
 
       const pane1 = drawPane(one, pane1Y, pane1H, "Top: 1m candles", false);
@@ -698,6 +735,30 @@
         const prev = i > 0 ? actionsAll[i - 1] : null;
         if (!prev || Number(cur.action) !== Number(prev.action)) actions.push(cur);
       }
+      const orderMarkers = [];
+      const orderEvents = (state.trade_events || [])
+        .filter((e) => e && e.symbol === sym && e.timestamp && e.result)
+        .slice(-500)
+        .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      orderEvents.forEach((evt) => {
+        const result = evt.result || {};
+        const orders = Array.isArray(result.orders) ? result.orders : [];
+        if (!orders.length) return;
+        orders.forEach((ord, legIdx) => {
+          const sideRaw =
+            ord?.response?.side
+            || ord?.response?.payload?.side
+            || ord?.side
+            || "";
+          orderMarkers.push({
+            timestamp: evt.timestamp,
+            type: String(ord?.type || "order").toLowerCase(),
+            side: String(sideRaw).toLowerCase(),
+            pos: Number(result?.pos),
+            legIdx: Number(legIdx)
+          });
+        });
+      });
 
       function drawActionMarkers(pane) {
         if (!pane || !pane.series.length) return;
@@ -736,15 +797,127 @@
         });
       }
 
+      function drawOrderMarkers(pane) {
+        if (!pane || !pane.series.length || !orderMarkers.length) return;
+        const firstTs = pane.series[0].t.getTime();
+        const lastTs = pane.series[pane.series.length - 1].t.getTime();
+        orderMarkers.forEach((m) => {
+          const t = new Date(m.timestamp);
+          const tms = t.getTime();
+          if (Number.isNaN(tms) || tms < firstTs || tms > lastTs) return;
+          const idx = nearestIndexByTime(pane.series, tms);
+          const x = pane.toX(idx);
+          const isOpen = m.type === "open";
+          const isClose = m.type === "close";
+          const isBuy = m.side === "buy";
+          const isSell = m.side === "sell";
+          let color = "#b7c3d1";
+          if (isOpen) {
+            color = Number.isFinite(m.pos) ? (m.pos >= 0 ? "#40d69a" : "#ff6f6f") : (isBuy ? "#40d69a" : "#ff6f6f");
+          } else if (isClose) {
+            color = "#f0b04f";
+          }
+          const yBase = pane.y0 + 18 + Math.min(4, Math.max(0, Number(m.legIdx) || 0)) * 11;
+
+          ctx.save();
+          ctx.strokeStyle = color;
+          ctx.fillStyle = color;
+          ctx.lineWidth = 1;
+          if (isClose || isSell) {
+            ctx.beginPath();
+            ctx.moveTo(x - 4, yBase - 4);
+            ctx.lineTo(x + 4, yBase - 4);
+            ctx.lineTo(x + 4, yBase + 4);
+            ctx.lineTo(x - 4, yBase + 4);
+            ctx.closePath();
+            ctx.stroke();
+          } else {
+            ctx.beginPath();
+            ctx.arc(x, yBase, 4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.restore();
+        });
+      }
+
       drawActionMarkers(pane1);
       drawActionMarkers(pane2);
+      drawOrderMarkers(pane1);
+      drawOrderMarkers(pane2);
+
+      function drawHoverCrosshair(pane) {
+        if (!hover.active || !pane || !pane.series?.length || typeof pane.fromY !== "function") return;
+        const paneTop = pane.y0;
+        const paneBottom = pane.y0 + pane.paneHeight;
+        if (hover.y < paneTop || hover.y > paneBottom) return;
+
+        const xMin = left;
+        const xMax = w - right;
+        const xClamped = Math.max(xMin, Math.min(xMax, hover.x));
+        const yClamped = Math.max(paneTop, Math.min(paneBottom, hover.y));
+        const n = pane.series.length;
+        const frac = (xClamped - left) / Math.max(1, plotW);
+        const idx = Math.max(0, Math.min(n - 1, Math.round(frac * n - 0.5)));
+        const xBar = pane.toX(idx);
+        const candle = pane.series[idx];
+        if (!candle) return;
+
+        ctx.save();
+        ctx.setLineDash([5, 5]);
+        ctx.strokeStyle = "#9ec7ef";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(xBar, paneTop);
+        ctx.lineTo(xBar, paneBottom);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(left, yClamped);
+        ctx.lineTo(w - right, yClamped);
+        ctx.stroke();
+        ctx.restore();
+
+        const priceVal = pane.fromY(yClamped);
+        const priceText = fmtPrice(priceVal);
+        const timeText = fmtHoverTime(candle.t);
+        const padX = 6;
+        const padY = 4;
+        const labelH = 18;
+
+        ctx.font = "12px Consolas, monospace";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+
+        const priceW = Math.ceil(ctx.measureText(priceText).width) + padX * 2;
+        const priceX = w - right - priceW - 2;
+        const priceY = Math.max(paneTop + 2, Math.min(paneBottom - labelH - 2, yClamped - labelH / 2));
+        ctx.fillStyle = "#123a52";
+        ctx.fillRect(priceX, priceY, priceW, labelH);
+        ctx.strokeStyle = "#6bd1ff";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(priceX, priceY, priceW, labelH);
+        ctx.fillStyle = "#d9f2ff";
+        ctx.fillText(priceText, priceX + padX, priceY + labelH / 2);
+
+        const timeW = Math.ceil(ctx.measureText(timeText).width) + padX * 2;
+        const timeX = Math.max(left, Math.min(w - right - timeW, xBar - timeW / 2));
+        const timeY = Math.min(h - labelH - 1, paneBottom + 6);
+        ctx.fillStyle = "#0f2c44";
+        ctx.fillRect(timeX, timeY, timeW, labelH);
+        ctx.strokeStyle = "#4eaee0";
+        ctx.strokeRect(timeX, timeY, timeW, labelH);
+        ctx.fillStyle = "#cde7fb";
+        ctx.fillText(timeText, timeX + padX, timeY + labelH / 2);
+      }
+
+      drawHoverCrosshair(pane1);
+      drawHoverCrosshair(pane2);
 
       // Shared marker legend.
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
       ctx.font = "11px Consolas, monospace";
       ctx.fillStyle = "#b7c3d1";
-      ctx.fillText("Markers show action changes: gray=flat(0), green=long(+1), red=short(-1)", left + 6, top - 12);
+      ctx.fillText("Markers: action changes gray/green/red. Orders: circle=open, square=close.", left + 6, top - 12);
     }
 
     function renderAll() {
@@ -853,10 +1026,12 @@
         replay_max_bars: replayMaxRaw ? Number(replayMaxRaw) : null,
         replay_regular_only: document.getElementById("replayRegularOnly").checked,
         replay_no_prepend_split_test_warmup: document.getElementById("replayNoWarmup").checked,
+        exec_flip_abs_threshold: Number(document.getElementById("execFlipAbsThreshold").value || 0),
         env_file: document.getElementById("envFile").value,
         enable_option_orders: document.getElementById("enableOrders").checked,
         simulate_orders: document.getElementById("simulateOrders").checked,
-        no_agent: document.getElementById("noAgent").checked
+        no_agent: document.getElementById("noAgent").checked,
+        eval_parity_mode: document.getElementById("evalParityMode").checked
       };
     }
 
@@ -892,6 +1067,17 @@
     });
     symbolSelect.addEventListener("change", renderAll);
     document.getElementById("runnerMode").addEventListener("change", applyModeUi);
+    chart.addEventListener("mousemove", (ev) => {
+      const rect = chart.getBoundingClientRect();
+      hover.active = true;
+      hover.x = ev.clientX - rect.left;
+      hover.y = ev.clientY - rect.top;
+      renderChart();
+    });
+    chart.addEventListener("mouseleave", () => {
+      hover.active = false;
+      renderChart();
+    });
     window.addEventListener("resize", renderChart);
 
     (async function init() {

@@ -58,6 +58,7 @@ def evaluate_policy_with_trace(
                     "episode": ep,
                     "timestamp": info.get("timestamp"),
                     "action_idx": int(info.get("action_idx", a)),
+                    "action_name": str(info.get("action_name", "")),
                     "reward": float(reward),
                     "reward_improvement": float(info.get("reward_improvement", 0.0)),
                     "agent_net": float(info.get("agent_net", 0.0)),
@@ -69,6 +70,11 @@ def evaluate_policy_with_trace(
                     "baseline_pos_units": int(info.get("baseline_pos_units", 0)),
                     "htf_dir": int(info.get("htf_dir", 0)),
                     "htf_conf": float(info.get("htf_conf", 0.0)),
+                    "event_type_code": int(info.get("event_type_code", 0)),
+                    "event_type": str(info.get("event_type", "NONE")),
+                    "pending_order": str(info.get("pending_order", "NONE")),
+                    "did_execute_event": bool(info.get("did_execute_event", False)),
+                    "forced_execute_event": bool(info.get("forced_execute_event", False)),
                     "ret_next": float(info.get("ret_next", 0.0)),
                     "close": float(info.get("close", np.nan)),
                     "did_trade": bool(info.get("did_trade", False)),
@@ -105,4 +111,3 @@ def summarize_trace(trace: pd.DataFrame) -> dict[str, float]:
         "trade_rate": float(pd.to_numeric(trace["did_trade"], errors="coerce").fillna(0.0).mean()),
     }
     return out
-

@@ -101,6 +101,19 @@ def _load_eval_frame(path_like: str | None) -> pd.DataFrame | None:
     return df
 
 
+def _resolve_default_inference_eval_path(*, ticker: str, dataset_name: str) -> Path | None:
+    ticker_slug = normalize_ticker(ticker).lower()
+    base = Path("Data") / "inference" / ticker_slug / dataset_name / "agent"
+    candidates = (
+        base / "agent_matrix.parquet",
+        base / "agent_matrix.csv",
+    )
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
 def _agent_equity_from_trace(trace: pd.DataFrame, initial_cash: float) -> pd.DataFrame:
     equity = float(initial_cash)
     equity_series = []
@@ -470,6 +483,19 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional evaluation data path (.csv or .parquet). Overrides --data-csv/--data-parquet.",
     )
+    parser.add_argument(
+        "--inference-agent-path",
+        default=None,
+        help=(
+            "Optional inference agent-matrix path (.csv/.parquet). "
+            "Used when --data-path/--data-csv/--data-parquet are not set."
+        ),
+    )
+    parser.add_argument(
+        "--use-training-test-split",
+        action="store_true",
+        help="Force evaluation on the training-pipeline test split instead of inference agent matrix.",
+    )
     parser.add_argument("--plot-out", default=None)
     parser.add_argument("--device", default=None, help="cuda/cpu (defaults to auto)")
     parser.add_argument(
@@ -495,6 +521,21 @@ def main() -> None:
     args = _parse_args()
     cfg = PipelineConfig(drop_na=True)
     explicit_data_path = args.data_path or args.data_parquet or args.data_csv
+    if not explicit_data_path and not args.use_training_test_split:
+        if args.inference_agent_path:
+            inference_eval_path = Path(args.inference_agent_path)
+            if not inference_eval_path.exists():
+                raise SystemExit(f"Missing inference agent matrix file: {inference_eval_path}")
+        else:
+            inference_eval_path = _resolve_default_inference_eval_path(
+                ticker=cfg.ticker,
+                dataset_name=cfg.dataset_name,
+            )
+        if inference_eval_path is not None:
+            explicit_data_path = str(inference_eval_path)
+            print(f"[run_eval] Using inference eval frame: {inference_eval_path}")
+        else:
+            print("[run_eval] Inference agent matrix not found; falling back to split-based test set.")
     loaded_df = _load_eval_frame(explicit_data_path)
     if loaded_df is not None:
         df = loaded_df
@@ -561,6 +602,10 @@ def main() -> None:
             k.startswith("policy_mlp.") or k.startswith("value_mlp.")
             for k in state_dict
         )
+        policy_head_mlp = bool(ckpt.get("policy_head_mlp", has_head_mlps))
+        policy_hidden_size = int(ckpt.get("policy_hidden_size", 128))
+        policy_layer_norm = bool(ckpt.get("policy_layer_norm", False))
+        policy_dropout_p = float(ckpt.get("policy_dropout_p", 0.0))
         action_type = str(ckpt.get("action_type", "discrete"))
         reward_mode = str(ckpt.get("reward_mode", "unknown"))
         env_overrides = _normalize_env_overrides(ckpt.get("env_overrides"))
@@ -574,7 +619,10 @@ def main() -> None:
             n_actions=ckpt.get("n_actions", 3),
             action_type=action_type,
             action_dim=int(ckpt.get("action_dim", 1)),
-            head_mlp=has_head_mlps,
+            hidden=policy_hidden_size,
+            head_mlp=policy_head_mlp,
+            use_layer_norm=policy_layer_norm,
+            dropout_p=policy_dropout_p,
         )
         model.load_state_dict(state_dict)
         model.eval()

@@ -50,9 +50,13 @@ def main() -> None:
     env = make_execution_env(df=df, feature_cols=feature_cols, config=env_cfg)
     model = ActorCritic(
         obs_dim=int(ckpt["obs_dim"]),
-        n_actions=int(ckpt.get("n_actions", 5)),
+        n_actions=int(ckpt.get("n_actions", 2)),
         action_type=str(ckpt.get("action_type", "discrete")),
         action_dim=int(ckpt.get("action_dim", 1)),
+        hidden=int(ckpt.get("policy_hidden_size", 128)),
+        head_mlp=bool(ckpt.get("policy_head_mlp", True)),
+        use_layer_norm=bool(ckpt.get("policy_layer_norm", False)),
+        dropout_p=float(ckpt.get("policy_dropout_p", 0.0)),
     )
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
@@ -69,4 +73,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

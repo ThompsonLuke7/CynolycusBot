@@ -510,12 +510,19 @@ class LivePPOAgent:
             k.startswith("policy_mlp.") or k.startswith("value_mlp.")
             for k in state_dict
         )
+        policy_head_mlp = bool(ckpt.get("policy_head_mlp", has_head_mlps))
+        policy_hidden_size = int(ckpt.get("policy_hidden_size", 128))
+        policy_layer_norm = bool(ckpt.get("policy_layer_norm", False))
+        policy_dropout_p = float(ckpt.get("policy_dropout_p", 0.0))
         self._model = ActorCritic(
             obs_dim=self._obs_dim,
             n_actions=self._n_actions,
             action_type=self._action_type,
             action_dim=self._action_dim,
-            head_mlp=has_head_mlps,
+            hidden=policy_hidden_size,
+            head_mlp=policy_head_mlp,
+            use_layer_norm=policy_layer_norm,
+            dropout_p=policy_dropout_p,
         )
         self._model.load_state_dict(state_dict)
         self._model.to(self._device)
@@ -899,6 +906,123 @@ class LivePPOAgent:
         else:
             self._state.unrealized_pnl = 0.0
             self._state.time_in_pos = 0
+
+    def replay_warmup_actions(
+        self,
+        *,
+        df_1m: pd.DataFrame,
+        df_15m: pd.DataFrame,
+        apply_ga_probs: bool = True,
+    ) -> list[dict[str, object]]:
+        """
+        Run a sequential warmup over prefilled 15m bars and return per-bar actions.
+        This is optimized for startup seeding (single feature build, sequential state updates).
+        """
+        if df_15m.empty or len(df_15m) < self._min_15m_bars:
+            return []
+
+        if apply_ga_probs:
+            df_15m = self._maybe_add_ga_probs(df_1m=df_1m, df_15m=df_15m, target_ts=None)
+        feat_df = build_agent_feature_frame_from_15m(
+            df_15m,
+            include_pivot_probs=self._include_pivot_probs,
+            include_tb_probs=self._include_tb_probs,
+            tz=self._tz,
+            assume_tz=self._assume_tz,
+            session_open=self._session_open,
+            session_close=self._session_close,
+            fill_missing_prob=self._fill_missing_prob,
+            include_state_placeholders=False,
+        )
+        if feat_df.empty:
+            return []
+
+        missing = [c for c in self._feature_cols if c not in feat_df.columns]
+        for col in missing:
+            feat_df[col] = 0.0
+
+        out: list[dict[str, object]] = []
+        for _, row_full in feat_df.iterrows():
+            price = float(row_full.get("close", np.nan))
+            self._last_probs = {
+                "p_pivot_long": float(row_full.get("p_pivot_long", np.nan)),
+                "p_pivot_short": float(row_full.get("p_pivot_short", np.nan)),
+                "p_tb_long": float(row_full.get("p_tb_long", np.nan)),
+                "p_tb_short": float(row_full.get("p_tb_short", np.nan)),
+            }
+            for key, val in list(self._last_probs.items()):
+                if not np.isfinite(val):
+                    self._last_probs[key] = None
+
+            if self._require_probs:
+                missing_prob_keys: list[str] = []
+                if self._include_pivot_probs:
+                    if self._last_probs.get("p_pivot_long") is None:
+                        missing_prob_keys.append("p_pivot_long")
+                    if self._last_probs.get("p_pivot_short") is None:
+                        missing_prob_keys.append("p_pivot_short")
+                if self._include_tb_probs:
+                    if self._last_probs.get("p_tb_long") is None:
+                        missing_prob_keys.append("p_tb_long")
+                    if self._last_probs.get("p_tb_short") is None:
+                        missing_prob_keys.append("p_tb_short")
+                if missing_prob_keys:
+                    continue
+
+            row = row_full.reindex(self._feature_cols)
+            if self._skip_on_nan and row.isna().any():
+                continue
+
+            ts = row.name
+            if not isinstance(ts, pd.Timestamp):
+                ts = pd.to_datetime(row.get("timestamp"), utc=True, errors="coerce")
+            if ts is None or pd.isna(ts) or (not np.isfinite(price)):
+                continue
+            ts = self._normalize_ts(ts)
+
+            self._update_day_state(ts, price)
+            self._mark_to_market(price)
+            obs = self._build_obs(row.to_numpy(dtype=np.float32), ts)
+            x = torch.as_tensor(obs, dtype=torch.float32, device=self._device).unsqueeze(0)
+            policy_out, _ = self._model(x)
+            if self._hybrid_action:
+                if self._deterministic:
+                    action_t, _logp, _entropy = self._model._sample_hybrid(  # noqa: SLF001
+                        policy_out,
+                        deterministic=True,
+                    )
+                else:
+                    action_t, _logp, _entropy = self._model._sample_hybrid(  # noqa: SLF001
+                        policy_out,
+                        deterministic=False,
+                    )
+                action = float(action_t[:, 0].squeeze().item())
+            elif self._continuous_action:
+                if self._deterministic:
+                    action_t = torch.tanh(policy_out)
+                else:
+                    action_t, _logp, _entropy = self._model._sample_continuous(  # noqa: SLF001
+                        policy_out,
+                        deterministic=False,
+                    )
+                action = float(action_t.squeeze().item())
+            else:
+                if self._deterministic:
+                    class_action = int(torch.argmax(policy_out, dim=-1).item())
+                else:
+                    dist = torch.distributions.Categorical(logits=policy_out)
+                    class_action = int(dist.sample().item())
+                action = self._action_to_exposure(float(class_action))
+
+            self._apply_action(action, price)
+            out.append(
+                {
+                    "timestamp": ts,
+                    "action": float(action),
+                    "close": float(price),
+                }
+            )
+        return out
 
     def snapshot_state(self) -> dict[str, object]:
         """

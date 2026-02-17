@@ -8,7 +8,7 @@ import time
 import traceback
 from collections import deque
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 from API.Alpaca_API.market_data.bar_aggregator import OhlcvAggregator
 from API.Alpaca_API.market_data.bar_buffer import BarRingBuffer
+from Policy.execution_latch import DirectionExecutionLatch
 
 UI_BUILD = "2026-02-10-dashboard-replay-v2"
 
@@ -127,7 +128,7 @@ def _action_to_position(action: float | int, *, deadband: float = 0.0) -> int:
     return 1 if a > 0.0 else -1
 
 
-def _agent_action_event(prev_action: int | None, action: int) -> str | None:
+def _agent_action_event(prev_action: float | int | None, action: float | int) -> str | None:
     if prev_action is None:
         return None
     prev_pos = _action_to_position(prev_action)
@@ -147,6 +148,37 @@ def _agent_action_event(prev_action: int | None, action: int) -> str | None:
     if prev_pos == 1 and cur_pos == -1:
         return "flip_to_short"
     return None
+
+
+def _apply_flip_abs_threshold(
+    *,
+    action_raw: float,
+    prev_exec_action: float | int | None,
+    flip_abs_threshold: float,
+) -> tuple[float, int, int, bool]:
+    """
+    Gate weak opposite-direction flips based on raw action magnitude.
+
+    Returns:
+      - gated_action_raw: possibly sign-adjusted raw action
+      - model_raw_pos: sign class from unmodified model action
+      - exec_raw_pos: sign class after threshold gate
+      - flip_blocked: whether threshold blocked a flip
+    """
+    threshold = max(0.0, float(flip_abs_threshold))
+    model_raw_pos = _action_to_position(action_raw, deadband=threshold)
+    if threshold <= 0.0 or prev_exec_action is None:
+        return action_raw, model_raw_pos, model_raw_pos, False
+
+    prev_pos = _action_to_position(prev_exec_action, deadband=threshold)
+    if prev_pos == 0 or model_raw_pos == 0 or model_raw_pos == prev_pos:
+        return action_raw, model_raw_pos, model_raw_pos, False
+
+    if (not np.isfinite(action_raw)) or abs(float(action_raw)) < threshold:
+        gated = float(np.sign(prev_pos) * abs(action_raw)) if np.isfinite(action_raw) else float(prev_pos)
+        return gated, model_raw_pos, prev_pos, True
+
+    return action_raw, model_raw_pos, model_raw_pos, False
 
 
 def _load_history_file(path: Path, *, assume_tz: str = "UTC") -> pd.DataFrame:
@@ -320,8 +352,64 @@ def _load_agent_matrix_probs(*, symbol: str, dataset_name: str) -> pd.DataFrame 
             Path("Data") / "models" / "agent" / dataset_name / clean / "agent_matrix.csv",
         ]
 
+        def _series_from_probs_parquet(path: Path, value_col: str) -> pd.Series | None:
+            if not path.exists():
+                return None
+            try:
+                df = pd.read_parquet(path)
+            except Exception:
+                return None
+            if value_col not in df.columns:
+                return None
+            if "timestamp" in df.columns:
+                ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            else:
+                ts = pd.to_datetime(df.index, utc=True, errors="coerce")
+            out = pd.Series(pd.to_numeric(df[value_col], errors="coerce").to_numpy(), index=ts)
+            out = out[out.index.notna()]
+            if out.empty:
+                return None
+            return out.sort_index()
+
         frames: list[pd.DataFrame] = []
         loaded_paths: list[str] = []
+
+        # Backfill source: GA-XGB full-series probabilities usually cover the full
+        # train window and can provide early replay timestamps before agent_matrix starts.
+        ga_roots = [
+            Path("Data") / "models" / "ga_xgboost" / dataset_name,
+            Path("Data") / "inference" / clean / dataset_name / "models" / "ga_xgboost" / dataset_name,
+        ]
+        ga_specs = [
+            ("p_pivot_long", "long", "pivots", "p_long_probs.parquet", "p_long_full"),
+            ("p_pivot_short", "short", "pivots", "p_short_probs.parquet", "p_short_full"),
+            ("p_tb_long", "long", "tb", "p_long_probs.parquet", "p_long_full"),
+            ("p_tb_short", "short", "tb", "p_short_probs.parquet", "p_short_full"),
+        ]
+        ga_cols: dict[str, pd.Series] = {}
+        for root in ga_roots:
+            found_any = False
+            for out_col, side, label_dir, fname, value_col in ga_specs:
+                series = _series_from_probs_parquet(
+                    root / side / "probs" / label_dir / fname,
+                    value_col=value_col,
+                )
+                if series is None:
+                    continue
+                ga_cols[out_col] = series
+                found_any = True
+            if found_any:
+                idx = None
+                for s in ga_cols.values():
+                    idx = s.index if idx is None else idx.union(s.index)
+                if idx is not None and len(idx) > 0:
+                    ga_df = pd.DataFrame(index=idx.sort_values())
+                    for col in prob_cols:
+                        ga_df[col] = ga_cols[col].reindex(ga_df.index) if col in ga_cols else np.nan
+                    frames.append(ga_df)
+                    loaded_paths.append(f"{root}/*/probs/*/*_probs.parquet")
+                break
+
         for path in candidates:
             if not path.exists():
                 continue
@@ -446,6 +534,10 @@ class SessionConfig:
     option_no_close_on_flip: bool = False
     startup_catchup_order: bool = False
     startup_catchup_max_age_min: int = 120
+    exec_entry_confirm_bars: int = 1
+    exec_exit_confirm_bars: int = 2
+    exec_flip_abs_threshold: float = 0.05
+    use_execution_latch: bool = False
     replay_data_path: str = "Data/raw/spy/inference_buffer_1m.parquet"
     replay_start: str | None = "2026-01-30T00:00:00Z"
     replay_end: str | None = None
@@ -453,6 +545,7 @@ class SessionConfig:
     replay_sleep: float = 0.0
     replay_max_bars: int | None = None
     replay_no_prepend_split_test_warmup: bool = False
+    eval_parity_mode: bool = False
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "SessionConfig":
@@ -506,6 +599,10 @@ class SessionConfig:
             option_no_close_on_flip=_coerce_bool(payload.get("option_no_close_on_flip"), False),
             startup_catchup_order=_coerce_bool(payload.get("startup_catchup_order"), False),
             startup_catchup_max_age_min=_coerce_int(payload.get("startup_catchup_max_age_min"), 120),
+            exec_entry_confirm_bars=max(1, _coerce_int(payload.get("exec_entry_confirm_bars"), 1)),
+            exec_exit_confirm_bars=max(1, _coerce_int(payload.get("exec_exit_confirm_bars"), 2)),
+            exec_flip_abs_threshold=max(0.0, _coerce_float(payload.get("exec_flip_abs_threshold"), 0.05)),
+            use_execution_latch=_coerce_bool(payload.get("use_execution_latch"), False),
             replay_data_path=str(payload.get("replay_data_path", "Data/raw/spy/inference_buffer_1m.parquet")),
             replay_start=payload.get("replay_start", "2026-01-30T00:00:00Z"),
             replay_end=payload.get("replay_end"),
@@ -520,6 +617,7 @@ class SessionConfig:
                 payload.get("replay_no_prepend_split_test_warmup"),
                 False,
             ),
+            eval_parity_mode=_coerce_bool(payload.get("eval_parity_mode"), False),
         )
 
 
@@ -583,7 +681,7 @@ class DashboardStore:
         symbols = list(config.symbols)
         with self._lock:
             self._running = True
-            self._started_at = _ts_iso(datetime.utcnow())
+            self._started_at = _ts_iso(datetime.now(timezone.utc))
             self._stopped_at = None
             self._last_error = None
             self._status_message = "starting"
@@ -605,7 +703,7 @@ class DashboardStore:
     def stop(self, *, error: str | None = None) -> None:
         with self._lock:
             self._running = False
-            self._stopped_at = _ts_iso(datetime.utcnow())
+            self._stopped_at = _ts_iso(datetime.now(timezone.utc))
             if error:
                 self._last_error = str(error)
             self._status_message = "stopped" if not error else f"error: {error}"
@@ -796,7 +894,7 @@ class LiveSession:
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         event = {
             "type": event_type,
-            "timestamp": _ts_iso(datetime.utcnow()),
+            "timestamp": _ts_iso(datetime.now(timezone.utc)),
             "payload": _json_safe(payload),
         }
         self._broker.publish(event)
@@ -827,14 +925,22 @@ class LiveSession:
             from Data.retrieve_data import normalize_ticker
 
             ticker = normalize_ticker(cfg.symbols[0])
-            candidate = (
+            candidates = [
                 get_ticker_processed_base_dir(ticker)
                 / "datasets"
                 / cfg.ga_dataset_name
-                / f"features_X_{cfg.ga_dataset_name}_tree.txt"
-            )
-            if candidate.exists():
-                return str(candidate)
+                / f"features_X_{cfg.ga_dataset_name}_tree.txt",
+                Path("Data")
+                / "inference"
+                / ticker.lower()
+                / cfg.ga_dataset_name
+                / "datasets"
+                / cfg.ga_dataset_name
+                / f"features_X_{cfg.ga_dataset_name}_tree.txt",
+            ]
+            for candidate in candidates:
+                if candidate.exists():
+                    return str(candidate)
         except Exception:
             return None
         return None
@@ -845,10 +951,14 @@ class LiveSession:
         cfg: SessionConfig,
         processor: Any,
         agent: Any | None,
+        inference: Any | None = None,
+        execution_latches: dict[str, DirectionExecutionLatch] | None = None,
+        last_exec_action_by_symbol: dict[str, int] | None = None,
     ) -> None:
         from API.Alpaca_API.inference.live_inference import build_15m
 
         seeded_counts: dict[str, int] = {}
+        warmup_action_counts: dict[str, int] = {}
         for symbol in cfg.symbols:
             buffer = processor._buffers.get(symbol)
             if buffer is None:
@@ -856,10 +966,21 @@ class LiveSession:
             df_1m = buffer.to_dataframe()
             if df_1m is None or df_1m.empty:
                 continue
+            if not isinstance(df_1m.index, pd.DatetimeIndex):
+                if "timestamp" not in df_1m.columns:
+                    continue
+                df_1m = df_1m.copy()
+                df_1m["timestamp"] = pd.to_datetime(df_1m["timestamp"], utc=True, errors="coerce")
+                df_1m = df_1m.dropna(subset=["timestamp"]).set_index("timestamp")
+            else:
+                df_1m = df_1m.copy()
+            if df_1m.index.tz is None:
+                df_1m.index = df_1m.index.tz_localize(cfg.assume_tz)
+            df_1m_utc = df_1m.sort_index().tz_convert("UTC")
 
             try:
                 df_15m = build_15m(
-                    df_1m,
+                    df_1m_utc,
                     rule=f"{cfg.interval}min",
                     label=cfg.resample_label,
                     closed=cfg.resample_closed,
@@ -874,9 +995,7 @@ class LiveSession:
             df_plot = df_15m
             if agent is not None:
                 try:
-                    # Precompute display probabilities from prefill without
-                    # emitting actions/orders before live bars arrive.
-                    df_plot = agent._maybe_add_ga_probs(df_1m=df_1m, df_15m=df_15m, target_ts=None)  # noqa: SLF001
+                    df_plot = agent._maybe_add_ga_probs(df_1m=df_1m_utc, df_15m=df_15m, target_ts=None)  # noqa: SLF001
                 except Exception:
                     df_plot = df_15m
 
@@ -903,8 +1022,68 @@ class LiveSession:
                 self._store.add_15m_bar(symbol, bar)
                 count += 1
 
+            warmup_actions = 0
+            if inference is not None and agent is not None:
+                try:
+                    warmup_records = agent.replay_warmup_actions(
+                        df_1m=df_1m_utc,
+                        df_15m=df_plot.set_index("timestamp"),
+                        apply_ga_probs=False,
+                    )
+                except Exception:
+                    warmup_records = []
+                for rec in warmup_records:
+                    action_raw = _coerce_float(rec.get("action"), float("nan"))
+                    prev_exec_action = (
+                        last_exec_action_by_symbol.get(symbol)
+                        if last_exec_action_by_symbol is not None
+                        else None
+                    )
+                    gated_action_raw, _model_raw_pos, raw_action_pos, _flip_blocked = _apply_flip_abs_threshold(
+                        action_raw=action_raw,
+                        prev_exec_action=prev_exec_action,
+                        flip_abs_threshold=float(cfg.exec_flip_abs_threshold),
+                    )
+                    if cfg.eval_parity_mode:
+                        selected_action = (
+                            gated_action_raw
+                            if np.isfinite(gated_action_raw)
+                            else float(raw_action_pos)
+                        )
+                        selected_action_class = raw_action_pos
+                    elif (
+                        cfg.use_execution_latch
+                        and execution_latches is not None
+                        and symbol in execution_latches
+                    ):
+                        gate = execution_latches[symbol].step(raw_action_pos)
+                        exec_action_pos = int(gate.executed_pos)
+                        selected_action = float(exec_action_pos)
+                        selected_action_class = exec_action_pos
+                    else:
+                        selected_action = (
+                            gated_action_raw
+                            if np.isfinite(gated_action_raw)
+                            else float(raw_action_pos)
+                        )
+                        selected_action_class = raw_action_pos
+                    self._store.set_last_action(
+                        symbol,
+                        action=float(selected_action),
+                        action_class=selected_action_class,
+                        ts=rec.get("timestamp"),
+                        close=rec.get("close"),
+                    )
+                    if last_exec_action_by_symbol is not None:
+                        last_exec_action_by_symbol[symbol] = selected_action_class
+                    warmup_actions += 1
+                if warmup_actions > 0:
+                    self._store.set_agent_state(agent.snapshot_state())
+
             if count > 0:
                 seeded_counts[symbol] = count
+            if warmup_actions > 0:
+                warmup_action_counts[symbol] = warmup_actions
 
         if seeded_counts:
             self._emit(
@@ -912,6 +1091,14 @@ class LiveSession:
                 {
                     "symbol": "SYSTEM",
                     "message": f"[live] seeded 15m/prob history from prefill: {seeded_counts}",
+                },
+            )
+        if warmup_action_counts:
+            self._emit(
+                "log",
+                {
+                    "symbol": "SYSTEM",
+                    "message": f"[live] seeded warmup action history from prefill: {warmup_action_counts}",
                 },
             )
 
@@ -1031,7 +1218,11 @@ class LiveSession:
 
             ga_feature_list = self._resolve_ga_feature_list(cfg)
             ga_probs_frame = _load_agent_matrix_probs(symbol=symbols[0], dataset_name=cfg.ga_dataset_name)
-            if ga_probs_frame is not None and ga_feature_list:
+            if cfg.eval_parity_mode and ga_probs_frame is not None and ga_feature_list:
+                ga_probs_mode = "hybrid"
+            elif cfg.eval_parity_mode and ga_probs_frame is not None:
+                ga_probs_mode = "frame"
+            elif ga_probs_frame is not None and ga_feature_list:
                 ga_probs_mode = "hybrid"
             elif ga_probs_frame is not None:
                 ga_probs_mode = "frame"
@@ -1137,7 +1328,15 @@ class LiveSession:
 
         order_policies = None
         simulated_orders: dict[str, deque] = {}
-        last_action_by_symbol: dict[str, int] = {}
+        last_exec_action_by_symbol: dict[str, int] = {}
+        execution_latches: dict[str, DirectionExecutionLatch] = {
+            symbol: DirectionExecutionLatch(
+                entry_confirm_bars=int(cfg.exec_entry_confirm_bars),
+                exit_confirm_bars=int(cfg.exec_exit_confirm_bars),
+                initial_position=0,
+            )
+            for symbol in symbols
+        }
         if cfg.enable_option_orders:
             from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
 
@@ -1152,6 +1351,9 @@ class LiveSession:
                     qty=int(cfg.option_order_qty),
                     close_on_flat=not cfg.option_no_close_on_flat,
                     close_on_flip=not cfg.option_no_close_on_flip,
+                    opposite_confirm_bars=1,
+                    opposite_min_abs_action=float(cfg.exec_flip_abs_threshold),
+                    opposite_min_prob_edge=0.0,
                     submit_orders=False,
                 )
                 policy = OptionOrderPolicy(pol_cfg)
@@ -1197,6 +1399,28 @@ class LiveSession:
         def _record_sim_orders(symbol: str, result: dict[str, Any], ts_iso: str | None) -> None:
             if symbol not in simulated_orders:
                 return
+            legs = result.get("orders")
+            if isinstance(legs, list):
+                for leg in legs:
+                    if not isinstance(leg, dict):
+                        continue
+                    resp = leg.get("response") if isinstance(leg.get("response"), dict) else {}
+                    payload = resp.get("payload") if isinstance(resp.get("payload"), dict) else {}
+                    side = resp.get("side", payload.get("side"))
+                    qty_val = resp.get("qty", payload.get("qty", leg.get("qty")))
+                    simulated_orders[symbol].appendleft(
+                        {
+                            "id": None,
+                            "symbol": leg.get("symbol", payload.get("symbol")),
+                            "side": side,
+                            "status": "simulated",
+                            "qty": str(qty_val) if qty_val is not None else None,
+                            "filled_qty": str(qty_val) if qty_val is not None else None,
+                            "filled_avg_price": None,
+                            "submitted_at": ts_iso,
+                            "filled_at": ts_iso,
+                        }
+                    )
             for key in ("open_order", "close_order", "flip_close_order"):
                 item = result.get(key)
                 if not isinstance(item, dict):
@@ -1245,9 +1469,49 @@ class LiveSession:
                 self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar15)})
                 return
 
+            prev_exec_action = last_exec_action_by_symbol.get(symbol)
             action_raw = _coerce_float(action, float("nan"))
-            action_pos = _action_to_position(action_raw)
-            prev_action = last_action_by_symbol.get(symbol)
+            gated_action_raw, model_raw_action_pos, raw_action_pos, flip_blocked_by_threshold = _apply_flip_abs_threshold(
+                action_raw=action_raw,
+                prev_exec_action=prev_exec_action,
+                flip_abs_threshold=float(cfg.exec_flip_abs_threshold),
+            )
+            if cfg.eval_parity_mode:
+                selected_action = (
+                    gated_action_raw
+                    if np.isfinite(gated_action_raw)
+                    else float(raw_action_pos)
+                )
+                selected_action_class = raw_action_pos
+                gate_status = "bypassed_parity_mode"
+                gate_changed = (
+                    prev_exec_action is not None
+                    and int(prev_exec_action) != int(selected_action_class)
+                )
+                gate_pending_target: int | None = None
+                gate_pending_count = 0
+            elif cfg.use_execution_latch:
+                gate = execution_latches[symbol].step(raw_action_pos)
+                selected_action_class = int(gate.executed_pos)
+                selected_action = float(selected_action_class)
+                gate_status = str(gate.status)
+                gate_changed = bool(gate.changed)
+                gate_pending_target = gate.pending_target
+                gate_pending_count = int(gate.pending_count)
+            else:
+                selected_action = (
+                    gated_action_raw
+                    if np.isfinite(gated_action_raw)
+                    else float(raw_action_pos)
+                )
+                selected_action_class = raw_action_pos
+                gate_status = "bypassed_latch_disabled"
+                gate_changed = (
+                    prev_exec_action is not None
+                    and int(prev_exec_action) != int(selected_action_class)
+                )
+                gate_pending_target = None
+                gate_pending_count = 0
             probs = agent.last_probs() if agent is not None else None
             bar_payload = dict(bar15)
             if probs:
@@ -1256,12 +1520,12 @@ class LiveSession:
             self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar_payload)})
             self._store.set_last_action(
                 symbol,
-                action=action_raw,
-                action_class=action_pos,
+                action=float(selected_action),
+                action_class=selected_action_class,
                 ts=bar15.get("timestamp"),
                 close=bar15.get("close"),
             )
-            last_action_by_symbol[symbol] = action_pos
+            last_exec_action_by_symbol[symbol] = selected_action_class
             agent_state = agent.snapshot_state() if agent is not None else None
             if agent_state is not None:
                 self._store.set_agent_state(agent_state)
@@ -1269,9 +1533,21 @@ class LiveSession:
                 "action",
                 {
                     "symbol": symbol,
-                    "action": action_pos,
-                    "action_class": action_pos,
+                    "action": float(selected_action),
+                    "action_class": selected_action_class,
                     "action_raw": action_raw if np.isfinite(action_raw) else None,
+                    "action_raw_exec": float(selected_action),
+                    "raw_action_class": raw_action_pos,
+                    "raw_action_class_model": model_raw_action_pos,
+                    "execution_gate": {
+                        "status": gate_status,
+                        "changed": gate_changed,
+                        "pending_target": gate_pending_target,
+                        "pending_count": gate_pending_count,
+                        "exec_pos": selected_action_class,
+                        "flip_abs_threshold": float(cfg.exec_flip_abs_threshold),
+                        "flip_blocked_by_threshold": bool(flip_blocked_by_threshold),
+                    },
                     "timestamp": _ts_iso(bar15.get("timestamp")),
                     "close": _coerce_float(bar15.get("close"), float("nan")),
                     "agent_state": agent_state,
@@ -1279,7 +1555,7 @@ class LiveSession:
             )
 
             if order_policies is None or symbol not in order_policies:
-                event_key = _agent_action_event(prev_action, action_pos)
+                event_key = _agent_action_event(prev_exec_action, selected_action_class)
                 if event_key is not None:
                     trade_payload = {
                         "symbol": symbol,
@@ -1287,9 +1563,15 @@ class LiveSession:
                         "result": {
                             "event": event_key,
                             "source": "agent_action",
-                            "prev_action": prev_action,
-                            "action": action_pos,
+                            "prev_action": prev_exec_action,
+                            "action": selected_action_class,
+                            "raw_action_class": raw_action_pos,
+                            "raw_action_class_model": model_raw_action_pos,
                             "action_raw": action_raw if np.isfinite(action_raw) else None,
+                            "action_raw_exec": float(selected_action),
+                            "execution_gate_status": gate_status,
+                            "flip_abs_threshold": float(cfg.exec_flip_abs_threshold),
+                            "flip_blocked_by_threshold": bool(flip_blocked_by_threshold),
                             "simulated": True,
                         },
                     }
@@ -1299,7 +1581,7 @@ class LiveSession:
 
             policy = order_policies[symbol]
             result = policy.on_decision(
-                action=action_raw,
+                action=float(selected_action),
                 closed_bar=bar15,
                 update_bar_state=False,
                 logger=self._policy_logger(symbol),
@@ -1388,13 +1670,67 @@ class LiveSession:
             from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
 
             symbols = cfg.symbols
-            last_action_by_symbol: dict[str, int] = {}
+            last_exec_action_by_symbol: dict[str, int] = {}
+            execution_latches: dict[str, DirectionExecutionLatch] = {
+                symbol: DirectionExecutionLatch(
+                    entry_confirm_bars=int(cfg.exec_entry_confirm_bars),
+                    exit_confirm_bars=int(cfg.exec_exit_confirm_bars),
+                    initial_position=0,
+                )
+                for symbol in symbols
+            }
             feed = lr._parse_feed(cfg.feed)
             bar_queue: queue_mod.Queue = queue_mod.Queue(maxsize=cfg.queue_size)
 
             agent: LivePPOAgent | None = None
             if not cfg.no_agent:
                 ga_feature_list = self._resolve_ga_feature_list(cfg)
+                ga_probs_frame = (
+                    _load_agent_matrix_probs(symbol=symbols[0], dataset_name=cfg.ga_dataset_name)
+                    if cfg.eval_parity_mode
+                    else None
+                )
+                if cfg.eval_parity_mode and ga_probs_frame is not None and ga_feature_list:
+                    ga_probs_mode = "hybrid"
+                elif cfg.eval_parity_mode and ga_probs_frame is not None:
+                    ga_probs_mode = "frame"
+                else:
+                    ga_probs_mode = "xgb"
+                if cfg.eval_parity_mode and ga_probs_frame is None:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": "[live] eval parity mode requested, but no agent_matrix probs were found; falling back to XGB probs.",
+                        },
+                    )
+                if cfg.eval_parity_mode and ga_probs_frame is not None:
+                    try:
+                        src = ga_probs_frame.attrs.get("source_paths", [])
+                        rng_min = ga_probs_frame.index.min()
+                        rng_max = ga_probs_frame.index.max()
+                        self._emit(
+                            "log",
+                            {
+                                "symbol": "SYSTEM",
+                                "message": (
+                                    "[live] loaded agent_matrix probs "
+                                    f"(rows={len(ga_probs_frame):,}, "
+                                    f"range={_ts_iso(rng_min)}..{_ts_iso(rng_max)}, "
+                                    f"sources={len(src)}, mode={ga_probs_mode})"
+                                ),
+                            },
+                        )
+                    except Exception:
+                        pass
+                    if ga_probs_mode == "frame":
+                        self._emit(
+                            "log",
+                            {
+                                "symbol": "SYSTEM",
+                                "message": "[live] eval parity mode using frame-only probs (no GA feature list for XGB fallback).",
+                            },
+                        )
                 agent = LivePPOAgent(
                     model_path=cfg.model_path,
                     deterministic=not cfg.stochastic,
@@ -1407,10 +1743,16 @@ class LiveSession:
                     session_close=cfg.session_close,
                     min_15m_bars=cfg.min_15m_bars,
                     fill_missing_prob=cfg.fill_missing_prob,
-                    ga_model_root=cfg.ga_model_root if ga_feature_list else None,
+                    ga_model_root=(
+                        cfg.ga_model_root
+                        if (ga_feature_list and ga_probs_mode != "frame")
+                        else None
+                    ),
                     ga_feature_list_path=ga_feature_list,
                     ga_pivot_label_dir=cfg.ga_pivot_label_dir,
                     ga_tb_label_dir=cfg.ga_tb_label_dir,
+                    ga_probs_frame=ga_probs_frame,
+                    ga_probs_mode=ga_probs_mode,
                     require_probs=True,
                     resample_label=cfg.resample_label,
                     resample_closed=cfg.resample_closed,
@@ -1441,6 +1783,9 @@ class LiveSession:
                         qty=int(cfg.option_order_qty),
                         close_on_flat=not cfg.option_no_close_on_flat,
                         close_on_flip=not cfg.option_no_close_on_flip,
+                        opposite_confirm_bars=1,
+                        opposite_min_abs_action=float(cfg.exec_flip_abs_threshold),
+                        opposite_min_prob_edge=0.0,
                         submit_orders=not cfg.simulate_orders,
                     )
                     policy = OptionOrderPolicy(pol_cfg)
@@ -1454,6 +1799,8 @@ class LiveSession:
                     for symbol in symbols:
                         policy = order_policies[symbol]
                         sync_result = policy.sync_from_broker(logger=self._policy_logger(symbol))
+                        if cfg.use_execution_latch:
+                            execution_latches[symbol].set_position(policy.snapshot_state().get("position", 0))
                         self._store.set_policy_state(symbol, policy.snapshot_state())
                         self._emit("startup_sync", {"symbol": symbol, "result": sync_result})
                         broker_snap = policy.snapshot_broker_state(orders_limit=20)
@@ -1484,9 +1831,49 @@ class LiveSession:
                     self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar15)})
                     return
 
+                prev_exec_action = last_exec_action_by_symbol.get(symbol)
                 action_raw = _coerce_float(action, float("nan"))
-                action_pos = _action_to_position(action_raw)
-                prev_action = last_action_by_symbol.get(symbol)
+                gated_action_raw, model_raw_action_pos, raw_action_pos, flip_blocked_by_threshold = _apply_flip_abs_threshold(
+                    action_raw=action_raw,
+                    prev_exec_action=prev_exec_action,
+                    flip_abs_threshold=float(cfg.exec_flip_abs_threshold),
+                )
+                if cfg.eval_parity_mode:
+                    selected_action = (
+                        gated_action_raw
+                        if np.isfinite(gated_action_raw)
+                        else float(raw_action_pos)
+                    )
+                    selected_action_class = raw_action_pos
+                    gate_status = "bypassed_parity_mode"
+                    gate_changed = (
+                        prev_exec_action is not None
+                        and int(prev_exec_action) != int(selected_action_class)
+                    )
+                    gate_pending_target: int | None = None
+                    gate_pending_count = 0
+                elif cfg.use_execution_latch:
+                    gate = execution_latches[symbol].step(raw_action_pos)
+                    selected_action_class = int(gate.executed_pos)
+                    selected_action = float(selected_action_class)
+                    gate_status = str(gate.status)
+                    gate_changed = bool(gate.changed)
+                    gate_pending_target = gate.pending_target
+                    gate_pending_count = int(gate.pending_count)
+                else:
+                    selected_action = (
+                        gated_action_raw
+                        if np.isfinite(gated_action_raw)
+                        else float(raw_action_pos)
+                    )
+                    selected_action_class = raw_action_pos
+                    gate_status = "bypassed_latch_disabled"
+                    gate_changed = (
+                        prev_exec_action is not None
+                        and int(prev_exec_action) != int(selected_action_class)
+                    )
+                    gate_pending_target = None
+                    gate_pending_count = 0
                 probs = agent.last_probs() if agent is not None else None
                 bar_payload = dict(bar15)
                 if probs:
@@ -1495,12 +1882,12 @@ class LiveSession:
                 self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar_payload)})
                 self._store.set_last_action(
                     symbol,
-                    action=action_raw,
-                    action_class=action_pos,
+                    action=float(selected_action),
+                    action_class=selected_action_class,
                     ts=bar15.get("timestamp"),
                     close=bar15.get("close"),
                 )
-                last_action_by_symbol[symbol] = action_pos
+                last_exec_action_by_symbol[symbol] = selected_action_class
 
                 agent_state = agent.snapshot_state() if agent is not None else None
                 if agent_state is not None:
@@ -1509,9 +1896,21 @@ class LiveSession:
                     "action",
                     {
                         "symbol": symbol,
-                        "action": action_pos,
-                        "action_class": action_pos,
+                        "action": float(selected_action),
+                        "action_class": selected_action_class,
                         "action_raw": action_raw if np.isfinite(action_raw) else None,
+                        "action_raw_exec": float(selected_action),
+                        "raw_action_class": raw_action_pos,
+                        "raw_action_class_model": model_raw_action_pos,
+                        "execution_gate": {
+                            "status": gate_status,
+                            "changed": gate_changed,
+                            "pending_target": gate_pending_target,
+                            "pending_count": gate_pending_count,
+                            "exec_pos": selected_action_class,
+                            "flip_abs_threshold": float(cfg.exec_flip_abs_threshold),
+                            "flip_blocked_by_threshold": bool(flip_blocked_by_threshold),
+                        },
                         "timestamp": _ts_iso(bar15.get("timestamp")),
                         "close": _coerce_float(bar15.get("close"), float("nan")),
                         "agent_state": agent_state,
@@ -1519,7 +1918,7 @@ class LiveSession:
                 )
 
                 if order_policies is None or symbol not in order_policies:
-                    event_key = _agent_action_event(prev_action, action_pos)
+                    event_key = _agent_action_event(prev_exec_action, selected_action_class)
                     if event_key is not None:
                         trade_payload = {
                             "symbol": symbol,
@@ -1527,9 +1926,15 @@ class LiveSession:
                             "result": {
                                 "event": event_key,
                                 "source": "agent_action",
-                                "prev_action": prev_action,
-                                "action": action_pos,
+                                "prev_action": prev_exec_action,
+                                "action": selected_action_class,
+                                "raw_action_class": raw_action_pos,
+                                "raw_action_class_model": model_raw_action_pos,
                                 "action_raw": action_raw if np.isfinite(action_raw) else None,
+                                "action_raw_exec": float(selected_action),
+                                "execution_gate_status": gate_status,
+                                "flip_abs_threshold": float(cfg.exec_flip_abs_threshold),
+                                "flip_blocked_by_threshold": bool(flip_blocked_by_threshold),
                                 "simulated": True,
                             },
                         }
@@ -1539,7 +1944,7 @@ class LiveSession:
 
                 policy = order_policies[symbol]
                 result = policy.on_decision(
-                    action=action_raw,
+                    action=float(selected_action),
                     closed_bar=bar15,
                     update_bar_state=False,
                     logger=self._policy_logger(symbol),
@@ -1594,10 +1999,46 @@ class LiveSession:
                     split_dataset_name=cfg.ga_dataset_name,
                     split_x_filename=cfg.split_x_filename,
                     prepend_split_test_warmup=True,
+                    feed=feed,
                 )
 
             self._store.seed_from_buffers(processor._buffers)
             seed_counts = {sym: len(buf) for sym, buf in processor._buffers.items()}
+            tz_name = cfg.tz or "America/New_York"
+            now_local = pd.Timestamp.now(tz=tz_name)
+            for symbol in symbols:
+                buf = processor._buffers.get(symbol)
+                if buf is None or len(buf) == 0:
+                    continue
+                buf_df = buf.to_dataframe()
+                if buf_df is None or buf_df.empty:
+                    continue
+                if "timestamp" in buf_df.columns:
+                    ts_series = pd.to_datetime(buf_df["timestamp"], utc=True, errors="coerce")
+                else:
+                    ts_series = pd.to_datetime(buf_df.index, utc=True, errors="coerce")
+                last_ts = ts_series.max()
+                if pd.isna(last_ts):
+                    continue
+                last_local = last_ts.tz_convert(tz_name)
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": f"[live] prefill latest 1m for {symbol}: {last_local.isoformat()}",
+                    },
+                )
+                if last_local.normalize() < now_local.normalize():
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": (
+                                f"[live] no prefill bars on {now_local.date()} for {symbol}; "
+                                "market may be closed/holiday or feed has no newer bars."
+                            ),
+                        },
+                    )
             self._emit(
                 "log",
                 {
@@ -1605,7 +2046,14 @@ class LiveSession:
                     "message": f"[live] prefill loaded bars: {seed_counts}",
                 },
             )
-            self._seed_15m_from_prefill(cfg=cfg, processor=processor, agent=agent)
+            self._seed_15m_from_prefill(
+                cfg=cfg,
+                processor=processor,
+                agent=agent,
+                inference=inference,
+                execution_latches=execution_latches,
+                last_exec_action_by_symbol=last_exec_action_by_symbol,
+            )
             self._emit_state_sync()
 
             if order_policies:
@@ -1621,6 +2069,7 @@ class LiveSession:
                         processor=processor,
                         inference=inference,
                         order_policies=order_policies,
+                        execution_latches=execution_latches,
                         latest_closed_by_symbol=latest_closed,
                         symbols=symbols,
                         print_tz=cfg.tz,
@@ -1787,7 +2236,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             q = app.broker.subscribe()
             try:
-                hello = {"type": "hello", "timestamp": _ts_iso(datetime.utcnow()), "payload": app.snapshot()}
+                hello = {
+                    "type": "hello",
+                    "timestamp": _ts_iso(datetime.now(timezone.utc)),
+                    "payload": app.snapshot(),
+                }
                 self.wfile.write(f"data: {json.dumps(_json_safe(hello))}\n\n".encode("utf-8"))
                 self.wfile.flush()
                 while True:

@@ -21,6 +21,7 @@ from Agent.env import VecTradingEnv
 from Agent.env_config import make_trading_env
 from Agent.train import train_ppo
 from Agent.eval import evaluate_loss_metrics, evaluate_policy, evaluate_policy_with_trace
+from training_logging import log_training_run
 
 
 def _daily_first_last(df):
@@ -85,6 +86,388 @@ def _agent_equity_from_trace(trace, initial_cash):
 
 def _is_vix_feature(col: str) -> bool:
     return col.startswith("vix_") or col.endswith("_x_vix")
+
+
+def _build_train_env(
+    *,
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    env_kwargs: dict[str, object],
+    num_envs: int,
+    seed_base: int,
+):
+    n_envs = max(1, int(num_envs))
+    if n_envs > 1:
+        envs = [
+            make_trading_env(
+                df=df,
+                feature_cols=feature_cols,
+                seed=int(seed_base) + i,
+                **env_kwargs,
+            )
+            for i in range(n_envs)
+        ]
+        return VecTradingEnv(envs, auto_reset=True, stagger_reset=True)
+    return make_trading_env(
+        df=df,
+        feature_cols=feature_cols,
+        seed=int(seed_base),
+        **env_kwargs,
+    )
+
+
+def _derive_htf_intent_from_trace(trace: pd.DataFrame) -> pd.DataFrame:
+    out = pd.DataFrame()
+    out["timestamp"] = pd.to_datetime(trace.get("timestamp"), errors="coerce")
+    if "action_dir_idx" in trace.columns:
+        idx = pd.to_numeric(trace["action_dir_idx"], errors="coerce")
+        d = pd.Series(0.0, index=trace.index)
+        d[idx == 1] = 1.0
+        d[idx == 2] = -1.0
+        out["htf_dir"] = d
+    else:
+        out["htf_dir"] = np.sign(
+            pd.to_numeric(trace.get("action", 0.0), errors="coerce").fillna(0.0)
+        )
+    if "action_mag" in trace.columns:
+        out["htf_conf"] = (
+            pd.to_numeric(trace["action_mag"], errors="coerce")
+            .fillna(0.0)
+            .clip(0.0, 1.0)
+        )
+    else:
+        out["htf_conf"] = (
+            pd.to_numeric(trace.get("action", 0.0), errors="coerce")
+            .abs()
+            .fillna(0.0)
+            .clip(0.0, 1.0)
+        )
+    if "convex_atr_scale" in trace.columns:
+        out["htf_atr_pct"] = pd.to_numeric(trace["convex_atr_scale"], errors="coerce")
+    else:
+        out["htf_atr_pct"] = np.nan
+    out["htf_expected_edge"] = np.nan
+    out = out[out["timestamp"].notna()].copy()
+    out = out.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+    out["htf_dir"] = out["htf_dir"].fillna(0.0).clip(-1.0, 1.0)
+    out["htf_conf"] = out["htf_conf"].fillna(0.0).clip(0.0, 1.0)
+    flipped = out["htf_dir"].ne(out["htf_dir"].shift(1))
+    last_flip_ts = out["timestamp"].where(flipped).ffill()
+    minutes = (out["timestamp"] - last_flip_ts).dt.total_seconds() / 60.0
+    out["time_since_flip_min"] = minutes.fillna(0.0).clip(lower=0.0)
+    return out.reset_index(drop=True)
+
+
+def _build_walkforward_day_folds(
+    *,
+    df: pd.DataFrame,
+    n_folds: int,
+    initial_train_days: int,
+) -> list[dict[str, object]]:
+    if "day_id" not in df.columns:
+        raise ValueError("Walk-forward OOF requires a day_id column.")
+    ordered = df
+    if "timestamp" in ordered.columns:
+        ordered = ordered.sort_values("timestamp")
+    day_values = list(pd.unique(pd.Series(ordered["day_id"]).dropna()))
+    n_days = len(day_values)
+    if n_days < 3:
+        raise ValueError("Need at least 3 distinct day_id values for walk-forward OOF.")
+    if int(n_folds) < 1:
+        raise ValueError("wf-n-folds must be >= 1.")
+
+    init_days = int(initial_train_days)
+    if init_days <= 0:
+        init_days = max(1, n_days // (int(n_folds) + 1))
+    if init_days >= n_days:
+        raise ValueError(
+            f"wf-initial-train-days={init_days} must be < number of days ({n_days})."
+        )
+
+    remaining = n_days - init_days
+    fold_size = remaining // int(n_folds)
+    if fold_size <= 0:
+        raise ValueError(
+            "Walk-forward fold size is 0. Reduce --wf-n-folds or lower --wf-initial-train-days."
+        )
+
+    folds: list[dict[str, object]] = []
+    for fold_id in range(int(n_folds)):
+        eval_start = init_days + fold_id * fold_size
+        eval_end = init_days + (fold_id + 1) * fold_size
+        if fold_id == int(n_folds) - 1:
+            eval_end = n_days
+        if eval_start >= eval_end:
+            continue
+        train_days = set(day_values[:eval_start])
+        eval_days = set(day_values[eval_start:eval_end])
+        folds.append(
+            {
+                "fold_id": fold_id,
+                "train_days": train_days,
+                "eval_days": eval_days,
+                "train_day_count": len(train_days),
+                "eval_day_count": len(eval_days),
+                "eval_day_start": day_values[eval_start],
+                "eval_day_end": day_values[eval_end - 1],
+            }
+        )
+    if not folds:
+        raise ValueError("No walk-forward folds were created.")
+    return folds
+
+
+def _run_walkforward_oof(
+    *,
+    source_df: pd.DataFrame,
+    feature_cols: list[str],
+    env_kwargs: dict[str, object],
+    cfg: PipelineConfig,
+    args: argparse.Namespace,
+    action_deadband: float,
+) -> dict[str, Path]:
+    working = source_df.copy()
+    if "timestamp" not in working.columns:
+        raise ValueError("Walk-forward OOF requires a timestamp column.")
+    if "timestamp" in working.columns:
+        working["timestamp"] = pd.to_datetime(working["timestamp"], errors="coerce")
+        working = working[working["timestamp"].notna()].copy()
+        working = working.sort_values("timestamp").reset_index(drop=True)
+    folds = _build_walkforward_day_folds(
+        df=working,
+        n_folds=int(args.wf_n_folds),
+        initial_train_days=int(args.wf_initial_train_days),
+    )
+
+    def _resolve_local_path(path_like: str) -> Path:
+        p = Path(path_like)
+        if p.is_absolute():
+            return p
+        return (Path.cwd() / p).resolve()
+
+    trace_out_path = _resolve_local_path(args.wf_trace_out)
+    intent_out_path = _resolve_local_path(args.wf_intent_out)
+    manifest_out_path = _resolve_local_path(args.wf_manifest_out)
+    model_dir = _resolve_local_path(args.wf_model_dir)
+
+    model_dir.mkdir(parents=True, exist_ok=True)
+    trace_out_path.parent.mkdir(parents=True, exist_ok=True)
+    intent_out_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    wf_total_timesteps = (
+        int(args.wf_total_timesteps)
+        if int(args.wf_total_timesteps) > 0
+        else int(args.total_timesteps)
+    )
+    fold_traces: list[pd.DataFrame] = []
+    manifest_rows: list[dict[str, object]] = []
+
+    print(
+        "[run_train] Walk-forward OOF:",
+        f"folds={len(folds)}",
+        f"timesteps_per_fold={wf_total_timesteps:,}",
+        f"source_rows={len(working):,}",
+    )
+    for fold in folds:
+        fold_id = int(fold["fold_id"])
+        train_fold_df = (
+            working[working["day_id"].isin(fold["train_days"])]
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+        eval_fold_df = (
+            working[working["day_id"].isin(fold["eval_days"])]
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+        if train_fold_df.empty or eval_fold_df.empty:
+            print(f"[run_train] Skipping empty fold {fold_id}.")
+            continue
+
+        print(
+            f"[run_train] Fold {fold_id + 1}/{len(folds)}:",
+            f"train_rows={len(train_fold_df):,}",
+            f"eval_rows={len(eval_fold_df):,}",
+            f"train_days={int(fold['train_day_count'])}",
+            f"eval_days={int(fold['eval_day_count'])}",
+            f"eval_day_range=[{fold['eval_day_start']}..{fold['eval_day_end']}]",
+        )
+
+        fold_seed = int(args.seed) + fold_id * 17
+        train_env = _build_train_env(
+            df=train_fold_df,
+            feature_cols=feature_cols,
+            env_kwargs=env_kwargs,
+            num_envs=int(args.num_envs),
+            seed_base=fold_seed,
+        )
+        model, history = train_ppo(
+            train_env,
+            total_timesteps=wf_total_timesteps,
+            rollout_len=int(args.rollout_len),
+            gamma=float(args.gamma),
+            gae_lambda=float(args.gae_lambda),
+            clip_ratio=float(args.clip_ratio),
+            pi_lr=float(args.pi_lr),
+            vf_lr=float(args.vf_lr),
+            train_epochs=int(args.train_epochs),
+            minibatch_size=int(args.minibatch_size),
+            entropy_coef=float(args.entropy_coef),
+            value_coef=float(args.value_coef),
+            max_grad_norm=float(args.max_grad_norm),
+            action_type=str(args.policy_action_type),
+            device=str(args.device),
+            seed=fold_seed,
+            verbose=True,
+            return_history=True,
+            checkpoint_every_steps=0,
+            checkpoint_start_steps=0,
+            checkpoint_payload={
+                "obs_dim": train_env.obs_dim,
+                "n_actions": 3,
+                "action_type": str(args.policy_action_type),
+                "action_low": -1.0,
+                "action_high": 1.0,
+                "action_deadband": float(action_deadband),
+                "feature_cols": feature_cols,
+                "config": cfg.__dict__,
+                "reward_mode": str(args.reward_mode),
+                "env_overrides": env_kwargs,
+            },
+            hidden_size=int(args.policy_hidden_size),
+            policy_head_mlp=not bool(args.no_policy_head_mlp),
+            policy_layer_norm=bool(args.policy_layer_norm),
+            policy_dropout_p=float(args.policy_dropout_p),
+            weight_decay=float(args.weight_decay),
+            target_kl=float(args.target_kl),
+            eval_env=(
+                make_trading_env(
+                    df=eval_fold_df,
+                    feature_cols=feature_cols,
+                    seed=fold_seed + 10_000,
+                    **env_kwargs,
+                )
+                if int(args.eval_every_updates) > 0
+                else None
+            ),
+            eval_every_updates=int(args.eval_every_updates),
+            eval_n_days=int(args.eval_n_days),
+            early_stop_patience_updates=int(args.early_stop_patience_updates),
+            early_stop_metric=str(args.early_stop_metric),
+            early_stop_min_delta=float(args.early_stop_min_delta),
+            early_stop_best_model_path=(
+                str((model_dir / f"fold_{fold_id:02d}" / "ppo_model_best.pt"))
+                if int(args.eval_every_updates) > 0 and int(args.early_stop_patience_updates) > 0
+                else None
+            ),
+            restore_best_on_early_stop=not bool(args.no_restore_best_on_early_stop),
+        )
+
+        fold_dir = model_dir / f"fold_{fold_id:02d}"
+        fold_dir.mkdir(parents=True, exist_ok=True)
+        history_path = fold_dir / "ppo_train_metrics.csv"
+        pd.DataFrame(history).to_csv(history_path, index=False)
+
+        fold_model_path = fold_dir / "ppo_model.pt"
+        torch.save(
+            {
+                "state_dict": model.state_dict(),
+                "obs_dim": train_env.obs_dim,
+                "n_actions": 3,
+                "action_type": str(args.policy_action_type),
+                "action_dim": int(getattr(model, "action_dim", 1)),
+                "action_low": -1.0,
+                "action_high": 1.0,
+                "policy_hidden_size": int(args.policy_hidden_size),
+                "policy_head_mlp": not bool(args.no_policy_head_mlp),
+                "policy_layer_norm": bool(args.policy_layer_norm),
+                "policy_dropout_p": float(args.policy_dropout_p),
+                "action_deadband": float(action_deadband),
+                "feature_cols": feature_cols,
+                "config": cfg.__dict__,
+                "reward_mode": str(args.reward_mode),
+                "env_overrides": env_kwargs,
+                "fold_id": fold_id,
+                "fold_train_days": int(fold["train_day_count"]),
+                "fold_eval_days": int(fold["eval_day_count"]),
+            },
+            fold_model_path,
+        )
+
+        eval_env = make_trading_env(
+            df=eval_fold_df,
+            feature_cols=feature_cols,
+            **env_kwargs,
+        )
+        fold_trace = evaluate_policy_with_trace(
+            eval_env,
+            model,
+            device=str(args.device),
+            deterministic=True,
+        )
+        fold_trace["fold_id"] = fold_id
+        fold_trace["is_oof"] = True
+        fold_trace_path = fold_dir / "agent_trace.csv"
+        fold_trace.to_csv(fold_trace_path, index=False)
+        fold_traces.append(fold_trace)
+
+        eval_start_ts = pd.to_datetime(eval_fold_df["timestamp"], errors="coerce").min()
+        eval_end_ts = pd.to_datetime(eval_fold_df["timestamp"], errors="coerce").max()
+        eval_end_excl = (
+            eval_end_ts + pd.Timedelta(microseconds=1)
+            if pd.notna(eval_end_ts)
+            else pd.NaT
+        )
+        manifest_rows.append(
+            {
+                "fold_id": fold_id,
+                "start_ts": eval_start_ts,
+                "end_ts": eval_end_excl,
+                "model_path": str(fold_model_path),
+                "trace_path": str(fold_trace_path),
+                "train_rows": int(len(train_fold_df)),
+                "eval_rows": int(len(eval_fold_df)),
+                "train_days": int(fold["train_day_count"]),
+                "eval_days": int(fold["eval_day_count"]),
+                "eval_day_start": fold["eval_day_start"],
+                "eval_day_end": fold["eval_day_end"],
+            }
+        )
+
+    if not fold_traces:
+        raise RuntimeError("Walk-forward OOF produced no fold traces.")
+
+    oof_trace = pd.concat(fold_traces, axis=0, ignore_index=True)
+    if "timestamp" in oof_trace.columns:
+        oof_trace["timestamp"] = pd.to_datetime(oof_trace["timestamp"], errors="coerce")
+        oof_trace = oof_trace[oof_trace["timestamp"].notna()].copy()
+        oof_trace = oof_trace.sort_values("timestamp")
+        oof_trace = oof_trace.drop_duplicates(subset=["timestamp"], keep="last")
+    oof_trace.to_csv(trace_out_path, index=False)
+
+    intent = _derive_htf_intent_from_trace(oof_trace)
+    if intent_out_path.suffix.lower() == ".csv":
+        intent.to_csv(intent_out_path, index=False)
+    else:
+        intent.to_parquet(intent_out_path, index=False)
+
+    manifest = pd.DataFrame(manifest_rows)
+    manifest = manifest.sort_values("start_ts").reset_index(drop=True)
+    manifest.to_csv(manifest_out_path, index=False)
+
+    print(
+        "[run_train] Walk-forward artifacts:",
+        f"trace={trace_out_path}",
+        f"intent={intent_out_path}",
+        f"manifest={manifest_out_path}",
+        f"rows={len(intent):,}",
+    )
+    return {
+        "trace_path": trace_out_path,
+        "intent_path": intent_out_path,
+        "manifest_path": manifest_out_path,
+    }
 
 
 def _plot_actions(trace, output_path):
@@ -310,6 +693,49 @@ def _plot_training_history(history_df: pd.DataFrame, output_path: Path) -> None:
     print(f"Saved training metrics plot to {output_path}")
 
 
+def _summarize_eval_report(report: pd.DataFrame) -> dict[str, float]:
+    if report is None or report.empty:
+        return {}
+    out: dict[str, float] = {"eval_rows": float(len(report))}
+    for col in ("pnl_component", "costs_component", "trades"):
+        if col in report.columns:
+            vals = pd.to_numeric(report[col], errors="coerce")
+            out[f"{col}_mean"] = float(vals.mean())
+            out[f"{col}_sum"] = float(vals.sum())
+    if "pnl_component" in report.columns and "costs_component" in report.columns:
+        pnl = pd.to_numeric(report["pnl_component"], errors="coerce")
+        costs = pd.to_numeric(report["costs_component"], errors="coerce")
+        out["pnl_net_mean"] = float((pnl - costs).mean())
+        out["pnl_net_sum"] = float((pnl - costs).sum())
+    return out
+
+
+def _extract_best_eval_metrics(
+    history_df: pd.DataFrame,
+    metric_name: str,
+) -> dict[str, float | str]:
+    if history_df.empty:
+        return {}
+    out: dict[str, float | str] = {"metric_name": str(metric_name)}
+    if "eval_metric" in history_df.columns:
+        eval_series = pd.to_numeric(history_df["eval_metric"], errors="coerce").dropna()
+        if not eval_series.empty:
+            out["final_eval_metric"] = float(eval_series.iloc[-1])
+    if "best_eval_metric" in history_df.columns:
+        best_series = pd.to_numeric(history_df["best_eval_metric"], errors="coerce").dropna()
+        if not best_series.empty:
+            best_val = float(best_series.iloc[-1])
+            out["best_eval_metric"] = best_val
+            matches = history_df.loc[
+                pd.to_numeric(history_df["best_eval_metric"], errors="coerce") == best_val
+            ]
+            if not matches.empty and "steps" in matches.columns:
+                out["best_eval_metric_steps"] = float(
+                    pd.to_numeric(matches["steps"], errors="coerce").iloc[0]
+                )
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train PPO agent.")
     parser.add_argument(
@@ -344,6 +770,77 @@ def main():
     parser.add_argument("--entropy-coef", type=float, default=0.004)
     parser.add_argument("--value-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=1e-6,
+        help="L2 regularization (Adam weight_decay) for PPO network weights.",
+    )
+    parser.add_argument(
+        "--target-kl",
+        type=float,
+        default=0.015,
+        help="If >0, stop minibatch epochs for an update when approx KL exceeds this value.",
+    )
+    parser.add_argument(
+        "--policy-hidden-size",
+        type=int,
+        default=128,
+        help="Hidden layer width for ActorCritic MLP.",
+    )
+    parser.add_argument(
+        "--no-policy-head-mlp",
+        action="store_true",
+        help="Disable separate policy/value head MLP blocks (shared trunk only).",
+    )
+    parser.add_argument(
+        "--policy-layer-norm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable LayerNorm in PPO MLP blocks.",
+    )
+    parser.add_argument(
+        "--policy-dropout-p",
+        type=float,
+        default=0.05,
+        help="Dropout probability in PPO MLP blocks (recommend <=0.05).",
+    )
+    parser.add_argument(
+        "--eval-every-updates",
+        type=int,
+        default=5,
+        help="Run holdout eval every N PPO updates for early-stop monitoring (<=0 disables).",
+    )
+    parser.add_argument(
+        "--eval-n-days",
+        type=int,
+        default=0,
+        help="Days to use per early-stop eval run (<=0 uses all available eval days).",
+    )
+    parser.add_argument(
+        "--early-stop-patience-updates",
+        type=int,
+        default=8,
+        help="Stop training after this many eval checks without improvement (<=0 disables).",
+    )
+    parser.add_argument(
+        "--early-stop-metric",
+        type=str,
+        default="pnl_net_mean",
+        choices=["pnl_net_mean", "pnl_net_sum", "pnl_mean", "pnl_sum", "costs_mean", "trades_mean"],
+        help="Metric used for patience-based early stopping.",
+    )
+    parser.add_argument(
+        "--early-stop-min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum absolute improvement required to reset patience.",
+    )
+    parser.add_argument(
+        "--no-restore-best-on-early-stop",
+        action="store_true",
+        help="When early stop triggers, keep last weights instead of restoring best monitored weights.",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument(
         "--device",
@@ -378,18 +875,18 @@ def main():
         help="Policy action head: hybrid direction+magnitude (recommended) or single continuous exposure.",
     )
     parser.add_argument("--convex-k1", type=float, default=1.0)
-    parser.add_argument("--convex-k2", type=float, default=0.08)
-    parser.add_argument("--convex-theta", type=float, default=0.0002)
+    parser.add_argument("--convex-k2", type=float, default=0.15)
+    parser.add_argument("--convex-theta", type=float, default=0.00005)
     parser.add_argument(
         "--convex-risk-lambda",
         type=float,
-        default=20.0,
+        default=0.0,
         help="Risk term weight for -lambda * pos^2 * vol^2 (vol proxy from ATR scale).",
     )
     parser.add_argument(
         "--convex-bonus-cap",
         type=float,
-        default=0.0008,
+        default=0.0,
         help="Soft cap (tanh) for convex bonus contribution per bar. Set <=0 to disable.",
     )
     parser.add_argument(
@@ -407,31 +904,31 @@ def main():
     parser.add_argument(
         "--convex-hold-penalty",
         type=float,
-        default=0.00008,
+        default=0.00002,
         help="Per-bar exposure penalty used in convex mode to reduce over-holding.",
     )
     parser.add_argument(
         "--dir-switch-penalty-ret",
         type=float,
-        default=0.00015,
+        default=0.00012,
         help="Penalty when direction flips directly long<->short.",
     )
     parser.add_argument(
         "--size-change-penalty-ret",
         type=float,
-        default=0.00006,
+        default=0.00003,
         help="Penalty scaled by |abs(pos_t)-abs(pos_t-1)|.",
     )
     parser.add_argument(
         "--saturation-threshold",
         type=float,
-        default=0.80,
+        default=0.90,
         help="Start penalizing exposure magnitude when |pos| exceeds this threshold.",
     )
     parser.add_argument(
         "--saturation-penalty-ret",
         type=float,
-        default=0.001,
+        default=0.0,
         help="Penalty slope on max(0, |pos|-saturation_threshold).",
     )
     parser.add_argument(
@@ -488,7 +985,61 @@ def main():
         default="0.001,0.002,0.003",
         help="Comma-separated bonuses aligned to thresholds (e.g. '0.1,0.2,0.3').",
     )
+    parser.add_argument(
+        "--walkforward-oof",
+        action="store_true",
+        help="Run expanding-window walk-forward OOF training and save intent outputs for the 1m execution agent.",
+    )
+    parser.add_argument(
+        "--walkforward-only",
+        action="store_true",
+        help="When --walkforward-oof is enabled, skip the single final model train/eval and only emit OOF artifacts.",
+    )
+    parser.add_argument(
+        "--wf-n-folds",
+        type=int,
+        default=5,
+        help="Number of walk-forward OOF folds.",
+    )
+    parser.add_argument(
+        "--wf-initial-train-days",
+        type=int,
+        default=0,
+        help="Initial number of day_id groups for the first OOF train window (<=0 uses auto sizing).",
+    )
+    parser.add_argument(
+        "--wf-total-timesteps",
+        type=int,
+        default=0,
+        help="PPO timesteps per OOF fold (<=0 reuses --total-timesteps).",
+    )
+    parser.add_argument(
+        "--wf-trace-out",
+        type=str,
+        default="Data/outputs/agent/agent_trace_oof.csv",
+        help="Combined walk-forward OOF trace output path.",
+    )
+    parser.add_argument(
+        "--wf-intent-out",
+        type=str,
+        default="Data/outputs/agent/htf_intent_oof.parquet",
+        help="Derived HTF intent output path used by 1m execution training.",
+    )
+    parser.add_argument(
+        "--wf-manifest-out",
+        type=str,
+        default="Data/outputs/agent/walkforward_manifest.csv",
+        help="Walk-forward fold manifest (start/end/model path) output path.",
+    )
+    parser.add_argument(
+        "--wf-model-dir",
+        type=str,
+        default="Data/outputs/agent/walkforward_models",
+        help="Directory to save per-fold OOF models and fold traces.",
+    )
     args = parser.parse_args()
+    if args.walkforward_only and not args.walkforward_oof:
+        raise ValueError("--walkforward-only requires --walkforward-oof.")
     reward_on_exit = args.reward_mode == "exit"
     use_convex_reward = args.reward_mode == "convex"
     if use_convex_reward:
@@ -655,27 +1206,62 @@ def main():
             f"sat_penalty={env_overrides['saturation_penalty_ret']}",
         )
     env_kwargs = dict(env_overrides)
-
-    if num_envs > 1:
-        train_envs = [
-            make_trading_env(
-                df=train_df,
-                feature_cols=feature_cols,
-                seed=7 + i,
-                **env_kwargs,
-            )
-            for i in range(num_envs)
-        ]
-        train_env = VecTradingEnv(train_envs, auto_reset=True, stagger_reset=True)
-    else:
-        train_env = make_trading_env(
-            df=train_df,
-            feature_cols=feature_cols,
-            **env_kwargs,
-        )
-
     output_dir = Path("Data") / "outputs" / "agent"
     output_dir.mkdir(parents=True, exist_ok=True)
+    walkforward_artifacts: dict[str, Path] = {}
+
+    if args.walkforward_oof:
+        walkforward_artifacts = _run_walkforward_oof(
+            source_df=train_df,
+            feature_cols=feature_cols,
+            env_kwargs=env_kwargs,
+            cfg=cfg,
+            args=args,
+            action_deadband=action_deadband,
+        )
+        if args.walkforward_only:
+            log_paths = log_training_run(
+                run_name="agent_run_train_walkforward_only",
+                output_dir=output_dir,
+                hyperparameters=vars(args),
+                train_metrics={"walkforward_only": True},
+                validation_metrics={},
+                best_validation_metrics={},
+                artifacts={
+                    **{k: str(v) for k, v in walkforward_artifacts.items()},
+                },
+                extra={
+                    "ticker": normalize_ticker(cfg.ticker),
+                    "dataset_name": cfg.dataset_name,
+                    "feature_count": len(feature_cols),
+                    "train_rows": int(len(train_df)),
+                },
+            )
+            print("[run_train] Completed walk-forward OOF only (--walkforward-only).")
+            print(f"[run_train] Saved training run summary: {log_paths['latest_path']}")
+            return
+
+    train_env = _build_train_env(
+        df=train_df,
+        feature_cols=feature_cols,
+        env_kwargs=env_kwargs,
+        num_envs=num_envs,
+        seed_base=int(args.seed),
+    )
+    eval_env_for_es = None
+    if int(args.eval_every_updates) > 0:
+        eval_source_df = test_df if not test_df.empty else val_df
+        if eval_source_df.empty:
+            print(
+                "[run_train] Early-stop eval requested but no holdout rows are available; disabling eval monitor."
+            )
+        else:
+            eval_env_for_es = make_trading_env(
+                df=eval_source_df,
+                feature_cols=feature_cols,
+                seed=int(args.seed) + 10_000,
+                **env_kwargs,
+            )
     checkpoint_dir = Path(args.checkpoint_dir)
     if not checkpoint_dir.is_absolute():
         checkpoint_dir = (Path.cwd() / checkpoint_dir).resolve()
@@ -716,6 +1302,24 @@ def main():
         checkpoint_dir=str(checkpoint_dir),
         checkpoint_prefix="ppo_model",
         checkpoint_payload=checkpoint_payload,
+        hidden_size=int(args.policy_hidden_size),
+        policy_head_mlp=not bool(args.no_policy_head_mlp),
+        policy_layer_norm=bool(args.policy_layer_norm),
+        policy_dropout_p=float(args.policy_dropout_p),
+        weight_decay=float(args.weight_decay),
+        target_kl=float(args.target_kl),
+        eval_env=eval_env_for_es,
+        eval_every_updates=int(args.eval_every_updates),
+        eval_n_days=int(args.eval_n_days),
+        early_stop_patience_updates=int(args.early_stop_patience_updates),
+        early_stop_metric=str(args.early_stop_metric),
+        early_stop_min_delta=float(args.early_stop_min_delta),
+        early_stop_best_model_path=(
+            str(output_dir / "ppo_model_best.pt")
+            if int(args.eval_every_updates) > 0 and int(args.early_stop_patience_updates) > 0
+            else None
+        ),
+        restore_best_on_early_stop=not bool(args.no_restore_best_on_early_stop),
     )
     history_df = pd.DataFrame(train_history)
     history_csv_path = output_dir / "ppo_train_metrics.csv"
@@ -734,6 +1338,10 @@ def main():
             "action_dim": int(getattr(model, "action_dim", 1)),
             "action_low": -1.0,
             "action_high": 1.0,
+            "policy_hidden_size": int(args.policy_hidden_size),
+            "policy_head_mlp": not bool(args.no_policy_head_mlp),
+            "policy_layer_norm": bool(args.policy_layer_norm),
+            "policy_dropout_p": float(args.policy_dropout_p),
             "action_deadband": float(action_deadband),
             "feature_cols": feature_cols,
             "config": cfg.__dict__,
@@ -743,9 +1351,42 @@ def main():
         model_path,
     )
     print(f"Saved model to {model_path}")
+    final_train_metrics = (
+        history_df.iloc[-1].to_dict() if not history_df.empty else {}
+    )
+    best_validation_metrics = _extract_best_eval_metrics(
+        history_df,
+        metric_name=str(args.early_stop_metric),
+    )
+    base_artifacts = {
+        "model_path": str(model_path),
+        "train_metrics_csv": str(history_csv_path),
+        "train_metrics_plot": str(history_plot_path),
+        **{k: str(v) for k, v in walkforward_artifacts.items()},
+    }
+    base_extra = {
+        "ticker": normalize_ticker(cfg.ticker),
+        "dataset_name": cfg.dataset_name,
+        "feature_count": len(feature_cols),
+        "train_rows": int(len(train_df)),
+        "val_rows": int(len(val_df)),
+        "test_rows": int(len(test_df)),
+        "reward_mode": str(args.reward_mode),
+    }
 
     if args.train_full:
         print("[run_train] Skipping evaluation because --train-full is set.")
+        log_paths = log_training_run(
+            run_name="agent_run_train",
+            output_dir=output_dir,
+            hyperparameters=vars(args),
+            train_metrics=final_train_metrics,
+            validation_metrics={"skipped": "--train-full"},
+            best_validation_metrics=best_validation_metrics,
+            artifacts=base_artifacts,
+            extra=base_extra,
+        )
+        print(f"[run_train] Saved training run summary: {log_paths['latest_path']}")
         return
 
     test_env = make_trading_env(
@@ -837,6 +1478,33 @@ def main():
         / "agent_actions_vs_price.png"
     )
     _plot_actions(trace, output_path)
+    validation_metrics = {
+        **_summarize_eval_report(report),
+        **{f"loss_{k}": v for k, v in eval_loss.items()},
+        "agent_total_return": float(agent_return),
+        "agent_final_equity": float(agent_final),
+    }
+    if baseline_mode == "intraday":
+        validation_metrics["baseline_intraday_return"] = float(base_ret)
+        validation_metrics["baseline_intraday_equity"] = float(base_final)
+    if baseline_mode == "buy_hold":
+        validation_metrics["baseline_buy_hold_return"] = float(base_ret)
+        validation_metrics["baseline_buy_hold_equity"] = float(base_final)
+    log_paths = log_training_run(
+        run_name="agent_run_train",
+        output_dir=output_dir,
+        hyperparameters=vars(args),
+        train_metrics=final_train_metrics,
+        validation_metrics=validation_metrics,
+        best_validation_metrics=best_validation_metrics,
+        artifacts={
+            **base_artifacts,
+            "trace_csv": str(trace_path),
+            "action_plot": str(output_path),
+        },
+        extra=base_extra,
+    )
+    print(f"[run_train] Saved training run summary: {log_paths['latest_path']}")
 
 
 if __name__ == "__main__":
