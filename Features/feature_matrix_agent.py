@@ -83,13 +83,13 @@ def _parse_hhmm(value: str) -> tuple[int, int]:
     return int(hour_str), int(minute_str)
 
 
-def _compute_time_sin_cos(
+def _compute_time_features(
     index: pd.DatetimeIndex,
     *,
     tz: str | None,
     session_open: str,
     session_close: str,
-) -> tuple[pd.Series, pd.Series]:
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
     idx = index
     if tz:
         if idx.tz is None:
@@ -105,14 +105,23 @@ def _compute_time_sin_cos(
 
     minutes = idx.hour * 60 + idx.minute + idx.second / 60.0
     minutes = np.asarray(minutes, dtype=float)
-    minutes_since_open = minutes - open_minutes
-    minutes_from_open = np.clip(minutes_since_open / session_minutes, 0.0, 1.0)
+    minutes_since_open_raw = minutes - open_minutes
+    minutes_since_open = np.clip(minutes_since_open_raw, 0.0, float(session_minutes))
+    minutes_to_close = np.clip(float(session_minutes) - minutes_since_open, 0.0, float(session_minutes))
+    session_progress = np.clip(minutes_since_open / float(session_minutes), 0.0, 1.0)
 
-    sin_time = np.sin(2 * np.pi * minutes_from_open)
-    cos_time = np.cos(2 * np.pi * minutes_from_open)
+    sin_time = np.sin(2 * np.pi * session_progress)
+    cos_time = np.cos(2 * np.pi * session_progress)
+    day_of_week = np.asarray(idx.dayofweek, dtype=float)
+    day_of_week_sin = np.sin(2 * np.pi * (day_of_week / 7.0))
+    day_of_week_cos = np.cos(2 * np.pi * (day_of_week / 7.0))
     return (
         pd.Series(sin_time, index=index, name="sin_time_of_day"),
         pd.Series(cos_time, index=index, name="cos_time_of_day"),
+        pd.Series(minutes_since_open, index=index, name="minutes_since_open"),
+        pd.Series(minutes_to_close, index=index, name="minutes_to_close"),
+        pd.Series(day_of_week_sin, index=index, name="day_of_week_sin"),
+        pd.Series(day_of_week_cos, index=index, name="day_of_week_cos"),
     )
 
 
@@ -726,11 +735,22 @@ def build_agent_feature_matrix(
 
     df = _add_probability_confidence_features(df)
 
-    sin_time, cos_time = _compute_time_sin_cos(
+    (
+        sin_time,
+        cos_time,
+        minutes_since_open,
+        minutes_to_close,
+        day_of_week_sin,
+        day_of_week_cos,
+    ) = _compute_time_features(
         df.index, tz=cfg.tz, session_open=cfg.session_open, session_close=cfg.session_close
     )
     df["sin_time_of_day"] = sin_time
     df["cos_time_of_day"] = cos_time
+    df["minutes_since_open"] = minutes_since_open
+    df["minutes_to_close"] = minutes_to_close
+    df["day_of_week_sin"] = day_of_week_sin
+    df["day_of_week_cos"] = day_of_week_cos
 
     atr = _series_from_ta(df.ta.atr(length=14, append=False))
     df["atr_pct"] = atr / df["close"].replace(0, np.nan)
@@ -779,6 +799,10 @@ def build_agent_feature_matrix(
         "volume",
         "sin_time_of_day",
         "cos_time_of_day",
+        "minutes_since_open",
+        "minutes_to_close",
+        "day_of_week_sin",
+        "day_of_week_cos",
         "atr_pct",
         "dist_to_vwap",
         "dist_to_pdh",
