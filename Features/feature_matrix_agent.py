@@ -189,6 +189,99 @@ def _add_pivot_features(df: pd.DataFrame, base_col: str) -> pd.DataFrame:
     return df
 
 
+def _rolling_zscore(
+    series: pd.Series,
+    *,
+    window: int,
+    min_periods: int | None = None,
+) -> pd.Series:
+    win = max(2, int(window))
+    minp = int(min_periods) if min_periods is not None else win
+    rolling_mean = series.rolling(win, min_periods=minp).mean()
+    rolling_std = series.rolling(win, min_periods=minp).std(ddof=0)
+    return (series - rolling_mean) / rolling_std.replace(0.0, np.nan)
+
+
+def _rolling_last_percentile(
+    series: pd.Series,
+    *,
+    window: int,
+    min_periods: int | None = None,
+) -> pd.Series:
+    win = max(2, int(window))
+    minp = int(min_periods) if min_periods is not None else win
+
+    def _percentile_last(arr: np.ndarray) -> float:
+        if arr.size == 0:
+            return np.nan
+        valid = arr[np.isfinite(arr)]
+        if valid.size == 0:
+            return np.nan
+        last = arr[-1]
+        if not np.isfinite(last):
+            return np.nan
+        return float((valid <= last).sum()) / float(valid.size)
+
+    return series.rolling(win, min_periods=minp).apply(_percentile_last, raw=True)
+
+
+def _add_probability_confidence_features(df: pd.DataFrame) -> pd.DataFrame:
+    has_pivot = {"p_pivot_long", "p_pivot_short"}.issubset(df.columns)
+    has_tb = {"p_tb_long", "p_tb_short"}.issubset(df.columns)
+
+    if has_pivot:
+        pivot_edge = df["p_pivot_long"] - df["p_pivot_short"]
+        df["pivot_edge"] = pivot_edge
+        df["pivot_edge_abs"] = pivot_edge.abs()
+    if has_tb:
+        tb_edge = df["p_tb_long"] - df["p_tb_short"]
+        df["tb_edge"] = tb_edge
+        df["tb_edge_abs"] = tb_edge.abs()
+
+    if has_pivot and has_tb:
+        pivot_edge = pd.to_numeric(df["pivot_edge"], errors="coerce")
+        tb_edge = pd.to_numeric(df["tb_edge"], errors="coerce")
+        df["edge_disagreement_abs"] = (pivot_edge - tb_edge).abs()
+        pivot_sign = np.sign(pivot_edge.to_numpy(dtype=float, copy=False))
+        tb_sign = np.sign(tb_edge.to_numpy(dtype=float, copy=False))
+        valid_sign = np.isfinite(pivot_sign) & np.isfinite(tb_sign)
+        sign_disagree = np.full(len(df), np.nan, dtype=float)
+        sign_disagree[valid_sign] = (pivot_sign[valid_sign] != tb_sign[valid_sign]).astype(float)
+        df["edge_sign_disagreement"] = sign_disagree
+    return df
+
+
+def _add_volatility_regime_features(df: pd.DataFrame) -> pd.DataFrame:
+    atr_pct = pd.to_numeric(df.get("atr_pct"), errors="coerce")
+    df["atr_pct_z_64"] = _rolling_zscore(atr_pct, window=64, min_periods=32)
+    df["atr_pct_rank_64"] = _rolling_last_percentile(atr_pct, window=64, min_periods=32)
+
+    ret_1 = pd.to_numeric(df.get("ret_1"), errors="coerce")
+    df["realized_vol_4"] = ret_1.rolling(4, min_periods=4).std(ddof=0)
+    df["realized_vol_16"] = ret_1.rolling(16, min_periods=16).std(ddof=0)
+    df["realized_vol_32"] = ret_1.rolling(32, min_periods=32).std(ddof=0)
+
+    close = pd.to_numeric(df.get("close"), errors="coerce")
+    high = pd.to_numeric(df.get("high"), errors="coerce")
+    low = pd.to_numeric(df.get("low"), errors="coerce")
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    tr_pct = tr / close.replace(0.0, np.nan)
+    tr_ema_fast = tr_pct.ewm(span=8, adjust=False).mean()
+    tr_ema_slow = tr_pct.ewm(span=32, adjust=False).mean()
+    tr_avg_32 = tr_pct.rolling(32, min_periods=16).mean()
+    df["range_regime_8_32"] = tr_ema_fast / tr_ema_slow.replace(0.0, np.nan) - 1.0
+    df["range_expansion_32"] = tr_pct / tr_avg_32.replace(0.0, np.nan) - 1.0
+    return df
+
+
 def _ensure_vix_feature_cols(df: pd.DataFrame) -> pd.DataFrame:
     for col in VIX_FEATURE_COLUMNS:
         if col not in df.columns:
@@ -631,6 +724,8 @@ def build_agent_feature_matrix(
         df = _add_pivot_features(df, "p_tb_long")
         df = _add_pivot_features(df, "p_tb_short")
 
+    df = _add_probability_confidence_features(df)
+
     sin_time, cos_time = _compute_time_sin_cos(
         df.index, tz=cfg.tz, session_open=cfg.session_open, session_close=cfg.session_close
     )
@@ -655,6 +750,8 @@ def build_agent_feature_matrix(
     close = df["close"].replace(0, np.nan).astype(float)
     for lag in (1, 2, 4, 8, 16):
         df[f"ret_{lag}"] = close.pct_change(lag)
+
+    df = _add_volatility_regime_features(df)
 
     if cfg.include_vix_features:
         try:
@@ -691,6 +788,13 @@ def build_agent_feature_matrix(
         "ret_4",
         "ret_8",
         "ret_16",
+        "atr_pct_z_64",
+        "atr_pct_rank_64",
+        "realized_vol_4",
+        "realized_vol_16",
+        "realized_vol_32",
+        "range_regime_8_32",
+        "range_expansion_32",
     ]
     if cfg.include_pivot_probs:
         cols.extend(
@@ -705,6 +809,8 @@ def build_agent_feature_matrix(
                 "p_pivot_short_lag2",
                 "p_pivot_short_max_last_4",
                 "p_pivot_short_delta_1",
+                "pivot_edge",
+                "pivot_edge_abs",
             ]
         )
     if cfg.include_tb_probs:
@@ -720,6 +826,15 @@ def build_agent_feature_matrix(
                 "p_tb_short_lag2",
                 "p_tb_short_max_last_4",
                 "p_tb_short_delta_1",
+                "tb_edge",
+                "tb_edge_abs",
+            ]
+        )
+    if cfg.include_pivot_probs and cfg.include_tb_probs:
+        cols.extend(
+            [
+                "edge_disagreement_abs",
+                "edge_sign_disagreement",
             ]
         )
     if cfg.include_vix_features:

@@ -88,6 +88,54 @@ def _is_vix_feature(col: str) -> bool:
     return col.startswith("vix_") or col.endswith("_x_vix")
 
 
+def _fit_feature_zscore_stats(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+) -> dict[str, object]:
+    stats: dict[str, dict[str, float]] = {}
+    skipped: list[str] = []
+    for col in feature_cols:
+        if col not in df.columns:
+            skipped.append(col)
+            continue
+        values = pd.to_numeric(df[col], errors="coerce")
+        mean_val = float(values.mean(skipna=True))
+        std_val = float(values.std(skipna=True, ddof=0))
+        if (not np.isfinite(mean_val)) or (not np.isfinite(std_val)) or std_val <= 1e-12:
+            skipped.append(col)
+            continue
+        stats[col] = {"mean": mean_val, "std": std_val}
+    return {
+        "enabled": True,
+        "method": "zscore",
+        "cols": list(stats.keys()),
+        "stats": stats,
+        "skipped_cols": skipped,
+    }
+
+
+def _apply_feature_zscore(
+    df: pd.DataFrame,
+    feature_norm: dict[str, object] | None,
+) -> pd.DataFrame:
+    if not feature_norm or not bool(feature_norm.get("enabled", False)):
+        return df
+    stats = feature_norm.get("stats")
+    if not isinstance(stats, dict) or not stats:
+        return df
+    out = df.copy()
+    for col, cfg in stats.items():
+        if col not in out.columns or not isinstance(cfg, dict):
+            continue
+        mean_val = float(cfg.get("mean", 0.0))
+        std_val = float(cfg.get("std", 1.0))
+        if (not np.isfinite(mean_val)) or (not np.isfinite(std_val)) or std_val <= 1e-12:
+            continue
+        values = pd.to_numeric(out[col], errors="coerce")
+        out[col] = (values - mean_val) / std_val
+    return out
+
+
 def _build_train_env(
     *,
     df: pd.DataFrame,
@@ -293,6 +341,16 @@ def _run_walkforward_oof(
             f"eval_days={int(fold['eval_day_count'])}",
             f"eval_day_range=[{fold['eval_day_start']}..{fold['eval_day_end']}]",
         )
+        fold_feature_norm: dict[str, object] | None = None
+        if bool(getattr(args, "feature_zscore", True)):
+            fold_feature_norm = _fit_feature_zscore_stats(train_fold_df, feature_cols)
+            train_fold_df = _apply_feature_zscore(train_fold_df, fold_feature_norm)
+            eval_fold_df = _apply_feature_zscore(eval_fold_df, fold_feature_norm)
+            print(
+                f"[run_train] Fold {fold_id + 1} z-score:",
+                f"scaled_cols={len(fold_feature_norm.get('cols', []))}",
+                f"skipped_cols={len(fold_feature_norm.get('skipped_cols', []))}",
+            )
 
         fold_seed = int(args.seed) + fold_id * 17
         train_env = _build_train_env(
@@ -334,6 +392,7 @@ def _run_walkforward_oof(
                 "config": cfg.__dict__,
                 "reward_mode": str(args.reward_mode),
                 "env_overrides": env_kwargs,
+                "feature_norm": fold_feature_norm or {},
             },
             hidden_size=int(args.policy_hidden_size),
             policy_head_mlp=not bool(args.no_policy_head_mlp),
@@ -388,6 +447,7 @@ def _run_walkforward_oof(
                 "config": cfg.__dict__,
                 "reward_mode": str(args.reward_mode),
                 "env_overrides": env_kwargs,
+                "feature_norm": fold_feature_norm or {},
                 "fold_id": fold_id,
                 "fold_train_days": int(fold["train_day_count"]),
                 "fold_eval_days": int(fold["eval_day_count"]),
@@ -767,7 +827,7 @@ def main():
     parser.add_argument("--vf-lr", type=float, default=1e-3)
     parser.add_argument("--train-epochs", type=int, default=5)
     parser.add_argument("--minibatch-size", type=int, default=256)
-    parser.add_argument("--entropy-coef", type=float, default=0.004)
+    parser.add_argument("--entropy-coef", type=float, default=0.0015)
     parser.add_argument("--value-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument(
@@ -785,7 +845,7 @@ def main():
     parser.add_argument(
         "--policy-hidden-size",
         type=int,
-        default=128,
+        default=256,
         help="Hidden layer width for ActorCritic MLP.",
     )
     parser.add_argument(
@@ -802,8 +862,14 @@ def main():
     parser.add_argument(
         "--policy-dropout-p",
         type=float,
-        default=0.05,
+        default=0.03,
         help="Dropout probability in PPO MLP blocks (recommend <=0.05).",
+    )
+    parser.add_argument(
+        "--feature-zscore",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Z-score normalize numeric PPO input features using train-split stats.",
     )
     parser.add_argument(
         "--eval-every-updates",
@@ -876,11 +942,11 @@ def main():
     )
     parser.add_argument("--convex-k1", type=float, default=1.0)
     parser.add_argument("--convex-k2", type=float, default=0.15)
-    parser.add_argument("--convex-theta", type=float, default=0.00005)
+    parser.add_argument("--convex-theta", type=float, default=0.0002)
     parser.add_argument(
         "--convex-risk-lambda",
         type=float,
-        default=0.0,
+        default=12.0,
         help="Risk term weight for -lambda * pos^2 * vol^2 (vol proxy from ATR scale).",
     )
     parser.add_argument(
@@ -898,7 +964,7 @@ def main():
     parser.add_argument(
         "--convex-pivot-k",
         type=float,
-        default=0.01,
+        default=0.02,
         help="Directional anchor toward pivot edge (p_pivot_long - p_pivot_short).",
     )
     parser.add_argument(
@@ -916,19 +982,19 @@ def main():
     parser.add_argument(
         "--size-change-penalty-ret",
         type=float,
-        default=0.00003,
+        default=0.0001,
         help="Penalty scaled by |abs(pos_t)-abs(pos_t-1)|.",
     )
     parser.add_argument(
         "--saturation-threshold",
         type=float,
-        default=0.90,
+        default=0.75,
         help="Start penalizing exposure magnitude when |pos| exceeds this threshold.",
     )
     parser.add_argument(
         "--saturation-penalty-ret",
         type=float,
-        default=0.0,
+        default=0.0002,
         help="Penalty slope on max(0, |pos|-saturation_threshold).",
     )
     parser.add_argument(
@@ -1241,6 +1307,20 @@ def main():
             print(f"[run_train] Saved training run summary: {log_paths['latest_path']}")
             return
 
+    feature_norm: dict[str, object] = {}
+    if bool(args.feature_zscore):
+        feature_norm = _fit_feature_zscore_stats(train_df, feature_cols)
+        train_df = _apply_feature_zscore(train_df, feature_norm)
+        if not val_df.empty:
+            val_df = _apply_feature_zscore(val_df, feature_norm)
+        if not test_df.empty:
+            test_df = _apply_feature_zscore(test_df, feature_norm)
+        print(
+            "[run_train] Z-score normalization:",
+            f"scaled_cols={len(feature_norm.get('cols', []))}",
+            f"skipped_cols={len(feature_norm.get('skipped_cols', []))}",
+        )
+
     train_env = _build_train_env(
         df=train_df,
         feature_cols=feature_cols,
@@ -1276,6 +1356,7 @@ def main():
         "config": cfg.__dict__,
         "reward_mode": str(args.reward_mode),
         "env_overrides": env_overrides,
+        "feature_norm": feature_norm,
     }
 
     model, train_history = train_ppo(
@@ -1347,6 +1428,7 @@ def main():
             "config": cfg.__dict__,
             "reward_mode": str(args.reward_mode),
             "env_overrides": env_overrides,
+            "feature_norm": feature_norm,
         },
         model_path,
     )

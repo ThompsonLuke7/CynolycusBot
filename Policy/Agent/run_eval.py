@@ -79,6 +79,30 @@ def _is_continuous_action_type(action_type: str) -> bool:
     }
 
 
+def _apply_checkpoint_feature_norm(
+    df: pd.DataFrame,
+    feature_norm: object,
+) -> pd.DataFrame:
+    if not isinstance(feature_norm, dict):
+        return df
+    if not bool(feature_norm.get("enabled", False)):
+        return df
+    stats = feature_norm.get("stats")
+    if not isinstance(stats, dict) or not stats:
+        return df
+    out = df.copy()
+    for col, cfg in stats.items():
+        if col not in out.columns or not isinstance(cfg, dict):
+            continue
+        mean_val = float(cfg.get("mean", 0.0))
+        std_val = float(cfg.get("std", 1.0))
+        if (not np.isfinite(mean_val)) or (not np.isfinite(std_val)) or std_val <= 1e-12:
+            continue
+        vals = pd.to_numeric(out[col], errors="coerce")
+        out[col] = (vals - mean_val) / std_val
+    return out
+
+
 def _load_eval_frame(path_like: str | None) -> pd.DataFrame | None:
     if not path_like:
         return None
@@ -594,6 +618,13 @@ def main() -> None:
                 )
         else:
             feature_cols = [c for c in df.columns if c not in drop_base]
+        feature_norm = ckpt.get("feature_norm")
+        if isinstance(feature_norm, dict) and bool(feature_norm.get("enabled", False)):
+            test_df = _apply_checkpoint_feature_norm(test_df, feature_norm)
+            print(
+                "[run_eval] Applied checkpoint feature normalization:",
+                f"scaled_cols={len(feature_norm.get('cols', []))}",
+            )
         if cfg.drop_na and not test_df.empty:
             test_df = test_df.dropna(subset=feature_cols)
 
