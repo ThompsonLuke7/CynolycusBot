@@ -998,6 +998,27 @@ def main():
         help="Penalty slope on max(0, |pos|-saturation_threshold).",
     )
     parser.add_argument(
+        "--magnitude-decay-lambda",
+        type=float,
+        default=0.0002,
+        help=(
+            "Penalty slope on max(0, |pos|-target_abs) where target_abs decays "
+            "from 1.0 toward --magnitude-decay-min-abs over --magnitude-decay-tau-bars."
+        ),
+    )
+    parser.add_argument(
+        "--magnitude-decay-tau-bars",
+        type=int,
+        default=12,
+        help="Bars to decay target magnitude from 1.0 to its floor.",
+    )
+    parser.add_argument(
+        "--magnitude-decay-min-abs",
+        type=float,
+        default=0.10,
+        help="Floor for decayed target |position|.",
+    )
+    parser.add_argument(
         "--commission-per-trade",
         type=float,
         default=0.0,
@@ -1253,6 +1274,11 @@ def main():
         "size_change_penalty_ret": size_change_penalty,
         "saturation_threshold": args.saturation_threshold,
         "saturation_penalty_ret": args.saturation_penalty_ret,
+        "magnitude_decay_lambda": (
+            float(args.magnitude_decay_lambda) if use_convex_reward else 0.0
+        ),
+        "magnitude_decay_tau_bars": int(args.magnitude_decay_tau_bars),
+        "magnitude_decay_min_abs": float(args.magnitude_decay_min_abs),
         "hold_penalty_ret": hold_penalty,
         "action_deadband": action_deadband,
         "convex_mfe_thresholds": tuple(convex_thresholds),
@@ -1270,6 +1296,9 @@ def main():
             f"size_penalty={env_overrides['size_change_penalty_ret']}",
             f"sat_threshold={env_overrides['saturation_threshold']}",
             f"sat_penalty={env_overrides['saturation_penalty_ret']}",
+            f"mag_decay_lambda={env_overrides['magnitude_decay_lambda']}",
+            f"mag_decay_tau={env_overrides['magnitude_decay_tau_bars']}",
+            f"mag_decay_min_abs={env_overrides['magnitude_decay_min_abs']}",
         )
     env_kwargs = dict(env_overrides)
     output_dir = Path("Data") / "outputs" / "agent"

@@ -53,6 +53,9 @@ class TradingEnv:
         convex_bonus_scale: float = 1.0,
         saturation_threshold: float = 0.9,
         saturation_penalty_ret: float = 0.0,
+        magnitude_decay_lambda: float = 0.0,
+        magnitude_decay_tau_bars: int = 12,
+        magnitude_decay_min_abs: float = 0.0,
         # Legacy args retained for checkpoint/env override compatibility.
         convex_directional_bonus_only: bool = True,
         convex_wrong_side_scale: float = 0.0,
@@ -109,6 +112,9 @@ class TradingEnv:
         self.convex_bonus_scale = float(convex_bonus_scale)
         self.saturation_threshold = float(np.clip(saturation_threshold, 0.0, 1.0))
         self.saturation_penalty_ret = max(0.0, float(saturation_penalty_ret))
+        self.magnitude_decay_lambda = max(0.0, float(magnitude_decay_lambda))
+        self.magnitude_decay_tau_bars = max(1, int(magnitude_decay_tau_bars))
+        self.magnitude_decay_min_abs = float(np.clip(magnitude_decay_min_abs, 0.0, 1.0))
         self._legacy_convex_directional_bonus_only = bool(convex_directional_bonus_only)
         self._legacy_convex_wrong_side_scale = float(convex_wrong_side_scale)
         self.convex_mfe_thresholds = tuple(float(x) for x in convex_mfe_thresholds)
@@ -305,10 +311,13 @@ class TradingEnv:
         reward_convex_bonus = 0.0
         reward_convex_risk_penalty = 0.0
         reward_saturation_penalty = 0.0
+        reward_magnitude_decay_penalty = 0.0
         convex_term = 0.0
         atr_scale = np.nan
         convex_vol_proxy = np.nan
         pivot_anchor = 0.0
+        magnitude_age_frac = np.nan
+        magnitude_target_abs = np.nan
         mfe_bonus = 0.0
         switch_penalty = 0.0
         size_penalty = 0.0
@@ -463,8 +472,31 @@ class TradingEnv:
             self.unrealized_pnl = 0.0
             self.time_in_pos = 0
 
+        if self.magnitude_decay_lambda > 0.0 and not self._is_flat(self.position):
+            magnitude_age_frac = float(
+                np.clip(
+                    float(self.time_in_pos) / float(self.magnitude_decay_tau_bars),
+                    0.0,
+                    1.0,
+                )
+            )
+            magnitude_target_abs = float(
+                max(self.magnitude_decay_min_abs, 1.0 - magnitude_age_frac)
+            )
+            pos_abs = abs(float(self.position))
+            reward_magnitude_decay_penalty = self.magnitude_decay_lambda * max(
+                0.0, pos_abs - magnitude_target_abs
+            )
+
         hold_penalty = self.hold_penalty_ret * abs(self.position)
-        reward = reward_pnl - reward_costs - hold_penalty - switch_penalty - size_penalty
+        reward = (
+            reward_pnl
+            - reward_costs
+            - hold_penalty
+            - switch_penalty
+            - size_penalty
+            - reward_magnitude_decay_penalty
+        )
 
         info: Dict[str, Any] = {
             "price": price,
@@ -487,6 +519,9 @@ class TradingEnv:
             "convex_vol_proxy": float(convex_vol_proxy) if self.use_convex_reward and np.isfinite(convex_vol_proxy) else None,
             "reward_pivot_anchor": pivot_anchor if self.use_convex_reward else None,
             "reward_saturation_penalty": reward_saturation_penalty,
+            "reward_magnitude_decay_penalty": reward_magnitude_decay_penalty,
+            "magnitude_age_frac": magnitude_age_frac if np.isfinite(magnitude_age_frac) else None,
+            "magnitude_target_abs": magnitude_target_abs if np.isfinite(magnitude_target_abs) else None,
             "mfe_atr": float(mfe_atr) if mfe_atr is not None and np.isfinite(mfe_atr) else None,
             "mfe_bonus": mfe_bonus if self.use_convex_reward else None,
             "reward_switch_penalty": switch_penalty,
@@ -526,7 +561,14 @@ class TradingEnv:
                 self.entry_price = np.nan
                 self.unrealized_pnl = 0.0
                 self.time_in_pos = 0
-                reward = reward_pnl - reward_costs - hold_penalty - switch_penalty - size_penalty
+                reward = (
+                    reward_pnl
+                    - reward_costs
+                    - hold_penalty
+                    - switch_penalty
+                    - size_penalty
+                    - reward_magnitude_decay_penalty
+                )
                 info["reward_pnl"] = reward_pnl
                 info["reward_costs"] = reward_costs
                 info["reward_pivot_bonus"] = reward_pivot_bonus
@@ -545,6 +587,13 @@ class TradingEnv:
                 )
                 info["reward_pivot_anchor"] = pivot_anchor if self.use_convex_reward else None
                 info["reward_saturation_penalty"] = reward_saturation_penalty
+                info["reward_magnitude_decay_penalty"] = reward_magnitude_decay_penalty
+                info["magnitude_age_frac"] = (
+                    magnitude_age_frac if np.isfinite(magnitude_age_frac) else None
+                )
+                info["magnitude_target_abs"] = (
+                    magnitude_target_abs if np.isfinite(magnitude_target_abs) else None
+                )
                 info["mfe_atr"] = float(mfe_atr) if mfe_atr is not None and np.isfinite(mfe_atr) else None
                 info["mfe_bonus"] = mfe_bonus if self.use_convex_reward else None
                 info["pos"] = self.position

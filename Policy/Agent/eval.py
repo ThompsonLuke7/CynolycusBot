@@ -273,6 +273,19 @@ def evaluate_policy_with_trace(
                     "reward_saturation_penalty": float(
                         info.get("reward_saturation_penalty", 0.0)
                     ),
+                    "reward_magnitude_decay_penalty": float(
+                        info.get("reward_magnitude_decay_penalty", 0.0)
+                    ),
+                    "magnitude_age_frac": (
+                        float(info.get("magnitude_age_frac"))
+                        if info.get("magnitude_age_frac") is not None
+                        else np.nan
+                    ),
+                    "magnitude_target_abs": (
+                        float(info.get("magnitude_target_abs"))
+                        if info.get("magnitude_target_abs") is not None
+                        else np.nan
+                    ),
                     "did_dir_switch": bool(info.get("did_dir_switch", False)),
                     "size_delta": float(info.get("size_delta", 0.0)),
                     "forced_flat_cost": float(info.get("forced_flat_cost", 0.0)),

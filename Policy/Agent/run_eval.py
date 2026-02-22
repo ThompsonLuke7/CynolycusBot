@@ -60,6 +60,9 @@ def _normalize_env_overrides(raw: object) -> dict[str, object]:
         "size_change_penalty_ret",
         "saturation_threshold",
         "saturation_penalty_ret",
+        "magnitude_decay_lambda",
+        "magnitude_decay_tau_bars",
+        "magnitude_decay_min_abs",
         "seed",
     }
     for key in allowed:
@@ -149,6 +152,40 @@ def _agent_equity_from_trace(trace: pd.DataFrame, initial_cash: float) -> pd.Dat
     trace = trace.copy()
     trace["equity"] = equity_series
     return trace
+
+
+def _derive_next_return_from_trace(trace: pd.DataFrame) -> pd.Series:
+    if "ret_next" in trace.columns:
+        return pd.to_numeric(trace["ret_next"], errors="coerce").fillna(0.0)
+    if "close" not in trace.columns:
+        return pd.Series(0.0, index=trace.index, dtype=float)
+
+    close = pd.to_numeric(trace["close"], errors="coerce")
+    if "day_ptr" in trace.columns:
+        day_ptr = pd.to_numeric(trace["day_ptr"], errors="coerce")
+        ret_next = close.groupby(day_ptr).shift(-1) / close - 1.0
+    else:
+        ret_next = close.shift(-1) / close - 1.0
+    return ret_next.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+def _add_true_pnl_equity(trace: pd.DataFrame, initial_cash: float) -> pd.DataFrame:
+    out = trace.copy()
+    pos = pd.to_numeric(out.get("position", 0.0), errors="coerce").fillna(0.0)
+    ret_next = _derive_next_return_from_trace(out)
+    costs = pd.to_numeric(out.get("reward_costs", 0.0), errors="coerce").fillna(0.0)
+    true_net_ret = pos * ret_next - costs
+
+    equity = float(initial_cash)
+    true_equity = []
+    for r in true_net_ret.to_numpy(dtype=float, copy=False):
+        equity *= (1.0 + float(r))
+        true_equity.append(equity)
+
+    out["ret_next_eval"] = ret_next.to_numpy(dtype=float, copy=False)
+    out["true_net_ret"] = true_net_ret.to_numpy(dtype=float, copy=False)
+    out["true_equity"] = true_equity
+    return out
 
 
 def _daily_first_last(df: pd.DataFrame) -> pd.DataFrame:
@@ -728,10 +765,14 @@ def main() -> None:
         )
         trace = evaluate_policy_with_trace(trace_env, model, device=device, deterministic=deterministic)
         trace = _agent_equity_from_trace(trace, initial_cash=100_000.0)
+        trace = _add_true_pnl_equity(trace, initial_cash=100_000.0)
         trace_path = Path(args.trace_out)
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         trace.to_csv(trace_path, index=False)
         print(f"Saved trace to {trace_path}")
+
+    if "true_equity" not in trace.columns:
+        trace = _add_true_pnl_equity(trace, initial_cash=100_000.0)
 
     if "timestamp" in trace.columns:
         trace["timestamp"] = pd.to_datetime(trace["timestamp"], errors="coerce")
@@ -853,6 +894,21 @@ def main() -> None:
             if "reward_saturation_penalty" in trace.columns
             else pd.Series(dtype=float)
         )
+        mag_decay_pen = (
+            pd.to_numeric(trace["reward_magnitude_decay_penalty"], errors="coerce")
+            if "reward_magnitude_decay_penalty" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        mag_age_frac = (
+            pd.to_numeric(trace["magnitude_age_frac"], errors="coerce")
+            if "magnitude_age_frac" in trace.columns
+            else pd.Series(dtype=float)
+        )
+        mag_target_abs = (
+            pd.to_numeric(trace["magnitude_target_abs"], errors="coerce")
+            if "magnitude_target_abs" in trace.columns
+            else pd.Series(dtype=float)
+        )
         bonus_hits = int((mfe_bonus.fillna(0.0) > 0).sum()) if not mfe_bonus.empty else 0
         pos = (
             pd.to_numeric(trace["position"], errors="coerce").fillna(0.0)
@@ -883,6 +939,9 @@ def main() -> None:
             f"mean_switch_penalty={float(switch_pen.dropna().mean()) if switch_pen.notna().any() else 0.0:.6f}",
             f"mean_size_penalty={float(size_pen.dropna().mean()) if size_pen.notna().any() else 0.0:.6f}",
             f"mean_saturation_penalty={float(saturation_pen.dropna().mean()) if saturation_pen.notna().any() else 0.0:.6f}",
+            f"mean_magnitude_decay_penalty={float(mag_decay_pen.dropna().mean()) if mag_decay_pen.notna().any() else 0.0:.6f}",
+            f"mean_magnitude_age_frac={float(mag_age_frac.dropna().mean()) if mag_age_frac.notna().any() else 0.0:.4f}",
+            f"mean_magnitude_target_abs={float(mag_target_abs.dropna().mean()) if mag_target_abs.notna().any() else 0.0:.4f}",
             f"mean_mfe_atr={float(mfe_atr.dropna().mean()) if mfe_atr.notna().any() else 0.0:.4f}",
             f"total_mfe_bonus={float(mfe_bonus.dropna().sum()) if mfe_bonus.notna().any() else 0.0:.6f}",
             f"mfe_bonus_hits={bonus_hits}",
@@ -921,7 +980,10 @@ def main() -> None:
         trade_cost_ret = test_env._trade_cost_ret
         agent_final = float(trace["equity"].iloc[-1]) if not trace.empty else 100_000.0
         agent_return = agent_final / 100_000.0 - 1.0
-        print(f"Agent total return: {agent_return:.2%} (equity: {agent_final:,.2f})")
+        true_final = float(trace["true_equity"].iloc[-1]) if ("true_equity" in trace.columns and not trace.empty) else 100_000.0
+        true_return = true_final / 100_000.0 - 1.0
+        print(f"Agent objective return: {agent_return:.2%} (equity: {agent_final:,.2f})")
+        print(f"Agent true total return: {true_return:.2%} (equity: {true_final:,.2f})")
 
         if args.baseline == "intraday":
             base_final, _base_pnl, base_ret = _intraday_long(daily_summary, 100_000.0, trade_cost_ret)

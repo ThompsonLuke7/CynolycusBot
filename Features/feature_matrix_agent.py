@@ -190,6 +190,59 @@ def _compute_prior_day_high(df: pd.DataFrame) -> pd.Series:
     return pd.Series(pdh, index=df.index)
 
 
+def _localize_index(index: pd.DatetimeIndex, tz: str | None) -> pd.DatetimeIndex:
+    idx = index
+    if tz:
+        if idx.tz is None:
+            idx = idx.tz_localize(tz)
+        else:
+            idx = idx.tz_convert(tz)
+    return idx
+
+
+def _add_intraday_sr_distance_features(
+    df: pd.DataFrame,
+    *,
+    atr: pd.Series,
+    tz: str | None,
+    session_open: str,
+    open_range_minutes: int = 30,
+) -> pd.DataFrame:
+    high = pd.to_numeric(df.get("high"), errors="coerce")
+    low = pd.to_numeric(df.get("low"), errors="coerce")
+    close = pd.to_numeric(df.get("close"), errors="coerce")
+    atr_safe = pd.to_numeric(atr, errors="coerce").replace(0.0, np.nan)
+
+    idx_local = _localize_index(df.index, tz)
+    session_key = pd.Series(idx_local.normalize(), index=df.index)
+    minute_of_day = pd.Series(
+        idx_local.hour * 60 + idx_local.minute + idx_local.second / 60.0,
+        index=df.index,
+        dtype=float,
+    )
+
+    day_high_so_far = high.groupby(session_key).cummax()
+    day_low_so_far = low.groupby(session_key).cummin()
+    df["dist_to_day_high_so_far_atr"] = (day_high_so_far - close) / atr_safe
+    df["dist_to_day_low_so_far_atr"] = (close - day_low_so_far) / atr_safe
+
+    open_hour, open_minute = _parse_hhmm(session_open)
+    open_min_total = open_hour * 60 + open_minute
+    or_end = open_min_total + max(1, int(open_range_minutes))
+    in_opening_range = (minute_of_day >= float(open_min_total)) & (minute_of_day < float(or_end))
+
+    or_high_partial = high.where(in_opening_range).groupby(session_key).cummax()
+    or_low_partial = low.where(in_opening_range).groupby(session_key).cummin()
+    or_high_final = high.where(in_opening_range).groupby(session_key).transform("max")
+    or_low_final = low.where(in_opening_range).groupby(session_key).transform("min")
+    or_high = or_high_partial.where(in_opening_range, or_high_final)
+    or_low = or_low_partial.where(in_opening_range, or_low_final)
+
+    df["dist_to_or_high_30m_atr"] = (or_high - close) / atr_safe
+    df["dist_to_or_low_30m_atr"] = (close - or_low) / atr_safe
+    return df
+
+
 def _add_pivot_features(df: pd.DataFrame, base_col: str) -> pd.DataFrame:
     df[f"{base_col}_lag1"] = df[base_col].shift(1)
     df[f"{base_col}_lag2"] = df[base_col].shift(2)
@@ -760,6 +813,13 @@ def build_agent_feature_matrix(
 
     pdh = _compute_prior_day_high(df)
     df["dist_to_pdh"] = df["close"] - pdh
+    df = _add_intraday_sr_distance_features(
+        df,
+        atr=atr,
+        tz=cfg.tz,
+        session_open=cfg.session_open,
+        open_range_minutes=30,
+    )
 
     adx_df = df.ta.adx(length=14, append=False)
     df["trend_strength"] = _series_from_ta(adx_df, prefix="ADX")
@@ -806,6 +866,10 @@ def build_agent_feature_matrix(
         "atr_pct",
         "dist_to_vwap",
         "dist_to_pdh",
+        "dist_to_day_high_so_far_atr",
+        "dist_to_day_low_so_far_atr",
+        "dist_to_or_high_30m_atr",
+        "dist_to_or_low_30m_atr",
         "trend_strength",
         "ret_1",
         "ret_2",
