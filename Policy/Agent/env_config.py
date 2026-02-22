@@ -35,6 +35,8 @@ class TradingEnvConfig:
     magnitude_decay_lambda: float = 0.0
     magnitude_decay_tau_bars: int = 12
     magnitude_decay_min_abs: float = 0.0
+    flat_position_penalty_ret: float = 0.0
+    flat_position_threshold: float = 0.0
     convex_directional_bonus_only: bool = True
     convex_wrong_side_scale: float = 0.0
     convex_mfe_thresholds: tuple[float, ...] = (1.0, 2.0, 3.0)

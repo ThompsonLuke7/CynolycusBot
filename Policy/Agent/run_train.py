@@ -1019,6 +1019,21 @@ def main():
         help="Floor for decayed target |position|.",
     )
     parser.add_argument(
+        "--flat-position-penalty-ret",
+        type=float,
+        default=0.0,
+        help=(
+            "Per-bar penalty when |position| is below --flat-position-threshold. "
+            "Helps discourage staying flat/near-flat for long stretches."
+        ),
+    )
+    parser.add_argument(
+        "--flat-position-threshold",
+        type=float,
+        default=0.10,
+        help="Near-flat threshold for applying --flat-position-penalty-ret.",
+    )
+    parser.add_argument(
         "--commission-per-trade",
         type=float,
         default=0.0,
@@ -1279,6 +1294,10 @@ def main():
         ),
         "magnitude_decay_tau_bars": int(args.magnitude_decay_tau_bars),
         "magnitude_decay_min_abs": float(args.magnitude_decay_min_abs),
+        "flat_position_penalty_ret": (
+            float(args.flat_position_penalty_ret) if use_convex_reward else 0.0
+        ),
+        "flat_position_threshold": float(args.flat_position_threshold),
         "hold_penalty_ret": hold_penalty,
         "action_deadband": action_deadband,
         "convex_mfe_thresholds": tuple(convex_thresholds),
@@ -1299,6 +1318,8 @@ def main():
             f"mag_decay_lambda={env_overrides['magnitude_decay_lambda']}",
             f"mag_decay_tau={env_overrides['magnitude_decay_tau_bars']}",
             f"mag_decay_min_abs={env_overrides['magnitude_decay_min_abs']}",
+            f"flat_penalty={env_overrides['flat_position_penalty_ret']}",
+            f"flat_threshold={env_overrides['flat_position_threshold']}",
         )
     env_kwargs = dict(env_overrides)
     output_dir = Path("Data") / "outputs" / "agent"

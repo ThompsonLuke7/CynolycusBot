@@ -276,6 +276,9 @@ def evaluate_policy_with_trace(
                     "reward_magnitude_decay_penalty": float(
                         info.get("reward_magnitude_decay_penalty", 0.0)
                     ),
+                    "reward_flat_position_penalty": float(
+                        info.get("reward_flat_position_penalty", 0.0)
+                    ),
                     "magnitude_age_frac": (
                         float(info.get("magnitude_age_frac"))
                         if info.get("magnitude_age_frac") is not None

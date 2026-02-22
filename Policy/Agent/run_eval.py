@@ -63,6 +63,8 @@ def _normalize_env_overrides(raw: object) -> dict[str, object]:
         "magnitude_decay_lambda",
         "magnitude_decay_tau_bars",
         "magnitude_decay_min_abs",
+        "flat_position_penalty_ret",
+        "flat_position_threshold",
         "seed",
     }
     for key in allowed:
@@ -899,6 +901,11 @@ def main() -> None:
             if "reward_magnitude_decay_penalty" in trace.columns
             else pd.Series(dtype=float)
         )
+        flat_pos_pen = (
+            pd.to_numeric(trace["reward_flat_position_penalty"], errors="coerce")
+            if "reward_flat_position_penalty" in trace.columns
+            else pd.Series(dtype=float)
+        )
         mag_age_frac = (
             pd.to_numeric(trace["magnitude_age_frac"], errors="coerce")
             if "magnitude_age_frac" in trace.columns
@@ -940,6 +947,7 @@ def main() -> None:
             f"mean_size_penalty={float(size_pen.dropna().mean()) if size_pen.notna().any() else 0.0:.6f}",
             f"mean_saturation_penalty={float(saturation_pen.dropna().mean()) if saturation_pen.notna().any() else 0.0:.6f}",
             f"mean_magnitude_decay_penalty={float(mag_decay_pen.dropna().mean()) if mag_decay_pen.notna().any() else 0.0:.6f}",
+            f"mean_flat_position_penalty={float(flat_pos_pen.dropna().mean()) if flat_pos_pen.notna().any() else 0.0:.6f}",
             f"mean_magnitude_age_frac={float(mag_age_frac.dropna().mean()) if mag_age_frac.notna().any() else 0.0:.4f}",
             f"mean_magnitude_target_abs={float(mag_target_abs.dropna().mean()) if mag_target_abs.notna().any() else 0.0:.4f}",
             f"mean_mfe_atr={float(mfe_atr.dropna().mean()) if mfe_atr.notna().any() else 0.0:.4f}",
