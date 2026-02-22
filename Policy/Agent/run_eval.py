@@ -363,6 +363,13 @@ def _plot_actions(
     ax_price.legend(loc="upper left")
 
     if ax_prob is not None and has_probs:
+        prob_all_vals = plot_df[[c[0] for c in prob_cols]].to_numpy(dtype=float)
+        finite_probs = prob_all_vals[np.isfinite(prob_all_vals)]
+        prob_is_bounded = (
+            finite_probs.size > 0
+            and float(np.nanmin(finite_probs)) >= -1e-6
+            and float(np.nanmax(finite_probs)) <= 1.0 + 1e-6
+        )
         for col, color, label in prob_cols:
             if col in plot_df.columns:
                 ax_prob.plot(
@@ -372,8 +379,17 @@ def _plot_actions(
                     linewidth=1.3,
                     label=label,
                 )
-        ax_prob.set_ylim(0, 1.02)
-        ax_prob.set_ylabel("Prob")
+        if prob_is_bounded:
+            ax_prob.set_ylim(0.0, 1.02)
+            ax_prob.set_ylabel("Prob")
+        else:
+            y_min = float(np.nanmin(finite_probs)) if finite_probs.size else -1.0
+            y_max = float(np.nanmax(finite_probs)) if finite_probs.size else 1.0
+            span = max(y_max - y_min, 1e-6)
+            pad = max(0.05 * span, 0.05)
+            ax_prob.set_ylim(y_min - pad, y_max + pad)
+            ax_prob.axhline(0.0, color="#777777", linewidth=0.8, alpha=0.7)
+            ax_prob.set_ylabel("Prob (normalized)")
         ax_prob.legend(loc="upper left")
 
     if ax_heads is not None and has_heads:

@@ -212,12 +212,14 @@
         <div class="field"><label>Replay End</label><input id="replayEnd" placeholder="optional ISO datetime" /></div>
         <div class="field"><label>Replay Sleep (sec)</label><input id="replaySleep" type="number" step="0.01" min="0" value="0.0" /></div>
         <div class="field"><label>Flip Abs Min</label><input id="execFlipAbsThreshold" type="number" step="0.01" min="0" value="0.05" /></div>
+        <div class="field"><label>Catch-up Max Age (min)</label><input id="startupCatchupMaxAgeMin" type="number" min="0" value="120" /></div>
         <div class="field"><label>Replay Max Bars</label><input id="replayMaxBars" type="number" min="1" placeholder="all" /></div>
         <div class="checks">
           <label><input id="enableOrders" type="checkbox" /> Option Orders</label>
           <label><input id="simulateOrders" type="checkbox" checked /> Simulate</label>
           <label><input id="noAgent" type="checkbox" /> No Agent</label>
           <label><input id="evalParityMode" type="checkbox" /> Eval Parity Mode</label>
+          <label><input id="startupCatchupOrder" type="checkbox" /> Startup Catch-up Order</label>
           <label><input id="replayRegularOnly" type="checkbox" /> Replay RTH Only</label>
           <label><input id="replayNoWarmup" type="checkbox" /> Replay No Warmup</label>
         </div>
@@ -281,8 +283,18 @@
       simulate.disabled = replay;
       document.getElementById("feed").disabled = replay;
       document.getElementById("prefillStart").disabled = replay;
-      const replayIds = ["replayDataPath", "replayStart", "replayEnd", "replaySleep", "replayMaxBars", "replayRegularOnly", "replayNoWarmup"];
+      const replayIds = [
+        "replayDataPath",
+        "replayStart",
+        "replayEnd",
+        "replaySleep",
+        "replayMaxBars",
+        "replayRegularOnly",
+        "replayNoWarmup",
+      ];
       replayIds.forEach((id) => { document.getElementById(id).disabled = !replay; });
+      const startupCatchupIds = ["startupCatchupOrder", "startupCatchupMaxAgeMin"];
+      startupCatchupIds.forEach((id) => { document.getElementById(id).disabled = replay; });
     }
 
     function updateStatus(text, mode = "idle") {
@@ -1031,7 +1043,9 @@
         enable_option_orders: document.getElementById("enableOrders").checked,
         simulate_orders: document.getElementById("simulateOrders").checked,
         no_agent: document.getElementById("noAgent").checked,
-        eval_parity_mode: document.getElementById("evalParityMode").checked
+        eval_parity_mode: document.getElementById("evalParityMode").checked,
+        startup_catchup_order: document.getElementById("startupCatchupOrder").checked,
+        startup_catchup_max_age_min: Number(document.getElementById("startupCatchupMaxAgeMin").value || 120)
       };
     }
 
