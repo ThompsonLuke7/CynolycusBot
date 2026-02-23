@@ -84,6 +84,25 @@ def _is_continuous_action_type(action_type: str) -> bool:
     }
 
 
+def _dir_sign_from_idx(dir_idx: np.ndarray) -> np.ndarray:
+    out = np.full_like(dir_idx, np.nan, dtype=float)
+    finite = np.isfinite(dir_idx)
+    if not finite.any():
+        return out
+    max_idx = int(np.nanmax(dir_idx[finite]))
+    if max_idx >= 4:
+        # 5-class conviction: 0=long_high,1=long_low,2=flat,3=short_low,4=short_high.
+        out = np.where(finite & ((dir_idx == 0.0) | (dir_idx == 1.0)), 1.0, out)
+        out = np.where(finite & (dir_idx == 2.0), 0.0, out)
+        out = np.where(finite & ((dir_idx == 3.0) | (dir_idx == 4.0)), -1.0, out)
+        return out
+    # 3-class direction: 0=flat,1=long,2=short.
+    out = np.where(finite & (dir_idx == 1.0), 1.0, out)
+    out = np.where(finite & (dir_idx == 2.0), -1.0, out)
+    out = np.where(finite & (dir_idx == 0.0), 0.0, out)
+    return out
+
+
 def _apply_checkpoint_feature_norm(
     df: pd.DataFrame,
     feature_norm: object,
@@ -268,10 +287,13 @@ def _plot_actions(
         prev_actions = np.roll(actions, 1)
         prev_actions[0] = 0.0
         if np.nanmax(np.abs(actions)) > 1.5:
-            entry_long = (actions == 1.0) & (prev_actions != 1.0)
-            entry_short = (actions == 2.0) & (prev_actions != 2.0)
-            exit_long = (prev_actions == 1.0) & (actions != 1.0)
-            exit_short = (prev_actions == 2.0) & (actions != 2.0)
+            # Discrete action fallback when prev_pos is unavailable in legacy traces.
+            dir_now = _dir_sign_from_idx(actions)
+            dir_prev = _dir_sign_from_idx(prev_actions)
+            entry_long = (dir_now > eps) & (dir_prev <= eps)
+            entry_short = (dir_now < -eps) & (dir_prev >= -eps)
+            exit_long = (dir_prev > eps) & (dir_now <= eps)
+            exit_short = (dir_prev < -eps) & (dir_now >= -eps)
         else:
             entry_long = (actions > eps) & (prev_actions <= eps)
             entry_short = (actions < -eps) & (prev_actions >= -eps)
@@ -434,10 +456,7 @@ def _plot_actions(
     if ax_heads is not None and has_heads:
         if "action_dir_idx" in plot_df.columns:
             dir_idx = pd.to_numeric(plot_df["action_dir_idx"], errors="coerce").to_numpy(dtype=float)
-            dir_sign = np.full_like(dir_idx, np.nan, dtype=float)
-            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 1.0), 1.0, dir_sign)
-            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 2.0), -1.0, dir_sign)
-            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 0.0), 0.0, dir_sign)
+            dir_sign = _dir_sign_from_idx(dir_idx)
         else:
             actions = pd.to_numeric(plot_df["action"], errors="coerce").to_numpy(dtype=float)
             dir_sign = np.where(np.abs(actions) <= eps, 0.0, np.sign(actions))
@@ -448,7 +467,7 @@ def _plot_actions(
 
         x_axis = pos if has_ohlc else ts
         ax_heads.step(x_axis, dir_sign, where="post", color="#8E24AA", linewidth=1.2, label="dir_sign (-1/0/+1)")
-        ax_heads.plot(x_axis, mag, color="#00897B", linewidth=1.2, label="magnitude (0..1)")
+        ax_heads.plot(x_axis, mag, color="#00897B", linewidth=1.2, label="conviction (0..1)")
         ax_heads.axhline(0.0, color="#777777", linewidth=0.8, alpha=0.7)
         ax_heads.set_ylim(-1.05, 1.05)
         ax_heads.set_yticks([-1.0, 0.0, 1.0])
@@ -792,9 +811,8 @@ def main() -> None:
                 trace = trace.drop(columns=[merge_col])
 
     use_convex_reward = bool(getattr(test_env, "use_convex_reward", False)) if not args.plot_only else False
-    continuous_action = _is_continuous_action_type(action_type) if not args.plot_only else False
 
-    if not args.plot_only and continuous_action and "position" in trace.columns:
+    if not args.plot_only and "position" in trace.columns:
         pos_series = pd.to_numeric(trace["position"], errors="coerce").fillna(0.0)
         dpos = pos_series.diff().abs().fillna(0.0)
         eps = 1e-3

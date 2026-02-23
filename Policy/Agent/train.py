@@ -184,7 +184,10 @@ def train_ppo(
         for _ in range(rollout_len):
             if is_vectorized:
                 actions_t, logp_t, val_t = model.act_batch(obs, dev)
-                actions_raw = actions_t.detach().cpu().numpy().astype("float32")
+                if model.continuous_action or model.hybrid_action:
+                    actions_raw = actions_t.detach().cpu().numpy().astype("float32")
+                else:
+                    actions_raw = actions_t.detach().cpu().numpy().astype("int64")
                 if model.hybrid_action:
                     if actions_raw.ndim != 2 or actions_raw.shape[-1] < 3:
                         raise RuntimeError(
@@ -192,11 +195,20 @@ def train_ppo(
                         )
                     env_actions = actions_raw[:, 0]
                     store_actions = actions_raw
-                else:
+                elif model.continuous_action:
                     env_actions = actions_raw
                     if actions_raw.ndim == 2 and actions_raw.shape[-1] == 1:
                         env_actions = actions_raw[:, 0]
                     store_actions = env_actions
+                else:
+                    env_actions = (
+                        model.discrete_actions_to_exposure(actions_t)
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype("float32")
+                    )
+                    store_actions = actions_raw
                 logp = logp_t.detach().cpu().numpy().astype("float32")
                 val = val_t.detach().cpu().numpy().astype("float32")
                 next_obs, reward, done, _info = env.step(env_actions)
@@ -223,10 +235,13 @@ def train_ppo(
                     action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
                     env_action = float(action_arr[0]) if action_arr.size else 0.0
                     store_action = action_arr
-                elif isinstance(action, (list, tuple, np.ndarray)):
+                elif model.continuous_action:
                     action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
                     env_action = float(action_arr[0]) if action_arr.size else 0.0
                     store_action = env_action
+                else:
+                    env_action = float(model.discrete_action_to_exposure(int(action)))
+                    store_action = int(action)
                 next_obs, reward, done, _info = env.step(env_action)
 
                 with torch.no_grad():

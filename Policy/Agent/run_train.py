@@ -88,6 +88,32 @@ def _is_vix_feature(col: str) -> bool:
     return col.startswith("vix_") or col.endswith("_x_vix")
 
 
+def _action_cardinality(action_type: str) -> int:
+    at = str(action_type or "").strip().lower()
+    if at in {"discrete_5", "discrete5", "discrete_5_conviction", "conviction_5"}:
+        return 5
+    return 3
+
+
+def _dir_sign_from_idx(dir_idx: np.ndarray) -> np.ndarray:
+    out = np.full_like(dir_idx, np.nan, dtype=float)
+    finite = np.isfinite(dir_idx)
+    if not finite.any():
+        return out
+    max_idx = int(np.nanmax(dir_idx[finite]))
+    if max_idx >= 4:
+        # 5-class conviction: 0=long_high,1=long_low,2=flat,3=short_low,4=short_high.
+        out = np.where(finite & ((dir_idx == 0.0) | (dir_idx == 1.0)), 1.0, out)
+        out = np.where(finite & (dir_idx == 2.0), 0.0, out)
+        out = np.where(finite & ((dir_idx == 3.0) | (dir_idx == 4.0)), -1.0, out)
+        return out
+    # 3-class direction: 0=flat,1=long,2=short.
+    out = np.where(finite & (dir_idx == 1.0), 1.0, out)
+    out = np.where(finite & (dir_idx == 2.0), -1.0, out)
+    out = np.where(finite & (dir_idx == 0.0), 0.0, out)
+    return out
+
+
 def _fit_feature_zscore_stats(
     df: pd.DataFrame,
     feature_cols: list[str],
@@ -168,11 +194,8 @@ def _derive_htf_intent_from_trace(trace: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame()
     out["timestamp"] = pd.to_datetime(trace.get("timestamp"), errors="coerce")
     if "action_dir_idx" in trace.columns:
-        idx = pd.to_numeric(trace["action_dir_idx"], errors="coerce")
-        d = pd.Series(0.0, index=trace.index)
-        d[idx == 1] = 1.0
-        d[idx == 2] = -1.0
-        out["htf_dir"] = d
+        idx = pd.to_numeric(trace["action_dir_idx"], errors="coerce").to_numpy(dtype=float)
+        out["htf_dir"] = pd.Series(_dir_sign_from_idx(idx), index=trace.index)
     else:
         out["htf_dir"] = np.sign(
             pd.to_numeric(trace.get("action", 0.0), errors="coerce").fillna(0.0)
@@ -353,6 +376,7 @@ def _run_walkforward_oof(
             )
 
         fold_seed = int(args.seed) + fold_id * 17
+        action_n_actions = _action_cardinality(str(args.policy_action_type))
         train_env = _build_train_env(
             df=train_fold_df,
             feature_cols=feature_cols,
@@ -375,6 +399,7 @@ def _run_walkforward_oof(
             value_coef=float(args.value_coef),
             max_grad_norm=float(args.max_grad_norm),
             action_type=str(args.policy_action_type),
+            n_actions=int(action_n_actions),
             device=str(args.device),
             seed=fold_seed,
             verbose=True,
@@ -383,7 +408,7 @@ def _run_walkforward_oof(
             checkpoint_start_steps=0,
             checkpoint_payload={
                 "obs_dim": train_env.obs_dim,
-                "n_actions": 3,
+                "n_actions": int(action_n_actions),
                 "action_type": str(args.policy_action_type),
                 "action_low": -1.0,
                 "action_high": 1.0,
@@ -433,7 +458,7 @@ def _run_walkforward_oof(
             {
                 "state_dict": model.state_dict(),
                 "obs_dim": train_env.obs_dim,
-                "n_actions": 3,
+                "n_actions": int(action_n_actions),
                 "action_type": str(args.policy_action_type),
                 "action_dim": int(getattr(model, "action_dim", 1)),
                 "action_low": -1.0,
@@ -575,8 +600,10 @@ def _plot_actions(trace, output_path):
         prev_actions = np.roll(actions, 1)
         prev_actions[0] = 0.0
         if np.nanmax(np.abs(actions)) > 1.5:
-            longs = (actions == 1.0) & (prev_actions != 1.0)
-            shorts = (actions == 2.0) & (prev_actions != 2.0)
+            dir_now = _dir_sign_from_idx(actions)
+            dir_prev = _dir_sign_from_idx(prev_actions)
+            longs = (dir_now > eps) & (dir_prev <= eps)
+            shorts = (dir_now < -eps) & (dir_prev >= -eps)
         else:
             longs = (actions > eps) & (prev_actions <= eps)
             shorts = (actions < -eps) & (prev_actions >= -eps)
@@ -682,10 +709,7 @@ def _plot_actions(trace, output_path):
     if ax_heads is not None and has_heads:
         if "action_dir_idx" in plot_df.columns:
             dir_idx = pd.to_numeric(plot_df["action_dir_idx"], errors="coerce").to_numpy(dtype=float)
-            dir_sign = np.full_like(dir_idx, np.nan, dtype=float)
-            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 1.0), 1.0, dir_sign)
-            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 2.0), -1.0, dir_sign)
-            dir_sign = np.where(np.isfinite(dir_idx) & (dir_idx == 0.0), 0.0, dir_sign)
+            dir_sign = _dir_sign_from_idx(dir_idx)
         else:
             actions = pd.to_numeric(plot_df["action"], errors="coerce").to_numpy(dtype=float)
             dir_sign = np.where(np.abs(actions) <= eps, 0.0, np.sign(actions))
@@ -696,7 +720,7 @@ def _plot_actions(trace, output_path):
 
         x_axis = pos if has_ohlc else ts
         ax_heads.step(x_axis, dir_sign, where="post", color="#8E24AA", linewidth=1.2, label="dir_sign (-1/0/+1)")
-        ax_heads.plot(x_axis, mag, color="#00897B", linewidth=1.2, label="magnitude (0..1)")
+        ax_heads.plot(x_axis, mag, color="#00897B", linewidth=1.2, label="conviction (0..1)")
         ax_heads.axhline(0.0, color="#777777", linewidth=0.8, alpha=0.7)
         ax_heads.set_ylim(-1.05, 1.05)
         ax_heads.set_yticks([-1.0, 0.0, 1.0])
@@ -936,9 +960,13 @@ def main():
     parser.add_argument(
         "--policy-action-type",
         type=str,
-        choices=["hybrid_dir_mag", "continuous_tanh"],
-        default="hybrid_dir_mag",
-        help="Policy action head: hybrid direction+magnitude (recommended) or single continuous exposure.",
+        choices=["discrete_5", "hybrid_dir_mag", "continuous_tanh"],
+        default="discrete_5",
+        help=(
+            "Policy action head: discrete_5 conviction actions "
+            "(long_high/long_low/flat/short_low/short_high), "
+            "hybrid direction+magnitude, or single continuous exposure."
+        ),
     )
     parser.add_argument("--convex-k1", type=float, default=1.0)
     parser.add_argument("--convex-k2", type=float, default=0.15)
@@ -1269,6 +1297,7 @@ def main():
     hold_penalty = float(args.convex_hold_penalty) if use_convex_reward else 0.0
     dir_switch_penalty = float(args.dir_switch_penalty_ret) if use_convex_reward else 0.0
     size_change_penalty = float(args.size_change_penalty_ret) if use_convex_reward else 0.0
+    use_hybrid_magnitude = str(args.policy_action_type).strip().lower() in {"hybrid", "hybrid_dir_mag"}
     env_overrides = {
         "carry_positions_across_days": True,
         "reward_on_exit": reward_on_exit,
@@ -1290,7 +1319,7 @@ def main():
         "saturation_threshold": args.saturation_threshold,
         "saturation_penalty_ret": args.saturation_penalty_ret,
         "magnitude_decay_lambda": (
-            float(args.magnitude_decay_lambda) if use_convex_reward else 0.0
+            float(args.magnitude_decay_lambda) if use_convex_reward and use_hybrid_magnitude else 0.0
         ),
         "magnitude_decay_tau_bars": int(args.magnitude_decay_tau_bars),
         "magnitude_decay_min_abs": float(args.magnitude_decay_min_abs),
@@ -1306,6 +1335,7 @@ def main():
     if use_convex_reward:
         print(
             "[run_train] Magnitude controls:",
+            f"policy_action_type={str(args.policy_action_type)}",
             f"k2={env_overrides['convex_k2']}",
             f"theta={env_overrides['convex_theta']}",
             f"risk_lambda={env_overrides['convex_risk_lambda']}",
@@ -1378,6 +1408,7 @@ def main():
         num_envs=num_envs,
         seed_base=int(args.seed),
     )
+    action_n_actions = _action_cardinality(str(args.policy_action_type))
     eval_env_for_es = None
     if int(args.eval_every_updates) > 0:
         eval_source_df = test_df if not test_df.empty else val_df
@@ -1397,7 +1428,7 @@ def main():
         checkpoint_dir = (Path.cwd() / checkpoint_dir).resolve()
     checkpoint_payload = {
         "obs_dim": train_env.obs_dim,
-        "n_actions": 3,
+        "n_actions": int(action_n_actions),
         "action_type": str(args.policy_action_type),
         "action_low": -1.0,
         "action_high": 1.0,
@@ -1424,6 +1455,7 @@ def main():
         value_coef=float(args.value_coef),
         max_grad_norm=float(args.max_grad_norm),
         action_type=str(args.policy_action_type),
+        n_actions=int(action_n_actions),
         device=str(args.device),
         seed=int(args.seed),
         verbose=True,
@@ -1464,7 +1496,7 @@ def main():
         {
             "state_dict": model.state_dict(),
             "obs_dim": train_env.obs_dim,
-            "n_actions": 3,
+            "n_actions": int(action_n_actions),
             "action_type": str(args.policy_action_type),
             "action_dim": int(getattr(model, "action_dim", 1)),
             "action_low": -1.0,

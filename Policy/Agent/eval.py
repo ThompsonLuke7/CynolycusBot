@@ -58,10 +58,12 @@ def _policy_decision(
         return float(action_t.squeeze().item()), None, None
     if deterministic:
         act = int(torch.argmax(policy_out, dim=-1).item())
-        return 0.0 if act == 0 else (1.0 if act == 1 else -1.0), act, None
+        exposure = float(model.discrete_action_to_exposure(act))
+        return exposure, act, abs(exposure)
     dist = torch.distributions.Categorical(logits=policy_out)
     act = int(dist.sample().item())
-    return 0.0 if act == 0 else (1.0 if act == 1 else -1.0), act, None
+    exposure = float(model.discrete_action_to_exposure(act))
+    return exposure, act, abs(exposure)
 
 
 def _policy_action(model: ActorCritic, x: torch.Tensor, deterministic: bool) -> float:
@@ -390,8 +392,7 @@ def evaluate_loss_metrics(
                         action_idx = dist.sample()
                     logp_t = dist.log_prob(action_idx)
                     entropy_t = dist.entropy()
-                    a = int(action_idx.item())
-                    action = 0.0 if a == 0 else (1.0 if a == 1 else -1.0)
+                    action = float(model.discrete_action_to_exposure(int(action_idx.item())))
 
                 next_obs, reward, done, _info = env.step(action)
                 x_next = torch.as_tensor(next_obs, dtype=torch.float32, device=dev).unsqueeze(0)

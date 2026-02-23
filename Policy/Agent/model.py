@@ -20,6 +20,12 @@ class ActorCritic(nn.Module):
         self.obs_dim = int(obs_dim)
         self.action_type = str(action_type).strip().lower()
         self.hybrid_action = self.action_type in {"hybrid", "hybrid_dir_mag"}
+        self.discrete_5_action = self.action_type in {
+            "discrete_5",
+            "discrete5",
+            "discrete_5_conviction",
+            "conviction_5",
+        }
         self.continuous_action = self.action_type in {
             "continuous",
             "continuous_tanh",
@@ -69,6 +75,35 @@ class ActorCritic(nn.Module):
             self.policy_log_std = None
         self.value_head = nn.Linear(hidden, 1)
         self._init_weights()
+
+    def discrete_action_to_exposure(self, action_idx: int) -> float:
+        idx = int(action_idx)
+        if self.discrete_5_action:
+            # Class order: 0=long_high, 1=long_low, 2=flat, 3=short_low, 4=short_high.
+            exposure_map = (1.0, 0.5, 0.0, -0.5, -1.0)
+            idx = max(0, min(idx, len(exposure_map) - 1))
+            return float(exposure_map[idx])
+        # Class order: 0=flat, 1=long, 2=short.
+        if idx == 1:
+            return 1.0
+        if idx == 2:
+            return -1.0
+        return 0.0
+
+    def discrete_actions_to_exposure(self, action_idx) -> torch.Tensor:
+        if torch.is_tensor(action_idx):
+            idx_t = action_idx.to(dtype=torch.int64)
+        else:
+            idx_t = torch.as_tensor(action_idx, dtype=torch.int64)
+        if self.discrete_5_action:
+            # Class order: 0=long_high, 1=long_low, 2=flat, 3=short_low, 4=short_high.
+            lut = torch.tensor([1.0, 0.5, 0.0, -0.5, -1.0], dtype=torch.float32, device=idx_t.device)
+            idx_t = idx_t.clamp(min=0, max=4)
+            return lut[idx_t]
+        out = torch.zeros_like(idx_t, dtype=torch.float32)
+        out = torch.where(idx_t == 1, torch.ones_like(out), out)
+        out = torch.where(idx_t == 2, -torch.ones_like(out), out)
+        return out
 
     def _init_weights(self) -> None:
         def _init_seq(seq: nn.Module) -> None:
