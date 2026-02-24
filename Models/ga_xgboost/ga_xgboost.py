@@ -2,6 +2,7 @@
 
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
@@ -41,6 +42,8 @@ class GAXGBoostFeatureSelector:
     selection: str = "tournament"   # "tournament" | "roulette"
     tournament_k: int = 3
     random_state: Optional[int] = 42
+    eval_workers: int = 1
+    allow_parallel_gpu_eval: bool = False
     xgb_params: Dict[str, Any] = field(default_factory=lambda: {
         "n_estimators": 2000,
         "max_depth": 3,
@@ -117,21 +120,49 @@ class GAXGBoostFeatureSelector:
 
         best_mask = None
         best_score = -np.inf
+        parallel_mode_printed = False
 
         for gen in range(self.generations):
             fitness = np.zeros(self.population_size)
-
-            # Evaluate fitness (validation accuracy) of each chromosome
-            for i, mask in enumerate(population):
-                fitness[i] = self._evaluate_chromosome(
-                    mask,
-                    X_train,
-                    y_train,
-                    X_val,
-                    y_val,
-                    w_train=w_train,
-                    w_val=w_val,
+            workers = self._effective_eval_workers()
+            use_parallel = workers > 1 and self._can_parallel_eval()
+            if use_parallel and not parallel_mode_printed:
+                mode = "GPU" if self._use_gpu else "CPU"
+                print(
+                    f"[GA-XGB] Parallel GA eval enabled: workers={workers} mode={mode}"
                 )
+                parallel_mode_printed = True
+
+            if use_parallel:
+                futures = {}
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    for i, mask in enumerate(population):
+                        fut = executor.submit(
+                            self._evaluate_chromosome,
+                            mask,
+                            X_train,
+                            y_train,
+                            X_val,
+                            y_val,
+                            w_train=w_train,
+                            w_val=w_val,
+                        )
+                        futures[fut] = i
+                    for fut in as_completed(futures):
+                        idx = futures[fut]
+                        fitness[idx] = float(fut.result())
+            else:
+                # Evaluate fitness (validation accuracy) of each chromosome
+                for i, mask in enumerate(population):
+                    fitness[i] = self._evaluate_chromosome(
+                        mask,
+                        X_train,
+                        y_train,
+                        X_val,
+                        y_val,
+                        w_train=w_train,
+                        w_val=w_val,
+                    )
 
             # Track global best
             gen_best_idx = int(np.argmax(fitness))
@@ -286,6 +317,7 @@ class GAXGBoostFeatureSelector:
             y_train,
             sample_weight=w_train,
             eval_set=eval_set,
+            for_ga_eval=True,
         )
         use_gpu = self._use_gpu is True
         dval = self._make_dmatrix(X_v, y=None, use_gpu=use_gpu, weight=w_val)
@@ -334,6 +366,7 @@ class GAXGBoostFeatureSelector:
         sample_weight: np.ndarray | None = None,
         eval_set: tuple[np.ndarray, np.ndarray, np.ndarray | None] | None = None,
         num_boost_round_override: int | None = None,
+        for_ga_eval: bool = False,
     ) -> xgb.Booster:
         """
         Train XGB with GPU when available; fall back to CPU once if GPU fails.
@@ -347,7 +380,9 @@ class GAXGBoostFeatureSelector:
         self.last_best_iteration_ = None
         use_gpu = True if self._use_gpu is None else self._use_gpu
         if use_gpu:
-            gpu_params, num_boost_round = self._xgb_params_for_mode(use_gpu=True)
+            gpu_params, num_boost_round = self._xgb_params_for_mode(
+                use_gpu=True, for_ga_eval=for_ga_eval
+            )
             if use_early_stopping and self.max_boost_round:
                 num_boost_round = int(self.max_boost_round)
             if num_boost_round_override is not None:
@@ -383,7 +418,9 @@ class GAXGBoostFeatureSelector:
                 self._maybe_print_gpu_error(exc)
                 self._use_gpu = False
 
-        cpu_params, num_boost_round = self._xgb_params_for_mode(use_gpu=False)
+        cpu_params, num_boost_round = self._xgb_params_for_mode(
+            use_gpu=False, for_ga_eval=for_ga_eval
+        )
         if use_early_stopping and self.max_boost_round:
             num_boost_round = int(self.max_boost_round)
         if num_boost_round_override is not None:
@@ -412,12 +449,15 @@ class GAXGBoostFeatureSelector:
         self.last_best_iteration_ = getattr(model, "best_iteration", None)
         return model
 
-    def _xgb_params_for_mode(self, use_gpu: bool) -> tuple[Dict[str, Any], int]:
+    def _xgb_params_for_mode(
+        self, use_gpu: bool, *, for_ga_eval: bool = False
+    ) -> tuple[Dict[str, Any], int]:
         params = dict(self.xgb_params)
         num_boost_round = int(params.pop("n_estimators", 100))
         n_jobs = params.pop("n_jobs", None)
-        if n_jobs is not None:
-            params["nthread"] = n_jobs
+        nthread = self._resolve_nthread(n_jobs, for_ga_eval=for_ga_eval)
+        if nthread is not None:
+            params["nthread"] = nthread
         if use_gpu:
             if self._xgb_supports_device_param():
                 gpu_id = params.pop("gpu_id", None)
@@ -444,6 +484,35 @@ class GAXGBoostFeatureSelector:
         else:
             params.pop("device", None)
         return params, num_boost_round
+
+    def _effective_eval_workers(self) -> int:
+        workers = int(self.eval_workers) if self.eval_workers is not None else 1
+        workers = max(1, workers)
+        return min(workers, max(1, int(self.population_size)))
+
+    def _can_parallel_eval(self) -> bool:
+        if self._use_gpu is True:
+            return bool(self.allow_parallel_gpu_eval)
+        if self._use_gpu is False:
+            return True
+        return False
+
+    def _resolve_nthread(
+        self,
+        n_jobs: int | None,
+        *,
+        for_ga_eval: bool,
+    ) -> int | None:
+        if n_jobs is None:
+            return None
+        cpu_count = os.cpu_count() or 1
+        if int(n_jobs) <= 0:
+            requested = cpu_count
+        else:
+            requested = int(n_jobs)
+        if for_ga_eval and self._effective_eval_workers() > 1:
+            return max(1, requested // self._effective_eval_workers())
+        return requested
 
     @staticmethod
     def _is_gpu_error(exc: Exception) -> bool:

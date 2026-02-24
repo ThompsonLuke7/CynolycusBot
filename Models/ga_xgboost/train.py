@@ -76,6 +76,8 @@ class TrainConfig:
     ga_selection: str | None = None
     ga_tournament_k: int | None = None
     ga_random_state: int | None = None
+    ga_eval_workers: int | None = None
+    ga_allow_parallel_gpu_eval: bool | None = None
 
 
 _GA_PARAM_FIELDS: tuple[str, ...] = (
@@ -92,6 +94,8 @@ _GA_PARAM_FIELDS: tuple[str, ...] = (
     "selection",
     "tournament_k",
     "random_state",
+    "eval_workers",
+    "allow_parallel_gpu_eval",
 )
 
 
@@ -129,6 +133,10 @@ def _ga_kwargs_from_config(cfg: TrainConfig) -> dict:
         kwargs["tournament_k"] = int(cfg.ga_tournament_k)
     if cfg.ga_random_state is not None:
         kwargs["random_state"] = int(cfg.ga_random_state)
+    if cfg.ga_eval_workers is not None:
+        kwargs["eval_workers"] = int(cfg.ga_eval_workers)
+    if cfg.ga_allow_parallel_gpu_eval is not None:
+        kwargs["allow_parallel_gpu_eval"] = bool(cfg.ga_allow_parallel_gpu_eval)
     return kwargs
 
 
@@ -884,6 +892,17 @@ def main() -> None:
     )
     parser.add_argument("--ga-tournament-k", type=int, default=None)
     parser.add_argument("--ga-random-state", type=int, default=None)
+    parser.add_argument(
+        "--ga-eval-workers",
+        type=int,
+        default=None,
+        help="Parallel workers for GA chromosome evaluation (best for CPU fallback mode).",
+    )
+    parser.add_argument(
+        "--ga-allow-parallel-gpu-eval",
+        action="store_true",
+        help="Allow parallel chromosome evaluation when GPU is active (may increase memory use).",
+    )
     args = parser.parse_args()
 
     cfg = TrainConfig(
@@ -910,6 +929,8 @@ def main() -> None:
         ga_selection=args.ga_selection,
         ga_tournament_k=args.ga_tournament_k,
         ga_random_state=args.ga_random_state,
+        ga_eval_workers=args.ga_eval_workers,
+        ga_allow_parallel_gpu_eval=args.ga_allow_parallel_gpu_eval,
     )
     ga_kwargs = _ga_kwargs_from_config(cfg)
     label_dir_probs = cfg.label_mode.lower()
