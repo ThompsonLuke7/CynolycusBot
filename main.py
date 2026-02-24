@@ -77,6 +77,11 @@ def parse_args():
         help="Override raw parquet path (e.g., Data/raw/spy/spy_intraday_15min.parquet).",
     )
     parser.add_argument(
+        "--vix-parquet",
+        default=None,
+        help="Override VIXY parquet path (e.g., Data/raw/vix/vixy_10min.parquet).",
+    )
+    parser.add_argument(
         "--start",
         default=None,
         help="Fetch start time (ISO string). Defaults to now - 200 days.",
@@ -115,6 +120,11 @@ def parse_args():
         default="leg",
         choices=["leg", "swing"],
         help='Label mode for feature engineering and splits (default: "leg").',
+    )
+    parser.add_argument(
+        "--label-timeframe",
+        default="15T",
+        help='Label/dataset timeframe (e.g., "10T", "10min", "15T"). Defaults to "15T".',
     )
     parser.add_argument(
         "--model",
@@ -316,7 +326,7 @@ if __name__ == "__main__":
         )
         raise SystemExit(0)
 
-    label_timeframe = "15T"
+    label_timeframe = _normalize_plot_timeframe(args.label_timeframe)
     dataset_name = _dataset_name_from_label_timeframe(label_timeframe)
     selected_models = ("Tree", "LSTM") if args.model == "all" else (args.model,)
     selected_model_keys = [model.strip().lower() for model in selected_models]
@@ -342,6 +352,7 @@ if __name__ == "__main__":
             ticker=args.ticker,
             label_timeframe=label_timeframe,
             models=selected_models,
+            vix_parquet_path=args.vix_parquet,
         )
         first = True
         align_index = None

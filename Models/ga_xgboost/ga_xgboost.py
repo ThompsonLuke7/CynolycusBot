@@ -64,6 +64,10 @@ class GAXGBoostFeatureSelector:
     _last_printed_device: Optional[bool] = field(init=False, default=None)
     _gpu_error_printed: bool = field(init=False, default=False)
     _has_val_split: bool = field(init=False, default=False)
+    last_evals_result_: Optional[Dict[str, Dict[str, list[float]]]] = field(
+        init=False, default=None
+    )
+    last_best_iteration_: Optional[int] = field(init=False, default=None)
 
     # ---------- Public API ----------
 
@@ -339,6 +343,8 @@ class GAXGBoostFeatureSelector:
             and self.early_stopping_rounds is not None
             and int(self.early_stopping_rounds) > 0
         )
+        self.last_evals_result_ = None
+        self.last_best_iteration_ = None
         use_gpu = True if self._use_gpu is None else self._use_gpu
         if use_gpu:
             gpu_params, num_boost_round = self._xgb_params_for_mode(use_gpu=True)
@@ -349,11 +355,12 @@ class GAXGBoostFeatureSelector:
             dtrain = self._make_dmatrix(X, y=y, use_gpu=True, weight=sample_weight)
             evals = None
             early_stopping = None
+            evals_result: Dict[str, Dict[str, list[float]]] = {}
             if use_early_stopping:
                 X_val, y_val, w_val = eval_set
                 if X_val.shape[0] > 0:
                     dval = self._make_dmatrix(X_val, y=y_val, use_gpu=True, weight=w_val)
-                    evals = [(dval, "val")]
+                    evals = [(dtrain, "train"), (dval, "val")]
                     early_stopping = int(self.early_stopping_rounds)
             try:
                 model = xgb.train(
@@ -362,10 +369,13 @@ class GAXGBoostFeatureSelector:
                     num_boost_round=num_boost_round,
                     evals=evals,
                     early_stopping_rounds=early_stopping,
+                    evals_result=evals_result,
                     verbose_eval=False,
                 )
                 self._use_gpu = True
                 self._maybe_print_device(use_gpu=True, params=gpu_params)
+                self.last_evals_result_ = evals_result or None
+                self.last_best_iteration_ = getattr(model, "best_iteration", None)
                 return model
             except XGBoostError as exc:
                 if not self._is_gpu_error(exc):
@@ -381,11 +391,12 @@ class GAXGBoostFeatureSelector:
         dtrain = self._make_dmatrix(X, y=y, use_gpu=False, weight=sample_weight)
         evals = None
         early_stopping = None
+        evals_result: Dict[str, Dict[str, list[float]]] = {}
         if use_early_stopping:
             X_val, y_val, w_val = eval_set
             if X_val.shape[0] > 0:
                 dval = self._make_dmatrix(X_val, y=y_val, use_gpu=False, weight=w_val)
-                evals = [(dval, "val")]
+                evals = [(dtrain, "train"), (dval, "val")]
                 early_stopping = int(self.early_stopping_rounds)
         model = xgb.train(
             cpu_params,
@@ -393,9 +404,12 @@ class GAXGBoostFeatureSelector:
             num_boost_round=num_boost_round,
             evals=evals,
             early_stopping_rounds=early_stopping,
+            evals_result=evals_result,
             verbose_eval=False,
         )
         self._maybe_print_device(use_gpu=False, params=cpu_params)
+        self.last_evals_result_ = evals_result or None
+        self.last_best_iteration_ = getattr(model, "best_iteration", None)
         return model
 
     def _xgb_params_for_mode(self, use_gpu: bool) -> tuple[Dict[str, Any], int]:

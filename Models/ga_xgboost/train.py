@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
@@ -62,6 +63,73 @@ class TrainConfig:
     split_root: str | None = None
     stats_root: str | None = None
     model_root: str | None = None
+    ga_population_size: int | None = None
+    ga_generations: int | None = None
+    ga_crossover_rate: float | None = None
+    ga_mutation_rate: float | None = None
+    ga_val_size: float | None = None
+    ga_fitness_metric: str | None = None
+    ga_feature_penalty: float | None = None
+    ga_early_stopping_rounds: int | None = None
+    ga_max_boost_round: int | None = None
+    ga_max_features: int | None = None
+    ga_selection: str | None = None
+    ga_tournament_k: int | None = None
+    ga_random_state: int | None = None
+
+
+_GA_PARAM_FIELDS: tuple[str, ...] = (
+    "population_size",
+    "generations",
+    "crossover_rate",
+    "mutation_rate",
+    "val_size",
+    "fitness_metric",
+    "feature_penalty",
+    "early_stopping_rounds",
+    "max_boost_round",
+    "max_features",
+    "selection",
+    "tournament_k",
+    "random_state",
+)
+
+
+def _extract_ga_params(selector: GAXGBoostFeatureSelector) -> dict:
+    return {name: getattr(selector, name, None) for name in _GA_PARAM_FIELDS}
+
+
+def _ga_kwargs_from_config(cfg: TrainConfig) -> dict:
+    kwargs: dict = {}
+    if cfg.ga_population_size is not None:
+        kwargs["population_size"] = int(cfg.ga_population_size)
+    if cfg.ga_generations is not None:
+        kwargs["generations"] = int(cfg.ga_generations)
+    if cfg.ga_crossover_rate is not None:
+        kwargs["crossover_rate"] = float(cfg.ga_crossover_rate)
+    if cfg.ga_mutation_rate is not None:
+        kwargs["mutation_rate"] = float(cfg.ga_mutation_rate)
+    if cfg.ga_val_size is not None:
+        kwargs["val_size"] = float(cfg.ga_val_size)
+    if cfg.ga_fitness_metric is not None:
+        kwargs["fitness_metric"] = str(cfg.ga_fitness_metric)
+    if cfg.ga_feature_penalty is not None:
+        kwargs["feature_penalty"] = float(cfg.ga_feature_penalty)
+    if cfg.ga_early_stopping_rounds is not None:
+        kwargs["early_stopping_rounds"] = int(cfg.ga_early_stopping_rounds)
+    if cfg.ga_max_boost_round is not None:
+        kwargs["max_boost_round"] = int(cfg.ga_max_boost_round)
+    if cfg.ga_max_features is not None:
+        kwargs["max_features"] = (
+            None if int(cfg.ga_max_features) <= 0 else int(cfg.ga_max_features)
+        )
+    if cfg.ga_selection is not None:
+        kwargs["selection"] = str(cfg.ga_selection)
+    if cfg.ga_tournament_k is not None:
+        kwargs["tournament_k"] = int(cfg.ga_tournament_k)
+    if cfg.ga_random_state is not None:
+        kwargs["random_state"] = int(cfg.ga_random_state)
+    return kwargs
 
 
 def load_feature_names(
@@ -110,6 +178,7 @@ def save_selector_artifacts(
         "best_score": selector.best_score_,
         "n_features": int(selector.best_mask_.size),
         "selected_features": int(selector.best_mask_.sum()),
+        "ga_params": _extract_ga_params(selector),
         "xgb_params": selector.xgb_params,
     }
     if metadata:
@@ -329,9 +398,11 @@ def _train_ga_selector(
     *,
     xgb_params: dict,
     sample_weight: np.ndarray | None = None,
+    ga_kwargs: dict | None = None,
 ) -> GAXGBoostFeatureSelector:
     selector = GAXGBoostFeatureSelector(
         xgb_params=xgb_params,
+        **(ga_kwargs or {}),
     )
     selector.fit(X_train, y_train, sample_weight=sample_weight)
     return selector
@@ -350,6 +421,7 @@ def refresh_masks_and_params(
     label_dir: str | None = None,
     full_fit: bool = False,
     scale_pos_weight: bool = True,
+    ga_kwargs: dict | None = None,
 ) -> tuple[np.ndarray, dict, np.ndarray, dict]:
     def _side_params(y_train: np.ndarray) -> dict:
         base = GAXGBoostFeatureSelector().xgb_params.copy()
@@ -365,11 +437,13 @@ def refresh_masks_and_params(
     if full_fit:
         long_selector = GAXGBoostFeatureSelector(
             xgb_params=_side_params(y_long_train),
+            **(ga_kwargs or {}),
         )
         long_selector.fit(X_train, y_long_train, sample_weight=w_long_train)
 
         short_selector = GAXGBoostFeatureSelector(
             xgb_params=_side_params(y_short_train),
+            **(ga_kwargs or {}),
         )
         short_selector.fit(X_train, y_short_train, sample_weight=w_short_train)
     else:
@@ -378,12 +452,14 @@ def refresh_masks_and_params(
             y_long_train,
             xgb_params=_side_params(y_long_train),
             sample_weight=w_long_train,
+            ga_kwargs=ga_kwargs,
         )
         short_selector = _train_ga_selector(
             X_train,
             y_short_train,
             xgb_params=_side_params(y_short_train),
             sample_weight=w_short_train,
+            ga_kwargs=ga_kwargs,
         )
 
     save_selector_artifacts(
@@ -429,8 +505,9 @@ def _fit_xgb_with_selector(
     xgb_params: dict,
     sample_weight: np.ndarray | None = None,
     eval_set: tuple[np.ndarray, np.ndarray, np.ndarray | None] | None = None,
+    ga_kwargs: dict | None = None,
 ) -> tuple[GAXGBoostFeatureSelector, object]:
-    selector = GAXGBoostFeatureSelector(xgb_params=xgb_params)
+    selector = GAXGBoostFeatureSelector(xgb_params=xgb_params, **(ga_kwargs or {}))
     model = selector._fit_xgb(
         X_train,
         y_train,
@@ -539,6 +616,7 @@ def walk_forward_oof_probs(
     initial_train_size: int | None,
     update_scale_pos_weight: bool,
     sample_weight: np.ndarray | None = None,
+    ga_kwargs: dict | None = None,
 ) -> np.ndarray:
     train_end = X_train.shape[0]
     if train_end <= 1:
@@ -574,7 +652,7 @@ def walk_forward_oof_probs(
         )
         w_fit = None if sample_weight is None else sample_weight[:fold_start]
         selector, model = _fit_xgb_with_selector(
-            X_fit, y_fit, params, sample_weight=w_fit
+            X_fit, y_fit, params, sample_weight=w_fit, ga_kwargs=ga_kwargs
         )
 
         X_pred = X_train[fold_start:fold_end][:, mask]
@@ -596,9 +674,10 @@ def train_final_and_predict_test(
     update_scale_pos_weight: bool,
     sample_weight: np.ndarray | None = None,
     eval_set: tuple[np.ndarray, np.ndarray, np.ndarray | None] | None = None,
-) -> np.ndarray:
+    ga_kwargs: dict | None = None,
+) -> tuple[np.ndarray, dict | None]:
     if X_test.size == 0:
-        return np.empty((0,), dtype=np.float32)
+        return np.empty((0,), dtype=np.float32), None
     if sample_weight is not None and sample_weight.shape[0] != X_train.shape[0]:
         raise ValueError("sample_weight must match X_train length.")
 
@@ -619,12 +698,63 @@ def train_final_and_predict_test(
         params,
         sample_weight=sample_weight,
         eval_set=eval_selected,
+        ga_kwargs=ga_kwargs,
     )
+    eval_history = selector.last_evals_result_
 
     X_test = X_test[:, mask]
     use_gpu = selector._use_gpu is True
     dmat = selector._make_dmatrix(X_test, y=None, use_gpu=use_gpu)
-    return selector._to_numpy(model.predict(dmat)).astype(np.float32)
+    probs = selector._to_numpy(model.predict(dmat)).astype(np.float32)
+    return probs, eval_history
+
+
+def _plot_train_val_logloss(
+    *,
+    long_history: dict | None,
+    short_history: dict | None,
+    save_path: Path,
+) -> bool:
+    def _extract(history: dict | None) -> tuple[list[float], list[float] | None]:
+        if not history:
+            return [], None
+        train = history.get("train", {})
+        val = history.get("val", {})
+        train_ll = train.get("logloss", []) if isinstance(train, dict) else []
+        val_ll = val.get("logloss", []) if isinstance(val, dict) else []
+        if not isinstance(train_ll, list):
+            train_ll = list(train_ll)
+        if not isinstance(val_ll, list):
+            val_ll = list(val_ll)
+        return train_ll, (val_ll if len(val_ll) else None)
+
+    long_train, long_val = _extract(long_history)
+    short_train, short_val = _extract(short_history)
+    if not long_train and not short_train:
+        return False
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
+    sides = (
+        ("LONG", long_train, long_val, axes[0]),
+        ("SHORT", short_train, short_val, axes[1]),
+    )
+    for title, train_ll, val_ll, ax in sides:
+        if train_ll:
+            ax.plot(train_ll, label="train_logloss", color="#1f77b4")
+        if val_ll:
+            ax.plot(val_ll, label="val_logloss", color="#ff7f0e")
+        ax.set_title(f"{title} XGBoost Logloss")
+        ax.set_xlabel("Boosting round")
+        ax.set_ylabel("Logloss")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best")
+
+    fig.suptitle("GA-XGB Final Fit: Train vs Validation Logloss")
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=140)
+    plt.close(fig)
+    return True
 
 
 def _save_series(
@@ -661,6 +791,24 @@ def _save_series(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate leakage-safe OOF probs for GA-XGB.")
+    parser.add_argument(
+        "--ticker",
+        type=str,
+        default=TrainConfig.ticker,
+        help="Ticker (default: SPY).",
+    )
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        default=TrainConfig.dataset_name,
+        help="Dataset name under processed datasets/ (e.g., 10min).",
+    )
+    parser.add_argument(
+        "--x-filename",
+        type=str,
+        default=TrainConfig.x_filename,
+        help="Feature parquet filename under dataset dir (e.g., X_10min_tree.parquet).",
+    )
     parser.add_argument(
         "--refresh-masks",
         action="store_true",
@@ -708,9 +856,40 @@ def main() -> None:
         action="store_true",
         help="Train GA-XGB on the full dataset (no holdout).",
     )
+    parser.add_argument("--ga-population-size", type=int, default=None)
+    parser.add_argument("--ga-generations", type=int, default=None)
+    parser.add_argument("--ga-crossover-rate", type=float, default=None)
+    parser.add_argument("--ga-mutation-rate", type=float, default=None)
+    parser.add_argument("--ga-val-size", type=float, default=None)
+    parser.add_argument(
+        "--ga-fitness-metric",
+        type=str,
+        choices=["f1", "f1_penalized"],
+        default=None,
+    )
+    parser.add_argument("--ga-feature-penalty", type=float, default=None)
+    parser.add_argument("--ga-early-stopping-rounds", type=int, default=None)
+    parser.add_argument("--ga-max-boost-round", type=int, default=None)
+    parser.add_argument(
+        "--ga-max-features",
+        type=int,
+        default=None,
+        help="GA feature cap. Set <=0 to disable cap.",
+    )
+    parser.add_argument(
+        "--ga-selection",
+        type=str,
+        choices=["tournament", "roulette"],
+        default=None,
+    )
+    parser.add_argument("--ga-tournament-k", type=int, default=None)
+    parser.add_argument("--ga-random-state", type=int, default=None)
     args = parser.parse_args()
 
     cfg = TrainConfig(
+        ticker=args.ticker,
+        dataset_name=args.dataset_name,
+        x_filename=args.x_filename,
         refresh_masks=bool(args.refresh_masks),
         label_mode=args.label_mode or TrainConfig.label_mode,
         super_pivot_weight=float(args.super_pivot_weight),
@@ -718,7 +897,21 @@ def main() -> None:
         split_root=args.split_root,
         stats_root=args.stats_root,
         model_root=args.model_root,
+        ga_population_size=args.ga_population_size,
+        ga_generations=args.ga_generations,
+        ga_crossover_rate=args.ga_crossover_rate,
+        ga_mutation_rate=args.ga_mutation_rate,
+        ga_val_size=args.ga_val_size,
+        ga_fitness_metric=args.ga_fitness_metric,
+        ga_feature_penalty=args.ga_feature_penalty,
+        ga_early_stopping_rounds=args.ga_early_stopping_rounds,
+        ga_max_boost_round=args.ga_max_boost_round,
+        ga_max_features=args.ga_max_features,
+        ga_selection=args.ga_selection,
+        ga_tournament_k=args.ga_tournament_k,
+        ga_random_state=args.ga_random_state,
     )
+    ga_kwargs = _ga_kwargs_from_config(cfg)
     label_dir_probs = cfg.label_mode.lower()
     if label_dir_probs in {"triple_barrier", "tb"}:
         label_dir_probs = "tb"
@@ -837,6 +1030,7 @@ def main() -> None:
             label_dir=artifact_label_dir,
             full_fit=args.full_fit,
             scale_pos_weight=scale_pos_weight,
+            ga_kwargs=ga_kwargs,
         )
     long_mask, long_params, long_meta = load_model_artifacts(
         model_dataset_root, "long", label_dir=artifact_label_dir
@@ -872,6 +1066,8 @@ def main() -> None:
         short_oof = np.full(train_val_idx.size, np.nan, dtype=np.float32)
         long_test = np.empty((0,), dtype=np.float32)
         short_test = np.empty((0,), dtype=np.float32)
+        long_eval_history = None
+        short_eval_history = None
     else:
         long_oof = walk_forward_oof_probs(
             X_train=X_train,
@@ -882,6 +1078,7 @@ def main() -> None:
             initial_train_size=cfg.initial_train_size,
             update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_long_train,
+            ga_kwargs=ga_kwargs,
         )
         short_oof = walk_forward_oof_probs(
             X_train=X_train,
@@ -892,9 +1089,10 @@ def main() -> None:
             initial_train_size=cfg.initial_train_size,
             update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_short_train,
+            ga_kwargs=ga_kwargs,
         )
 
-        long_test = train_final_and_predict_test(
+        long_test, long_eval_history = train_final_and_predict_test(
             X_train=X_train_only,
             y_train=y_long_train_only,
             X_test=X_test,
@@ -903,8 +1101,9 @@ def main() -> None:
             update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_long_train_only,
             eval_set=(X_val, y_long_val, w_long_val) if val_idx.size else None,
+            ga_kwargs=ga_kwargs,
         )
-        short_test = train_final_and_predict_test(
+        short_test, short_eval_history = train_final_and_predict_test(
             X_train=X_train_only,
             y_train=y_short_train_only,
             X_test=X_test,
@@ -913,6 +1112,7 @@ def main() -> None:
             update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_short_train_only,
             eval_set=(X_val, y_short_val, w_short_val) if val_idx.size else None,
+            ga_kwargs=ga_kwargs,
         )
 
     _summarize_probs(long_oof, "LONG OOF probs")
@@ -941,7 +1141,7 @@ def main() -> None:
 
     n_total = X.shape[0]
     if args.full_fit:
-        long_full = train_final_and_predict_test(
+        long_full, _ = train_final_and_predict_test(
             X_train=X_train,
             y_train=y_long_train,
             X_test=X_train,
@@ -949,8 +1149,9 @@ def main() -> None:
             xgb_params=long_params,
             update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_long_train,
+            ga_kwargs=ga_kwargs,
         )
-        short_full = train_final_and_predict_test(
+        short_full, _ = train_final_and_predict_test(
             X_train=X_train,
             y_train=y_short_train,
             X_test=X_train,
@@ -958,6 +1159,7 @@ def main() -> None:
             xgb_params=short_params,
             update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_short_train,
+            ga_kwargs=ga_kwargs,
         )
         if long_full.size != n_total or short_full.size != n_total:
             raise ValueError("Full-fit predictions do not match dataset length.")
@@ -1042,12 +1244,25 @@ def main() -> None:
             save_path=str(save_path),
         )
 
+    loss_plot_path = model_dataset_root / f"ga_xgb_{cfg.label_mode}_train_vs_val_loss.png"
+    saved_loss_plot = False
+    if not args.full_fit:
+        saved_loss_plot = _plot_train_val_logloss(
+            long_history=long_eval_history,
+            short_history=short_eval_history,
+            save_path=loss_plot_path,
+        )
+        if saved_loss_plot:
+            print(f"[GA-XGB] Saved loss curve plot: {loss_plot_path}")
+
     print(f"Saved OOF/test/full probability arrays under {probs_root}")
     hyperparams = {
         **asdict(cfg),
         **vars(args),
         "scale_pos_weight_enabled": bool(scale_pos_weight),
         "model_dataset_root": str(model_dataset_root),
+        "long_ga_params": dict(long_meta.get("ga_params", {})),
+        "short_ga_params": dict(short_meta.get("ga_params", {})),
     }
     train_metrics = (
         {
@@ -1085,6 +1300,7 @@ def main() -> None:
             "probs_root": str(probs_root),
             "long_probs_dir": str(probs_root / "long" / cfg.output_dirname / label_dir),
             "short_probs_dir": str(probs_root / "short" / cfg.output_dirname / label_dir),
+            "loss_curve_plot": str(loss_plot_path) if saved_loss_plot else None,
             "long_meta_path": str(
                 (model_dataset_root / "long" / "probs" / artifact_label_dir / "meta.json")
                 if artifact_label_dir

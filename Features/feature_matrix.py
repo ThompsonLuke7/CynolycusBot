@@ -382,7 +382,7 @@ def build_feature_matrices(
     label_kwargs: dict | None = None,
     include_custom: bool = True,
     include_date_features: bool = True,
-    include_htf_date_features: bool = False,
+    include_htf_date_features: bool = True,
     verbose: bool = False,
     models: Iterable[str] = ("LSTM",),
     shift_htf_bars: int = 1,
