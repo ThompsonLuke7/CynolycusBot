@@ -78,6 +78,12 @@ class TrainConfig:
     ga_random_state: int | None = None
     ga_eval_workers: int | None = None
     ga_allow_parallel_gpu_eval: bool | None = None
+    xgb_booster: str | None = None
+    xgb_rate_drop: float | None = None
+    xgb_skip_drop: float | None = None
+    xgb_one_drop: bool | None = None
+    xgb_sample_type: str | None = None
+    xgb_normalize_type: str | None = None
 
 
 _GA_PARAM_FIELDS: tuple[str, ...] = (
@@ -97,6 +103,14 @@ _GA_PARAM_FIELDS: tuple[str, ...] = (
     "eval_workers",
     "allow_parallel_gpu_eval",
 )
+
+DART_DEFAULTS: dict[str, object] = {
+    "rate_drop": 0.1,
+    "skip_drop": 0.5,
+    "one_drop": 1,
+    "sample_type": "uniform",
+    "normalize_type": "tree",
+}
 
 
 def _extract_ga_params(selector: GAXGBoostFeatureSelector) -> dict:
@@ -138,6 +152,38 @@ def _ga_kwargs_from_config(cfg: TrainConfig) -> dict:
     if cfg.ga_allow_parallel_gpu_eval is not None:
         kwargs["allow_parallel_gpu_eval"] = bool(cfg.ga_allow_parallel_gpu_eval)
     return kwargs
+
+
+def _xgb_overrides_from_config(cfg: TrainConfig) -> dict:
+    overrides: dict = {}
+    has_dart_knob = any(
+        v is not None
+        for v in (
+            cfg.xgb_rate_drop,
+            cfg.xgb_skip_drop,
+            cfg.xgb_one_drop,
+            cfg.xgb_sample_type,
+            cfg.xgb_normalize_type,
+        )
+    )
+    booster = cfg.xgb_booster
+    if booster is None and has_dart_knob:
+        booster = "dart"
+    if booster is not None:
+        overrides["booster"] = str(booster)
+    if str(booster).lower() == "dart":
+        overrides.update(DART_DEFAULTS)
+    if cfg.xgb_rate_drop is not None:
+        overrides["rate_drop"] = float(cfg.xgb_rate_drop)
+    if cfg.xgb_skip_drop is not None:
+        overrides["skip_drop"] = float(cfg.xgb_skip_drop)
+    if cfg.xgb_one_drop is not None:
+        overrides["one_drop"] = int(bool(cfg.xgb_one_drop))
+    if cfg.xgb_sample_type is not None:
+        overrides["sample_type"] = str(cfg.xgb_sample_type)
+    if cfg.xgb_normalize_type is not None:
+        overrides["normalize_type"] = str(cfg.xgb_normalize_type)
+    return overrides
 
 
 def load_feature_names(
@@ -430,9 +476,12 @@ def refresh_masks_and_params(
     full_fit: bool = False,
     scale_pos_weight: bool = True,
     ga_kwargs: dict | None = None,
+    xgb_param_overrides: dict | None = None,
 ) -> tuple[np.ndarray, dict, np.ndarray, dict]:
     def _side_params(y_train: np.ndarray) -> dict:
         base = GAXGBoostFeatureSelector().xgb_params.copy()
+        if xgb_param_overrides:
+            base.update(xgb_param_overrides)
         if scale_pos_weight:
             pos = int((y_train == 1).sum())
             neg = int((y_train == 0).sum())
@@ -903,6 +952,46 @@ def main() -> None:
         action="store_true",
         help="Allow parallel chromosome evaluation when GPU is active (may increase memory use).",
     )
+    parser.add_argument(
+        "--xgb-booster",
+        "--booster",
+        type=str,
+        choices=["gbtree", "dart"],
+        default=None,
+        help="XGBoost booster type. Use dart to enable tree-dropout regularization with default DART settings unless overridden.",
+    )
+    parser.add_argument(
+        "--xgb-rate-drop",
+        type=float,
+        default=None,
+        help="DART: fraction of previous trees to drop each boosting round.",
+    )
+    parser.add_argument(
+        "--xgb-skip-drop",
+        type=float,
+        default=None,
+        help="DART: probability of skipping dropout in a boosting round.",
+    )
+    parser.add_argument(
+        "--xgb-one-drop",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="DART: enforce dropping at least one tree (true/false).",
+    )
+    parser.add_argument(
+        "--xgb-sample-type",
+        type=str,
+        choices=["uniform", "weighted"],
+        default=None,
+        help="DART: tree sampling method for dropout.",
+    )
+    parser.add_argument(
+        "--xgb-normalize-type",
+        type=str,
+        choices=["tree", "forest"],
+        default=None,
+        help="DART: normalization mode after dropout.",
+    )
     args = parser.parse_args()
 
     cfg = TrainConfig(
@@ -931,8 +1020,15 @@ def main() -> None:
         ga_random_state=args.ga_random_state,
         ga_eval_workers=args.ga_eval_workers,
         ga_allow_parallel_gpu_eval=args.ga_allow_parallel_gpu_eval,
+        xgb_booster=args.xgb_booster,
+        xgb_rate_drop=args.xgb_rate_drop,
+        xgb_skip_drop=args.xgb_skip_drop,
+        xgb_one_drop=args.xgb_one_drop,
+        xgb_sample_type=args.xgb_sample_type,
+        xgb_normalize_type=args.xgb_normalize_type,
     )
     ga_kwargs = _ga_kwargs_from_config(cfg)
+    xgb_overrides = _xgb_overrides_from_config(cfg)
     label_dir_probs = cfg.label_mode.lower()
     if label_dir_probs in {"triple_barrier", "tb"}:
         label_dir_probs = "tb"
@@ -1052,6 +1148,7 @@ def main() -> None:
             full_fit=args.full_fit,
             scale_pos_weight=scale_pos_weight,
             ga_kwargs=ga_kwargs,
+            xgb_param_overrides=xgb_overrides,
         )
     long_mask, long_params, long_meta = load_model_artifacts(
         model_dataset_root, "long", label_dir=artifact_label_dir
@@ -1059,6 +1156,9 @@ def main() -> None:
     short_mask, short_params, short_meta = load_model_artifacts(
         model_dataset_root, "short", label_dir=artifact_label_dir
     )
+    if xgb_overrides:
+        long_params = {**long_params, **xgb_overrides}
+        short_params = {**short_params, **xgb_overrides}
 
     if long_mask.size != X.shape[1] or short_mask.size != X.shape[1]:
         raise ValueError("Mask size does not match feature count.")
@@ -1081,6 +1181,8 @@ def main() -> None:
         f"[GA-XGB] XGBoost objective={long_params.get('objective', 'binary:logistic')} "
         f"eval_metric={long_params.get('eval_metric', 'logloss')}"
     )
+    if xgb_overrides:
+        print(f"[GA-XGB] XGBoost overrides={xgb_overrides}")
 
     if args.full_fit:
         long_oof = np.full(train_val_idx.size, np.nan, dtype=np.float32)

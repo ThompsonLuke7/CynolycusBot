@@ -46,6 +46,7 @@ class GAXGBoostFeatureSelector:
     allow_parallel_gpu_eval: bool = False
     xgb_params: Dict[str, Any] = field(default_factory=lambda: {
         "n_estimators": 2000,
+        "booster": "gbtree",
         "max_depth": 3,
         "learning_rate": 0.03,
         "subsample": 0.8,
@@ -174,7 +175,7 @@ class GAXGBoostFeatureSelector:
                 best_mask = gen_best_mask
 
             metric_label = "val_fitness"
-            if gen%10 ==0:
+            if gen % 5 == 0:
                 print(f"[GA-XGB] Generation {gen+1}/{self.generations} "
                     f"- best {metric_label}: {gen_best_score:.4f}, global best: {best_score:.4f}")
 
@@ -453,6 +454,14 @@ class GAXGBoostFeatureSelector:
         self, use_gpu: bool, *, for_ga_eval: bool = False
     ) -> tuple[Dict[str, Any], int]:
         params = dict(self.xgb_params)
+        booster = str(params.get("booster", "gbtree")).lower()
+        if booster != "dart":
+            # Keep params clean when using non-DART boosters.
+            params.pop("rate_drop", None)
+            params.pop("skip_drop", None)
+            params.pop("one_drop", None)
+            params.pop("sample_type", None)
+            params.pop("normalize_type", None)
         num_boost_round = int(params.pop("n_estimators", 100))
         n_jobs = params.pop("n_jobs", None)
         nthread = self._resolve_nthread(n_jobs, for_ga_eval=for_ga_eval)
