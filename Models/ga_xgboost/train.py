@@ -315,16 +315,7 @@ def load_dataset(
             )
         y_long = y_df[long_col].to_numpy(dtype=np.int64)
         y_short = y_df[short_col].to_numpy(dtype=np.int64)
-    elif label_mode == "leg":
-        long_col, short_col = "leg_up_label", "leg_down_label"
-        missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
-        if missing_cols:
-            raise KeyError(
-                f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
-            )
-        y_long = y_df[long_col].to_numpy(dtype=np.int64)
-        y_short = y_df[short_col].to_numpy(dtype=np.int64)
-    elif label_mode in {"pivot", "pivots"}:
+    elif label_mode == "pivot":
         long_col, short_col = "pivot_down", "pivot_up"
         missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
         if missing_cols:
@@ -355,7 +346,7 @@ def load_dataset(
                 )
                 sample_weight_long[super_long] = float(super_pivot_weight)
                 sample_weight_short[super_short] = float(super_pivot_weight)
-    elif label_mode in {"triple_barrier", "tb"}:
+    elif label_mode == "tb":
         long_col, short_col = "tb_long_label", "tb_short_label"
         missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
         if missing_cols:
@@ -663,6 +654,33 @@ def _print_binary_metrics(
     }
 
 
+def _find_best_f1_threshold(
+    y_true: np.ndarray,
+    probs: np.ndarray,
+    *,
+    default_threshold: float = 0.5,
+    grid_size: int = 199,
+) -> tuple[float, float]:
+    mask = np.isfinite(probs)
+    y = y_true[mask]
+    p = probs[mask]
+    if y.size == 0:
+        return float(default_threshold), float("nan")
+
+    thresholds = np.linspace(0.01, 0.99, max(3, int(grid_size)))
+    best_t = float(default_threshold)
+    best_f1 = -1.0
+    for t in thresholds:
+        pred = (p >= t).astype(int)
+        f1 = float(f1_score(y, pred, zero_division=0))
+        if f1 > best_f1:
+            best_f1 = f1
+            best_t = float(t)
+    if best_f1 < 0.0:
+        return float(default_threshold), float("nan")
+    return best_t, best_f1
+
+
 def walk_forward_oof_probs(
     *,
     X_train: np.ndarray,
@@ -875,7 +893,7 @@ def main() -> None:
         "--label-mode",
         type=str,
         default=None,
-        choices=["swing", "leg", "triple_barrier", "tb", "pivot", "pivots"],
+        choices=["swing", "pivot", "tb"],
         help="Label mode to use (default: swing).",
     )
     parser.add_argument(
@@ -1030,9 +1048,9 @@ def main() -> None:
     ga_kwargs = _ga_kwargs_from_config(cfg)
     xgb_overrides = _xgb_overrides_from_config(cfg)
     label_dir_probs = cfg.label_mode.lower()
-    if label_dir_probs in {"triple_barrier", "tb"}:
+    if label_dir_probs == "tb":
         label_dir_probs = "tb"
-    elif label_dir_probs in {"pivot", "pivots"}:
+    elif label_dir_probs == "pivot":
         label_dir_probs = "pivots"
     artifact_label_dir = (
         label_dir_probs if label_dir_probs in {"pivots", "tb"} else None
@@ -1131,7 +1149,7 @@ def main() -> None:
             need_refresh = True
 
     scale_pos_weight = cfg.update_scale_pos_weight
-    if cfg.label_mode in {"triple_barrier", "tb"}:
+    if cfg.label_mode == "tb":
         scale_pos_weight = False
 
     if need_refresh:
@@ -1169,7 +1187,7 @@ def main() -> None:
     )
     _print_label_stats(y_long_train, "LONG labels (train+val)")
     _print_label_stats(y_short_train, "SHORT labels (train+val)")
-    if cfg.label_mode in {"pivot", "pivots"} and cfg.super_pivot_weight != 1.0:
+    if cfg.label_mode == "pivot" and cfg.super_pivot_weight != 1.0:
         if w_long_train is not None and w_short_train is not None:
             long_super = int((w_long_train > 1.0).sum())
             short_super = int((w_short_train > 1.0).sum())
@@ -1248,18 +1266,30 @@ def main() -> None:
     short_test_metrics: dict[str, float] | None = None
     long_full_train_metrics: dict[str, float] | None = None
     short_full_train_metrics: dict[str, float] | None = None
+    long_threshold = 0.5
+    short_threshold = 0.5
     if not args.full_fit:
+        long_threshold, long_best_oof_f1 = _find_best_f1_threshold(y_long_train, long_oof)
+        short_threshold, short_best_oof_f1 = _find_best_f1_threshold(y_short_train, short_oof)
+        print(
+            f"[GA-XGB] LONG best OOF F1 threshold={long_threshold:.4f} "
+            f"(f1={long_best_oof_f1:.4f})"
+        )
+        print(
+            f"[GA-XGB] SHORT best OOF F1 threshold={short_threshold:.4f} "
+            f"(f1={short_best_oof_f1:.4f})"
+        )
         long_oof_metrics = _print_binary_metrics(
-            y_long_train, long_oof, name="LONG OOF metrics"
+            y_long_train, long_oof, name="LONG OOF metrics", threshold=long_threshold
         )
         short_oof_metrics = _print_binary_metrics(
-            y_short_train, short_oof, name="SHORT OOF metrics"
+            y_short_train, short_oof, name="SHORT OOF metrics", threshold=short_threshold
         )
         long_test_metrics = _print_binary_metrics(
-            y_long[test_idx], long_test, name="LONG test metrics"
+            y_long[test_idx], long_test, name="LONG test metrics", threshold=long_threshold
         )
         short_test_metrics = _print_binary_metrics(
-            y_short[test_idx], short_test, name="SHORT test metrics"
+            y_short[test_idx], short_test, name="SHORT test metrics", threshold=short_threshold
         )
 
     n_total = X.shape[0]
@@ -1363,6 +1393,8 @@ def main() -> None:
             long_label_name="LONG",
             short_label_name="SHORT",
             threshold=0.5,
+            long_threshold=long_threshold,
+            short_threshold=short_threshold,
             title=f"{normalize_ticker(cfg.ticker)} | GA-XGB {cfg.label_mode} (test tail)",
             save_path=str(save_path),
         )

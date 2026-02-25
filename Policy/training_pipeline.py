@@ -27,7 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from Data.load_data import get_ticker_processed_split_dir
 from Data.retrieve_data import normalize_ticker
-from Features.feature_matrix_agent import AgentFeatureConfig, build_agent_feature_matrix
+from Features.feature_matrix_regime import AgentFeatureConfig, build_agent_feature_matrix
 
 
 @dataclass(frozen=True)

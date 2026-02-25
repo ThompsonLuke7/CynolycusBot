@@ -16,7 +16,7 @@ import xgboost as xgb
 from Policy.Agent.env import sincos_time_of_day
 from Policy.Agent.model import ActorCritic
 from Features.feature_matrix import DEFAULT_FEATURE_TIMEFRAMES, _add_feature_set, _align_htf_features
-from Features.feature_matrix_agent import (
+from Features.feature_matrix_regime import (
     _add_pivot_features,
     _compute_prior_day_high,
     _compute_time_sin_cos,

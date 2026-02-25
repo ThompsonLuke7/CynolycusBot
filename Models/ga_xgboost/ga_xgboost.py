@@ -52,7 +52,7 @@ class GAXGBoostFeatureSelector:
         "subsample": 0.8,
         "colsample_bytree": 0.7,
         "objective": "binary:logistic",
-        "eval_metric": ["logloss", "aucpr"],
+        "eval_metric": "logloss",
         "min_child_weight": 5,
         "gamma": 0.0,
         "reg_lambda": 2.0,
@@ -454,6 +454,8 @@ class GAXGBoostFeatureSelector:
         self, use_gpu: bool, *, for_ga_eval: bool = False
     ) -> tuple[Dict[str, Any], int]:
         params = dict(self.xgb_params)
+        # Force single-metric optimization for consistent early-stopping behavior.
+        params["eval_metric"] = "logloss"
         booster = str(params.get("booster", "gbtree")).lower()
         if booster != "dart":
             # Keep params clean when using non-DART boosters.

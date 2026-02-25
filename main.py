@@ -21,6 +21,7 @@ from Features.label_generations import (
     add_bars_to_exhaustion_label,
     add_mfe_mae_labels,
     add_pivot_swing_state_machine,
+    add_trend_phase_labels,
     add_triple_barrier_labels_atr,
 )
 from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
@@ -271,6 +272,8 @@ if __name__ == "__main__":
                 key = "bars_to_exhaustion"
             elif key in {"tb", "triple", "triple_barrier"}:
                 key = "triple_barrier"
+            elif key in {"trend", "phase", "trend_phase"}:
+                key = "trend_phase"
             canonical_plot_types.add(key)
 
         if "all" in canonical_plot_types or "all_labels" in canonical_plot_types:
@@ -306,6 +309,8 @@ if __name__ == "__main__":
                 df = add_bars_to_exhaustion_label(df)
             if "triple_barrier" in canonical_plot_types:
                 df = add_triple_barrier_labels_atr(df)
+            if "trend_phase" in canonical_plot_types:
+                df = add_trend_phase_labels(df)
 
         save_paths = None
         if args.save_plot_path:

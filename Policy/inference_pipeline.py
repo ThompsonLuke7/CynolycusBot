@@ -13,7 +13,7 @@ from Data.load_data import get_ticker_processed_base_dir
 from Data.retrieve_data import normalize_ticker
 from Features import data_pipeline
 from Features.feature_matrix import build_feature_matrices, clean_feature_matrix
-from Features.feature_matrix_agent import AgentFeatureConfig, build_agent_feature_matrix
+from Features.feature_matrix_regime import AgentFeatureConfig, build_agent_feature_matrix
 from Features.feature_scaling import save_normalization_stats
 
 
