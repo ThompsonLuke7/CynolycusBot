@@ -1235,6 +1235,155 @@ def add_pivot_swing_state_machine(
 
 
 # ----------------------------------------------------------------------
+# 9) Trend phase labels (momentum/acceleration regime)
+# ----------------------------------------------------------------------
+def add_trend_phase_labels(
+    df: pd.DataFrame,
+    *,
+    close_col: str = "close",
+    ema_length: int = 20,
+    return_col: str = "trend_phase_ret",
+    momentum_col: str = "trend_phase_m",
+    accel_raw_col: str = "trend_phase_dm",
+    accel_col: str = "trend_phase_a",
+    phase_col: str = "trend_phase_label",
+    dead_col: str = "trend_phase_dead",
+    ignition_col: str = "trend_phase_ignition",
+    expansion_col: str = "trend_phase_expansion",
+    saturation_col: str = "trend_phase_saturation",
+    dead_abs_m_threshold: float | None = None,
+    dead_quantile: float = 0.25,
+    high_m_threshold: float | None = None,
+    high_quantile: float = 0.70,
+    a_pos_eps: float | None = None,
+    a_neg_eps: float | None = None,
+    a_near_zero_band: float | None = None,
+    a_near_zero_quantile: float = 0.35,
+    a_eps_frac_of_zero_band: float = 0.35,
+    min_positive_m_for_phase: float = 0.0,
+) -> pd.DataFrame:
+    """
+    Label trend phase using smoothed return momentum and its acceleration.
+
+    Definitions
+    -----------
+      m = EMA(return, n)
+      a = EMA(delta(m), n)
+
+    Phase map
+    ---------
+      0: dead/chop        (|m| small, or m <= min_positive_m_for_phase)
+      1: ignition         (m > 0 and a > a_pos_eps)
+      2: expansion        (m high and a in near-zero band, slightly positive)
+      3: saturation       (m > 0 and a < -a_neg_eps)
+
+    Notes
+    -----
+    - This is intentionally a long-side phase interpretation.
+      Negative momentum defaults to dead/chop (phase 0).
+    - If thresholds are omitted, robust quantile-based defaults are derived from
+      the current series. In particular, a_pos_eps/a_neg_eps default to a
+      non-zero fraction of the near-zero acceleration band.
+    """
+    if close_col not in df.columns:
+        raise KeyError(f"Missing close column: {close_col}")
+    if int(ema_length) <= 0:
+        raise ValueError("ema_length must be > 0.")
+
+    close = pd.Series(df[close_col], index=df.index).astype(float)
+    ret = close.pct_change()
+    m = ret.ewm(span=int(ema_length), adjust=False, min_periods=1).mean()
+    dm = m.diff()
+    a = dm.ewm(span=int(ema_length), adjust=False, min_periods=1).mean()
+
+    m_np = m.to_numpy(dtype=float)
+    a_np = a.to_numpy(dtype=float)
+
+    finite_m = np.isfinite(m_np)
+    finite_a = np.isfinite(a_np)
+    finite_both = finite_m & finite_a
+
+    abs_m = np.abs(m_np)
+    if dead_abs_m_threshold is None:
+        if np.any(finite_m):
+            q = float(np.clip(dead_quantile, 0.0, 1.0))
+            dead_thr = float(np.nanquantile(abs_m[finite_m], q))
+        else:
+            dead_thr = 0.0
+    else:
+        dead_thr = max(0.0, float(dead_abs_m_threshold))
+
+    pos_m = m_np[finite_m & (m_np > float(min_positive_m_for_phase))]
+    if high_m_threshold is None:
+        if pos_m.size:
+            q = float(np.clip(high_quantile, 0.0, 1.0))
+            high_thr = float(np.nanquantile(pos_m, q))
+        else:
+            high_thr = float(min_positive_m_for_phase)
+    else:
+        high_thr = float(high_m_threshold)
+
+    abs_a = np.abs(a_np)
+    if a_near_zero_band is None:
+        if np.any(finite_a):
+            q = float(np.clip(a_near_zero_quantile, 0.0, 1.0))
+            a_zero_band = float(np.nanquantile(abs_a[finite_a], q))
+        else:
+            a_zero_band = 0.0
+    else:
+        a_zero_band = max(0.0, float(a_near_zero_band))
+
+    eps_floor = 1e-12
+    eps_frac = max(0.0, float(a_eps_frac_of_zero_band))
+    if a_pos_eps is None:
+        pos_eps = max(eps_floor, a_zero_band * eps_frac)
+    else:
+        pos_eps = max(0.0, float(a_pos_eps))
+    if a_neg_eps is None:
+        neg_eps = max(eps_floor, a_zero_band * eps_frac)
+    else:
+        neg_eps = max(0.0, abs(float(a_neg_eps)))
+    min_m = float(min_positive_m_for_phase)
+
+    phase = np.zeros(len(df), dtype=np.int8)
+    for i in range(len(df)):
+        if not finite_both[i]:
+            continue
+        m_i = m_np[i]
+        a_i = a_np[i]
+
+        if abs(m_i) <= dead_thr or m_i <= min_m:
+            phase[i] = 0
+            continue
+
+        is_expansion = (
+            m_i >= high_thr
+            and a_i >= -a_zero_band
+            and a_i <= pos_eps
+        )
+        if is_expansion:
+            phase[i] = 2
+        elif a_i < -neg_eps:
+            phase[i] = 3
+        elif a_i > pos_eps:
+            phase[i] = 1
+        else:
+            phase[i] = 1
+
+    phase_s = pd.Series(phase, index=df.index).astype("Int64")
+    df[return_col] = ret
+    df[momentum_col] = m
+    df[accel_raw_col] = dm
+    df[accel_col] = a
+    df[phase_col] = phase_s
+    df[dead_col] = (phase_s == 0).astype("Int64")
+    df[ignition_col] = (phase_s == 1).astype("Int64")
+    df[expansion_col] = (phase_s == 2).astype("Int64")
+    df[saturation_col] = (phase_s == 3).astype("Int64")
+    return df
+
+
+# ----------------------------------------------------------------------
 # Helper: run all label builders in one call
 # ----------------------------------------------------------------------
 def add_all_labels(
@@ -1249,6 +1398,7 @@ def add_all_labels(
     continuation_kwargs: dict | None = None,
     mfe_mae_kwargs: dict | None = None,
     bars_to_exhaustion_kwargs: dict | None = None,
+    trend_phase_kwargs: dict | None = None,
 ) -> pd.DataFrame:
     """
     Convenience wrapper that applies every label function in this module
@@ -1293,6 +1443,8 @@ def add_all_labels(
         df = add_mfe_mae_labels(df, **mfe_mae_kwargs)
     if bars_to_exhaustion_kwargs is not None:
         df = add_bars_to_exhaustion_label(df, **bars_to_exhaustion_kwargs)
+    if trend_phase_kwargs is not None:
+        df = add_trend_phase_labels(df, **trend_phase_kwargs)
 
     return df
 
@@ -1314,6 +1466,7 @@ def add_all_labels_on_timeframe(
     continuation_kwargs: dict | None = None,
     mfe_mae_kwargs: dict | None = None,
     bars_to_exhaustion_kwargs: dict | None = None,
+    trend_phase_kwargs: dict | None = None,
 ) -> pd.DataFrame:
     """
     Compute labels on a higher timeframe and forward-fill them onto the base index.
@@ -1344,6 +1497,7 @@ def add_all_labels_on_timeframe(
         continuation_kwargs=continuation_kwargs,
         mfe_mae_kwargs=mfe_mae_kwargs,
         bars_to_exhaustion_kwargs=bars_to_exhaustion_kwargs,
+        trend_phase_kwargs=trend_phase_kwargs,
     )
 
     label_cols = [c for c in SWING_LABEL_COLUMNS if c in tf_df.columns]

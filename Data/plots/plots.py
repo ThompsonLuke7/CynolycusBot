@@ -35,6 +35,8 @@ _PLOT_TYPE_ALIASES = {
     "exhaustion": "bars_to_exhaustion",
     "tb": "triple_barrier",
     "triple": "triple_barrier",
+    "trend": "trend_phase",
+    "phase": "trend_phase",
 }
 
 _LABEL_PLOT_FILES = {
@@ -46,6 +48,7 @@ _LABEL_PLOT_FILES = {
     "all_labels": "all_labels_plot.png",
     "mfe_mae": "mfe_mae_plot.png",
     "bars_to_exhaustion": "bars_to_exhaustion_plot.png",
+    "trend_phase": "trend_phase_plot.png",
 }
 
 _PLOT_TAIL_BARS = 200
@@ -1291,6 +1294,88 @@ def plot_triple_barrier_signals(
     )
 
 
+def plot_trend_phase_signals(
+    df: pd.DataFrame,
+    *,
+    phase_col: str = "trend_phase_label",
+    tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
+    save_path: str | None = None,
+) -> None:
+    """
+    Plot OHLC candles with trend phase labels:
+      0=dead/chop, 1=ignition, 2=expansion, 3=saturation.
+    """
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
+    fig, ax = plt.subplots(figsize=(18, 6))
+
+    date_index = df.index
+    pos, open_y, high_y, low_y, close_y = _extract_ohlc(df)
+    marker_offset = _compute_marker_offset(df, high_y, low_y)
+
+    _plot_candles(ax, pos, open_y, high_y, low_y, close_y)
+
+    if phase_col not in df.columns:
+        raise KeyError(f"Missing required column: {phase_col}")
+
+    phase = pd.Series(df[phase_col], index=df.index).fillna(0).astype(int).to_numpy()
+    phase_defs = (
+        (0, "dead/chop", "#757575", "o", 26, 0.65),
+        (1, "ignition", "#1E88E5", "^", 40, 0.9),
+        (2, "expansion", "#2E7D32", "s", 36, 0.9),
+        (3, "saturation", "#C62828", "v", 40, 0.9),
+    )
+    counts: dict[int, int] = {}
+    for code, label, color, marker, size, alpha in phase_defs:
+        mask = phase == code
+        count = int(mask.sum())
+        counts[code] = count
+        if not count:
+            continue
+        if code == 0:
+            yvals = close_y[mask]
+        elif code == 3:
+            yvals = close_y[mask] - marker_offset * 0.45
+        else:
+            yvals = close_y[mask] + marker_offset * 0.45
+        ax.scatter(
+            pos[mask],
+            yvals,
+            color=color,
+            marker=marker,
+            s=size,
+            label=f"{label} ({count})",
+            alpha=alpha,
+            zorder=2.0,
+        )
+
+    bar_label = _infer_bar_label(date_index)
+    ax.set_title(
+        (
+            f"{bar_label} | bars: {len(df)} | "
+            f"dead={counts.get(0,0)} | ignition={counts.get(1,0)} | "
+            f"expansion={counts.get(2,0)} | saturation={counts.get(3,0)}"
+        ),
+        fontsize=14,
+    )
+    ax.set_ylabel("Close Price")
+    ax.set_xlabel("Date")
+    ax.legend(loc="upper left", fontsize=10, ncol=2)
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax, tick_positions, tick_labels)
+    _draw_day_lines([ax], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="Close Price with Trend Phase Labels",
+        suptitle_y=1.02,
+        top=0.93,
+        save_path=save_path,
+    )
+
+
 _LABEL_PLOTTERS = {
     "atr_swing": plot_atr_swing_signals,
     "leg_segmentation": plot_leg_segmentation_signals,
@@ -1301,6 +1386,7 @@ _LABEL_PLOTTERS = {
     "mfe_mae": plot_mfe_mae_labels,
     "bars_to_exhaustion": plot_exhaustion_progress,
     "continuation_strength": plot_continuation_strength,
+    "trend_phase": plot_trend_phase_signals,
 }
 
 
@@ -1788,6 +1874,8 @@ def plot_model_inference(
     long_label_name: str | None = None,
     short_label_name: str | None = None,
     threshold: float = 0.8,
+    long_threshold: float | None = None,
+    short_threshold: float | None = None,
     title: str | None = None,
     save_path: str | None = None,
 ) -> None:
@@ -1805,6 +1893,8 @@ def plot_model_inference(
         raise ValueError("long_actual length must match X_df for plotting.")
     if short_actual is not None and len(short_actual) != len(X_df):
         raise ValueError("short_actual length must match X_df for plotting.")
+    long_thr = float(threshold if long_threshold is None else long_threshold)
+    short_thr = float(threshold if short_threshold is None else short_threshold)
 
     fig, (ax_price, ax_prob) = plt.subplots(
         2,
@@ -1888,7 +1978,7 @@ def plot_model_inference(
         short_actual_y = close_y + marker_offset * 3
 
     if long_probs is not None:
-        long_mask = (long_probs >= threshold) & valid_mask
+        long_mask = (long_probs >= long_thr) & valid_mask
         if long_mask.any():
             ax_price.scatter(
                 pos[long_mask],
@@ -1896,11 +1986,11 @@ def plot_model_inference(
                 color="#1565C0",
                 marker="^",
                 s=60,
-                label=f"LONG prob >= {threshold:.2f}",
+                label=f"LONG prob >= {long_thr:.2f}",
                 zorder=2,
             )
     if short_probs is not None:
-        short_mask = (short_probs >= threshold) & valid_mask
+        short_mask = (short_probs >= short_thr) & valid_mask
         if short_mask.any():
             ax_price.scatter(
                 pos[short_mask],
@@ -1908,7 +1998,7 @@ def plot_model_inference(
                 color="#FB8C00",
                 marker="v",
                 s=60,
-                label=f"SHORT prob >= {threshold:.2f}",
+                label=f"SHORT prob >= {short_thr:.2f}",
                 zorder=2,
             )
     if long_actual is not None:
@@ -1976,7 +2066,24 @@ def plot_model_inference(
             alpha=0.7,
             label=f"{short_label_name or 'SHORT'} actual",
         )
-    ax_prob.axhline(threshold, color="#1f77b4", linestyle="--", label="Threshold")
+    if np.isfinite(long_thr):
+        ax_prob.axhline(
+            long_thr,
+            color="#1565C0",
+            linestyle="--",
+            linewidth=1.0,
+            alpha=0.9,
+            label=f"LONG thr={long_thr:.2f}",
+        )
+    if np.isfinite(short_thr) and abs(short_thr - long_thr) > 1e-12:
+        ax_prob.axhline(
+            short_thr,
+            color="#FB8C00",
+            linestyle="--",
+            linewidth=1.0,
+            alpha=0.9,
+            label=f"SHORT thr={short_thr:.2f}",
+        )
     ax_prob.set_ylim(0, 1.02)
     ax_prob.set_title("Model Probabilities (Window)")
     ax_prob.legend(loc="upper right")

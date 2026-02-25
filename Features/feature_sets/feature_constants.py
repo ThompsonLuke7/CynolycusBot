@@ -64,6 +64,16 @@ SWING_LABEL_COLUMNS = [
     "p_long_pending",
     "p_short_pending",
     "p_flat_state_gate",
+    # Trend phase labels (momentum/acceleration regime)
+    "trend_phase_ret",
+    "trend_phase_m",
+    "trend_phase_dm",
+    "trend_phase_a",
+    "trend_phase_label",
+    "trend_phase_dead",
+    "trend_phase_ignition",
+    "trend_phase_expansion",
+    "trend_phase_saturation",
 ]
 # NOTE: normalize_continuous_features() supports matching by base feature name (e.g., ret_1 will also match ret_1__30m).
 # So SCALE_FEATURE_COLUMNS should contain UNSUFFIXED base names only.
