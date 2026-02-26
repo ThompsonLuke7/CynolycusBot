@@ -1274,7 +1274,7 @@ def add_trend_phase_labels(
     ---------
       0: dead/chop        (|m| small, or m <= min_positive_m_for_phase)
       1: ignition         (m > 0 and a > a_pos_eps)
-      2: expansion        (m high and a in near-zero band, slightly positive)
+      2: expansion        (strong momentum + near-zero acceleration)
       3: saturation       (m > 0 and a < -a_neg_eps)
 
     Notes
@@ -1356,11 +1356,9 @@ def add_trend_phase_labels(
             phase[i] = 0
             continue
 
-        is_expansion = (
-            m_i >= high_thr
-            and a_i >= -a_zero_band
-            and a_i <= pos_eps
-        )
+        # Expansion should be reachable by default: strong momentum + near-zero accel.
+        # Evaluate it before saturation/ignition so it does not get shadowed.
+        is_expansion = (m_i >= high_thr) and (abs(a_i) <= a_zero_band)
         if is_expansion:
             phase[i] = 2
         elif a_i < -neg_eps:
@@ -1368,7 +1366,8 @@ def add_trend_phase_labels(
         elif a_i > pos_eps:
             phase[i] = 1
         else:
-            phase[i] = 1
+            # Keep a "steady trend" fallback instead of making ignition a catch-all.
+            phase[i] = 2
 
     phase_s = pd.Series(phase, index=df.index).astype("Int64")
     df[return_col] = ret
