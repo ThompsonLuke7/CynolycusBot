@@ -186,6 +186,20 @@ def _xgb_overrides_from_config(cfg: TrainConfig) -> dict:
     return overrides
 
 
+def _sanitize_xgb_params(xgb_params: dict) -> dict:
+    params = dict(xgb_params)
+    # Force single-metric training behavior across fresh and reused artifacts.
+    params["eval_metric"] = "logloss"
+    booster = str(params.get("booster", "gbtree")).lower()
+    if booster != "dart":
+        params.pop("rate_drop", None)
+        params.pop("skip_drop", None)
+        params.pop("one_drop", None)
+        params.pop("sample_type", None)
+        params.pop("normalize_type", None)
+    return params
+
+
 def load_feature_names(
     ticker: str,
     dataset_name: str,
@@ -473,6 +487,7 @@ def refresh_masks_and_params(
         base = GAXGBoostFeatureSelector().xgb_params.copy()
         if xgb_param_overrides:
             base.update(xgb_param_overrides)
+        base = _sanitize_xgb_params(base)
         if scale_pos_weight:
             pos = int((y_train == 1).sum())
             neg = int((y_train == 0).sum())
@@ -529,8 +544,8 @@ def refresh_masks_and_params(
 
     long_mask = long_selector.best_mask_.astype(bool)
     short_mask = short_selector.best_mask_.astype(bool)
-    long_params = long_selector.xgb_params
-    short_params = short_selector.xgb_params
+    long_params = _sanitize_xgb_params(long_selector.xgb_params)
+    short_params = _sanitize_xgb_params(short_selector.xgb_params)
     return long_mask, long_params, short_mask, short_params
 
 
@@ -719,6 +734,10 @@ def walk_forward_oof_probs(
             fold_end = train_end
         if fold_start >= fold_end:
             continue
+        print(
+            f"[GA-XGB] OOF fold {fold + 1}/{n_folds}: "
+            f"fit_rows={fold_start}, pred_rows={fold_end - fold_start}"
+        )
 
         X_fit = X_train[:fold_start][:, mask]
         y_fit = y_train[:fold_start]
@@ -735,6 +754,7 @@ def walk_forward_oof_probs(
         dmat = selector._make_dmatrix(X_pred, y=None, use_gpu=use_gpu)
         probs = selector._to_numpy(model.predict(dmat)).astype(np.float32)
         oof[fold_start:fold_end] = probs
+        print(f"[GA-XGB] OOF fold {fold + 1}/{n_folds}: done")
 
     return oof
 
@@ -830,6 +850,35 @@ def _plot_train_val_logloss(
     fig.savefig(save_path, dpi=140)
     plt.close(fig)
     return True
+
+
+def _print_eval_history_summary(*, side: str, history: dict | None) -> None:
+    if not history:
+        print(f"[GA-XGB] {side} eval history: unavailable")
+        return
+    train = history.get("train", {})
+    val = history.get("val", {})
+    train_ll = train.get("logloss", []) if isinstance(train, dict) else []
+    val_ll = val.get("logloss", []) if isinstance(val, dict) else []
+    if not isinstance(train_ll, list):
+        train_ll = list(train_ll)
+    if not isinstance(val_ll, list):
+        val_ll = list(val_ll)
+    if not train_ll:
+        print(f"[GA-XGB] {side} eval history: no train logloss series")
+        return
+    if val_ll:
+        best_idx = int(np.argmin(val_ll))
+        print(
+            f"[GA-XGB] {side} final-fit logloss: rounds={len(train_ll)}, "
+            f"best_val={val_ll[best_idx]:.5f} @ round {best_idx + 1}, "
+            f"final_train={train_ll[-1]:.5f}, final_val={val_ll[-1]:.5f}"
+        )
+    else:
+        print(
+            f"[GA-XGB] {side} final-fit logloss: rounds={len(train_ll)}, "
+            f"final_train={train_ll[-1]:.5f} (no val series)"
+        )
 
 
 def _save_series(
@@ -1174,9 +1223,11 @@ def main() -> None:
     short_mask, short_params, short_meta = load_model_artifacts(
         model_dataset_root, "short", label_dir=artifact_label_dir
     )
+    long_params = _sanitize_xgb_params(long_params)
+    short_params = _sanitize_xgb_params(short_params)
     if xgb_overrides:
-        long_params = {**long_params, **xgb_overrides}
-        short_params = {**short_params, **xgb_overrides}
+        long_params = _sanitize_xgb_params({**long_params, **xgb_overrides})
+        short_params = _sanitize_xgb_params({**short_params, **xgb_overrides})
 
     if long_mask.size != X.shape[1] or short_mask.size != X.shape[1]:
         raise ValueError("Mask size does not match feature count.")
@@ -1255,6 +1306,8 @@ def main() -> None:
             eval_set=(X_val, y_short_val, w_short_val) if val_idx.size else None,
             ga_kwargs=ga_kwargs,
         )
+        _print_eval_history_summary(side="LONG", history=long_eval_history)
+        _print_eval_history_summary(side="SHORT", history=short_eval_history)
 
     _summarize_probs(long_oof, "LONG OOF probs")
     _summarize_probs(short_oof, "SHORT OOF probs")
