@@ -42,18 +42,23 @@ def _run_cmd(args: list[str]) -> None:
 def _artifacts_exist(model_root: Path, label_dirs: list[str]) -> bool:
     for label_dir in label_dirs:
         for side in ("long", "short"):
-            base_side = model_root / side
-            candidates = [base_side / "probs" / label_dir, base_side]
-            found = False
-            for candidate in candidates:
-                mask_path = candidate / "best_mask.npy"
-                model_path = candidate / "xgb_model.json"
-                if mask_path.exists() and model_path.exists():
-                    found = True
-                    break
-            if not found:
+            artifact_dir = model_root / side / label_dir
+            mask_path = artifact_dir / "best_mask.npy"
+            model_path = artifact_dir / "xgb_model.json"
+            if not (mask_path.exists() and model_path.exists()):
                 return False
     return True
+
+
+def _normalize_ga_label_dir(token: str) -> str:
+    value = token.strip().lower()
+    if value in {"pivot", "pivots"}:
+        return "pivots"
+    if value == "tb":
+        return "tb"
+    if value == "swing":
+        return "swing"
+    return value
 
 
 def _parse_args() -> argparse.Namespace:
@@ -140,7 +145,11 @@ def main() -> None:
         processed_root=processed_root,
     )
 
-    label_dirs = [s.strip() for s in args.ga_label_dirs.split(",") if s.strip()]
+    label_dirs = [
+        _normalize_ga_label_dir(s)
+        for s in args.ga_label_dirs.split(",")
+        if s.strip()
+    ]
     ga_model_root = Path(args.ga_model_root)
     if not _artifacts_exist(ga_model_root, label_dirs):
         if not args.train_if_missing:

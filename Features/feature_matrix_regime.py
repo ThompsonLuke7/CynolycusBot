@@ -154,12 +154,15 @@ def _load_prob_series(
     label_dir: str | None = None,
     fallback_to_root: bool = True,
 ) -> pd.Series:
-    probs_root = model_root / side.lower() / "probs"
-    probe_dirs = []
+    side_root = model_root / side.lower()
+    probe_dirs: list[Path] = []
     if label_dir:
-        probe_dirs.append(probs_root / label_dir)
+        probe_dirs.append(side_root / label_dir)
+        # Backward compatibility with previous nested layout.
+        probe_dirs.append(side_root / "probs" / label_dir)
     if fallback_to_root or not label_dir:
-        probe_dirs.append(probs_root)
+        probe_dirs.append(side_root)
+        probe_dirs.append(side_root / "probs")
 
     for probs_dir in probe_dirs:
         parquet_path = probs_dir / f"{column.split('_full')[0]}_probs.parquet"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -200,6 +201,85 @@ def _sanitize_xgb_params(xgb_params: dict) -> dict:
     return params
 
 
+def _normalize_ga_label_dir(label_mode_or_dir: str) -> str:
+    token = str(label_mode_or_dir).strip().lower()
+    if token in {"pivot", "pivots"}:
+        return "pivots"
+    if token == "tb":
+        return "tb"
+    if token == "swing":
+        return "swing"
+    return token
+
+
+def _artifact_side_dir(model_root: Path, side: str, label_dir: str) -> Path:
+    return model_root / side.lower() / label_dir
+
+
+def _maybe_migrate_legacy_label_artifacts(
+    model_root: Path, *, side: str, label_dir: str
+) -> None:
+    base_side = model_root / side.lower()
+    target_dir = _artifact_side_dir(model_root, side, label_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    moved_any = False
+
+    # Legacy layout v1: <side>/probs/<label>/...
+    legacy_label_dir = base_side / "probs" / label_dir
+    if legacy_label_dir.exists():
+        for src in legacy_label_dir.iterdir():
+            if not src.is_file():
+                continue
+            dst = target_dir / src.name
+            if not dst.exists():
+                shutil.move(str(src), str(dst))
+                moved_any = True
+    for name in ("best_mask.npy", "meta.json", "xgb_model.json", "selected_features.txt"):
+        src = legacy_label_dir / name
+        dst = target_dir / name
+        if src.exists() and not dst.exists():
+            shutil.move(str(src), str(dst))
+            moved_any = True
+
+    # Legacy layout v0: <side>/... (pre-label scoping, swing only).
+    if label_dir == "swing":
+        legacy_mask = base_side / "best_mask.npy"
+        legacy_meta = base_side / "meta.json"
+        if legacy_mask.exists() and legacy_meta.exists():
+            for name in ("best_mask.npy", "meta.json", "xgb_model.json", "selected_features.txt"):
+                src = base_side / name
+                dst = target_dir / name
+                if src.exists() and not dst.exists():
+                    shutil.move(str(src), str(dst))
+                    moved_any = True
+
+    if moved_any:
+        print(f"[GA-XGB] Migrated legacy {side.upper()} artifacts -> {target_dir}")
+
+
+def _maybe_cleanup_legacy_probs_dir(model_root: Path, *, side: str, label_dir: str) -> None:
+    legacy_label_dir = model_root / side.lower() / "probs" / label_dir
+    if legacy_label_dir.exists():
+        try:
+            legacy_label_dir.rmdir()
+        except OSError:
+            pass
+    legacy_probs_root = model_root / side.lower() / "probs"
+    if legacy_probs_root.exists():
+        try:
+            legacy_probs_root.rmdir()
+        except OSError:
+            pass
+
+
+def _maybe_migrate_legacy_tree(model_root: Path, *, label_dir: str) -> None:
+    for side in ("long", "short"):
+        _maybe_migrate_legacy_label_artifacts(
+            model_root, side=side, label_dir=label_dir
+        )
+        _maybe_cleanup_legacy_probs_dir(model_root, side=side, label_dir=label_dir)
+
+
 def load_feature_names(
     ticker: str,
     dataset_name: str,
@@ -231,7 +311,7 @@ def save_selector_artifacts(
 
     side_dir = output_dir / side_name.lower()
     if label_dir:
-        side_dir = side_dir / "probs" / label_dir
+        side_dir = _artifact_side_dir(output_dir, side_name, label_dir)
     side_dir.mkdir(parents=True, exist_ok=True)
 
     model = selector.xgb_model_
@@ -421,29 +501,13 @@ def load_model_artifacts(
     model_root: Path,
     side: str,
     *,
-    label_dir: str | None = None,
+    label_dir: str,
 ) -> tuple[np.ndarray, dict, dict]:
-    candidates = []
-    base_side = model_root / side.lower()
-    if label_dir:
-        candidates.append(base_side / "probs" / label_dir)
-    candidates.append(base_side)
-
-    side_dir = None
-    for candidate in candidates:
-        mask_path = candidate / "best_mask.npy"
-        meta_path = candidate / "meta.json"
-        if mask_path.exists() and meta_path.exists():
-            side_dir = candidate
-            break
-
-    if side_dir is None:
-        raise FileNotFoundError(
-            f"Missing artifacts under {', '.join(str(c) for c in candidates)}"
-        )
-
+    side_dir = _artifact_side_dir(model_root, side, label_dir)
     mask_path = side_dir / "best_mask.npy"
     meta_path = side_dir / "meta.json"
+    if not (mask_path.exists() and meta_path.exists()):
+        raise FileNotFoundError(f"Missing artifacts under {side_dir}")
 
     mask = np.load(mask_path).astype(bool)
     meta = json.loads(meta_path.read_text())
@@ -1096,14 +1160,8 @@ def main() -> None:
     )
     ga_kwargs = _ga_kwargs_from_config(cfg)
     xgb_overrides = _xgb_overrides_from_config(cfg)
-    label_dir_probs = cfg.label_mode.lower()
-    if label_dir_probs == "tb":
-        label_dir_probs = "tb"
-    elif label_dir_probs == "pivot":
-        label_dir_probs = "pivots"
-    artifact_label_dir = (
-        label_dir_probs if label_dir_probs in {"pivots", "tb"} else None
-    )
+    label_dir_probs = _normalize_ga_label_dir(cfg.label_mode)
+    artifact_label_dir = label_dir_probs
     processed_root = Path(cfg.processed_root) if cfg.processed_root else None
     split_root = Path(cfg.split_root) if cfg.split_root else None
     stats_root = Path(cfg.stats_root) if cfg.stats_root else None
@@ -1142,6 +1200,7 @@ def main() -> None:
         model_root = model_root_override
     model_root = model_root / cfg.model_dirname
     model_dataset_root = model_root / cfg.dataset_name
+    _maybe_migrate_legacy_tree(model_dataset_root, label_dir=artifact_label_dir)
     feature_names = load_feature_names(
         cfg.ticker,
         cfg.dataset_name,
@@ -1392,7 +1451,7 @@ def main() -> None:
     probs_root = model_dataset_root
     label_dir = label_dir_probs
     _save_series(
-        output_dir=probs_root / "long" / cfg.output_dirname / label_dir,
+        output_dir=probs_root / "long" / label_dir,
         prefix="p_long",
         train_oof=long_oof,
         test_probs=long_test,
@@ -1402,7 +1461,7 @@ def main() -> None:
         index=plot_index,
     )
     _save_series(
-        output_dir=probs_root / "short" / cfg.output_dirname / label_dir,
+        output_dir=probs_root / "short" / label_dir,
         prefix="p_short",
         train_oof=short_oof,
         test_probs=short_test,
@@ -1506,18 +1565,20 @@ def main() -> None:
         best_validation_metrics=best_validation_metrics,
         artifacts={
             "probs_root": str(probs_root),
-            "long_probs_dir": str(probs_root / "long" / cfg.output_dirname / label_dir),
-            "short_probs_dir": str(probs_root / "short" / cfg.output_dirname / label_dir),
+            "long_probs_dir": str(probs_root / "long" / label_dir),
+            "short_probs_dir": str(probs_root / "short" / label_dir),
             "loss_curve_plot": str(loss_plot_path) if saved_loss_plot else None,
             "long_meta_path": str(
-                (model_dataset_root / "long" / "probs" / artifact_label_dir / "meta.json")
-                if artifact_label_dir
-                else (model_dataset_root / "long" / "meta.json")
+                model_dataset_root
+                / "long"
+                / artifact_label_dir
+                / "meta.json"
             ),
             "short_meta_path": str(
-                (model_dataset_root / "short" / "probs" / artifact_label_dir / "meta.json")
-                if artifact_label_dir
-                else (model_dataset_root / "short" / "meta.json")
+                model_dataset_root
+                / "short"
+                / artifact_label_dir
+                / "meta.json"
             ),
         },
         extra={

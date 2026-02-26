@@ -1688,6 +1688,32 @@ def _load_model_and_mask(model_dir: Path) -> tuple["XGBClassifier", np.ndarray]:
     return model, mask
 
 
+def _ga_label_dir_from_mode(label_mode: str) -> str | None:
+    mode = (label_mode or "").strip().lower()
+    if mode in {"pivot", "pivots"}:
+        return "pivots"
+    if mode == "tb":
+        return "tb"
+    if mode == "swing":
+        return "swing"
+    return None
+
+
+def _resolve_ga_side_dir(model_root: Path, side: str, label_mode: str) -> Path | None:
+    base_side = model_root / side
+    candidates: list[Path] = []
+    label_dir = _ga_label_dir_from_mode(label_mode)
+    if label_dir:
+        candidates.append(base_side / label_dir)
+        # Backward compatibility with older nested layout.
+        candidates.append(base_side / "probs" / label_dir)
+    candidates.append(base_side)
+    for candidate in candidates:
+        if (candidate / "best_mask.npy").exists() and (candidate / "xgb_model.json").exists():
+            return candidate
+    return None
+
+
 def plot_bilstm_inference_vs_actual(
     *,
     ticker: str = "$SPY",
@@ -2265,13 +2291,13 @@ def model_inference_main() -> None:
                     f"No labels found for label_mode='{args.label_mode}' in {y_path.name}."
                 )
 
-    long_dir = model_root / "long"
-    if long_dir.exists():
+    long_dir = _resolve_ga_side_dir(model_root, "long", args.label_mode)
+    if long_dir is not None:
         long_model, long_mask = _load_model_and_mask(long_dir)
         long_probs = long_model.predict_proba(_select_features(X, long_mask))[:, 1]
 
-    short_dir = model_root / "short"
-    if short_dir.exists():
+    short_dir = _resolve_ga_side_dir(model_root, "short", args.label_mode)
+    if short_dir is not None:
         short_model, short_mask = _load_model_and_mask(short_dir)
         short_probs = short_model.predict_proba(_select_features(X, short_mask))[:, 1]
 

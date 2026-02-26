@@ -27,6 +27,17 @@ def _resolve_repo_root() -> Path:
 REPO_ROOT = _resolve_repo_root()
 
 
+def _normalize_ga_label_dir(token: str) -> str:
+    value = token.strip().lower()
+    if value in {"pivot", "pivots"}:
+        return "pivots"
+    if value == "tb":
+        return "tb"
+    if value == "swing":
+        return "swing"
+    return value
+
+
 def _normalize_label_timeframe(label_timeframe: str) -> str:
     tf = label_timeframe.strip().lower()
     if tf.endswith("min"):
@@ -239,29 +250,14 @@ def _predict_ga_xgb(
     feature_list: list[str],
     model_dir: Path,
     side: str,
-    label_dir: str | None = None,
+    label_dir: str,
 ) -> np.ndarray:
     x_aligned = x_df.reindex(columns=feature_list)
-    candidates = []
-    base_side = model_dir / side
-    if label_dir:
-        candidates.append(base_side / "probs" / label_dir)
-    candidates.append(base_side)
-
-    artifact_dir = None
-    for candidate in candidates:
-        mask_path = candidate / "best_mask.npy"
-        model_path = candidate / "xgb_model.json"
-        if mask_path.exists() and model_path.exists():
-            artifact_dir = candidate
-            break
-    if artifact_dir is None:
-        raise FileNotFoundError(
-            f"Missing GA-XGB artifacts under {', '.join(str(c) for c in candidates)}"
-        )
-
+    artifact_dir = model_dir / side / label_dir
     mask_path = artifact_dir / "best_mask.npy"
     model_path = artifact_dir / "xgb_model.json"
+    if not (mask_path.exists() and model_path.exists()):
+        raise FileNotFoundError(f"Missing GA-XGB artifacts under {artifact_dir}")
 
     mask = np.load(mask_path).astype(bool)
     if mask.size != len(feature_list):
@@ -329,10 +325,10 @@ def _run_ga_xgb_inference(
             label_dir=label_dir,
         )
         long_out = (
-            output_model_root / "ga_xgboost" / dataset_name / "long" / "probs" / label_dir
+            output_model_root / "ga_xgboost" / dataset_name / "long" / label_dir
         )
         short_out = (
-            output_model_root / "ga_xgboost" / dataset_name / "short" / "probs" / label_dir
+            output_model_root / "ga_xgboost" / dataset_name / "short" / label_dir
         )
         _save_probs(probs=long_probs, index=plot_df.index, output_dir=long_out, prefix="p_long")
         _save_probs(probs=short_probs, index=plot_df.index, output_dir=short_out, prefix="p_short")
@@ -535,7 +531,11 @@ def main() -> None:
             filename=f"norm_stats_{dataset_name}_{x_stem}_train.json",
         )
 
-    label_dirs = [s.strip() for s in args.ga_label_dirs.split(",") if s.strip()]
+    label_dirs = [
+        _normalize_ga_label_dir(s)
+        for s in args.ga_label_dirs.split(",")
+        if s.strip()
+    ]
     if not args.skip_ga:
         if args.full_fit_ga:
             print("[inference_pipeline] Training GA-XGB full-fit masks...")
