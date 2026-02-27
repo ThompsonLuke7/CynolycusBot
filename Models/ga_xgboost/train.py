@@ -59,6 +59,7 @@ class TrainConfig:
     update_scale_pos_weight: bool = True
     output_dirname: str = "probs"
     refresh_masks: bool = False
+    no_ga_mask: bool = False
     super_pivot_weight: float = 2.0
     processed_root: str | None = None
     split_root: str | None = None
@@ -1003,6 +1004,11 @@ def main() -> None:
         help="Re-run GA feature selection on the train split to refresh masks/params.",
     )
     parser.add_argument(
+        "--no-ga-mask",
+        action="store_true",
+        help="Bypass GA feature masking and train XGBoost on all features directly.",
+    )
+    parser.add_argument(
         "--label-mode",
         type=str,
         default=None,
@@ -1130,6 +1136,7 @@ def main() -> None:
         dataset_name=args.dataset_name,
         x_filename=args.x_filename,
         refresh_masks=bool(args.refresh_masks),
+        no_ga_mask=bool(args.no_ga_mask),
         label_mode=args.label_mode or TrainConfig.label_mode,
         super_pivot_weight=float(args.super_pivot_weight),
         processed_root=args.processed_root,
@@ -1244,49 +1251,75 @@ def main() -> None:
     else:
         X_test = X[test_idx]
 
-    need_refresh = cfg.refresh_masks
-    if not need_refresh:
-        try:
-            load_model_artifacts(
-                model_dataset_root, "long", label_dir=artifact_label_dir
-            )
-            load_model_artifacts(
-                model_dataset_root, "short", label_dir=artifact_label_dir
-            )
-        except FileNotFoundError:
-            need_refresh = True
-
     scale_pos_weight = cfg.update_scale_pos_weight
     if cfg.label_mode == "tb":
         scale_pos_weight = False
 
-    if need_refresh:
-        refresh_masks_and_params(
-            X_train=X_train,
-            y_long_train=y_long_train,
-            y_short_train=y_short_train,
-            w_long_train=w_long_train,
-            w_short_train=w_short_train,
-            model_root=model_dataset_root,
-            feature_names=feature_names,
-            metadata=common_meta,
-            label_dir=artifact_label_dir,
-            full_fit=args.full_fit,
-            scale_pos_weight=scale_pos_weight,
-            ga_kwargs=ga_kwargs,
-            xgb_param_overrides=xgb_overrides,
+    if cfg.no_ga_mask:
+        if cfg.refresh_masks:
+            print("[GA-XGB] --refresh-masks ignored because --no-ga-mask is enabled.")
+        print("[GA-XGB] --no-ga-mask enabled: using all features (GA bypassed).")
+        long_mask = np.ones(X.shape[1], dtype=bool)
+        short_mask = np.ones(X.shape[1], dtype=bool)
+        long_params = GAXGBoostFeatureSelector().xgb_params.copy()
+        short_params = GAXGBoostFeatureSelector().xgb_params.copy()
+        if xgb_overrides:
+            long_params.update(xgb_overrides)
+            short_params.update(xgb_overrides)
+        long_params = _sanitize_xgb_params(long_params)
+        short_params = _sanitize_xgb_params(short_params)
+        long_meta = {
+            "best_score": None,
+            "ga_params": {},
+            "xgb_params": long_params,
+            "mode": "no_ga_mask",
+        }
+        short_meta = {
+            "best_score": None,
+            "ga_params": {},
+            "xgb_params": short_params,
+            "mode": "no_ga_mask",
+        }
+    else:
+        need_refresh = cfg.refresh_masks
+        if not need_refresh:
+            try:
+                load_model_artifacts(
+                    model_dataset_root, "long", label_dir=artifact_label_dir
+                )
+                load_model_artifacts(
+                    model_dataset_root, "short", label_dir=artifact_label_dir
+                )
+            except FileNotFoundError:
+                need_refresh = True
+
+        if need_refresh:
+            refresh_masks_and_params(
+                X_train=X_train,
+                y_long_train=y_long_train,
+                y_short_train=y_short_train,
+                w_long_train=w_long_train,
+                w_short_train=w_short_train,
+                model_root=model_dataset_root,
+                feature_names=feature_names,
+                metadata=common_meta,
+                label_dir=artifact_label_dir,
+                full_fit=args.full_fit,
+                scale_pos_weight=scale_pos_weight,
+                ga_kwargs=ga_kwargs,
+                xgb_param_overrides=xgb_overrides,
+            )
+        long_mask, long_params, long_meta = load_model_artifacts(
+            model_dataset_root, "long", label_dir=artifact_label_dir
         )
-    long_mask, long_params, long_meta = load_model_artifacts(
-        model_dataset_root, "long", label_dir=artifact_label_dir
-    )
-    short_mask, short_params, short_meta = load_model_artifacts(
-        model_dataset_root, "short", label_dir=artifact_label_dir
-    )
-    long_params = _sanitize_xgb_params(long_params)
-    short_params = _sanitize_xgb_params(short_params)
-    if xgb_overrides:
-        long_params = _sanitize_xgb_params({**long_params, **xgb_overrides})
-        short_params = _sanitize_xgb_params({**short_params, **xgb_overrides})
+        short_mask, short_params, short_meta = load_model_artifacts(
+            model_dataset_root, "short", label_dir=artifact_label_dir
+        )
+        long_params = _sanitize_xgb_params(long_params)
+        short_params = _sanitize_xgb_params(short_params)
+        if xgb_overrides:
+            long_params = _sanitize_xgb_params({**long_params, **xgb_overrides})
+            short_params = _sanitize_xgb_params({**short_params, **xgb_overrides})
 
     if long_mask.size != X.shape[1] or short_mask.size != X.shape[1]:
         raise ValueError("Mask size does not match feature count.")
@@ -1556,6 +1589,8 @@ def main() -> None:
         "long_selector_best_score": long_meta.get("best_score"),
         "short_selector_best_score": short_meta.get("best_score"),
     }
+    long_meta_path = model_dataset_root / "long" / artifact_label_dir / "meta.json"
+    short_meta_path = model_dataset_root / "short" / artifact_label_dir / "meta.json"
     log_paths = log_training_run(
         run_name="ga_xgboost_train",
         output_dir=probs_root,
@@ -1568,18 +1603,8 @@ def main() -> None:
             "long_probs_dir": str(probs_root / "long" / label_dir),
             "short_probs_dir": str(probs_root / "short" / label_dir),
             "loss_curve_plot": str(loss_plot_path) if saved_loss_plot else None,
-            "long_meta_path": str(
-                model_dataset_root
-                / "long"
-                / artifact_label_dir
-                / "meta.json"
-            ),
-            "short_meta_path": str(
-                model_dataset_root
-                / "short"
-                / artifact_label_dir
-                / "meta.json"
-            ),
+            "long_meta_path": str(long_meta_path) if long_meta_path.exists() else None,
+            "short_meta_path": str(short_meta_path) if short_meta_path.exists() else None,
         },
         extra={
             "ticker": normalize_ticker(cfg.ticker),

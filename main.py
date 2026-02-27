@@ -19,6 +19,8 @@ from Features.label_generations import (
     add_atr_leg_segmentation_labels,
     add_atr_pivot_swing_labels,
     add_bars_to_exhaustion_label,
+    build_meta_entry_labels,
+    build_meta_exit_labels,
     add_mfe_mae_labels,
     add_pivot_swing_state_machine,
     add_trend_phase_labels,
@@ -180,6 +182,12 @@ def parse_args():
         default=None,
         help="Optional RNG seed for random plot windows.",
     )
+    parser.add_argument(
+        "--plot-side",
+        default="both",
+        choices=["both", "long", "short"],
+        help='Filter directional label plots to one side: "both", "long", or "short" (default: "both").',
+    )
     return parser.parse_args()
 
 
@@ -274,6 +282,10 @@ if __name__ == "__main__":
                 key = "triple_barrier"
             elif key in {"trend", "phase", "trend_phase"}:
                 key = "trend_phase"
+            elif key in {"meta", "entry", "meta_entry"}:
+                key = "meta_entry"
+            elif key in {"meta_exit", "hazard", "hazard_exit", "exit"}:
+                key = "meta_exit"
             canonical_plot_types.add(key)
 
         if "all" in canonical_plot_types or "all_labels" in canonical_plot_types:
@@ -311,6 +323,41 @@ if __name__ == "__main__":
                 df = add_triple_barrier_labels_atr(df)
             if "trend_phase" in canonical_plot_types:
                 df = add_trend_phase_labels(df)
+                if "y_enter_long" not in df.columns or "y_enter_short" not in df.columns:
+                    if "atr" not in df.columns:
+                        df = add_triple_barrier_labels_atr(df)
+                    if "session_date" not in df.columns:
+                        if not hasattr(df.index, "normalize"):
+                            raise KeyError("session_date missing and index is not datetime-like.")
+                        idx = df.index
+                        if getattr(idx, "tz", None) is not None:
+                            idx = idx.tz_convert("America/New_York")
+                        df["session_date"] = idx.normalize().date
+                    df = build_meta_entry_labels(df)
+            if "meta_entry" in canonical_plot_types:
+                if "atr" not in df.columns:
+                    df = add_triple_barrier_labels_atr(df)
+                if "session_date" not in df.columns:
+                    if not hasattr(df.index, "normalize"):
+                        raise KeyError("session_date missing and index is not datetime-like.")
+                    idx = df.index
+                    if getattr(idx, "tz", None) is not None:
+                        idx = idx.tz_convert("America/New_York")
+                    df["session_date"] = idx.normalize().date
+                df = build_meta_entry_labels(df)
+            if "meta_exit" in canonical_plot_types:
+                if "atr" not in df.columns:
+                    df = add_triple_barrier_labels_atr(df)
+                if "session_date" not in df.columns:
+                    if not hasattr(df.index, "normalize"):
+                        raise KeyError("session_date missing and index is not datetime-like.")
+                    idx = df.index
+                    if getattr(idx, "tz", None) is not None:
+                        idx = idx.tz_convert("America/New_York")
+                    df["session_date"] = idx.normalize().date
+                if "y_enter_long" not in df.columns or "y_enter_short" not in df.columns:
+                    df = build_meta_entry_labels(df)
+                df = build_meta_exit_labels(df)
 
         save_paths = None
         if args.save_plot_path:
@@ -319,10 +366,17 @@ if __name__ == "__main__":
             else:
                 print("save_plot_path ignored because multiple plot types were requested.")
 
+        plot_kwargs = {
+            "trend_phase": {"side": args.plot_side},
+            "meta_entry": {"side": args.plot_side},
+            "meta_exit": {"side": args.plot_side},
+        }
+
         plot_selected_label_plots(
             df,
             plot_types=args.plot_type,
             save_paths=save_paths,
+            plot_kwargs=plot_kwargs,
             tail=args.plot_window,
             random_window=args.plot_random_window,
             seed=args.plot_seed,

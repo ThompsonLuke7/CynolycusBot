@@ -37,6 +37,13 @@ _PLOT_TYPE_ALIASES = {
     "triple": "triple_barrier",
     "trend": "trend_phase",
     "phase": "trend_phase",
+    "meta": "meta_entry",
+    "entry": "meta_entry",
+    "meta_labels": "meta_entry",
+    "meta_exit": "meta_exit",
+    "hazard": "meta_exit",
+    "hazard_exit": "meta_exit",
+    "exit": "meta_exit",
 }
 
 _LABEL_PLOT_FILES = {
@@ -49,6 +56,8 @@ _LABEL_PLOT_FILES = {
     "mfe_mae": "mfe_mae_plot.png",
     "bars_to_exhaustion": "bars_to_exhaustion_plot.png",
     "trend_phase": "trend_phase_plot.png",
+    "meta_entry": "meta_entry_plot.png",
+    "meta_exit": "meta_exit_plot.png",
 }
 
 _PLOT_TAIL_BARS = 200
@@ -1298,15 +1307,302 @@ def plot_trend_phase_signals(
     df: pd.DataFrame,
     *,
     phase_col: str = "trend_phase_label",
+    show_phase_labels: bool = False,
+    exit_long_col: str = "trend_phase_exit_long",
+    exit_short_col: str = "trend_phase_exit_short",
+    enter_long_col: str = "y_enter_long",
+    enter_short_col: str = "y_enter_short",
+    overlay_entries: bool = True,
+    show_position_timeline: bool = True,
+    side: str = "both",
     tail: int | None = _PLOT_TAIL_BARS,
     random_window: bool = False,
     seed: int | None = None,
     save_path: str | None = None,
 ) -> None:
     """
-    Plot OHLC candles with trend phase labels:
-      0=dead/chop, 1=ignition, 2=expansion, 3=saturation.
+    Plot momentum-decay labels on OHLC:
+      - enter long / enter short
+      - decay-exit long / decay-exit short
+    Consecutive entry 1s are collapsed to first-in-run markers.
+    Optionally draws a position timeline (long/short spans) below price.
+    Optional phase overlays can be enabled via show_phase_labels=True.
     """
+    side_key = str(side).strip().lower()
+    if side_key not in {"both", "long", "short"}:
+        raise ValueError("side must be one of: both, long, short")
+
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
+    if show_position_timeline:
+        fig, (ax, ax_pos) = plt.subplots(
+            2,
+            1,
+            figsize=(18, 7.3),
+            sharex=True,
+            gridspec_kw={"height_ratios": [5.0, 1.15], "hspace": 0.04},
+        )
+    else:
+        fig, ax = plt.subplots(figsize=(18, 6))
+        ax_pos = None
+
+    date_index = df.index
+    pos, open_y, high_y, low_y, close_y = _extract_ohlc(df)
+    marker_offset = _compute_marker_offset(df, high_y, low_y)
+
+    _plot_candles(ax, pos, open_y, high_y, low_y, close_y)
+
+    counts: dict[int, int] = {}
+    if show_phase_labels and phase_col in df.columns:
+        phase = pd.Series(df[phase_col], index=df.index).fillna(0).astype(int).to_numpy()
+        phase_defs = (
+            (0, "dead/chop", "#757575", "o", 26, 0.65),
+            (1, "ignition", "#1E88E5", "^", 40, 0.9),
+            (2, "expansion", "#2E7D32", "s", 36, 0.9),
+            (3, "saturation/decay", "#C62828", "v", 40, 0.9),
+        )
+        for code, label, color, marker, size, alpha in phase_defs:
+            mask = phase == code
+            count = int(mask.sum())
+            counts[code] = count
+            if not count:
+                continue
+            if code == 0:
+                yvals = close_y[mask]
+            elif code == 3:
+                yvals = close_y[mask] - marker_offset * 0.45
+            else:
+                yvals = close_y[mask] + marker_offset * 0.45
+            ax.scatter(
+                pos[mask],
+                yvals,
+                color=color,
+                marker=marker,
+                s=size,
+                label=f"{label} ({count})",
+                alpha=alpha,
+                zorder=2.0,
+            )
+
+    long_exit_hits = np.zeros(len(df), dtype=bool)
+    short_exit_hits = np.zeros(len(df), dtype=bool)
+    enter_long_hits = np.zeros(len(df), dtype=bool)
+    enter_short_hits = np.zeros(len(df), dtype=bool)
+
+    if exit_long_col in df.columns:
+        long_exit_hits = (
+            pd.Series(df[exit_long_col], index=df.index).fillna(0).astype(int).to_numpy() == 1
+        )
+    if exit_short_col in df.columns:
+        short_exit_hits = (
+            pd.Series(df[exit_short_col], index=df.index).fillna(0).astype(int).to_numpy() == 1
+        )
+
+    if side_key == "long":
+        short_exit_hits[:] = False
+    elif side_key == "short":
+        long_exit_hits[:] = False
+
+    if long_exit_hits.any():
+        ax.scatter(
+            pos[long_exit_hits],
+            close_y[long_exit_hits] + marker_offset * 0.75,
+            color="#D81B60",
+            marker="*",
+            s=95,
+            label=f"decay-exit long ({int(long_exit_hits.sum())})",
+            alpha=0.95,
+            zorder=2.1,
+        )
+    if short_exit_hits.any():
+        ax.scatter(
+            pos[short_exit_hits],
+            close_y[short_exit_hits] - marker_offset * 0.75,
+            color="#6A1B9A",
+            marker="*",
+            s=95,
+            label=f"decay-exit short ({int(short_exit_hits.sum())})",
+            alpha=0.95,
+            zorder=2.1,
+        )
+
+    if overlay_entries:
+        if enter_long_col in df.columns:
+            enter_long_hits = (
+                pd.Series(df[enter_long_col], index=df.index).fillna(0).astype(int).to_numpy()
+                == 1
+            )
+        if enter_short_col in df.columns:
+            enter_short_hits = (
+                pd.Series(df[enter_short_col], index=df.index).fillna(0).astype(int).to_numpy()
+                == 1
+            )
+
+        if side_key == "long":
+            enter_short_hits[:] = False
+        elif side_key == "short":
+            enter_long_hits[:] = False
+
+        # Collapse runs of repeated 1s to a single visible entry marker.
+        enter_long_first = enter_long_hits.copy()
+        enter_short_first = enter_short_hits.copy()
+        if enter_long_first.size:
+            enter_long_first[1:] &= ~enter_long_hits[:-1]
+        if enter_short_first.size:
+            enter_short_first[1:] &= ~enter_short_hits[:-1]
+
+        if enter_long_first.any():
+            ax.scatter(
+                pos[enter_long_first],
+                close_y[enter_long_first] + marker_offset * 1.02,
+                color="#2E7D32",
+                marker="^",
+                s=32,
+                label=f"enter long ({int(enter_long_first.sum())})",
+                alpha=0.65,
+                zorder=1.9,
+            )
+        if enter_short_first.any():
+            ax.scatter(
+                pos[enter_short_first],
+                close_y[enter_short_first] - marker_offset * 1.02,
+                color="#C62828",
+                marker="v",
+                s=32,
+                label=f"enter short ({int(enter_short_first.sum())})",
+                alpha=0.65,
+                zorder=1.9,
+            )
+    else:
+        enter_long_first = enter_long_hits
+        enter_short_first = enter_short_hits
+
+    def _build_position_spans(entry_first: np.ndarray, exit_hits: np.ndarray) -> list[tuple[int, int]]:
+        spans: list[tuple[int, int]] = []
+        in_pos = False
+        start = 0
+        i = 0
+        n = len(entry_first)
+        while i < n:
+            if not in_pos and entry_first[i]:
+                in_pos = True
+                start = i
+                i += 1
+                continue
+            if in_pos and exit_hits[i]:
+                # For hazard exits, close on the end of the current 1-run (point exit).
+                j = i
+                while (j + 1) < n and exit_hits[j + 1]:
+                    j += 1
+                spans.append((start, j))
+                in_pos = False
+                i = j + 1
+                continue
+            i += 1
+        if in_pos and n:
+            spans.append((start, len(entry_first) - 1))
+        return spans
+
+    long_spans = _build_position_spans(enter_long_first, long_exit_hits)
+    short_spans = _build_position_spans(enter_short_first, short_exit_hits)
+
+    if ax_pos is not None:
+        long_label_drawn = False
+        short_label_drawn = False
+        for s, e in long_spans:
+            x0 = pos[s] - 0.42
+            x1 = pos[e] + 0.42
+            ax_pos.hlines(
+                y=1.0,
+                xmin=x0,
+                xmax=x1,
+                color="#2E7D32",
+                linewidth=8.5,
+                alpha=0.9,
+                label="long position" if not long_label_drawn else None,
+            )
+            long_label_drawn = True
+        for s, e in short_spans:
+            x0 = pos[s] - 0.42
+            x1 = pos[e] + 0.42
+            ax_pos.hlines(
+                y=0.0,
+                xmin=x0,
+                xmax=x1,
+                color="#C62828",
+                linewidth=8.5,
+                alpha=0.9,
+                label="short position" if not short_label_drawn else None,
+            )
+            short_label_drawn = True
+        ax_pos.set_yticks([0.0, 1.0])
+        ax_pos.set_yticklabels(["Short", "Long"], fontsize=9)
+        ax_pos.set_ylim(-0.65, 1.65)
+        ax_pos.set_ylabel("Position", fontsize=10)
+        ax_pos.grid(axis="x", alpha=0.25, linestyle="--", linewidth=0.7)
+        if long_label_drawn or short_label_drawn:
+            ax_pos.legend(loc="upper left", fontsize=9, ncol=2)
+        ax_pos.set_xlabel("Date")
+        ax.tick_params(axis="x", labelbottom=False)
+
+    bar_label = _infer_bar_label(date_index)
+    if show_phase_labels and phase_col in df.columns:
+        title = (
+            f"{bar_label} | bars: {len(df)} | "
+            f"side={side_key} | "
+            f"dead={counts.get(0,0)} | ignition={counts.get(1,0)} | "
+            f"expansion={counts.get(2,0)} | sat/decay={counts.get(3,0)} | "
+            f"enterL={int(enter_long_first.sum())} | enterS={int(enter_short_first.sum())} | "
+            f"exitL={int(long_exit_hits.sum())} | exitS={int(short_exit_hits.sum())}"
+        )
+    else:
+        title = (
+            f"{bar_label} | bars: {len(df)} | "
+            f"side={side_key} | "
+            f"enterL={int(enter_long_first.sum())} | enterS={int(enter_short_first.sum())} | "
+            f"exitL={int(long_exit_hits.sum())} | exitS={int(short_exit_hits.sum())}"
+        )
+    ax.set_title(title, fontsize=14)
+    ax.set_ylabel("Close Price")
+    if ax_pos is None:
+        ax.set_xlabel("Date")
+    ax.legend(loc="upper left", fontsize=10, ncol=3)
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax_pos if ax_pos is not None else ax, tick_positions, tick_labels)
+    if ax_pos is not None:
+        _draw_day_lines([ax, ax_pos], tick_positions)
+    else:
+        _draw_day_lines([ax], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="Close Price with Momentum-Decay Labels",
+        suptitle_y=1.02,
+        top=0.93,
+        save_path=save_path,
+    )
+
+
+def plot_meta_entry_signals(
+    df: pd.DataFrame,
+    *,
+    long_col: str = "y_enter_long",
+    short_col: str = "y_enter_short",
+    side: str = "both",
+    tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
+    save_path: str | None = None,
+) -> None:
+    """
+    Plot OHLC candles with meta-entry win labels:
+      - y_enter_long=1: long TP hit before long SL within session
+      - y_enter_short=1: short TP hit before short SL within session
+    """
+    side_key = str(side).strip().lower()
+    if side_key not in {"both", "long", "short"}:
+        raise ValueError("side must be one of: both, long, short")
+
     df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
     fig, ax = plt.subplots(figsize=(18, 6))
 
@@ -1316,52 +1612,65 @@ def plot_trend_phase_signals(
 
     _plot_candles(ax, pos, open_y, high_y, low_y, close_y)
 
-    if phase_col not in df.columns:
-        raise KeyError(f"Missing required column: {phase_col}")
+    if long_col not in df.columns:
+        raise KeyError(f"Missing required column: {long_col}")
+    if short_col not in df.columns:
+        raise KeyError(f"Missing required column: {short_col}")
 
-    phase = pd.Series(df[phase_col], index=df.index).fillna(0).astype(int).to_numpy()
-    phase_defs = (
-        (0, "dead/chop", "#757575", "o", 26, 0.65),
-        (1, "ignition", "#1E88E5", "^", 40, 0.9),
-        (2, "expansion", "#2E7D32", "s", 36, 0.9),
-        (3, "saturation", "#C62828", "v", 40, 0.9),
-    )
-    counts: dict[int, int] = {}
-    for code, label, color, marker, size, alpha in phase_defs:
-        mask = phase == code
-        count = int(mask.sum())
-        counts[code] = count
-        if not count:
-            continue
-        if code == 0:
-            yvals = close_y[mask]
-        elif code == 3:
-            yvals = close_y[mask] - marker_offset * 0.45
-        else:
-            yvals = close_y[mask] + marker_offset * 0.45
+    long_hits = df[long_col].fillna(0).astype(int).to_numpy() == 1
+    short_hits = df[short_col].fillna(0).astype(int).to_numpy() == 1
+    if side_key == "long":
+        short_hits[:] = False
+    elif side_key == "short":
+        long_hits[:] = False
+    both_hits = long_hits & short_hits
+
+    if long_hits.any():
         ax.scatter(
-            pos[mask],
-            yvals,
-            color=color,
-            marker=marker,
-            s=size,
-            label=f"{label} ({count})",
-            alpha=alpha,
+            pos[long_hits],
+            close_y[long_hits] + marker_offset * 0.45,
+            color="#2E7D32",
+            marker="^",
+            s=44,
+            alpha=0.9,
             zorder=2.0,
+            label=f"{long_col}=1 ({int(long_hits.sum())})",
+        )
+    if short_hits.any():
+        ax.scatter(
+            pos[short_hits],
+            close_y[short_hits] - marker_offset * 0.45,
+            color="#C62828",
+            marker="v",
+            s=44,
+            alpha=0.9,
+            zorder=2.0,
+            label=f"{short_col}=1 ({int(short_hits.sum())})",
+        )
+    if both_hits.any():
+        ax.scatter(
+            pos[both_hits],
+            close_y[both_hits],
+            color="#6A1B9A",
+            marker="D",
+            s=30,
+            alpha=0.75,
+            zorder=2.1,
+            label=f"both=1 ({int(both_hits.sum())})",
         )
 
     bar_label = _infer_bar_label(date_index)
     ax.set_title(
         (
             f"{bar_label} | bars: {len(df)} | "
-            f"dead={counts.get(0,0)} | ignition={counts.get(1,0)} | "
-            f"expansion={counts.get(2,0)} | saturation={counts.get(3,0)}"
+            f"side={side_key} | "
+            f"long_wins={int(long_hits.sum())} | short_wins={int(short_hits.sum())}"
         ),
         fontsize=14,
     )
     ax.set_ylabel("Close Price")
     ax.set_xlabel("Date")
-    ax.legend(loc="upper left", fontsize=10, ncol=2)
+    ax.legend(loc="upper left", fontsize=10, ncol=3)
 
     tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
     _apply_time_ticks(ax, tick_positions, tick_labels)
@@ -1369,7 +1678,228 @@ def plot_trend_phase_signals(
 
     _finalize_plot(
         fig,
-        suptitle="Close Price with Trend Phase Labels",
+        suptitle="Close Price with Meta Entry Labels",
+        suptitle_y=1.02,
+        top=0.93,
+        save_path=save_path,
+    )
+
+
+def plot_meta_exit_signals(
+    df: pd.DataFrame,
+    *,
+    long_col: str = "y_exit_long",
+    short_col: str = "y_exit_short",
+    point_long_col: str = "y_exit_long_point",
+    point_short_col: str = "y_exit_short_point",
+    reason_long_col: str = "exit_reason_long",
+    reason_short_col: str = "exit_reason_short",
+    enter_long_col: str = "y_enter_long",
+    enter_short_col: str = "y_enter_short",
+    overlay_entries: bool = True,
+    show_hybrid_reasons: bool = True,
+    side: str = "both",
+    tail: int | None = _PLOT_TAIL_BARS,
+    random_window: bool = False,
+    seed: int | None = None,
+    save_path: str | None = None,
+) -> None:
+    """
+    Plot OHLC candles with hybrid hazard-style meta-exit labels:
+      - y_exit_long=1: long trade exits within K bars
+      - y_exit_short=1: short trade exits within K bars
+      - Optional point-exit overlay with reasons: DECAY/TRAIL/SL/EOD
+    """
+    side_key = str(side).strip().lower()
+    if side_key not in {"both", "long", "short"}:
+        raise ValueError("side must be one of: both, long, short")
+
+    df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
+    fig, ax = plt.subplots(figsize=(18, 6))
+
+    date_index = df.index
+    pos, open_y, high_y, low_y, close_y = _extract_ohlc(df)
+    marker_offset = _compute_marker_offset(df, high_y, low_y)
+
+    _plot_candles(ax, pos, open_y, high_y, low_y, close_y)
+
+    if long_col not in df.columns:
+        raise KeyError(f"Missing required column: {long_col}")
+    if short_col not in df.columns:
+        raise KeyError(f"Missing required column: {short_col}")
+
+    long_hits = df[long_col].fillna(0).astype(int).to_numpy() == 1
+    short_hits = df[short_col].fillna(0).astype(int).to_numpy() == 1
+    long_point_hits = np.zeros_like(long_hits, dtype=bool)
+    short_point_hits = np.zeros_like(short_hits, dtype=bool)
+    long_reasons = np.full(len(df), "NONE", dtype=object)
+    short_reasons = np.full(len(df), "NONE", dtype=object)
+    if point_long_col in df.columns:
+        long_point_hits = df[point_long_col].fillna(0).astype(int).to_numpy() == 1
+    if point_short_col in df.columns:
+        short_point_hits = df[point_short_col].fillna(0).astype(int).to_numpy() == 1
+    if reason_long_col in df.columns:
+        long_reasons = np.array(
+            df[reason_long_col].fillna("NONE").astype(str).str.upper().to_numpy(dtype=object),
+            dtype=object,
+            copy=True,
+        )
+    if reason_short_col in df.columns:
+        short_reasons = np.array(
+            df[reason_short_col].fillna("NONE").astype(str).str.upper().to_numpy(dtype=object),
+            dtype=object,
+            copy=True,
+        )
+    if side_key == "long":
+        short_hits[:] = False
+        short_point_hits[:] = False
+        short_reasons[:] = "NONE"
+    elif side_key == "short":
+        long_hits[:] = False
+        long_point_hits[:] = False
+        long_reasons[:] = "NONE"
+    both_hits = long_hits & short_hits
+    enter_long_hits = np.zeros_like(long_hits, dtype=bool)
+    enter_short_hits = np.zeros_like(short_hits, dtype=bool)
+    if overlay_entries:
+        if enter_long_col not in df.columns:
+            raise KeyError(f"Missing required column for overlay: {enter_long_col}")
+        if enter_short_col not in df.columns:
+            raise KeyError(f"Missing required column for overlay: {enter_short_col}")
+        enter_long_hits = df[enter_long_col].fillna(0).astype(int).to_numpy() == 1
+        enter_short_hits = df[enter_short_col].fillna(0).astype(int).to_numpy() == 1
+        if side_key == "long":
+            enter_short_hits[:] = False
+        elif side_key == "short":
+            enter_long_hits[:] = False
+
+    if long_hits.any():
+        ax.scatter(
+            pos[long_hits],
+            close_y[long_hits] + marker_offset * 0.45,
+            color="#1565C0",
+            marker="s",
+            s=40,
+            alpha=0.9,
+            zorder=2.0,
+            label=f"{long_col}=1 ({int(long_hits.sum())})",
+        )
+    if short_hits.any():
+        ax.scatter(
+            pos[short_hits],
+            close_y[short_hits] - marker_offset * 0.45,
+            color="#EF6C00",
+            marker="s",
+            s=40,
+            alpha=0.9,
+            zorder=2.0,
+            label=f"{short_col}=1 ({int(short_hits.sum())})",
+        )
+    if both_hits.any():
+        ax.scatter(
+            pos[both_hits],
+            close_y[both_hits],
+            color="#6A1B9A",
+            marker="D",
+            s=30,
+            alpha=0.75,
+            zorder=2.1,
+            label=f"both=1 ({int(both_hits.sum())})",
+        )
+    if overlay_entries and enter_long_hits.any():
+        ax.scatter(
+            pos[enter_long_hits],
+            close_y[enter_long_hits] + marker_offset * 0.9,
+            color="#2E7D32",
+            marker="^",
+            s=30,
+            alpha=0.65,
+            zorder=1.8,
+            label=f"{enter_long_col}=1 ({int(enter_long_hits.sum())})",
+        )
+    if overlay_entries and enter_short_hits.any():
+        ax.scatter(
+            pos[enter_short_hits],
+            close_y[enter_short_hits] - marker_offset * 0.9,
+            color="#C62828",
+            marker="v",
+            s=30,
+            alpha=0.65,
+            zorder=1.8,
+            label=f"{enter_short_col}=1 ({int(enter_short_hits.sum())})",
+        )
+
+    reason_counts_long = {"DECAY": 0, "TRAIL": 0, "SL": 0, "EOD": 0}
+    reason_counts_short = {"DECAY": 0, "TRAIL": 0, "SL": 0, "EOD": 0}
+    if show_hybrid_reasons and (long_point_hits.any() or short_point_hits.any()):
+        reason_style = {
+            "DECAY": {"color": "#8E24AA", "marker": "*"},
+            "TRAIL": {"color": "#00897B", "marker": "P"},
+            "SL": {"color": "#FB8C00", "marker": "X"},
+            "EOD": {"color": "#546E7A", "marker": "D"},
+        }
+        for reason, style in reason_style.items():
+            mask_l = long_point_hits & (long_reasons == reason)
+            mask_s = short_point_hits & (short_reasons == reason)
+            reason_counts_long[reason] = int(mask_l.sum())
+            reason_counts_short[reason] = int(mask_s.sum())
+            if mask_l.any():
+                ax.scatter(
+                    pos[mask_l],
+                    close_y[mask_l] + marker_offset * 1.25,
+                    color=style["color"],
+                    marker=style["marker"],
+                    s=62 if reason != "DECAY" else 88,
+                    alpha=0.95,
+                    zorder=2.15,
+                    label=f"long {reason.lower()} ({int(mask_l.sum())})",
+                )
+            if mask_s.any():
+                ax.scatter(
+                    pos[mask_s],
+                    close_y[mask_s] - marker_offset * 1.25,
+                    color=style["color"],
+                    marker=style["marker"],
+                    s=62 if reason != "DECAY" else 88,
+                    alpha=0.95,
+                    zorder=2.15,
+                    label=f"short {reason.lower()} ({int(mask_s.sum())})",
+                )
+
+    bar_label = _infer_bar_label(date_index)
+    point_long_count = int(long_point_hits.sum())
+    point_short_count = int(short_point_hits.sum())
+    if show_hybrid_reasons and (point_long_count or point_short_count):
+        reason_text = (
+            f"L(decay/trail/sl/eod)="
+            f"{reason_counts_long['DECAY']}/{reason_counts_long['TRAIL']}/"
+            f"{reason_counts_long['SL']}/{reason_counts_long['EOD']} | "
+            f"S(decay/trail/sl/eod)="
+            f"{reason_counts_short['DECAY']}/{reason_counts_short['TRAIL']}/"
+            f"{reason_counts_short['SL']}/{reason_counts_short['EOD']}"
+        )
+    else:
+        reason_text = "point exits unavailable"
+    ax.set_title(
+        (
+            f"{bar_label} | bars: {len(df)} | "
+            f"side={side_key} | "
+            f"long_exit_soon={int(long_hits.sum())} | short_exit_soon={int(short_hits.sum())} | "
+            f"pointL={point_long_count} | pointS={point_short_count} | {reason_text}"
+        ),
+        fontsize=14,
+    )
+    ax.set_ylabel("Close Price")
+    ax.set_xlabel("Date")
+    ax.legend(loc="upper left", fontsize=10, ncol=3)
+
+    tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
+    _apply_time_ticks(ax, tick_positions, tick_labels)
+    _draw_day_lines([ax], tick_positions)
+
+    _finalize_plot(
+        fig,
+        suptitle="Close Price with Hybrid Meta Exit Labels (Entry Overlay)",
         suptitle_y=1.02,
         top=0.93,
         save_path=save_path,
@@ -1387,6 +1917,8 @@ _LABEL_PLOTTERS = {
     "bars_to_exhaustion": plot_exhaustion_progress,
     "continuation_strength": plot_continuation_strength,
     "trend_phase": plot_trend_phase_signals,
+    "meta_entry": plot_meta_entry_signals,
+    "meta_exit": plot_meta_exit_signals,
 }
 
 

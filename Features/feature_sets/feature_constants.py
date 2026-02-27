@@ -74,6 +74,20 @@ SWING_LABEL_COLUMNS = [
     "trend_phase_ignition",
     "trend_phase_expansion",
     "trend_phase_saturation",
+    "trend_phase_decay",
+    "trend_phase_exit_long",
+    "trend_phase_exit_short",
+    # Meta entry/exit labels
+    "y_enter_long",
+    "y_enter_short",
+    "y_exit_long",
+    "y_exit_short",
+    "y_exit_long_point",
+    "y_exit_short_point",
+    "tp_hit_before_exit_long",
+    "tp_hit_before_exit_short",
+    "exit_reason_long",
+    "exit_reason_short",
 ]
 # NOTE: normalize_continuous_features() supports matching by base feature name (e.g., ret_1 will also match ret_1__30m).
 # So SCALE_FEATURE_COLUMNS should contain UNSUFFIXED base names only.
