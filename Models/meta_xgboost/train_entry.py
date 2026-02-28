@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from Data.plots.plots import plot_model_inference
+from Data.retrieve_data import normalize_ticker
 from Policy.training_logging import log_training_run
 from Models.meta_xgboost.common import (
     ENTRY_TARGETS,
@@ -25,6 +27,41 @@ from Models.meta_xgboost.common import (
     train_walkforward_binary,
     xgb_params_from_config,
 )
+
+
+def _save_entry_eval_plot(
+    *,
+    frame: pd.DataFrame,
+    entry_root: Path,
+    combined_cols: dict[str, np.ndarray],
+    threshold_summary: dict[str, dict[str, float | None]],
+    cfg: PipelineConfig,
+) -> Path | None:
+    long_probs = np.asarray(combined_cols.get("p_enter_long_oof"), dtype=np.float32)
+    short_probs = np.asarray(combined_cols.get("p_enter_short_oof"), dtype=np.float32)
+    valid = np.isfinite(long_probs) | np.isfinite(short_probs)
+    if not np.any(valid):
+        return None
+
+    valid_idx = np.flatnonzero(valid)
+    tail_idx = valid_idx[-300:] if valid_idx.size > 300 else valid_idx
+    plot_df = frame.iloc[tail_idx]
+    save_path = entry_root / "meta_entry_oof_eval.png"
+    plot_model_inference(
+        plot_df,
+        long_probs[tail_idx],
+        short_probs[tail_idx],
+        long_actual=plot_df["y_enter_long"].to_numpy(dtype=np.int64),
+        short_actual=plot_df["y_enter_short"].to_numpy(dtype=np.int64),
+        long_label_name="ENTRY LONG",
+        short_label_name="ENTRY SHORT",
+        threshold=0.5,
+        long_threshold=float(threshold_summary["enter_long"]["threshold"]),
+        short_threshold=float(threshold_summary["enter_short"]["threshold"]),
+        title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB entry OOF eval ({cfg.dataset_name})",
+        save_path=str(save_path),
+    )
+    return save_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -167,6 +204,13 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
             "y_enter_short": frame["y_enter_short"].to_numpy(dtype=np.int8),
         },
     )
+    plot_path = _save_entry_eval_plot(
+        frame=frame,
+        entry_root=entry_root,
+        combined_cols=combined_cols,
+        threshold_summary=threshold_summary,
+        cfg=cfg,
+    )
 
     log_training_run(
         run_name="meta_xgboost_entry_train",
@@ -180,6 +224,7 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
             "entry_probs": str(prob_path),
             "entry_labels": str(labels_path),
             "thresholds": str(thresholds_path),
+            "oof_eval_plot": str(plot_path) if plot_path is not None else None,
         },
         extra={
             "rows": int(len(frame)),

@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from Data.plots.plots import plot_model_inference
+from Data.retrieve_data import normalize_ticker
 from Policy.training_logging import log_training_run
 from Models.meta_xgboost.common import (
     EXIT_TARGETS,
@@ -31,6 +33,41 @@ from Features.label_generations import build_meta_exit_labels
 
 ENTRY_THRESHOLDS_FILENAME = "entry_thresholds.json"
 ENTRY_PROBS_FILENAME = "entry_probs.parquet"
+
+
+def _save_exit_eval_plot(
+    *,
+    frame: pd.DataFrame,
+    exit_root: Path,
+    combined_cols: dict[str, np.ndarray],
+    threshold_summary: dict[str, dict[str, float | None]],
+    cfg: PipelineConfig,
+) -> Path | None:
+    long_probs = np.asarray(combined_cols.get("p_exit_long_oof"), dtype=np.float32)
+    short_probs = np.asarray(combined_cols.get("p_exit_short_oof"), dtype=np.float32)
+    valid = np.isfinite(long_probs) | np.isfinite(short_probs)
+    if not np.any(valid):
+        return None
+
+    valid_idx = np.flatnonzero(valid)
+    tail_idx = valid_idx[-300:] if valid_idx.size > 300 else valid_idx
+    plot_df = frame.iloc[tail_idx]
+    save_path = exit_root / "meta_exit_oof_eval.png"
+    plot_model_inference(
+        plot_df,
+        long_probs[tail_idx],
+        short_probs[tail_idx],
+        long_actual=plot_df["y_exit_long"].to_numpy(dtype=np.int64),
+        short_actual=plot_df["y_exit_short"].to_numpy(dtype=np.int64),
+        long_label_name="EXIT LONG",
+        short_label_name="EXIT SHORT",
+        threshold=0.5,
+        long_threshold=float(threshold_summary["exit_long"]["threshold"]),
+        short_threshold=float(threshold_summary["exit_short"]["threshold"]),
+        title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB exit OOF eval ({cfg.dataset_name})",
+        save_path=str(save_path),
+    )
+    return save_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -321,6 +358,13 @@ def run_exit_pipeline(
     context_cols["p_enter_long_oof"] = pd.to_numeric(frame["p_enter_long_oof"], errors="coerce").to_numpy(dtype=float)
     context_cols["p_enter_short_oof"] = pd.to_numeric(frame["p_enter_short_oof"], errors="coerce").to_numpy(dtype=float)
     context_path = save_prob_frame(exit_root / "exit_context.parquet", index=frame.index, columns=context_cols)
+    plot_path = _save_exit_eval_plot(
+        frame=frame,
+        exit_root=exit_root,
+        combined_cols=combined_cols,
+        threshold_summary=threshold_summary,
+        cfg=cfg,
+    )
 
     log_training_run(
         run_name="meta_xgboost_exit_train",
@@ -347,6 +391,7 @@ def run_exit_pipeline(
             "exit_labels": str(label_path),
             "exit_context": str(context_path),
             "thresholds": str(thresholds_out),
+            "oof_eval_plot": str(plot_path) if plot_path is not None else None,
         },
         extra={
             "rows": int(len(frame)),
