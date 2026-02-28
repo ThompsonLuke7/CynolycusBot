@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
@@ -35,6 +38,54 @@ def _get_prob_array(
         f"Missing required column '{prob_col}'"
         + (f" and fallback '{binary_fallback_col}'" if binary_fallback_col else "")
     )
+
+
+def _load_long_short_thresholds_from_summary(
+    summary_path: str | Path | None,
+) -> tuple[float | None, float | None, str | None]:
+    """
+    Read long/short probability thresholds from a GA training summary JSON.
+
+    Returns (long_threshold, short_threshold, label_mode).
+    """
+    if summary_path is None:
+        return None, None, None
+    path = Path(summary_path)
+    if not path.exists():
+        return None, None, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None, None, None
+
+    mode_raw = (
+        payload.get("hyperparameters", {}).get("label_mode")
+        or payload.get("extra", {}).get("label_mode")
+    )
+    label_mode = str(mode_raw).strip().lower() if mode_raw is not None else None
+
+    metric_roots = (
+        ("final_validation_metrics", "long_test", "short_test"),
+        ("final_train_metrics", "long_oof", "short_oof"),
+    )
+    long_thr: float | None = None
+    short_thr: float | None = None
+    for root_key, long_key, short_key in metric_roots:
+        root = payload.get(root_key)
+        if not isinstance(root, dict):
+            continue
+        long_raw = root.get(long_key, {}).get("threshold")
+        short_raw = root.get(short_key, {}).get("threshold")
+        try:
+            long_val = float(long_raw)
+            short_val = float(short_raw)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(long_val) and np.isfinite(short_val):
+            long_thr = float(long_val)
+            short_thr = float(short_val)
+            break
+    return long_thr, short_thr, label_mode
 
 
 # ----------------------------------------------------------------------
@@ -1449,7 +1500,7 @@ def add_trend_phase_labels(
 
 
 # ----------------------------------------------------------------------
-# 10) Meta entry labels (event-based TP-before-SL with EOD cap)
+# 10) Meta entry labels (TP or phase/gate triggers)
 # ----------------------------------------------------------------------
 def build_meta_entry_labels(
     df,
@@ -1459,21 +1510,53 @@ def build_meta_entry_labels(
     use_next_open=True,
     cost_bps=2.0,
     day_col="session_date",
+    allow_cross_day: bool = True,
+    entry_mode: str = "tp",
+    phase_col="trend_phase_label",
+    ignition_col="trend_phase_ignition",
+    expansion_col="trend_phase_expansion",
+    momentum_col="trend_phase_m",
+    accel_col="trend_phase_a",
+    p_pivot_long_col="p_pivot_long",
+    p_pivot_short_col="p_pivot_short",
+    p_tb_long_col="p_tb_long",
+    p_tb_short_col="p_tb_short",
+    tb_long_col="tb_long_label",
+    tb_short_col="tb_short_label",
+    pivot_prob_threshold=0.55,
+    pivot_prob_threshold_long: float | None = None,
+    pivot_prob_threshold_short: float | None = None,
+    tb_prob_threshold=0.50,
+    tb_prob_threshold_long: float | None = None,
+    tb_prob_threshold_short: float | None = None,
+    thresholds_summary_path: str | Path | None = None,
+    use_summary_thresholds: bool = True,
+    short_accel_zero_quantile=0.35,
+    collapse_first_in_run=True,
 ) -> pd.DataFrame:
     """
-    Build meta entry labels for long/short entries with same-session barriers.
+    Build meta-entry labels for long/short entries.
 
-    For each bar t:
-      - entry is open[t+1] when use_next_open=True, else open[t]
-      - TP/SL are ATR-scaled from atr[t]
-      - forward scan is capped to bars in the same session only
-      - label=1 if TP is hit strictly before SL, else 0
-
-    Output columns:
-      - y_enter_long: int8 in {0, 1}
-      - y_enter_short: int8 in {0, 1}
+    Modes
+    -----
+    - entry_mode='tp' (default):
+      event-based TP-before-SL labeling within the same session. TP labels are
+      left raw so the exit simulator can choose the first valid re-entry after
+      flat.
+    - entry_mode='phase':
+      phase/gate labeling from ignition/expansion + prob/TB filters.
     """
-    required = {"open", "high", "low", atr_col, day_col}
+    mode = str(entry_mode).strip().lower()
+    if mode not in {"tp", "phase"}:
+        raise ValueError("entry_mode must be one of: tp, phase")
+
+    required = {"open", "high", "low"}
+    if not bool(allow_cross_day):
+        required.add(day_col)
+    if mode == "tp":
+        required.add(atr_col)
+    else:
+        required.add("close")
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise KeyError(f"Missing required columns: {', '.join(missing)}")
@@ -1487,74 +1570,200 @@ def build_meta_entry_labels(
         out["y_enter_short"] = y_short
         return out
 
-    open_px = pd.to_numeric(out["open"], errors="coerce").to_numpy(dtype=float)
-    high_px = pd.to_numeric(out["high"], errors="coerce").to_numpy(dtype=float)
-    low_px = pd.to_numeric(out["low"], errors="coerce").to_numpy(dtype=float)
-    atr = pd.to_numeric(out[atr_col], errors="coerce").to_numpy(dtype=float)
-    day_vals = out[day_col].to_numpy()
+    if bool(allow_cross_day):
+        starts = np.array([0], dtype=int)
+        ends = np.array([n], dtype=int)
+    else:
+        day_vals = out[day_col].to_numpy()
+        boundaries = np.flatnonzero(day_vals[1:] != day_vals[:-1]) + 1
+        starts = np.concatenate(([0], boundaries))
+        ends = np.concatenate((boundaries, [n]))
 
-    entry_offset = 1 if bool(use_next_open) else 0
-    tp_mult = float(a_tp)
-    sl_mult = float(b_sl)
-    cost_bps = max(0.0, float(cost_bps))
+    def _collapse_runs(sig: np.ndarray) -> np.ndarray:
+        out_sig = np.zeros(sig.shape[0], dtype=np.int8)
+        if sig.size == 0:
+            return out_sig
+        out_sig[0] = np.int8(sig[0])
+        if sig.size > 1:
+            out_sig[1:] = (sig[1:] & ~sig[:-1]).astype(np.int8)
+        return out_sig
 
-    if tp_mult <= 0.0:
-        raise ValueError("a_tp must be > 0.")
-    if sl_mult <= 0.0:
-        raise ValueError("b_sl must be > 0.")
+    if mode == "tp":
+        entry_offset = 1 if bool(use_next_open) else 0
+        tp_mult = float(a_tp)
+        sl_mult = float(b_sl)
+        cost_bps = max(0.0, float(cost_bps))
+        if tp_mult <= 0.0:
+            raise ValueError("a_tp must be > 0.")
+        if sl_mult <= 0.0:
+            raise ValueError("b_sl must be > 0.")
 
-    boundaries = np.flatnonzero(day_vals[1:] != day_vals[:-1]) + 1
-    starts = np.concatenate(([0], boundaries))
-    ends = np.concatenate((boundaries, [n]))
+        open_px = pd.to_numeric(out["open"], errors="coerce").to_numpy(dtype=float)
+        high_px = pd.to_numeric(out["high"], errors="coerce").to_numpy(dtype=float)
+        low_px = pd.to_numeric(out["low"], errors="coerce").to_numpy(dtype=float)
+        atr = pd.to_numeric(out[atr_col], errors="coerce").to_numpy(dtype=float)
+        raw_long = np.zeros(n, dtype=bool)
+        raw_short = np.zeros(n, dtype=bool)
 
-    for s, e in zip(starts, ends):
-        if (e - s) <= entry_offset:
-            continue
-        for t in range(s, e):
-            entry_idx = t + entry_offset
-            if entry_idx >= e:
-                break
-
-            entry = open_px[entry_idx]
-            atr_t = atr[t]
-            if not np.isfinite(entry) or not np.isfinite(atr_t) or atr_t <= 0.0:
+        for s, e in zip(starts, ends):
+            if (e - s) <= entry_offset:
                 continue
+            for t in range(s, e):
+                entry_idx = t + entry_offset
+                if entry_idx >= e:
+                    break
 
-            tp_dist = tp_mult * atr_t
-            sl_dist = sl_mult * atr_t
-            if tp_dist <= 0.0 or sl_dist <= 0.0:
-                continue
+                entry = open_px[entry_idx]
+                atr_t = atr[t]
+                if not np.isfinite(entry) or not np.isfinite(atr_t) or atr_t <= 0.0:
+                    continue
 
-            # Skip events where target distance is not large enough to clear costs.
-            cost_px = (cost_bps / 1e4) * entry
-            if tp_dist <= cost_px:
-                continue
+                tp_dist = tp_mult * atr_t
+                sl_dist = sl_mult * atr_t
+                if tp_dist <= 0.0 or sl_dist <= 0.0:
+                    continue
 
-            scan_start = entry_idx + 1
-            if scan_start >= e:
-                continue
+                cost_px = (cost_bps / 1e4) * entry
+                if tp_dist <= cost_px:
+                    continue
 
-            high_fwd = high_px[scan_start:e]
-            low_fwd = low_px[scan_start:e]
+                scan_start = entry_idx + 1
+                if scan_start >= e:
+                    continue
 
-            long_tp = entry + tp_dist
-            long_sl = entry - sl_dist
-            short_tp = entry - tp_dist
-            short_sl = entry + sl_dist
+                high_fwd = high_px[scan_start:e]
+                low_fwd = low_px[scan_start:e]
 
-            long_tp_hit = np.flatnonzero(high_fwd >= long_tp)
-            long_sl_hit = np.flatnonzero(low_fwd <= long_sl)
-            long_tp_i = int(long_tp_hit[0]) if long_tp_hit.size else None
-            long_sl_i = int(long_sl_hit[0]) if long_sl_hit.size else None
-            if long_tp_i is not None and (long_sl_i is None or long_tp_i < long_sl_i):
-                y_long[t] = 1
+                long_tp = entry + tp_dist
+                long_sl = entry - sl_dist
+                short_tp = entry - tp_dist
+                short_sl = entry + sl_dist
 
-            short_tp_hit = np.flatnonzero(low_fwd <= short_tp)
-            short_sl_hit = np.flatnonzero(high_fwd >= short_sl)
-            short_tp_i = int(short_tp_hit[0]) if short_tp_hit.size else None
-            short_sl_i = int(short_sl_hit[0]) if short_sl_hit.size else None
-            if short_tp_i is not None and (short_sl_i is None or short_tp_i < short_sl_i):
-                y_short[t] = 1
+                long_tp_hit = np.flatnonzero(high_fwd >= long_tp)
+                long_sl_hit = np.flatnonzero(low_fwd <= long_sl)
+                long_tp_i = int(long_tp_hit[0]) if long_tp_hit.size else None
+                long_sl_i = int(long_sl_hit[0]) if long_sl_hit.size else None
+                if long_tp_i is not None and (long_sl_i is None or long_tp_i < long_sl_i):
+                    raw_long[t] = True
+
+                short_tp_hit = np.flatnonzero(low_fwd <= short_tp)
+                short_sl_hit = np.flatnonzero(high_fwd >= short_sl)
+                short_tp_i = int(short_tp_hit[0]) if short_tp_hit.size else None
+                short_sl_i = int(short_sl_hit[0]) if short_sl_hit.size else None
+                if short_tp_i is not None and (short_sl_i is None or short_tp_i < short_sl_i):
+                    raw_short[t] = True
+
+        y_long[:] = raw_long.astype(np.int8)
+        y_short[:] = raw_short.astype(np.int8)
+    else:
+        if a_tp <= 0.0:
+            raise ValueError("a_tp must be > 0.")
+        if b_sl <= 0.0:
+            raise ValueError("b_sl must be > 0.")
+
+        pivot_long_thr = (
+            float(pivot_prob_threshold_long)
+            if pivot_prob_threshold_long is not None
+            else float(pivot_prob_threshold)
+        )
+        pivot_short_thr = (
+            float(pivot_prob_threshold_short)
+            if pivot_prob_threshold_short is not None
+            else float(pivot_prob_threshold)
+        )
+        tb_long_thr = (
+            float(tb_prob_threshold_long)
+            if tb_prob_threshold_long is not None
+            else float(tb_prob_threshold)
+        )
+        tb_short_thr = (
+            float(tb_prob_threshold_short)
+            if tb_prob_threshold_short is not None
+            else float(tb_prob_threshold)
+        )
+        if bool(use_summary_thresholds):
+            summary_long_thr, summary_short_thr, summary_mode = _load_long_short_thresholds_from_summary(
+                thresholds_summary_path
+            )
+            if summary_long_thr is not None and summary_short_thr is not None:
+                if summary_mode in {"pivot", "pivots"}:
+                    if pivot_prob_threshold_long is None:
+                        pivot_long_thr = summary_long_thr
+                    if pivot_prob_threshold_short is None:
+                        pivot_short_thr = summary_short_thr
+                elif summary_mode in {"tb", "triple", "triple_barrier"}:
+                    if tb_prob_threshold_long is None:
+                        tb_long_thr = summary_long_thr
+                    if tb_prob_threshold_short is None:
+                        tb_short_thr = summary_short_thr
+
+        need_phase_cols = {ignition_col, expansion_col, momentum_col, accel_col}
+        if not need_phase_cols.issubset(out.columns):
+            out = add_trend_phase_labels(
+                out,
+                close_col="close",
+                momentum_col=momentum_col,
+                accel_col=accel_col,
+                phase_col=phase_col,
+                ignition_col=ignition_col,
+                expansion_col=expansion_col,
+                write_phase_columns=True,
+                use_hazard_exit_labels=False,
+            )
+
+        if tb_long_col not in out.columns or tb_short_col not in out.columns:
+            out = add_triple_barrier_labels_atr(
+                out,
+                close_col="close",
+                high_col="high",
+                low_col="low",
+                open_col="open",
+                atr_col=atr_col,
+                k_up=float(a_tp),
+                k_dn=float(b_sl),
+                base_label_col="tb_label",
+            )
+
+        ignition = out[ignition_col].fillna(0).astype(int).to_numpy() == 1
+        expansion = out[expansion_col].fillna(0).astype(int).to_numpy() == 1
+        m_np = pd.to_numeric(out[momentum_col], errors="coerce").to_numpy(dtype=float)
+        a_np = pd.to_numeric(out[accel_col], errors="coerce").to_numpy(dtype=float)
+
+        finite_a = np.isfinite(a_np)
+        if np.any(finite_a):
+            q = float(np.clip(short_accel_zero_quantile, 0.0, 1.0))
+            short_zero_band = float(np.nanquantile(np.abs(a_np[finite_a]), q))
+        else:
+            short_zero_band = 0.0
+
+        phase_long = ignition | expansion
+        phase_short = np.isfinite(m_np) & np.isfinite(a_np) & (m_np < 0.0) & (
+            (a_np < 0.0) | (np.abs(a_np) <= short_zero_band)
+        )
+
+        def _prob_gate(prob_col: str, thr: float) -> np.ndarray:
+            if prob_col not in out.columns:
+                return np.ones(n, dtype=bool)
+            p = pd.to_numeric(out[prob_col], errors="coerce").to_numpy(dtype=float)
+            return np.isfinite(p) & (p >= float(thr))
+
+        pivot_long_gate = _prob_gate(p_pivot_long_col, pivot_long_thr)
+        pivot_short_gate = _prob_gate(p_pivot_short_col, pivot_short_thr)
+        tb_prob_long_gate = _prob_gate(p_tb_long_col, tb_long_thr)
+        tb_prob_short_gate = _prob_gate(p_tb_short_col, tb_short_thr)
+        tb_long_gate = out[tb_long_col].fillna(0).astype(int).to_numpy() == 1
+        tb_short_gate = out[tb_short_col].fillna(0).astype(int).to_numpy() == 1
+
+        raw_long = phase_long & pivot_long_gate & tb_prob_long_gate & tb_long_gate
+        raw_short = phase_short & pivot_short_gate & tb_prob_short_gate & tb_short_gate
+
+        if bool(collapse_first_in_run):
+            for s, e in zip(starts, ends):
+                y_long[s:e] = _collapse_runs(raw_long[s:e])
+                y_short[s:e] = _collapse_runs(raw_short[s:e])
+        else:
+            y_long[:] = raw_long.astype(np.int8)
+            y_short[:] = raw_short.astype(np.int8)
 
     # Minimal sanity checks
     if y_long.shape[0] != n or y_short.shape[0] != n:
@@ -1581,8 +1790,9 @@ def build_meta_exit_labels(
     b_sl=0.8,
     use_next_open=True,
     cost_bps=2.0,
-    K=2,
+    K=1,
     day_col="session_date",
+    allow_cross_day: bool = True,
     close_col="close",
     use_decay_exit=True,
     decay_ema_length=8,
@@ -1590,7 +1800,7 @@ def build_meta_exit_labels(
     decay_consecutive_bars=2,
     decay_a_eps=0.0,
     decay_require_m_trend=True,
-    trail_activate_atr=1.0,
+    trail_activate_atr=2,
     trail_atr=1.0,
     trail_atr_after_tp=0.8,
     use_tp_to_tighten_trail=True,
@@ -1600,11 +1810,12 @@ def build_meta_exit_labels(
     reason_short_col="exit_reason_short",
     tp_hit_long_col="tp_hit_before_exit_long",
     tp_hit_short_col="tp_hit_before_exit_short",
+    overwrite_entry_with_used=True,
 ) -> pd.DataFrame:
     """
     Build hybrid hazard-style exit labels for long/short trades driven by meta entries.
 
-    Trade simulation (per session):
+    Trade simulation:
       - If y_enter_side[t] == 1, open at open[t+1] (or open[t] if use_next_open=False)
       - TP/SL are ATR-scaled off atr[t]
       - Optional decay trigger uses smoothed momentum/acceleration from close:
@@ -1613,6 +1824,8 @@ def build_meta_exit_labels(
       - Canonical exit is earliest of {DECAY, TRAIL, SL, EOD}
       - Same-side overlapping entries are ignored while a trade is active
       - TP is analytics-only (can tighten/activate trailing), not a direct exit
+      - If allow_cross_day=False, simulations reset each session boundary.
+        If allow_cross_day=True, simulation runs continuously across days.
 
     Exit labels:
       - For bars t in [entry_idx, exit_idx):
@@ -1622,8 +1835,12 @@ def build_meta_exit_labels(
           y_exit_*_point, exit_reason_*
       - Writes TP-hit analytics per side:
           tp_hit_before_exit_long, tp_hit_before_exit_short
+      - Optionally rewrites y_enter_long/y_enter_short to only the entries
+        actually used by this simulator (first valid after flat).
     """
-    required = {"open", "high", "low", atr_col, day_col, enter_long_col, enter_short_col}
+    required = {"open", "high", "low", atr_col, enter_long_col, enter_short_col}
+    if not bool(allow_cross_day):
+        required.add(day_col)
     if use_decay_exit:
         required.add(close_col)
     missing = [c for c in required if c not in df.columns]
@@ -1636,6 +1853,8 @@ def build_meta_exit_labels(
     y_exit_short = np.zeros(n, dtype=np.int8)
     y_exit_long_point = np.zeros(n, dtype=np.int8)
     y_exit_short_point = np.zeros(n, dtype=np.int8)
+    used_enter_long = np.zeros(n, dtype=np.int8)
+    used_enter_short = np.zeros(n, dtype=np.int8)
     tp_hit_long = np.zeros(n, dtype=np.int8)
     tp_hit_short = np.zeros(n, dtype=np.int8)
     reason_long = np.full(n, "NONE", dtype=object)
@@ -1655,7 +1874,6 @@ def build_meta_exit_labels(
     high_px = pd.to_numeric(out["high"], errors="coerce").to_numpy(dtype=float)
     low_px = pd.to_numeric(out["low"], errors="coerce").to_numpy(dtype=float)
     atr = pd.to_numeric(out[atr_col], errors="coerce").to_numpy(dtype=float)
-    day_vals = out[day_col].to_numpy()
     enter_long = out[enter_long_col].fillna(0).astype(int).to_numpy() == 1
     enter_short = out[enter_short_col].fillna(0).astype(int).to_numpy() == 1
 
@@ -1692,14 +1910,20 @@ def build_meta_exit_labels(
         m_np = m.to_numpy(dtype=float)
         a_np = a.to_numpy(dtype=float)
 
-    boundaries = np.flatnonzero(day_vals[1:] != day_vals[:-1]) + 1
-    starts = np.concatenate(([0], boundaries))
-    ends = np.concatenate((boundaries, [n]))
+    if bool(allow_cross_day):
+        starts = np.array([0], dtype=int)
+        ends = np.array([n], dtype=int)
+    else:
+        day_vals = out[day_col].to_numpy()
+        boundaries = np.flatnonzero(day_vals[1:] != day_vals[:-1]) + 1
+        starts = np.concatenate(([0], boundaries))
+        ends = np.concatenate((boundaries, [n]))
 
     def _label_side(
         enter_sig: np.ndarray,
         y_out: np.ndarray,
         y_point_out: np.ndarray,
+        used_entry_out: np.ndarray,
         tp_hit_out: np.ndarray,
         reason_out: np.ndarray,
         *,
@@ -1743,6 +1967,7 @@ def build_meta_exit_labels(
                 else:
                     tp = entry - tp_dist
                     sl = entry + sl_dist
+                used_entry_out[i] = 1
 
                 exit_idx = e - 1
                 exit_reason = "EOD"
@@ -1757,6 +1982,19 @@ def build_meta_exit_labels(
                     if is_long:
                         sl_hit = low_px[j] <= sl
                         tp_hit = high_px[j] >= tp
+                        peak_prev = peak
+                        trail_active_prev = trail_active
+                        trail_dist_prev = trail_dist
+                        trail_level = (
+                            peak_prev - trail_dist_prev
+                            if trail_active_prev
+                            else np.nan
+                        )
+                        trail_hit = (
+                            trail_active_prev
+                            and np.isfinite(trail_level)
+                            and (low_px[j] <= trail_level)
+                        )
                         if np.isfinite(high_px[j]):
                             peak = max(peak, high_px[j])
                         if (peak - entry) >= (trail_activate_mult * atr_i):
@@ -1766,11 +2004,22 @@ def build_meta_exit_labels(
                             if use_tp_to_tighten_trail:
                                 trail_active = True
                                 trail_dist = min(trail_dist, trail_dist_tight)
-                        trail_level = peak - trail_dist if trail_active else np.nan
-                        trail_hit = trail_active and np.isfinite(trail_level) and (low_px[j] <= trail_level)
                     else:
                         sl_hit = high_px[j] >= sl
                         tp_hit = low_px[j] <= tp
+                        trough_prev = trough
+                        trail_active_prev = trail_active
+                        trail_dist_prev = trail_dist
+                        trail_level = (
+                            trough_prev + trail_dist_prev
+                            if trail_active_prev
+                            else np.nan
+                        )
+                        trail_hit = (
+                            trail_active_prev
+                            and np.isfinite(trail_level)
+                            and (high_px[j] >= trail_level)
+                        )
                         if np.isfinite(low_px[j]):
                             trough = min(trough, low_px[j])
                         if (entry - trough) >= (trail_activate_mult * atr_i):
@@ -1780,8 +2029,6 @@ def build_meta_exit_labels(
                             if use_tp_to_tighten_trail:
                                 trail_active = True
                                 trail_dist = min(trail_dist, trail_dist_tight)
-                        trail_level = trough + trail_dist if trail_active else np.nan
-                        trail_hit = trail_active and np.isfinite(trail_level) and (high_px[j] >= trail_level)
                     decay_hit = False
                     if use_decay_exit and m_np is not None and a_np is not None:
                         if (j - entry_idx) >= min_hold and np.isfinite(m_np[j]) and np.isfinite(a_np[j]):
@@ -1823,6 +2070,7 @@ def build_meta_exit_labels(
         enter_long,
         y_exit_long,
         y_exit_long_point,
+        used_enter_long,
         tp_hit_long,
         reason_long,
         is_long=True,
@@ -1831,6 +2079,7 @@ def build_meta_exit_labels(
         enter_short,
         y_exit_short,
         y_exit_short_point,
+        used_enter_short,
         tp_hit_short,
         reason_short,
         is_long=False,
@@ -1854,6 +2103,9 @@ def build_meta_exit_labels(
 
     out["y_exit_long"] = y_exit_long
     out["y_exit_short"] = y_exit_short
+    if bool(overwrite_entry_with_used):
+        out[enter_long_col] = used_enter_long
+        out[enter_short_col] = used_enter_short
     out[point_long_col] = y_exit_long_point
     out[point_short_col] = y_exit_short_point
     out[tp_hit_long_col] = tp_hit_long

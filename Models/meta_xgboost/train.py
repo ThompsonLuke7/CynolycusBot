@@ -196,6 +196,7 @@ def _build_feature_matrix_with_labels(cfg: TrainConfig) -> pd.DataFrame:
         ga_model_root = Path(cfg.ga_model_root)
     else:
         ga_model_root = REPO_ROOT / "Data" / "models" / "ga_xgboost" / cfg.dataset_name
+    ga_summary_path = ga_model_root / "training_run_summary.json"
     agent_cfg = AgentFeatureConfig(
         ticker=clean,
         dataset_name=cfg.dataset_name,
@@ -215,7 +216,23 @@ def _build_feature_matrix_with_labels(cfg: TrainConfig) -> pd.DataFrame:
     if not {"open", "high", "low", "close"}.issubset(feat_df.columns):
         raise KeyError("Agent feature matrix must include open/high/low/close columns.")
 
-    label_df = feat_df[["open", "high", "low", "close"]].copy()
+    label_cols = ["open", "high", "low", "close"]
+    for col in (
+        "p_pivot_long",
+        "p_pivot_short",
+        "p_tb_long",
+        "p_tb_short",
+        "tb_long_label",
+        "tb_short_label",
+        "trend_phase_label",
+        "trend_phase_ignition",
+        "trend_phase_expansion",
+        "trend_phase_m",
+        "trend_phase_a",
+    ):
+        if col in feat_df.columns and col not in label_cols:
+            label_cols.append(col)
+    label_df = feat_df[label_cols].copy()
     label_df[cfg.atr_col] = ta.atr(
         label_df["high"], label_df["low"], label_df["close"], length=14
     )
@@ -228,6 +245,8 @@ def _build_feature_matrix_with_labels(cfg: TrainConfig) -> pd.DataFrame:
         use_next_open=cfg.use_next_open,
         cost_bps=cfg.cost_bps,
         day_col="session_date",
+        thresholds_summary_path=ga_summary_path,
+        use_summary_thresholds=True,
     )
     label_df = build_meta_exit_labels(
         label_df,

@@ -1,6 +1,7 @@
 import argparse
 import datetime as dt
 import math
+from pathlib import Path
 
 from API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
 from Data.load_data import (
@@ -260,6 +261,14 @@ if __name__ == "__main__":
         df = load_ticker_parquet(args.ticker, parquet_path=args.raw_parquet)
         df = ensure_time_index(df)
         rule = _normalize_plot_timeframe(args.plot_timeframe)
+        plot_dataset_name = _dataset_name_from_label_timeframe(rule)
+        ga_summary_path = (
+            Path("Data")
+            / "models"
+            / "ga_xgboost"
+            / plot_dataset_name
+            / "training_run_summary.json"
+        )
         if rule != "1T":
             df = resample_ohlcv(df, rule)
         raw_plot_types = [p.strip() for p in str(args.plot_type).split(",") if p.strip()]
@@ -333,7 +342,11 @@ if __name__ == "__main__":
                         if getattr(idx, "tz", None) is not None:
                             idx = idx.tz_convert("America/New_York")
                         df["session_date"] = idx.normalize().date
-                    df = build_meta_entry_labels(df)
+                    df = build_meta_entry_labels(
+                        df,
+                        thresholds_summary_path=ga_summary_path,
+                        use_summary_thresholds=True,
+                    )
             if "meta_entry" in canonical_plot_types:
                 if "atr" not in df.columns:
                     df = add_triple_barrier_labels_atr(df)
@@ -344,7 +357,11 @@ if __name__ == "__main__":
                     if getattr(idx, "tz", None) is not None:
                         idx = idx.tz_convert("America/New_York")
                     df["session_date"] = idx.normalize().date
-                df = build_meta_entry_labels(df)
+                df = build_meta_entry_labels(
+                    df,
+                    thresholds_summary_path=ga_summary_path,
+                    use_summary_thresholds=True,
+                )
             if "meta_exit" in canonical_plot_types:
                 if "atr" not in df.columns:
                     df = add_triple_barrier_labels_atr(df)
@@ -356,7 +373,11 @@ if __name__ == "__main__":
                         idx = idx.tz_convert("America/New_York")
                     df["session_date"] = idx.normalize().date
                 if "y_enter_long" not in df.columns or "y_enter_short" not in df.columns:
-                    df = build_meta_entry_labels(df)
+                    df = build_meta_entry_labels(
+                        df,
+                        thresholds_summary_path=ga_summary_path,
+                        use_summary_thresholds=True,
+                    )
                 df = build_meta_exit_labels(df)
 
         save_paths = None

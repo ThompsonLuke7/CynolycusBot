@@ -7,7 +7,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, log_loss
 import xgboost as xgb
 from xgboost.core import XGBoostError
 
@@ -27,15 +27,15 @@ class GAXGBoostFeatureSelector:
       - Generations = 60
       - Crossover rate = 0.6
       - Mutation rate = 0.005
-      - Fitness = configurable (default: f1_penalized) with optional sparsity penalty
+      - Fitness = configurable (default: logloss_penalized) with optional sparsity penalty
     """
     population_size: int = 32
     generations: int = 60
     crossover_rate: float = 0.6
     mutation_rate: float = 0.005  # per-bit mutation probability
     val_size: float = 0.10           # portion of given data used as validation
-    fitness_metric: str = "f1_penalized"  # "f1" | "f1_penalized"
-    feature_penalty: float = 0.0015  # penalty per selected feature when using f1_penalized
+    fitness_metric: str = "logloss_penalized"  # "f1" | "f1_penalized" | "logloss" | "logloss_penalized"
+    feature_penalty: float = 0.0001  # penalty per selected feature when using penalized fitness
     early_stopping_rounds: Optional[int] = 50
     max_boost_round: int = 2000
     max_features: Optional[int] = 80  # hard cap; None disables
@@ -324,9 +324,16 @@ class GAXGBoostFeatureSelector:
         dval = self._make_dmatrix(X_v, y=None, use_gpu=use_gpu, weight=w_val)
         y_prob = model.predict(dval)
         y_pred = (self._to_numpy(y_prob) >= 0.5).astype(np.int64)
-        base = f1_score(y_val, y_pred, pos_label=1)
+        metric = str(self.fitness_metric).strip().lower()
+        if metric in {"logloss", "logloss_penalized"}:
+            y_prob_np = np.clip(self._to_numpy(y_prob), 1e-7, 1.0 - 1e-7)
+            base = -float(log_loss(y_val, y_prob_np, labels=[0, 1], sample_weight=w_val))
+            if metric == "logloss_penalized":
+                return float(base - self.feature_penalty * n_selected)
+            return float(base)
 
-        if self.fitness_metric == "f1_penalized":
+        base = f1_score(y_val, y_pred, pos_label=1)
+        if metric == "f1_penalized":
             return float(base - self.feature_penalty * n_selected)
         return float(base)
 

@@ -1595,9 +1595,9 @@ def plot_meta_entry_signals(
     save_path: str | None = None,
 ) -> None:
     """
-    Plot OHLC candles with meta-entry win labels:
-      - y_enter_long=1: long TP hit before long SL within session
-      - y_enter_short=1: short TP hit before short SL within session
+    Plot OHLC candles with meta-entry labels:
+      - y_enter_long=1: long entry label
+      - y_enter_short=1: short entry label
     """
     side_key = str(side).strip().lower()
     if side_key not in {"both", "long", "short"}:
@@ -1664,7 +1664,7 @@ def plot_meta_entry_signals(
         (
             f"{bar_label} | bars: {len(df)} | "
             f"side={side_key} | "
-            f"long_wins={int(long_hits.sum())} | short_wins={int(short_hits.sum())}"
+            f"long_entries={int(long_hits.sum())} | short_entries={int(short_hits.sum())}"
         ),
         fontsize=14,
     )

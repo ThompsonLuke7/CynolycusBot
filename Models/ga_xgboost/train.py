@@ -516,6 +516,28 @@ def load_model_artifacts(
     return mask, xgb_params, meta
 
 
+def update_model_artifact_meta(
+    model_root: Path,
+    side: str,
+    *,
+    label_dir: str,
+    xgb_params: dict,
+    metadata_updates: dict | None = None,
+) -> Path:
+    side_dir = _artifact_side_dir(model_root, side, label_dir)
+    side_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = side_dir / "meta.json"
+    meta: dict = {}
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+    meta["side"] = side.upper()
+    meta["xgb_params"] = dict(xgb_params)
+    if metadata_updates:
+        meta.update(metadata_updates)
+    meta_path.write_text(json.dumps(meta, indent=2))
+    return meta_path
+
+
 def _train_ga_selector(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -1058,7 +1080,7 @@ def main() -> None:
     parser.add_argument(
         "--ga-fitness-metric",
         type=str,
-        choices=["f1", "f1_penalized"],
+        choices=["f1", "f1_penalized", "logloss", "logloss_penalized"],
         default=None,
     )
     parser.add_argument("--ga-feature-penalty", type=float, default=None)
@@ -1323,6 +1345,29 @@ def main() -> None:
 
     if long_mask.size != X.shape[1] or short_mask.size != X.shape[1]:
         raise ValueError("Mask size does not match feature count.")
+
+    long_meta_path = update_model_artifact_meta(
+        model_dataset_root,
+        "long",
+        label_dir=artifact_label_dir,
+        xgb_params=long_params,
+        metadata_updates={
+            "mode": long_meta.get("mode", "ga_mask"),
+            "best_score": long_meta.get("best_score"),
+            "ga_params": dict(long_meta.get("ga_params", {})),
+        },
+    )
+    short_meta_path = update_model_artifact_meta(
+        model_dataset_root,
+        "short",
+        label_dir=artifact_label_dir,
+        xgb_params=short_params,
+        metadata_updates={
+            "mode": short_meta.get("mode", "ga_mask"),
+            "best_score": short_meta.get("best_score"),
+            "ga_params": dict(short_meta.get("ga_params", {})),
+        },
+    )
 
     print(
         "Split sizes: "
@@ -1589,8 +1634,6 @@ def main() -> None:
         "long_selector_best_score": long_meta.get("best_score"),
         "short_selector_best_score": short_meta.get("best_score"),
     }
-    long_meta_path = model_dataset_root / "long" / artifact_label_dir / "meta.json"
-    short_meta_path = model_dataset_root / "short" / artifact_label_dir / "meta.json"
     log_paths = log_training_run(
         run_name="ga_xgboost_train",
         output_dir=probs_root,
