@@ -59,7 +59,7 @@ class PipelineConfig:
     processed_root: str | None = None
     ga_model_root: str | None = None
     model_root: str | None = None
-    pivot_label_dir: str = "pivots"
+    pivot_label_dir: str = "swing"
     tb_label_dir: str = "tb"
     include_vix_features: bool = True
     session_tz: str = "America/New_York"
@@ -227,12 +227,73 @@ def _replace_meta_prob_features_with_oos(
             target_index=target_index,
         ),
     }
-    for col, series in replacements.items():
-        coverage = float(series.notna().mean()) if len(series) else 1.0
-        if coverage < float(min_coverage):
-            raise ValueError(
-                f"OOS coverage for {col} below threshold: {coverage:.2%} < {float(min_coverage):.2%}"
+    def _fmt_index_value(idx: pd.Index, pos: int | None) -> str:
+        if pos is None or pos < 0 or pos >= len(idx):
+            return "None"
+        return f"{pos}:{idx[pos]}"
+
+    def _coverage_diag(series: pd.Series) -> dict[str, str | float | int]:
+        present = series.notna().to_numpy(dtype=bool)
+        coverage = float(present.mean()) if present.size else 1.0
+        valid_idx = np.flatnonzero(present)
+        missing_idx = np.flatnonzero(~present)
+        first_valid = int(valid_idx[0]) if valid_idx.size else None
+        first_missing = int(missing_idx[0]) if missing_idx.size else None
+        last_missing = int(missing_idx[-1]) if missing_idx.size else None
+        missing_segments = 0
+        if missing_idx.size:
+            missing_segments = int(np.sum(np.diff(missing_idx) > 1) + 1)
+        front_warmup_only = bool(missing_idx.size and np.all(~present[: int(valid_idx[0])] if valid_idx.size else ~present))
+        if missing_idx.size == 0:
+            gap_type = "none"
+        elif valid_idx.size == 0:
+            gap_type = "all_missing"
+        elif front_warmup_only and np.all(present[int(valid_idx[0]) :]):
+            gap_type = "front_warmup_only"
+        else:
+            gap_type = "scattered"
+        return {
+            "coverage": coverage,
+            "first_valid": _fmt_index_value(target_index, first_valid),
+            "first_missing": _fmt_index_value(target_index, first_missing),
+            "last_missing": _fmt_index_value(target_index, last_missing),
+            "missing_segments": missing_segments,
+            "gap_type": gap_type,
+        }
+
+    coverage_by_col: dict[str, float] = {
+        col: (float(series.notna().mean()) if len(series) else 1.0)
+        for col, series in replacements.items()
+    }
+    diag_by_col = {col: _coverage_diag(series) for col, series in replacements.items()}
+    low_coverage = {
+        col: cov for col, cov in coverage_by_col.items() if cov < float(min_coverage)
+    }
+    if low_coverage:
+        details = ", ".join(
+            (
+                f"{col}={diag_by_col[col]['coverage']:.2%} "
+                f"(first_valid={diag_by_col[col]['first_valid']}, "
+                f"first_missing={diag_by_col[col]['first_missing']}, "
+                f"last_missing={diag_by_col[col]['last_missing']}, "
+                f"segments={diag_by_col[col]['missing_segments']}, "
+                f"gap_type={diag_by_col[col]['gap_type']})"
             )
+            for col in sorted(diag_by_col)
+        )
+        failing = ", ".join(
+            (
+                f"{col}={diag_by_col[col]['coverage']:.2%} "
+                f"(gap_type={diag_by_col[col]['gap_type']}, "
+                f"segments={diag_by_col[col]['missing_segments']})"
+            )
+            for col in sorted(low_coverage)
+        )
+        raise ValueError(
+            "OOS probability coverage below threshold after reindex. "
+            f"threshold={float(min_coverage):.2%}; failing: {failing}; all: {details}"
+        )
+    for col, series in replacements.items():
         out[col] = series
         out = _add_pivot_features(out, col)
     out = _add_probability_confidence_features(out)
@@ -660,6 +721,11 @@ def train_walkforward_binary(
     valid_mask = np.isfinite(X).all(axis=1) & ((y == 0) | (y == 1))
     if condition_mask is not None:
         valid_mask &= np.asarray(condition_mask, dtype=bool)
+    print(
+        f"[META-XGB] {target_col}: rows={len(df)} valid_rows={int(np.sum(valid_mask))} "
+        f"pos_rate={float(np.mean(y[valid_mask])):.4f}" if np.any(valid_mask) else
+        f"[META-XGB] {target_col}: rows={len(df)} valid_rows=0"
+    )
     folds = build_day_folds(
         session_dates,
         valid_mask=valid_mask,
@@ -683,6 +749,11 @@ def train_walkforward_binary(
             keep_mask = embargo_idx[fit_idx] < eval_start_row
             embargoed_rows = int(np.sum(~keep_mask))
             fit_idx = fit_idx[keep_mask]
+        print(
+            f"[META-XGB] {target_col}: fold={int(fold['fold_id']) + 1}/{len(folds)} "
+            f"fit_rows={int(fit_idx.size)} pred_rows={int(pred_idx.size)} "
+            f"embargoed={int(embargoed_rows)} eval_start_row={int(fold['eval_start_row'])}"
+        )
         if fit_idx.size == 0 or pred_idx.size == 0:
             fold_rows.append(
                 {
@@ -724,6 +795,10 @@ def train_walkforward_binary(
         constant_prob=constant_prob_full,
     )
     coverage = float(np.isfinite(oof[valid_mask]).mean()) if np.any(valid_mask) else 0.0
+    print(
+        f"[META-XGB] {target_col}: OOF coverage={coverage:.2%} "
+        f"full_fit_rows={int(np.sum(valid_mask))}"
+    )
     return TrainResult(
         target_col=target_col,
         model=model_full,

@@ -135,6 +135,7 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
 
 
 def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float] | pd.DataFrame]:
+    print(f"[META-ENTRY] Building feature frame for {cfg.ticker} {cfg.dataset_name}")
     frame = add_entry_targets(build_base_feature_frame(cfg), cfg)
     exclude = {
         "open", "high", "low", "close", "session_date", cfg.atr_col,
@@ -148,6 +149,7 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
 
     entry_root = resolve_meta_dataset_root(cfg) / "entry"
     entry_root.mkdir(parents=True, exist_ok=True)
+    print(f"[META-ENTRY] Output dir: {entry_root}")
 
     target_to_prob = {
         "y_enter_long": "p_enter_long",
@@ -162,6 +164,8 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
     metrics_summary: dict[str, dict[str, dict[str, float]]] = {}
 
     for target_col, prob_prefix in target_to_prob.items():
+        key = summary_key[target_col]
+        print(f"[META-ENTRY] Training {key}")
         embargo_end_idx = compute_entry_embargo_end_idx(frame, cfg, target_col=target_col)
         result = train_walkforward_binary(
             df=frame,
@@ -177,9 +181,20 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
         threshold, best_row = choose_threshold(sweep, objective=cfg.threshold_objective)
         train_metrics = binary_metrics(y[result.valid_mask], result.full_probs[result.valid_mask], threshold=threshold)
         oof_metrics = binary_metrics(y[result.valid_mask], result.oof_probs[result.valid_mask], threshold=threshold)
-        key = summary_key[target_col]
         metrics_summary[key] = {"full": train_metrics, "oof": oof_metrics}
         threshold_summary[key] = {"threshold": float(threshold), **best_row}
+        print(
+            f"[META-ENTRY] {key}: threshold={float(threshold):.4f} "
+            f"train_logloss={train_metrics.get('logloss', float('nan')):.4f} "
+            f"train_auc={train_metrics.get('auc', float('nan')):.4f} "
+            f"train_f1={train_metrics.get('f1', float('nan')):.4f}"
+        )
+        print(
+            f"[META-ENTRY] {key}: oof_logloss={oof_metrics.get('logloss', float('nan')):.4f} "
+            f"oof_auc={oof_metrics.get('auc', float('nan')):.4f} "
+            f"oof_f1={oof_metrics.get('f1', float('nan')):.4f} "
+            f"oof_ap={oof_metrics.get('average_precision', float('nan')):.4f}"
+        )
 
         side_dir = entry_root / ("long" if target_col.endswith("long") else "short")
         save_booster_artifacts(
@@ -211,6 +226,8 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
         threshold_summary=threshold_summary,
         cfg=cfg,
     )
+    if plot_path is not None:
+        print(f"[META-ENTRY] Saved OOF eval plot: {plot_path}")
 
     log_training_run(
         run_name="meta_xgboost_entry_train",

@@ -162,8 +162,10 @@ def _load_entry_thresholds(
 ) -> tuple[float, float, Path]:
     path = entry_root / ENTRY_THRESHOLDS_FILENAME
     payload = json.loads(path.read_text(encoding="utf-8"))
-    long_thr = float(cli_long) if cli_long is not None else float(payload["y_enter_long"]["threshold"])
-    short_thr = float(cli_short) if cli_short is not None else float(payload["y_enter_short"]["threshold"])
+    long_key = "enter_long" if "enter_long" in payload else "y_enter_long"
+    short_key = "enter_short" if "enter_short" in payload else "y_enter_short"
+    long_thr = float(cli_long) if cli_long is not None else float(payload[long_key]["threshold"])
+    short_thr = float(cli_short) if cli_short is not None else float(payload[short_key]["threshold"])
     return long_thr, short_thr, path
 
 
