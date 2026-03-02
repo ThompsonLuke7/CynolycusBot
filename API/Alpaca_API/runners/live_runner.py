@@ -17,7 +17,7 @@ from alpaca.data.enums import DataFeed
 from ..market_data.bar_aggregator import OhlcvAggregator
 from ..market_data.bar_buffer import BarRingBuffer
 from ..market_data.fetch_intraday import fetch_intraday
-from ..inference.live_inference import LiveInferenceEngine, LivePPOAgent, build_15m
+from ..inference.live_inference import LiveInferenceEngine, LiveMetaXGBAgent, LivePPOAgent, build_15m
 from ..market_data.live_stream import AlpacaBarStreamer
 from Policy.execution_latch import DirectionExecutionLatch
 from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
@@ -144,14 +144,17 @@ def _make_15m_handler(
             raw_pos = _action_to_position(raw_action)
             gate = execution_latches[symbol].step(raw_pos)
             exec_pos = int(gate.executed_pos)
+            probs = inference.last_probs() or {}
             print(
                 f"{symbol} inference raw={raw_action:+.4f} raw_pos={raw_pos:+d} "
                 f"exec={exec_pos:+d} gate={gate.status}"
             )
             if order_policies is not None and symbol in order_policies:
+                policy_bar = dict(bar15)
+                policy_bar.update({k: v for k, v in probs.items() if v is not None})
                 result = order_policies[symbol].on_decision(
                     action=float(exec_pos),
-                    closed_bar=bar15,
+                    closed_bar=policy_bar,
                     update_bar_state=False,
                 )
                 event = str(result.get("event", "unknown"))
@@ -483,9 +486,12 @@ def _run_startup_catchup_decision(
             f"raw_action={action_raw:+.4f} raw_pos={action_pos:+d} "
             f"exec_pos={exec_pos:+d} gate={gate_status}"
         )
+        policy_bar = dict(bar15)
+        probs = inference.last_probs() or {}
+        policy_bar.update({k: v for k, v in probs.items() if v is not None})
         result = order_policies[symbol].on_decision(
             action=float(exec_pos),
-            closed_bar=bar15,
+            closed_bar=policy_bar,
             update_bar_state=False,
         )
         event = str(result.get("event", "unknown"))
@@ -497,7 +503,7 @@ def _replay_warmup_actions_from_prefill(
     *,
     processor: LiveBarProcessor,
     inference: LiveInferenceEngine,
-    agent: LivePPOAgent | None,
+    agent: object | None,
     execution_latches: dict[str, DirectionExecutionLatch],
     symbols: list[str],
     interval_minutes: int,
@@ -571,6 +577,38 @@ def _replay_warmup_actions_from_prefill(
         if action_count > 0:
             counts[symbol] = action_count
     return counts
+
+
+def _seed_agent_from_sync(
+    *,
+    processor: LiveBarProcessor,
+    agent: object | None,
+    sync_results: dict[str, dict[str, object]],
+    symbols: list[str],
+) -> None:
+    if agent is None:
+        return
+    sync_fn = getattr(agent, "sync_live_position", None)
+    if sync_fn is None:
+        return
+    for symbol in symbols:
+        sync_result = sync_results.get(symbol) or {}
+        desired_position = int(sync_result.get("position", 0) or 0)
+        buffer = processor._buffers.get(symbol)
+        if buffer is None:
+            continue
+        df_1m = buffer.to_dataframe()
+        if df_1m is None or df_1m.empty:
+            continue
+        try:
+            seed_result = sync_fn(
+                desired_position=desired_position,
+                df_1m=df_1m,
+                entry_price=sync_result.get("avg_entry_price"),
+            )
+            print(f"[live] Meta startup seed {symbol}: {seed_result}")
+        except Exception as exc:
+            print(f"[live] Meta startup seed {symbol} failed: {exc}")
 
 
 def _resolve_split_test_idx_path(*, split_root: Path, dataset_name: str, x_filename: str) -> Path | None:
@@ -669,7 +707,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--symbols", default="SPY", help="Comma-separated symbols.")
     parser.add_argument("--feed", default="IEX", help="IEX or SIP.")
-    parser.add_argument("--interval", type=int, default=15, help="Aggregation interval in minutes.")
+    parser.add_argument("--interval", type=int, default=10, help="Aggregation interval in minutes.")
     parser.add_argument("--buffer-size", type=int, default=5000, help="Ring buffer size in 1m bars.")
     parser.add_argument("--queue-size", type=int, default=5000, help="Max queued bars before dropping.")
     parser.add_argument("--print-1m", action="store_true", help="Print each 1m bar.")
@@ -678,6 +716,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--resample-closed", default="left", help="Resample closed (left/right).")
     parser.add_argument("--tz", default="America/New_York", help="Timezone for resampling (e.g. America/New_York).")
     parser.add_argument("--assume-tz", default="UTC", help="Assume timezone for naive timestamps.")
+    parser.add_argument("--inference-mode", choices=["meta", "ppo", "none"], default="meta", help="Inference controller to run.")
     parser.add_argument("--model-path", default="Data/outputs/agent/ppo_model.pt", help="PPO model checkpoint.")
     parser.add_argument("--no-agent", action="store_true", help="Disable PPO inference.")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions from policy (default is deterministic mean).")
@@ -688,16 +727,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fill-missing-prob", type=float, default=0.0, help="Value for missing prob features.")
     parser.add_argument("--session-open", default="09:30", help="Session open for time features.")
     parser.add_argument("--session-close", default="16:00", help="Session close for time features.")
-    parser.add_argument("--ga-model-root", default="Data/models/ga_xgboost/15min", help="GA-XGB model root.")
+    parser.add_argument("--ga-model-root", default="Data/models/ga_xgboost/10min", help="GA-XGB model root.")
     parser.add_argument("--ga-feature-list", default=None, help="Path to GA-XGB feature list txt.")
-    parser.add_argument("--ga-dataset-name", default="15min", help="Dataset name for GA-XGB feature list fallback.")
+    parser.add_argument("--ga-dataset-name", default="10min", help="Dataset name for GA-XGB feature list fallback.")
     parser.add_argument(
         "--split-x-filename",
-        default="X_15min_tree.parquet",
+        default="X_10min_tree.parquet",
         help="Feature filename stem used to locate split indices for test warmup preload.",
     )
-    parser.add_argument("--ga-pivot-label-dir", default="pivots", help="Label dir for pivot GA-XGB models.")
+    parser.add_argument("--ga-pivot-label-dir", default="swing", help="Label dir for pivot GA-XGB models.")
     parser.add_argument("--ga-tb-label-dir", default="tb", help="Label dir for TB GA-XGB models.")
+    parser.add_argument("--meta-model-root", default="Data/models/meta_xgboost/10min", help="Meta-XGB model root.")
+    parser.add_argument("--meta-trail-activate-atr", type=float, default=2.0, help="Trail activation ATR used to build live exit context.")
+    parser.add_argument("--meta-trail-atr", type=float, default=1.0, help="Base trail ATR used to build live exit context.")
+    parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.8, help="Tightened trail ATR after TP is seen.")
+    parser.add_argument("--meta-use-tp-to-tighten-trail", action=argparse.BooleanOptionalAction, default=True, help="Mirror training trail-tightening behavior in live exit context.")
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
     parser.add_argument(
         "--prefill-path",
@@ -822,37 +866,38 @@ def main() -> None:
     args = _parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     feed = _parse_feed(args.feed)
+    inference_mode = "none" if args.no_agent else str(args.inference_mode).strip().lower()
 
     bar_queue: queue_mod.Queue = queue_mod.Queue(maxsize=args.queue_size)
     stop_event = threading.Event()
 
     agent = None
-    if not args.no_agent:
+    ga_feature_list = args.ga_feature_list
+    if inference_mode != "none" and ga_feature_list is None:
+        try:
+            from Data.load_data import get_ticker_processed_base_dir
+            from Data.retrieve_data import normalize_ticker
+
+            ticker = normalize_ticker(symbols[0])
+            dataset_name = args.ga_dataset_name
+            candidate = (
+                get_ticker_processed_base_dir(ticker)
+                / "datasets"
+                / dataset_name
+                / f"features_X_{dataset_name}_tree.txt"
+            )
+            if candidate.exists():
+                ga_feature_list = str(candidate)
+        except Exception:
+            ga_feature_list = None
+
+    if inference_mode != "none" and ga_feature_list is None and not (args.no_pivot_probs and args.no_tb_probs):
+        print("[live] Warning: GA-XGB feature list not found; pivot/TB probs will be filled with defaults.")
+
+    if inference_mode == "ppo":
         model_path = args.model_path
         if not model_path:
             raise SystemExit("Missing --model-path for PPO inference.")
-        ga_feature_list = args.ga_feature_list
-        if ga_feature_list is None:
-            try:
-                from Data.load_data import get_ticker_processed_base_dir
-                from Data.retrieve_data import normalize_ticker
-
-                ticker = normalize_ticker(symbols[0])
-                dataset_name = args.ga_dataset_name
-                candidate = (
-                    get_ticker_processed_base_dir(ticker)
-                    / "datasets"
-                    / dataset_name
-                    / f"features_X_{dataset_name}_tree.txt"
-                )
-                if candidate.exists():
-                    ga_feature_list = str(candidate)
-            except Exception:
-                ga_feature_list = None
-
-        if ga_feature_list is None and not (args.no_pivot_probs and args.no_tb_probs):
-            print("[live] Warning: GA-XGB feature list not found; pivot/TB probs will be filled with defaults.")
-
         agent = LivePPOAgent(
             model_path=model_path,
             deterministic=not args.stochastic,
@@ -873,6 +918,35 @@ def main() -> None:
             resample_closed=args.resample_closed,
             label_timeframe_rule=f"{args.interval}min",
         )
+    elif inference_mode == "meta":
+        if int(args.interval) != 10:
+            print(f"[live] Warning: meta inference is trained for 10min bars; current --interval={args.interval}.")
+        agent = LiveMetaXGBAgent(
+            model_root=args.meta_model_root,
+            ga_model_root=args.ga_model_root if ga_feature_list else None,
+            ga_feature_list_path=ga_feature_list,
+            include_pivot_probs=not args.no_pivot_probs,
+            include_tb_probs=not args.no_tb_probs,
+            pivot_label_dir=args.ga_pivot_label_dir,
+            tb_label_dir=args.ga_tb_label_dir,
+            tz=args.tz or "America/New_York",
+            assume_tz=args.assume_tz,
+            session_open=args.session_open,
+            session_close=args.session_close,
+            min_15m_bars=args.min_15m_bars,
+            fill_missing_prob=args.fill_missing_prob,
+            resample_label=args.resample_label,
+            resample_closed=args.resample_closed,
+            label_timeframe_rule=f"{args.interval}min",
+            trail_activate_atr=float(args.meta_trail_activate_atr),
+            trail_atr=float(args.meta_trail_atr),
+            trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
+            use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
+        )
+        print(
+            f"[live] Meta-XGB inference enabled: model_root={args.meta_model_root} "
+            f"timeframe={args.interval}min"
+        )
 
     inference = LiveInferenceEngine(
         agent=agent,
@@ -892,6 +966,7 @@ def main() -> None:
     }
 
     order_policies: dict[str, OptionOrderPolicy] | None = None
+    startup_sync_results: dict[str, dict[str, object]] = {}
     if args.enable_option_orders:
         order_policies = {}
         for symbol in symbols:
@@ -919,6 +994,7 @@ def main() -> None:
             for symbol in symbols:
                 try:
                     sync_result = order_policies[symbol].sync_from_broker()
+                    startup_sync_results[symbol] = sync_result
                     execution_latches[symbol].set_position(
                         order_policies[symbol].snapshot_state().get("position", 0)
                     )
@@ -968,7 +1044,7 @@ def main() -> None:
             )
         except Exception as exc:
             print(f"[live] Prefill fetch failed: {exc}")
-    if not args.no_agent:
+    if agent is not None:
         warmup_action_counts = _replay_warmup_actions_from_prefill(
             processor=processor,
             inference=inference,
@@ -982,6 +1058,13 @@ def main() -> None:
             print(f"[live] Warmup action history replayed: {warmup_action_counts}")
         else:
             print("[live] Warmup action replay: no actionable 15m decisions from prefill.")
+        if startup_sync_results:
+            _seed_agent_from_sync(
+                processor=processor,
+                agent=agent,
+                sync_results=startup_sync_results,
+                symbols=symbols,
+            )
     latest_closed_by_symbol: dict[str, dict] = {}
     if order_policies:
         latest_closed_by_symbol = _warmup_order_policies_from_prefill(

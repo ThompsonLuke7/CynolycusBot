@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import contextlib
 import io
+import json
 from pathlib import Path
 from typing import Callable, Optional
 import warnings
@@ -17,11 +18,20 @@ from Policy.Agent.env import sincos_time_of_day
 from Policy.Agent.model import ActorCritic
 from Features.feature_matrix import DEFAULT_FEATURE_TIMEFRAMES, _add_feature_set, _align_htf_features
 from Features.feature_matrix_regime import (
+    AgentFeatureConfig,
+    VIX_FEATURE_COLUMNS,
+    _add_intraday_sr_distance_features,
     _add_pivot_features,
+    _add_probability_confidence_features,
+    _add_vix_feature_suite,
+    _add_volatility_regime_features,
     _compute_prior_day_high,
-    _compute_time_sin_cos,
+    _compute_time_features,
+    _ensure_vix_feature_cols,
+    _load_align_vix_ohlcv,
     _series_from_ta,
 )
+from Features.label_generations import add_trend_phase_labels
 from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
 
 
@@ -160,6 +170,7 @@ def build_agent_feature_frame_from_15m(
     *,
     include_pivot_probs: bool = True,
     include_tb_probs: bool = True,
+    include_vix_features: bool = True,
     tz: str | None = "America/New_York",
     assume_tz: str = "UTC",
     session_open: str = "09:30",
@@ -202,17 +213,29 @@ def build_agent_feature_frame_from_15m(
             df["p_tb_short"] = float(fill_missing_prob)
         df = _add_pivot_features(df, "p_tb_long")
         df = _add_pivot_features(df, "p_tb_short")
+    df = _add_probability_confidence_features(df)
 
     def _quiet_ta(fn, *args, **kwargs):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             return fn(*args, **kwargs)
 
-    sin_time, cos_time = _compute_time_sin_cos(
+    (
+        sin_time,
+        cos_time,
+        minutes_since_open,
+        minutes_to_close,
+        day_of_week_sin,
+        day_of_week_cos,
+    ) = _compute_time_features(
         df.index, tz=tz, session_open=session_open, session_close=session_close
     )
     df["sin_time_of_day"] = sin_time
     df["cos_time_of_day"] = cos_time
+    df["minutes_since_open"] = minutes_since_open
+    df["minutes_to_close"] = minutes_to_close
+    df["day_of_week_sin"] = day_of_week_sin
+    df["day_of_week_cos"] = day_of_week_cos
 
     atr = _series_from_ta(_quiet_ta(df.ta.atr, length=14, append=False))
     df["atr_pct"] = atr / df["close"].replace(0, np.nan)
@@ -222,6 +245,13 @@ def build_agent_feature_frame_from_15m(
 
     pdh = _compute_prior_day_high(df)
     df["dist_to_pdh"] = df["close"] - pdh
+    df = _add_intraday_sr_distance_features(
+        df,
+        atr=atr,
+        tz=tz,
+        session_open=session_open,
+        open_range_minutes=30,
+    )
 
     adx_df = _quiet_ta(df.ta.adx, length=14, append=False)
     df["trend_strength"] = _series_from_ta(adx_df, prefix="ADX")
@@ -232,6 +262,26 @@ def build_agent_feature_frame_from_15m(
     close = df["close"].replace(0, np.nan).astype(float)
     for lag in (1, 2, 4, 8, 16):
         df[f"ret_{lag}"] = close.pct_change(lag)
+    df = _add_volatility_regime_features(df)
+
+    if include_vix_features:
+        vix_cfg = AgentFeatureConfig(
+            dataset_name="live",
+            tz=tz,
+            session_open=session_open,
+            session_close=session_close,
+            include_vix_features=True,
+            vix_fetch_if_missing=False,
+            vix_refetch_if_low_coverage=False,
+            vix_warn_on_missing=False,
+        )
+        try:
+            vix_ohlcv = _load_align_vix_ohlcv(cfg=vix_cfg, target_index=df.index)
+            df = _add_vix_feature_suite(df, vix_ohlcv=vix_ohlcv)
+        except Exception:
+            df = _ensure_vix_feature_cols(df)
+    else:
+        df = _ensure_vix_feature_cols(df)
 
     if include_state_placeholders:
         df["current_position"] = 0.0
@@ -250,15 +300,30 @@ def build_agent_feature_frame_from_15m(
         "volume",
         "sin_time_of_day",
         "cos_time_of_day",
+        "minutes_since_open",
+        "minutes_to_close",
+        "day_of_week_sin",
+        "day_of_week_cos",
         "atr_pct",
         "dist_to_vwap",
         "dist_to_pdh",
+        "dist_to_day_high_so_far_atr",
+        "dist_to_day_low_so_far_atr",
+        "dist_to_or_high_30m_atr",
+        "dist_to_or_low_30m_atr",
         "trend_strength",
         "ret_1",
         "ret_2",
         "ret_4",
         "ret_8",
         "ret_16",
+        "atr_pct_z_64",
+        "atr_pct_rank_64",
+        "realized_vol_4",
+        "realized_vol_16",
+        "realized_vol_32",
+        "range_regime_8_32",
+        "range_expansion_32",
     ]
     if include_pivot_probs:
         cols.extend(
@@ -273,6 +338,8 @@ def build_agent_feature_frame_from_15m(
                 "p_pivot_short_lag2",
                 "p_pivot_short_max_last_4",
                 "p_pivot_short_delta_1",
+                "pivot_edge",
+                "pivot_edge_abs",
             ]
         )
     if include_tb_probs:
@@ -288,8 +355,14 @@ def build_agent_feature_frame_from_15m(
                 "p_tb_short_lag2",
                 "p_tb_short_max_last_4",
                 "p_tb_short_delta_1",
+                "tb_edge",
+                "tb_edge_abs",
             ]
         )
+    if include_pivot_probs and include_tb_probs:
+        cols.extend(["edge_disagreement_abs", "edge_sign_disagreement"])
+    if include_vix_features:
+        cols.extend(VIX_FEATURE_COLUMNS)
 
     if include_state_placeholders:
         cols.extend(
@@ -304,6 +377,89 @@ def build_agent_feature_frame_from_15m(
 
     cols = [c for c in cols if c in df.columns]
     return df[cols].copy()
+
+
+def build_meta_feature_frame_from_1m(
+    df_1m: pd.DataFrame,
+    *,
+    rule: str = "10min",
+    label: str = "left",
+    closed: str = "left",
+    tz: str | None = "America/New_York",
+    assume_tz: str = "UTC",
+    include_pivot_probs: bool = True,
+    include_tb_probs: bool = True,
+    include_vix_features: bool = True,
+    fill_missing_prob: float = 0.0,
+    session_open: str = "09:30",
+    session_close: str = "16:00",
+    ga_predictor: LiveGAXGBPredictor | None = None,
+) -> pd.DataFrame:
+    df_tf = build_15m(
+        df_1m,
+        rule=rule,
+        label=label,
+        closed=closed,
+        tz=tz,
+        assume_tz=assume_tz,
+    )
+    if df_tf.empty:
+        return df_tf
+
+    if ga_predictor is not None:
+        try:
+            x_tree = build_tree_feature_frame_from_1m(
+                df_1m,
+                label_timeframe=rule,
+                resample_label=label,
+                resample_closed=closed,
+                tz=tz,
+                assume_tz=assume_tz,
+            )
+            if not x_tree.empty:
+                probs_df = ga_predictor.predict_frame(x_tree)
+                for col in probs_df.columns:
+                    df_tf[col] = probs_df[col].reindex(df_tf.index)
+        except Exception as exc:
+            print(f"[live] GA-XGB inference failed: {exc}")
+
+    for col in ("p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short"):
+        if col in df_tf.columns:
+            df_tf[col] = pd.to_numeric(df_tf[col], errors="coerce").fillna(float(fill_missing_prob))
+
+    feat_df = build_agent_feature_frame_from_15m(
+        df_tf,
+        include_pivot_probs=include_pivot_probs,
+        include_tb_probs=include_tb_probs,
+        include_vix_features=include_vix_features,
+        tz=tz,
+        assume_tz=assume_tz,
+        session_open=session_open,
+        session_close=session_close,
+        fill_missing_prob=fill_missing_prob,
+        include_state_placeholders=False,
+    )
+    if feat_df.empty:
+        return feat_df
+
+    if "atr" not in feat_df.columns:
+        feat_df["atr"] = ta.atr(feat_df["high"], feat_df["low"], feat_df["close"], length=14)
+    feat_df = add_trend_phase_labels(
+        feat_df,
+        close_col="close",
+        momentum_col="trend_phase_m",
+        accel_col="trend_phase_a",
+        phase_col="trend_phase_label",
+        ignition_col="trend_phase_ignition",
+        expansion_col="trend_phase_expansion",
+        saturation_col="trend_phase_saturation",
+        decay_col="trend_phase_decay",
+        exit_long_col="trend_phase_exit_long",
+        exit_short_col="trend_phase_exit_short",
+        write_phase_columns=True,
+        use_hazard_exit_labels=False,
+    )
+    return feat_df
 
 
 class LiveGAXGBPredictor:
@@ -426,6 +582,508 @@ class LiveGAXGBPredictor:
         if pred.empty:
             return {}
         return {k: float(v) for k, v in pred.iloc[-1].to_dict().items()}
+
+
+class _LiveXGBArtifact:
+    def __init__(self, side_dir: Path) -> None:
+        self._side_dir = Path(side_dir)
+        self.feature_cols = self._load_feature_cols(self._side_dir / "feature_columns.txt")
+        meta = {}
+        meta_path = self._side_dir / "meta.json"
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        constant_prob = meta.get("constant_prob")
+        self.constant_prob = float(constant_prob) if constant_prob is not None else None
+        self.model: xgb.Booster | None = None
+        model_path = self._side_dir / "xgb_model.json"
+        if model_path.exists():
+            booster = xgb.Booster()
+            booster.load_model(str(model_path))
+            self.model = booster
+
+    @staticmethod
+    def _load_feature_cols(path: Path) -> list[str]:
+        if not path.exists():
+            raise FileNotFoundError(f"Missing feature list: {path}")
+        return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def predict_frame(self, frame: pd.DataFrame) -> np.ndarray:
+        if frame.empty:
+            return np.asarray([], dtype=np.float32)
+        if self.constant_prob is not None:
+            return np.full(len(frame), float(self.constant_prob), dtype=np.float32)
+        if self.model is None:
+            raise FileNotFoundError(f"Missing xgb_model.json under {self._side_dir}")
+        aligned = frame.reindex(columns=self.feature_cols)
+        dmat = xgb.DMatrix(aligned.to_numpy(dtype=np.float32), missing=np.nan)
+        return self.model.predict(dmat).astype(np.float32, copy=False)
+
+    def predict_row(self, frame: pd.DataFrame, *, target_ts: pd.Timestamp | None = None) -> float:
+        if frame.empty:
+            return float("nan")
+        if target_ts is not None and target_ts in frame.index:
+            row_df = frame.loc[[target_ts]]
+        else:
+            row_df = frame.tail(1)
+        preds = self.predict_frame(row_df)
+        if preds.size == 0:
+            return float("nan")
+        return float(preds[-1])
+
+
+@dataclass
+class _MetaTradeState:
+    position: int = 0
+    entry_price: float = np.nan
+    entry_atr: float = np.nan
+    bars_since_entry: int = 0
+    favorable_anchor: float = np.nan
+    adverse_anchor: float = np.nan
+    tp_seen: bool = False
+
+
+class LiveMetaXGBAgent:
+    def __init__(
+        self,
+        *,
+        model_root: str | Path,
+        ga_model_root: str | None = None,
+        ga_feature_list_path: str | None = None,
+        include_pivot_probs: bool = True,
+        include_tb_probs: bool = True,
+        include_vix_features: bool = True,
+        pivot_label_dir: str = "swing",
+        tb_label_dir: str = "tb",
+        tz: str | None = "America/New_York",
+        assume_tz: str = "UTC",
+        session_open: str = "09:30",
+        session_close: str = "16:00",
+        min_15m_bars: int = 20,
+        fill_missing_prob: float = 0.0,
+        resample_label: str = "left",
+        resample_closed: str = "left",
+        label_timeframe_rule: str = "10min",
+        a_tp: float = 1.6,
+        trail_activate_atr: float = 2.0,
+        trail_atr: float = 1.0,
+        trail_atr_after_tp: float = 0.8,
+        use_tp_to_tighten_trail: bool = True,
+    ) -> None:
+        self._model_root = Path(model_root)
+        self._include_pivot_probs = bool(include_pivot_probs)
+        self._include_tb_probs = bool(include_tb_probs)
+        self._include_vix_features = bool(include_vix_features)
+        self._tz = tz
+        self._assume_tz = assume_tz
+        self._session_open = session_open
+        self._session_close = session_close
+        self._min_bars = int(min_15m_bars)
+        self._fill_missing_prob = float(fill_missing_prob)
+        self._resample_label = resample_label
+        self._resample_closed = resample_closed
+        self._label_timeframe_rule = label_timeframe_rule
+        self._a_tp = float(a_tp)
+        self._trail_activate_atr = float(trail_activate_atr)
+        self._trail_atr = float(trail_atr)
+        self._trail_atr_after_tp = float(trail_atr_after_tp)
+        self._use_tp_to_tighten_trail = bool(use_tp_to_tighten_trail)
+        self._state = _MetaTradeState()
+        self._last_probs: dict[str, float | None] | None = None
+
+        self._ga_predictor: LiveGAXGBPredictor | None = None
+        if (self._include_pivot_probs or self._include_tb_probs) and ga_model_root and ga_feature_list_path:
+            self._ga_predictor = LiveGAXGBPredictor(
+                model_root=ga_model_root,
+                feature_list_path=ga_feature_list_path,
+                include_pivot_probs=self._include_pivot_probs,
+                include_tb_probs=self._include_tb_probs,
+                pivot_label_dir=pivot_label_dir,
+                tb_label_dir=tb_label_dir,
+            )
+
+        self._entry_long = _LiveXGBArtifact(self._model_root / "entry" / "long")
+        self._entry_short = _LiveXGBArtifact(self._model_root / "entry" / "short")
+        self._exit_long = _LiveXGBArtifact(self._model_root / "exit" / "long")
+        self._exit_short = _LiveXGBArtifact(self._model_root / "exit" / "short")
+        self._entry_thresholds = self._load_thresholds(self._model_root / "entry" / "entry_thresholds.json")
+        self._exit_thresholds = self._load_thresholds(self._model_root / "exit" / "exit_thresholds.json")
+
+    @staticmethod
+    def _load_thresholds(path: Path) -> dict[str, float]:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        out: dict[str, float] = {}
+        for old_key, new_key in (
+            ("y_enter_long", "enter_long"),
+            ("y_enter_short", "enter_short"),
+            ("y_exit_long", "exit_long"),
+            ("y_exit_short", "exit_short"),
+        ):
+            key = new_key if new_key in payload else old_key
+            if key in payload and "threshold" in payload[key]:
+                out[new_key] = float(payload[key]["threshold"])
+        return out
+
+    @staticmethod
+    def _normalize_ts(ts: pd.Timestamp, *, assume_tz: str, tz: str | None) -> pd.Timestamp:
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(assume_tz)
+        if tz is not None:
+            ts = ts.tz_convert(tz)
+        return ts
+
+    def _reset_trade_state(self) -> None:
+        self._state = _MetaTradeState()
+
+    def _set_trade_entry(self, *, position: int, row: pd.Series, entry_price: float | None = None) -> None:
+        close = float(row.get("close", np.nan))
+        atr = float(row.get("atr", np.nan))
+        seed_entry = float(entry_price) if entry_price is not None and np.isfinite(entry_price) else close
+        if not np.isfinite(seed_entry):
+            seed_entry = close
+        self._state = _MetaTradeState(
+            position=int(position),
+            entry_price=float(seed_entry),
+            entry_atr=float(atr) if np.isfinite(atr) and atr > 0.0 else float("nan"),
+            bars_since_entry=0,
+            favorable_anchor=float(close),
+            adverse_anchor=float(close),
+            tp_seen=False,
+        )
+
+    def _build_base_frame(self, *, df_1m: pd.DataFrame) -> pd.DataFrame:
+        return build_meta_feature_frame_from_1m(
+            df_1m,
+            rule=self._label_timeframe_rule,
+            label=self._resample_label,
+            closed=self._resample_closed,
+            tz=self._tz,
+            assume_tz=self._assume_tz,
+            include_pivot_probs=self._include_pivot_probs,
+            include_tb_probs=self._include_tb_probs,
+            include_vix_features=self._include_vix_features,
+            fill_missing_prob=self._fill_missing_prob,
+            session_open=self._session_open,
+            session_close=self._session_close,
+            ga_predictor=self._ga_predictor,
+        )
+
+    def _annotate_current_context(self, row: pd.Series) -> pd.Series:
+        out = row.copy()
+        for side in ("long", "short"):
+            out[f"in_{side}_trade"] = 0
+            out[f"{side}_bars_since_entry"] = np.nan
+            out[f"{side}_mfe_atr"] = np.nan
+            out[f"{side}_mae_atr"] = np.nan
+            out[f"{side}_tp_seen_run"] = 0
+            out[f"{side}_trail_gap_atr"] = np.nan
+            out[f"{side}_entry_price_ctx"] = np.nan
+        if self._state.position == 0:
+            return out
+
+        entry = float(self._state.entry_price)
+        atr_i = float(self._state.entry_atr)
+        high = float(row.get("high", np.nan))
+        low = float(row.get("low", np.nan))
+        close = float(row.get("close", np.nan))
+        if not np.isfinite(entry) or not np.isfinite(atr_i) or atr_i <= 0.0:
+            return out
+
+        side = "long" if self._state.position > 0 else "short"
+        out[f"in_{side}_trade"] = 1
+        out[f"{side}_bars_since_entry"] = float(self._state.bars_since_entry + 1)
+        out[f"{side}_entry_price_ctx"] = entry
+
+        if side == "long":
+            favorable_anchor = max(float(self._state.favorable_anchor), high) if np.isfinite(high) else float(self._state.favorable_anchor)
+            adverse_anchor = min(float(self._state.adverse_anchor), low) if np.isfinite(low) else float(self._state.adverse_anchor)
+            tp = entry + self._a_tp * atr_i
+            tp_seen = bool(self._state.tp_seen or (np.isfinite(high) and high >= tp))
+            trail_active = (favorable_anchor - entry) >= self._trail_activate_atr * atr_i
+            trail_dist = self._trail_atr * atr_i
+            if tp_seen and self._use_tp_to_tighten_trail:
+                trail_active = True
+                trail_dist = min(trail_dist, max(self._trail_atr_after_tp, 1e-9) * atr_i)
+            trail_level = favorable_anchor - trail_dist if trail_active else np.nan
+            out["long_mfe_atr"] = (favorable_anchor - entry) / atr_i
+            out["long_mae_atr"] = (entry - adverse_anchor) / atr_i
+            out["long_tp_seen_run"] = int(tp_seen)
+            out["long_trail_gap_atr"] = (
+                (close - trail_level) / atr_i if np.isfinite(close) and np.isfinite(trail_level) else np.nan
+            )
+        else:
+            favorable_anchor = min(float(self._state.favorable_anchor), low) if np.isfinite(low) else float(self._state.favorable_anchor)
+            adverse_anchor = max(float(self._state.adverse_anchor), high) if np.isfinite(high) else float(self._state.adverse_anchor)
+            tp = entry - self._a_tp * atr_i
+            tp_seen = bool(self._state.tp_seen or (np.isfinite(low) and low <= tp))
+            trail_active = (entry - favorable_anchor) >= self._trail_activate_atr * atr_i
+            trail_dist = self._trail_atr * atr_i
+            if tp_seen and self._use_tp_to_tighten_trail:
+                trail_active = True
+                trail_dist = min(trail_dist, max(self._trail_atr_after_tp, 1e-9) * atr_i)
+            trail_level = favorable_anchor + trail_dist if trail_active else np.nan
+            out["short_mfe_atr"] = (entry - favorable_anchor) / atr_i
+            out["short_mae_atr"] = (adverse_anchor - entry) / atr_i
+            out["short_tp_seen_run"] = int(tp_seen)
+            out["short_trail_gap_atr"] = (
+                (trail_level - close) / atr_i if np.isfinite(close) and np.isfinite(trail_level) else np.nan
+            )
+        return out
+
+    def _decide_action(self, *, p_enter_long: float, p_enter_short: float, p_exit_long: float, p_exit_short: float) -> int:
+        if self._state.position > 0:
+            return 0 if np.isfinite(p_exit_long) and p_exit_long >= self._exit_thresholds["exit_long"] else 1
+        if self._state.position < 0:
+            return 0 if np.isfinite(p_exit_short) and p_exit_short >= self._exit_thresholds["exit_short"] else -1
+
+        long_thr = self._entry_thresholds["enter_long"]
+        short_thr = self._entry_thresholds["enter_short"]
+        long_ready = np.isfinite(p_enter_long) and p_enter_long >= long_thr
+        short_ready = np.isfinite(p_enter_short) and p_enter_short >= short_thr
+        if long_ready and short_ready:
+            long_margin = p_enter_long - long_thr
+            short_margin = p_enter_short - short_thr
+            if abs(long_margin - short_margin) <= 1e-9:
+                return 0
+            return 1 if long_margin > short_margin else -1
+        if long_ready:
+            return 1
+        if short_ready:
+            return -1
+        return 0
+
+    def _advance_state(self, *, action: int, row: pd.Series) -> None:
+        high = float(row.get("high", np.nan))
+        low = float(row.get("low", np.nan))
+        close = float(row.get("close", np.nan))
+        atr = float(row.get("atr", np.nan))
+
+        if self._state.position != 0:
+            self._state.bars_since_entry += 1
+            if self._state.position > 0:
+                if np.isfinite(high):
+                    self._state.favorable_anchor = max(float(self._state.favorable_anchor), high)
+                if np.isfinite(low):
+                    self._state.adverse_anchor = min(float(self._state.adverse_anchor), low)
+                tp = float(self._state.entry_price) + self._a_tp * float(self._state.entry_atr)
+                if np.isfinite(high) and high >= tp:
+                    self._state.tp_seen = True
+            else:
+                if np.isfinite(low):
+                    self._state.favorable_anchor = min(float(self._state.favorable_anchor), low)
+                if np.isfinite(high):
+                    self._state.adverse_anchor = max(float(self._state.adverse_anchor), high)
+                tp = float(self._state.entry_price) - self._a_tp * float(self._state.entry_atr)
+                if np.isfinite(low) and low <= tp:
+                    self._state.tp_seen = True
+
+        if action == 0:
+            self._reset_trade_state()
+            return
+        if self._state.position == action:
+            return
+        if not np.isfinite(close):
+            return
+        self._state = _MetaTradeState(
+            position=int(action),
+            entry_price=float(close),
+            entry_atr=float(atr) if np.isfinite(atr) and atr > 0.0 else float("nan"),
+            bars_since_entry=0,
+            favorable_anchor=float(close),
+            adverse_anchor=float(close),
+            tp_seen=False,
+        )
+
+    def sync_live_position(
+        self,
+        *,
+        desired_position: int,
+        df_1m: pd.DataFrame,
+        entry_price: float | None = None,
+    ) -> dict[str, object]:
+        side = 1 if int(desired_position) > 0 else (-1 if int(desired_position) < 0 else 0)
+        if side == 0:
+            self._reset_trade_state()
+            return {"synced": True, "position": 0, "reason": "flat"}
+
+        base_frame = self._build_base_frame(df_1m=df_1m)
+        if base_frame.empty:
+            self._reset_trade_state()
+            self._state.position = side
+            if entry_price is not None and np.isfinite(entry_price):
+                self._state.entry_price = float(entry_price)
+            return {"synced": False, "position": side, "reason": "empty_feature_frame"}
+
+        side_probs = (
+            self._entry_long.predict_frame(base_frame)
+            if side > 0
+            else self._entry_short.predict_frame(base_frame)
+        )
+        side_thr = self._entry_thresholds["enter_long"] if side > 0 else self._entry_thresholds["enter_short"]
+        above = np.isfinite(side_probs) & (side_probs >= float(side_thr))
+        rising = above.copy()
+        if rising.size:
+            rising[1:] = above[1:] & (~above[:-1])
+        candidate_idx = np.flatnonzero(rising)
+        if candidate_idx.size:
+            start_idx = int(candidate_idx[-1])
+            seed_mode = "threshold_cross"
+        else:
+            active_idx = np.flatnonzero(above)
+            if active_idx.size:
+                start_idx = int(active_idx[-1])
+                seed_mode = "threshold_active"
+            else:
+                start_idx = int(len(base_frame) - 1)
+                seed_mode = "latest_bar"
+
+        seed_rows = base_frame.iloc[start_idx:]
+        self._reset_trade_state()
+        first = True
+        for _, row in seed_rows.iterrows():
+            if first:
+                self._set_trade_entry(position=side, row=row, entry_price=entry_price)
+                first = False
+                continue
+            self._advance_state(action=side, row=row)
+
+        last_row = base_frame.iloc[-1].copy()
+        p_enter_long = self._entry_long.predict_row(base_frame.tail(1), target_ts=last_row.name)
+        p_enter_short = self._entry_short.predict_row(base_frame.tail(1), target_ts=last_row.name)
+        last_row["p_enter_long_oof"] = p_enter_long
+        last_row["p_enter_short_oof"] = p_enter_short
+        exit_row = self._annotate_current_context(last_row)
+        exit_df = pd.DataFrame([exit_row], index=[last_row.name])
+        p_exit_long = self._exit_long.predict_row(exit_df, target_ts=last_row.name) if side > 0 else float("nan")
+        p_exit_short = self._exit_short.predict_row(exit_df, target_ts=last_row.name) if side < 0 else float("nan")
+        self._last_probs = {
+            "p_pivot_long": float(last_row.get("p_pivot_long", np.nan)),
+            "p_pivot_short": float(last_row.get("p_pivot_short", np.nan)),
+            "p_tb_long": float(last_row.get("p_tb_long", np.nan)),
+            "p_tb_short": float(last_row.get("p_tb_short", np.nan)),
+            "p_enter_long": p_enter_long,
+            "p_enter_short": p_enter_short,
+            "p_exit_long": p_exit_long,
+            "p_exit_short": p_exit_short,
+        }
+        for key, value in list(self._last_probs.items()):
+            if not np.isfinite(value):
+                self._last_probs[key] = None
+        return {
+            "synced": True,
+            "position": side,
+            "seed_mode": seed_mode,
+            "seed_start_ts": str(seed_rows.index[0]),
+            "bars_since_entry": int(self._state.bars_since_entry),
+            "entry_price": float(self._state.entry_price) if np.isfinite(self._state.entry_price) else None,
+        }
+
+    def act(
+        self,
+        *,
+        df_1m: pd.DataFrame,
+        df_15m: pd.DataFrame,
+        target_ts: pd.Timestamp | None = None,
+    ) -> Optional[float]:
+        del df_15m
+        base_frame = self._build_base_frame(df_1m=df_1m)
+        if base_frame.empty or len(base_frame) < self._min_bars:
+            return None
+
+        ts = target_ts
+        if ts is not None:
+            ts = self._normalize_ts(pd.to_datetime(ts, utc=True, errors="coerce"), assume_tz=self._assume_tz, tz=self._tz)
+        row_df = base_frame.loc[[ts]] if ts is not None and ts in base_frame.index else base_frame.tail(1)
+        row = row_df.iloc[-1].copy()
+
+        p_enter_long = self._entry_long.predict_row(row_df, target_ts=row.name)
+        p_enter_short = self._entry_short.predict_row(row_df, target_ts=row.name)
+        row["p_enter_long_oof"] = p_enter_long
+        row["p_enter_short_oof"] = p_enter_short
+        exit_row = self._annotate_current_context(row)
+        exit_df = pd.DataFrame([exit_row], index=[row.name])
+        p_exit_long = self._exit_long.predict_row(exit_df, target_ts=row.name) if self._state.position > 0 else float("nan")
+        p_exit_short = self._exit_short.predict_row(exit_df, target_ts=row.name) if self._state.position < 0 else float("nan")
+
+        action = self._decide_action(
+            p_enter_long=p_enter_long,
+            p_enter_short=p_enter_short,
+            p_exit_long=p_exit_long,
+            p_exit_short=p_exit_short,
+        )
+        self._last_probs = {
+            "p_pivot_long": float(row.get("p_pivot_long", np.nan)),
+            "p_pivot_short": float(row.get("p_pivot_short", np.nan)),
+            "p_tb_long": float(row.get("p_tb_long", np.nan)),
+            "p_tb_short": float(row.get("p_tb_short", np.nan)),
+            "p_enter_long": p_enter_long,
+            "p_enter_short": p_enter_short,
+            "p_exit_long": p_exit_long,
+            "p_exit_short": p_exit_short,
+        }
+        for key, value in list(self._last_probs.items()):
+            if not np.isfinite(value):
+                self._last_probs[key] = None
+        self._advance_state(action=action, row=row)
+        return float(action)
+
+    def replay_warmup_actions(
+        self,
+        *,
+        df_1m: pd.DataFrame,
+        df_15m: pd.DataFrame,
+        apply_ga_probs: bool = True,
+    ) -> list[dict[str, object]]:
+        del df_15m, apply_ga_probs
+        base_frame = self._build_base_frame(df_1m=df_1m)
+        if base_frame.empty or len(base_frame) < self._min_bars:
+            return []
+        entry_long_probs = self._entry_long.predict_frame(base_frame)
+        entry_short_probs = self._entry_short.predict_frame(base_frame)
+        out: list[dict[str, object]] = []
+        self._reset_trade_state()
+        for idx, (_, row) in enumerate(base_frame.iterrows()):
+            p_enter_long = float(entry_long_probs[idx]) if idx < entry_long_probs.size else float("nan")
+            p_enter_short = float(entry_short_probs[idx]) if idx < entry_short_probs.size else float("nan")
+            row = row.copy()
+            row["p_enter_long_oof"] = p_enter_long
+            row["p_enter_short_oof"] = p_enter_short
+            exit_row = self._annotate_current_context(row)
+            exit_df = pd.DataFrame([exit_row], index=[row.name])
+            p_exit_long = self._exit_long.predict_row(exit_df, target_ts=row.name) if self._state.position > 0 else float("nan")
+            p_exit_short = self._exit_short.predict_row(exit_df, target_ts=row.name) if self._state.position < 0 else float("nan")
+            action = self._decide_action(
+                p_enter_long=p_enter_long,
+                p_enter_short=p_enter_short,
+                p_exit_long=p_exit_long,
+                p_exit_short=p_exit_short,
+            )
+            self._last_probs = {
+                "p_pivot_long": float(row.get("p_pivot_long", np.nan)),
+                "p_pivot_short": float(row.get("p_pivot_short", np.nan)),
+                "p_tb_long": float(row.get("p_tb_long", np.nan)),
+                "p_tb_short": float(row.get("p_tb_short", np.nan)),
+                "p_enter_long": p_enter_long,
+                "p_enter_short": p_enter_short,
+                "p_exit_long": p_exit_long,
+                "p_exit_short": p_exit_short,
+            }
+            for key, value in list(self._last_probs.items()):
+                if not np.isfinite(value):
+                    self._last_probs[key] = None
+            self._advance_state(action=action, row=row)
+            out.append({"timestamp": row.name, "action": float(action), "close": float(row.get("close", np.nan))})
+        return out
+
+    def snapshot_state(self) -> dict[str, object]:
+        return {
+            "position": float(self._state.position),
+            "entry_price": float(self._state.entry_price) if np.isfinite(self._state.entry_price) else None,
+            "time_in_position": int(self._state.bars_since_entry),
+            "last_probs": self._last_probs,
+        }
+
+    def last_probs(self) -> dict[str, float | None] | None:
+        return self._last_probs
 
 
 @dataclass
@@ -1056,7 +1714,7 @@ class LiveInferenceEngine:
         *,
         feature_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
         predict_fn: Optional[Callable[[pd.DataFrame], object]] = None,
-        agent: Optional[LivePPOAgent] = None,
+        agent: Optional[object] = None,
         label: str = "left",
         closed: str = "left",
         rule: str = "15min",
@@ -1094,3 +1752,11 @@ class LiveInferenceEngine:
             return None
         features = self._feature_fn(df_15m)
         return self._predict_fn(features)
+
+    def last_probs(self) -> dict[str, float | None] | None:
+        if self._agent is None:
+            return None
+        getter = getattr(self._agent, "last_probs", None)
+        if getter is None:
+            return None
+        return getter()

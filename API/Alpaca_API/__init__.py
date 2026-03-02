@@ -26,6 +26,7 @@ __all__ = [
     "AlpacaBarStreamer",
     "LiveInferenceEngine",
     "LivePPOAgent",
+    "LiveMetaXGBAgent",
     "LiveGAXGBPredictor",
     "build_15m",
 ]
@@ -33,10 +34,11 @@ __all__ = [
 
 def __getattr__(name: str):
     # Keep package import light; only import live inference stack when requested.
-    if name in {"LiveGAXGBPredictor", "LiveInferenceEngine", "LivePPOAgent", "build_15m"}:
+    if name in {"LiveGAXGBPredictor", "LiveInferenceEngine", "LivePPOAgent", "LiveMetaXGBAgent", "build_15m"}:
         from .inference.live_inference import (
             LiveGAXGBPredictor,
             LiveInferenceEngine,
+            LiveMetaXGBAgent,
             LivePPOAgent,
             build_15m,
         )
@@ -44,6 +46,7 @@ def __getattr__(name: str):
         mapping = {
             "LiveGAXGBPredictor": LiveGAXGBPredictor,
             "LiveInferenceEngine": LiveInferenceEngine,
+            "LiveMetaXGBAgent": LiveMetaXGBAgent,
             "LivePPOAgent": LivePPOAgent,
             "build_15m": build_15m,
         }

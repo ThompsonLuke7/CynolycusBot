@@ -150,6 +150,12 @@ class OptionOrderPolicy:
         Compute directional confidence edge from available 15m probability columns.
         Positive edge favors the desired side.
         """
+        meta_long = _as_float(closed_bar.get("p_enter_long"))
+        meta_short = _as_float(closed_bar.get("p_enter_short"))
+        if math.isfinite(meta_long) and math.isfinite(meta_short):
+            edge = float(meta_long - meta_short)
+            return edge if int(desired_pos) > 0 else -edge
+
         p_long_vals = [
             _as_float(closed_bar.get("p_pivot_long")),
             _as_float(closed_bar.get("p_tb_long")),
@@ -393,6 +399,7 @@ class OptionOrderPolicy:
                     "position": 0,
                     "signed_contracts": 0,
                     "symbol": None,
+                    "avg_entry_price": None,
                     "ignored_short_positions": ignored_short_count,
                 }
 
@@ -421,6 +428,7 @@ class OptionOrderPolicy:
                 "signed_contracts": self._signed_contracts,
                 "symbol": symbol,
                 "qty": qty_abs,
+                "avg_entry_price": float(_avg_entry) if math.isfinite(_avg_entry) else None,
                 "multiple_positions": len(candidates) > 1,
                 "ignored_short_positions": ignored_short_count,
             }

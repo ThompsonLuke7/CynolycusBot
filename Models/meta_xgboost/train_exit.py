@@ -251,16 +251,6 @@ def run_exit_pipeline(
         use_tp_to_tighten_trail=bool(use_tp_to_tighten_trail),
     )
 
-    exclude = {
-        "open", "high", "low", "close", "session_date", cfg.atr_col,
-        *EXIT_TARGETS,
-        "y_exit_long_point", "y_exit_short_point",
-        "exit_reason_long", "exit_reason_short",
-        "tp_hit_before_exit_long", "tp_hit_before_exit_short",
-        "enter_long_trigger_oof", "enter_short_trigger_oof",
-        "in_long_trade", "in_short_trade",
-    }
-    feature_cols = select_numeric_feature_columns(frame, exclude=exclude)
     xgb_params = xgb_params_from_config(cfg)
     session_dates = frame["session_date"]
 
@@ -278,6 +268,16 @@ def run_exit_pipeline(
                 point_exit_col="y_exit_long_point",
                 use_next_open=cfg.use_next_open,
             ),
+            {
+                "open", "high", "low", "close", "session_date", cfg.atr_col,
+                *EXIT_TARGETS,
+                "y_exit_long_point", "y_exit_short_point",
+                "exit_reason_long", "exit_reason_short",
+                "tp_hit_before_exit_long", "tp_hit_before_exit_short",
+                "enter_long_trigger_oof", "enter_short_trigger_oof",
+                "in_long_trade", "in_short_trade",
+                *(c for c in frame.columns if c.startswith("short_")),
+            },
         ),
         "y_exit_short": (
             "p_exit_short",
@@ -289,6 +289,16 @@ def run_exit_pipeline(
                 point_exit_col="y_exit_short_point",
                 use_next_open=cfg.use_next_open,
             ),
+            {
+                "open", "high", "low", "close", "session_date", cfg.atr_col,
+                *EXIT_TARGETS,
+                "y_exit_long_point", "y_exit_short_point",
+                "exit_reason_long", "exit_reason_short",
+                "tp_hit_before_exit_long", "tp_hit_before_exit_short",
+                "enter_long_trigger_oof", "enter_short_trigger_oof",
+                "in_long_trade", "in_short_trade",
+                *(c for c in frame.columns if c.startswith("long_")),
+            },
         ),
     }
     summary_key = {
@@ -299,7 +309,8 @@ def run_exit_pipeline(
     threshold_summary: dict[str, dict[str, float | None]] = {}
     metrics_summary: dict[str, dict[str, dict[str, float]]] = {}
 
-    for target_col, (prob_prefix, active_mask, embargo_end_idx) in target_setup.items():
+    for target_col, (prob_prefix, active_mask, embargo_end_idx, exclude_cols) in target_setup.items():
+        feature_cols = select_numeric_feature_columns(frame, exclude=exclude_cols)
         result = train_walkforward_binary(
             df=frame,
             feature_cols=feature_cols,
