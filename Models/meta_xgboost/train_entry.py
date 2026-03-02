@@ -22,6 +22,7 @@ from Models.meta_xgboost.common import (
     resolve_meta_dataset_root,
     save_booster_artifacts,
     save_prob_frame,
+    save_train_val_loss_plot,
     select_numeric_feature_columns,
     sweep_thresholds,
     train_walkforward_binary,
@@ -162,6 +163,11 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
     combined_cols: dict[str, np.ndarray] = {}
     threshold_summary: dict[str, dict[str, float | None]] = {}
     metrics_summary: dict[str, dict[str, dict[str, float]]] = {}
+    loss_histories: dict[str, dict[str, list[float]] | None] = {}
+    feature_columns_by_target = {
+        "enter_long": list(feature_cols),
+        "enter_short": list(feature_cols),
+    }
 
     for target_col, prob_prefix in target_to_prob.items():
         key = summary_key[target_col]
@@ -183,6 +189,7 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
         oof_metrics = binary_metrics(y[result.valid_mask], result.oof_probs[result.valid_mask], threshold=threshold)
         metrics_summary[key] = {"full": train_metrics, "oof": oof_metrics}
         threshold_summary[key] = {"threshold": float(threshold), **best_row}
+        loss_histories[key] = result.eval_history
         print(
             f"[META-ENTRY] {key}: threshold={float(threshold):.4f} "
             f"train_logloss={train_metrics.get('logloss', float('nan')):.4f} "
@@ -228,11 +235,24 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
     )
     if plot_path is not None:
         print(f"[META-ENTRY] Saved OOF eval plot: {plot_path}")
+    loss_plot_path = save_train_val_loss_plot(
+        histories=loss_histories,
+        save_path=entry_root / "meta_entry_train_val_loss.png",
+        title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB entry train vs validation logloss ({cfg.dataset_name})",
+    )
+    if loss_plot_path is not None:
+        print(f"[META-ENTRY] Saved train/val loss plot: {loss_plot_path}")
 
-    log_training_run(
+    summary_paths = log_training_run(
         run_name="meta_xgboost_entry_train",
         output_dir=entry_root,
-        hyperparameters={**asdict(cfg), "feature_count": len(feature_cols), "feature_columns": feature_cols},
+        hyperparameters={
+            **asdict(cfg),
+            "feature_count": len(feature_cols),
+            "feature_columns": feature_cols,
+            "feature_count_by_target": {k: len(v) for k, v in feature_columns_by_target.items()},
+            "feature_columns_by_target": feature_columns_by_target,
+        },
         train_metrics={k: v["full"] for k, v in metrics_summary.items()},
         validation_metrics={k: v["oof"] for k, v in metrics_summary.items()},
         best_validation_metrics=threshold_summary,
@@ -242,6 +262,7 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
             "entry_labels": str(labels_path),
             "thresholds": str(thresholds_path),
             "oof_eval_plot": str(plot_path) if plot_path is not None else None,
+            "train_val_loss_plot": str(loss_plot_path) if loss_plot_path is not None else None,
         },
         extra={
             "rows": int(len(frame)),
@@ -251,11 +272,14 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
             "boundary_embargo": "exclude training rows whose label resolution crosses an eval fold start",
         },
     )
+    print(f"[META-ENTRY] Saved summary: {summary_paths['versioned_path']}")
     return {
         "entry_root": entry_root,
         "entry_probs_path": prob_path,
         "entry_thresholds_path": thresholds_path,
         "entry_labels_path": labels_path,
+        "training_summary_latest_path": summary_paths["latest_path"],
+        "training_summary_versioned_path": summary_paths["versioned_path"],
         "threshold_summary": threshold_summary,
     }
 
@@ -265,6 +289,7 @@ def main() -> None:
     artifacts = run_entry_pipeline(cfg)
     print(f"[META-ENTRY] Saved probabilities: {artifacts['entry_probs_path']}")
     print(f"[META-ENTRY] Saved thresholds: {artifacts['entry_thresholds_path']}")
+    print(f"[META-ENTRY] Saved versioned summary: {artifacts['training_summary_versioned_path']}")
 
 
 if __name__ == "__main__":

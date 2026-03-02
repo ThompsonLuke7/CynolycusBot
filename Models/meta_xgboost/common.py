@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
@@ -101,6 +102,7 @@ class TrainResult:
     full_probs: np.ndarray
     coverage: float
     fold_rows: list[dict[str, int]]
+    eval_history: dict[str, list[float]] | None = None
 
 
 def derive_session_date(index: pd.Index, *, tz: str) -> np.ndarray:
@@ -690,6 +692,68 @@ def _fit_booster(
     return model, None, params_local, num_boost_round
 
 
+def build_final_eval_history(
+    *,
+    X: np.ndarray,
+    y: np.ndarray,
+    session_dates: pd.Series | np.ndarray,
+    valid_mask: np.ndarray,
+    params: dict[str, Any],
+    seed: int,
+    validation_fraction: float = 0.20,
+    min_validation_days: int = 1,
+) -> dict[str, list[float]] | None:
+    valid_idx = np.flatnonzero(np.asarray(valid_mask, dtype=bool))
+    if valid_idx.size < 10:
+        return None
+    session_arr = pd.Series(session_dates).astype("string").to_numpy()
+    valid_days = pd.Index(session_arr[valid_idx]).dropna().unique()
+    if len(valid_days) < 2:
+        return None
+    val_days = max(int(np.ceil(len(valid_days) * float(validation_fraction))), int(min_validation_days))
+    val_days = min(max(1, val_days), len(valid_days) - 1)
+    train_days = valid_days[:-val_days]
+    eval_days = valid_days[-val_days:]
+    fit_idx = valid_idx[np.isin(session_arr[valid_idx], train_days)]
+    eval_idx = valid_idx[np.isin(session_arr[valid_idx], eval_days)]
+    if fit_idx.size == 0 or eval_idx.size == 0:
+        return None
+
+    y_fit = y[fit_idx]
+    y_eval = y[eval_idx]
+    if len(np.unique(y_fit)) < 2 or len(np.unique(y_eval)) < 2:
+        return None
+
+    params_local = dict(params)
+    params_local["seed"] = int(seed)
+    params_local["scale_pos_weight"] = float(np.sum(y_fit == 0) / max(int(np.sum(y_fit == 1)), 1))
+    params_local = _sanitize_xgb_params(params_local)
+    num_boost_round = int(params_local.pop("n_estimators", 100))
+    n_jobs = params_local.pop("n_jobs", None)
+    if n_jobs is not None:
+        params_local["nthread"] = int(n_jobs)
+
+    dtrain = xgb.DMatrix(X[fit_idx], label=y_fit)
+    dval = xgb.DMatrix(X[eval_idx], label=y_eval)
+    evals_result: dict[str, dict[str, list[float]]] = {}
+    xgb.train(
+        params_local,
+        dtrain,
+        num_boost_round=num_boost_round,
+        evals=[(dtrain, "train"), (dval, "validation")],
+        evals_result=evals_result,
+        verbose_eval=False,
+    )
+    train_logloss = [float(v) for v in evals_result.get("train", {}).get("logloss", [])]
+    val_logloss = [float(v) for v in evals_result.get("validation", {}).get("logloss", [])]
+    if not train_logloss or not val_logloss:
+        return None
+    return {
+        "train_logloss": train_logloss,
+        "val_logloss": val_logloss,
+    }
+
+
 def predict_probs(
     model: xgb.Booster | None,
     X: np.ndarray,
@@ -799,6 +863,14 @@ def train_walkforward_binary(
         f"[META-XGB] {target_col}: OOF coverage={coverage:.2%} "
         f"full_fit_rows={int(np.sum(valid_mask))}"
     )
+    eval_history = build_final_eval_history(
+        X=X,
+        y=y,
+        session_dates=session_dates,
+        valid_mask=valid_mask,
+        params=xgb_params,
+        seed=int(cfg.random_state) + 20_000,
+    )
     return TrainResult(
         target_col=target_col,
         model=model_full,
@@ -810,6 +882,7 @@ def train_walkforward_binary(
         full_probs=full_probs,
         coverage=coverage,
         fold_rows=fold_rows,
+        eval_history=eval_history,
     )
 
 
@@ -875,6 +948,37 @@ def choose_threshold(sweep_df: pd.DataFrame, *, objective: str) -> tuple[float, 
     return float(best["threshold"]), {str(k): (float(v) if isinstance(v, (int, float, np.generic)) and np.isfinite(v) else None) for k, v in best.items()}
 
 
+def save_train_val_loss_plot(
+    *,
+    histories: dict[str, dict[str, list[float]] | None],
+    save_path: Path,
+    title: str,
+) -> Path | None:
+    valid_items = [(name, hist) for name, hist in histories.items() if hist and hist.get("train_logloss") and hist.get("val_logloss")]
+    if not valid_items:
+        return None
+    fig, axes = plt.subplots(1, len(valid_items), figsize=(10 * len(valid_items), 5))
+    if not isinstance(axes, np.ndarray):
+        axes = np.asarray([axes], dtype=object)
+    for ax, (name, hist) in zip(axes, valid_items):
+        train_vals = np.asarray(hist["train_logloss"], dtype=float)
+        val_vals = np.asarray(hist["val_logloss"], dtype=float)
+        rounds = np.arange(train_vals.size)
+        ax.plot(rounds, train_vals, label="train_logloss")
+        ax.plot(rounds, val_vals, label="val_logloss")
+        ax.set_title(str(name).replace("_", " ").title())
+        ax.set_xlabel("Boosting round")
+        ax.set_ylabel("Logloss")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    fig.suptitle(title)
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    return save_path
+
+
 def save_booster_artifacts(
     *,
     out_dir: Path,
@@ -897,6 +1001,7 @@ def save_booster_artifacts(
         "coverage": float(result.coverage),
         "fold_rows": result.fold_rows,
         "valid_rows": int(np.sum(result.valid_mask)),
+        "eval_history": result.eval_history,
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 

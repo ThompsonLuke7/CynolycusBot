@@ -2427,8 +2427,12 @@ def plot_model_inference(
     long_probs: np.ndarray | None,
     short_probs: np.ndarray | None,
     *,
+    long_entry_actual: np.ndarray | None = None,
+    short_entry_actual: np.ndarray | None = None,
     long_actual: np.ndarray | None = None,
     short_actual: np.ndarray | None = None,
+    long_entry_label_name: str | None = None,
+    short_entry_label_name: str | None = None,
     long_label_name: str | None = None,
     short_label_name: str | None = None,
     threshold: float = 0.8,
@@ -2446,11 +2450,19 @@ def plot_model_inference(
         long_actual = np.asarray(long_actual).reshape(-1)
     if short_actual is not None:
         short_actual = np.asarray(short_actual).reshape(-1)
+    if long_entry_actual is not None:
+        long_entry_actual = np.asarray(long_entry_actual).reshape(-1)
+    if short_entry_actual is not None:
+        short_entry_actual = np.asarray(short_entry_actual).reshape(-1)
 
     if long_actual is not None and len(long_actual) != len(X_df):
         raise ValueError("long_actual length must match X_df for plotting.")
     if short_actual is not None and len(short_actual) != len(X_df):
         raise ValueError("short_actual length must match X_df for plotting.")
+    if long_entry_actual is not None and len(long_entry_actual) != len(X_df):
+        raise ValueError("long_entry_actual length must match X_df for plotting.")
+    if short_entry_actual is not None and len(short_entry_actual) != len(X_df):
+        raise ValueError("short_entry_actual length must match X_df for plotting.")
     long_thr = float(threshold if long_threshold is None else long_threshold)
     short_thr = float(threshold if short_threshold is None else short_threshold)
 
@@ -2522,6 +2534,8 @@ def plot_model_inference(
             marker_offset = np.nanmax(high_y[valid_mask]) * 0.002
         long_y = low_y - marker_offset * 0.6
         short_y = high_y + marker_offset * 0.6
+        long_entry_y = low_y - marker_offset * 1.8
+        short_entry_y = high_y + marker_offset * 1.8
         long_actual_y = low_y - marker_offset * 1.2
         short_actual_y = high_y + marker_offset * 1.2
     elif close_y is not None:
@@ -2532,6 +2546,8 @@ def plot_model_inference(
             marker_offset = np.nanmax(clean_close) * 0.002
         long_y = close_y - marker_offset * 2
         short_y = close_y + marker_offset * 2
+        long_entry_y = close_y - marker_offset * 4
+        short_entry_y = close_y + marker_offset * 4
         long_actual_y = close_y - marker_offset * 3
         short_actual_y = close_y + marker_offset * 3
 
@@ -2558,6 +2574,34 @@ def plot_model_inference(
                 s=60,
                 label=f"SHORT prob >= {short_thr:.2f}",
                 zorder=2,
+            )
+    if long_entry_actual is not None:
+        long_entry_label = f"{long_entry_label_name or 'LONG ENTRY'} actual"
+        long_entry_mask = (long_entry_actual == 1) & valid_mask
+        if long_entry_mask.any():
+            ax_price.scatter(
+                pos[long_entry_mask],
+                long_entry_y[long_entry_mask],
+                color="#2E7D32",
+                marker="^",
+                s=52,
+                alpha=0.75,
+                label=long_entry_label,
+                zorder=2.1,
+            )
+    if short_entry_actual is not None:
+        short_entry_label = f"{short_entry_label_name or 'SHORT ENTRY'} actual"
+        short_entry_mask = (short_entry_actual == 1) & valid_mask
+        if short_entry_mask.any():
+            ax_price.scatter(
+                pos[short_entry_mask],
+                short_entry_y[short_entry_mask],
+                color="#C62828",
+                marker="v",
+                s=52,
+                alpha=0.75,
+                label=short_entry_label,
+                zorder=2.1,
             )
     if long_actual is not None:
         long_label = f"{long_label_name or 'LONG'} actual"

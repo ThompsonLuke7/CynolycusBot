@@ -23,6 +23,7 @@ from Models.meta_xgboost.common import (
     resolve_meta_dataset_root,
     save_booster_artifacts,
     save_prob_frame,
+    save_train_val_loss_plot,
     select_numeric_feature_columns,
     sweep_thresholds,
     train_walkforward_binary,
@@ -42,32 +43,50 @@ def _save_exit_eval_plot(
     combined_cols: dict[str, np.ndarray],
     threshold_summary: dict[str, dict[str, float | None]],
     cfg: PipelineConfig,
-) -> Path | None:
+) -> dict[str, Path]:
     long_probs = np.asarray(combined_cols.get("p_exit_long_oof"), dtype=np.float32)
     short_probs = np.asarray(combined_cols.get("p_exit_short_oof"), dtype=np.float32)
     valid = np.isfinite(long_probs) | np.isfinite(short_probs)
     if not np.any(valid):
-        return None
+        return {}
 
     valid_idx = np.flatnonzero(valid)
     tail_idx = valid_idx[-300:] if valid_idx.size > 300 else valid_idx
     plot_df = frame.iloc[tail_idx]
-    save_path = exit_root / "meta_exit_oof_eval.png"
+    outputs: dict[str, Path] = {}
+
+    long_save_path = exit_root / "meta_exit_oof_eval_long.png"
     plot_model_inference(
         plot_df,
         long_probs[tail_idx],
-        short_probs[tail_idx],
+        None,
+        long_entry_actual=plot_df["enter_long_trigger_oof"].to_numpy(dtype=np.int64),
         long_actual=plot_df["y_exit_long"].to_numpy(dtype=np.int64),
-        short_actual=plot_df["y_exit_short"].to_numpy(dtype=np.int64),
+        long_entry_label_name="ENTRY LONG",
         long_label_name="EXIT LONG",
-        short_label_name="EXIT SHORT",
         threshold=0.5,
         long_threshold=float(threshold_summary["exit_long"]["threshold"]),
-        short_threshold=float(threshold_summary["exit_short"]["threshold"]),
-        title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB exit OOF eval ({cfg.dataset_name})",
-        save_path=str(save_path),
+        title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB long entry/exit OOF eval ({cfg.dataset_name})",
+        save_path=str(long_save_path),
     )
-    return save_path
+    outputs["long"] = long_save_path
+
+    short_save_path = exit_root / "meta_exit_oof_eval_short.png"
+    plot_model_inference(
+        plot_df,
+        None,
+        short_probs[tail_idx],
+        short_entry_actual=plot_df["enter_short_trigger_oof"].to_numpy(dtype=np.int64),
+        short_actual=plot_df["y_exit_short"].to_numpy(dtype=np.int64),
+        short_entry_label_name="ENTRY SHORT",
+        short_label_name="EXIT SHORT",
+        threshold=0.5,
+        short_threshold=float(threshold_summary["exit_short"]["threshold"]),
+        title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB short entry/exit OOF eval ({cfg.dataset_name})",
+        save_path=str(short_save_path),
+    )
+    outputs["short"] = short_save_path
+    return outputs
 
 
 def parse_args() -> argparse.Namespace:
@@ -256,6 +275,7 @@ def run_exit_pipeline(
 
     exit_root = resolve_meta_dataset_root(cfg) / "exit"
     exit_root.mkdir(parents=True, exist_ok=True)
+    print(f"[META-EXIT] Output dir: {exit_root}")
 
     target_setup = {
         "y_exit_long": (
@@ -308,9 +328,14 @@ def run_exit_pipeline(
     combined_cols: dict[str, np.ndarray] = {}
     threshold_summary: dict[str, dict[str, float | None]] = {}
     metrics_summary: dict[str, dict[str, dict[str, float]]] = {}
+    loss_histories: dict[str, dict[str, list[float]] | None] = {}
+    feature_columns_by_target: dict[str, list[str]] = {}
 
     for target_col, (prob_prefix, active_mask, embargo_end_idx, exclude_cols) in target_setup.items():
+        key = summary_key[target_col]
+        print(f"[META-EXIT] Training {key}")
         feature_cols = select_numeric_feature_columns(frame, exclude=exclude_cols)
+        feature_columns_by_target[key] = list(feature_cols)
         result = train_walkforward_binary(
             df=frame,
             feature_cols=feature_cols,
@@ -326,9 +351,25 @@ def run_exit_pipeline(
         threshold, best_row = choose_threshold(sweep, objective=cfg.threshold_objective)
         train_metrics = binary_metrics(y[result.valid_mask], result.full_probs[result.valid_mask], threshold=threshold)
         oof_metrics = binary_metrics(y[result.valid_mask], result.oof_probs[result.valid_mask], threshold=threshold)
-        key = summary_key[target_col]
         metrics_summary[key] = {"full": train_metrics, "oof": oof_metrics}
-        threshold_summary[key] = {"threshold": float(threshold), **best_row}
+        loss_histories[key] = result.eval_history
+        threshold_summary[key] = {
+            "threshold": float(threshold),
+            "selection_objective": "f1",
+            **best_row,
+        }
+        print(
+            f"[META-EXIT] {key}: threshold={float(threshold):.4f} "
+            f"train_logloss={train_metrics.get('logloss', float('nan')):.4f} "
+            f"train_auc={train_metrics.get('auc', float('nan')):.4f} "
+            f"train_f1={train_metrics.get('f1', float('nan')):.4f}"
+        )
+        print(
+            f"[META-EXIT] {key}: oof_logloss={oof_metrics.get('logloss', float('nan')):.4f} "
+            f"oof_auc={oof_metrics.get('auc', float('nan')):.4f} "
+            f"oof_f1={oof_metrics.get('f1', float('nan')):.4f} "
+            f"oof_ap={oof_metrics.get('average_precision', float('nan')):.4f}"
+        )
 
         side_dir = exit_root / ("long" if target_col.endswith("long") else "short")
         save_booster_artifacts(
@@ -371,21 +412,33 @@ def run_exit_pipeline(
     context_cols["p_enter_long_oof"] = pd.to_numeric(frame["p_enter_long_oof"], errors="coerce").to_numpy(dtype=float)
     context_cols["p_enter_short_oof"] = pd.to_numeric(frame["p_enter_short_oof"], errors="coerce").to_numpy(dtype=float)
     context_path = save_prob_frame(exit_root / "exit_context.parquet", index=frame.index, columns=context_cols)
-    plot_path = _save_exit_eval_plot(
+    plot_paths = _save_exit_eval_plot(
         frame=frame,
         exit_root=exit_root,
         combined_cols=combined_cols,
         threshold_summary=threshold_summary,
         cfg=cfg,
     )
+    if plot_paths:
+        for side, path in plot_paths.items():
+            print(f"[META-EXIT] Saved {side} OOF eval plot: {path}")
+    loss_plot_path = save_train_val_loss_plot(
+        histories=loss_histories,
+        save_path=exit_root / "meta_exit_train_val_loss.png",
+        title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB exit train vs validation logloss ({cfg.dataset_name})",
+    )
+    if loss_plot_path is not None:
+        print(f"[META-EXIT] Saved train/val loss plot: {loss_plot_path}")
 
-    log_training_run(
+    summary_paths = log_training_run(
         run_name="meta_xgboost_exit_train",
         output_dir=exit_root,
         hyperparameters={
             **asdict(cfg),
-            "feature_count": len(feature_cols),
-            "feature_columns": feature_cols,
+            "feature_count": max((len(v) for v in feature_columns_by_target.values()), default=0),
+            "feature_columns": feature_columns_by_target.get("exit_short") or feature_columns_by_target.get("exit_long") or [],
+            "feature_count_by_target": {k: len(v) for k, v in feature_columns_by_target.items()},
+            "feature_columns_by_target": feature_columns_by_target,
             "entry_root": str(entry_root),
             "entry_long_threshold": float(long_thr),
             "entry_short_threshold": float(short_thr),
@@ -404,7 +457,8 @@ def run_exit_pipeline(
             "exit_labels": str(label_path),
             "exit_context": str(context_path),
             "thresholds": str(thresholds_out),
-            "oof_eval_plot": str(plot_path) if plot_path is not None else None,
+            "oof_eval_plots": {k: str(v) for k, v in plot_paths.items()},
+            "train_val_loss_plot": str(loss_plot_path) if loss_plot_path is not None else None,
         },
         extra={
             "rows": int(len(frame)),
@@ -416,12 +470,15 @@ def run_exit_pipeline(
             "boundary_embargo": "exclude active training rows whose simulated exit lands in or after an eval fold start",
         },
     )
+    print(f"[META-EXIT] Saved summary: {summary_paths['versioned_path']}")
     return {
         "exit_root": exit_root,
         "exit_probs_path": prob_path,
         "exit_thresholds_path": thresholds_out,
         "exit_labels_path": label_path,
         "exit_context_path": context_path,
+        "training_summary_latest_path": summary_paths["latest_path"],
+        "training_summary_versioned_path": summary_paths["versioned_path"],
         "threshold_summary": threshold_summary,
     }
 
@@ -441,6 +498,7 @@ def main() -> None:
     )
     print(f"[META-EXIT] Saved probabilities: {artifacts['exit_probs_path']}")
     print(f"[META-EXIT] Saved thresholds: {artifacts['exit_thresholds_path']}")
+    print(f"[META-EXIT] Saved versioned summary: {artifacts['training_summary_versioned_path']}")
 
 
 if __name__ == "__main__":
