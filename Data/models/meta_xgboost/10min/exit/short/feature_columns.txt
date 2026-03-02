@@ -77,12 +77,6 @@ trend_phase_exit_long
 trend_phase_exit_short
 p_enter_long_oof
 p_enter_short_oof
-long_bars_since_entry
-long_mfe_atr
-long_mae_atr
-long_tp_seen_run
-long_trail_gap_atr
-long_entry_price_ctx
 short_bars_since_entry
 short_mfe_atr
 short_mae_atr

@@ -83,9 +83,3 @@ long_mae_atr
 long_tp_seen_run
 long_trail_gap_atr
 long_entry_price_ctx
-short_bars_since_entry
-short_mfe_atr
-short_mae_atr
-short_tp_seen_run
-short_trail_gap_atr
-short_entry_price_ctx
