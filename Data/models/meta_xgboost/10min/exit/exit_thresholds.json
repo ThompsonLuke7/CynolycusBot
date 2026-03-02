@@ -1,6 +1,7 @@
 {
   "exit_long": {
     "threshold": 0.5,
+    "selection_objective": "f1",
     "n": 5513.0,
     "tp": 1396.0,
     "tn": 2638.0,
@@ -17,6 +18,7 @@
   },
   "exit_short": {
     "threshold": 0.5,
+    "selection_objective": "f1",
     "n": 3948.0,
     "tp": 1429.0,
     "tn": 1487.0,
