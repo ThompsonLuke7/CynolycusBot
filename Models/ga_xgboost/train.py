@@ -583,6 +583,18 @@ def refresh_masks_and_params(
             base["scale_pos_weight"] = 1.0
         return base
 
+    def _save_checkpoint(side: str, selector: GAXGBoostFeatureSelector) -> None:
+        # Persist each side immediately so long runs can resume after interruptions.
+        checkpoint_dir = save_selector_artifacts(
+            selector,
+            model_root,
+            side,
+            feature_names=feature_names,
+            metadata=metadata,
+            label_dir=label_dir,
+        )
+        print(f"[GA-XGB] Checkpoint saved for {side.upper()} at {checkpoint_dir}")
+
     print("Refreshing GA-XGB masks/params on train split only...")
     if full_fit:
         long_selector = GAXGBoostFeatureSelector(
@@ -590,12 +602,14 @@ def refresh_masks_and_params(
             **(ga_kwargs or {}),
         )
         long_selector.fit(X_train, y_long_train, sample_weight=w_long_train)
+        _save_checkpoint("long", long_selector)
 
         short_selector = GAXGBoostFeatureSelector(
             xgb_params=_side_params(y_short_train),
             **(ga_kwargs or {}),
         )
         short_selector.fit(X_train, y_short_train, sample_weight=w_short_train)
+        _save_checkpoint("short", short_selector)
     else:
         long_selector = _train_ga_selector(
             X_train,
@@ -604,6 +618,8 @@ def refresh_masks_and_params(
             sample_weight=w_long_train,
             ga_kwargs=ga_kwargs,
         )
+        _save_checkpoint("long", long_selector)
+
         short_selector = _train_ga_selector(
             X_train,
             y_short_train,
@@ -611,23 +627,7 @@ def refresh_masks_and_params(
             sample_weight=w_short_train,
             ga_kwargs=ga_kwargs,
         )
-
-    save_selector_artifacts(
-        long_selector,
-        model_root,
-        "long",
-        feature_names=feature_names,
-        metadata=metadata,
-        label_dir=label_dir,
-    )
-    save_selector_artifacts(
-        short_selector,
-        model_root,
-        "short",
-        feature_names=feature_names,
-        metadata=metadata,
-        label_dir=label_dir,
-    )
+        _save_checkpoint("short", short_selector)
 
     long_mask = long_selector.best_mask_.astype(bool)
     short_mask = short_selector.best_mask_.astype(bool)
