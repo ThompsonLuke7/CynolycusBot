@@ -95,6 +95,30 @@ def _format_ts_local(ts: object, *, tz: str = "America/New_York") -> str:
         return str(ts)
 
 
+def _fmt_prob(value: object) -> str:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "NA"
+    if not np.isfinite(v):
+        return "NA"
+    return f"{v:.3f}"
+
+
+def _print_meta_prob_log(*, prefix: str, probs: dict[str, float | None] | None, thresholds: dict[str, float] | None) -> None:
+    if not probs and not thresholds:
+        return
+    probs = probs or {}
+    thresholds = thresholds or {}
+    print(
+        f"{prefix} "
+        f"p_enter_long={_fmt_prob(probs.get('p_enter_long'))} thr_enter_long={_fmt_prob(thresholds.get('enter_long'))} "
+        f"p_enter_short={_fmt_prob(probs.get('p_enter_short'))} thr_enter_short={_fmt_prob(thresholds.get('enter_short'))} "
+        f"p_exit_long={_fmt_prob(probs.get('p_exit_long'))} thr_exit_long={_fmt_prob(thresholds.get('exit_long'))} "
+        f"p_exit_short={_fmt_prob(probs.get('p_exit_short'))} thr_exit_short={_fmt_prob(thresholds.get('exit_short'))}"
+    )
+
+
 def _action_to_position(action: float | int, *, deadband: float = 0.0) -> int:
     try:
         a = float(action)
@@ -145,6 +169,12 @@ def _make_15m_handler(
             gate = execution_latches[symbol].step(raw_pos)
             exec_pos = int(gate.executed_pos)
             probs = inference.last_probs() or {}
+            thresholds = inference.last_thresholds() or {}
+            _print_meta_prob_log(
+                prefix=f"{symbol} meta:",
+                probs=probs,
+                thresholds=thresholds,
+            )
             print(
                 f"{symbol} inference raw={raw_action:+.4f} raw_pos={raw_pos:+d} "
                 f"exec={exec_pos:+d} gate={gate.status}"
@@ -152,6 +182,14 @@ def _make_15m_handler(
             if order_policies is not None and symbol in order_policies:
                 policy_bar = dict(bar15)
                 policy_bar.update({k: v for k, v in probs.items() if v is not None})
+                policy_bar.update(
+                    {
+                        "thr_enter_long": thresholds.get("enter_long"),
+                        "thr_enter_short": thresholds.get("enter_short"),
+                        "thr_exit_long": thresholds.get("exit_long"),
+                        "thr_exit_short": thresholds.get("exit_short"),
+                    }
+                )
                 result = order_policies[symbol].on_decision(
                     action=float(exec_pos),
                     closed_bar=policy_bar,
@@ -488,7 +526,21 @@ def _run_startup_catchup_decision(
         )
         policy_bar = dict(bar15)
         probs = inference.last_probs() or {}
+        thresholds = inference.last_thresholds() or {}
+        _print_meta_prob_log(
+            prefix=f"[live] Startup catch-up {symbol} meta:",
+            probs=probs,
+            thresholds=thresholds,
+        )
         policy_bar.update({k: v for k, v in probs.items() if v is not None})
+        policy_bar.update(
+            {
+                "thr_enter_long": thresholds.get("enter_long"),
+                "thr_enter_short": thresholds.get("enter_short"),
+                "thr_exit_long": thresholds.get("exit_long"),
+                "thr_exit_short": thresholds.get("exit_short"),
+            }
+        )
         result = order_policies[symbol].on_decision(
             action=float(exec_pos),
             closed_bar=policy_bar,
@@ -738,6 +790,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ga-pivot-label-dir", default="swing", help="Label dir for pivot GA-XGB models.")
     parser.add_argument("--ga-tb-label-dir", default="tb", help="Label dir for TB GA-XGB models.")
     parser.add_argument("--meta-model-root", default="Data/models/meta_xgboost/10min", help="Meta-XGB model root.")
+    parser.add_argument("--meta-entry-threshold", type=float, default=0.8, help="Execution threshold override for both meta long/short entries.")
+    parser.add_argument("--meta-exit-threshold", type=float, default=0.8, help="Execution threshold override for both meta long/short exits.")
     parser.add_argument("--meta-trail-activate-atr", type=float, default=2.0, help="Trail activation ATR used to build live exit context.")
     parser.add_argument("--meta-trail-atr", type=float, default=1.0, help="Base trail ATR used to build live exit context.")
     parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.8, help="Tightened trail ATR after TP is seen.")
@@ -942,6 +996,8 @@ def main() -> None:
             trail_atr=float(args.meta_trail_atr),
             trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
             use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
+            entry_threshold_override=float(args.meta_entry_threshold),
+            exit_threshold_override=float(args.meta_exit_threshold),
         )
         print(
             f"[live] Meta-XGB inference enabled: model_root={args.meta_model_root} "

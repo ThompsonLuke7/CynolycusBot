@@ -21,10 +21,10 @@ from API.Alpaca_API.market_data.bar_aggregator import OhlcvAggregator
 from API.Alpaca_API.market_data.bar_buffer import BarRingBuffer
 from Policy.execution_latch import DirectionExecutionLatch
 
-UI_BUILD = "2026-02-10-dashboard-replay-v2"
+UI_BUILD = "2026-03-02-dashboard-meta-10min"
 
 if TYPE_CHECKING:
-    from API.Alpaca_API.inference.live_inference import LiveInferenceEngine, LivePPOAgent
+    from API.Alpaca_API.inference.live_inference import LiveInferenceEngine, LiveMetaXGBAgent, LivePPOAgent
     from API.Alpaca_API.market_data.live_stream import AlpacaBarStreamer
     from Policy.order_policy import OptionOrderPolicy
 
@@ -107,7 +107,7 @@ def _normalize_bar(bar: dict[str, Any]) -> dict[str, Any]:
             num = _coerce_float(val, float("nan"))
             out[key] = num if np.isfinite(num) else None
     for key, val in bar.items():
-        if not isinstance(key, str) or not key.startswith("p_"):
+        if not isinstance(key, str) or (not key.startswith("p_") and not key.startswith("thr_")):
             continue
         num = _coerce_float(val, float("nan"))
         out[key] = num if np.isfinite(num) else None
@@ -381,20 +381,48 @@ def _load_agent_matrix_probs(*, symbol: str, dataset_name: str) -> pd.DataFrame 
             Path("Data") / "inference" / clean / dataset_name / "models" / "ga_xgboost" / dataset_name,
         ]
         ga_specs = [
-            ("p_pivot_long", "long", "pivots", "p_long_probs.parquet", "p_long_full"),
-            ("p_pivot_short", "short", "pivots", "p_short_probs.parquet", "p_short_full"),
-            ("p_tb_long", "long", "tb", "p_long_probs.parquet", "p_long_full"),
-            ("p_tb_short", "short", "tb", "p_short_probs.parquet", "p_short_full"),
+            ("p_pivot_long", "long", "swing", "p_long_probs.parquet", "p_long_oof_train", "p_long_test", "p_long_full"),
+            ("p_pivot_short", "short", "swing", "p_short_probs.parquet", "p_short_oof_train", "p_short_test", "p_short_full"),
+            ("p_tb_long", "long", "tb", "p_long_probs.parquet", "p_long_oof_train", "p_long_test", "p_long_full"),
+            ("p_tb_short", "short", "tb", "p_short_probs.parquet", "p_short_oof_train", "p_short_test", "p_short_full"),
         ]
         ga_cols: dict[str, pd.Series] = {}
         for root in ga_roots:
             found_any = False
-            for out_col, side, label_dir, fname, value_col in ga_specs:
-                series = _series_from_probs_parquet(
+            for out_col, side, label_dir, fname, oof_col, test_col, full_col in ga_specs:
+                candidate_paths = [
+                    root / side / label_dir / fname,
                     root / side / "probs" / label_dir / fname,
-                    value_col=value_col,
-                )
-                if series is None:
+                    root / side / fname,
+                ]
+                series = None
+                for candidate_path in candidate_paths:
+                    if not candidate_path.exists():
+                        continue
+                    try:
+                        df = pd.read_parquet(candidate_path)
+                    except Exception:
+                        continue
+                    picked = None
+                    if oof_col in df.columns and test_col in df.columns:
+                        picked = pd.to_numeric(df[oof_col], errors="coerce").combine_first(
+                            pd.to_numeric(df[test_col], errors="coerce")
+                        )
+                        if full_col in df.columns:
+                            picked = picked.combine_first(pd.to_numeric(df[full_col], errors="coerce"))
+                    elif full_col in df.columns:
+                        picked = pd.to_numeric(df[full_col], errors="coerce")
+                    if picked is None:
+                        continue
+                    if "timestamp" in df.columns:
+                        ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+                    else:
+                        ts = pd.to_datetime(df.index, utc=True, errors="coerce")
+                    series = pd.Series(picked.to_numpy(), index=ts)
+                    series = series[series.index.notna()].sort_index()
+                    if not series.empty:
+                        break
+                if series is None or series.empty:
                     continue
                 ga_cols[out_col] = series
                 found_any = True
@@ -407,7 +435,7 @@ def _load_agent_matrix_probs(*, symbol: str, dataset_name: str) -> pd.DataFrame 
                     for col in prob_cols:
                         ga_df[col] = ga_cols[col].reindex(ga_df.index) if col in ga_cols else np.nan
                     frames.append(ga_df)
-                    loaded_paths.append(f"{root}/*/probs/*/*_probs.parquet")
+                    loaded_paths.append(f"{root}/*/(swing|tb)/*_probs.parquet")
                 break
 
         for path in candidates:
@@ -495,8 +523,9 @@ class ReplayBarProcessor:
 class SessionConfig:
     symbols: list[str]
     runner_mode: str = "live"
+    inference_mode: str = "meta"
     feed: str = "IEX"
-    interval: int = 15
+    interval: int = 10
     buffer_size: int = 5000
     queue_size: int = 5000
     resample_label: str = "left"
@@ -504,6 +533,7 @@ class SessionConfig:
     tz: str = "America/New_York"
     assume_tz: str = "UTC"
     model_path: str = "Data/outputs/agent/ppo_model.pt"
+    meta_model_root: str = "Data/models/meta_xgboost/10min"
     no_agent: bool = False
     stochastic: bool = False
     device: str = "auto"
@@ -513,12 +543,18 @@ class SessionConfig:
     fill_missing_prob: float = 0.0
     session_open: str = "09:30"
     session_close: str = "16:00"
-    ga_model_root: str = "Data/models/ga_xgboost/15min"
+    ga_model_root: str = "Data/models/ga_xgboost/10min"
     ga_feature_list: str | None = None
-    ga_dataset_name: str = "15min"
-    split_x_filename: str = "X_15min_tree.parquet"
-    ga_pivot_label_dir: str = "pivots"
+    ga_dataset_name: str = "10min"
+    split_x_filename: str = "X_10min_tree.parquet"
+    ga_pivot_label_dir: str = "swing"
     ga_tb_label_dir: str = "tb"
+    meta_entry_threshold: float = 0.8
+    meta_exit_threshold: float = 0.8
+    meta_trail_activate_atr: float = 2.0
+    meta_trail_atr: float = 1.0
+    meta_trail_atr_after_tp: float = 0.8
+    meta_use_tp_to_tighten_trail: bool = True
     env_file: str = ".env"
     prefill_path: str | None = None
     prefill_start: str = "2026-01-30"
@@ -556,8 +592,9 @@ class SessionConfig:
         return cls(
             symbols=symbols,
             runner_mode=str(payload.get("runner_mode", "live")).strip().lower(),
+            inference_mode=str(payload.get("inference_mode", "meta")).strip().lower(),
             feed=str(payload.get("feed", "IEX")).upper(),
-            interval=max(1, _coerce_int(payload.get("interval"), 15)),
+            interval=max(1, _coerce_int(payload.get("interval"), 10)),
             buffer_size=max(100, _coerce_int(payload.get("buffer_size"), 5000)),
             queue_size=max(100, _coerce_int(payload.get("queue_size"), 5000)),
             resample_label=str(payload.get("resample_label", "left")).strip().lower(),
@@ -565,6 +602,7 @@ class SessionConfig:
             tz=str(payload.get("tz", "America/New_York")),
             assume_tz=str(payload.get("assume_tz", "UTC")),
             model_path=str(payload.get("model_path", "Data/outputs/agent/ppo_model.pt")),
+            meta_model_root=str(payload.get("meta_model_root", "Data/models/meta_xgboost/10min")),
             no_agent=_coerce_bool(payload.get("no_agent"), False),
             stochastic=_coerce_bool(payload.get("stochastic"), False),
             device=str(payload.get("device", "auto")),
@@ -574,12 +612,18 @@ class SessionConfig:
             fill_missing_prob=_coerce_float(payload.get("fill_missing_prob"), 0.0),
             session_open=str(payload.get("session_open", "09:30")),
             session_close=str(payload.get("session_close", "16:00")),
-            ga_model_root=str(payload.get("ga_model_root", "Data/models/ga_xgboost/15min")),
+            ga_model_root=str(payload.get("ga_model_root", "Data/models/ga_xgboost/10min")),
             ga_feature_list=payload.get("ga_feature_list"),
-            ga_dataset_name=str(payload.get("ga_dataset_name", "15min")),
-            split_x_filename=str(payload.get("split_x_filename", "X_15min_tree.parquet")),
-            ga_pivot_label_dir=str(payload.get("ga_pivot_label_dir", "pivots")),
+            ga_dataset_name=str(payload.get("ga_dataset_name", "10min")),
+            split_x_filename=str(payload.get("split_x_filename", "X_10min_tree.parquet")),
+            ga_pivot_label_dir=str(payload.get("ga_pivot_label_dir", "swing")),
             ga_tb_label_dir=str(payload.get("ga_tb_label_dir", "tb")),
+            meta_entry_threshold=_coerce_float(payload.get("meta_entry_threshold"), 0.8),
+            meta_exit_threshold=_coerce_float(payload.get("meta_exit_threshold"), 0.8),
+            meta_trail_activate_atr=_coerce_float(payload.get("meta_trail_activate_atr"), 2.0),
+            meta_trail_atr=_coerce_float(payload.get("meta_trail_atr"), 1.0),
+            meta_trail_atr_after_tp=_coerce_float(payload.get("meta_trail_atr_after_tp"), 0.8),
+            meta_use_tp_to_tighten_trail=_coerce_bool(payload.get("meta_use_tp_to_tighten_trail"), True),
             env_file=str(payload.get("env_file", ".env")),
             prefill_path=payload.get("prefill_path"),
             prefill_start=str(payload.get("prefill_start", "2026-01-30")),
@@ -752,6 +796,18 @@ class DashboardStore:
         with self._lock:
             safe = _json_safe(state) if state is not None else None
             if isinstance(safe, dict):
+                last_probs = safe.get("last_probs")
+                if isinstance(last_probs, dict):
+                    for key, value in last_probs.items():
+                        safe[key] = value
+                last_prob_sources = safe.get("last_prob_sources")
+                if isinstance(last_prob_sources, dict):
+                    for key, value in last_prob_sources.items():
+                        safe[key] = value
+                last_thresholds = safe.get("last_thresholds")
+                if isinstance(last_thresholds, dict):
+                    for key, value in last_thresholds.items():
+                        safe[f"thr_{key}"] = value
                 day = safe.get("last_session_day")
                 day_key = str(day) if day is not None else None
                 today_val = _coerce_float(safe.get("realized_pnl_today"), float("nan"))
@@ -1131,16 +1187,13 @@ class LiveSession:
             end = pd.to_datetime(cfg.replay_end, utc=True, errors="coerce")
             df = df[df["timestamp"] <= end]
 
-        prepend_replay_warmup = (
-            (not cfg.replay_no_prepend_split_test_warmup)
-            and (cfg.replay_start is None)
-        )
-        if not prepend_replay_warmup and cfg.replay_start and (not cfg.replay_no_prepend_split_test_warmup):
+        prepend_replay_warmup = (not cfg.replay_no_prepend_split_test_warmup)
+        if prepend_replay_warmup and cfg.replay_start:
             self._emit(
                 "log",
                 {
                     "symbol": "SYSTEM",
-                    "message": "[replay] replay_start is set; split-test warmup prepend disabled to honor requested start.",
+                    "message": "[replay] replay_start is set; prepending split-test warmup bars for indicator/meta state seeding before requested start.",
                 },
             )
 
@@ -1212,9 +1265,10 @@ class LiveSession:
 
         agent = None
         inference = None
-        if not cfg.no_agent:
-            self._emit_status(running=True, message="replay loading PPO agent")
-            from API.Alpaca_API.inference.live_inference import LiveInferenceEngine, LivePPOAgent
+        inference_mode = "none" if cfg.no_agent else str(cfg.inference_mode or "meta").strip().lower()
+        if inference_mode != "none":
+            self._emit_status(running=True, message=f"replay loading {inference_mode} agent")
+            from API.Alpaca_API.inference.live_inference import LiveInferenceEngine, LiveMetaXGBAgent, LivePPOAgent
 
             ga_feature_list = self._resolve_ga_feature_list(cfg)
             ga_probs_frame = _load_agent_matrix_probs(symbol=symbols[0], dataset_name=cfg.ga_dataset_name)
@@ -1291,29 +1345,64 @@ class LiveSession:
                         "message": "[replay] GA-XGB feature list missing; pivot/TB probs will be zeros.",
                     },
                 )
-            agent = LivePPOAgent(
-                model_path=cfg.model_path,
-                deterministic=not cfg.stochastic,
-                device=cfg.device,
-                include_pivot_probs=not cfg.no_pivot_probs,
-                include_tb_probs=not cfg.no_tb_probs,
-                tz=cfg.tz or "America/New_York",
-                assume_tz=cfg.assume_tz,
-                session_open=cfg.session_open,
-                session_close=cfg.session_close,
-                min_15m_bars=cfg.min_15m_bars,
-                fill_missing_prob=cfg.fill_missing_prob,
-                ga_model_root=cfg.ga_model_root if ga_feature_list else None,
-                ga_feature_list_path=ga_feature_list,
-                ga_pivot_label_dir=cfg.ga_pivot_label_dir,
-                ga_tb_label_dir=cfg.ga_tb_label_dir,
-                ga_probs_frame=ga_probs_frame,
-                ga_probs_mode=ga_probs_mode,
-                require_probs=True,
-                resample_label=cfg.resample_label,
-                resample_closed=cfg.resample_closed,
-                label_timeframe_rule=f"{cfg.interval}min",
-            )
+            if inference_mode == "meta":
+                agent = LiveMetaXGBAgent(
+                    model_root=cfg.meta_model_root,
+                    ga_model_root=cfg.ga_model_root if ga_feature_list else None,
+                    ga_feature_list_path=ga_feature_list,
+                    ga_probs_frame=ga_probs_frame,
+                    ga_probs_mode=ga_probs_mode,
+                    include_pivot_probs=not cfg.no_pivot_probs,
+                    include_tb_probs=not cfg.no_tb_probs,
+                    pivot_label_dir=cfg.ga_pivot_label_dir,
+                    tb_label_dir=cfg.ga_tb_label_dir,
+                    tz=cfg.tz or "America/New_York",
+                    assume_tz=cfg.assume_tz,
+                    session_open=cfg.session_open,
+                    session_close=cfg.session_close,
+                    min_15m_bars=cfg.min_15m_bars,
+                    fill_missing_prob=cfg.fill_missing_prob,
+                    resample_label=cfg.resample_label,
+                    resample_closed=cfg.resample_closed,
+                    label_timeframe_rule=f"{cfg.interval}min",
+                    trail_activate_atr=float(cfg.meta_trail_activate_atr),
+                    trail_atr=float(cfg.meta_trail_atr),
+                    trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
+                    use_tp_to_tighten_trail=bool(cfg.meta_use_tp_to_tighten_trail),
+                    entry_threshold_override=float(cfg.meta_entry_threshold),
+                    exit_threshold_override=float(cfg.meta_exit_threshold),
+                )
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": f"[replay] Meta-XGB inference enabled: model_root={cfg.meta_model_root} timeframe={cfg.interval}min",
+                    },
+                )
+            else:
+                agent = LivePPOAgent(
+                    model_path=cfg.model_path,
+                    deterministic=not cfg.stochastic,
+                    device=cfg.device,
+                    include_pivot_probs=not cfg.no_pivot_probs,
+                    include_tb_probs=not cfg.no_tb_probs,
+                    tz=cfg.tz or "America/New_York",
+                    assume_tz=cfg.assume_tz,
+                    session_open=cfg.session_open,
+                    session_close=cfg.session_close,
+                    min_15m_bars=cfg.min_15m_bars,
+                    fill_missing_prob=cfg.fill_missing_prob,
+                    ga_model_root=cfg.ga_model_root if ga_feature_list else None,
+                    ga_feature_list_path=ga_feature_list,
+                    ga_pivot_label_dir=cfg.ga_pivot_label_dir,
+                    ga_tb_label_dir=cfg.ga_tb_label_dir,
+                    ga_probs_frame=ga_probs_frame,
+                    ga_probs_mode=ga_probs_mode,
+                    require_probs=True,
+                    resample_label=cfg.resample_label,
+                    resample_closed=cfg.resample_closed,
+                    label_timeframe_rule=f"{cfg.interval}min",
+                )
             self._store.set_agent_state(agent.snapshot_state())
             self._emit("agent_state", {"state": agent.snapshot_state()})
 
@@ -1372,14 +1461,24 @@ class LiveSession:
             if order_policies is None or symbol not in order_policies:
                 return {"simulation": True, "positions": [], "recent_orders": []}
             pol_state = order_policies[symbol].snapshot_state()
-            open_symbol = pol_state.get("open_symbol")
             positions = []
-            if open_symbol:
+            if pol_state.get("open_long_symbol"):
                 positions.append(
                     {
-                        "symbol": open_symbol,
+                        "symbol": pol_state.get("open_long_symbol"),
                         "side": "long",
-                        "qty": pol_state.get("qty"),
+                        "qty": pol_state.get("long_contracts"),
+                        "avg_entry_price": None,
+                        "market_value": None,
+                        "unrealized_pl": None,
+                    }
+                )
+            if pol_state.get("open_short_symbol"):
+                positions.append(
+                    {
+                        "symbol": pol_state.get("open_short_symbol"),
+                        "side": "short",
+                        "qty": pol_state.get("short_contracts"),
                         "avg_entry_price": None,
                         "market_value": None,
                         "unrealized_pl": None,
@@ -1513,9 +1612,19 @@ class LiveSession:
                 gate_pending_target = None
                 gate_pending_count = 0
             probs = agent.last_probs() if agent is not None else None
+            thresholds = inference.last_thresholds() if inference is not None else None
             bar_payload = dict(bar15)
             if probs:
                 bar_payload.update({k: v for k, v in probs.items() if v is not None})
+            if thresholds:
+                bar_payload.update(
+                    {
+                        "thr_enter_long": thresholds.get("enter_long"),
+                        "thr_enter_short": thresholds.get("enter_short"),
+                        "thr_exit_long": thresholds.get("exit_long"),
+                        "thr_exit_short": thresholds.get("exit_short"),
+                    }
+                )
             self._store.add_15m_bar(symbol, bar_payload)
             self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar_payload)})
             self._store.set_last_action(
@@ -1527,6 +1636,9 @@ class LiveSession:
             )
             last_exec_action_by_symbol[symbol] = selected_action_class
             agent_state = agent.snapshot_state() if agent is not None else None
+            if agent_state is not None and thresholds:
+                agent_state = dict(agent_state)
+                agent_state["last_thresholds"] = thresholds
             if agent_state is not None:
                 self._store.set_agent_state(agent_state)
             self._emit(
@@ -1664,7 +1776,7 @@ class LiveSession:
             if mode != "live":
                 raise ValueError(f"Unknown runner_mode: {cfg.runner_mode}")
 
-            from API.Alpaca_API.inference.live_inference import LiveInferenceEngine, LivePPOAgent
+            from API.Alpaca_API.inference.live_inference import LiveInferenceEngine, LiveMetaXGBAgent, LivePPOAgent
             from API.Alpaca_API.market_data.live_stream import AlpacaBarStreamer
             from API.Alpaca_API.runners import live_runner as lr
             from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
@@ -1682,21 +1794,22 @@ class LiveSession:
             feed = lr._parse_feed(cfg.feed)
             bar_queue: queue_mod.Queue = queue_mod.Queue(maxsize=cfg.queue_size)
 
-            agent: LivePPOAgent | None = None
-            if not cfg.no_agent:
+            inference_mode = "none" if cfg.no_agent else str(cfg.inference_mode or "meta").strip().lower()
+            agent: LivePPOAgent | LiveMetaXGBAgent | None = None
+            if inference_mode != "none":
                 ga_feature_list = self._resolve_ga_feature_list(cfg)
                 ga_probs_frame = (
                     _load_agent_matrix_probs(symbol=symbols[0], dataset_name=cfg.ga_dataset_name)
-                    if cfg.eval_parity_mode
+                    if cfg.eval_parity_mode and inference_mode == "ppo"
                     else None
                 )
-                if cfg.eval_parity_mode and ga_probs_frame is not None and ga_feature_list:
+                if cfg.eval_parity_mode and inference_mode == "ppo" and ga_probs_frame is not None and ga_feature_list:
                     ga_probs_mode = "hybrid"
-                elif cfg.eval_parity_mode and ga_probs_frame is not None:
+                elif cfg.eval_parity_mode and inference_mode == "ppo" and ga_probs_frame is not None:
                     ga_probs_mode = "frame"
                 else:
                     ga_probs_mode = "xgb"
-                if cfg.eval_parity_mode and ga_probs_frame is None:
+                if cfg.eval_parity_mode and inference_mode == "ppo" and ga_probs_frame is None:
                     self._emit(
                         "log",
                         {
@@ -1704,7 +1817,7 @@ class LiveSession:
                             "message": "[live] eval parity mode requested, but no agent_matrix probs were found; falling back to XGB probs.",
                         },
                     )
-                if cfg.eval_parity_mode and ga_probs_frame is not None:
+                if cfg.eval_parity_mode and inference_mode == "ppo" and ga_probs_frame is not None:
                     try:
                         src = ga_probs_frame.attrs.get("source_paths", [])
                         rng_min = ga_probs_frame.index.min()
@@ -1731,33 +1844,68 @@ class LiveSession:
                                 "message": "[live] eval parity mode using frame-only probs (no GA feature list for XGB fallback).",
                             },
                         )
-                agent = LivePPOAgent(
-                    model_path=cfg.model_path,
-                    deterministic=not cfg.stochastic,
-                    device=cfg.device,
-                    include_pivot_probs=not cfg.no_pivot_probs,
-                    include_tb_probs=not cfg.no_tb_probs,
-                    tz=cfg.tz or "America/New_York",
-                    assume_tz=cfg.assume_tz,
-                    session_open=cfg.session_open,
-                    session_close=cfg.session_close,
-                    min_15m_bars=cfg.min_15m_bars,
-                    fill_missing_prob=cfg.fill_missing_prob,
-                    ga_model_root=(
-                        cfg.ga_model_root
-                        if (ga_feature_list and ga_probs_mode != "frame")
-                        else None
-                    ),
-                    ga_feature_list_path=ga_feature_list,
-                    ga_pivot_label_dir=cfg.ga_pivot_label_dir,
-                    ga_tb_label_dir=cfg.ga_tb_label_dir,
-                    ga_probs_frame=ga_probs_frame,
-                    ga_probs_mode=ga_probs_mode,
-                    require_probs=True,
-                    resample_label=cfg.resample_label,
-                    resample_closed=cfg.resample_closed,
-                    label_timeframe_rule=f"{cfg.interval}min",
-                )
+                if inference_mode == "meta":
+                    agent = LiveMetaXGBAgent(
+                        model_root=cfg.meta_model_root,
+                        ga_model_root=cfg.ga_model_root if ga_feature_list else None,
+                        ga_feature_list_path=ga_feature_list,
+                        ga_probs_frame=ga_probs_frame,
+                        ga_probs_mode=ga_probs_mode,
+                        include_pivot_probs=not cfg.no_pivot_probs,
+                        include_tb_probs=not cfg.no_tb_probs,
+                        pivot_label_dir=cfg.ga_pivot_label_dir,
+                        tb_label_dir=cfg.ga_tb_label_dir,
+                        tz=cfg.tz or "America/New_York",
+                        assume_tz=cfg.assume_tz,
+                        session_open=cfg.session_open,
+                        session_close=cfg.session_close,
+                        min_15m_bars=cfg.min_15m_bars,
+                        fill_missing_prob=cfg.fill_missing_prob,
+                        resample_label=cfg.resample_label,
+                        resample_closed=cfg.resample_closed,
+                        label_timeframe_rule=f"{cfg.interval}min",
+                        trail_activate_atr=float(cfg.meta_trail_activate_atr),
+                        trail_atr=float(cfg.meta_trail_atr),
+                        trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
+                        use_tp_to_tighten_trail=bool(cfg.meta_use_tp_to_tighten_trail),
+                        entry_threshold_override=float(cfg.meta_entry_threshold),
+                        exit_threshold_override=float(cfg.meta_exit_threshold),
+                    )
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": f"[live] Meta-XGB inference enabled: model_root={cfg.meta_model_root} timeframe={cfg.interval}min",
+                        },
+                    )
+                else:
+                    agent = LivePPOAgent(
+                        model_path=cfg.model_path,
+                        deterministic=not cfg.stochastic,
+                        device=cfg.device,
+                        include_pivot_probs=not cfg.no_pivot_probs,
+                        include_tb_probs=not cfg.no_tb_probs,
+                        tz=cfg.tz or "America/New_York",
+                        assume_tz=cfg.assume_tz,
+                        session_open=cfg.session_open,
+                        session_close=cfg.session_close,
+                        min_15m_bars=cfg.min_15m_bars,
+                        fill_missing_prob=cfg.fill_missing_prob,
+                        ga_model_root=(
+                            cfg.ga_model_root
+                            if (ga_feature_list and ga_probs_mode != "frame")
+                            else None
+                        ),
+                        ga_feature_list_path=ga_feature_list,
+                        ga_pivot_label_dir=cfg.ga_pivot_label_dir,
+                        ga_tb_label_dir=cfg.ga_tb_label_dir,
+                        ga_probs_frame=ga_probs_frame,
+                        ga_probs_mode=ga_probs_mode,
+                        require_probs=True,
+                        resample_label=cfg.resample_label,
+                        resample_closed=cfg.resample_closed,
+                        label_timeframe_rule=f"{cfg.interval}min",
+                    )
                 self._store.set_agent_state(agent.snapshot_state())
                 self._emit("agent_state", {"state": agent.snapshot_state()})
 
@@ -1875,9 +2023,19 @@ class LiveSession:
                     gate_pending_target = None
                     gate_pending_count = 0
                 probs = agent.last_probs() if agent is not None else None
+                thresholds = inference.last_thresholds() if inference is not None else None
                 bar_payload = dict(bar15)
                 if probs:
                     bar_payload.update({k: v for k, v in probs.items() if v is not None})
+                if thresholds:
+                    bar_payload.update(
+                        {
+                            "thr_enter_long": thresholds.get("enter_long"),
+                            "thr_enter_short": thresholds.get("enter_short"),
+                            "thr_exit_long": thresholds.get("exit_long"),
+                            "thr_exit_short": thresholds.get("exit_short"),
+                        }
+                    )
                 self._store.add_15m_bar(symbol, bar_payload)
                 self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar_payload)})
                 self._store.set_last_action(
@@ -1890,6 +2048,9 @@ class LiveSession:
                 last_exec_action_by_symbol[symbol] = selected_action_class
 
                 agent_state = agent.snapshot_state() if agent is not None else None
+                if agent_state is not None and thresholds:
+                    agent_state = dict(agent_state)
+                    agent_state["last_thresholds"] = thresholds
                 if agent_state is not None:
                     self._store.set_agent_state(agent_state)
                 self._emit(

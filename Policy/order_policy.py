@@ -88,6 +88,10 @@ class OptionOrderPolicy:
         self._cutoff = _parse_hhmm(config.dte_cutoff_hhmm)
         self._client = AlpacaOptionsClient(env_file=config.env_file)
 
+        self._long_contracts = 0
+        self._short_contracts = 0
+        self._long_symbol: str | None = None
+        self._short_symbol: str | None = None
         self._pos = 0
         self._signed_contracts = 0
         self._open_symbol: str | None = None
@@ -98,6 +102,21 @@ class OptionOrderPolicy:
         self._pending_flat_bars: int = 0
         self._pending_opposite_side: int = 0
         self._pending_opposite_bars: int = 0
+
+    def _refresh_legacy_state(self) -> None:
+        self._signed_contracts = int(self._long_contracts) - int(self._short_contracts)
+        if self._long_contracts > 0 and self._short_contracts <= 0:
+            self._pos = 1
+            self._open_symbol = self._long_symbol
+        elif self._short_contracts > 0 and self._long_contracts <= 0:
+            self._pos = -1
+            self._open_symbol = self._short_symbol
+        elif self._long_contracts <= 0 and self._short_contracts <= 0:
+            self._pos = 0
+            self._open_symbol = None
+        else:
+            self._pos = 0
+            self._open_symbol = None
 
     def _to_local_ts(self, ts: Any) -> datetime:
         dt = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts))
@@ -338,6 +357,23 @@ class OptionOrderPolicy:
             max_ct = min(max_ct, int(self.cfg.max_contracts_cap))
         return max_ct, bp, price
 
+    @staticmethod
+    def _meta_threshold_value(closed_bar: dict[str, Any], *keys: str) -> float:
+        for key in keys:
+            value = _as_float(closed_bar.get(key))
+            if math.isfinite(value):
+                return value
+        return float("nan")
+
+    @classmethod
+    def _has_meta_side_thresholds(cls, closed_bar: dict[str, Any]) -> bool:
+        return (
+            math.isfinite(cls._meta_threshold_value(closed_bar, "thr_enter_long", "enter_long_threshold"))
+            and math.isfinite(cls._meta_threshold_value(closed_bar, "thr_enter_short", "enter_short_threshold"))
+            and math.isfinite(cls._meta_threshold_value(closed_bar, "thr_exit_long", "exit_long_threshold"))
+            and math.isfinite(cls._meta_threshold_value(closed_bar, "thr_exit_short", "exit_short_threshold"))
+        )
+
     def _smooth_action(self, action: float) -> float:
         alpha = min(max(float(self.cfg.ema_alpha), 0.0), 0.9999)
         if self._action_ema is None or not math.isfinite(self._action_ema):
@@ -355,7 +391,8 @@ class OptionOrderPolicy:
             positions = self._extract_positions(resp)
             under = self.cfg.underlying.strip().upper()
 
-            candidates: list[tuple[float, int, str, float]] = []
+            long_candidates: list[tuple[float, str, float]] = []
+            short_candidates: list[tuple[float, str, float]] = []
             ignored_short_count = 0
             for p in positions:
                 symbol = str(p.get("symbol", "")).strip().upper()
@@ -378,17 +415,24 @@ class OptionOrderPolicy:
                 elif math.isfinite(qty_val) and qty_val < 0:
                     side_mult = -1
 
-                # Map option position to directional policy state.
-                # Long call => +1, long put => -1, short call => -1, short put => +1.
-                pos_sign = side_mult if cp == "C" else -side_mult
                 qty_abs = abs(qty_val) if math.isfinite(qty_val) else 0.0
                 avg_entry = _as_float(p.get("avg_entry_price"))
-                candidates.append((qty_abs, pos_sign, symbol, avg_entry))
+                if qty_abs <= 0.0:
+                    continue
 
-            if not candidates:
-                self._pos = 0
-                self._signed_contracts = 0
-                self._open_symbol = None
+                # Long call => bullish bucket, long put => bearish bucket.
+                # Short option inventory is ignored when long_options_only=True.
+                if cp == "C" and side_mult > 0:
+                    long_candidates.append((qty_abs, symbol, avg_entry))
+                elif cp == "P" and side_mult > 0:
+                    short_candidates.append((qty_abs, symbol, avg_entry))
+
+            if not long_candidates and not short_candidates:
+                self._long_contracts = 0
+                self._short_contracts = 0
+                self._long_symbol = None
+                self._short_symbol = None
+                self._refresh_legacy_state()
                 self._pending_flat_side = 0
                 self._pending_flat_bars = 0
                 self._pending_opposite_side = 0
@@ -398,38 +442,53 @@ class OptionOrderPolicy:
                     "synced": True,
                     "position": 0,
                     "signed_contracts": 0,
-                    "symbol": None,
-                    "avg_entry_price": None,
+                    "long_contracts": 0,
+                    "short_contracts": 0,
+                    "long_symbol": None,
+                    "short_symbol": None,
+                    "avg_entry_price_long": None,
+                    "avg_entry_price_short": None,
                     "ignored_short_positions": ignored_short_count,
                 }
 
-            candidates.sort(key=lambda x: x[0], reverse=True)
-            qty_abs, pos_sign, symbol, _avg_entry = candidates[0]
-            self._pos = int(1 if pos_sign > 0 else -1)
-            self._signed_contracts = int(round(qty_abs)) * self._pos
-            self._open_symbol = symbol
+            long_candidates.sort(key=lambda x: x[0], reverse=True)
+            short_candidates.sort(key=lambda x: x[0], reverse=True)
+            long_qty, long_symbol, long_avg_entry = long_candidates[0] if long_candidates else (0.0, None, float("nan"))
+            short_qty, short_symbol, short_avg_entry = short_candidates[0] if short_candidates else (0.0, None, float("nan"))
+            self._long_contracts = int(round(long_qty)) if long_symbol else 0
+            self._short_contracts = int(round(short_qty)) if short_symbol else 0
+            self._long_symbol = long_symbol
+            self._short_symbol = short_symbol
+            self._refresh_legacy_state()
             self._pending_flat_side = 0
             self._pending_flat_bars = 0
             self._pending_opposite_side = 0
             self._pending_opposite_bars = 0
 
-            if len(candidates) > 1:
+            if len(long_candidates) > 1 or len(short_candidates) > 1:
                 logger(
                     f"[order_policy] Startup sync warning: multiple open {under} option positions "
-                    f"found ({len(candidates)}); using largest qty symbol={symbol}."
+                    f"found (long={len(long_candidates)}, short={len(short_candidates)}); "
+                    "using largest qty symbol per side."
                 )
             logger(
-                f"[order_policy] Startup sync: restored pos={self._pos} symbol={symbol} "
-                f"qty={qty_abs:g} signed_contracts={self._signed_contracts}"
+                f"[order_policy] Startup sync: restored long={self._long_contracts} symbol={self._long_symbol} "
+                f"short={self._short_contracts} symbol={self._short_symbol} "
+                f"signed_contracts={self._signed_contracts}"
             )
             return {
                 "synced": True,
                 "position": self._pos,
                 "signed_contracts": self._signed_contracts,
-                "symbol": symbol,
-                "qty": qty_abs,
-                "avg_entry_price": float(_avg_entry) if math.isfinite(_avg_entry) else None,
-                "multiple_positions": len(candidates) > 1,
+                "long_contracts": self._long_contracts,
+                "short_contracts": self._short_contracts,
+                "long_symbol": self._long_symbol,
+                "short_symbol": self._short_symbol,
+                "qty_long": long_qty if long_symbol else 0.0,
+                "qty_short": short_qty if short_symbol else 0.0,
+                "avg_entry_price_long": float(long_avg_entry) if math.isfinite(long_avg_entry) else None,
+                "avg_entry_price_short": float(short_avg_entry) if math.isfinite(short_avg_entry) else None,
+                "multiple_positions": (len(long_candidates) > 1 or len(short_candidates) > 1),
                 "ignored_short_positions": ignored_short_count,
             }
         except Exception as exc:
@@ -788,6 +847,10 @@ class OptionOrderPolicy:
             "position": int(self._pos),
             "signed_contracts": int(self._signed_contracts),
             "open_symbol": self._open_symbol,
+            "long_contracts": int(self._long_contracts),
+            "short_contracts": int(self._short_contracts),
+            "open_long_symbol": self._long_symbol,
+            "open_short_symbol": self._short_symbol,
             "atr": float(atr) if math.isfinite(atr) else None,
             "bars_15m": int(len(self._bars_15m)),
             "submit_orders": bool(self.cfg.submit_orders),
@@ -877,6 +940,246 @@ class OptionOrderPolicy:
             out["orders_error"] = str(exc)
         return out
 
+    def _target_contracts_for_side(
+        self,
+        *,
+        side: str,
+        closed_bar: dict[str, Any],
+    ) -> int:
+        side_key = str(side).strip().lower()
+        if side_key not in {"long", "short"}:
+            return 0
+        current_qty = self._long_contracts if side_key == "long" else self._short_contracts
+        enter_prob = _as_float(closed_bar.get(f"p_enter_{side_key}"))
+        exit_prob = _as_float(closed_bar.get(f"p_exit_{side_key}"))
+        enter_thr = self._meta_threshold_value(closed_bar, f"thr_enter_{side_key}", f"enter_{side_key}_threshold")
+        exit_thr = self._meta_threshold_value(closed_bar, f"thr_exit_{side_key}", f"exit_{side_key}_threshold")
+        desired_qty = max(0, int(self.cfg.qty))
+        if current_qty > 0:
+            if math.isfinite(exit_prob) and math.isfinite(exit_thr) and exit_prob >= exit_thr:
+                return 0
+            return desired_qty
+        if math.isfinite(enter_prob) and math.isfinite(enter_thr) and enter_prob >= enter_thr:
+            return desired_qty
+        return 0
+
+    def _select_side_contract(
+        self,
+        *,
+        side: str,
+        close: float,
+        atr: float,
+        local_ts: datetime,
+    ) -> tuple[str, str, date, float, float]:
+        option_type = "call" if side == "long" else "put"
+        strike_target = (
+            close + self.cfg.atr_multiplier * atr
+            if side == "long"
+            else close - self.cfg.atr_multiplier * atr
+        )
+        expiration = self._resolve_expiration(local_ts)
+        try:
+            contract_symbol, picked_strike = self._select_contract(
+                option_type=option_type,
+                expiration=expiration,
+                target_strike=strike_target,
+                atr=atr,
+            )
+        except Exception as exc:
+            if self.cfg.submit_orders:
+                raise
+            contract_symbol = self._sim_contract_symbol(
+                option_type=option_type,
+                expiration=expiration,
+                strike=strike_target,
+            )
+            picked_strike = strike_target
+            raise RuntimeError(
+                f"sim_fallback:{option_type}:{expiration.isoformat()}:{strike_target:.2f}:{exc}"
+            ) from exc
+        return contract_symbol, option_type, expiration, strike_target, picked_strike
+
+    def _on_independent_meta_decision(
+        self,
+        *,
+        closed_bar: dict[str, Any],
+        logger: Callable[[str], None],
+        close: float,
+        atr: float,
+        local_ts: datetime,
+    ) -> dict[str, Any]:
+        if not math.isfinite(close):
+            return {"event": "error", "reason": "invalid_close"}
+
+        target_long = self._target_contracts_for_side(side="long", closed_bar=closed_bar)
+        target_short = self._target_contracts_for_side(side="short", closed_bar=closed_bar)
+        current_long = int(self._long_contracts)
+        current_short = int(self._short_contracts)
+        side_state: dict[str, dict[str, Any]] = {
+            "long": {
+                "current": current_long,
+                "target": target_long,
+                "symbol": self._long_symbol,
+                "option_type": "call",
+            },
+            "short": {
+                "current": current_short,
+                "target": target_short,
+                "symbol": self._short_symbol,
+                "option_type": "put",
+            },
+        }
+
+        orders: list[dict[str, Any]] = []
+        side_events: list[str] = []
+        buying_power = self._get_buying_power()
+
+        for side in ("long", "short"):
+            current_qty = int(side_state[side]["current"])
+            target_qty = int(side_state[side]["target"])
+            symbol = side_state[side]["symbol"]
+            if current_qty > target_qty:
+                if not symbol:
+                    return {"event": "error", "reason": f"missing_{side}_symbol_for_close"}
+                close_qty = current_qty - target_qty
+                close_resp = self._submit_order(
+                    symbol=symbol,
+                    side="sell",
+                    intent="close",
+                    qty=close_qty,
+                    logger=logger,
+                )
+                orders.append(
+                    {
+                        "type": f"close_{side}",
+                        "side_key": side,
+                        "symbol": symbol,
+                        "qty": close_qty,
+                        "response": close_resp,
+                    }
+                )
+                side_events.append(f"close_{side}")
+                if side == "long":
+                    self._long_contracts = target_qty
+                    if target_qty == 0:
+                        self._long_symbol = None
+                else:
+                    self._short_contracts = target_qty
+                    if target_qty == 0:
+                        self._short_symbol = None
+
+        for side in ("long", "short"):
+            current_qty = int(self._long_contracts if side == "long" else self._short_contracts)
+            target_qty = int(side_state[side]["target"])
+            if target_qty <= current_qty:
+                continue
+            symbol = self._long_symbol if side == "long" else self._short_symbol
+            option_type = "call" if side == "long" else "put"
+            picked_strike = None
+            strike_target = None
+            expiration = None
+            if not symbol:
+                if not math.isfinite(atr) or atr <= 0.0:
+                    return {"event": "error", "reason": "atr_unavailable", "close": close, "atr": atr}
+                try:
+                    symbol, option_type, expiration, strike_target, picked_strike = self._select_side_contract(
+                        side=side,
+                        close=close,
+                        atr=atr,
+                        local_ts=local_ts,
+                    )
+                except RuntimeError as exc:
+                    msg = str(exc)
+                    if msg.startswith("sim_fallback:"):
+                        _, option_type, exp_str, strike_str, reason = msg.split(":", 4)
+                        expiration = date.fromisoformat(exp_str)
+                        strike_target = float(strike_str)
+                        picked_strike = strike_target
+                        symbol = self._sim_contract_symbol(
+                            option_type=option_type,
+                            expiration=expiration,
+                            strike=strike_target,
+                        )
+                        logger(
+                            "[order_policy] SIM fallback contract "
+                            f"type={option_type} exp={expiration.isoformat()} "
+                            f"strike={strike_target:.2f} reason={reason}"
+                        )
+                    else:
+                        raise
+            contracts_max, _bp_side, contract_price = self._contracts_max_for_symbol(
+                symbol=symbol,
+                logger=logger,
+            )
+            desired_final = min(target_qty, contracts_max) if contracts_max > 0 else target_qty
+            if desired_final <= current_qty:
+                continue
+            open_qty = desired_final - current_qty
+            open_resp = self._submit_order(
+                symbol=symbol,
+                side="buy",
+                intent="open",
+                qty=open_qty,
+                logger=logger,
+            )
+            orders.append(
+                {
+                    "type": f"open_{side}",
+                    "side_key": side,
+                    "symbol": symbol,
+                    "qty": open_qty,
+                    "response": open_resp,
+                    "contract_price": contract_price if math.isfinite(contract_price) else None,
+                    "selected_option_type": option_type,
+                    "expiration": expiration.isoformat() if isinstance(expiration, date) else None,
+                    "target_strike": strike_target if strike_target is not None and math.isfinite(strike_target) else None,
+                    "picked_strike": picked_strike if picked_strike is not None and math.isfinite(picked_strike) else None,
+                }
+            )
+            side_events.append(f"open_{side}")
+            if side == "long":
+                self._long_contracts = desired_final
+                self._long_symbol = symbol
+            else:
+                self._short_contracts = desired_final
+                self._short_symbol = symbol
+
+        self._refresh_legacy_state()
+        if not orders:
+            return {
+                "event": "hold",
+                "mode": "independent_meta",
+                "position": int(self._pos),
+                "signed_contracts": int(self._signed_contracts),
+                "long_contracts": int(self._long_contracts),
+                "short_contracts": int(self._short_contracts),
+                "open_long_symbol": self._long_symbol,
+                "open_short_symbol": self._short_symbol,
+                "target_long_contracts": int(target_long),
+                "target_short_contracts": int(target_short),
+                "buying_power": buying_power if math.isfinite(buying_power) else None,
+                "close": close,
+                "atr": atr,
+            }
+
+        event = "multi_update" if len(side_events) > 1 else side_events[0]
+        return {
+            "event": event,
+            "mode": "independent_meta",
+            "position": int(self._pos),
+            "signed_contracts": int(self._signed_contracts),
+            "long_contracts": int(self._long_contracts),
+            "short_contracts": int(self._short_contracts),
+            "open_long_symbol": self._long_symbol,
+            "open_short_symbol": self._short_symbol,
+            "target_long_contracts": int(target_long),
+            "target_short_contracts": int(target_short),
+            "buying_power": buying_power if math.isfinite(buying_power) else None,
+            "orders": orders,
+            "close": close,
+            "atr": atr,
+        }
+
     def on_decision(
         self,
         *,
@@ -913,6 +1216,14 @@ class OptionOrderPolicy:
 
             if not math.isfinite(close):
                 return {"event": "error", "reason": "invalid_close"}
+            if self._has_meta_side_thresholds(closed_bar):
+                return self._on_independent_meta_decision(
+                    closed_bar=closed_bar,
+                    logger=logger,
+                    close=close,
+                    atr=atr,
+                    local_ts=local_ts,
+                )
             current_signed = int(self._signed_contracts)
             current_pos = 1 if current_signed > 0 else (-1 if current_signed < 0 else 0)
 
@@ -1191,6 +1502,20 @@ class OptionOrderPolicy:
             self._pos = 1 if self._signed_contracts > 0 else (-1 if self._signed_contracts < 0 else 0)
             if self._signed_contracts == 0:
                 self._open_symbol = None
+                self._long_contracts = 0
+                self._short_contracts = 0
+                self._long_symbol = None
+                self._short_symbol = None
+            elif self._signed_contracts > 0:
+                self._long_contracts = int(abs(self._signed_contracts))
+                self._short_contracts = 0
+                self._long_symbol = self._open_symbol
+                self._short_symbol = None
+            else:
+                self._long_contracts = 0
+                self._short_contracts = int(abs(self._signed_contracts))
+                self._long_symbol = None
+                self._short_symbol = self._open_symbol
 
             if current_signed == 0 and self._signed_contracts != 0:
                 event = "enter"

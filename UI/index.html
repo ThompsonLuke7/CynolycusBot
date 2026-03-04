@@ -194,7 +194,7 @@
 <body>
   <div class="page">
     <div class="top">
-      <h1>Live / Replay Runner Dashboard</h1>
+      <h1>10min Meta Runner Dashboard</h1>
       <div id="statusBadge" class="status">idle</div>
     </div>
 
@@ -203,8 +203,9 @@
         <div class="field"><label>Mode</label><select id="runnerMode"><option value="live">Live</option><option value="replay">Replay</option></select></div>
         <div class="field"><label>Symbols</label><input id="symbols" value="SPY" /></div>
         <div class="field"><label>Feed</label><select id="feed"><option value="IEX">IEX</option><option value="SIP">SIP</option></select></div>
-        <div class="field"><label>Interval (min)</label><input id="interval" type="number" value="15" min="1" /></div>
-        <div class="field"><label>Model Path</label><input id="modelPath" value="Data/outputs/agent/ppo_model.pt" /></div>
+        <div class="field"><label>Interval (min)</label><input id="interval" type="number" value="10" min="1" /></div>
+        <div class="field"><label>Signal Model</label><input value="Meta-XGB (10min)" disabled /></div>
+        <div class="field"><label>Meta Model Root</label><input id="metaModelRoot" value="Data/models/meta_xgboost/10min" /></div>
         <div class="field"><label>Live Prefill Start</label><input id="prefillStart" value="2026-01-30" /></div>
         <div class="field"><label>Env File</label><input id="envFile" value=".env" /></div>
         <div class="field"><label>Replay Data Path</label><input id="replayDataPath" value="Data/raw/spy/inference_buffer_1m.parquet" /></div>
@@ -217,8 +218,6 @@
         <div class="checks">
           <label><input id="enableOrders" type="checkbox" /> Option Orders</label>
           <label><input id="simulateOrders" type="checkbox" checked /> Simulate</label>
-          <label><input id="noAgent" type="checkbox" /> No Agent</label>
-          <label><input id="evalParityMode" type="checkbox" /> Eval Parity Mode</label>
           <label><input id="startupCatchupOrder" type="checkbox" /> Startup Catch-up Order</label>
           <label><input id="replayRegularOnly" type="checkbox" /> Replay RTH Only</label>
           <label><input id="replayNoWarmup" type="checkbox" /> Replay No Warmup</label>
@@ -240,7 +239,7 @@
         <div class="chart-wrap"><canvas id="chart"></canvas></div>
       </div>
       <div class="card">
-        <div style="font-weight:700;padding-bottom:8px;">Agent / Position State</div>
+        <div style="font-weight:700;padding-bottom:8px;">Meta / Position State</div>
         <div id="meta" class="meta"></div>
         <div style="font-weight:700;padding:12px 0 8px;">Broker Positions / Orders</div>
         <div id="brokerPanel" class="list"></div>
@@ -361,6 +360,30 @@
       if (symbols.includes(prev)) symbolSelect.value = prev;
     }
 
+    function normalizeAgentState(agentState) {
+      if (!agentState || typeof agentState !== "object") return agentState;
+      const out = { ...agentState };
+      const lastProbs = out.last_probs;
+      if (lastProbs && typeof lastProbs === "object") {
+        Object.entries(lastProbs).forEach(([key, value]) => {
+          out[key] = value;
+        });
+      }
+      const lastThresholds = out.last_thresholds;
+      if (lastThresholds && typeof lastThresholds === "object") {
+        Object.entries(lastThresholds).forEach(([key, value]) => {
+          out[`thr_${key}`] = value;
+        });
+      }
+      const lastProbSources = out.last_prob_sources;
+      if (lastProbSources && typeof lastProbSources === "object") {
+        Object.entries(lastProbSources).forEach(([key, value]) => {
+          out[key] = value;
+        });
+      }
+      return out;
+    }
+
     function renderMeta() {
       const sym = symbolSelect.value || state.symbols?.[0] || "SPY";
       const action = state.last_actions?.[sym];
@@ -388,12 +411,26 @@
         ["Symbol", sym],
         ["Last Action", lastActionText],
         ["Action Time", action ? String(action.timestamp || "-") : "-"],
-        ["Action Mix (-1/0/+1)", `${cNeg}/${c0}/${cPos}`],
-        ["Policy Pos", pol.position ?? "-"],
-        ["Open Contract", pol.open_symbol || "-"],
-        ["Policy ATR", pol.atr ?? "-"],
-        ["Agent Pos", ag.position ?? "-"],
+        ["Recent Signal Mix (-1/0/+1)", `${cNeg}/${c0}/${cPos}`],
+        ["Net Position", pol.position ?? "-"],
+        ["Open Long", pol.open_long_symbol || "-"],
+        ["Open Short", pol.open_short_symbol || "-"],
+        ["Long Contracts", pol.long_contracts ?? "-"],
+        ["Short Contracts", pol.short_contracts ?? "-"],
+        ["ATR", pol.atr ?? "-"],
         ["Entry Price", ag.entry_price ?? "-"],
+        ["p_enter_long", ag.p_enter_long ?? "-"],
+        ["p_enter_short", ag.p_enter_short ?? "-"],
+        ["p_exit_long", ag.p_exit_long ?? "-"],
+        ["p_exit_short", ag.p_exit_short ?? "-"],
+        ["p_pivot_long_source", ag.p_pivot_long_source ?? "-"],
+        ["p_pivot_short_source", ag.p_pivot_short_source ?? "-"],
+        ["p_tb_long_source", ag.p_tb_long_source ?? "-"],
+        ["p_tb_short_source", ag.p_tb_short_source ?? "-"],
+        ["thr_enter_long", ag.thr_enter_long ?? "-"],
+        ["thr_enter_short", ag.thr_enter_short ?? "-"],
+        ["thr_exit_long", ag.thr_exit_long ?? "-"],
+        ["thr_exit_short", ag.thr_exit_short ?? "-"],
         ["Unrealized PnL", ag.unrealized_pnl ?? "-"],
         ["Realized Today", ag.realized_pnl_today ?? "-"],
         ["Realized Total", ag.realized_pnl_total ?? "-"],
@@ -494,6 +531,10 @@
       })).filter((x) => Number.isFinite(x.open) && Number.isFinite(x.high) && Number.isFinite(x.low) && Number.isFinite(x.close) && !Number.isNaN(x.t.getTime()));
       const probs = (state.bars_15m?.[sym] || []).slice(-140).map((x) => ({
         t: new Date(x.timestamp),
+        p_enter_long: Number(x.p_enter_long),
+        p_enter_short: Number(x.p_enter_short),
+        p_exit_long: Number(x.p_exit_long),
+        p_exit_short: Number(x.p_exit_short),
         p_pivot_long: Number(x.p_pivot_long),
         p_pivot_short: Number(x.p_pivot_short),
         p_tb_long: Number(x.p_tb_long),
@@ -628,7 +669,7 @@
       }
 
       const pane1 = drawPane(one, pane1Y, pane1H, "Top: 1m candles", false);
-      const pane2 = drawPane(fifteen, pane2Y, pane2H, "Middle: 15m candles", true);
+      const pane2 = drawPane(fifteen, pane2Y, pane2H, "Middle: 10m candles", true);
 
       function drawProbPane(series, y0, paneHeight, label) {
         if (!series.length) {
@@ -667,13 +708,24 @@
         ctx.lineTo(w - right, y0 + paneHeight);
         ctx.stroke();
 
-        const colors = {
-          p_pivot_long: "#3b82f6",
-          p_pivot_short: "#f59e0b",
-          p_tb_long: "#10b981",
-          p_tb_short: "#ef4444"
-        };
-        const keys = ["p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short"];
+        const metaKeys = ["p_enter_long", "p_enter_short", "p_exit_long", "p_exit_short"];
+        const metaPresent = series.some((row) => metaKeys.some((key) => Number.isFinite(row[key])));
+        const colors = metaPresent
+          ? {
+              p_enter_long: "#3b82f6",
+              p_enter_short: "#f59e0b",
+              p_exit_long: "#10b981",
+              p_exit_short: "#ef4444"
+            }
+          : {
+              p_pivot_long: "#3b82f6",
+              p_pivot_short: "#f59e0b",
+              p_tb_long: "#10b981",
+              p_tb_short: "#ef4444"
+            };
+        const keys = metaPresent
+          ? ["p_enter_long", "p_enter_short", "p_exit_long", "p_exit_short"]
+          : ["p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short"];
         keys.forEach((key) => {
           ctx.strokeStyle = colors[key];
           ctx.lineWidth = 1.2;
@@ -735,7 +787,15 @@
         return { series, toX, toY, y0, paneHeight };
       }
 
-      const pane3 = drawProbPane(probs, pane3Y, pane3H, "Bottom: 15m probs");
+      const hasMetaProbSeries = probs.some((row) =>
+        ["p_enter_long", "p_enter_short", "p_exit_long", "p_exit_short"].some((key) => Number.isFinite(row[key]))
+      );
+      const pane3 = drawProbPane(
+        probs,
+        pane3Y,
+        pane3H,
+        hasMetaProbSeries ? "Bottom: 10m meta probs" : "Bottom: 10m GA probs"
+      );
 
       const actionsAll = (state.action_events || [])
         .filter((a) => a && a.symbol === sym && a.timestamp)
@@ -993,7 +1053,7 @@
             close: p.close
           });
           if (state.action_events.length > 5000) state.action_events = state.action_events.slice(-5000);
-          if (p.agent_state) state.agent_state = p.agent_state;
+          if (p.agent_state) state.agent_state = normalizeAgentState(p.agent_state);
         } else if (evt.type === "order_policy") {
           state.policy_state = state.policy_state || {};
           state.policy_state[p.symbol] = p.policy_state;
@@ -1014,7 +1074,7 @@
         } else if (evt.type === "log") {
           state.logs = [...(state.logs || []), p].slice(-400);
         } else if (evt.type === "agent_state" && p.state) {
-          state.agent_state = p.state;
+          state.agent_state = normalizeAgentState(p.state);
         } else if (evt.type === "startup_sync") {
           state.logs = [...(state.logs || []), { symbol: p.symbol || "SYSTEM", message: `startup_sync ${JSON.stringify(p.result || {})}` }].slice(-400);
         }
@@ -1026,10 +1086,12 @@
       const replayMaxRaw = document.getElementById("replayMaxBars").value;
       return {
         runner_mode: document.getElementById("runnerMode").value,
+        inference_mode: "meta",
         symbols: document.getElementById("symbols").value,
         feed: document.getElementById("feed").value,
         interval: Number(document.getElementById("interval").value),
-        model_path: document.getElementById("modelPath").value,
+        model_path: null,
+        meta_model_root: document.getElementById("metaModelRoot").value,
         prefill_start: document.getElementById("prefillStart").value,
         replay_data_path: document.getElementById("replayDataPath").value,
         replay_start: document.getElementById("replayStart").value || null,
@@ -1042,8 +1104,8 @@
         env_file: document.getElementById("envFile").value,
         enable_option_orders: document.getElementById("enableOrders").checked,
         simulate_orders: document.getElementById("simulateOrders").checked,
-        no_agent: document.getElementById("noAgent").checked,
-        eval_parity_mode: document.getElementById("evalParityMode").checked,
+        no_agent: false,
+        eval_parity_mode: false,
         startup_catchup_order: document.getElementById("startupCatchupOrder").checked,
         startup_catchup_max_age_min: Number(document.getElementById("startupCatchupMaxAgeMin").value || 120)
       };

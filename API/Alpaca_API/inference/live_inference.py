@@ -394,7 +394,10 @@ def build_meta_feature_frame_from_1m(
     session_open: str = "09:30",
     session_close: str = "16:00",
     ga_predictor: LiveGAXGBPredictor | None = None,
+    ga_probs_frame: pd.DataFrame | None = None,
+    ga_probs_mode: str = "xgb",
 ) -> pd.DataFrame:
+    prob_cols = ("p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short")
     df_tf = build_15m(
         df_1m,
         rule=rule,
@@ -405,6 +408,7 @@ def build_meta_feature_frame_from_1m(
     )
     if df_tf.empty:
         return df_tf
+    prob_sources = pd.DataFrame(index=df_tf.index)
 
     if ga_predictor is not None:
         try:
@@ -419,13 +423,58 @@ def build_meta_feature_frame_from_1m(
             if not x_tree.empty:
                 probs_df = ga_predictor.predict_frame(x_tree)
                 for col in probs_df.columns:
-                    df_tf[col] = probs_df[col].reindex(df_tf.index)
+                    aligned = pd.to_numeric(probs_df[col].reindex(df_tf.index), errors="coerce")
+                    df_tf[col] = aligned
+                    if col in prob_cols:
+                        prob_sources[col] = np.where(aligned.notna(), "xgb", None)
         except Exception as exc:
             print(f"[live] GA-XGB inference failed: {exc}")
 
-    for col in ("p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short"):
-        if col in df_tf.columns:
-            df_tf[col] = pd.to_numeric(df_tf[col], errors="coerce").fillna(float(fill_missing_prob))
+    if ga_probs_frame is not None and not ga_probs_frame.empty:
+        idx = ga_probs_frame.index
+        if isinstance(idx, pd.DatetimeIndex):
+            base = ga_probs_frame
+            if idx.tz is None:
+                base = base.copy()
+                base.index = base.index.tz_localize(assume_tz)
+            if tz is not None:
+                base = base.copy()
+                base.index = base.index.tz_convert(tz)
+            aligned = base.reindex(df_tf.index)
+            for col in prob_cols:
+                if col not in aligned.columns:
+                    continue
+                aligned_col = pd.to_numeric(aligned[col], errors="coerce")
+                existing = (
+                    pd.to_numeric(df_tf[col], errors="coerce")
+                    if col in df_tf.columns
+                    else pd.Series(np.nan, index=df_tf.index, dtype=float)
+                )
+                df_tf[col] = existing.where(aligned_col.isna(), aligned_col)
+                existing_src = (
+                    prob_sources[col]
+                    if col in prob_sources.columns
+                    else pd.Series(index=df_tf.index, dtype=object)
+                )
+                prob_sources[col] = existing_src.where(aligned_col.isna(), "frame")
+
+    for col in prob_cols:
+        if col not in df_tf.columns:
+            df_tf[col] = float(fill_missing_prob)
+            prob_sources[col] = "fill"
+            continue
+        numeric = pd.to_numeric(df_tf[col], errors="coerce")
+        missing = numeric.isna()
+        if missing.any():
+            numeric = numeric.fillna(float(fill_missing_prob))
+        df_tf[col] = numeric
+        existing_src = (
+            prob_sources[col]
+            if col in prob_sources.columns
+            else pd.Series(index=df_tf.index, dtype=object)
+        )
+        prob_sources[col] = existing_src.where(~missing, "fill")
+        prob_sources[col] = prob_sources[col].fillna("fill")
 
     feat_df = build_agent_feature_frame_from_15m(
         df_tf,
@@ -441,6 +490,7 @@ def build_meta_feature_frame_from_1m(
     )
     if feat_df.empty:
         return feat_df
+    feat_df.attrs["ga_prob_sources"] = prob_sources
 
     if "atr" not in feat_df.columns:
         feat_df["atr"] = ta.atr(feat_df["high"], feat_df["low"], feat_df["close"], length=14)
@@ -500,6 +550,7 @@ class LiveGAXGBPredictor:
         candidates = []
         base_side = self._model_root / side.lower()
         if label_dir:
+            candidates.append(base_side / label_dir)
             candidates.append(base_side / "probs" / label_dir)
         candidates.append(base_side)
 
@@ -668,6 +719,10 @@ class LiveMetaXGBAgent:
         trail_atr: float = 1.0,
         trail_atr_after_tp: float = 0.8,
         use_tp_to_tighten_trail: bool = True,
+        entry_threshold_override: float | None = 0.8,
+        exit_threshold_override: float | None = 0.8,
+        ga_probs_frame: pd.DataFrame | None = None,
+        ga_probs_mode: str = "xgb",
     ) -> None:
         self._model_root = Path(model_root)
         self._include_pivot_probs = bool(include_pivot_probs)
@@ -687,8 +742,21 @@ class LiveMetaXGBAgent:
         self._trail_atr = float(trail_atr)
         self._trail_atr_after_tp = float(trail_atr_after_tp)
         self._use_tp_to_tighten_trail = bool(use_tp_to_tighten_trail)
+        self._ga_probs_frame = ga_probs_frame
+        self._ga_probs_mode = str(ga_probs_mode or "xgb").strip().lower()
+        self._entry_threshold_override = (
+            float(entry_threshold_override)
+            if entry_threshold_override is not None and np.isfinite(entry_threshold_override)
+            else None
+        )
+        self._exit_threshold_override = (
+            float(exit_threshold_override)
+            if exit_threshold_override is not None and np.isfinite(exit_threshold_override)
+            else None
+        )
         self._state = _MetaTradeState()
         self._last_probs: dict[str, float | None] | None = None
+        self._last_prob_sources: dict[str, str | None] | None = None
 
         self._ga_predictor: LiveGAXGBPredictor | None = None
         if (self._include_pivot_probs or self._include_tb_probs) and ga_model_root and ga_feature_list_path:
@@ -707,6 +775,12 @@ class LiveMetaXGBAgent:
         self._exit_short = _LiveXGBArtifact(self._model_root / "exit" / "short")
         self._entry_thresholds = self._load_thresholds(self._model_root / "entry" / "entry_thresholds.json")
         self._exit_thresholds = self._load_thresholds(self._model_root / "exit" / "exit_thresholds.json")
+        if self._entry_threshold_override is not None:
+            self._entry_thresholds["enter_long"] = float(self._entry_threshold_override)
+            self._entry_thresholds["enter_short"] = float(self._entry_threshold_override)
+        if self._exit_threshold_override is not None:
+            self._exit_thresholds["exit_long"] = float(self._exit_threshold_override)
+            self._exit_thresholds["exit_short"] = float(self._exit_threshold_override)
 
     @staticmethod
     def _load_thresholds(path: Path) -> dict[str, float]:
@@ -765,7 +839,25 @@ class LiveMetaXGBAgent:
             session_open=self._session_open,
             session_close=self._session_close,
             ga_predictor=self._ga_predictor,
+            ga_probs_frame=self._ga_probs_frame,
+            ga_probs_mode=self._ga_probs_mode,
         )
+
+    @staticmethod
+    def _extract_last_prob_sources(base_frame: pd.DataFrame, ts: pd.Timestamp) -> dict[str, str | None] | None:
+        src_df = base_frame.attrs.get("ga_prob_sources")
+        if not isinstance(src_df, pd.DataFrame) or src_df.empty:
+            return None
+        if ts not in src_df.index:
+            return None
+        row = src_df.loc[ts]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[-1]
+        out: dict[str, str | None] = {}
+        for key in ("p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short"):
+            value = row.get(key)
+            out[f"{key}_source"] = None if pd.isna(value) else str(value)
+        return out
 
     def _annotate_current_context(self, row: pd.Series) -> pd.Series:
         out = row.copy()
@@ -947,6 +1039,7 @@ class LiveMetaXGBAgent:
             self._advance_state(action=side, row=row)
 
         last_row = base_frame.iloc[-1].copy()
+        self._last_prob_sources = self._extract_last_prob_sources(base_frame, last_row.name)
         p_enter_long = self._entry_long.predict_row(base_frame.tail(1), target_ts=last_row.name)
         p_enter_short = self._entry_short.predict_row(base_frame.tail(1), target_ts=last_row.name)
         last_row["p_enter_long_oof"] = p_enter_long
@@ -994,6 +1087,7 @@ class LiveMetaXGBAgent:
             ts = self._normalize_ts(pd.to_datetime(ts, utc=True, errors="coerce"), assume_tz=self._assume_tz, tz=self._tz)
         row_df = base_frame.loc[[ts]] if ts is not None and ts in base_frame.index else base_frame.tail(1)
         row = row_df.iloc[-1].copy()
+        self._last_prob_sources = self._extract_last_prob_sources(base_frame, row.name)
 
         p_enter_long = self._entry_long.predict_row(row_df, target_ts=row.name)
         p_enter_short = self._entry_short.predict_row(row_df, target_ts=row.name)
@@ -1070,6 +1164,7 @@ class LiveMetaXGBAgent:
             for key, value in list(self._last_probs.items()):
                 if not np.isfinite(value):
                     self._last_probs[key] = None
+            self._last_prob_sources = self._extract_last_prob_sources(base_frame, row.name)
             self._advance_state(action=action, row=row)
             out.append({"timestamp": row.name, "action": float(action), "close": float(row.get("close", np.nan))})
         return out
@@ -1080,10 +1175,19 @@ class LiveMetaXGBAgent:
             "entry_price": float(self._state.entry_price) if np.isfinite(self._state.entry_price) else None,
             "time_in_position": int(self._state.bars_since_entry),
             "last_probs": self._last_probs,
+            "last_prob_sources": self._last_prob_sources,
         }
 
     def last_probs(self) -> dict[str, float | None] | None:
         return self._last_probs
+
+    def last_thresholds(self) -> dict[str, float] | None:
+        return {
+            "enter_long": float(self._entry_thresholds.get("enter_long", float("nan"))),
+            "enter_short": float(self._entry_thresholds.get("enter_short", float("nan"))),
+            "exit_long": float(self._exit_thresholds.get("exit_long", float("nan"))),
+            "exit_short": float(self._exit_thresholds.get("exit_short", float("nan"))),
+        }
 
 
 @dataclass
@@ -1757,6 +1861,14 @@ class LiveInferenceEngine:
         if self._agent is None:
             return None
         getter = getattr(self._agent, "last_probs", None)
+        if getter is None:
+            return None
+        return getter()
+
+    def last_thresholds(self) -> dict[str, float] | None:
+        if self._agent is None:
+            return None
+        getter = getattr(self._agent, "last_thresholds", None)
         if getter is None:
             return None
         return getter()

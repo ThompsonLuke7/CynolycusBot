@@ -116,6 +116,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--entry-root", type=str, default=None)
     p.add_argument("--entry-long-threshold", type=float, default=None)
     p.add_argument("--entry-short-threshold", type=float, default=None)
+    p.add_argument("--fixed-long-threshold", type=float, default=None)
+    p.add_argument("--fixed-short-threshold", type=float, default=None)
     p.add_argument("--trail-activate-atr", type=float, default=2.0)
     p.add_argument("--trail-atr", type=float, default=1.0)
     p.add_argument("--trail-atr-after-tp", type=float, default=0.8)
@@ -194,6 +196,8 @@ def run_exit_pipeline(
     entry_root: Path,
     entry_long_threshold: float | None,
     entry_short_threshold: float | None,
+    fixed_long_threshold: float | None,
+    fixed_short_threshold: float | None,
     trail_activate_atr: float,
     trail_atr: float,
     trail_atr_after_tp: float,
@@ -280,6 +284,7 @@ def run_exit_pipeline(
     target_setup = {
         "y_exit_long": (
             "p_exit_long",
+            fixed_long_threshold,
             frame["in_long_trade"].fillna(0).astype(int).to_numpy() == 1,
             compute_exit_embargo_end_idx(
                 frame,
@@ -301,6 +306,7 @@ def run_exit_pipeline(
         ),
         "y_exit_short": (
             "p_exit_short",
+            fixed_short_threshold,
             frame["in_short_trade"].fillna(0).astype(int).to_numpy() == 1,
             compute_exit_embargo_end_idx(
                 frame,
@@ -331,7 +337,7 @@ def run_exit_pipeline(
     loss_histories: dict[str, dict[str, list[float]] | None] = {}
     feature_columns_by_target: dict[str, list[str]] = {}
 
-    for target_col, (prob_prefix, active_mask, embargo_end_idx, exclude_cols) in target_setup.items():
+    for target_col, (prob_prefix, fixed_threshold, active_mask, embargo_end_idx, exclude_cols) in target_setup.items():
         key = summary_key[target_col]
         print(f"[META-EXIT] Training {key}")
         feature_cols = select_numeric_feature_columns(frame, exclude=exclude_cols)
@@ -348,15 +354,27 @@ def run_exit_pipeline(
         )
         y = pd.to_numeric(frame[target_col], errors="coerce").fillna(0).astype(np.int8).to_numpy()
         sweep = sweep_thresholds(y_true=y[result.valid_mask], probs=result.oof_probs[result.valid_mask], cfg=cfg)
-        threshold, best_row = choose_threshold(sweep, objective=cfg.threshold_objective)
+        best_f1_threshold, best_row = choose_threshold(sweep, objective="f1")
+        if fixed_threshold is not None:
+            threshold = float(fixed_threshold)
+            threshold_row = sweep.iloc[(sweep["threshold"] - threshold).abs().argmin()].to_dict()
+            threshold_source = "fixed_threshold"
+            selection_objective = "fixed"
+        else:
+            threshold = float(best_f1_threshold)
+            threshold_row = dict(best_row)
+            threshold_source = "best_f1_sweep"
+            selection_objective = "f1"
         train_metrics = binary_metrics(y[result.valid_mask], result.full_probs[result.valid_mask], threshold=threshold)
         oof_metrics = binary_metrics(y[result.valid_mask], result.oof_probs[result.valid_mask], threshold=threshold)
         metrics_summary[key] = {"full": train_metrics, "oof": oof_metrics}
         loss_histories[key] = result.eval_history
         threshold_summary[key] = {
             "threshold": float(threshold),
-            "selection_objective": "f1",
-            **best_row,
+            "threshold_source": threshold_source,
+            "selection_objective": selection_objective,
+            "best_f1_sweep_threshold": float(best_f1_threshold),
+            **threshold_row,
         }
         print(
             f"[META-EXIT] {key}: threshold={float(threshold):.4f} "
@@ -442,6 +460,8 @@ def run_exit_pipeline(
             "entry_root": str(entry_root),
             "entry_long_threshold": float(long_thr),
             "entry_short_threshold": float(short_thr),
+            "fixed_long_threshold": float(fixed_long_threshold) if fixed_long_threshold is not None else None,
+            "fixed_short_threshold": float(fixed_short_threshold) if fixed_short_threshold is not None else None,
             "trail_activate_atr": float(trail_activate_atr),
             "trail_atr": float(trail_atr),
             "trail_atr_after_tp": float(trail_atr_after_tp),
@@ -491,6 +511,8 @@ def main() -> None:
         entry_root=_entry_root(cfg, args.entry_root),
         entry_long_threshold=args.entry_long_threshold,
         entry_short_threshold=args.entry_short_threshold,
+        fixed_long_threshold=args.fixed_long_threshold,
+        fixed_short_threshold=args.fixed_short_threshold,
         trail_activate_atr=float(args.trail_activate_atr),
         trail_atr=float(args.trail_atr),
         trail_atr_after_tp=float(args.trail_atr_after_tp),

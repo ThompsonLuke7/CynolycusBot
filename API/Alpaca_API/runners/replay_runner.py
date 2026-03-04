@@ -4,8 +4,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..inference.live_inference import LiveInferenceEngine, LivePPOAgent
-from .live_runner import LiveBarProcessor, _format_ts_local, _load_test_split_warmup_1m
+from ..inference.live_inference import LiveInferenceEngine, LiveMetaXGBAgent, LivePPOAgent
+from .live_runner import (
+    LiveBarProcessor,
+    _action_to_position,
+    _fmt_prob,
+    _format_ts_local,
+    _load_test_split_warmup_1m,
+)
+from Policy.execution_latch import DirectionExecutionLatch
 from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
 
 
@@ -53,30 +60,70 @@ def _apply_regular_hours(df: pd.DataFrame, *, tz: str = "America/New_York") -> p
     return df.loc[regular_mask].copy()
 
 
-def _make_15m_handler(
+def _print_meta_prob_log(*, prefix: str, probs: dict[str, float | None] | None, thresholds: dict[str, float] | None) -> None:
+    if not probs and not thresholds:
+        return
+    probs = probs or {}
+    thresholds = thresholds or {}
+    print(
+        f"{prefix} "
+        f"p_enter_long={_fmt_prob(probs.get('p_enter_long'))} thr_enter_long={_fmt_prob(thresholds.get('enter_long'))} "
+        f"p_enter_short={_fmt_prob(probs.get('p_enter_short'))} thr_enter_short={_fmt_prob(thresholds.get('enter_short'))} "
+        f"p_exit_long={_fmt_prob(probs.get('p_exit_long'))} thr_exit_long={_fmt_prob(thresholds.get('exit_long'))} "
+        f"p_exit_short={_fmt_prob(probs.get('p_exit_short'))} thr_exit_short={_fmt_prob(thresholds.get('exit_short'))}"
+    )
+
+
+def _make_close_handler(
     *,
     inference: LiveInferenceEngine,
-    print_15m: bool,
+    interval_minutes: int,
+    print_close: bool,
     print_tz: str,
+    execution_latches: dict[str, DirectionExecutionLatch],
     order_policies: dict[str, OptionOrderPolicy] | None = None,
 ):
-    def _handler(symbol: str, bar15: dict, buffer) -> None:
-        if print_15m:
-            ts = _format_ts_local(bar15.get("timestamp"), tz=print_tz)
+    def _handler(symbol: str, closed_bar: dict, buffer) -> None:
+        if print_close:
+            ts = _format_ts_local(closed_bar.get("timestamp"), tz=print_tz)
             print(
-                f"{symbol} 15m closed: {ts} "
-                f"o={bar15.get('open')} h={bar15.get('high')} "
-                f"l={bar15.get('low')} c={bar15.get('close')} v={bar15.get('volume')}"
+                f"{symbol} {interval_minutes}m closed: {ts} "
+                f"o={closed_bar.get('open')} h={closed_bar.get('high')} "
+                f"l={closed_bar.get('low')} c={closed_bar.get('close')} v={closed_bar.get('volume')}"
             )
         if order_policies is not None and symbol in order_policies:
-            order_policies[symbol].on_15m_bar(closed_bar=bar15)
-        action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
+            order_policies[symbol].on_15m_bar(closed_bar=closed_bar)
+        action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=closed_bar)
         if action is not None:
-            print(f"{symbol} inference action: {float(action):+.4f}")
+            raw_action = float(action)
+            raw_pos = _action_to_position(raw_action)
+            gate = execution_latches[symbol].step(raw_pos)
+            exec_pos = int(gate.executed_pos)
+            probs = inference.last_probs() or {}
+            thresholds = inference.last_thresholds() or {}
+            _print_meta_prob_log(
+                prefix=f"{symbol} meta:",
+                probs=probs,
+                thresholds=thresholds,
+            )
+            print(
+                f"{symbol} inference raw={raw_action:+.4f} raw_pos={raw_pos:+d} "
+                f"exec={exec_pos:+d} gate={gate.status}"
+            )
             if order_policies is not None and symbol in order_policies:
+                policy_bar = dict(closed_bar)
+                policy_bar.update({k: v for k, v in probs.items() if v is not None})
+                policy_bar.update(
+                    {
+                        "thr_enter_long": thresholds.get("enter_long"),
+                        "thr_enter_short": thresholds.get("enter_short"),
+                        "thr_exit_long": thresholds.get("exit_long"),
+                        "thr_exit_short": thresholds.get("exit_short"),
+                    }
+                )
                 result = order_policies[symbol].on_decision(
-                    action=float(action),
-                    closed_bar=bar15,
+                    action=float(exec_pos),
+                    closed_bar=policy_bar,
                     update_bar_state=False,
                 )
                 event = str(result.get("event", "unknown"))
@@ -103,11 +150,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-bars", type=int, default=None, help="Max bars to replay.")
     parser.add_argument("--buffer-size", type=int, default=5000, help="Ring buffer size.")
     parser.add_argument("--print-1m", action="store_true", help="Print each 1m bar.")
-    parser.add_argument("--print-15m", action="store_true", help="Print completed 15m bars.")
+    parser.add_argument("--print-15m", action="store_true", help="Print completed interval bars.")
     parser.add_argument("--resample-label", default="left", help="Resample label (left/right).")
     parser.add_argument("--resample-closed", default="left", help="Resample closed (left/right).")
     parser.add_argument("--tz", default="America/New_York", help="Timezone for resampling.")
     parser.add_argument("--assume-tz", default="UTC", help="Assume timezone for naive timestamps.")
+    parser.add_argument("--inference-mode", choices=["meta", "ppo", "none"], default="meta", help="Inference controller to run.")
+    parser.add_argument("--interval", type=int, default=10, help="Aggregation interval in minutes.")
     parser.add_argument("--model-path", default="Data/outputs/agent/ppo_model.pt", help="PPO model checkpoint.")
     parser.add_argument("--no-agent", action="store_true", help="Disable PPO inference.")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions from policy (default is deterministic mean).")
@@ -118,16 +167,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fill-missing-prob", type=float, default=0.0, help="Value for missing prob features.")
     parser.add_argument("--session-open", default="09:30", help="Session open for time features.")
     parser.add_argument("--session-close", default="16:00", help="Session close for time features.")
-    parser.add_argument("--ga-model-root", default="Data/models/ga_xgboost/15min", help="GA-XGB model root.")
+    parser.add_argument("--ga-model-root", default="Data/models/ga_xgboost/10min", help="GA-XGB model root.")
     parser.add_argument("--ga-feature-list", default=None, help="Path to GA-XGB feature list txt.")
-    parser.add_argument("--ga-dataset-name", default="15min", help="Dataset name for split-warmup lookup.")
+    parser.add_argument("--ga-dataset-name", default="10min", help="Dataset name for split-warmup lookup.")
     parser.add_argument(
         "--split-x-filename",
-        default="X_15min_tree.parquet",
+        default="X_10min_tree.parquet",
         help="Feature filename stem used to locate split indices for test warmup preload.",
     )
-    parser.add_argument("--ga-pivot-label-dir", default="pivots", help="Label dir for pivot GA-XGB models.")
+    parser.add_argument("--ga-pivot-label-dir", default="swing", help="Label dir for pivot GA-XGB models.")
     parser.add_argument("--ga-tb-label-dir", default="tb", help="Label dir for TB GA-XGB models.")
+    parser.add_argument("--meta-model-root", default="Data/models/meta_xgboost/10min", help="Meta-XGB model root.")
+    parser.add_argument("--meta-entry-threshold", type=float, default=0.8, help="Execution threshold override for both meta long/short entries.")
+    parser.add_argument("--meta-exit-threshold", type=float, default=0.8, help="Execution threshold override for both meta long/short exits.")
+    parser.add_argument("--meta-trail-activate-atr", type=float, default=2.0, help="Trail activation ATR used to build live exit context.")
+    parser.add_argument("--meta-trail-atr", type=float, default=1.0, help="Base trail ATR used to build live exit context.")
+    parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.8, help="Tightened trail ATR after TP is seen.")
+    parser.add_argument("--meta-use-tp-to-tighten-trail", action=argparse.BooleanOptionalAction, default=True, help="Mirror training trail-tightening behavior in replay exit context.")
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
     parser.add_argument(
         "--enable-option-orders",
@@ -201,6 +257,18 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable prepending test-split 1m warmup bars before replay data.",
     )
+    parser.add_argument(
+        "--exec-entry-confirm-bars",
+        type=int,
+        default=1,
+        help="Consecutive bars required to confirm a new entry while flat.",
+    )
+    parser.add_argument(
+        "--exec-exit-confirm-bars",
+        type=int,
+        default=2,
+        help="Consecutive bars required to confirm exit/flip while in-position.",
+    )
     return parser.parse_args()
 
 
@@ -266,8 +334,30 @@ def main() -> None:
         if keep_n > 0:
             df = df.tail(keep_n).copy()
 
+    inference_mode = "none" if args.no_agent else str(args.inference_mode).strip().lower()
     agent = None
-    if not args.no_agent:
+    if inference_mode != "none" and args.ga_feature_list is None and not (args.no_pivot_probs and args.no_tb_probs):
+        try:
+            from Data.load_data import get_ticker_processed_base_dir
+            from Data.retrieve_data import normalize_ticker
+
+            ticker = normalize_ticker(symbols[0])
+            dataset_name = args.ga_dataset_name
+            candidate = (
+                get_ticker_processed_base_dir(ticker)
+                / "datasets"
+                / dataset_name
+                / f"features_X_{dataset_name}_tree.txt"
+            )
+            if candidate.exists():
+                args.ga_feature_list = str(candidate)
+        except Exception:
+            args.ga_feature_list = None
+
+    if inference_mode != "none" and args.ga_feature_list is None and not (args.no_pivot_probs and args.no_tb_probs):
+        print("[replay] Warning: GA-XGB feature list not found; pivot/TB probs will be filled with defaults.")
+
+    if inference_mode == "ppo":
         agent = LivePPOAgent(
             model_path=args.model_path,
             deterministic=not args.stochastic,
@@ -286,17 +376,56 @@ def main() -> None:
             ga_tb_label_dir=args.ga_tb_label_dir,
             resample_label=args.resample_label,
             resample_closed=args.resample_closed,
-            label_timeframe_rule="15min",
+            label_timeframe_rule=f"{args.interval}min",
+        )
+    elif inference_mode == "meta":
+        if int(args.interval) != 10:
+            print(f"[replay] Warning: meta inference is trained for 10min bars; current --interval={args.interval}.")
+            agent = LiveMetaXGBAgent(
+                model_root=args.meta_model_root,
+                ga_model_root=args.ga_model_root if args.ga_feature_list else None,
+                ga_feature_list_path=args.ga_feature_list,
+            include_pivot_probs=not args.no_pivot_probs,
+            include_tb_probs=not args.no_tb_probs,
+            pivot_label_dir=args.ga_pivot_label_dir,
+            tb_label_dir=args.ga_tb_label_dir,
+            tz=args.tz or "America/New_York",
+            assume_tz=args.assume_tz,
+            session_open=args.session_open,
+            session_close=args.session_close,
+            min_15m_bars=args.min_15m_bars,
+            fill_missing_prob=args.fill_missing_prob,
+            resample_label=args.resample_label,
+            resample_closed=args.resample_closed,
+            label_timeframe_rule=f"{args.interval}min",
+                trail_activate_atr=float(args.meta_trail_activate_atr),
+                trail_atr=float(args.meta_trail_atr),
+                trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
+                use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
+                entry_threshold_override=float(args.meta_entry_threshold),
+                exit_threshold_override=float(args.meta_exit_threshold),
+            )
+        print(
+            f"[replay] Meta-XGB inference enabled: model_root={args.meta_model_root} "
+            f"timeframe={args.interval}min"
         )
 
     inference = LiveInferenceEngine(
         agent=agent,
         label=args.resample_label,
         closed=args.resample_closed,
-        rule="15min",
+        rule=f"{args.interval}min",
         tz=args.tz,
         assume_tz=args.assume_tz,
     )
+    execution_latches: dict[str, DirectionExecutionLatch] = {
+        symbol: DirectionExecutionLatch(
+            entry_confirm_bars=max(1, int(args.exec_entry_confirm_bars)),
+            exit_confirm_bars=max(1, int(args.exec_exit_confirm_bars)),
+            initial_position=0,
+        )
+        for symbol in symbols
+    }
 
     order_policies: dict[str, OptionOrderPolicy] | None = None
     if args.enable_option_orders:
@@ -324,7 +453,7 @@ def main() -> None:
         print(f"[replay] Option order policy enabled ({mode}) for symbols: {', '.join(symbols)}")
 
     processor = LiveBarProcessor(
-        interval_minutes=15,
+        interval_minutes=args.interval,
         buffer_size=args.buffer_size,
         agg_label=args.resample_label,
         on_1m=(lambda symbol, bar, _buf: print(
@@ -332,10 +461,12 @@ def main() -> None:
             f"o={bar.get('open')} h={bar.get('high')} l={bar.get('low')} "
             f"c={bar.get('close')} v={bar.get('volume')}"
         )) if args.print_1m else None,
-        on_15m_close=_make_15m_handler(
+        on_15m_close=_make_close_handler(
             inference=inference,
-            print_15m=args.print_15m,
+            interval_minutes=int(args.interval),
+            print_close=args.print_15m,
             print_tz=args.tz or "America/New_York",
+            execution_latches=execution_latches,
             order_policies=order_policies,
         ),
     )
