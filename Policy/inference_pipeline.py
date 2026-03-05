@@ -38,6 +38,17 @@ def _normalize_ga_label_dir(token: str) -> str:
     return value
 
 
+def _label_dir_to_train_mode(label_dir: str) -> str:
+    token = _normalize_ga_label_dir(label_dir)
+    if token == "pivots":
+        return "pivot"
+    if token == "swing":
+        return "swing"
+    if token == "tb":
+        return "tb"
+    return token
+
+
 def _normalize_label_timeframe(label_timeframe: str) -> str:
     tf = label_timeframe.strip().lower()
     if tf.endswith("min"):
@@ -396,17 +407,78 @@ def _run_agent_eval(
     _run_cmd(cmd)
 
 
+def _resolve_cli_path(path_value: str) -> Path:
+    p = Path(path_value)
+    if p.is_absolute():
+        return p
+    return REPO_ROOT / p
+
+
+def _run_meta_replay_eval(
+    *,
+    ticker: str,
+    dataset_name: str,
+    replay_data_path: Path,
+    meta_model_root: Path,
+    ga_model_root: Path,
+    pivot_label_dir: str,
+    tb_label_dir: str,
+    interval: int,
+    start: str | None,
+    end: str | None,
+    regular_only: bool,
+    prepend_split_test_warmup: bool,
+    plot_out: str | None,
+    trace_out: str | None,
+) -> None:
+    cmd = [
+        sys.executable,
+        str(REPO_ROOT / "API" / "Alpaca_API" / "runners" / "replay_runner.py"),
+        "--data-path",
+        str(replay_data_path),
+        "--symbols",
+        normalize_ticker(ticker),
+        "--inference-mode",
+        "meta",
+        "--interval",
+        str(int(interval)),
+        "--meta-model-root",
+        str(meta_model_root),
+        "--ga-model-root",
+        str(ga_model_root),
+        "--ga-dataset-name",
+        str(dataset_name),
+        "--ga-pivot-label-dir",
+        str(pivot_label_dir),
+        "--ga-tb-label-dir",
+        str(tb_label_dir),
+    ]
+    if start:
+        cmd += ["--start", str(start)]
+    if end:
+        cmd += ["--end", str(end)]
+    if regular_only:
+        cmd.append("--regular-only")
+    if not prepend_split_test_warmup:
+        cmd.append("--no-prepend-split-test-warmup")
+    if plot_out:
+        cmd += ["--plot-out", str(plot_out)]
+    if trace_out:
+        cmd += ["--trace-out", str(trace_out)]
+    _run_cmd(cmd)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="End-to-end inference pipeline for new raw intraday data."
     )
-    parser.add_argument("--ticker", default="$SPY")
+    parser.add_argument("--ticker", default="SPY")
     parser.add_argument(
         "--raw-parquet",
-        required=True,
+        default="Data/raw/spy/inference_buffer_10min.parquet",
         help="Path to the new raw intraday parquet (e.g. 15m bars).",
     )
-    parser.add_argument("--label-timeframe", default="15T")
+    parser.add_argument("--label-timeframe", default="10T")
     parser.add_argument("--dataset-name", default=None)
     parser.add_argument("--models", default="Tree", help="Comma-separated models.")
     parser.add_argument("--train-frac", type=float, default=0.75)
@@ -420,7 +492,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ga-model-root",
-        default="Data/models/ga_xgboost/15min",
+        default="Data/models/ga_xgboost/10min",
         help="Root folder with trained GA-XGB models (long/short).",
     )
     parser.add_argument(
@@ -430,8 +502,14 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ga-label-dirs",
-        default="pivots,tb",
+        default="swing,tb",
         help="Comma-separated label dirs to write probs under (e.g. pivots,tb).",
+    )
+    parser.add_argument(
+        "--eval-mode",
+        choices=["ppo", "meta", "none"],
+        default="meta",
+        help="Evaluation mode: ppo policy eval, replayed meta eval, or none.",
     )
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument(
@@ -444,6 +522,57 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--plot-seed", type=int, default=None)
     parser.add_argument("--plot-out", default=None)
     parser.add_argument("--trace-out", default=None)
+    parser.add_argument(
+        "--meta-model-root",
+        default="Data/models/meta_xgboost/10min",
+        help="Meta-XGB model root used by replay eval mode.",
+    )
+    parser.add_argument(
+        "--meta-ga-model-root",
+        default="Data/models/ga_xgboost/10min",
+        help="Optional GA model root for replay meta eval (defaults to --ga-model-root).",
+    )
+    parser.add_argument(
+        "--meta-pivot-label-dir",
+        default="swing",
+        help="Pivot label dir used by replay meta eval.",
+    )
+    parser.add_argument(
+        "--meta-tb-label-dir",
+        default="tb",
+        help="TB label dir used by replay meta eval.",
+    )
+    parser.add_argument(
+        "--meta-replay-data-path",
+        default="Data/raw/spy/inference_buffer_1m.parquet",
+        help="Replay source (1m parquet/csv) for meta eval mode.",
+    )
+    parser.add_argument(
+        "--meta-replay-start",
+        default="2026-01-30T00:00:00Z",
+        help="Optional ISO UTC start for replay meta eval.",
+    )
+    parser.add_argument(
+        "--meta-replay-end",
+        default="2026-03-05T00:00:00Z",
+        help="Optional ISO UTC end for replay meta eval.",
+    )
+    parser.add_argument(
+        "--meta-replay-regular-only",
+        action="store_true",
+        help="Filter replay bars to regular hours for meta eval mode.",
+    )
+    parser.add_argument(
+        "--meta-interval",
+        type=int,
+        default=10,
+        help="Replay aggregation interval for meta eval mode.",
+    )
+    parser.add_argument(
+        "--meta-prepend-split-test-warmup",
+        action="store_true",
+        help="Prepend split-test warmup bars in replay meta eval (default disabled).",
+    )
     parser.add_argument(
         "--vix-parquet",
         default="Data/raw/vix/vixy_15min_buffer.parquet",
@@ -539,27 +668,22 @@ def main() -> None:
     if not args.skip_ga:
         if args.full_fit_ga:
             print("[inference_pipeline] Training GA-XGB full-fit masks...")
-            _run_ga_xgb(
-                label_mode="pivot",
-                refresh_masks=args.refresh_masks,
-                processed_root=processed_root,
-                split_root=split_root,
-                stats_root=stats_root,
-                model_root=model_root,
-                full_fit=True,
-            )
-            _run_ga_xgb(
-                label_mode="tb",
-                refresh_masks=args.refresh_masks,
-                processed_root=processed_root,
-                split_root=split_root,
-                stats_root=stats_root,
-                model_root=model_root,
-                full_fit=True,
-            )
+            for label_dir in label_dirs:
+                train_mode = _label_dir_to_train_mode(label_dir)
+                if train_mode not in {"pivot", "swing", "tb"}:
+                    continue
+                _run_ga_xgb(
+                    label_mode=train_mode,
+                    refresh_masks=args.refresh_masks,
+                    processed_root=processed_root,
+                    split_root=split_root,
+                    stats_root=stats_root,
+                    model_root=model_root,
+                    full_fit=True,
+                )
         else:
             print("[inference_pipeline] Running GA-XGB inference using existing models...")
-            ga_model_root = Path(args.ga_model_root)
+            ga_model_root = _resolve_cli_path(args.ga_model_root)
             if not ga_model_root.exists():
                 raise SystemExit(f"Missing GA-XGB model root: {ga_model_root}")
             feature_root = (
@@ -593,36 +717,79 @@ def main() -> None:
         processed_root=processed_root,
         model_root=model_root / "ga_xgboost" / dataset_name,
         output_root=inference_root,
-        include_pivot_probs="pivots" in label_dirs,
+        include_pivot_probs=any(lbl in {"pivots", "swing"} for lbl in label_dirs),
         include_tb_probs="tb" in label_dirs,
         vix_parquet_path=vix_parquet_path,
     )
     print(f"[inference_pipeline] Agent matrix saved to {agent_csv}")
 
-    if args.skip_eval:
+    eval_mode = "none" if args.skip_eval else str(args.eval_mode).strip().lower()
+    if eval_mode == "none":
         return
 
-    model_path = Path(args.model_path)
-    if not model_path.exists():
-        raise SystemExit(f"Missing model checkpoint: {model_path}")
+    if eval_mode == "ppo":
+        model_path = Path(args.model_path)
+        if not model_path.exists():
+            raise SystemExit(f"Missing model checkpoint: {model_path}")
 
-    print("[inference_pipeline] Running policy evaluation...")
-    plot_out = args.plot_out
-    if plot_out is None:
-        plots_root.mkdir(parents=True, exist_ok=True)
-        plot_out = str(plots_root / "agent_actions_vs_price.png")
-    trace_out = args.trace_out
-    if trace_out is None:
-        trace_out = str(inference_root / "agent" / "agent_trace.csv")
-    _run_agent_eval(
-        agent_csv=agent_csv,
-        model_path=model_path,
-        plot_tail=args.plot_tail,
-        plot_random_window=args.plot_random_window,
-        plot_seed=args.plot_seed,
-        plot_out=plot_out,
-        trace_out=trace_out,
-    )
+        print("[inference_pipeline] Running PPO policy evaluation...")
+        plot_out = args.plot_out
+        if plot_out is None:
+            plots_root.mkdir(parents=True, exist_ok=True)
+            plot_out = str(plots_root / "agent_actions_vs_price.png")
+        trace_out = args.trace_out
+        if trace_out is None:
+            trace_out = str(inference_root / "agent" / "agent_trace.csv")
+        _run_agent_eval(
+            agent_csv=agent_csv,
+            model_path=model_path,
+            plot_tail=args.plot_tail,
+            plot_random_window=args.plot_random_window,
+            plot_seed=args.plot_seed,
+            plot_out=plot_out,
+            trace_out=trace_out,
+        )
+        return
+
+    if eval_mode == "meta":
+        replay_data_path = _resolve_cli_path(args.meta_replay_data_path)
+        if not replay_data_path.exists():
+            raise SystemExit(f"Missing replay data path: {replay_data_path}")
+        meta_model_root = _resolve_cli_path(args.meta_model_root)
+        if not meta_model_root.exists():
+            raise SystemExit(f"Missing meta model root: {meta_model_root}")
+        ga_model_root_value = args.meta_ga_model_root or args.ga_model_root
+        ga_model_root = _resolve_cli_path(ga_model_root_value)
+        if not ga_model_root.exists():
+            raise SystemExit(f"Missing GA model root for meta replay: {ga_model_root}")
+
+        print("[inference_pipeline] Running Meta-XGB replay evaluation...")
+        plot_out = args.plot_out
+        if plot_out is None:
+            plots_root.mkdir(parents=True, exist_ok=True)
+            plot_out = str(plots_root / "meta_entries_exits_probs.png")
+        trace_out = args.trace_out
+        if trace_out is None:
+            trace_out = str(inference_root / "meta" / "meta_trace.csv")
+        _run_meta_replay_eval(
+            ticker=ticker,
+            dataset_name=dataset_name,
+            replay_data_path=replay_data_path,
+            meta_model_root=meta_model_root,
+            ga_model_root=ga_model_root,
+            pivot_label_dir=str(args.meta_pivot_label_dir),
+            tb_label_dir=str(args.meta_tb_label_dir),
+            interval=int(args.meta_interval),
+            start=args.meta_replay_start,
+            end=args.meta_replay_end,
+            regular_only=bool(args.meta_replay_regular_only),
+            prepend_split_test_warmup=bool(args.meta_prepend_split_test_warmup),
+            plot_out=plot_out,
+            trace_out=trace_out,
+        )
+        return
+
+    raise SystemExit(f"Unsupported eval mode: {eval_mode}")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import argparse
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from ..inference.live_inference import LiveInferenceEngine, LiveMetaXGBAgent, LivePPOAgent
@@ -74,6 +75,114 @@ def _print_meta_prob_log(*, prefix: str, probs: dict[str, float | None] | None, 
     )
 
 
+def _save_trace_plot(
+    *,
+    trace_df: pd.DataFrame,
+    save_path: Path,
+    tz: str,
+) -> None:
+    if trace_df.empty:
+        return
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # noqa: BLE001
+        print(f"[replay] Plot skipped (matplotlib unavailable): {exc}")
+        return
+
+    df = trace_df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
+    if df.empty:
+        return
+
+    symbols = sorted(df["symbol"].dropna().astype(str).unique().tolist())
+    n = max(1, len(symbols))
+    fig, axes = plt.subplots(n, 2, figsize=(14, 4.5 * n), sharex=False)
+    if n == 1:
+        axes = [axes]
+
+    for row_idx, symbol in enumerate(symbols):
+        sdf = df[df["symbol"].astype(str) == str(symbol)].copy()
+        if sdf.empty:
+            continue
+        sdf["prev_exec_pos"] = (
+            pd.to_numeric(sdf["exec_pos"], errors="coerce")
+            .fillna(0.0)
+            .astype(float)
+            .shift(1)
+            .fillna(0.0)
+            .astype(int)
+        )
+        sdf["exec_pos"] = pd.to_numeric(sdf["exec_pos"], errors="coerce").fillna(0.0).astype(int)
+        ts_plot = sdf["timestamp"].dt.tz_convert(tz)
+
+        ax_price = axes[row_idx][0]
+        ax_probs = axes[row_idx][1]
+
+        if "close" in sdf.columns:
+            close = pd.to_numeric(sdf["close"], errors="coerce")
+            ax_price.plot(ts_plot, close, color="#1f77b4", linewidth=1.3, label="close")
+        entry_long = sdf[(sdf["exec_pos"] == 1) & (sdf["prev_exec_pos"] != 1)]
+        exit_long = sdf[(sdf["prev_exec_pos"] == 1) & (sdf["exec_pos"] != 1)]
+        entry_short = sdf[(sdf["exec_pos"] == -1) & (sdf["prev_exec_pos"] != -1)]
+        exit_short = sdf[(sdf["prev_exec_pos"] == -1) & (sdf["exec_pos"] != -1)]
+        for marker_df, marker, color, label in (
+            (entry_long, "^", "#2ca02c", "enter long"),
+            (exit_long, "v", "#8c564b", "exit long"),
+            (entry_short, "v", "#d62728", "enter short"),
+            (exit_short, "^", "#9467bd", "exit short"),
+        ):
+            if marker_df.empty:
+                continue
+            m_ts = pd.to_datetime(marker_df["timestamp"], utc=True, errors="coerce").dt.tz_convert(tz)
+            m_close = pd.to_numeric(marker_df["close"], errors="coerce")
+            ax_price.scatter(m_ts, m_close, marker=marker, s=28, color=color, alpha=0.9, label=label)
+        ax_price.set_title(f"{symbol} | meta entries/exits")
+        ax_price.set_xlabel(f"time ({tz})")
+        ax_price.set_ylabel("price")
+        ax_price.grid(True, alpha=0.25)
+        ax_price.legend(loc="best", fontsize=8)
+
+        prob_specs = (
+            ("p_enter_long", "#2ca02c", "p_enter_long"),
+            ("p_enter_short", "#d62728", "p_enter_short"),
+            ("p_exit_long", "#17becf", "p_exit_long"),
+            ("p_exit_short", "#ff7f0e", "p_exit_short"),
+        )
+        thr_specs = (
+            ("thr_enter_long", "#2ca02c", "thr_enter_long"),
+            ("thr_enter_short", "#d62728", "thr_enter_short"),
+            ("thr_exit_long", "#17becf", "thr_exit_long"),
+            ("thr_exit_short", "#ff7f0e", "thr_exit_short"),
+        )
+        plotted_any = False
+        for col, color, label in prob_specs:
+            if col in sdf.columns:
+                series = pd.to_numeric(sdf[col], errors="coerce")
+                if series.notna().any():
+                    ax_probs.plot(ts_plot, series, color=color, linewidth=1.2, label=label)
+                    plotted_any = True
+        for col, color, label in thr_specs:
+            if col in sdf.columns:
+                series = pd.to_numeric(sdf[col], errors="coerce")
+                finite = series[np.isfinite(series)]
+                if finite.size:
+                    ax_probs.axhline(float(finite.iloc[-1]), color=color, linewidth=1.0, linestyle="--", alpha=0.8, label=label)
+                    plotted_any = True
+        if plotted_any:
+            ax_probs.set_ylim(-0.02, 1.02)
+            ax_probs.legend(loc="best", fontsize=8)
+        ax_probs.set_title(f"{symbol} | meta probabilities")
+        ax_probs.set_xlabel(f"time ({tz})")
+        ax_probs.set_ylabel("probability")
+        ax_probs.grid(True, alpha=0.25)
+
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+
+
 def _make_close_handler(
     *,
     inference: LiveInferenceEngine,
@@ -82,6 +191,7 @@ def _make_close_handler(
     print_tz: str,
     execution_latches: dict[str, DirectionExecutionLatch],
     order_policies: dict[str, OptionOrderPolicy] | None = None,
+    trace_rows: list[dict] | None = None,
 ):
     def _handler(symbol: str, closed_bar: dict, buffer) -> None:
         if print_close:
@@ -110,6 +220,26 @@ def _make_close_handler(
                 f"{symbol} inference raw={raw_action:+.4f} raw_pos={raw_pos:+d} "
                 f"exec={exec_pos:+d} gate={gate.status}"
             )
+            if trace_rows is not None:
+                trace_rows.append(
+                    {
+                        "symbol": symbol,
+                        "timestamp": closed_bar.get("timestamp"),
+                        "close": closed_bar.get("close"),
+                        "raw_action": raw_action,
+                        "raw_pos": int(raw_pos),
+                        "exec_pos": int(exec_pos),
+                        "gate_status": str(gate.status),
+                        "p_enter_long": probs.get("p_enter_long"),
+                        "p_enter_short": probs.get("p_enter_short"),
+                        "p_exit_long": probs.get("p_exit_long"),
+                        "p_exit_short": probs.get("p_exit_short"),
+                        "thr_enter_long": thresholds.get("enter_long"),
+                        "thr_enter_short": thresholds.get("enter_short"),
+                        "thr_exit_long": thresholds.get("exit_long"),
+                        "thr_exit_short": thresholds.get("exit_short"),
+                    }
+                )
             if order_policies is not None and symbol in order_policies:
                 policy_bar = dict(closed_bar)
                 policy_bar.update({k: v for k, v in probs.items() if v is not None})
@@ -148,6 +278,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--regular-only", action="store_true", help="Filter to 9:30-16:00 ET.")
     parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to sleep between bars.")
     parser.add_argument("--max-bars", type=int, default=None, help="Max bars to replay.")
+    parser.add_argument("--trace-out", default=None, help="Optional CSV path to save per-bar meta trace.")
+    parser.add_argument("--plot-out", default=None, help="Optional PNG path to save entries/exits + probability plot.")
     parser.add_argument("--buffer-size", type=int, default=5000, help="Ring buffer size.")
     parser.add_argument("--print-1m", action="store_true", help="Print each 1m bar.")
     parser.add_argument("--print-15m", action="store_true", help="Print completed interval bars.")
@@ -381,10 +513,10 @@ def main() -> None:
     elif inference_mode == "meta":
         if int(args.interval) != 10:
             print(f"[replay] Warning: meta inference is trained for 10min bars; current --interval={args.interval}.")
-            agent = LiveMetaXGBAgent(
-                model_root=args.meta_model_root,
-                ga_model_root=args.ga_model_root if args.ga_feature_list else None,
-                ga_feature_list_path=args.ga_feature_list,
+        agent = LiveMetaXGBAgent(
+            model_root=args.meta_model_root,
+            ga_model_root=args.ga_model_root if args.ga_feature_list else None,
+            ga_feature_list_path=args.ga_feature_list,
             include_pivot_probs=not args.no_pivot_probs,
             include_tb_probs=not args.no_tb_probs,
             pivot_label_dir=args.ga_pivot_label_dir,
@@ -398,13 +530,13 @@ def main() -> None:
             resample_label=args.resample_label,
             resample_closed=args.resample_closed,
             label_timeframe_rule=f"{args.interval}min",
-                trail_activate_atr=float(args.meta_trail_activate_atr),
-                trail_atr=float(args.meta_trail_atr),
-                trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
-                use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
-                entry_threshold_override=float(args.meta_entry_threshold),
-                exit_threshold_override=float(args.meta_exit_threshold),
-            )
+            trail_activate_atr=float(args.meta_trail_activate_atr),
+            trail_atr=float(args.meta_trail_atr),
+            trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
+            use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
+            entry_threshold_override=float(args.meta_entry_threshold),
+            exit_threshold_override=float(args.meta_exit_threshold),
+        )
         print(
             f"[replay] Meta-XGB inference enabled: model_root={args.meta_model_root} "
             f"timeframe={args.interval}min"
@@ -452,6 +584,8 @@ def main() -> None:
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
         print(f"[replay] Option order policy enabled ({mode}) for symbols: {', '.join(symbols)}")
 
+    trace_rows: list[dict] | None = [] if (args.trace_out or args.plot_out) else None
+
     processor = LiveBarProcessor(
         interval_minutes=args.interval,
         buffer_size=args.buffer_size,
@@ -468,6 +602,7 @@ def main() -> None:
             print_tz=args.tz or "America/New_York",
             execution_latches=execution_latches,
             order_policies=order_policies,
+            trace_rows=trace_rows,
         ),
     )
 
@@ -490,6 +625,17 @@ def main() -> None:
             time.sleep(args.sleep)
 
     print(f"[replay] Done. Bars processed: {count:,}.")
+    if (args.trace_out or args.plot_out) and isinstance(trace_rows, list):
+        trace_df = pd.DataFrame(trace_rows)
+        if args.trace_out:
+            trace_path = Path(args.trace_out)
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_df.to_csv(trace_path, index=False)
+            print(f"[replay] Saved trace: {trace_path}")
+        if args.plot_out:
+            plot_path = Path(args.plot_out)
+            _save_trace_plot(trace_df=trace_df, save_path=plot_path, tz=args.tz or "America/New_York")
+            print(f"[replay] Saved plot: {plot_path}")
 
 
 if __name__ == "__main__":
