@@ -1,16 +1,16 @@
 {
-  "side": "long",
-  "best_score": 0.7032821297429621,
+  "side": "LONG",
+  "best_score": -0.3309281746316971,
   "n_features": 1549,
-  "selected_features": 87,
+  "selected_features": 194,
   "ga_params": {
     "population_size": 32,
-    "generations": 60,
+    "generations": 30,
     "crossover_rate": 0.6,
     "mutation_rate": 0.005,
     "val_size": 0.1,
-    "fitness_metric": "f1_penalized",
-    "feature_penalty": 0.0015,
+    "fitness_metric": "logloss_penalized",
+    "feature_penalty": 0.0001,
     "early_stopping_rounds": 50,
     "max_boost_round": 2000,
     "max_features": 200,
@@ -39,5 +39,6 @@
   "ticker": "SPY",
   "dataset_name": "10min",
   "label_mode": "tb",
-  "super_pivot_weight": 2.0
+  "super_pivot_weight": 2.0,
+  "mode": "ga_mask"
 }
