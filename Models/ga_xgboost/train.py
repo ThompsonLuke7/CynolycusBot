@@ -27,6 +27,7 @@ from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
     confusion_matrix,
+    fbeta_score,
     f1_score,
     log_loss,
     precision_score,
@@ -569,7 +570,9 @@ def refresh_masks_and_params(
     scale_pos_weight: bool = True,
     ga_kwargs: dict | None = None,
     xgb_param_overrides: dict | None = None,
-) -> tuple[np.ndarray, dict, np.ndarray, dict]:
+    train_long: bool = True,
+    train_short: bool = True,
+) -> tuple[np.ndarray | None, dict | None, np.ndarray | None, dict | None]:
     def _side_params(y_train: np.ndarray) -> dict:
         base = GAXGBoostFeatureSelector().xgb_params.copy()
         if xgb_param_overrides:
@@ -596,43 +599,61 @@ def refresh_masks_and_params(
         print(f"[GA-XGB] Checkpoint saved for {side.upper()} at {checkpoint_dir}")
 
     print("Refreshing GA-XGB masks/params on train split only...")
+    long_selector: GAXGBoostFeatureSelector | None = None
+    short_selector: GAXGBoostFeatureSelector | None = None
     if full_fit:
-        long_selector = GAXGBoostFeatureSelector(
-            xgb_params=_side_params(y_long_train),
-            **(ga_kwargs or {}),
-        )
-        long_selector.fit(X_train, y_long_train, sample_weight=w_long_train)
-        _save_checkpoint("long", long_selector)
+        if train_long:
+            long_selector = GAXGBoostFeatureSelector(
+                xgb_params=_side_params(y_long_train),
+                **(ga_kwargs or {}),
+            )
+            long_selector.fit(X_train, y_long_train, sample_weight=w_long_train)
+            _save_checkpoint("long", long_selector)
 
-        short_selector = GAXGBoostFeatureSelector(
-            xgb_params=_side_params(y_short_train),
-            **(ga_kwargs or {}),
-        )
-        short_selector.fit(X_train, y_short_train, sample_weight=w_short_train)
-        _save_checkpoint("short", short_selector)
+        if train_short:
+            short_selector = GAXGBoostFeatureSelector(
+                xgb_params=_side_params(y_short_train),
+                **(ga_kwargs or {}),
+            )
+            short_selector.fit(X_train, y_short_train, sample_weight=w_short_train)
+            _save_checkpoint("short", short_selector)
     else:
-        long_selector = _train_ga_selector(
-            X_train,
-            y_long_train,
-            xgb_params=_side_params(y_long_train),
-            sample_weight=w_long_train,
-            ga_kwargs=ga_kwargs,
-        )
-        _save_checkpoint("long", long_selector)
+        if train_long:
+            long_selector = _train_ga_selector(
+                X_train,
+                y_long_train,
+                xgb_params=_side_params(y_long_train),
+                sample_weight=w_long_train,
+                ga_kwargs=ga_kwargs,
+            )
+            _save_checkpoint("long", long_selector)
 
-        short_selector = _train_ga_selector(
-            X_train,
-            y_short_train,
-            xgb_params=_side_params(y_short_train),
-            sample_weight=w_short_train,
-            ga_kwargs=ga_kwargs,
-        )
-        _save_checkpoint("short", short_selector)
+        if train_short:
+            short_selector = _train_ga_selector(
+                X_train,
+                y_short_train,
+                xgb_params=_side_params(y_short_train),
+                sample_weight=w_short_train,
+                ga_kwargs=ga_kwargs,
+            )
+            _save_checkpoint("short", short_selector)
 
-    long_mask = long_selector.best_mask_.astype(bool)
-    short_mask = short_selector.best_mask_.astype(bool)
-    long_params = _sanitize_xgb_params(long_selector.xgb_params)
-    short_params = _sanitize_xgb_params(short_selector.xgb_params)
+    long_mask = (
+        long_selector.best_mask_.astype(bool) if long_selector is not None else None
+    )
+    short_mask = (
+        short_selector.best_mask_.astype(bool) if short_selector is not None else None
+    )
+    long_params = (
+        _sanitize_xgb_params(long_selector.xgb_params)
+        if long_selector is not None
+        else None
+    )
+    short_params = (
+        _sanitize_xgb_params(short_selector.xgb_params)
+        if short_selector is not None
+        else None
+    )
     return long_mask, long_params, short_mask, short_params
 
 
@@ -697,6 +718,7 @@ def _print_binary_metrics(
     *,
     name: str,
     threshold: float = 0.5,
+    threshold_metric_beta: float = 1.0,
 ) -> dict[str, float] | None:
     if probs.size == 0:
         print(f"[GA-XGB] {name}: empty")
@@ -713,6 +735,8 @@ def _print_binary_metrics(
     prec = precision_score(y, pred, zero_division=0)
     rec = recall_score(y, pred, zero_division=0)
     f1 = f1_score(y, pred, zero_division=0)
+    fbeta = fbeta_score(y, pred, beta=threshold_metric_beta, zero_division=0)
+    metric_name = "f1" if np.isclose(threshold_metric_beta, 1.0) else f"f{threshold_metric_beta:g}"
     try:
         auc = roc_auc_score(y, p) if len(np.unique(y)) > 1 else float("nan")
     except ValueError:
@@ -736,6 +760,7 @@ def _print_binary_metrics(
     print(
         f"[GA-XGB] {name} (thr={threshold:.2f}): "
         f"acc={acc:.4f}, prec={prec:.4f}, rec={rec:.4f}, f1={f1:.4f}, "
+        f"{metric_name}={fbeta:.4f}, "
         f"auc={auc:.4f}, ap={ap:.4f}, logloss={ll:.4f}, "
         f"tp={tp}, fp={fp}, tn={tn}, fn={fn}"
     )
@@ -746,6 +771,8 @@ def _print_binary_metrics(
         "precision": float(prec),
         "recall": float(rec),
         "f1": float(f1),
+        "f_beta": float(fbeta),
+        "f_beta_beta": float(threshold_metric_beta),
         "auc": float(auc),
         "average_precision": float(ap),
         "logloss": float(ll),
@@ -756,13 +783,16 @@ def _print_binary_metrics(
     }
 
 
-def _find_best_f1_threshold(
+def _find_best_fbeta_threshold(
     y_true: np.ndarray,
     probs: np.ndarray,
     *,
+    beta: float = 1.0,
     default_threshold: float = 0.5,
     grid_size: int = 199,
 ) -> tuple[float, float]:
+    if beta <= 0:
+        raise ValueError("beta must be > 0 for F-beta threshold search.")
     mask = np.isfinite(probs)
     y = y_true[mask]
     p = probs[mask]
@@ -771,16 +801,16 @@ def _find_best_f1_threshold(
 
     thresholds = np.linspace(0.01, 0.99, max(3, int(grid_size)))
     best_t = float(default_threshold)
-    best_f1 = -1.0
+    best_score = -1.0
     for t in thresholds:
         pred = (p >= t).astype(int)
-        f1 = float(f1_score(y, pred, zero_division=0))
-        if f1 > best_f1:
-            best_f1 = f1
+        score = float(fbeta_score(y, pred, beta=beta, zero_division=0))
+        if score > best_score:
+            best_score = score
             best_t = float(t)
-    if best_f1 < 0.0:
+    if best_score < 0.0:
         return float(default_threshold), float("nan")
-    return best_t, best_f1
+    return best_t, best_score
 
 
 def walk_forward_oof_probs(
@@ -1045,6 +1075,22 @@ def main() -> None:
         help="Label mode to use (default: swing).",
     )
     parser.add_argument(
+        "--side",
+        type=str,
+        default="both",
+        choices=["both", "long", "short"],
+        help="Train/evaluate both sides (default), or only one side.",
+    )
+    parser.add_argument(
+        "--threshold-beta",
+        type=float,
+        default=1.0,
+        help=(
+            "F-beta used to select OOF decision thresholds. "
+            "beta<1 favors precision, beta>1 favors recall. Default: 1.0 (F1)."
+        ),
+    )
+    parser.add_argument(
         "--super-pivot-weight",
         type=float,
         default=TrainConfig.super_pivot_weight,
@@ -1196,6 +1242,15 @@ def main() -> None:
     )
     ga_kwargs = _ga_kwargs_from_config(cfg)
     xgb_overrides = _xgb_overrides_from_config(cfg)
+    side_mode = str(args.side).strip().lower()
+    run_long = side_mode in {"both", "long"}
+    run_short = side_mode in {"both", "short"}
+    if not run_long and not run_short:
+        raise ValueError("--side must be one of: both, long, short")
+    threshold_beta = float(args.threshold_beta)
+    if threshold_beta <= 0:
+        raise ValueError("--threshold-beta must be > 0.")
+    metric_label = "F1" if np.isclose(threshold_beta, 1.0) else f"F{threshold_beta:g}"
     label_dir_probs = _normalize_ga_label_dir(cfg.label_mode)
     artifact_label_dir = label_dir_probs
     processed_root = Path(cfg.processed_root) if cfg.processed_root else None
@@ -1248,6 +1303,7 @@ def main() -> None:
         "dataset_name": cfg.dataset_name,
         "label_mode": cfg.label_mode,
         "super_pivot_weight": cfg.super_pivot_weight,
+        "side_mode": side_mode,
     }
 
     train_val_idx = np.sort(np.concatenate([train_idx, val_idx]))
@@ -1284,41 +1340,54 @@ def main() -> None:
     if cfg.label_mode == "tb":
         scale_pos_weight = False
 
+    default_params = _sanitize_xgb_params(GAXGBoostFeatureSelector().xgb_params.copy())
+    long_mask = np.ones(X.shape[1], dtype=bool)
+    short_mask = np.ones(X.shape[1], dtype=bool)
+    long_params = dict(default_params)
+    short_params = dict(default_params)
+    long_meta: dict = {"mode": "untrained", "ga_params": {}, "best_score": None}
+    short_meta: dict = {"mode": "untrained", "ga_params": {}, "best_score": None}
+    long_meta_path: Path | None = None
+    short_meta_path: Path | None = None
+
     if cfg.no_ga_mask:
         if cfg.refresh_masks:
             print("[GA-XGB] --refresh-masks ignored because --no-ga-mask is enabled.")
-        print("[GA-XGB] --no-ga-mask enabled: using all features (GA bypassed).")
-        long_mask = np.ones(X.shape[1], dtype=bool)
-        short_mask = np.ones(X.shape[1], dtype=bool)
-        long_params = GAXGBoostFeatureSelector().xgb_params.copy()
-        short_params = GAXGBoostFeatureSelector().xgb_params.copy()
+        print(
+            "[GA-XGB] --no-ga-mask enabled: using all features (GA bypassed)"
+            f" for side={side_mode}."
+        )
         if xgb_overrides:
-            long_params.update(xgb_overrides)
-            short_params.update(xgb_overrides)
-        long_params = _sanitize_xgb_params(long_params)
-        short_params = _sanitize_xgb_params(short_params)
-        long_meta = {
-            "best_score": None,
-            "ga_params": {},
-            "xgb_params": long_params,
-            "mode": "no_ga_mask",
-        }
-        short_meta = {
-            "best_score": None,
-            "ga_params": {},
-            "xgb_params": short_params,
-            "mode": "no_ga_mask",
-        }
+            if run_long:
+                long_params = _sanitize_xgb_params({**long_params, **xgb_overrides})
+            if run_short:
+                short_params = _sanitize_xgb_params({**short_params, **xgb_overrides})
+        if run_long:
+            long_meta = {
+                "best_score": None,
+                "ga_params": {},
+                "xgb_params": long_params,
+                "mode": "no_ga_mask",
+            }
+        if run_short:
+            short_meta = {
+                "best_score": None,
+                "ga_params": {},
+                "xgb_params": short_params,
+                "mode": "no_ga_mask",
+            }
     else:
         need_refresh = cfg.refresh_masks
         if not need_refresh:
             try:
-                load_model_artifacts(
-                    model_dataset_root, "long", label_dir=artifact_label_dir
-                )
-                load_model_artifacts(
-                    model_dataset_root, "short", label_dir=artifact_label_dir
-                )
+                if run_long:
+                    load_model_artifacts(
+                        model_dataset_root, "long", label_dir=artifact_label_dir
+                    )
+                if run_short:
+                    load_model_artifacts(
+                        model_dataset_root, "short", label_dir=artifact_label_dir
+                    )
             except FileNotFoundError:
                 need_refresh = True
 
@@ -1337,51 +1406,64 @@ def main() -> None:
                 scale_pos_weight=scale_pos_weight,
                 ga_kwargs=ga_kwargs,
                 xgb_param_overrides=xgb_overrides,
+                train_long=run_long,
+                train_short=run_short,
             )
-        long_mask, long_params, long_meta = load_model_artifacts(
-            model_dataset_root, "long", label_dir=artifact_label_dir
-        )
-        short_mask, short_params, short_meta = load_model_artifacts(
-            model_dataset_root, "short", label_dir=artifact_label_dir
-        )
-        long_params = _sanitize_xgb_params(long_params)
-        short_params = _sanitize_xgb_params(short_params)
+        if run_long:
+            long_mask, long_params, long_meta = load_model_artifacts(
+                model_dataset_root, "long", label_dir=artifact_label_dir
+            )
+            long_params = _sanitize_xgb_params(long_params)
+        if run_short:
+            short_mask, short_params, short_meta = load_model_artifacts(
+                model_dataset_root, "short", label_dir=artifact_label_dir
+            )
+            short_params = _sanitize_xgb_params(short_params)
         if xgb_overrides:
-            long_params = _sanitize_xgb_params({**long_params, **xgb_overrides})
-            short_params = _sanitize_xgb_params({**short_params, **xgb_overrides})
+            if run_long:
+                long_params = _sanitize_xgb_params({**long_params, **xgb_overrides})
+            if run_short:
+                short_params = _sanitize_xgb_params({**short_params, **xgb_overrides})
 
-    if long_mask.size != X.shape[1] or short_mask.size != X.shape[1]:
-        raise ValueError("Mask size does not match feature count.")
+    if run_long and long_mask.size != X.shape[1]:
+        raise ValueError("LONG mask size does not match feature count.")
+    if run_short and short_mask.size != X.shape[1]:
+        raise ValueError("SHORT mask size does not match feature count.")
 
-    long_meta_path = update_model_artifact_meta(
-        model_dataset_root,
-        "long",
-        label_dir=artifact_label_dir,
-        xgb_params=long_params,
-        metadata_updates={
-            "mode": long_meta.get("mode", "ga_mask"),
-            "best_score": long_meta.get("best_score"),
-            "ga_params": dict(long_meta.get("ga_params", {})),
-        },
-    )
-    short_meta_path = update_model_artifact_meta(
-        model_dataset_root,
-        "short",
-        label_dir=artifact_label_dir,
-        xgb_params=short_params,
-        metadata_updates={
-            "mode": short_meta.get("mode", "ga_mask"),
-            "best_score": short_meta.get("best_score"),
-            "ga_params": dict(short_meta.get("ga_params", {})),
-        },
-    )
+    if run_long:
+        long_meta_path = update_model_artifact_meta(
+            model_dataset_root,
+            "long",
+            label_dir=artifact_label_dir,
+            xgb_params=long_params,
+            metadata_updates={
+                "mode": long_meta.get("mode", "ga_mask"),
+                "best_score": long_meta.get("best_score"),
+                "ga_params": dict(long_meta.get("ga_params", {})),
+            },
+        )
+    if run_short:
+        short_meta_path = update_model_artifact_meta(
+            model_dataset_root,
+            "short",
+            label_dir=artifact_label_dir,
+            xgb_params=short_params,
+            metadata_updates={
+                "mode": short_meta.get("mode", "ga_mask"),
+                "best_score": short_meta.get("best_score"),
+                "ga_params": dict(short_meta.get("ga_params", {})),
+            },
+        )
 
     print(
         "Split sizes: "
         f"train+val={train_val_idx.size}, test={test_idx.size}"
     )
-    _print_label_stats(y_long_train, "LONG labels (train+val)")
-    _print_label_stats(y_short_train, "SHORT labels (train+val)")
+    print(f"[GA-XGB] Side selection: {side_mode}")
+    if run_long:
+        _print_label_stats(y_long_train, "LONG labels (train+val)")
+    if run_short:
+        _print_label_stats(y_short_train, "SHORT labels (train+val)")
     if cfg.label_mode == "pivot" and cfg.super_pivot_weight != 1.0:
         if w_long_train is not None and w_short_train is not None:
             long_super = int((w_long_train > 1.0).sum())
@@ -1391,80 +1473,90 @@ def main() -> None:
                 f"(long super={long_super}, short super={short_super})"
             )
     print(
-        f"[GA-XGB] XGBoost objective={long_params.get('objective', 'binary:logistic')} "
-        f"eval_metric={long_params.get('eval_metric', 'logloss')}"
+        f"[GA-XGB] XGBoost objective="
+        f"{(long_params if run_long else short_params).get('objective', 'binary:logistic')} "
+        f"eval_metric={(long_params if run_long else short_params).get('eval_metric', 'logloss')}"
     )
     if xgb_overrides:
         print(f"[GA-XGB] XGBoost overrides={xgb_overrides}")
 
-    if args.full_fit:
-        long_oof = np.full(train_val_idx.size, np.nan, dtype=np.float32)
-        short_oof = np.full(train_val_idx.size, np.nan, dtype=np.float32)
-        long_test = np.empty((0,), dtype=np.float32)
-        short_test = np.empty((0,), dtype=np.float32)
-        long_eval_history = None
-        short_eval_history = None
-    else:
-        long_oof = walk_forward_oof_probs(
-            X_train=X_train,
-            y_train=y_long_train,
-            mask=long_mask,
-            xgb_params=long_params,
-            n_folds=cfg.n_folds,
-            initial_train_size=cfg.initial_train_size,
-            update_scale_pos_weight=scale_pos_weight,
-            sample_weight=w_long_train,
-            ga_kwargs=ga_kwargs,
-        )
-        short_oof = walk_forward_oof_probs(
-            X_train=X_train,
-            y_train=y_short_train,
-            mask=short_mask,
-            xgb_params=short_params,
-            n_folds=cfg.n_folds,
-            initial_train_size=cfg.initial_train_size,
-            update_scale_pos_weight=scale_pos_weight,
-            sample_weight=w_short_train,
-            ga_kwargs=ga_kwargs,
-        )
+    long_oof = np.full(train_val_idx.size, np.nan, dtype=np.float32)
+    short_oof = np.full(train_val_idx.size, np.nan, dtype=np.float32)
+    long_test = np.empty((0,), dtype=np.float32)
+    short_test = np.empty((0,), dtype=np.float32)
+    long_eval_history = None
+    short_eval_history = None
+    if not args.full_fit:
+        if run_long:
+            long_oof = walk_forward_oof_probs(
+                X_train=X_train,
+                y_train=y_long_train,
+                mask=long_mask,
+                xgb_params=long_params,
+                n_folds=cfg.n_folds,
+                initial_train_size=cfg.initial_train_size,
+                update_scale_pos_weight=scale_pos_weight,
+                sample_weight=w_long_train,
+                ga_kwargs=ga_kwargs,
+            )
+        if run_short:
+            short_oof = walk_forward_oof_probs(
+                X_train=X_train,
+                y_train=y_short_train,
+                mask=short_mask,
+                xgb_params=short_params,
+                n_folds=cfg.n_folds,
+                initial_train_size=cfg.initial_train_size,
+                update_scale_pos_weight=scale_pos_weight,
+                sample_weight=w_short_train,
+                ga_kwargs=ga_kwargs,
+            )
 
-        long_test, long_eval_history = train_final_and_predict_test(
-            X_train=X_train_only,
-            y_train=y_long_train_only,
-            X_test=X_test,
-            mask=long_mask,
-            xgb_params=long_params,
-            update_scale_pos_weight=scale_pos_weight,
-            sample_weight=w_long_train_only,
-            eval_set=(X_val, y_long_val, w_long_val) if val_idx.size else None,
-            ga_kwargs=ga_kwargs,
-            save_model_path=(
-                _artifact_side_dir(model_dataset_root, "long", artifact_label_dir)
-                / "xgb_model.json"
-            ),
-        )
-        short_test, short_eval_history = train_final_and_predict_test(
-            X_train=X_train_only,
-            y_train=y_short_train_only,
-            X_test=X_test,
-            mask=short_mask,
-            xgb_params=short_params,
-            update_scale_pos_weight=scale_pos_weight,
-            sample_weight=w_short_train_only,
-            eval_set=(X_val, y_short_val, w_short_val) if val_idx.size else None,
-            ga_kwargs=ga_kwargs,
-            save_model_path=(
-                _artifact_side_dir(model_dataset_root, "short", artifact_label_dir)
-                / "xgb_model.json"
-            ),
-        )
-        _print_eval_history_summary(side="LONG", history=long_eval_history)
-        _print_eval_history_summary(side="SHORT", history=short_eval_history)
+        if run_long:
+            long_test, long_eval_history = train_final_and_predict_test(
+                X_train=X_train_only,
+                y_train=y_long_train_only,
+                X_test=X_test,
+                mask=long_mask,
+                xgb_params=long_params,
+                update_scale_pos_weight=scale_pos_weight,
+                sample_weight=w_long_train_only,
+                eval_set=(X_val, y_long_val, w_long_val) if val_idx.size else None,
+                ga_kwargs=ga_kwargs,
+                save_model_path=(
+                    _artifact_side_dir(model_dataset_root, "long", artifact_label_dir)
+                    / "xgb_model.json"
+                ),
+            )
+        if run_short:
+            short_test, short_eval_history = train_final_and_predict_test(
+                X_train=X_train_only,
+                y_train=y_short_train_only,
+                X_test=X_test,
+                mask=short_mask,
+                xgb_params=short_params,
+                update_scale_pos_weight=scale_pos_weight,
+                sample_weight=w_short_train_only,
+                eval_set=(X_val, y_short_val, w_short_val) if val_idx.size else None,
+                ga_kwargs=ga_kwargs,
+                save_model_path=(
+                    _artifact_side_dir(model_dataset_root, "short", artifact_label_dir)
+                    / "xgb_model.json"
+                ),
+            )
+        if run_long:
+            _print_eval_history_summary(side="LONG", history=long_eval_history)
+        if run_short:
+            _print_eval_history_summary(side="SHORT", history=short_eval_history)
 
-    _summarize_probs(long_oof, "LONG OOF probs")
-    _summarize_probs(short_oof, "SHORT OOF probs")
-    _summarize_probs(long_test, "LONG test probs")
-    _summarize_probs(short_test, "SHORT test probs")
+    if run_long:
+        _summarize_probs(long_oof, "LONG OOF probs")
+    if run_short:
+        _summarize_probs(short_oof, "SHORT OOF probs")
+    if run_long:
+        _summarize_probs(long_test, "LONG test probs")
+    if run_short:
+        _summarize_probs(short_test, "SHORT test probs")
     long_oof_metrics: dict[str, float] | None = None
     short_oof_metrics: dict[str, float] | None = None
     long_test_metrics: dict[str, float] | None = None
@@ -1474,135 +1566,173 @@ def main() -> None:
     long_threshold = 0.5
     short_threshold = 0.5
     if not args.full_fit:
-        long_threshold, long_best_oof_f1 = _find_best_f1_threshold(y_long_train, long_oof)
-        short_threshold, short_best_oof_f1 = _find_best_f1_threshold(y_short_train, short_oof)
-        print(
-            f"[GA-XGB] LONG best OOF F1 threshold={long_threshold:.4f} "
-            f"(f1={long_best_oof_f1:.4f})"
-        )
-        print(
-            f"[GA-XGB] SHORT best OOF F1 threshold={short_threshold:.4f} "
-            f"(f1={short_best_oof_f1:.4f})"
-        )
-        long_oof_metrics = _print_binary_metrics(
-            y_long_train, long_oof, name="LONG OOF metrics", threshold=long_threshold
-        )
-        short_oof_metrics = _print_binary_metrics(
-            y_short_train, short_oof, name="SHORT OOF metrics", threshold=short_threshold
-        )
-        long_test_metrics = _print_binary_metrics(
-            y_long[test_idx], long_test, name="LONG test metrics", threshold=long_threshold
-        )
-        short_test_metrics = _print_binary_metrics(
-            y_short[test_idx], short_test, name="SHORT test metrics", threshold=short_threshold
-        )
+        if run_long:
+            long_threshold, long_best_oof_score = _find_best_fbeta_threshold(
+                y_long_train,
+                long_oof,
+                beta=threshold_beta,
+            )
+            print(
+                f"[GA-XGB] LONG best OOF {metric_label} threshold={long_threshold:.4f} "
+                f"({metric_label.lower()}={long_best_oof_score:.4f})"
+            )
+            long_oof_metrics = _print_binary_metrics(
+                y_long_train,
+                long_oof,
+                name="LONG OOF metrics",
+                threshold=long_threshold,
+                threshold_metric_beta=threshold_beta,
+            )
+            long_test_metrics = _print_binary_metrics(
+                y_long[test_idx],
+                long_test,
+                name="LONG test metrics",
+                threshold=long_threshold,
+                threshold_metric_beta=threshold_beta,
+            )
+        if run_short:
+            short_threshold, short_best_oof_score = _find_best_fbeta_threshold(
+                y_short_train,
+                short_oof,
+                beta=threshold_beta,
+            )
+            print(
+                f"[GA-XGB] SHORT best OOF {metric_label} threshold={short_threshold:.4f} "
+                f"({metric_label.lower()}={short_best_oof_score:.4f})"
+            )
+            short_oof_metrics = _print_binary_metrics(
+                y_short_train,
+                short_oof,
+                name="SHORT OOF metrics",
+                threshold=short_threshold,
+                threshold_metric_beta=threshold_beta,
+            )
+            short_test_metrics = _print_binary_metrics(
+                y_short[test_idx],
+                short_test,
+                name="SHORT test metrics",
+                threshold=short_threshold,
+                threshold_metric_beta=threshold_beta,
+            )
 
     n_total = X.shape[0]
     if args.full_fit:
-        long_full, _ = train_final_and_predict_test(
-            X_train=X_train,
-            y_train=y_long_train,
-            X_test=X_train,
-            mask=long_mask,
-            xgb_params=long_params,
-            update_scale_pos_weight=scale_pos_weight,
-            sample_weight=w_long_train,
-            ga_kwargs=ga_kwargs,
-            save_model_path=(
-                _artifact_side_dir(model_dataset_root, "long", artifact_label_dir)
-                / "xgb_model.json"
-            ),
-        )
-        short_full, _ = train_final_and_predict_test(
-            X_train=X_train,
-            y_train=y_short_train,
-            X_test=X_train,
-            mask=short_mask,
-            xgb_params=short_params,
-            update_scale_pos_weight=scale_pos_weight,
-            sample_weight=w_short_train,
-            ga_kwargs=ga_kwargs,
-            save_model_path=(
-                _artifact_side_dir(model_dataset_root, "short", artifact_label_dir)
-                / "xgb_model.json"
-            ),
-        )
-        if long_full.size != n_total or short_full.size != n_total:
-            raise ValueError("Full-fit predictions do not match dataset length.")
-        long_full_train_metrics = _print_binary_metrics(
-            y_long_train,
-            long_full,
-            name="LONG full-fit train metrics",
-        )
-        short_full_train_metrics = _print_binary_metrics(
-            y_short_train,
-            short_full,
-            name="SHORT full-fit train metrics",
-        )
+        long_full = np.full(n_total, np.nan, dtype=np.float32)
+        short_full = np.full(n_total, np.nan, dtype=np.float32)
+        if run_long:
+            long_full, _ = train_final_and_predict_test(
+                X_train=X_train,
+                y_train=y_long_train,
+                X_test=X_train,
+                mask=long_mask,
+                xgb_params=long_params,
+                update_scale_pos_weight=scale_pos_weight,
+                sample_weight=w_long_train,
+                ga_kwargs=ga_kwargs,
+                save_model_path=(
+                    _artifact_side_dir(model_dataset_root, "long", artifact_label_dir)
+                    / "xgb_model.json"
+                ),
+            )
+            if long_full.size != n_total:
+                raise ValueError("LONG full-fit predictions do not match dataset length.")
+            long_full_train_metrics = _print_binary_metrics(
+                y_long_train,
+                long_full,
+                name="LONG full-fit train metrics",
+                threshold_metric_beta=threshold_beta,
+            )
+        if run_short:
+            short_full, _ = train_final_and_predict_test(
+                X_train=X_train,
+                y_train=y_short_train,
+                X_test=X_train,
+                mask=short_mask,
+                xgb_params=short_params,
+                update_scale_pos_weight=scale_pos_weight,
+                sample_weight=w_short_train,
+                ga_kwargs=ga_kwargs,
+                save_model_path=(
+                    _artifact_side_dir(model_dataset_root, "short", artifact_label_dir)
+                    / "xgb_model.json"
+                ),
+            )
+            if short_full.size != n_total:
+                raise ValueError("SHORT full-fit predictions do not match dataset length.")
+            short_full_train_metrics = _print_binary_metrics(
+                y_short_train,
+                short_full,
+                name="SHORT full-fit train metrics",
+                threshold_metric_beta=threshold_beta,
+            )
     else:
         long_full = np.full(n_total, np.nan, dtype=np.float32)
         short_full = np.full(n_total, np.nan, dtype=np.float32)
-        long_full[train_val_idx] = long_oof
-        short_full[train_val_idx] = short_oof
-        if long_test.size:
-            long_full[test_idx] = long_test
-        if short_test.size:
-            short_full[test_idx] = short_test
+        if run_long:
+            long_full[train_val_idx] = long_oof
+            if long_test.size:
+                long_full[test_idx] = long_test
+        if run_short:
+            short_full[train_val_idx] = short_oof
+            if short_test.size:
+                short_full[test_idx] = short_test
 
     probs_root = model_dataset_root
     label_dir = label_dir_probs
-    _save_series(
-        output_dir=probs_root / "long" / label_dir,
-        prefix="p_long",
-        train_oof=long_oof,
-        test_probs=long_test,
-        full_probs=long_full,
-        train_idx=train_val_idx,
-        test_idx=test_idx,
-        index=plot_index,
-    )
-    _save_series(
-        output_dir=probs_root / "short" / label_dir,
-        prefix="p_short",
-        train_oof=short_oof,
-        test_probs=short_test,
-        full_probs=short_full,
-        train_idx=train_val_idx,
-        test_idx=test_idx,
-        index=plot_index,
-    )
+    if run_long:
+        _save_series(
+            output_dir=probs_root / "long" / label_dir,
+            prefix="p_long",
+            train_oof=long_oof,
+            test_probs=long_test,
+            full_probs=long_full,
+            train_idx=train_val_idx,
+            test_idx=test_idx,
+            index=plot_index,
+        )
+    if run_short:
+        _save_series(
+            output_dir=probs_root / "short" / label_dir,
+            prefix="p_short",
+            train_oof=short_oof,
+            test_probs=short_test,
+            full_probs=short_full,
+            train_idx=train_val_idx,
+            test_idx=test_idx,
+            index=plot_index,
+        )
 
-    missing_long = int(np.isnan(long_oof).sum())
-    missing_short = int(np.isnan(short_oof).sum())
-    if not args.full_fit and (missing_long or missing_short):
+    missing_long = int(np.isnan(long_oof).sum()) if run_long else 0
+    missing_short = int(np.isnan(short_oof).sum()) if run_short else 0
+    if not args.full_fit and ((run_long and missing_long) or (run_short and missing_short)):
         print(
             "OOF gap detected (early bars without prior data). "
             f"long={missing_long}, short={missing_short}"
         )
     if plot_df is not None and not args.full_fit:
         test_df = plot_df.iloc[test_idx]
-        y_long_test = y_long[test_idx]
-        y_short_test = y_short[test_idx]
+        y_long_test = y_long[test_idx] if run_long else np.empty((0,), dtype=y_long.dtype)
+        y_short_test = y_short[test_idx] if run_short else np.empty((0,), dtype=y_short.dtype)
         tail = 200
         if len(test_df) > tail:
             test_df = test_df.tail(tail)
-            long_test_tail = long_test[-tail:]
-            short_test_tail = short_test[-tail:]
+            long_test_tail = long_test[-tail:] if run_long else np.empty((0,), dtype=np.float32)
+            short_test_tail = short_test[-tail:] if run_short else np.empty((0,), dtype=np.float32)
             y_long_test = y_long_test[-tail:]
             y_short_test = y_short_test[-tail:]
         else:
-            long_test_tail = long_test
-            short_test_tail = short_test
+            long_test_tail = long_test if run_long else np.empty((0,), dtype=np.float32)
+            short_test_tail = short_test if run_short else np.empty((0,), dtype=np.float32)
 
         save_path = get_default_model_inference_plot_path(
             cfg.ticker, f"ga_xgb_{cfg.label_mode}_test"
         )
         plot_model_inference(
             test_df,
-            long_test_tail if long_test_tail.size else None,
-            short_test_tail if short_test_tail.size else None,
-            long_actual=y_long_test if y_long_test.size else None,
-            short_actual=y_short_test if y_short_test.size else None,
+            long_test_tail if run_long and long_test_tail.size else None,
+            short_test_tail if run_short and short_test_tail.size else None,
+            long_actual=y_long_test if run_long and y_long_test.size else None,
+            short_actual=y_short_test if run_short and y_short_test.size else None,
             long_label_name="LONG",
             short_label_name="SHORT",
             threshold=0.5,
@@ -1624,29 +1754,31 @@ def main() -> None:
             print(f"[GA-XGB] Saved loss curve plot: {loss_plot_path}")
 
     print(f"Saved OOF/test/full probability arrays under {probs_root}")
+    trained_sides = [side for side, enabled in (("long", run_long), ("short", run_short)) if enabled]
     hyperparams = {
         **asdict(cfg),
         **vars(args),
         "scale_pos_weight_enabled": bool(scale_pos_weight),
         "model_dataset_root": str(model_dataset_root),
-        "long_ga_params": dict(long_meta.get("ga_params", {})),
-        "short_ga_params": dict(short_meta.get("ga_params", {})),
+        "trained_sides": trained_sides,
+        "long_ga_params": dict(long_meta.get("ga_params", {})) if run_long else None,
+        "short_ga_params": dict(short_meta.get("ga_params", {})) if run_short else None,
     }
     train_metrics = (
         {
-            "long_oof": long_oof_metrics,
-            "short_oof": short_oof_metrics,
+            "long_oof": long_oof_metrics if run_long else None,
+            "short_oof": short_oof_metrics if run_short else None,
         }
         if not args.full_fit
         else {
-            "long_full_train": long_full_train_metrics,
-            "short_full_train": short_full_train_metrics,
+            "long_full_train": long_full_train_metrics if run_long else None,
+            "short_full_train": short_full_train_metrics if run_short else None,
         }
     )
     validation_metrics = (
         {
-            "long_test": long_test_metrics,
-            "short_test": short_test_metrics,
+            "long_test": long_test_metrics if run_long else None,
+            "short_test": short_test_metrics if run_short else None,
             "test_rows": float(test_idx.size),
             "val_rows": float(val_idx.size),
         }
@@ -1654,8 +1786,8 @@ def main() -> None:
         else {"skipped": "--full-fit"}
     )
     best_validation_metrics = {
-        "long_selector_best_score": long_meta.get("best_score"),
-        "short_selector_best_score": short_meta.get("best_score"),
+        "long_selector_best_score": long_meta.get("best_score") if run_long else None,
+        "short_selector_best_score": short_meta.get("best_score") if run_short else None,
     }
     log_paths = log_training_run(
         run_name="ga_xgboost_train",
@@ -1666,13 +1798,25 @@ def main() -> None:
         best_validation_metrics=best_validation_metrics,
         artifacts={
             "probs_root": str(probs_root),
-            "long_probs_dir": str(probs_root / "long" / label_dir),
-            "short_probs_dir": str(probs_root / "short" / label_dir),
+            "long_probs_dir": str(probs_root / "long" / label_dir) if run_long else None,
+            "short_probs_dir": str(probs_root / "short" / label_dir) if run_short else None,
             "loss_curve_plot": str(loss_plot_path) if saved_loss_plot else None,
-            "long_model_path": str(probs_root / "long" / label_dir / "xgb_model.json"),
-            "short_model_path": str(probs_root / "short" / label_dir / "xgb_model.json"),
-            "long_meta_path": str(long_meta_path) if long_meta_path.exists() else None,
-            "short_meta_path": str(short_meta_path) if short_meta_path.exists() else None,
+            "long_model_path": (
+                str(probs_root / "long" / label_dir / "xgb_model.json") if run_long else None
+            ),
+            "short_model_path": (
+                str(probs_root / "short" / label_dir / "xgb_model.json") if run_short else None
+            ),
+            "long_meta_path": (
+                str(long_meta_path)
+                if long_meta_path is not None and long_meta_path.exists()
+                else None
+            ),
+            "short_meta_path": (
+                str(short_meta_path)
+                if short_meta_path is not None and short_meta_path.exists()
+                else None
+            ),
         },
         extra={
             "ticker": normalize_ticker(cfg.ticker),
@@ -1682,8 +1826,8 @@ def main() -> None:
             "train_rows": int(train_idx.size),
             "val_rows": int(val_idx.size),
             "test_rows": int(test_idx.size),
-            "oof_missing_long": int(np.isnan(long_oof).sum()),
-            "oof_missing_short": int(np.isnan(short_oof).sum()),
+            "oof_missing_long": int(np.isnan(long_oof).sum()) if run_long else None,
+            "oof_missing_short": int(np.isnan(short_oof).sum()) if run_short else None,
         },
     )
     print(f"[GA-XGB] Saved training run summary: {log_paths['latest_path']}")
