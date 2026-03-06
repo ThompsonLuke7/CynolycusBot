@@ -1,16 +1,16 @@
 {
-  "side": "short",
-  "best_score": 0.6917382587201318,
+  "side": "SHORT",
+  "best_score": -0.31508294867952946,
   "n_features": 1549,
-  "selected_features": 94,
+  "selected_features": 200,
   "ga_params": {
     "population_size": 32,
-    "generations": 60,
+    "generations": 30,
     "crossover_rate": 0.6,
     "mutation_rate": 0.005,
     "val_size": 0.1,
-    "fitness_metric": "f1_penalized",
-    "feature_penalty": 0.0015,
+    "fitness_metric": "logloss_penalized",
+    "feature_penalty": 0.0001,
     "early_stopping_rounds": 50,
     "max_boost_round": 2000,
     "max_features": 200,
@@ -22,7 +22,7 @@
   },
   "xgb_params": {
     "n_estimators": 2000,
-    "booster": "gbtree",
+    "booster": "dart",
     "max_depth": 3,
     "learning_rate": 0.03,
     "subsample": 0.8,
@@ -34,10 +34,16 @@
     "reg_lambda": 2.0,
     "reg_alpha": 0.0,
     "n_jobs": -1,
-    "scale_pos_weight": 1.0
+    "scale_pos_weight": 1.0,
+    "rate_drop": 0.1,
+    "skip_drop": 0.5,
+    "one_drop": 1,
+    "sample_type": "uniform",
+    "normalize_type": "tree"
   },
   "ticker": "SPY",
   "dataset_name": "10min",
   "label_mode": "tb",
-  "super_pivot_weight": 2.0
+  "super_pivot_weight": 2.0,
+  "mode": "ga_mask"
 }
