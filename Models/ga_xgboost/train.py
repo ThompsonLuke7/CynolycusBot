@@ -857,9 +857,8 @@ def train_final_and_predict_test(
     sample_weight: np.ndarray | None = None,
     eval_set: tuple[np.ndarray, np.ndarray, np.ndarray | None] | None = None,
     ga_kwargs: dict | None = None,
+    save_model_path: Path | None = None,
 ) -> tuple[np.ndarray, dict | None]:
-    if X_test.size == 0:
-        return np.empty((0,), dtype=np.float32), None
     if sample_weight is not None and sample_weight.shape[0] != X_train.shape[0]:
         raise ValueError("sample_weight must match X_train length.")
 
@@ -883,6 +882,14 @@ def train_final_and_predict_test(
         ga_kwargs=ga_kwargs,
     )
     eval_history = selector.last_evals_result_
+    if save_model_path is not None:
+        save_model_path.parent.mkdir(parents=True, exist_ok=True)
+        if hasattr(model, "save_model"):
+            model.save_model(str(save_model_path))
+        else:
+            model.get_booster().save_model(str(save_model_path))
+    if X_test.size == 0:
+        return np.empty((0,), dtype=np.float32), eval_history
 
     X_test = X_test[:, mask]
     use_gpu = selector._use_gpu is True
@@ -1431,6 +1438,10 @@ def main() -> None:
             sample_weight=w_long_train_only,
             eval_set=(X_val, y_long_val, w_long_val) if val_idx.size else None,
             ga_kwargs=ga_kwargs,
+            save_model_path=(
+                _artifact_side_dir(model_dataset_root, "long", artifact_label_dir)
+                / "xgb_model.json"
+            ),
         )
         short_test, short_eval_history = train_final_and_predict_test(
             X_train=X_train_only,
@@ -1442,6 +1453,10 @@ def main() -> None:
             sample_weight=w_short_train_only,
             eval_set=(X_val, y_short_val, w_short_val) if val_idx.size else None,
             ga_kwargs=ga_kwargs,
+            save_model_path=(
+                _artifact_side_dir(model_dataset_root, "short", artifact_label_dir)
+                / "xgb_model.json"
+            ),
         )
         _print_eval_history_summary(side="LONG", history=long_eval_history)
         _print_eval_history_summary(side="SHORT", history=short_eval_history)
@@ -1493,6 +1508,10 @@ def main() -> None:
             update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_long_train,
             ga_kwargs=ga_kwargs,
+            save_model_path=(
+                _artifact_side_dir(model_dataset_root, "long", artifact_label_dir)
+                / "xgb_model.json"
+            ),
         )
         short_full, _ = train_final_and_predict_test(
             X_train=X_train,
@@ -1503,6 +1522,10 @@ def main() -> None:
             update_scale_pos_weight=scale_pos_weight,
             sample_weight=w_short_train,
             ga_kwargs=ga_kwargs,
+            save_model_path=(
+                _artifact_side_dir(model_dataset_root, "short", artifact_label_dir)
+                / "xgb_model.json"
+            ),
         )
         if long_full.size != n_total or short_full.size != n_total:
             raise ValueError("Full-fit predictions do not match dataset length.")
@@ -1646,6 +1669,8 @@ def main() -> None:
             "long_probs_dir": str(probs_root / "long" / label_dir),
             "short_probs_dir": str(probs_root / "short" / label_dir),
             "loss_curve_plot": str(loss_plot_path) if saved_loss_plot else None,
+            "long_model_path": str(probs_root / "long" / label_dir / "xgb_model.json"),
+            "short_model_path": str(probs_root / "short" / label_dir / "xgb_model.json"),
             "long_meta_path": str(long_meta_path) if long_meta_path.exists() else None,
             "short_meta_path": str(short_meta_path) if short_meta_path.exists() else None,
         },

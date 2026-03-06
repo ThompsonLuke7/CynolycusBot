@@ -272,10 +272,14 @@ def _prefill_from_alpaca(
     split_dataset_name: str = "15min",
     split_x_filename: str = "X_15min_tree.parquet",
     prepend_split_test_warmup: bool = True,
+    prepend_warmup_bars: int = 500,
     feed: DataFeed = DataFeed.IEX,
 ) -> None:
     feed_enum = feed if isinstance(feed, DataFeed) else _parse_feed(str(feed))
     effective_tail = int(tail) if tail is not None else int(processor._buffer_size)
+    warmup_target = max(0, int(prepend_warmup_bars))
+    if effective_tail > 0:
+        warmup_target = min(warmup_target, effective_tail)
     for symbol in symbols:
         fetched_df = fetch_intraday(
             ticker=symbol,
@@ -296,22 +300,31 @@ def _prefill_from_alpaca(
             )
             if warmup_df is not None and not warmup_df.empty:
                 raw_warmup_count = int(len(warmup_df))
-                if effective_tail > 0:
-                    warmup_df = warmup_df.tail(effective_tail)
+                if warmup_target > 0:
+                    warmup_df = warmup_df.tail(warmup_target)
+                else:
+                    warmup_df = warmup_df.iloc[0:0]
                 used_warmup_count = int(len(warmup_df))
-                frames.append(warmup_df)
+                if used_warmup_count > 0:
+                    frames.append(warmup_df)
 
         raw_fetched_count = 0
         used_fetched_count = 0
         if fetched_df is not None and not fetched_df.empty:
-            raw_fetched_count = int(len(fetched_df))
             fetched_df = _normalize_prefill_1m_frame(fetched_df, symbol=symbol)
+            raw_fetched_count = int(len(fetched_df))
+            fetched_latest_df = fetched_df
             if effective_tail > 0:
-                fetched_df = fetched_df.tail(effective_tail)
+                fetch_tail_cap = max(effective_tail - used_warmup_count, 0)
+                if fetch_tail_cap > 0:
+                    fetched_df = fetched_df.tail(fetch_tail_cap)
+                else:
+                    fetched_df = fetched_df.iloc[0:0]
             used_fetched_count = int(len(fetched_df))
-            frames.append(fetched_df)
+            if used_fetched_count > 0:
+                frames.append(fetched_df)
             last_fetch_ts = pd.to_datetime(
-                fetched_df["timestamp"],
+                fetched_latest_df["timestamp"],
                 utc=True,
                 errors="coerce",
             ).max()
@@ -337,8 +350,14 @@ def _prefill_from_alpaca(
         combined = combined.dropna(subset=["timestamp"])
         combined = combined.sort_values("timestamp")
         combined = combined.drop_duplicates(subset=["symbol", "timestamp"], keep="first")
-        if effective_tail > 0:
-            combined = combined.tail(effective_tail)
+        if effective_tail > 0 and len(combined) > effective_tail:
+            warmup_keep = min(used_warmup_count, len(combined), effective_tail)
+            remaining_cap = max(effective_tail - warmup_keep, 0)
+            keep_warmup = combined.head(warmup_keep) if warmup_keep > 0 else combined.iloc[0:0]
+            keep_fetched = combined.tail(remaining_cap) if remaining_cap > 0 else combined.iloc[0:0]
+            combined = pd.concat([keep_warmup, keep_fetched], axis=0, ignore_index=True)
+            combined = combined.drop_duplicates(subset=["symbol", "timestamp"], keep="first")
+            combined = combined.sort_values("timestamp")
         used_combined_count = int(len(combined))
 
         _prefill_buffers(
@@ -349,7 +368,7 @@ def _prefill_from_alpaca(
         )
         print(
             f"[live] Prefill source breakdown for {symbol}: "
-            f"split_test_warmup(raw={raw_warmup_count:,}, used={used_warmup_count:,}), "
+            f"split_test_warmup(raw={raw_warmup_count:,}, used={used_warmup_count:,}, target={warmup_target:,}), "
             f"alpaca_fetch(raw={raw_fetched_count:,}, used={used_fetched_count:,}), "
             f"combined_used={used_combined_count:,}, cap={effective_tail:,}"
         )
@@ -819,6 +838,12 @@ def _parse_args() -> argparse.Namespace:
         help="If set, use the most recent N rows per symbol; otherwise defaults to --buffer-size.",
     )
     parser.add_argument(
+        "--prefill-prepend-warmup-bars",
+        type=int,
+        default=500,
+        help="Always reserve and prepend this many split-test warmup 1m bars before fetched history (0 disables).",
+    )
+    parser.add_argument(
         "--enable-option-orders",
         action="store_true",
         help="Enable option order policy execution on each 15m inference action.",
@@ -1096,6 +1121,7 @@ def main() -> None:
                 split_dataset_name=args.ga_dataset_name,
                 split_x_filename=args.split_x_filename,
                 prepend_split_test_warmup=True,
+                prepend_warmup_bars=max(0, int(args.prefill_prepend_warmup_bars)),
                 feed=feed,
             )
         except Exception as exc:
