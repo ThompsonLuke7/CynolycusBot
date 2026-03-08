@@ -1,0 +1,29 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="PSL_12__30m<16.666666" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="leaf=-0.0418428704" ]
+
+    2 [ label="CDL_HAMMER__1d<100" ]
+    2 -> 3 [label="yes" color="#FF0000"]
+    2 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="REFLEX_20_20_0.04<-2.08835292" ]
+    3 -> 5 [label="yes" color="#FF0000"]
+    3 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="leaf=-0.0117354253" ]
+
+    6 [ label="leaf=0.000315687939" ]
+
+    4 [ label="STOCHh_14_3_3<-8.61628342" ]
+    4 -> 7 [label="yes" color="#FF0000"]
+    4 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.00734544452" ]
+
+    8 [ label="leaf=-0.0337619595" ]
+}

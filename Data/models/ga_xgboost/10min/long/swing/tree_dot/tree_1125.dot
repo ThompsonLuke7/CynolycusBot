@@ -1,0 +1,41 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="SLOPE_1__1h<6.42999983" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="AROOND_14<100" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="AROOND_14<78.5714264" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.000396115764" ]
+
+    8 [ label="leaf=-0.03108388" ]
+
+    4 [ label="BBP_5_2.0_2.0<0.356728494" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.000148242078" ]
+
+    10 [ label="leaf=0.0166439805" ]
+
+    2 [ label="VTXM_14__1h<0.820433438" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="leaf=-0.0129250195" ]
+
+    6 [ label="SMCti_14_50_20_5<-0.665000021" ]
+    6 -> 11 [label="yes" color="#FF0000"]
+    6 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=0.00945672859" ]
+
+    12 [ label="leaf=0.0399882719" ]
+}

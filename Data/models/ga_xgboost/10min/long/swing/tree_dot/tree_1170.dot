@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="DPO_20<1.44500005" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="range_pct<0.00261382991" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="dist_to_vwap_upper_1<-3.35819173" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.0111754909" ]
+
+    8 [ label="leaf=-0.000334551936" ]
+
+    4 [ label="DPO_20<-0.108000003" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=0.000442180375" ]
+
+    10 [ label="leaf=0.0117920386" ]
+
+    2 [ label="range_pct<0.00552991638" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="dist_to_recent_high_24__1d<33.7900009" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=-0.0396956503" ]
+
+    12 [ label="leaf=0.00206613401" ]
+
+    6 [ label="atr_swing_bars_since_flip__4h<3" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=0.0265849326" ]
+
+    14 [ label="leaf=-0.00850557722" ]
+}

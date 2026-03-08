@@ -1,0 +1,41 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="lower_wick_ratio<0.715596318" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="PPOh_12_26_9<-0.0142642567" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="PVO_12_26_9<-13.5058718" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.00733840931" ]
+
+    8 [ label="leaf=-0.000559953565" ]
+
+    4 [ label="recent_high_touch_count<19" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.00306212693" ]
+
+    10 [ label="leaf=0.0212738682" ]
+
+    2 [ label="ret_8__1d<0.0510108471" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="ret_8__1d<0.00130244694" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=-0.000643738429" ]
+
+    12 [ label="leaf=0.0137036238" ]
+
+    6 [ label="leaf=-0.0460904725" ]
+}

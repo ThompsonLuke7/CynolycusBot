@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="EXHC_UPa<2" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="lower_wick_ratio<0.49000001" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="THERMOma_20_2_0.5<0.150847614" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.0144701162" ]
+
+    8 [ label="leaf=0.00133578537" ]
+
+    4 [ label="dist_to_vwap_upper_1<0.543818176" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=0.00700439513" ]
+
+    10 [ label="leaf=-0.0415629558" ]
+
+    2 [ label="lower_wick_ratio<0.217741936" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="is_opening_30m_flag<1" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=-0.0230142325" ]
+
+    12 [ label="leaf=0.0104884412" ]
+
+    6 [ label="STDEV_30__30m<1.20382679" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=0.0111019993" ]
+
+    14 [ label="leaf=-0.0036706673" ]
+}

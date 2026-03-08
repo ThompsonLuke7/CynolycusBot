@@ -1,0 +1,35 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="dist_to_vwap_upper_1<1.43769991" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="CDL_HIGHWAVE__30m<100" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="CDL_HOMINGPIGEON<100" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.000508452067" ]
+
+    8 [ label="leaf=-0.0296538454" ]
+
+    4 [ label="PPOh_12_26_9<-0.11146491" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.0452650674" ]
+
+    10 [ label="leaf=-0.0051584593" ]
+
+    2 [ label="SMCti_14_50_20_5__30m<-2.85500002" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="leaf=-0.0400545411" ]
+
+    6 [ label="leaf=-0.0144411093" ]
+}

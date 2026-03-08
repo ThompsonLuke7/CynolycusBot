@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="lower_wick_ratio<0.10358566" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="CDL_ENGULFING<80" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="EXHC_UPa<1" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.00761916256" ]
+
+    8 [ label="leaf=-0.0254766531" ]
+
+    4 [ label="range_pct<0.00123662956" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.0203646459" ]
+
+    10 [ label="leaf=0.0158627313" ]
+
+    2 [ label="EXHC_UPa<2" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="SMCbi_14_50_20_5__30m<-0.764999986" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=0.00142920623" ]
+
+    12 [ label="leaf=0.0117696039" ]
+
+    6 [ label="range_pct<0.00118542835" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=-0.0206068549" ]
+
+    14 [ label="leaf=0.00456406688" ]
+}

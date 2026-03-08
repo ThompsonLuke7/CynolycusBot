@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="rsilg_gamma__30m<0.7069996" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="vix_trend_ema_8_21__1d<-0.0434732549" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="ADX_14__1d<16.9938602" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.012644357" ]
+
+    8 [ label="leaf=-0.000554474187" ]
+
+    4 [ label="BULLP_13<-0.835352838" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.00507351477" ]
+
+    10 [ label="leaf=0.00195507263" ]
+
+    2 [ label="dist_to_vwap_upper_2__4h<0.110289671" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="PVOL__1d<283802208" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=-0.02049076" ]
+
+    12 [ label="leaf=0.01042041" ]
+
+    6 [ label="upper_wick_ratio<0.271428585" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=0.00120070064" ]
+
+    14 [ label="leaf=-0.0309944656" ]
+}

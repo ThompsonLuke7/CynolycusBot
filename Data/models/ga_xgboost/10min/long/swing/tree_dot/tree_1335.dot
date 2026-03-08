@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="lower_wick_ratio<0.207547173" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="ADOSC_3_10<-3797.12183" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="dist_to_vwap_upper_1<-0.711659014" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.00328726415" ]
+
+    8 [ label="leaf=0.0093019316" ]
+
+    4 [ label="PVO_12_26_9<16.7480927" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.00903153513" ]
+
+    10 [ label="leaf=0.00531645305" ]
+
+    2 [ label="DPO_20<-0.263500005" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="minutes_from_open__30m<0.692307711" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=0.0102379695" ]
+
+    12 [ label="leaf=0.00263641379" ]
+
+    6 [ label="upper_wick_ratio<0.487179488" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=0.000893192715" ]
+
+    14 [ label="leaf=-0.0286824796" ]
+}

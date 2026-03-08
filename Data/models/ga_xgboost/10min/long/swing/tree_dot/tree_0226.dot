@@ -1,0 +1,29 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="SMCbf_14_50_20_5<1" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="upper_wick_ratio<0.159090906" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="STOCHh_14_3_3<6.95551395" ]
+    3 -> 5 [label="yes" color="#FF0000"]
+    3 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="leaf=0.00581111992" ]
+
+    6 [ label="leaf=-0.0152345067" ]
+
+    4 [ label="AROOND_14<100" ]
+    4 -> 7 [label="yes" color="#FF0000"]
+    4 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.00792426243" ]
+
+    8 [ label="leaf=0.0051408126" ]
+
+    2 [ label="leaf=-0.0316582248" ]
+}

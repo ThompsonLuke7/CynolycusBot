@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="ADX_14__1d<17.0533638" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="vix_trend_ema_8_21__1d<-0.048352275" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="DPO_20<0.107249998" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.00677310536" ]
+
+    8 [ label="leaf=-0.0301619153" ]
+
+    4 [ label="THERMOma_20_2_0.5<0.381364018" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=0.00317359949" ]
+
+    10 [ label="leaf=-0.00554713327" ]
+
+    2 [ label="range_pct<0.000691971101" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="SMCti_14_50_20_5<-0.170000002" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=-0.0290815495" ]
+
+    12 [ label="leaf=0.000605336681" ]
+
+    6 [ label="vix_z_20<2.01806736" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=0.00302286539" ]
+
+    14 [ label="leaf=-0.00657257112" ]
+}

@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="DPO_20<-2.53125" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="PPOh_12_26_9<-0.137625635" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="DPO_20<-3.43249989" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.012133752" ]
+
+    8 [ label="leaf=-0.0265735835" ]
+
+    4 [ label="PPOs_12_26_9__4h<-0.955440462" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.000789189071" ]
+
+    10 [ label="leaf=0.0230358355" ]
+
+    2 [ label="STOCHh_14_3_3<-10.0424662" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="CHOP_14_1_100.0__1h<49.4415283" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=-0.000959114812" ]
+
+    12 [ label="leaf=-0.0135212839" ]
+
+    6 [ label="range_pct<0.000313933822" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=-0.0337206461" ]
+
+    14 [ label="leaf=0.000580103486" ]
+}

@@ -1,0 +1,29 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="SMCbf_14_50_20_5<1" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="range_pct<0.0010618238" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="SMCtp_14_50_20_5<-8.05369091" ]
+    3 -> 5 [label="yes" color="#FF0000"]
+    3 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="leaf=-0.0169287119" ]
+
+    6 [ label="leaf=0.00520675629" ]
+
+    4 [ label="dist_to_recent_high_12<1.67499995" ]
+    4 -> 7 [label="yes" color="#FF0000"]
+    4 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.0110743009" ]
+
+    8 [ label="leaf=-0.00288186478" ]
+
+    2 [ label="leaf=-0.0327102654" ]
+}

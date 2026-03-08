@@ -19,6 +19,7 @@ from Models.meta_xgboost.common import (
     build_base_feature_frame,
     choose_threshold,
     compute_entry_embargo_end_idx,
+    load_prob_frame,
     resolve_meta_dataset_root,
     save_booster_artifacts,
     save_prob_frame,
@@ -29,6 +30,8 @@ from Models.meta_xgboost.common import (
     xgb_params_from_config,
 )
 
+ENTRY_SIDES = ("long", "short")
+
 
 def _save_entry_eval_plot(
     *,
@@ -38,27 +41,38 @@ def _save_entry_eval_plot(
     threshold_summary: dict[str, dict[str, float | None]],
     cfg: PipelineConfig,
 ) -> Path | None:
-    long_probs = np.asarray(combined_cols.get("p_enter_long_oof"), dtype=np.float32)
-    short_probs = np.asarray(combined_cols.get("p_enter_short_oof"), dtype=np.float32)
-    valid = np.isfinite(long_probs) | np.isfinite(short_probs)
+    long_probs = None
+    short_probs = None
+    if "p_enter_long_oof" in combined_cols:
+        long_probs = np.asarray(combined_cols["p_enter_long_oof"], dtype=np.float32).reshape(-1)
+    if "p_enter_short_oof" in combined_cols:
+        short_probs = np.asarray(combined_cols["p_enter_short_oof"], dtype=np.float32).reshape(-1)
+
+    valid = np.zeros(len(frame), dtype=bool)
+    if long_probs is not None and long_probs.size == len(frame):
+        valid |= np.isfinite(long_probs)
+    if short_probs is not None and short_probs.size == len(frame):
+        valid |= np.isfinite(short_probs)
     if not np.any(valid):
         return None
 
     valid_idx = np.flatnonzero(valid)
     tail_idx = valid_idx[-300:] if valid_idx.size > 300 else valid_idx
     plot_df = frame.iloc[tail_idx]
+    long_thr = threshold_summary.get("enter_long", {}).get("threshold")
+    short_thr = threshold_summary.get("enter_short", {}).get("threshold")
     save_path = entry_root / "meta_entry_oof_eval.png"
     plot_model_inference(
         plot_df,
-        long_probs[tail_idx],
-        short_probs[tail_idx],
-        long_actual=plot_df["y_enter_long"].to_numpy(dtype=np.int64),
-        short_actual=plot_df["y_enter_short"].to_numpy(dtype=np.int64),
+        long_probs[tail_idx] if long_probs is not None else None,
+        short_probs[tail_idx] if short_probs is not None else None,
+        long_actual=plot_df["y_enter_long"].to_numpy(dtype=np.int64) if long_probs is not None else None,
+        short_actual=plot_df["y_enter_short"].to_numpy(dtype=np.int64) if short_probs is not None else None,
         long_label_name="ENTRY LONG",
         short_label_name="ENTRY SHORT",
         threshold=0.5,
-        long_threshold=float(threshold_summary["enter_long"]["threshold"]),
-        short_threshold=float(threshold_summary["enter_short"]["threshold"]),
+        long_threshold=float(long_thr) if long_thr is not None else None,
+        short_threshold=float(short_thr) if short_thr is not None else None,
         title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB entry OOF eval ({cfg.dataset_name})",
         save_path=str(save_path),
     )
@@ -89,6 +103,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threshold-step", type=float, default=PipelineConfig.threshold_step)
     p.add_argument("--threshold-objective", type=str, default=PipelineConfig.threshold_objective)
     p.add_argument("--min-oos-prob-coverage", type=float, default=PipelineConfig.min_oos_prob_coverage)
+    p.add_argument("--sides", choices=["both", "long", "short"], default="both")
     p.add_argument("--xgb-booster", choices=["gbtree", "dart"], default=None)
     p.add_argument("--xgb-rate-drop", type=float, default=None)
     p.add_argument("--xgb-skip-drop", type=float, default=None)
@@ -135,8 +150,25 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
     )
 
 
-def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float] | pd.DataFrame]:
-    print(f"[META-ENTRY] Building feature frame for {cfg.ticker} {cfg.dataset_name}")
+def _resolve_sides(raw: str | tuple[str, ...]) -> tuple[str, ...]:
+    if isinstance(raw, tuple):
+        sides = tuple(s.lower() for s in raw)
+    else:
+        key = str(raw).strip().lower()
+        sides = ENTRY_SIDES if key == "both" else (key,)
+    invalid = [s for s in sides if s not in ENTRY_SIDES]
+    if invalid:
+        raise ValueError(f"Unsupported side(s): {invalid}. Expected one of {ENTRY_SIDES}.")
+    return tuple(dict.fromkeys(sides))
+
+
+def run_entry_pipeline(
+    cfg: PipelineConfig,
+    *,
+    sides: tuple[str, ...] = ENTRY_SIDES,
+) -> dict[str, Path | dict[str, float] | pd.DataFrame]:
+    active_sides = _resolve_sides(sides)
+    print(f"[META-ENTRY] Building feature frame for {cfg.ticker} {cfg.dataset_name} | sides={active_sides}")
     frame = add_entry_targets(build_base_feature_frame(cfg), cfg)
     exclude = {
         "open", "high", "low", "close", "session_date", cfg.atr_col,
@@ -152,25 +184,22 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
     entry_root.mkdir(parents=True, exist_ok=True)
     print(f"[META-ENTRY] Output dir: {entry_root}")
 
-    target_to_prob = {
-        "y_enter_long": "p_enter_long",
-        "y_enter_short": "p_enter_short",
-    }
-    summary_key = {
-        "y_enter_long": "enter_long",
-        "y_enter_short": "enter_short",
-    }
+    target_specs: list[tuple[str, str, str]] = []
+    if "long" in active_sides:
+        target_specs.append(("y_enter_long", "p_enter_long", "enter_long"))
+    if "short" in active_sides:
+        target_specs.append(("y_enter_short", "p_enter_short", "enter_short"))
+    if not target_specs:
+        raise ValueError("No entry targets selected.")
+
     combined_cols: dict[str, np.ndarray] = {}
     threshold_summary: dict[str, dict[str, float | None]] = {}
     metrics_summary: dict[str, dict[str, dict[str, float]]] = {}
     loss_histories: dict[str, dict[str, list[float]] | None] = {}
-    feature_columns_by_target = {
-        "enter_long": list(feature_cols),
-        "enter_short": list(feature_cols),
-    }
+    feature_columns_by_target: dict[str, list[str]] = {}
+    trained_targets: list[str] = []
 
-    for target_col, prob_prefix in target_to_prob.items():
-        key = summary_key[target_col]
+    for target_col, prob_prefix, key in target_specs:
         print(f"[META-ENTRY] Training {key}")
         embargo_end_idx = compute_entry_embargo_end_idx(frame, cfg, target_col=target_col)
         result = train_walkforward_binary(
@@ -190,6 +219,8 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
         metrics_summary[key] = {"full": train_metrics, "oof": oof_metrics}
         threshold_summary[key] = {"threshold": float(threshold), **best_row}
         loss_histories[key] = result.eval_history
+        feature_columns_by_target[key] = list(feature_cols)
+        trained_targets.append(key)
         print(
             f"[META-ENTRY] {key}: threshold={float(threshold):.4f} "
             f"train_logloss={train_metrics.get('logloss', float('nan')):.4f} "
@@ -215,9 +246,24 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
         combined_cols[f"{prob_prefix}_oof"] = result.oof_probs
         combined_cols[f"{prob_prefix}_full"] = result.full_probs
 
-    prob_path = save_prob_frame(entry_root / "entry_probs.parquet", index=frame.index, columns=combined_cols)
+    prob_path = entry_root / "entry_probs.parquet"
+    merged_prob_cols = dict(combined_cols)
+    if prob_path.exists():
+        existing_probs = load_prob_frame(prob_path).reindex(frame.index)
+        for col in existing_probs.columns:
+            if col not in merged_prob_cols:
+                merged_prob_cols[col] = pd.to_numeric(existing_probs[col], errors="coerce").to_numpy(dtype=float)
+    prob_path = save_prob_frame(prob_path, index=frame.index, columns=merged_prob_cols)
+
     thresholds_path = entry_root / "entry_thresholds.json"
-    thresholds_path.write_text(json.dumps(threshold_summary, indent=2), encoding="utf-8")
+    merged_thresholds: dict[str, dict[str, float | None]] = {}
+    if thresholds_path.exists():
+        loaded = json.loads(thresholds_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            merged_thresholds.update(loaded)
+    merged_thresholds.update(threshold_summary)
+    thresholds_path.write_text(json.dumps(merged_thresholds, indent=2), encoding="utf-8")
+
     labels_path = save_prob_frame(
         entry_root / "entry_labels.parquet",
         index=frame.index,
@@ -229,8 +275,8 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
     plot_path = _save_entry_eval_plot(
         frame=frame,
         entry_root=entry_root,
-        combined_cols=combined_cols,
-        threshold_summary=threshold_summary,
+        combined_cols=merged_prob_cols,
+        threshold_summary=merged_thresholds,
         cfg=cfg,
     )
     if plot_path is not None:
@@ -268,7 +314,7 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
             "rows": int(len(frame)),
             "ticker": cfg.ticker,
             "dataset_name": cfg.dataset_name,
-            "targets": list(summary_key.values()),
+            "targets": trained_targets,
             "boundary_embargo": "exclude training rows whose label resolution crosses an eval fold start",
         },
     )
@@ -285,8 +331,10 @@ def run_entry_pipeline(cfg: PipelineConfig) -> dict[str, Path | dict[str, float]
 
 
 def main() -> None:
-    cfg = build_config(parse_args())
-    artifacts = run_entry_pipeline(cfg)
+    args = parse_args()
+    cfg = build_config(args)
+    sides = ENTRY_SIDES if args.sides == "both" else (str(args.sides),)
+    artifacts = run_entry_pipeline(cfg, sides=sides)
     print(f"[META-ENTRY] Saved probabilities: {artifacts['entry_probs_path']}")
     print(f"[META-ENTRY] Saved thresholds: {artifacts['entry_thresholds_path']}")
     print(f"[META-ENTRY] Saved versioned summary: {artifacts['training_summary_versioned_path']}")

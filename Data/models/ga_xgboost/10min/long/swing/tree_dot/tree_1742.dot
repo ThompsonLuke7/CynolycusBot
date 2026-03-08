@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="TMOs_14_5_3<-5.10869217" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="AROOND_14<78.5714264" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="CDL_LONGLINE__1d<100" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.00450545363" ]
+
+    8 [ label="leaf=0.0267522056" ]
+
+    4 [ label="AROOND_14<100" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.0258355532" ]
+
+    10 [ label="leaf=0.0029739812" ]
+
+    2 [ label="STOCHh_14_3_3<-1.02008367" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="TMOs_14_5_3<-0.320051551" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=-0.00654657604" ]
+
+    12 [ label="leaf=0.0017408994" ]
+
+    6 [ label="upper_wick_ratio<0.14009662" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=-0.00229274272" ]
+
+    14 [ label="leaf=-0.0152659267" ]
+}

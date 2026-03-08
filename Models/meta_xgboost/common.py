@@ -48,6 +48,7 @@ DART_DEFAULTS: dict[str, object] = {
     "sample_type": "uniform",
     "normalize_type": "tree",
 }
+XGB_VERBOSE_EVAL_EVERY = 100
 
 ENTRY_TARGETS = ("y_enter_long", "y_enter_short")
 EXIT_TARGETS = ("y_exit_long", "y_exit_short")
@@ -688,7 +689,13 @@ def _fit_booster(
         const_prob = float(np.mean(y)) if y.size else 0.0
         return None, const_prob, params_local, num_boost_round
     dtrain = xgb.DMatrix(X, label=y)
-    model = xgb.train(params_local, dtrain, num_boost_round=num_boost_round, verbose_eval=False)
+    model = xgb.train(
+        params_local,
+        dtrain,
+        num_boost_round=num_boost_round,
+        evals=[(dtrain, "train")],
+        verbose_eval=max(1, min(int(XGB_VERBOSE_EVAL_EVERY), int(num_boost_round))),
+    )
     return model, None, params_local, num_boost_round
 
 
@@ -742,7 +749,7 @@ def build_final_eval_history(
         num_boost_round=num_boost_round,
         evals=[(dtrain, "train"), (dval, "validation")],
         evals_result=evals_result,
-        verbose_eval=False,
+        verbose_eval=max(1, min(int(XGB_VERBOSE_EVAL_EVERY), int(num_boost_round))),
     )
     train_logloss = [float(v) for v in evals_result.get("train", {}).get("logloss", [])]
     val_logloss = [float(v) for v in evals_result.get("validation", {}).get("logloss", [])]

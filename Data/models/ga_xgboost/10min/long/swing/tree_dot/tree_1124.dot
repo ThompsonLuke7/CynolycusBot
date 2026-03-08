@@ -1,0 +1,41 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="STOCHh_14_3_3__4h<-21.4733543" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="SMCtp_14_50_20_5<5.49450541" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="THERMOma_20_2_0.5<0.613378823" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.00603728183" ]
+
+    8 [ label="leaf=0.0302960481" ]
+
+    4 [ label="leaf=-0.0213827379" ]
+
+    2 [ label="SMCti_14_50_20_5<-0.150000006" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="range_pct<0.000778477115" ]
+    5 -> 9 [label="yes" color="#FF0000"]
+    5 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.0174114667" ]
+
+    10 [ label="leaf=-0.000691391935" ]
+
+    6 [ label="BBP_5_2.0_2.0<0.286144674" ]
+    6 -> 11 [label="yes" color="#FF0000"]
+    6 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=-0.00164917193" ]
+
+    12 [ label="leaf=0.0115775773" ]
+}

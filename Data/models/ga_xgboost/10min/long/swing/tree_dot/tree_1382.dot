@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="STOCHh_14_3_3<0.755215406" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="dist_to_prior_day_vwap__4h<8.52686501" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="vix_trend_ema_8_21__1d<-0.0451693013" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.00279756472" ]
+
+    8 [ label="leaf=0.00211802754" ]
+
+    4 [ label="recent_high_touch_count<6" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.0251605995" ]
+
+    10 [ label="leaf=0.0082459813" ]
+
+    2 [ label="range_pct<0.0013695478" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="dist_to_recent_high_12<0.465000004" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=-0.00448972872" ]
+
+    12 [ label="leaf=-0.0236382447" ]
+
+    6 [ label="BULLP_13__30m<2.24913311" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=0.0015471736" ]
+
+    14 [ label="leaf=-0.0280833077" ]
+}

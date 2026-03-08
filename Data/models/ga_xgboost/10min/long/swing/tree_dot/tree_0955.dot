@@ -1,0 +1,29 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="SMCtp_14_50_20_5<-75.8474579" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="leaf=-0.0315590464" ]
+
+    2 [ label="dist_to_vwap_upper_1<1.32699561" ]
+    2 -> 3 [label="yes" color="#FF0000"]
+    2 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="BULLP_13__30m<3.62393165" ]
+    3 -> 5 [label="yes" color="#FF0000"]
+    3 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="leaf=-0.000157308503" ]
+
+    6 [ label="leaf=0.00947155803" ]
+
+    4 [ label="ADX_14<18.1431198" ]
+    4 -> 7 [label="yes" color="#FF0000"]
+    4 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.00566255255" ]
+
+    8 [ label="leaf=-0.0382045507" ]
+}

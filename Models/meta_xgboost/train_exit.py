@@ -34,6 +34,7 @@ from Features.label_generations import build_meta_exit_labels
 
 ENTRY_THRESHOLDS_FILENAME = "entry_thresholds.json"
 ENTRY_PROBS_FILENAME = "entry_probs.parquet"
+EXIT_SIDES = ("long", "short")
 
 
 def _save_exit_eval_plot(
@@ -44,48 +45,55 @@ def _save_exit_eval_plot(
     threshold_summary: dict[str, dict[str, float | None]],
     cfg: PipelineConfig,
 ) -> dict[str, Path]:
-    long_probs = np.asarray(combined_cols.get("p_exit_long_oof"), dtype=np.float32)
-    short_probs = np.asarray(combined_cols.get("p_exit_short_oof"), dtype=np.float32)
-    valid = np.isfinite(long_probs) | np.isfinite(short_probs)
-    if not np.any(valid):
-        return {}
-
-    valid_idx = np.flatnonzero(valid)
-    tail_idx = valid_idx[-300:] if valid_idx.size > 300 else valid_idx
-    plot_df = frame.iloc[tail_idx]
     outputs: dict[str, Path] = {}
+    long_probs = None
+    short_probs = None
+    if "p_exit_long_oof" in combined_cols:
+        long_probs = np.asarray(combined_cols["p_exit_long_oof"], dtype=np.float32).reshape(-1)
+    if "p_exit_short_oof" in combined_cols:
+        short_probs = np.asarray(combined_cols["p_exit_short_oof"], dtype=np.float32).reshape(-1)
 
-    long_save_path = exit_root / "meta_exit_oof_eval_long.png"
-    plot_model_inference(
-        plot_df,
-        long_probs[tail_idx],
-        None,
-        long_entry_actual=plot_df["enter_long_trigger_oof"].to_numpy(dtype=np.int64),
-        long_actual=plot_df["y_exit_long"].to_numpy(dtype=np.int64),
-        long_entry_label_name="ENTRY LONG",
-        long_label_name="EXIT LONG",
-        threshold=0.5,
-        long_threshold=float(threshold_summary["exit_long"]["threshold"]),
-        title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB long entry/exit OOF eval ({cfg.dataset_name})",
-        save_path=str(long_save_path),
-    )
-    outputs["long"] = long_save_path
+    if long_probs is not None and long_probs.size == len(frame) and "exit_long" in threshold_summary:
+        long_valid = np.isfinite(long_probs)
+        if np.any(long_valid):
+            tail_idx = np.flatnonzero(long_valid)[-300:]
+            plot_df = frame.iloc[tail_idx]
+            long_save_path = exit_root / "meta_exit_oof_eval_long.png"
+            plot_model_inference(
+                plot_df,
+                long_probs[tail_idx],
+                None,
+                long_entry_actual=plot_df["enter_long_trigger_oof"].to_numpy(dtype=np.int64),
+                long_actual=plot_df["y_exit_long"].to_numpy(dtype=np.int64),
+                long_entry_label_name="ENTRY LONG",
+                long_label_name="EXIT LONG",
+                threshold=0.5,
+                long_threshold=float(threshold_summary["exit_long"]["threshold"]),
+                title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB long entry/exit OOF eval ({cfg.dataset_name})",
+                save_path=str(long_save_path),
+            )
+            outputs["long"] = long_save_path
 
-    short_save_path = exit_root / "meta_exit_oof_eval_short.png"
-    plot_model_inference(
-        plot_df,
-        None,
-        short_probs[tail_idx],
-        short_entry_actual=plot_df["enter_short_trigger_oof"].to_numpy(dtype=np.int64),
-        short_actual=plot_df["y_exit_short"].to_numpy(dtype=np.int64),
-        short_entry_label_name="ENTRY SHORT",
-        short_label_name="EXIT SHORT",
-        threshold=0.5,
-        short_threshold=float(threshold_summary["exit_short"]["threshold"]),
-        title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB short entry/exit OOF eval ({cfg.dataset_name})",
-        save_path=str(short_save_path),
-    )
-    outputs["short"] = short_save_path
+    if short_probs is not None and short_probs.size == len(frame) and "exit_short" in threshold_summary:
+        short_valid = np.isfinite(short_probs)
+        if np.any(short_valid):
+            tail_idx = np.flatnonzero(short_valid)[-300:]
+            plot_df = frame.iloc[tail_idx]
+            short_save_path = exit_root / "meta_exit_oof_eval_short.png"
+            plot_model_inference(
+                plot_df,
+                None,
+                short_probs[tail_idx],
+                short_entry_actual=plot_df["enter_short_trigger_oof"].to_numpy(dtype=np.int64),
+                short_actual=plot_df["y_exit_short"].to_numpy(dtype=np.int64),
+                short_entry_label_name="ENTRY SHORT",
+                short_label_name="EXIT SHORT",
+                threshold=0.5,
+                short_threshold=float(threshold_summary["exit_short"]["threshold"]),
+                title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB short entry/exit OOF eval ({cfg.dataset_name})",
+                save_path=str(short_save_path),
+            )
+            outputs["short"] = short_save_path
     return outputs
 
 
@@ -113,6 +121,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threshold-step", type=float, default=PipelineConfig.threshold_step)
     p.add_argument("--threshold-objective", type=str, default=PipelineConfig.threshold_objective)
     p.add_argument("--min-oos-prob-coverage", type=float, default=PipelineConfig.min_oos_prob_coverage)
+    p.add_argument("--sides", choices=["both", "long", "short"], default="both")
     p.add_argument("--entry-root", type=str, default=None)
     p.add_argument("--entry-long-threshold", type=float, default=None)
     p.add_argument("--entry-short-threshold", type=float, default=None)
@@ -174,6 +183,18 @@ def _entry_root(cfg: PipelineConfig, cli_value: str | None) -> Path:
     return resolve_meta_dataset_root(cfg) / "entry"
 
 
+def _resolve_sides(raw: str | tuple[str, ...]) -> tuple[str, ...]:
+    if isinstance(raw, tuple):
+        sides = tuple(s.lower() for s in raw)
+    else:
+        key = str(raw).strip().lower()
+        sides = EXIT_SIDES if key == "both" else (key,)
+    invalid = [s for s in sides if s not in EXIT_SIDES]
+    if invalid:
+        raise ValueError(f"Unsupported side(s): {invalid}. Expected one of {EXIT_SIDES}.")
+    return tuple(dict.fromkeys(sides))
+
+
 def _load_entry_thresholds(
     *,
     cfg: PipelineConfig,
@@ -185,8 +206,10 @@ def _load_entry_thresholds(
     payload = json.loads(path.read_text(encoding="utf-8"))
     long_key = "enter_long" if "enter_long" in payload else "y_enter_long"
     short_key = "enter_short" if "enter_short" in payload else "y_enter_short"
-    long_thr = float(cli_long) if cli_long is not None else float(payload[long_key]["threshold"])
-    short_thr = float(cli_short) if cli_short is not None else float(payload[short_key]["threshold"])
+    long_payload = payload.get(long_key, {}) if isinstance(payload, dict) else {}
+    short_payload = payload.get(short_key, {}) if isinstance(payload, dict) else {}
+    long_thr = float(cli_long) if cli_long is not None else float(long_payload.get("threshold", 1.0))
+    short_thr = float(cli_short) if cli_short is not None else float(short_payload.get("threshold", 1.0))
     return long_thr, short_thr, path
 
 
@@ -202,7 +225,9 @@ def run_exit_pipeline(
     trail_atr: float,
     trail_atr_after_tp: float,
     use_tp_to_tighten_trail: bool,
+    sides: tuple[str, ...] = EXIT_SIDES,
 ) -> dict[str, Path | dict[str, float] | pd.DataFrame]:
+    active_sides = _resolve_sides(sides)
     frame = build_base_feature_frame(cfg)
     entry_prob_df = load_prob_frame(entry_root / ENTRY_PROBS_FILENAME).reindex(frame.index)
     long_thr, short_thr, thresholds_path = _load_entry_thresholds(
@@ -211,8 +236,14 @@ def run_exit_pipeline(
         cli_long=entry_long_threshold,
         cli_short=entry_short_threshold,
     )
-    frame["p_enter_long_oof"] = pd.to_numeric(entry_prob_df["p_enter_long_oof"], errors="coerce")
-    frame["p_enter_short_oof"] = pd.to_numeric(entry_prob_df["p_enter_short_oof"], errors="coerce")
+    frame["p_enter_long_oof"] = pd.to_numeric(
+        entry_prob_df["p_enter_long_oof"] if "p_enter_long_oof" in entry_prob_df.columns else np.nan,
+        errors="coerce",
+    )
+    frame["p_enter_short_oof"] = pd.to_numeric(
+        entry_prob_df["p_enter_short_oof"] if "p_enter_short_oof" in entry_prob_df.columns else np.nan,
+        errors="coerce",
+    )
     frame["enter_long_trigger_oof"] = (frame["p_enter_long_oof"] >= float(long_thr)).fillna(False).astype(np.int8)
     frame["enter_short_trigger_oof"] = (frame["p_enter_short_oof"] >= float(short_thr)).fillna(False).astype(np.int8)
 
@@ -327,17 +358,24 @@ def run_exit_pipeline(
             },
         ),
     }
-    summary_key = {
-        "y_exit_long": "exit_long",
-        "y_exit_short": "exit_short",
-    }
+    selected_target_cols = []
+    if "long" in active_sides:
+        selected_target_cols.append("y_exit_long")
+    if "short" in active_sides:
+        selected_target_cols.append("y_exit_short")
+    if not selected_target_cols:
+        raise ValueError("No exit targets selected.")
+
+    summary_key = {"y_exit_long": "exit_long", "y_exit_short": "exit_short"}
     combined_cols: dict[str, np.ndarray] = {}
     threshold_summary: dict[str, dict[str, float | None]] = {}
     metrics_summary: dict[str, dict[str, dict[str, float]]] = {}
     loss_histories: dict[str, dict[str, list[float]] | None] = {}
     feature_columns_by_target: dict[str, list[str]] = {}
+    trained_targets: list[str] = []
 
-    for target_col, (prob_prefix, fixed_threshold, active_mask, embargo_end_idx, exclude_cols) in target_setup.items():
+    for target_col in selected_target_cols:
+        prob_prefix, fixed_threshold, active_mask, embargo_end_idx, exclude_cols = target_setup[target_col]
         key = summary_key[target_col]
         print(f"[META-EXIT] Training {key}")
         feature_cols = select_numeric_feature_columns(frame, exclude=exclude_cols)
@@ -369,6 +407,7 @@ def run_exit_pipeline(
         oof_metrics = binary_metrics(y[result.valid_mask], result.oof_probs[result.valid_mask], threshold=threshold)
         metrics_summary[key] = {"full": train_metrics, "oof": oof_metrics}
         loss_histories[key] = result.eval_history
+        trained_targets.append(key)
         threshold_summary[key] = {
             "threshold": float(threshold),
             "threshold_source": threshold_source,
@@ -401,9 +440,24 @@ def run_exit_pipeline(
         combined_cols[f"{prob_prefix}_oof"] = result.oof_probs
         combined_cols[f"{prob_prefix}_full"] = result.full_probs
 
-    prob_path = save_prob_frame(exit_root / "exit_probs.parquet", index=frame.index, columns=combined_cols)
+    prob_path = exit_root / "exit_probs.parquet"
+    merged_prob_cols = dict(combined_cols)
+    if prob_path.exists():
+        existing_probs = load_prob_frame(prob_path).reindex(frame.index)
+        for col in existing_probs.columns:
+            if col not in merged_prob_cols:
+                merged_prob_cols[col] = pd.to_numeric(existing_probs[col], errors="coerce").to_numpy(dtype=float)
+    prob_path = save_prob_frame(prob_path, index=frame.index, columns=merged_prob_cols)
+
     thresholds_out = exit_root / "exit_thresholds.json"
-    thresholds_out.write_text(json.dumps(threshold_summary, indent=2), encoding="utf-8")
+    merged_thresholds: dict[str, dict[str, float | None]] = {}
+    if thresholds_out.exists():
+        loaded = json.loads(thresholds_out.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            merged_thresholds.update(loaded)
+    merged_thresholds.update(threshold_summary)
+    thresholds_out.write_text(json.dumps(merged_thresholds, indent=2), encoding="utf-8")
+
     label_path = save_prob_frame(
         exit_root / "exit_labels.parquet",
         index=frame.index,
@@ -433,8 +487,8 @@ def run_exit_pipeline(
     plot_paths = _save_exit_eval_plot(
         frame=frame,
         exit_root=exit_root,
-        combined_cols=combined_cols,
-        threshold_summary=threshold_summary,
+        combined_cols=merged_prob_cols,
+        threshold_summary=merged_thresholds,
         cfg=cfg,
     )
     if plot_paths:
@@ -484,7 +538,7 @@ def run_exit_pipeline(
             "rows": int(len(frame)),
             "ticker": cfg.ticker,
             "dataset_name": cfg.dataset_name,
-            "targets": list(summary_key.values()),
+            "targets": trained_targets,
             "exit_reason_counts_long": frame["exit_reason_long"].value_counts(dropna=False).to_dict(),
             "exit_reason_counts_short": frame["exit_reason_short"].value_counts(dropna=False).to_dict(),
             "boundary_embargo": "exclude active training rows whose simulated exit lands in or after an eval fold start",
@@ -506,6 +560,7 @@ def run_exit_pipeline(
 def main() -> None:
     args = parse_args()
     cfg = build_config(args)
+    sides = EXIT_SIDES if args.sides == "both" else (str(args.sides),)
     artifacts = run_exit_pipeline(
         cfg,
         entry_root=_entry_root(cfg, args.entry_root),
@@ -517,6 +572,7 @@ def main() -> None:
         trail_atr=float(args.trail_atr),
         trail_atr_after_tp=float(args.trail_atr_after_tp),
         use_tp_to_tighten_trail=bool(args.use_tp_to_tighten_trail),
+        sides=sides,
     )
     print(f"[META-EXIT] Saved probabilities: {artifacts['exit_probs_path']}")
     print(f"[META-EXIT] Saved thresholds: {artifacts['exit_thresholds_path']}")

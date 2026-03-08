@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threshold-step", type=float, default=0.05)
     p.add_argument("--threshold-objective", type=str, default="f1")
     p.add_argument("--min-oos-prob-coverage", type=float, default=0.85)
+    p.add_argument("--fixed-long-threshold", type=float, default=.5)
+    p.add_argument("--fixed-short-threshold", type=float, default=.5)
     p.add_argument("--trail-activate-atr", type=float, default=2.0)
     p.add_argument("--trail-atr", type=float, default=1.0)
     p.add_argument("--trail-atr-after-tp", type=float, default=0.8)
@@ -55,6 +57,8 @@ def main() -> None:
         entry_root=entry_artifacts["entry_root"],
         entry_long_threshold=None,
         entry_short_threshold=None,
+        fixed_long_threshold=args.fixed_long_threshold,
+        fixed_short_threshold=args.fixed_short_threshold,
         trail_activate_atr=float(args.trail_activate_atr),
         trail_atr=float(args.trail_atr),
         trail_atr_after_tp=float(args.trail_atr_after_tp),
