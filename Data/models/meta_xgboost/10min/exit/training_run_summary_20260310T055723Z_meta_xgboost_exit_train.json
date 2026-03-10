@@ -6,95 +6,95 @@
     "exit_probs": "/content/CynolycusBot/Data/models/meta_xgboost/10min/exit/exit_probs.parquet",
     "exit_root": "/content/CynolycusBot/Data/models/meta_xgboost/10min/exit",
     "oof_eval_plots": {
-      "short": "/content/CynolycusBot/Data/models/meta_xgboost/10min/exit/meta_exit_oof_eval_short.png"
+      "long": "/content/CynolycusBot/Data/models/meta_xgboost/10min/exit/meta_exit_oof_eval_long.png"
     },
     "thresholds": "/content/CynolycusBot/Data/models/meta_xgboost/10min/exit/exit_thresholds.json",
     "train_val_loss_plot": "/content/CynolycusBot/Data/models/meta_xgboost/10min/exit/meta_exit_train_val_loss.png"
   },
   "best_validation_metrics": {
-    "exit_short": {
-      "auc": 0.8374411876595729,
-      "average_precision": 0.8350985897911891,
+    "exit_long": {
+      "auc": 0.8183209122997118,
+      "average_precision": 0.7191312826773513,
       "best_f0_5_sweep_threshold": 0.65,
       "best_sweep_threshold": 0.65,
-      "f0_5": 0.7704599138529942,
-      "f1": 0.6903205726735139,
-      "f2": 0.6252819124943617,
-      "fn": 776.0,
-      "fp": 219.0,
-      "logloss": 0.49649676439270035,
-      "n": 3914.0,
-      "pos_rate": 0.4816044966785897,
-      "precision": 0.8350903614457831,
-      "pred_rate": 0.33929483903934593,
-      "recall": 0.5883289124668435,
+      "f0_5": 0.6705378128024333,
+      "f1": 0.6083411727814362,
+      "f2": 0.5567033976124884,
+      "fn": 871.0,
+      "fp": 378.0,
+      "logloss": 0.5112590976156142,
+      "n": 5348.0,
+      "pos_rate": 0.34424083769633507,
+      "precision": 0.7195845697329377,
+      "pred_rate": 0.25205684367988035,
+      "recall": 0.5268875611080934,
       "selection_objective": "f0_5",
       "threshold": 0.65,
       "threshold_source": "best_f0_5_sweep",
-      "tn": 1810.0,
-      "tp": 1109.0
+      "tn": 3129.0,
+      "tp": 970.0
     }
   },
-  "created_at_utc": "2026-03-10T06:33:36.596934Z",
+  "created_at_utc": "2026-03-10T05:57:23.563999Z",
   "extra": {
     "boundary_embargo": "exclude active training rows whose simulated exit lands in or after an eval fold start",
     "dataset_name": "10min",
     "exit_reason_counts_long": {
-      "DECAY": 502,
-      "NONE": 46408,
-      "SL": 1307,
-      "TRAIL": 2290
+      "DECAY": 398,
+      "NONE": 47318,
+      "SL": 733,
+      "TRAIL": 2058
     },
     "exit_reason_counts_short": {
-      "DECAY": 146,
-      "NONE": 47153,
-      "SL": 909,
-      "TRAIL": 2299
+      "DECAY": 166,
+      "NONE": 46824,
+      "SL": 1153,
+      "TRAIL": 2364
     },
     "rows": 50507,
     "targets": [
-      "exit_short"
+      "exit_long"
     ],
     "ticker": "SPY"
   },
   "final_train_metrics": {
-    "exit_short": {
-      "auc": 0.8784762053439303,
-      "average_precision": 0.8716919846349527,
-      "f0_5": 0.7983379501385043,
-      "f1": 0.7140733399405352,
-      "f2": 0.6458987001344688,
-      "fn": 932.0,
-      "fp": 222.0,
-      "logloss": 0.4434722195000399,
-      "n": 5094.0,
-      "pos_rate": 0.4658421672555948,
-      "precision": 0.8665063138905592,
-      "pred_rate": 0.3264625049077346,
-      "recall": 0.6072482090181205,
+    "exit_long": {
+      "auc": 0.8810885978840332,
+      "average_precision": 0.8146494116635672,
+      "f0_5": 0.7372470489038786,
+      "f1": 0.6864573110893032,
+      "f2": 0.642214469335292,
+      "fn": 873.0,
+      "fp": 405.0,
+      "logloss": 0.4459309502166967,
+      "n": 6552.0,
+      "pos_rate": 0.34676434676434675,
+      "precision": 0.7754988913525499,
+      "pred_rate": 0.27533577533577536,
+      "recall": 0.6157570422535211,
       "threshold": 0.65,
-      "tn": 2499.0,
-      "tp": 1441.0
+      "tn": 3875.0,
+      "tp": 1399.0
     }
   },
   "final_validation_metrics": {
-    "exit_short": {
-      "auc": 0.8374411876595729,
-      "average_precision": 0.8350985897911891,
-      "f0_5": 0.7704599138529942,
-      "f1": 0.6903205726735139,
-      "f2": 0.6252819124943617,
-      "fn": 776.0,
-      "fp": 219.0,
-      "logloss": 0.49649676439270035,
-      "n": 3914.0,
-      "pos_rate": 0.4816044966785897,
-      "precision": 0.8350903614457831,
-      "pred_rate": 0.33929483903934593,
-      "recall": 0.5883289124668435,
+    "exit_long": {
+      "auc": 0.8183209122997118,
+      "average_precision": 0.7191312826773513,
+      "f0_5": 0.6705378128024333,
+      "f1": 0.6083411727814362,
+      "f2": 0.5567033976124884,
+      "fn": 871.0,
+      "fp": 378.0,
+      "logloss": 0.5112590976156142,
+      "n": 5348.0,
+      "pos_rate": 0.34424083769633507,
+      "precision": 0.7195845697329377,
+      "pred_rate": 0.25205684367988035,
+      "recall": 0.5268875611080934,
       "threshold": 0.65,
-      "tn": 1810.0,
-      "tp": 1109.0
+      "tn": 3129.0,
+      "tp": 970.0
     }
   },
   "hyperparameters": {
@@ -107,10 +107,10 @@
     "early_stopping_min_val_rows": 100,
     "early_stopping_rounds": 200,
     "early_stopping_val_fraction": 0.2,
-    "entry_long_threshold": 0.5,
+    "entry_long_threshold": 0.75,
     "entry_mode": "tp",
     "entry_root": "/content/CynolycusBot/Data/models/meta_xgboost/10min/entry",
-    "entry_short_threshold": 0.65,
+    "entry_short_threshold": 0.5,
     "feature_columns": [
       "day_id",
       "volume",
@@ -191,15 +191,15 @@
       "trend_phase_exit_short",
       "p_enter_long_oof",
       "p_enter_short_oof",
-      "short_bars_since_entry",
-      "short_mfe_atr",
-      "short_mae_atr",
-      "short_tp_seen_run",
-      "short_trail_gap_atr",
-      "short_entry_price_ctx"
+      "long_bars_since_entry",
+      "long_mfe_atr",
+      "long_mae_atr",
+      "long_tp_seen_run",
+      "long_trail_gap_atr",
+      "long_entry_price_ctx"
     ],
     "feature_columns_by_target": {
-      "exit_short": [
+      "exit_long": [
         "day_id",
         "volume",
         "sin_time_of_day",
@@ -279,17 +279,17 @@
         "trend_phase_exit_short",
         "p_enter_long_oof",
         "p_enter_short_oof",
-        "short_bars_since_entry",
-        "short_mfe_atr",
-        "short_mae_atr",
-        "short_tp_seen_run",
-        "short_trail_gap_atr",
-        "short_entry_price_ctx"
+        "long_bars_since_entry",
+        "long_mfe_atr",
+        "long_mae_atr",
+        "long_tp_seen_run",
+        "long_trail_gap_atr",
+        "long_entry_price_ctx"
       ]
     },
     "feature_count": 85,
     "feature_count_by_target": {
-      "exit_short": 85
+      "exit_long": 85
     },
     "fixed_long_threshold": null,
     "fixed_short_threshold": null,
@@ -324,6 +324,6 @@
     "xgb_sample_type": null,
     "xgb_skip_drop": null
   },
-  "run_id": "20260310T063336Z_meta_xgboost_exit_train",
+  "run_id": "20260310T055723Z_meta_xgboost_exit_train",
   "run_name": "meta_xgboost_exit_train"
 }
