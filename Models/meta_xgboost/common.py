@@ -905,15 +905,28 @@ def binary_metrics(y_true: np.ndarray, probs: np.ndarray, *, threshold: float) -
     tn = int(np.sum((pred == 0) & (y == 0)))
     fp = int(np.sum((pred == 1) & (y == 0)))
     fn = int(np.sum((pred == 0) & (y == 1)))
+    precision = float(precision_score(y, pred, zero_division=0))
+    recall = float(recall_score(y, pred, zero_division=0))
+    f1 = float(f1_score(y, pred, zero_division=0))
+
+    def _fbeta_from_pr(prec: float, rec: float, beta: float) -> float:
+        beta_sq = float(beta) ** 2
+        denom = beta_sq * prec + rec
+        if denom <= 0.0:
+            return 0.0
+        return float((1.0 + beta_sq) * prec * rec / denom)
+
     out.update(
         {
             "tp": float(tp),
             "tn": float(tn),
             "fp": float(fp),
             "fn": float(fn),
-            "precision": float(precision_score(y, pred, zero_division=0)),
-            "recall": float(recall_score(y, pred, zero_division=0)),
-            "f1": float(f1_score(y, pred, zero_division=0)),
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "f0_5": _fbeta_from_pr(precision, recall, beta=0.5),
+            "f2": _fbeta_from_pr(precision, recall, beta=2.0),
             "pos_rate": float(np.mean(y)),
             "pred_rate": float(np.mean(pred)),
         }
@@ -948,9 +961,25 @@ def sweep_thresholds(
 def choose_threshold(sweep_df: pd.DataFrame, *, objective: str) -> tuple[float, dict[str, float]]:
     if sweep_df.empty:
         return 0.5, {"threshold": 0.5}
-    key = str(objective).strip().lower()
-    metric = "f1" if key not in sweep_df.columns else key
-    ordered = sweep_df.sort_values([metric, "precision", "recall", "threshold"], ascending=[False, False, False, False])
+    key = str(objective).strip().lower().replace("-", "_")
+    aliases = {
+        "ap": "average_precision",
+        "pr_auc": "average_precision",
+        "f0.5": "f0_5",
+        "f05": "f0_5",
+        "fbeta_0_5": "f0_5",
+        "fbeta0_5": "f0_5",
+        "fbeta0.5": "f0_5",
+    }
+    metric = key if key in sweep_df.columns else aliases.get(key, "f1")
+    if metric not in sweep_df.columns:
+        metric = "f1"
+
+    ascending_metric = metric == "logloss"
+    ordered = sweep_df.sort_values(
+        [metric, "precision", "recall", "threshold"],
+        ascending=[ascending_metric, False, False, False],
+    )
     best = ordered.iloc[0].to_dict()
     return float(best["threshold"]), {str(k): (float(v) if isinstance(v, (int, float, np.generic)) and np.isfinite(v) else None) for k, v in best.items()}
 

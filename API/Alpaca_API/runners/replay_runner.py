@@ -310,8 +310,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ga-pivot-label-dir", default="swing", help="Label dir for pivot GA-XGB models.")
     parser.add_argument("--ga-tb-label-dir", default="tb", help="Label dir for TB GA-XGB models.")
     parser.add_argument("--meta-model-root", default="Data/models/meta_xgboost/10min", help="Meta-XGB model root.")
-    parser.add_argument("--meta-entry-threshold", type=float, default=0.8, help="Execution threshold override for both meta long/short entries.")
-    parser.add_argument("--meta-exit-threshold", type=float, default=0.8, help="Execution threshold override for both meta long/short exits.")
+    parser.add_argument(
+        "--meta-entry-threshold",
+        type=float,
+        default=None,
+        help="Optional execution threshold override for both meta long/short entries.",
+    )
+    parser.add_argument(
+        "--meta-exit-threshold",
+        type=float,
+        default=None,
+        help="Optional execution threshold override for both meta long/short exits.",
+    )
     parser.add_argument("--meta-trail-activate-atr", type=float, default=2.0, help="Trail activation ATR used to build live exit context.")
     parser.add_argument("--meta-trail-atr", type=float, default=1.0, help="Base trail ATR used to build live exit context.")
     parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.8, help="Tightened trail ATR after TP is seen.")
@@ -534,8 +544,8 @@ def main() -> None:
             trail_atr=float(args.meta_trail_atr),
             trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
             use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
-            entry_threshold_override=float(args.meta_entry_threshold),
-            exit_threshold_override=float(args.meta_exit_threshold),
+            entry_threshold_override=args.meta_entry_threshold,
+            exit_threshold_override=args.meta_exit_threshold,
         )
         print(
             f"[replay] Meta-XGB inference enabled: model_root={args.meta_model_root} "

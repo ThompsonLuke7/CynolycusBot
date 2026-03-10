@@ -719,8 +719,8 @@ class LiveMetaXGBAgent:
         trail_atr: float = 1.0,
         trail_atr_after_tp: float = 0.8,
         use_tp_to_tighten_trail: bool = True,
-        entry_threshold_override: float | None = 0.8,
-        exit_threshold_override: float | None = 0.8,
+        entry_threshold_override: float | None = None,
+        exit_threshold_override: float | None = None,
         ga_probs_frame: pd.DataFrame | None = None,
         ga_probs_mode: str = "xgb",
     ) -> None:
@@ -773,8 +773,14 @@ class LiveMetaXGBAgent:
         self._entry_short = _LiveXGBArtifact(self._model_root / "entry" / "short")
         self._exit_long = _LiveXGBArtifact(self._model_root / "exit" / "long")
         self._exit_short = _LiveXGBArtifact(self._model_root / "exit" / "short")
-        self._entry_thresholds = self._load_thresholds(self._model_root / "entry" / "entry_thresholds.json")
-        self._exit_thresholds = self._load_thresholds(self._model_root / "exit" / "exit_thresholds.json")
+        self._entry_thresholds = self._load_thresholds(
+            self._model_root / "entry" / "entry_thresholds.json",
+            defaults={"enter_long": 0.8, "enter_short": 0.8},
+        )
+        self._exit_thresholds = self._load_thresholds(
+            self._model_root / "exit" / "exit_thresholds.json",
+            defaults={"exit_long": 0.8, "exit_short": 0.8},
+        )
         if self._entry_threshold_override is not None:
             self._entry_thresholds["enter_long"] = float(self._entry_threshold_override)
             self._entry_thresholds["enter_short"] = float(self._entry_threshold_override)
@@ -783,9 +789,13 @@ class LiveMetaXGBAgent:
             self._exit_thresholds["exit_short"] = float(self._exit_threshold_override)
 
     @staticmethod
-    def _load_thresholds(path: Path) -> dict[str, float]:
+    def _load_thresholds(path: Path, *, defaults: dict[str, float]) -> dict[str, float]:
+        out: dict[str, float] = dict(defaults)
+        if not path.exists():
+            print(f"[meta] Threshold file missing ({path}); using defaults: {defaults}")
+            return out
+
         payload = json.loads(path.read_text(encoding="utf-8"))
-        out: dict[str, float] = {}
         for old_key, new_key in (
             ("y_enter_long", "enter_long"),
             ("y_enter_short", "enter_short"),

@@ -83,6 +83,15 @@ def _coerce_float(raw: Any, default: float) -> float:
         return float(default)
 
 
+def _coerce_optional_float(raw: Any) -> float | None:
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _coerce_bool(raw: Any, default: bool = False) -> bool:
     if isinstance(raw, bool):
         return raw
@@ -549,8 +558,8 @@ class SessionConfig:
     split_x_filename: str = "X_10min_tree.parquet"
     ga_pivot_label_dir: str = "swing"
     ga_tb_label_dir: str = "tb"
-    meta_entry_threshold: float = 0.8
-    meta_exit_threshold: float = 0.8
+    meta_entry_threshold: float | None = None
+    meta_exit_threshold: float | None = None
     meta_trail_activate_atr: float = 2.0
     meta_trail_atr: float = 1.0
     meta_trail_atr_after_tp: float = 0.8
@@ -618,8 +627,8 @@ class SessionConfig:
             split_x_filename=str(payload.get("split_x_filename", "X_10min_tree.parquet")),
             ga_pivot_label_dir=str(payload.get("ga_pivot_label_dir", "swing")),
             ga_tb_label_dir=str(payload.get("ga_tb_label_dir", "tb")),
-            meta_entry_threshold=_coerce_float(payload.get("meta_entry_threshold"), 0.8),
-            meta_exit_threshold=_coerce_float(payload.get("meta_exit_threshold"), 0.8),
+            meta_entry_threshold=_coerce_optional_float(payload.get("meta_entry_threshold")),
+            meta_exit_threshold=_coerce_optional_float(payload.get("meta_exit_threshold")),
             meta_trail_activate_atr=_coerce_float(payload.get("meta_trail_activate_atr"), 2.0),
             meta_trail_atr=_coerce_float(payload.get("meta_trail_atr"), 1.0),
             meta_trail_atr_after_tp=_coerce_float(payload.get("meta_trail_atr_after_tp"), 0.8),
@@ -1369,8 +1378,8 @@ class LiveSession:
                     trail_atr=float(cfg.meta_trail_atr),
                     trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
                     use_tp_to_tighten_trail=bool(cfg.meta_use_tp_to_tighten_trail),
-                    entry_threshold_override=float(cfg.meta_entry_threshold),
-                    exit_threshold_override=float(cfg.meta_exit_threshold),
+                    entry_threshold_override=cfg.meta_entry_threshold,
+                    exit_threshold_override=cfg.meta_exit_threshold,
                 )
                 self._emit(
                     "log",
@@ -1868,8 +1877,8 @@ class LiveSession:
                         trail_atr=float(cfg.meta_trail_atr),
                         trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
                         use_tp_to_tighten_trail=bool(cfg.meta_use_tp_to_tighten_trail),
-                        entry_threshold_override=float(cfg.meta_entry_threshold),
-                        exit_threshold_override=float(cfg.meta_exit_threshold),
+                        entry_threshold_override=cfg.meta_entry_threshold,
+                        exit_threshold_override=cfg.meta_exit_threshold,
                     )
                     self._emit(
                         "log",

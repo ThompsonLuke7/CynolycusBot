@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -76,7 +76,10 @@ def _save_entry_eval_plot(
         title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB entry OOF eval ({cfg.dataset_name})",
         save_path=str(save_path),
     )
-    return save_path
+    if save_path.exists():
+        return save_path
+    print(f"[META-ENTRY] Warning: expected plot file was not found at {save_path}")
+    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,6 +107,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threshold-objective", type=str, default=PipelineConfig.threshold_objective)
     p.add_argument("--min-oos-prob-coverage", type=float, default=PipelineConfig.min_oos_prob_coverage)
     p.add_argument("--sides", choices=["both", "long", "short"], default="both")
+    p.add_argument("--plot-only", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--xgb-booster", choices=["gbtree", "dart"], default=None)
     p.add_argument("--xgb-rate-drop", type=float, default=None)
     p.add_argument("--xgb-skip-drop", type=float, default=None)
@@ -160,6 +164,62 @@ def _resolve_sides(raw: str | tuple[str, ...]) -> tuple[str, ...]:
     if invalid:
         raise ValueError(f"Unsupported side(s): {invalid}. Expected one of {ENTRY_SIDES}.")
     return tuple(dict.fromkeys(sides))
+
+
+def replot_entry_eval_from_saved_artifacts(cfg: PipelineConfig) -> Path | None:
+    entry_root = resolve_meta_dataset_root(cfg) / "entry"
+    prob_path = entry_root / "entry_probs.parquet"
+    thresholds_path = entry_root / "entry_thresholds.json"
+    labels_path = entry_root / "entry_labels.parquet"
+
+    if not prob_path.exists():
+        raise FileNotFoundError(f"Missing saved probabilities for replot: {prob_path}")
+    if not thresholds_path.exists():
+        raise FileNotFoundError(f"Missing saved thresholds for replot: {thresholds_path}")
+
+    probs_df = load_prob_frame(prob_path)
+    combined_cols = {
+        col: pd.to_numeric(probs_df[col], errors="coerce").to_numpy(dtype=float)
+        for col in probs_df.columns
+    }
+
+    try:
+        frame = build_base_feature_frame(cfg)
+    except ValueError as exc:
+        if "OOS probability coverage below threshold" not in str(exc):
+            raise
+        relaxed_cfg = replace(cfg, min_oos_prob_coverage=0.0)
+        print(
+            "[META-ENTRY] Replot fallback: lowering min_oos_prob_coverage "
+            f"from {cfg.min_oos_prob_coverage:.2f} to 0.00 for plotting."
+        )
+        frame = build_base_feature_frame(relaxed_cfg)
+    if labels_path.exists():
+        labels_df = load_prob_frame(labels_path).reindex(frame.index)
+        for col in ("y_enter_long", "y_enter_short"):
+            if col in labels_df.columns:
+                frame[col] = (
+                    pd.to_numeric(labels_df[col], errors="coerce")
+                    .fillna(0)
+                    .astype(np.int8)
+                    .to_numpy()
+                )
+    if "y_enter_long" not in frame.columns or "y_enter_short" not in frame.columns:
+        frame = add_entry_targets(frame, cfg)
+
+    raw_thresholds = json.loads(thresholds_path.read_text(encoding="utf-8"))
+    threshold_summary = raw_thresholds if isinstance(raw_thresholds, dict) else {}
+
+    plot_path = _save_entry_eval_plot(
+        frame=frame,
+        entry_root=entry_root,
+        combined_cols=combined_cols,
+        threshold_summary=threshold_summary,
+        cfg=cfg,
+    )
+    if plot_path is not None:
+        print(f"[META-ENTRY] Rebuilt OOF eval plot: {plot_path}")
+    return plot_path
 
 
 def run_entry_pipeline(
@@ -333,6 +393,9 @@ def run_entry_pipeline(
 def main() -> None:
     args = parse_args()
     cfg = build_config(args)
+    if bool(args.plot_only):
+        replot_entry_eval_from_saved_artifacts(cfg)
+        return
     sides = ENTRY_SIDES if args.sides == "both" else (str(args.sides),)
     artifacts = run_entry_pipeline(cfg, sides=sides)
     print(f"[META-ENTRY] Saved probabilities: {artifacts['entry_probs_path']}")
