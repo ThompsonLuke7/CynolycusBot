@@ -115,6 +115,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--xgb-sample-type", choices=["uniform", "weighted"], default=None)
     p.add_argument("--xgb-normalize-type", choices=["tree", "forest"], default=None)
     p.add_argument("--n-estimators", type=int, default=None)
+    p.add_argument("--early-stopping-rounds", type=int, default=PipelineConfig.early_stopping_rounds)
+    p.add_argument("--early-stopping-val-fraction", type=float, default=PipelineConfig.early_stopping_val_fraction)
+    p.add_argument("--early-stopping-min-val-rows", type=int, default=PipelineConfig.early_stopping_min_val_rows)
     p.add_argument("--random-state", type=int, default=PipelineConfig.random_state)
     return p.parse_args()
 
@@ -150,6 +153,9 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
         xgb_sample_type=args.xgb_sample_type,
         xgb_normalize_type=args.xgb_normalize_type,
         n_estimators=args.n_estimators,
+        early_stopping_rounds=args.early_stopping_rounds,
+        early_stopping_val_fraction=args.early_stopping_val_fraction,
+        early_stopping_min_val_rows=args.early_stopping_min_val_rows,
         random_state=int(args.random_state),
     )
 

@@ -79,7 +79,7 @@ class PipelineConfig:
     threshold_min: float = 0.50
     threshold_max: float = 0.95
     threshold_step: float = 0.05
-    threshold_objective: str = "f1"
+    threshold_objective: str = "f0_5"
     min_oos_prob_coverage: float = 0.95
     xgb_booster: str | None = None
     xgb_rate_drop: float | None = None
@@ -88,6 +88,9 @@ class PipelineConfig:
     xgb_sample_type: str | None = None
     xgb_normalize_type: str | None = None
     n_estimators: int | None = None
+    early_stopping_rounds: int | None = 100
+    early_stopping_val_fraction: float = 0.20
+    early_stopping_min_val_rows: int = 100
     random_state: int = 42
 
 
@@ -672,6 +675,9 @@ def _fit_booster(
     *,
     params: dict[str, Any],
     seed: int,
+    early_stopping_rounds: int | None = None,
+    early_stopping_val_fraction: float = 0.20,
+    early_stopping_min_val_rows: int = 100,
 ) -> tuple[xgb.Booster | None, float | None, dict[str, Any], int]:
     if X.shape[0] == 0:
         return None, 0.0, _sanitize_xgb_params(params), int(params.get("n_estimators", 100))
@@ -688,14 +694,38 @@ def _fit_booster(
     if pos == 0 or neg == 0:
         const_prob = float(np.mean(y)) if y.size else 0.0
         return None, const_prob, params_local, num_boost_round
+
     dtrain = xgb.DMatrix(X, label=y)
-    model = xgb.train(
-        params_local,
-        dtrain,
-        num_boost_round=num_boost_round,
-        evals=[(dtrain, "train")],
-        verbose_eval=max(1, min(int(XGB_VERBOSE_EVAL_EVERY), int(num_boost_round))),
-    )
+    evals: list[tuple[xgb.DMatrix, str]] = [(dtrain, "train")]
+    early_stopping = None
+    es_rounds = int(early_stopping_rounds) if early_stopping_rounds is not None else 0
+    if es_rounds > 0:
+        n_rows = int(X.shape[0])
+        val_rows = max(
+            int(early_stopping_min_val_rows),
+            int(np.ceil(n_rows * float(early_stopping_val_fraction))),
+        )
+        if 0 < val_rows < n_rows:
+            split_idx = n_rows - val_rows
+            if split_idx > 0:
+                y_fit = y[:split_idx]
+                y_val = y[split_idx:]
+                if len(np.unique(y_fit)) > 1 and len(np.unique(y_val)) > 1:
+                    dtrain = xgb.DMatrix(X[:split_idx], label=y_fit)
+                    dval = xgb.DMatrix(X[split_idx:], label=y_val)
+                    evals = [(dtrain, "train"), (dval, "validation")]
+                    early_stopping = es_rounds
+
+    train_kwargs: dict[str, Any] = {
+        "params": params_local,
+        "dtrain": dtrain,
+        "num_boost_round": num_boost_round,
+        "evals": evals,
+        "verbose_eval": max(1, min(int(XGB_VERBOSE_EVAL_EVERY), int(num_boost_round))),
+    }
+    if early_stopping is not None:
+        train_kwargs["early_stopping_rounds"] = int(early_stopping)
+    model = xgb.train(**train_kwargs)
     return model, None, params_local, num_boost_round
 
 
@@ -709,6 +739,7 @@ def build_final_eval_history(
     seed: int,
     validation_fraction: float = 0.20,
     min_validation_days: int = 1,
+    early_stopping_rounds: int | None = None,
 ) -> dict[str, list[float]] | None:
     valid_idx = np.flatnonzero(np.asarray(valid_mask, dtype=bool))
     if valid_idx.size < 10:
@@ -743,14 +774,18 @@ def build_final_eval_history(
     dtrain = xgb.DMatrix(X[fit_idx], label=y_fit)
     dval = xgb.DMatrix(X[eval_idx], label=y_eval)
     evals_result: dict[str, dict[str, list[float]]] = {}
-    xgb.train(
-        params_local,
-        dtrain,
-        num_boost_round=num_boost_round,
-        evals=[(dtrain, "train"), (dval, "validation")],
-        evals_result=evals_result,
-        verbose_eval=max(1, min(int(XGB_VERBOSE_EVAL_EVERY), int(num_boost_round))),
-    )
+    train_kwargs: dict[str, Any] = {
+        "params": params_local,
+        "dtrain": dtrain,
+        "num_boost_round": num_boost_round,
+        "evals": [(dtrain, "train"), (dval, "validation")],
+        "evals_result": evals_result,
+        "verbose_eval": max(1, min(int(XGB_VERBOSE_EVAL_EVERY), int(num_boost_round))),
+    }
+    es_rounds = int(early_stopping_rounds) if early_stopping_rounds is not None else 0
+    if es_rounds > 0:
+        train_kwargs["early_stopping_rounds"] = es_rounds
+    xgb.train(**train_kwargs)
     train_logloss = [float(v) for v in evals_result.get("train", {}).get("logloss", [])]
     val_logloss = [float(v) for v in evals_result.get("validation", {}).get("logloss", [])]
     if not train_logloss or not val_logloss:
@@ -773,6 +808,18 @@ def predict_probs(
         p = 0.0 if constant_prob is None else float(constant_prob)
         return np.full(X.shape[0], p, dtype=np.float32)
     dmat = xgb.DMatrix(X)
+    best_iteration = getattr(model, "best_iteration", None)
+    if best_iteration is not None and int(best_iteration) >= 0:
+        try:
+            return model.predict(dmat, iteration_range=(0, int(best_iteration) + 1)).astype(np.float32)
+        except TypeError:
+            pass
+    best_ntree_limit = getattr(model, "best_ntree_limit", None)
+    if best_ntree_limit is not None and int(best_ntree_limit) > 0:
+        try:
+            return model.predict(dmat, ntree_limit=int(best_ntree_limit)).astype(np.float32)
+        except TypeError:
+            pass
     return model.predict(dmat).astype(np.float32)
 
 
@@ -841,6 +888,9 @@ def train_walkforward_binary(
             y[fit_idx],
             params=xgb_params,
             seed=int(cfg.random_state) + int(fold["fold_id"]),
+            early_stopping_rounds=cfg.early_stopping_rounds,
+            early_stopping_val_fraction=cfg.early_stopping_val_fraction,
+            early_stopping_min_val_rows=cfg.early_stopping_min_val_rows,
         )
         oof[pred_idx] = predict_probs(model, X[pred_idx], constant_prob=constant_prob)
         fold_rows.append(
@@ -858,6 +908,9 @@ def train_walkforward_binary(
         y[valid_mask],
         params=xgb_params,
         seed=int(cfg.random_state) + 10_000,
+        early_stopping_rounds=cfg.early_stopping_rounds,
+        early_stopping_val_fraction=cfg.early_stopping_val_fraction,
+        early_stopping_min_val_rows=cfg.early_stopping_min_val_rows,
     )
     full_probs = np.full(len(df), np.nan, dtype=np.float32)
     full_probs[valid_mask] = predict_probs(
@@ -877,6 +930,8 @@ def train_walkforward_binary(
         valid_mask=valid_mask,
         params=xgb_params,
         seed=int(cfg.random_state) + 20_000,
+        validation_fraction=float(cfg.early_stopping_val_fraction),
+        early_stopping_rounds=cfg.early_stopping_rounds,
     )
     return TrainResult(
         target_col=target_col,

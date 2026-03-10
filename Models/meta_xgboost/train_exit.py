@@ -138,6 +138,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--xgb-sample-type", choices=["uniform", "weighted"], default=None)
     p.add_argument("--xgb-normalize-type", choices=["tree", "forest"], default=None)
     p.add_argument("--n-estimators", type=int, default=None)
+    p.add_argument("--early-stopping-rounds", type=int, default=PipelineConfig.early_stopping_rounds)
+    p.add_argument("--early-stopping-val-fraction", type=float, default=PipelineConfig.early_stopping_val_fraction)
+    p.add_argument("--early-stopping-min-val-rows", type=int, default=PipelineConfig.early_stopping_min_val_rows)
     p.add_argument("--random-state", type=int, default=PipelineConfig.random_state)
     return p.parse_args()
 
@@ -173,6 +176,9 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
         xgb_sample_type=args.xgb_sample_type,
         xgb_normalize_type=args.xgb_normalize_type,
         n_estimators=args.n_estimators,
+        early_stopping_rounds=args.early_stopping_rounds,
+        early_stopping_val_fraction=args.early_stopping_val_fraction,
+        early_stopping_min_val_rows=args.early_stopping_min_val_rows,
         random_state=int(args.random_state),
     )
 
@@ -392,17 +398,18 @@ def run_exit_pipeline(
         )
         y = pd.to_numeric(frame[target_col], errors="coerce").fillna(0).astype(np.int8).to_numpy()
         sweep = sweep_thresholds(y_true=y[result.valid_mask], probs=result.oof_probs[result.valid_mask], cfg=cfg)
-        best_f1_threshold, best_row = choose_threshold(sweep, objective="f1")
+        objective_key = str(cfg.threshold_objective).strip().lower().replace("-", "_").replace(".", "_")
+        best_threshold, best_row = choose_threshold(sweep, objective=cfg.threshold_objective)
         if fixed_threshold is not None:
             threshold = float(fixed_threshold)
             threshold_row = sweep.iloc[(sweep["threshold"] - threshold).abs().argmin()].to_dict()
             threshold_source = "fixed_threshold"
             selection_objective = "fixed"
         else:
-            threshold = float(best_f1_threshold)
+            threshold = float(best_threshold)
             threshold_row = dict(best_row)
-            threshold_source = "best_f1_sweep"
-            selection_objective = "f1"
+            threshold_source = f"best_{objective_key}_sweep"
+            selection_objective = objective_key
         train_metrics = binary_metrics(y[result.valid_mask], result.full_probs[result.valid_mask], threshold=threshold)
         oof_metrics = binary_metrics(y[result.valid_mask], result.oof_probs[result.valid_mask], threshold=threshold)
         metrics_summary[key] = {"full": train_metrics, "oof": oof_metrics}
@@ -412,7 +419,8 @@ def run_exit_pipeline(
             "threshold": float(threshold),
             "threshold_source": threshold_source,
             "selection_objective": selection_objective,
-            "best_f1_sweep_threshold": float(best_f1_threshold),
+            "best_sweep_threshold": float(best_threshold),
+            f"best_{objective_key}_sweep_threshold": float(best_threshold),
             **threshold_row,
         }
         print(
