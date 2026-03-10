@@ -67,6 +67,21 @@ class OptionOrderPolicyConfig:
     price_mode: str = "ask"  # ask|mid|bid|last|mark
     max_contracts_fallback: int = 1
     max_contracts_cap: int = 0  # <=0 disables hard cap
+    meta_trailing_stop_enabled: bool = True
+    meta_trail_activate_atr: float = 2.0
+    meta_trail_atr: float = 1.0
+    meta_trail_atr_after_tp: float = 0.8
+    meta_trail_tp_atr: float = 1.6
+    meta_use_tp_to_tighten_trail: bool = True
+
+
+@dataclass
+class _MetaTrailState:
+    active: bool = False
+    entry_price: float = float("nan")
+    entry_atr: float = float("nan")
+    favorable_anchor: float = float("nan")
+    tp_seen: bool = False
 
 
 class OptionOrderPolicy:
@@ -102,6 +117,142 @@ class OptionOrderPolicy:
         self._pending_flat_bars: int = 0
         self._pending_opposite_side: int = 0
         self._pending_opposite_bars: int = 0
+        self._meta_long_trail = _MetaTrailState()
+        self._meta_short_trail = _MetaTrailState()
+        self._last_1m_close: float = float("nan")
+        self._prev_1m_close: float = float("nan")
+        self._latest_meta_side_snapshot: dict[str, float] | None = None
+
+    def _trail_state(self, side: str) -> _MetaTrailState:
+        return self._meta_long_trail if side == "long" else self._meta_short_trail
+
+    def _reset_trail_state(self, side: str) -> None:
+        state = self._trail_state(side)
+        state.active = False
+        state.entry_price = float("nan")
+        state.entry_atr = float("nan")
+        state.favorable_anchor = float("nan")
+        state.tp_seen = False
+
+    def _seed_trail_state(
+        self,
+        *,
+        side: str,
+        close: float,
+        atr: float,
+        high: float,
+        low: float,
+    ) -> None:
+        state = self._trail_state(side)
+        state.active = True
+        state.entry_price = float(close) if math.isfinite(close) else float("nan")
+        state.entry_atr = float(atr) if math.isfinite(atr) and atr > 0.0 else float("nan")
+        if side == "long":
+            anchor = high if math.isfinite(high) else close
+        else:
+            anchor = low if math.isfinite(low) else close
+        state.favorable_anchor = float(anchor) if math.isfinite(anchor) else float(close)
+        state.tp_seen = False
+
+    def _update_trail_state(
+        self,
+        *,
+        side: str,
+        close: float,
+        high: float,
+        low: float,
+    ) -> None:
+        state = self._trail_state(side)
+        if not state.active:
+            return
+        if side == "long":
+            if math.isfinite(high):
+                state.favorable_anchor = max(float(state.favorable_anchor), float(high))
+            elif math.isfinite(close):
+                state.favorable_anchor = max(float(state.favorable_anchor), float(close))
+            if (
+                not state.tp_seen
+                and math.isfinite(state.entry_price)
+                and math.isfinite(state.entry_atr)
+                and state.entry_atr > 0.0
+                and float(self.cfg.meta_trail_tp_atr) > 0.0
+                and math.isfinite(high)
+                and high >= state.entry_price + float(self.cfg.meta_trail_tp_atr) * state.entry_atr
+            ):
+                state.tp_seen = True
+            return
+
+        if math.isfinite(low):
+            state.favorable_anchor = min(float(state.favorable_anchor), float(low))
+        elif math.isfinite(close):
+            state.favorable_anchor = min(float(state.favorable_anchor), float(close))
+        if (
+            not state.tp_seen
+            and math.isfinite(state.entry_price)
+            and math.isfinite(state.entry_atr)
+            and state.entry_atr > 0.0
+            and float(self.cfg.meta_trail_tp_atr) > 0.0
+            and math.isfinite(low)
+            and low <= state.entry_price - float(self.cfg.meta_trail_tp_atr) * state.entry_atr
+        ):
+            state.tp_seen = True
+
+    def _trail_stop_hit(
+        self,
+        *,
+        side: str,
+        close: float,
+        high: float,
+        low: float,
+    ) -> bool:
+        if not bool(self.cfg.meta_trailing_stop_enabled):
+            return False
+        state = self._trail_state(side)
+        if (
+            (not state.active)
+            or (not math.isfinite(state.entry_price))
+            or (not math.isfinite(state.entry_atr))
+            or state.entry_atr <= 0.0
+            or (not math.isfinite(state.favorable_anchor))
+        ):
+            return False
+
+        activate_mult = max(0.0, float(self.cfg.meta_trail_activate_atr))
+        trail_mult = float(self.cfg.meta_trail_atr_after_tp) if (
+            bool(self.cfg.meta_use_tp_to_tighten_trail) and bool(state.tp_seen)
+        ) else float(self.cfg.meta_trail_atr)
+        if trail_mult <= 0.0:
+            trail_mult = float(self.cfg.meta_trail_atr)
+        if trail_mult <= 0.0:
+            return False
+
+        trail_active = False
+        if side == "long":
+            move = float(state.favorable_anchor) - float(state.entry_price)
+            if move >= activate_mult * float(state.entry_atr):
+                trail_active = True
+            if bool(self.cfg.meta_use_tp_to_tighten_trail) and bool(state.tp_seen):
+                trail_active = True
+            if not trail_active:
+                return False
+            trail_level = float(state.favorable_anchor) - trail_mult * float(state.entry_atr)
+            return (
+                (math.isfinite(low) and low <= trail_level)
+                or (math.isfinite(close) and close <= trail_level)
+            )
+
+        move = float(state.entry_price) - float(state.favorable_anchor)
+        if move >= activate_mult * float(state.entry_atr):
+            trail_active = True
+        if bool(self.cfg.meta_use_tp_to_tighten_trail) and bool(state.tp_seen):
+            trail_active = True
+        if not trail_active:
+            return False
+        trail_level = float(state.favorable_anchor) + trail_mult * float(state.entry_atr)
+        return (
+            (math.isfinite(high) and high >= trail_level)
+            or (math.isfinite(close) and close >= trail_level)
+        )
 
     def _refresh_legacy_state(self) -> None:
         self._signed_contracts = int(self._long_contracts) - int(self._short_contracts)
@@ -364,6 +515,39 @@ class OptionOrderPolicy:
             if math.isfinite(value):
                 return value
         return float("nan")
+
+    @staticmethod
+    def _trend_gate_passed(
+        *,
+        side: str,
+        transition: str,
+        close: float,
+        prev_close: float,
+    ) -> bool:
+        side_key = str(side).strip().lower()
+        transition_key = str(transition).strip().lower()
+        if side_key not in {"long", "short"}:
+            return True
+        if transition_key not in {"enter", "exit"}:
+            return True
+        if not (math.isfinite(close) and math.isfinite(prev_close)):
+            return True
+        if transition_key == "enter":
+            return close > prev_close if side_key == "long" else close < prev_close
+        # Exit confirmation: long exits on non-rising bar; short exits on non-falling bar.
+        return close < prev_close if side_key == "long" else close > prev_close
+
+    def _cache_meta_side_snapshot(self, *, closed_bar: dict[str, Any]) -> None:
+        self._latest_meta_side_snapshot = {
+            "p_enter_long": _as_float(closed_bar.get("p_enter_long")),
+            "p_enter_short": _as_float(closed_bar.get("p_enter_short")),
+            "p_exit_long": _as_float(closed_bar.get("p_exit_long")),
+            "p_exit_short": _as_float(closed_bar.get("p_exit_short")),
+            "thr_enter_long": self._meta_threshold_value(closed_bar, "thr_enter_long", "enter_long_threshold"),
+            "thr_enter_short": self._meta_threshold_value(closed_bar, "thr_enter_short", "enter_short_threshold"),
+            "thr_exit_long": self._meta_threshold_value(closed_bar, "thr_exit_long", "exit_long_threshold"),
+            "thr_exit_short": self._meta_threshold_value(closed_bar, "thr_exit_short", "exit_short_threshold"),
+        }
 
     @classmethod
     def _has_meta_side_thresholds(cls, closed_bar: dict[str, Any]) -> bool:
@@ -945,6 +1129,12 @@ class OptionOrderPolicy:
         *,
         side: str,
         closed_bar: dict[str, Any],
+        close: float,
+        high: float,
+        low: float,
+        atr: float,
+        prev_close: float = float("nan"),
+        enforce_trend_gate: bool = False,
     ) -> int:
         side_key = str(side).strip().lower()
         if side_key not in {"long", "short"}:
@@ -956,10 +1146,38 @@ class OptionOrderPolicy:
         exit_thr = self._meta_threshold_value(closed_bar, f"thr_exit_{side_key}", f"exit_{side_key}_threshold")
         desired_qty = max(0, int(self.cfg.qty))
         if current_qty > 0:
-            if math.isfinite(exit_prob) and math.isfinite(exit_thr) and exit_prob >= exit_thr:
-                return 0
-            return desired_qty
+            state = self._trail_state(side_key)
+            if not state.active:
+                self._seed_trail_state(side=side_key, close=close, atr=atr, high=high, low=low)
+            else:
+                self._update_trail_state(side=side_key, close=close, high=high, low=low)
+        else:
+            self._reset_trail_state(side_key)
+        if current_qty > 0:
+            exit_signal = (
+                math.isfinite(exit_prob)
+                and math.isfinite(exit_thr)
+                and exit_prob >= exit_thr
+            )
+            trail_signal = self._trail_stop_hit(side=side_key, close=close, high=high, low=low)
+            if not (exit_signal or trail_signal):
+                return desired_qty
+            if enforce_trend_gate and not self._trend_gate_passed(
+                side=side_key,
+                transition="exit",
+                close=close,
+                prev_close=prev_close,
+            ):
+                return desired_qty
+            return 0
         if math.isfinite(enter_prob) and math.isfinite(enter_thr) and enter_prob >= enter_thr:
+            if enforce_trend_gate and not self._trend_gate_passed(
+                side=side_key,
+                transition="enter",
+                close=close,
+                prev_close=prev_close,
+            ):
+                return 0
             return desired_qty
         return 0
 
@@ -1007,12 +1225,34 @@ class OptionOrderPolicy:
         close: float,
         atr: float,
         local_ts: datetime,
+        prev_close: float = float("nan"),
+        enforce_trend_gate: bool = False,
     ) -> dict[str, Any]:
         if not math.isfinite(close):
             return {"event": "error", "reason": "invalid_close"}
+        high = _as_float(closed_bar.get("high"))
+        low = _as_float(closed_bar.get("low"))
 
-        target_long = self._target_contracts_for_side(side="long", closed_bar=closed_bar)
-        target_short = self._target_contracts_for_side(side="short", closed_bar=closed_bar)
+        target_long = self._target_contracts_for_side(
+            side="long",
+            closed_bar=closed_bar,
+            close=close,
+            high=high,
+            low=low,
+            atr=atr,
+            prev_close=prev_close,
+            enforce_trend_gate=enforce_trend_gate,
+        )
+        target_short = self._target_contracts_for_side(
+            side="short",
+            closed_bar=closed_bar,
+            close=close,
+            high=high,
+            low=low,
+            atr=atr,
+            prev_close=prev_close,
+            enforce_trend_gate=enforce_trend_gate,
+        )
         current_long = int(self._long_contracts)
         current_short = int(self._short_contracts)
         side_state: dict[str, dict[str, Any]] = {
@@ -1063,10 +1303,12 @@ class OptionOrderPolicy:
                     self._long_contracts = target_qty
                     if target_qty == 0:
                         self._long_symbol = None
+                        self._reset_trail_state("long")
                 else:
                     self._short_contracts = target_qty
                     if target_qty == 0:
                         self._short_symbol = None
+                        self._reset_trail_state("short")
 
         for side in ("long", "short"):
             current_qty = int(self._long_contracts if side == "long" else self._short_contracts)
@@ -1140,9 +1382,13 @@ class OptionOrderPolicy:
             if side == "long":
                 self._long_contracts = desired_final
                 self._long_symbol = symbol
+                if current_qty <= 0 and desired_final > 0:
+                    self._seed_trail_state(side="long", close=close, atr=atr, high=high, low=low)
             else:
                 self._short_contracts = desired_final
                 self._short_symbol = symbol
+                if current_qty <= 0 and desired_final > 0:
+                    self._seed_trail_state(side="short", close=close, atr=atr, high=high, low=low)
 
         self._refresh_legacy_state()
         if not orders:
@@ -1157,6 +1403,7 @@ class OptionOrderPolicy:
                 "open_short_symbol": self._short_symbol,
                 "target_long_contracts": int(target_long),
                 "target_short_contracts": int(target_short),
+                "meta_trailing_stop_enabled": bool(self.cfg.meta_trailing_stop_enabled),
                 "buying_power": buying_power if math.isfinite(buying_power) else None,
                 "close": close,
                 "atr": atr,
@@ -1174,11 +1421,58 @@ class OptionOrderPolicy:
             "open_short_symbol": self._short_symbol,
             "target_long_contracts": int(target_long),
             "target_short_contracts": int(target_short),
+            "meta_trailing_stop_enabled": bool(self.cfg.meta_trailing_stop_enabled),
             "buying_power": buying_power if math.isfinite(buying_power) else None,
             "orders": orders,
             "close": close,
             "atr": atr,
         }
+
+    def on_1m_bar(
+        self,
+        *,
+        bar: dict[str, Any],
+        logger: Callable[[str], None] = print,
+    ) -> dict[str, Any]:
+        """
+        Optional intrabar execution monitor for independent meta mode.
+        Uses latest 15m meta probabilities/thresholds and 1m trend gating.
+        """
+        close = _as_float(bar.get("close"))
+        high = _as_float(bar.get("high"))
+        low = _as_float(bar.get("low"))
+        if not math.isfinite(close):
+            return {"event": "hold", "mode": "intrabar_meta", "reason": "invalid_close"}
+
+        self._prev_1m_close = self._last_1m_close
+        self._last_1m_close = float(close)
+
+        if not self._latest_meta_side_snapshot:
+            return {"event": "hold", "mode": "intrabar_meta", "reason": "no_meta_snapshot"}
+
+        local_ts = self._to_local_ts(bar.get("timestamp"))
+        atr = self._compute_atr()
+        side_bar = dict(self._latest_meta_side_snapshot)
+        side_bar.update(
+            {
+                "timestamp": bar.get("timestamp"),
+                "close": close,
+                "high": high,
+                "low": low,
+            }
+        )
+        result = self._on_independent_meta_decision(
+            closed_bar=side_bar,
+            logger=logger,
+            close=close,
+            atr=atr,
+            local_ts=local_ts,
+            prev_close=self._prev_1m_close,
+            enforce_trend_gate=True,
+        )
+        if isinstance(result, dict):
+            result.setdefault("mode", "intrabar_meta")
+        return result
 
     def on_decision(
         self,
@@ -1217,13 +1511,17 @@ class OptionOrderPolicy:
             if not math.isfinite(close):
                 return {"event": "error", "reason": "invalid_close"}
             if self._has_meta_side_thresholds(closed_bar):
+                self._cache_meta_side_snapshot(closed_bar=closed_bar)
                 return self._on_independent_meta_decision(
                     closed_bar=closed_bar,
                     logger=logger,
                     close=close,
                     atr=atr,
                     local_ts=local_ts,
+                    prev_close=self._prev_1m_close,
+                    enforce_trend_gate=True,
                 )
+            self._latest_meta_side_snapshot = None
             current_signed = int(self._signed_contracts)
             current_pos = 1 if current_signed > 0 else (-1 if current_signed < 0 else 0)
 

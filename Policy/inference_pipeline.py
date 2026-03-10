@@ -355,6 +355,8 @@ def _write_agent_matrix_csv(
     output_root: Path,
     include_pivot_probs: bool,
     include_tb_probs: bool,
+    pivot_label_dir: str,
+    tb_label_dir: str,
     vix_parquet_path: Path,
 ) -> Path:
     cfg = AgentFeatureConfig(
@@ -363,6 +365,8 @@ def _write_agent_matrix_csv(
         drop_na=drop_na,
         processed_root=processed_root,
         model_root=model_root,
+        pivot_label_dir=pivot_label_dir,
+        tb_label_dir=tb_label_dir,
         include_pivot_probs=include_pivot_probs,
         include_tb_probs=include_tb_probs,
         vix_parquet_path=str(vix_parquet_path),
@@ -665,6 +669,8 @@ def main() -> None:
         for s in args.ga_label_dirs.split(",")
         if s.strip()
     ]
+    pivot_label_dir = next((lbl for lbl in label_dirs if lbl in {"swing", "pivots"}), "pivots")
+    tb_label_dir = "tb"
     if not args.skip_ga:
         if args.full_fit_ga:
             print("[inference_pipeline] Training GA-XGB full-fit masks...")
@@ -719,6 +725,8 @@ def main() -> None:
         output_root=inference_root,
         include_pivot_probs=any(lbl in {"pivots", "swing"} for lbl in label_dirs),
         include_tb_probs="tb" in label_dirs,
+        pivot_label_dir=pivot_label_dir,
+        tb_label_dir=tb_label_dir,
         vix_parquet_path=vix_parquet_path,
     )
     print(f"[inference_pipeline] Agent matrix saved to {agent_csv}")

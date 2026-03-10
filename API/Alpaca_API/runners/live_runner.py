@@ -135,13 +135,24 @@ def _action_to_position(action: float | int, *, deadband: float = 0.0) -> int:
     return 1 if a > 0.0 else -1
 
 
-def _make_1m_handler(*, print_tz: str) -> Callable[[str, dict, BarRingBuffer], None]:
+def _make_1m_handler(
+    *,
+    print_tz: str,
+    print_1m: bool,
+    order_policies: dict[str, OptionOrderPolicy] | None = None,
+) -> Callable[[str, dict, BarRingBuffer], None]:
     def _handler(symbol: str, bar: dict, _buffer: BarRingBuffer) -> None:
-        ts = _format_ts_local(bar.get("timestamp"), tz=print_tz)
-        print(
-            f"{symbol} 1m: {ts} o={bar.get('open')} h={bar.get('high')} "
-            f"l={bar.get('low')} c={bar.get('close')} v={bar.get('volume')}"
-        )
+        if order_policies is not None and symbol in order_policies:
+            result = order_policies[symbol].on_1m_bar(bar=bar)
+            event = str(result.get("event", "unknown"))
+            if event not in {"hold", "no_change"}:
+                print(f"{symbol} order_policy 1m event={event} details={result}")
+        if print_1m:
+            ts = _format_ts_local(bar.get("timestamp"), tz=print_tz)
+            print(
+                f"{symbol} 1m: {ts} o={bar.get('open')} h={bar.get('high')} "
+                f"l={bar.get('low')} c={bar.get('close')} v={bar.get('volume')}"
+            )
     return _handler
 
 
@@ -1077,6 +1088,11 @@ def main() -> None:
                 price_mode=str(args.option_price_mode),
                 max_contracts_fallback=int(args.option_order_qty),
                 max_contracts_cap=int(args.option_max_contracts_cap),
+                meta_trailing_stop_enabled=True,
+                meta_trail_activate_atr=float(args.meta_trail_activate_atr),
+                meta_trail_atr=float(args.meta_trail_atr),
+                meta_trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
+                meta_use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
             )
             order_policies[symbol] = OptionOrderPolicy(cfg)
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
@@ -1093,7 +1109,15 @@ def main() -> None:
                 except Exception as exc:
                     print(f"[live] Startup sync {symbol} failed: {exc}")
 
-    on_1m = _make_1m_handler(print_tz=args.tz or "America/New_York") if args.print_1m else None
+    on_1m = (
+        _make_1m_handler(
+            print_tz=args.tz or "America/New_York",
+            print_1m=bool(args.print_1m),
+            order_policies=order_policies,
+        )
+        if (args.print_1m or order_policies is not None)
+        else None
+    )
     on_15m = _make_15m_handler(
         inference=inference,
         print_15m=args.print_15m,

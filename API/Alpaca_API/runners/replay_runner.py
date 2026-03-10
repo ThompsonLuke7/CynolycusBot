@@ -12,6 +12,7 @@ from .live_runner import (
     _fmt_prob,
     _format_ts_local,
     _load_test_split_warmup_1m,
+    _make_1m_handler,
 )
 from Policy.execution_latch import DirectionExecutionLatch
 from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
@@ -589,6 +590,11 @@ def main() -> None:
                 price_mode=str(args.option_price_mode),
                 max_contracts_fallback=int(args.option_order_qty),
                 max_contracts_cap=int(args.option_max_contracts_cap),
+                meta_trailing_stop_enabled=True,
+                meta_trail_activate_atr=float(args.meta_trail_activate_atr),
+                meta_trail_atr=float(args.meta_trail_atr),
+                meta_trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
+                meta_use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
             )
             order_policies[symbol] = OptionOrderPolicy(cfg)
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
@@ -600,11 +606,15 @@ def main() -> None:
         interval_minutes=args.interval,
         buffer_size=args.buffer_size,
         agg_label=args.resample_label,
-        on_1m=(lambda symbol, bar, _buf: print(
-            f"{symbol} 1m: {_format_ts_local(bar.get('timestamp'), tz=args.tz or 'America/New_York')} "
-            f"o={bar.get('open')} h={bar.get('high')} l={bar.get('low')} "
-            f"c={bar.get('close')} v={bar.get('volume')}"
-        )) if args.print_1m else None,
+        on_1m=(
+            _make_1m_handler(
+                print_tz=args.tz or "America/New_York",
+                print_1m=bool(args.print_1m),
+                order_policies=order_policies,
+            )
+            if (args.print_1m or order_policies is not None)
+            else None
+        ),
         on_15m_close=_make_close_handler(
             inference=inference,
             interval_minutes=int(args.interval),
