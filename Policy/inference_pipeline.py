@@ -160,6 +160,7 @@ def _run_cmd(args: list[str]) -> None:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        cwd=str(REPO_ROOT),
     )
     assert proc.stdout is not None
     for line in proc.stdout:
@@ -437,7 +438,8 @@ def _run_meta_replay_eval(
 ) -> None:
     cmd = [
         sys.executable,
-        str(REPO_ROOT / "API" / "Alpaca_API" / "runners" / "replay_runner.py"),
+        "-m",
+        "API.Alpaca_API.runners.replay_runner",
         "--data-path",
         str(replay_data_path),
         "--symbols",
