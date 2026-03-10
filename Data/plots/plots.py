@@ -2668,7 +2668,7 @@ def plot_model_inference(
             alpha=0.7,
             label=f"{short_label_name or 'SHORT'} actual",
         )
-    if np.isfinite(long_thr):
+    if long_probs is not None and np.isfinite(long_thr):
         ax_prob.axhline(
             long_thr,
             color="#1565C0",
@@ -2677,7 +2677,9 @@ def plot_model_inference(
             alpha=0.9,
             label=f"LONG thr={long_thr:.2f}",
         )
-    if np.isfinite(short_thr) and abs(short_thr - long_thr) > 1e-12:
+    if short_probs is not None and np.isfinite(short_thr) and (
+        (not np.isfinite(long_thr)) or abs(short_thr - long_thr) > 1e-12
+    ):
         ax_prob.axhline(
             short_thr,
             color="#FB8C00",

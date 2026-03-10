@@ -88,7 +88,7 @@ class PipelineConfig:
     xgb_sample_type: str | None = None
     xgb_normalize_type: str | None = None
     n_estimators: int | None = None
-    early_stopping_rounds: int | None = 100
+    early_stopping_rounds: int | None = 200
     early_stopping_val_fraction: float = 0.20
     early_stopping_min_val_rows: int = 100
     random_state: int = 42

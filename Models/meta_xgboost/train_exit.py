@@ -67,7 +67,7 @@ def _save_exit_eval_plot(
                 long_actual=plot_df["y_exit_long"].to_numpy(dtype=np.int64),
                 long_entry_label_name="ENTRY LONG",
                 long_label_name="EXIT LONG",
-                threshold=0.5,
+                threshold=float("nan"),
                 long_threshold=float(threshold_summary["exit_long"]["threshold"]),
                 title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB long entry/exit OOF eval ({cfg.dataset_name})",
                 save_path=str(long_save_path),
@@ -88,7 +88,7 @@ def _save_exit_eval_plot(
                 short_actual=plot_df["y_exit_short"].to_numpy(dtype=np.int64),
                 short_entry_label_name="ENTRY SHORT",
                 short_label_name="EXIT SHORT",
-                threshold=0.5,
+                threshold=float("nan"),
                 short_threshold=float(threshold_summary["exit_short"]["threshold"]),
                 title=f"{normalize_ticker(cfg.ticker)} | Meta-XGB short entry/exit OOF eval ({cfg.dataset_name})",
                 save_path=str(short_save_path),
@@ -495,8 +495,8 @@ def run_exit_pipeline(
     plot_paths = _save_exit_eval_plot(
         frame=frame,
         exit_root=exit_root,
-        combined_cols=merged_prob_cols,
-        threshold_summary=merged_thresholds,
+        combined_cols=combined_cols,
+        threshold_summary=threshold_summary,
         cfg=cfg,
     )
     if plot_paths:
