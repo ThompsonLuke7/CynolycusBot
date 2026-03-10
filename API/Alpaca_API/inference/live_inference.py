@@ -35,6 +35,16 @@ from Features.label_generations import add_trend_phase_labels
 from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
 
 
+_EMITTED_RUNTIME_WARNINGS: set[str] = set()
+
+
+def _warn_once(message: str) -> None:
+    if message in _EMITTED_RUNTIME_WARNINGS:
+        return
+    _EMITTED_RUNTIME_WARNINGS.add(message)
+    print(message)
+
+
 def _resolve_device(device: str) -> torch.device:
     dev = (device or "auto").lower()
     if dev in ("auto", "gpu", "cuda"):
@@ -428,7 +438,7 @@ def build_meta_feature_frame_from_1m(
                     if col in prob_cols:
                         prob_sources[col] = np.where(aligned.notna(), "xgb", None)
         except Exception as exc:
-            print(f"[live] GA-XGB inference failed: {exc}")
+            _warn_once(f"[live] GA-XGB inference failed: {exc}")
 
     if ga_probs_frame is not None and not ga_probs_frame.empty:
         idx = ga_probs_frame.index

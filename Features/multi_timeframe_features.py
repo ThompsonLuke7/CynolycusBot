@@ -15,9 +15,9 @@ from Features.feature_sets.pandas_ta_indicators import add_all_pandasta_indicato
 
 NY_TZ = "America/New_York"
 DEFAULT_TIMEFRAMES: dict[str, str] = {
-    "5m": "5T",
-    "15m": "15T",
-    "60m": "60T",
+    "5m": "5min",
+    "15m": "15min",
+    "60m": "60min",
 }
 
 

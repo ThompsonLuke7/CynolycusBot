@@ -32,10 +32,10 @@ from Features.feature_sets.pandas_ta_indicators import add_all_pandasta_indicato
 from Features.feature_sets.LSTM_features import add_lstm_features
 
 DEFAULT_FEATURE_TIMEFRAMES: dict[str, str] = {
-    "30m": "30T",
-    "1h": "1H",
-    "4h": "4H",
-    "1d": "1D",
+    "30m": "30min",
+    "1h": "1h",
+    "4h": "4h",
+    "1d": "1d",
 }
 DATASETS_DIRNAME = "datasets"
 PIVOT_LABEL_COLUMNS = (
@@ -257,7 +257,7 @@ def build_feature_matrix(
     *,
     ticker: str = "$SPY",
     tz: str | None = "America/New_York",
-    label_timeframe: str = "15T",
+    label_timeframe: str = "15min",
     feature_timeframes: Mapping[str, str] | None = None,
     pivot_kwargs: dict | None = None,
     label_kwargs: dict | None = None,
@@ -376,7 +376,7 @@ def build_feature_matrices(
     *,
     ticker: str = "$SPY",
     tz: str | None = "America/New_York",
-    label_timeframe: str = "15T",
+    label_timeframe: str = "15min",
     feature_timeframes: Mapping[str, str] | None = None,
     pivot_kwargs: dict | None = None,
     label_kwargs: dict | None = None,
@@ -548,7 +548,11 @@ def clean_feature_matrix(
         else:
             corr_features = feature_df.corr().abs()
 
-        feature_df = drop_correlated_and_constant_features(feature_df, corr_features)
+        feature_df = drop_correlated_and_constant_features(
+            feature_df,
+            corr_features,
+            verbose=run_diagnostics,
+        )
         kept_cols = list(feature_df.columns)
         drop_cols = [c for c in feature_cols if c not in kept_cols]
         if drop_cols:

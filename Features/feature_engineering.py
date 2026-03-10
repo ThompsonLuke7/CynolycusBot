@@ -109,6 +109,8 @@ def drop_correlated_and_constant_features(
     feature_df: pd.DataFrame,
     corr_features: pd.DataFrame,
     report_path: Path | None = None,
+    *,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     upper = corr_features.where(np.triu(np.ones(corr_features.shape), k=1).astype(bool))
 
@@ -139,18 +141,21 @@ def drop_correlated_and_constant_features(
         report_lines.append(f"{col}\t{match_str}")
     report_path.write_text("\n".join(report_lines) + "\n")
 
-    print("Dropping redundant features:", len(to_drop))
-    print(to_drop)
+    if verbose:
+        print("Dropping redundant features:", len(to_drop))
+        print(to_drop)
 
     feature_df_reduced = feature_df.drop(columns=to_drop)
-    print("Original feature shape:", feature_df.shape)
-    print("Reduced feature shape:", feature_df_reduced.shape)
+    if verbose:
+        print("Original feature shape:", feature_df.shape)
+        print("Reduced feature shape:", feature_df_reduced.shape)
 
     constant_cols = [
         c for c in feature_df_reduced.columns if feature_df_reduced[c].nunique() <= 1
     ]
-    print("constant cols:")
-    print(constant_cols)
+    if verbose:
+        print("constant cols:")
+        print(constant_cols)
 
     return feature_df_reduced.drop(columns=constant_cols)
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +28,24 @@ def _resolve_repo_root() -> Path:
 
 
 REPO_ROOT = _resolve_repo_root()
+
+
+def _now_local_ts() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
+
+
+def _log(message: str) -> None:
+    print(f"[{_now_local_ts()}] {message}")
+
+
+@contextlib.contextmanager
+def _quiet_stdio(enabled: bool):
+    if not enabled:
+        yield
+        return
+    sink = io.StringIO()
+    with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+        yield
 
 
 def _normalize_ga_label_dir(token: str) -> str:
@@ -135,7 +156,7 @@ def _ensure_vix_parquet(
         tf = _infer_vix_fetch_timeframe(label_timeframe)
         start, end = _infer_fetch_window_from_raw(raw_parquet)
         vix_parquet_path.parent.mkdir(parents=True, exist_ok=True)
-        print(
+        _log(
             f"[inference_pipeline] Missing VIX parquet at {vix_parquet_path}; "
             f"fetching {vix_ticker} {tf}..."
         )
@@ -149,11 +170,11 @@ def _ensure_vix_parquet(
             save_path=str(vix_parquet_path),
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"[inference_pipeline] VIX fetch skipped/failed: {exc}")
+        _log(f"[inference_pipeline] VIX fetch skipped/failed: {exc}")
 
 
-def _run_cmd(args: list[str]) -> None:
-    print(f"[inference_pipeline] Running: {' '.join(args)}")
+def _run_cmd(args: list[str], *, collapse_repeated_lines: bool = True) -> None:
+    _log(f"[inference_pipeline] Running: {' '.join(args)}")
     proc = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
@@ -163,8 +184,24 @@ def _run_cmd(args: list[str]) -> None:
         cwd=str(REPO_ROOT),
     )
     assert proc.stdout is not None
+    last_line: str | None = None
+    repeat_count = 0
+
+    def _flush_repeat_notice() -> None:
+        nonlocal repeat_count
+        if repeat_count > 0:
+            _log(f"[inference_pipeline] (previous line repeated {repeat_count} times)")
+            repeat_count = 0
+
     for line in proc.stdout:
-        print(line, end="")
+        stripped = line.rstrip("\n")
+        if collapse_repeated_lines and stripped == last_line:
+            repeat_count += 1
+            continue
+        _flush_repeat_notice()
+        _log(stripped)
+        last_line = stripped
+    _flush_repeat_notice()
     ret = proc.wait()
     if ret != 0:
         raise subprocess.CalledProcessError(ret, args)
@@ -433,6 +470,8 @@ def _run_meta_replay_eval(
     end: str | None,
     regular_only: bool,
     prepend_split_test_warmup: bool,
+    max_bars: int | None,
+    quiet_inference_logs: bool,
     plot_out: str | None,
     trace_out: str | None,
 ) -> None:
@@ -467,6 +506,10 @@ def _run_meta_replay_eval(
         cmd.append("--regular-only")
     if not prepend_split_test_warmup:
         cmd.append("--no-prepend-split-test-warmup")
+    if max_bars is not None and int(max_bars) > 0:
+        cmd += ["--max-bars", str(int(max_bars))]
+    if quiet_inference_logs:
+        cmd.append("--quiet-inference-logs")
     if plot_out:
         cmd += ["--plot-out", str(plot_out)]
     if trace_out:
@@ -487,6 +530,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--label-timeframe", default="10T")
     parser.add_argument("--dataset-name", default=None)
     parser.add_argument("--models", default="Tree", help="Comma-separated models.")
+    parser.add_argument(
+        "--verbose-feature-build",
+        action="store_true",
+        help="Show full feature/indicator build logs (default suppresses noisy internals).",
+    )
     parser.add_argument("--train-frac", type=float, default=0.75)
     parser.add_argument("--val-frac", type=float, default=0.15)
     parser.add_argument("--refresh-masks", action="store_true")
@@ -516,6 +564,11 @@ def _parse_args() -> argparse.Namespace:
         choices=["ppo", "meta", "none"],
         default="meta",
         help="Evaluation mode: ppo policy eval, replayed meta eval, or none.",
+    )
+    parser.add_argument(
+        "--plot-only",
+        action="store_true",
+        help="Skip feature/agent rebuild and run only evaluation (best for fast plot refresh).",
     )
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument(
@@ -575,6 +628,18 @@ def _parse_args() -> argparse.Namespace:
         help="Replay aggregation interval for meta eval mode.",
     )
     parser.add_argument(
+        "--meta-max-bars",
+        type=int,
+        default=None,
+        help="Optional max bars for replay (smaller value is faster).",
+    )
+    parser.add_argument(
+        "--meta-quiet",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Suppress per-bar replay inference logs (default: on).",
+    )
+    parser.add_argument(
         "--meta-prepend-split-test-warmup",
         action="store_true",
         help="Prepend split-test warmup bars in replay meta eval (default disabled).",
@@ -609,7 +674,7 @@ def main() -> None:
     args = _parse_args()
 
     raw_parquet = Path(args.raw_parquet)
-    if not raw_parquet.exists():
+    if not args.plot_only and not raw_parquet.exists():
         raise SystemExit(f"Missing raw parquet: {raw_parquet}")
 
     label_timeframe = _normalize_label_timeframe(args.label_timeframe)
@@ -632,40 +697,6 @@ def main() -> None:
     if not model_list:
         raise SystemExit("No models specified.")
 
-    print("[inference_pipeline] Building processed features/labels...")
-    _build_processed_from_raw(
-        raw_parquet=raw_parquet,
-        ticker=ticker,
-        dataset_name=dataset_name,
-        label_timeframe=label_timeframe,
-        models=model_list,
-        save_processed=True,
-        processed_root=processed_root,
-        vix_parquet_path=vix_parquet_path,
-        vix_ticker=args.vix_ticker,
-        vix_fetch_if_missing=bool(args.vix_fetch_if_missing),
-    )
-
-    print("[inference_pipeline] Building splits + scaler stats...")
-    for model_name in model_list:
-        model_key = model_name.strip().lower()
-        x_filename = f"X_{dataset_name}_{model_key}.parquet"
-        dataset_dir = processed_root / "datasets" / dataset_name
-        X = pd.read_parquet(dataset_dir / x_filename)
-        splits = data_pipeline.chronological_split_indices(
-            len(X),
-            train_frac=args.train_frac,
-            val_frac=args.val_frac,
-        )
-        stats = data_pipeline.fit_scaler_on_train(X, splits["train"])
-        x_stem = Path(x_filename).stem
-        data_pipeline.save_split_indices(split_root, dataset_name, splits, x_stem)
-        save_normalization_stats(
-            stats_root,
-            stats,
-            filename=f"norm_stats_{dataset_name}_{x_stem}_train.json",
-        )
-
     label_dirs = [
         _normalize_ga_label_dir(s)
         for s in args.ga_label_dirs.split(",")
@@ -673,76 +704,118 @@ def main() -> None:
     ]
     pivot_label_dir = next((lbl for lbl in label_dirs if lbl in {"swing", "pivots"}), "pivots")
     tb_label_dir = "tb"
-    if not args.skip_ga:
-        if args.full_fit_ga:
-            print("[inference_pipeline] Training GA-XGB full-fit masks...")
-            for label_dir in label_dirs:
-                train_mode = _label_dir_to_train_mode(label_dir)
-                if train_mode not in {"pivot", "swing", "tb"}:
-                    continue
-                _run_ga_xgb(
-                    label_mode=train_mode,
-                    refresh_masks=args.refresh_masks,
-                    processed_root=processed_root,
-                    split_root=split_root,
-                    stats_root=stats_root,
-                    model_root=model_root,
-                    full_fit=True,
-                )
-        else:
-            print("[inference_pipeline] Running GA-XGB inference using existing models...")
-            ga_model_root = _resolve_cli_path(args.ga_model_root)
-            if not ga_model_root.exists():
-                raise SystemExit(f"Missing GA-XGB model root: {ga_model_root}")
-            feature_root = (
-                Path(args.ga_feature_root)
-                if args.ga_feature_root
-                else get_ticker_processed_base_dir(normalize_ticker(ticker))
-            )
-            feature_list_path = (
-                feature_root
-                / "datasets"
-                / dataset_name
-                / f"features_X_{dataset_name}_tree.txt"
-            )
-            plot_frame_path = processed_root / "datasets" / dataset_name / "plot_frame.parquet"
-            _run_ga_xgb_inference(
-                processed_root=processed_root,
-                dataset_name=dataset_name,
-                x_filename=f"X_{dataset_name}_tree.parquet",
-                plot_frame_path=plot_frame_path,
-                feature_list_path=feature_list_path,
-                model_root=ga_model_root,
-                label_dirs=label_dirs,
-                output_model_root=model_root,
-            )
-
-    print("[inference_pipeline] Building agent matrix...")
-    agent_csv = _write_agent_matrix_csv(
-        ticker=ticker,
-        dataset_name=dataset_name,
-        drop_na=True,
-        processed_root=processed_root,
-        model_root=model_root / "ga_xgboost" / dataset_name,
-        output_root=inference_root,
-        include_pivot_probs=any(lbl in {"pivots", "swing"} for lbl in label_dirs),
-        include_tb_probs="tb" in label_dirs,
-        pivot_label_dir=pivot_label_dir,
-        tb_label_dir=tb_label_dir,
-        vix_parquet_path=vix_parquet_path,
-    )
-    print(f"[inference_pipeline] Agent matrix saved to {agent_csv}")
-
     eval_mode = "none" if args.skip_eval else str(args.eval_mode).strip().lower()
+    if args.plot_only and eval_mode != "meta":
+        raise SystemExit("--plot-only is supported only with --eval-mode meta.")
+
+    agent_csv: Path | None = None
+    if not args.plot_only:
+        _log("[inference_pipeline] Building processed features/labels...")
+        with _quiet_stdio(enabled=not bool(args.verbose_feature_build)):
+            _build_processed_from_raw(
+                raw_parquet=raw_parquet,
+                ticker=ticker,
+                dataset_name=dataset_name,
+                label_timeframe=label_timeframe,
+                models=model_list,
+                save_processed=True,
+                processed_root=processed_root,
+                vix_parquet_path=vix_parquet_path,
+                vix_ticker=args.vix_ticker,
+                vix_fetch_if_missing=bool(args.vix_fetch_if_missing),
+            )
+
+        _log("[inference_pipeline] Building splits + scaler stats...")
+        for model_name in model_list:
+            model_key = model_name.strip().lower()
+            x_filename = f"X_{dataset_name}_{model_key}.parquet"
+            dataset_dir = processed_root / "datasets" / dataset_name
+            X = pd.read_parquet(dataset_dir / x_filename)
+            splits = data_pipeline.chronological_split_indices(
+                len(X),
+                train_frac=args.train_frac,
+                val_frac=args.val_frac,
+            )
+            stats = data_pipeline.fit_scaler_on_train(X, splits["train"])
+            x_stem = Path(x_filename).stem
+            data_pipeline.save_split_indices(split_root, dataset_name, splits, x_stem)
+            save_normalization_stats(
+                stats_root,
+                stats,
+                filename=f"norm_stats_{dataset_name}_{x_stem}_train.json",
+            )
+
+        if not args.skip_ga:
+            if args.full_fit_ga:
+                _log("[inference_pipeline] Training GA-XGB full-fit masks...")
+                for label_dir in label_dirs:
+                    train_mode = _label_dir_to_train_mode(label_dir)
+                    if train_mode not in {"pivot", "swing", "tb"}:
+                        continue
+                    _run_ga_xgb(
+                        label_mode=train_mode,
+                        refresh_masks=args.refresh_masks,
+                        processed_root=processed_root,
+                        split_root=split_root,
+                        stats_root=stats_root,
+                        model_root=model_root,
+                        full_fit=True,
+                    )
+            else:
+                _log("[inference_pipeline] Running GA-XGB inference using existing models...")
+                ga_model_root = _resolve_cli_path(args.ga_model_root)
+                if not ga_model_root.exists():
+                    raise SystemExit(f"Missing GA-XGB model root: {ga_model_root}")
+                feature_root = (
+                    Path(args.ga_feature_root)
+                    if args.ga_feature_root
+                    else get_ticker_processed_base_dir(normalize_ticker(ticker))
+                )
+                feature_list_path = (
+                    feature_root
+                    / "datasets"
+                    / dataset_name
+                    / f"features_X_{dataset_name}_tree.txt"
+                )
+                plot_frame_path = processed_root / "datasets" / dataset_name / "plot_frame.parquet"
+                _run_ga_xgb_inference(
+                    processed_root=processed_root,
+                    dataset_name=dataset_name,
+                    x_filename=f"X_{dataset_name}_tree.parquet",
+                    plot_frame_path=plot_frame_path,
+                    feature_list_path=feature_list_path,
+                    model_root=ga_model_root,
+                    label_dirs=label_dirs,
+                    output_model_root=model_root,
+                )
+
+        _log("[inference_pipeline] Building agent matrix...")
+        with _quiet_stdio(enabled=not bool(args.verbose_feature_build)):
+            agent_csv = _write_agent_matrix_csv(
+                ticker=ticker,
+                dataset_name=dataset_name,
+                drop_na=True,
+                processed_root=processed_root,
+                model_root=model_root / "ga_xgboost" / dataset_name,
+                output_root=inference_root,
+                include_pivot_probs=any(lbl in {"pivots", "swing"} for lbl in label_dirs),
+                include_tb_probs="tb" in label_dirs,
+                pivot_label_dir=pivot_label_dir,
+                tb_label_dir=tb_label_dir,
+                vix_parquet_path=vix_parquet_path,
+            )
+        _log(f"[inference_pipeline] Agent matrix saved to {agent_csv}")
     if eval_mode == "none":
         return
 
     if eval_mode == "ppo":
+        if agent_csv is None:
+            raise SystemExit("PPO eval requires an agent matrix build; disable --plot-only.")
         model_path = Path(args.model_path)
         if not model_path.exists():
             raise SystemExit(f"Missing model checkpoint: {model_path}")
 
-        print("[inference_pipeline] Running PPO policy evaluation...")
+        _log("[inference_pipeline] Running PPO policy evaluation...")
         plot_out = args.plot_out
         if plot_out is None:
             plots_root.mkdir(parents=True, exist_ok=True)
@@ -773,7 +846,7 @@ def main() -> None:
         if not ga_model_root.exists():
             raise SystemExit(f"Missing GA model root for meta replay: {ga_model_root}")
 
-        print("[inference_pipeline] Running Meta-XGB replay evaluation...")
+        _log("[inference_pipeline] Running Meta-XGB replay evaluation...")
         plot_out = args.plot_out
         if plot_out is None:
             plots_root.mkdir(parents=True, exist_ok=True)
@@ -794,6 +867,8 @@ def main() -> None:
             end=args.meta_replay_end,
             regular_only=bool(args.meta_replay_regular_only),
             prepend_split_test_warmup=bool(args.meta_prepend_split_test_warmup),
+            max_bars=args.meta_max_bars,
+            quiet_inference_logs=bool(args.meta_quiet),
             plot_out=plot_out,
             trace_out=trace_out,
         )

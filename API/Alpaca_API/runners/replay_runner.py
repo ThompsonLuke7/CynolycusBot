@@ -190,6 +190,7 @@ def _make_close_handler(
     interval_minutes: int,
     print_close: bool,
     print_tz: str,
+    quiet_inference_logs: bool,
     execution_latches: dict[str, DirectionExecutionLatch],
     order_policies: dict[str, OptionOrderPolicy] | None = None,
     trace_rows: list[dict] | None = None,
@@ -206,21 +207,23 @@ def _make_close_handler(
             order_policies[symbol].on_15m_bar(closed_bar=closed_bar)
         action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=closed_bar)
         if action is not None:
+            ts = _format_ts_local(closed_bar.get("timestamp"), tz=print_tz)
             raw_action = float(action)
             raw_pos = _action_to_position(raw_action)
             gate = execution_latches[symbol].step(raw_pos)
             exec_pos = int(gate.executed_pos)
             probs = inference.last_probs() or {}
             thresholds = inference.last_thresholds() or {}
-            _print_meta_prob_log(
-                prefix=f"{symbol} meta:",
-                probs=probs,
-                thresholds=thresholds,
-            )
-            print(
-                f"{symbol} inference raw={raw_action:+.4f} raw_pos={raw_pos:+d} "
-                f"exec={exec_pos:+d} gate={gate.status}"
-            )
+            if not quiet_inference_logs:
+                _print_meta_prob_log(
+                    prefix=f"{symbol} meta [{ts}]:",
+                    probs=probs,
+                    thresholds=thresholds,
+                )
+                print(
+                    f"{symbol} inference ts={ts} raw={raw_action:+.4f} raw_pos={raw_pos:+d} "
+                    f"exec={exec_pos:+d} gate={gate.status}"
+                )
             if trace_rows is not None:
                 trace_rows.append(
                     {
@@ -281,6 +284,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-bars", type=int, default=None, help="Max bars to replay.")
     parser.add_argument("--trace-out", default=None, help="Optional CSV path to save per-bar meta trace.")
     parser.add_argument("--plot-out", default=None, help="Optional PNG path to save entries/exits + probability plot.")
+    parser.add_argument(
+        "--quiet-inference-logs",
+        action="store_true",
+        help="Suppress per-bar inference/probability logs and keep summary output only.",
+    )
     parser.add_argument("--buffer-size", type=int, default=5000, help="Ring buffer size.")
     parser.add_argument("--print-1m", action="store_true", help="Print each 1m bar.")
     parser.add_argument("--print-15m", action="store_true", help="Print completed interval bars.")
@@ -620,6 +628,7 @@ def main() -> None:
             interval_minutes=int(args.interval),
             print_close=args.print_15m,
             print_tz=args.tz or "America/New_York",
+            quiet_inference_logs=bool(args.quiet_inference_logs),
             execution_latches=execution_latches,
             order_policies=order_policies,
             trace_rows=trace_rows,
