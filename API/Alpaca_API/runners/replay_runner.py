@@ -98,51 +98,114 @@ def _save_trace_plot(
 
     symbols = sorted(df["symbol"].dropna().astype(str).unique().tolist())
     n = max(1, len(symbols))
-    fig, axes = plt.subplots(n, 2, figsize=(14, 4.5 * n), sharex=False)
-    if n == 1:
-        axes = [axes]
+    fig, axes = plt.subplots(
+        n * 2,
+        1,
+        figsize=(18, max(7.5, 6.0 * n)),
+        sharex=False,
+        gridspec_kw={"height_ratios": [2.2, 1.0] * n},
+    )
+    if not isinstance(axes, np.ndarray):
+        axes = np.asarray([axes])
 
     for row_idx, symbol in enumerate(symbols):
         sdf = df[df["symbol"].astype(str) == str(symbol)].copy()
         if sdf.empty:
             continue
-        sdf["prev_exec_pos"] = (
-            pd.to_numeric(sdf["exec_pos"], errors="coerce")
-            .fillna(0.0)
-            .astype(float)
-            .shift(1)
-            .fillna(0.0)
-            .astype(int)
-        )
-        sdf["exec_pos"] = pd.to_numeric(sdf["exec_pos"], errors="coerce").fillna(0.0).astype(int)
-        ts_plot = sdf["timestamp"].dt.tz_convert(tz)
 
-        ax_price = axes[row_idx][0]
-        ax_probs = axes[row_idx][1]
+        sdf["timestamp"] = pd.to_datetime(sdf["timestamp"], utc=True, errors="coerce")
+        sdf = sdf.dropna(subset=["timestamp"]).sort_values("timestamp")
+        if sdf.empty:
+            continue
 
-        if "close" in sdf.columns:
-            close = pd.to_numeric(sdf["close"], errors="coerce")
-            ax_price.plot(ts_plot, close, color="#1f77b4", linewidth=1.3, label="close")
-        entry_long = sdf[(sdf["exec_pos"] == 1) & (sdf["prev_exec_pos"] != 1)]
-        exit_long = sdf[(sdf["prev_exec_pos"] == 1) & (sdf["exec_pos"] != 1)]
-        entry_short = sdf[(sdf["exec_pos"] == -1) & (sdf["prev_exec_pos"] != -1)]
-        exit_short = sdf[(sdf["prev_exec_pos"] == -1) & (sdf["exec_pos"] != -1)]
-        for marker_df, marker, color, label in (
-            (entry_long, "^", "#2ca02c", "enter long"),
-            (exit_long, "v", "#8c564b", "exit long"),
-            (entry_short, "v", "#d62728", "enter short"),
-            (exit_short, "^", "#9467bd", "exit short"),
-        ):
-            if marker_df.empty:
-                continue
-            m_ts = pd.to_datetime(marker_df["timestamp"], utc=True, errors="coerce").dt.tz_convert(tz)
-            m_close = pd.to_numeric(marker_df["close"], errors="coerce")
-            ax_price.scatter(m_ts, m_close, marker=marker, s=28, color=color, alpha=0.9, label=label)
+        plot_df = sdf.copy()
+        plot_df["ts_local"] = plot_df["timestamp"].dt.tz_convert(tz)
+        plot_df = plot_df.dropna(subset=["ts_local"]).sort_values("ts_local")
+        plot_df = plot_df.drop_duplicates(subset=["ts_local"], keep="last").set_index("ts_local")
+        if plot_df.empty:
+            continue
+
+        ax_price = axes[row_idx * 2]
+        ax_probs = axes[row_idx * 2 + 1]
+
+        pos = np.arange(len(plot_df))
+        close = pd.to_numeric(plot_df["close"], errors="coerce").to_numpy()
+        open_ = pd.to_numeric(plot_df.get("open"), errors="coerce").to_numpy() if "open" in plot_df.columns else None
+        high = pd.to_numeric(plot_df.get("high"), errors="coerce").to_numpy() if "high" in plot_df.columns else None
+        low = pd.to_numeric(plot_df.get("low"), errors="coerce").to_numpy() if "low" in plot_df.columns else None
+        has_ohlc = open_ is not None and high is not None and low is not None
+
+        if has_ohlc:
+            valid_mask = np.isfinite(open_) & np.isfinite(high) & np.isfinite(low) & np.isfinite(close)
+        else:
+            valid_mask = np.isfinite(close)
+        if not valid_mask.any():
+            continue
+
+        if has_ohlc:
+            up = close >= open_
+            up_mask = up & valid_mask
+            down_mask = (~up) & valid_mask
+            ax_price.vlines(pos[valid_mask], low[valid_mask], high[valid_mask], color="#4a4a4a", linewidth=1.0, zorder=1)
+            ax_price.bar(
+                pos[up_mask],
+                close[up_mask] - open_[up_mask],
+                width=0.8,
+                bottom=open_[up_mask],
+                color="#1976D2",
+                edgecolor="none",
+                zorder=1.2,
+                label="bull candle",
+            )
+            ax_price.bar(
+                pos[down_mask],
+                close[down_mask] - open_[down_mask],
+                width=0.8,
+                bottom=open_[down_mask],
+                color="#E53935",
+                edgecolor="none",
+                zorder=1.2,
+                label="bear candle",
+            )
+            spread = (high - low)[valid_mask]
+            marker_offset = np.nanmedian(spread)
+            if not np.isfinite(marker_offset) or marker_offset <= 0:
+                marker_offset = np.nanmax(high[valid_mask]) * 0.002
+            y_enter_long = low - marker_offset * 1.8
+            y_exit_long = high + marker_offset * 1.2
+            y_enter_short = high + marker_offset * 1.8
+            y_exit_short = low - marker_offset * 1.2
+        else:
+            ax_price.plot(pos, close, color="#1f77b4", linewidth=1.4, label="close")
+            clean_close = close[valid_mask]
+            marker_offset = np.nanmedian(np.abs(np.diff(clean_close)))
+            if not np.isfinite(marker_offset) or marker_offset <= 0:
+                marker_offset = np.nanmax(clean_close) * 0.002
+            y_enter_long = close - marker_offset * 1.8
+            y_exit_long = close + marker_offset * 1.2
+            y_enter_short = close + marker_offset * 1.8
+            y_exit_short = close - marker_offset * 1.2
+
+        exec_pos = pd.to_numeric(plot_df.get("exec_pos"), errors="coerce").fillna(0.0).astype(int)
+        prev_exec = exec_pos.shift(1).fillna(0).astype(int)
+        entry_long_mask = ((exec_pos == 1) & (prev_exec != 1)).to_numpy() & valid_mask
+        exit_long_mask = ((prev_exec == 1) & (exec_pos != 1)).to_numpy() & valid_mask
+        entry_short_mask = ((exec_pos == -1) & (prev_exec != -1)).to_numpy() & valid_mask
+        exit_short_mask = ((prev_exec == -1) & (exec_pos != -1)).to_numpy() & valid_mask
+
+        if entry_long_mask.any():
+            ax_price.scatter(pos[entry_long_mask], y_enter_long[entry_long_mask], color="#2E7D32", marker="^", s=58, label="enter long", zorder=2.1)
+        if exit_long_mask.any():
+            ax_price.scatter(pos[exit_long_mask], y_exit_long[exit_long_mask], color="#8c564b", marker="v", s=54, label="exit long", zorder=2.1)
+        if entry_short_mask.any():
+            ax_price.scatter(pos[entry_short_mask], y_enter_short[entry_short_mask], color="#C62828", marker="v", s=58, label="enter short", zorder=2.1)
+        if exit_short_mask.any():
+            ax_price.scatter(pos[exit_short_mask], y_exit_short[exit_short_mask], color="#9467bd", marker="^", s=54, label="exit short", zorder=2.1)
+
         ax_price.set_title(f"{symbol} | meta entries/exits")
-        ax_price.set_xlabel(f"time ({tz})")
-        ax_price.set_ylabel("price")
+        ax_price.set_ylabel("Price")
         ax_price.grid(True, alpha=0.25)
-        ax_price.legend(loc="best", fontsize=8)
+        ax_price.legend(loc="upper left", fontsize=8)
 
         prob_specs = (
             ("p_enter_long", "#2ca02c", "p_enter_long"),
@@ -158,25 +221,49 @@ def _save_trace_plot(
         )
         plotted_any = False
         for col, color, label in prob_specs:
-            if col in sdf.columns:
-                series = pd.to_numeric(sdf[col], errors="coerce")
-                if series.notna().any():
-                    ax_probs.plot(ts_plot, series, color=color, linewidth=1.2, label=label)
+            if col in plot_df:
+                series = pd.to_numeric(plot_df[col], errors="coerce").to_numpy()
+                if np.isfinite(series).any():
+                    ax_probs.plot(pos, series, color=color, linewidth=1.3, label=label)
                     plotted_any = True
         for col, color, label in thr_specs:
-            if col in sdf.columns:
-                series = pd.to_numeric(sdf[col], errors="coerce")
+            if col in plot_df:
+                series = pd.to_numeric(plot_df[col], errors="coerce")
                 finite = series[np.isfinite(series)]
                 if finite.size:
-                    ax_probs.axhline(float(finite.iloc[-1]), color=color, linewidth=1.0, linestyle="--", alpha=0.8, label=label)
+                    ax_probs.axhline(
+                        float(finite.iloc[-1]),
+                        color=color,
+                        linewidth=1.0,
+                        linestyle="--",
+                        alpha=0.85,
+                        label=label,
+                    )
                     plotted_any = True
         if plotted_any:
             ax_probs.set_ylim(-0.02, 1.02)
-            ax_probs.legend(loc="best", fontsize=8)
+            ax_probs.legend(loc="upper right", fontsize=8)
         ax_probs.set_title(f"{symbol} | meta probabilities")
-        ax_probs.set_xlabel(f"time ({tz})")
-        ax_probs.set_ylabel("probability")
+        ax_probs.set_ylabel("Probability")
         ax_probs.grid(True, alpha=0.25)
+
+        dates = pd.Series(plot_df.index)
+        day_start = dates.dt.normalize().ne(dates.dt.normalize().shift())
+        tick_positions = pos[day_start.to_numpy()]
+        tick_labels = dates[day_start].dt.strftime("%Y-%m-%d").to_list()
+        if len(tick_positions) > 25:
+            step = int(np.ceil(len(tick_positions) / 25))
+            tick_positions = tick_positions[::step]
+            tick_labels = tick_labels[::step]
+        if len(tick_positions) > 0:
+            ax_probs.set_xticks(tick_positions)
+            ax_probs.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+            ax_probs.set_xlabel("Session")
+            for x in tick_positions:
+                ax_price.axvline(x, color="#cfd8dc", linestyle="--", linewidth=0.8, alpha=0.7, zorder=0.5)
+                ax_probs.axvline(x, color="#cfd8dc", linestyle="--", linewidth=0.8, alpha=0.7, zorder=0.5)
+        else:
+            ax_probs.set_xlabel("Bar")
 
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -229,7 +316,11 @@ def _make_close_handler(
                     {
                         "symbol": symbol,
                         "timestamp": closed_bar.get("timestamp"),
+                        "open": closed_bar.get("open"),
+                        "high": closed_bar.get("high"),
+                        "low": closed_bar.get("low"),
                         "close": closed_bar.get("close"),
+                        "volume": closed_bar.get("volume"),
                         "raw_action": raw_action,
                         "raw_pos": int(raw_pos),
                         "exec_pos": int(exec_pos),
