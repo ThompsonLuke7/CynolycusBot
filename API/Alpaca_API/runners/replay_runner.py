@@ -76,6 +76,57 @@ def _print_meta_prob_log(*, prefix: str, probs: dict[str, float | None] | None, 
     )
 
 
+def _print_trace_prob_diagnostics(trace_df: pd.DataFrame) -> None:
+    if trace_df.empty:
+        return
+
+    prob_cols = (
+        "p_enter_long",
+        "p_enter_short",
+        "p_exit_long",
+        "p_exit_short",
+        "p_pivot_long",
+        "p_pivot_short",
+        "p_tb_long",
+        "p_tb_short",
+    )
+    for col in prob_cols:
+        if col not in trace_df.columns:
+            continue
+        series = pd.to_numeric(trace_df[col], errors="coerce")
+        valid = series[np.isfinite(series)]
+        if valid.empty:
+            print(f"[replay] Trace probs {col}: valid=0/{len(series):,} (all NaN/non-numeric)")
+            continue
+        zero_count = int((valid == 0.0).sum())
+        print(
+            f"[replay] Trace probs {col}: valid={len(valid):,}/{len(series):,} "
+            f"zero={zero_count:,} ({zero_count / len(valid):.1%})"
+        )
+
+    source_cols = (
+        "p_pivot_long_source",
+        "p_pivot_short_source",
+        "p_tb_long_source",
+        "p_tb_short_source",
+    )
+    for col in source_cols:
+        if col not in trace_df.columns:
+            continue
+        src = trace_df[col].astype("string").str.lower()
+        valid = src[src.notna()]
+        if valid.empty:
+            print(f"[replay] Trace sources {col}: no values")
+            continue
+        counts = valid.value_counts(dropna=False)
+        pieces = [f"{idx}={int(val):,}" for idx, val in counts.items()]
+        fill_ratio = float((valid == "fill").mean())
+        print(
+            f"[replay] Trace sources {col}: {', '.join(pieces)} "
+            f"(fill={fill_ratio:.1%})"
+        )
+
+
 def _save_trace_plot(
     *,
     trace_df: pd.DataFrame,
@@ -300,6 +351,7 @@ def _make_close_handler(
             gate = execution_latches[symbol].step(raw_pos)
             exec_pos = int(gate.executed_pos)
             probs = inference.last_probs() or {}
+            prob_sources = inference.last_prob_sources() or {}
             thresholds = inference.last_thresholds() or {}
             if not quiet_inference_logs:
                 _print_meta_prob_log(
@@ -329,6 +381,14 @@ def _make_close_handler(
                         "p_enter_short": probs.get("p_enter_short"),
                         "p_exit_long": probs.get("p_exit_long"),
                         "p_exit_short": probs.get("p_exit_short"),
+                        "p_pivot_long": probs.get("p_pivot_long"),
+                        "p_pivot_short": probs.get("p_pivot_short"),
+                        "p_tb_long": probs.get("p_tb_long"),
+                        "p_tb_short": probs.get("p_tb_short"),
+                        "p_pivot_long_source": prob_sources.get("p_pivot_long_source"),
+                        "p_pivot_short_source": prob_sources.get("p_pivot_short_source"),
+                        "p_tb_long_source": prob_sources.get("p_tb_long_source"),
+                        "p_tb_short_source": prob_sources.get("p_tb_short_source"),
                         "thr_enter_long": thresholds.get("enter_long"),
                         "thr_enter_short": thresholds.get("enter_short"),
                         "thr_exit_long": thresholds.get("exit_long"),
@@ -747,6 +807,7 @@ def main() -> None:
     print(f"[replay] Done. Bars processed: {count:,}.")
     if (args.trace_out or args.plot_out) and isinstance(trace_rows, list):
         trace_df = pd.DataFrame(trace_rows)
+        _print_trace_prob_diagnostics(trace_df)
         if args.trace_out:
             trace_path = Path(args.trace_out)
             trace_path.parent.mkdir(parents=True, exist_ok=True)

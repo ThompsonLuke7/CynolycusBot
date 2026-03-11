@@ -1892,3 +1892,19 @@ class LiveInferenceEngine:
         if getter is None:
             return None
         return getter()
+
+    def snapshot_state(self) -> dict[str, object] | None:
+        if self._agent is None:
+            return None
+        getter = getattr(self._agent, "snapshot_state", None)
+        if getter is None:
+            return None
+        state = getter()
+        return state if isinstance(state, dict) else None
+
+    def last_prob_sources(self) -> dict[str, str | None] | None:
+        state = self.snapshot_state()
+        if not isinstance(state, dict):
+            return None
+        sources = state.get("last_prob_sources")
+        return sources if isinstance(sources, dict) else None
