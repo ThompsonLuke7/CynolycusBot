@@ -5,7 +5,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ..inference.live_inference import LiveInferenceEngine, LiveMetaXGBAgent, LivePPOAgent
+from ..inference.live_inference import (
+    LiveInferenceEngine,
+    LiveMetaXGBAgent,
+    LivePPOAgent,
+    build_meta_feature_frame_from_1m,
+    build_tree_feature_frame_from_1m,
+)
 from .live_runner import (
     LiveBarProcessor,
     _action_to_position,
@@ -322,6 +328,146 @@ def _save_trace_plot(
     plt.close(fig)
 
 
+def _write_frame(df: pd.DataFrame, *, path_no_ext: Path, fmt: str) -> Path:
+    fmt_l = str(fmt).strip().lower()
+    if fmt_l == "csv":
+        out = path_no_ext.with_suffix(".csv")
+        df.to_csv(out, index=True)
+        return out
+    out = path_no_ext.with_suffix(".parquet")
+    df.to_parquet(out)
+    return out
+
+
+def _dump_live_inference_matrices(
+    *,
+    raw_df: pd.DataFrame,
+    symbols: list[str],
+    agent: object | None,
+    trace_df: pd.DataFrame | None,
+    interval_minutes: int,
+    resample_label: str,
+    resample_closed: str,
+    tz: str | None,
+    assume_tz: str,
+    session_open: str,
+    session_close: str,
+    include_pivot_probs: bool,
+    include_tb_probs: bool,
+    fill_missing_prob: float,
+    out_dir: Path,
+    out_fmt: str,
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    meta_agent = agent if isinstance(agent, LiveMetaXGBAgent) else None
+    ga_predictor = getattr(meta_agent, "_ga_predictor", None) if meta_agent is not None else None
+    ga_feature_list = getattr(ga_predictor, "_feature_list", None) if ga_predictor is not None else None
+    include_vix_features = bool(getattr(meta_agent, "_include_vix_features", True)) if meta_agent is not None else True
+
+    for symbol in symbols:
+        one_min = raw_df[raw_df["symbol"].astype(str) == str(symbol)].copy()
+        if one_min.empty:
+            continue
+        one_min["timestamp"] = pd.to_datetime(one_min["timestamp"], utc=True, errors="coerce")
+        one_min = one_min.dropna(subset=["timestamp"]).sort_values("timestamp")
+        one_min = one_min[["timestamp", "open", "high", "low", "close", "volume"]]
+        one_min = one_min.set_index("timestamp")
+
+        tf_rule = f"{int(interval_minutes)}min"
+        x_tree = build_tree_feature_frame_from_1m(
+            one_min,
+            label_timeframe=tf_rule,
+            resample_label=resample_label,
+            resample_closed=resample_closed,
+            tz=tz or "America/New_York",
+            assume_tz=assume_tz,
+        )
+
+        symbol_dir = out_dir / str(symbol).lower()
+        symbol_dir.mkdir(parents=True, exist_ok=True)
+        x_tree_path = _write_frame(
+            x_tree,
+            path_no_ext=symbol_dir / "live_ga_tree_matrix_full",
+            fmt=out_fmt,
+        )
+        print(f"[replay] Dumped live GA tree matrix (full): {x_tree_path}")
+
+        if isinstance(ga_feature_list, list) and len(ga_feature_list) > 0:
+            x_tree_sel = x_tree.reindex(columns=ga_feature_list)
+            x_tree_sel_path = _write_frame(
+                x_tree_sel,
+                path_no_ext=symbol_dir / "live_ga_tree_matrix_selected",
+                fmt=out_fmt,
+            )
+            print(f"[replay] Dumped live GA tree matrix (selected): {x_tree_sel_path}")
+
+        ga_probs = pd.DataFrame(index=x_tree.index)
+        if ga_predictor is not None and not x_tree.empty:
+            ga_probs = ga_predictor.predict_frame(x_tree)
+            ga_probs_path = _write_frame(
+                ga_probs,
+                path_no_ext=symbol_dir / "live_ga_probs",
+                fmt=out_fmt,
+            )
+            print(f"[replay] Dumped live GA probs: {ga_probs_path}")
+
+        meta_frame = build_meta_feature_frame_from_1m(
+            one_min,
+            rule=tf_rule,
+            label=resample_label,
+            closed=resample_closed,
+            tz=tz or "America/New_York",
+            assume_tz=assume_tz,
+            include_pivot_probs=include_pivot_probs,
+            include_tb_probs=include_tb_probs,
+            include_vix_features=include_vix_features,
+            fill_missing_prob=float(fill_missing_prob),
+            session_open=session_open,
+            session_close=session_close,
+            ga_predictor=ga_predictor,
+            ga_probs_frame=None if ga_probs.empty else ga_probs,
+            ga_probs_mode="xgb",
+        )
+        meta_path = _write_frame(
+            meta_frame,
+            path_no_ext=symbol_dir / "live_meta_matrix",
+            fmt=out_fmt,
+        )
+        print(f"[replay] Dumped live meta matrix: {meta_path}")
+
+        if trace_df is None or trace_df.empty:
+            continue
+        trace_symbol = trace_df[trace_df["symbol"].astype(str) == str(symbol)].copy()
+        if trace_symbol.empty:
+            continue
+        trace_ts = pd.to_datetime(trace_symbol["timestamp"], utc=True, errors="coerce").dropna()
+        if trace_ts.empty:
+            continue
+        trace_idx = pd.DatetimeIndex(trace_ts.unique()).sort_values()
+        if meta_frame.index.tz is not None:
+            trace_idx = trace_idx.tz_convert(meta_frame.index.tz)
+        elif trace_idx.tz is not None:
+            trace_idx = trace_idx.tz_localize(None)
+
+        meta_on_trace = meta_frame.reindex(trace_idx)
+        meta_trace_path = _write_frame(
+            meta_on_trace,
+            path_no_ext=symbol_dir / "live_meta_matrix_on_trace_ts",
+            fmt=out_fmt,
+        )
+        print(f"[replay] Dumped live meta matrix on trace timestamps: {meta_trace_path}")
+
+        if not x_tree.empty:
+            x_tree_on_trace = x_tree.reindex(trace_idx)
+            x_tree_trace_path = _write_frame(
+                x_tree_on_trace,
+                path_no_ext=symbol_dir / "live_ga_tree_matrix_on_trace_ts",
+                fmt=out_fmt,
+            )
+            print(f"[replay] Dumped live GA tree matrix on trace timestamps: {x_tree_trace_path}")
+
+
 def _make_close_handler(
     *,
     inference: LiveInferenceEngine,
@@ -435,6 +581,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-bars", type=int, default=None, help="Max bars to replay.")
     parser.add_argument("--trace-out", default=None, help="Optional CSV path to save per-bar meta trace.")
     parser.add_argument("--plot-out", default=None, help="Optional PNG path to save entries/exits + probability plot.")
+    parser.add_argument(
+        "--dump-live-matrix-dir",
+        default=None,
+        help="Optional directory to dump live GA tree + meta feature matrices used for replay.",
+    )
+    parser.add_argument(
+        "--dump-live-matrix-format",
+        choices=["parquet", "csv"],
+        default="parquet",
+        help="Output format for --dump-live-matrix-dir artifacts.",
+    )
     parser.add_argument(
         "--quiet-inference-logs",
         action="store_true",
@@ -805,6 +962,7 @@ def main() -> None:
             time.sleep(args.sleep)
 
     print(f"[replay] Done. Bars processed: {count:,}.")
+    trace_df: pd.DataFrame | None = None
     if (args.trace_out or args.plot_out) and isinstance(trace_rows, list):
         trace_df = pd.DataFrame(trace_rows)
         _print_trace_prob_diagnostics(trace_df)
@@ -817,6 +975,26 @@ def main() -> None:
             plot_path = Path(args.plot_out)
             _save_trace_plot(trace_df=trace_df, save_path=plot_path, tz=args.tz or "America/New_York")
             print(f"[replay] Saved plot: {plot_path}")
+
+    if args.dump_live_matrix_dir:
+        _dump_live_inference_matrices(
+            raw_df=df,
+            symbols=symbols,
+            agent=agent,
+            trace_df=trace_df,
+            interval_minutes=int(args.interval),
+            resample_label=args.resample_label,
+            resample_closed=args.resample_closed,
+            tz=args.tz,
+            assume_tz=args.assume_tz,
+            session_open=args.session_open,
+            session_close=args.session_close,
+            include_pivot_probs=not args.no_pivot_probs,
+            include_tb_probs=not args.no_tb_probs,
+            fill_missing_prob=float(args.fill_missing_prob),
+            out_dir=Path(args.dump_live_matrix_dir),
+            out_fmt=str(args.dump_live_matrix_format),
+        )
 
 
 if __name__ == "__main__":
