@@ -386,6 +386,33 @@ def load_dataset(
         raise FileNotFoundError(f"Missing {x_filename} or y.parquet in {dataset_dir}")
 
     X_df = pd.read_parquet(x_path)
+    y_df = pd.read_parquet(y_path)
+    plot_path = dataset_dir / "plot_frame.parquet"
+    plot_df = None
+    if plot_path.exists():
+        plot_df = pd.read_parquet(plot_path)
+
+    if not isinstance(X_df.index, pd.DatetimeIndex):
+        if (
+            plot_df is not None
+            and isinstance(plot_df.index, pd.DatetimeIndex)
+            and len(plot_df) == len(X_df)
+        ):
+            X_df = X_df.copy()
+            X_df.index = plot_df.index
+            if not isinstance(y_df.index, pd.DatetimeIndex) and len(y_df) == len(plot_df):
+                y_df = y_df.copy()
+                y_df.index = plot_df.index
+            print(
+                "[GA-XGB] X index was non-datetime; aligned to plot_frame index "
+                "for time-consistent probability artifacts."
+            )
+        else:
+            print(
+                "[GA-XGB] Warning: X index is non-datetime and could not be aligned to "
+                "plot_frame. Probability parquet indices may be non-temporal."
+            )
+
     if apply_scaler:
         stats_dir = stats_root if stats_root is not None else get_ticker_processed_stats_dir(clean)
         stats = _load_norm_stats(stats_dir, dataset_name, x_filename)
@@ -397,7 +424,6 @@ def load_dataset(
             print(f"No scaler stats found at {stats_path}; using raw features.")
 
     X = X_df.to_numpy(dtype=np.float32)
-    y_df = pd.read_parquet(y_path)
 
     sample_weight_long = None
     sample_weight_short = None
@@ -453,11 +479,6 @@ def load_dataset(
         y_short = y_df[short_col].to_numpy(dtype=np.int64)
     else:
         raise ValueError(f"Unknown label_mode: {label_mode}")
-
-    plot_path = dataset_dir / "plot_frame.parquet"
-    plot_df = None
-    if plot_path.exists():
-        plot_df = pd.read_parquet(plot_path)
 
     return X, y_long, y_short, plot_df, sample_weight_long, sample_weight_short
 

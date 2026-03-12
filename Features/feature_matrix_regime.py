@@ -172,7 +172,15 @@ def _load_prob_series(
             df = pd.read_parquet(parquet_path)
             if column not in df.columns:
                 raise KeyError(f"Missing {column} in {parquet_path}")
-            return df[column].reindex(target_index)
+            series = pd.to_numeric(df[column], errors="coerce")
+            aligned = series.reindex(target_index)
+            if aligned.notna().any():
+                return aligned
+            # Backward compatibility: older probability parquet files may have
+            # non-datetime/default indices; align positionally when lengths match.
+            if len(series) == len(target_index):
+                return pd.Series(series.to_numpy(dtype=float), index=target_index, name=column)
+            return aligned
 
         if npy_path.exists():
             arr = np.load(npy_path)

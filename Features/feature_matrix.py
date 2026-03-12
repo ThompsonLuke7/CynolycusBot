@@ -605,8 +605,10 @@ def clean_feature_matrix(
             else pd.DataFrame(index=cleaned.index)
         )
 
-        # X: model-specific filename
-        feature_df.astype("float32").to_parquet(dataset_dir / x_filename, index=False)
+        # X: preserve the DatetimeIndex so downstream parity/debug checks can align by bar time.
+        x_out = feature_df.astype("float32")
+        x_out.index.name = x_out.index.name or "timestamp"
+        x_out.to_parquet(dataset_dir / x_filename, index=True)
 
         # Plot frame: save OHLCV aligned to cleaned rows if available.
         if plot_frame is not None and not plot_frame.empty:
@@ -625,7 +627,9 @@ def clean_feature_matrix(
 
         # y: shared, write once (or force if you want)
         if write_y or not (dataset_dir / "y.parquet").exists():
-            labels_df.to_parquet(dataset_dir / "y.parquet", index=False)
+            y_out = labels_df.copy()
+            y_out.index.name = y_out.index.name or "timestamp"
+            y_out.to_parquet(dataset_dir / "y.parquet", index=True)
 
         # features list: also model-specific so you don't clobber
         features_txt = f"features_{Path(x_filename).stem}.txt"  # e.g. features_X_15min_tree.txt

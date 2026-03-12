@@ -190,7 +190,14 @@ def _load_ga_oos_prob_series(
     oos = pd.to_numeric(df[oof_col], errors="coerce").combine_first(
         pd.to_numeric(df[test_col], errors="coerce")
     )
-    return oos.reindex(target_index)
+    aligned = oos.reindex(target_index)
+    if aligned.notna().any():
+        return aligned
+    # Backward compatibility: older GA probability artifacts may be saved with
+    # RangeIndex instead of DatetimeIndex; align by position when lengths match.
+    if len(oos) == len(target_index):
+        return pd.Series(oos.to_numpy(dtype=float), index=target_index, name=oos.name)
+    return aligned
 
 
 def _replace_meta_prob_features_with_oos(
