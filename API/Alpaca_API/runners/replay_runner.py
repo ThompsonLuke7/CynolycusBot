@@ -329,13 +329,17 @@ def _save_trace_plot(
 
 
 def _write_frame(df: pd.DataFrame, *, path_no_ext: Path, fmt: str) -> Path:
+    out_df = df.copy()
+    # Parquet writer serializes DataFrame attrs as JSON metadata; live meta frames
+    # include non-JSON attrs (e.g., embedded DataFrames), so strip attrs for dumps.
+    out_df.attrs = {}
     fmt_l = str(fmt).strip().lower()
     if fmt_l == "csv":
         out = path_no_ext.with_suffix(".csv")
-        df.to_csv(out, index=True)
+        out_df.to_csv(out, index=True)
         return out
     out = path_no_ext.with_suffix(".parquet")
-    df.to_parquet(out)
+    out_df.to_parquet(out)
     return out
 
 
