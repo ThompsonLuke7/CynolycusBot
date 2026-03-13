@@ -16,7 +16,14 @@ import xgboost as xgb
 
 from Policy.Agent.env import sincos_time_of_day
 from Policy.Agent.model import ActorCritic
-from Features.feature_matrix import DEFAULT_FEATURE_TIMEFRAMES, _add_feature_set, _align_htf_features
+from Features.feature_matrix import (
+    DEFAULT_FEATURE_TIMEFRAMES,
+    _add_feature_set,
+    _add_lstm_features_for_tree,
+    _add_vix_suite_to_frame,
+    _align_htf_features,
+    _load_vix_1m,
+)
 from Features.feature_matrix_regime import (
     AgentFeatureConfig,
     VIX_FEATURE_COLUMNS,
@@ -122,6 +129,9 @@ def build_tree_feature_frame_from_1m(
     resample_closed: str = "left",
     tz: str | None = "America/New_York",
     assume_tz: str = "UTC",
+    include_vix_features: bool = True,
+    vix_ticker: str = "VIXY",
+    vix_parquet_path: str | Path | None = None,
 ) -> pd.DataFrame:
     if df_1m.empty:
         return pd.DataFrame()
@@ -136,6 +146,16 @@ def build_tree_feature_frame_from_1m(
     df = ensure_time_index(df, tz=tz, assume_tz=assume_tz)
 
     feature_timeframes = feature_timeframes or DEFAULT_FEATURE_TIMEFRAMES
+    vix_1m: pd.DataFrame | None = None
+    if include_vix_features:
+        try:
+            vix_1m = _load_vix_1m(
+                vix_ticker=vix_ticker,
+                vix_parquet_path=vix_parquet_path,
+                tz=tz,
+            )
+        except Exception:
+            vix_1m = None
 
     with _quiet_feature_ops():
         df_15m = resample_ohlcv(
@@ -151,6 +171,19 @@ def build_tree_feature_frame_from_1m(
             verbose=False,
             model="tree",
         )
+        f15 = _add_lstm_features_for_tree(
+            f15,
+            include_time_features=True,
+            tz=tz,
+        )
+        if include_vix_features:
+            f15 = _add_vix_suite_to_frame(
+                f15,
+                vix_1m=vix_1m,
+                timeframe_rule=label_timeframe,
+                resample_label=resample_label,
+                resample_closed=resample_closed,
+            )
 
         frames = [f15]
         for tf_label, tf_rule in feature_timeframes.items():
@@ -164,6 +197,19 @@ def build_tree_feature_frame_from_1m(
                 verbose=False,
                 model="tree",
             )
+            tf_feat = _add_lstm_features_for_tree(
+                tf_feat,
+                include_time_features=include_htf_date_features,
+                tz=tz,
+            )
+            if include_vix_features:
+                tf_feat = _add_vix_suite_to_frame(
+                    tf_feat,
+                    vix_1m=vix_1m,
+                    timeframe_rule=tf_rule,
+                    resample_label=resample_label,
+                    resample_closed=resample_closed,
+                )
             aligned = _align_htf_features(
                 tf_feat,
                 base_index=f15.index,

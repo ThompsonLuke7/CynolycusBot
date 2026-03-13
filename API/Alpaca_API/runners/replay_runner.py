@@ -24,6 +24,134 @@ from Policy.execution_latch import DirectionExecutionLatch
 from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
 
 
+def _ga_prob_parquet_path(
+    *,
+    model_root: Path,
+    side: str,
+    label_dir: str,
+    prefix: str,
+) -> Path:
+    side_root = model_root / side.lower()
+    probe_dirs = [
+        side_root / label_dir,
+        side_root / "probs" / label_dir,
+        side_root,
+        side_root / "probs",
+    ]
+    for base in probe_dirs:
+        path = base / f"{prefix}_probs.parquet"
+        if path.exists():
+            return path
+    searched = ", ".join(str(base / f"{prefix}_probs.parquet") for base in probe_dirs)
+    raise FileNotFoundError(f"Missing GA probability parquet for {side}/{label_dir}: {searched}")
+
+
+def _load_replay_ga_oos_prob_series(
+    *,
+    model_root: Path,
+    side: str,
+    label_dir: str,
+    prefix: str,
+    target_index: pd.DatetimeIndex,
+) -> pd.Series:
+    path = _ga_prob_parquet_path(
+        model_root=model_root,
+        side=side,
+        label_dir=label_dir,
+        prefix=prefix,
+    )
+    df = pd.read_parquet(path)
+    oof_col = f"{prefix}_oof_train"
+    test_col = f"{prefix}_test"
+    if oof_col not in df.columns or test_col not in df.columns:
+        raise KeyError(f"{path} must contain {oof_col} and {test_col}")
+    oos = pd.to_numeric(df[oof_col], errors="coerce").combine_first(
+        pd.to_numeric(df[test_col], errors="coerce")
+    )
+    aligned = oos.reindex(target_index)
+    if aligned.notna().any():
+        return aligned
+    if len(oos) == len(target_index):
+        return pd.Series(oos.to_numpy(dtype=float), index=target_index, name=oos.name)
+    return aligned
+
+
+def _build_replay_ga_probs_frame(
+    *,
+    raw_df: pd.DataFrame,
+    symbols: list[str],
+    interval_minutes: int,
+    resample_label: str,
+    resample_closed: str,
+    tz: str | None,
+    assume_tz: str,
+    ga_model_root: str,
+    pivot_label_dir: str,
+    tb_label_dir: str,
+    include_pivot_probs: bool,
+    include_tb_probs: bool,
+) -> pd.DataFrame | None:
+    if len(symbols) != 1:
+        print("[replay] GA prob frame mode currently supports a single symbol; falling back to XGB mode.")
+        return None
+
+    symbol = str(symbols[0]).upper()
+    one_min = raw_df[raw_df["symbol"].astype(str).str.upper() == symbol].copy()
+    if one_min.empty:
+        return None
+
+    one_min["timestamp"] = pd.to_datetime(one_min["timestamp"], utc=True, errors="coerce")
+    one_min = one_min.dropna(subset=["timestamp"]).sort_values("timestamp")
+    one_min = one_min[["timestamp", "open", "high", "low", "close", "volume"]].set_index("timestamp")
+
+    tf_rule = f"{int(interval_minutes)}min"
+    x_tree = build_tree_feature_frame_from_1m(
+        one_min,
+        label_timeframe=tf_rule,
+        resample_label=resample_label,
+        resample_closed=resample_closed,
+        tz=tz or "America/New_York",
+        assume_tz=assume_tz,
+    )
+    if x_tree.empty:
+        return None
+
+    target_index = pd.DatetimeIndex(x_tree.index)
+    model_root = Path(ga_model_root)
+    out = pd.DataFrame(index=target_index)
+    if include_pivot_probs:
+        out["p_pivot_long"] = _load_replay_ga_oos_prob_series(
+            model_root=model_root,
+            side="long",
+            label_dir=pivot_label_dir,
+            prefix="p_long",
+            target_index=target_index,
+        )
+        out["p_pivot_short"] = _load_replay_ga_oos_prob_series(
+            model_root=model_root,
+            side="short",
+            label_dir=pivot_label_dir,
+            prefix="p_short",
+            target_index=target_index,
+        )
+    if include_tb_probs:
+        out["p_tb_long"] = _load_replay_ga_oos_prob_series(
+            model_root=model_root,
+            side="long",
+            label_dir=tb_label_dir,
+            prefix="p_long",
+            target_index=target_index,
+        )
+        out["p_tb_short"] = _load_replay_ga_oos_prob_series(
+            model_root=model_root,
+            side="short",
+            label_dir=tb_label_dir,
+            prefix="p_short",
+            target_index=target_index,
+        )
+    return out
+
+
 def _load_history(path: Path, *, assume_tz: str = "UTC") -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Missing history file: {path}")
@@ -348,6 +476,8 @@ def _dump_live_inference_matrices(
     raw_df: pd.DataFrame,
     symbols: list[str],
     agent: object | None,
+    ga_probs_frame: pd.DataFrame | None,
+    ga_probs_mode: str,
     trace_df: pd.DataFrame | None,
     interval_minutes: int,
     resample_label: str,
@@ -430,8 +560,8 @@ def _dump_live_inference_matrices(
             session_open=session_open,
             session_close=session_close,
             ga_predictor=ga_predictor,
-            ga_probs_frame=None if ga_probs.empty else ga_probs,
-            ga_probs_mode="xgb",
+            ga_probs_frame=ga_probs_frame,
+            ga_probs_mode=ga_probs_mode,
         )
         meta_path = _write_frame(
             meta_frame,
@@ -630,6 +760,16 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--ga-pivot-label-dir", default="swing", help="Label dir for pivot GA-XGB models.")
     parser.add_argument("--ga-tb-label-dir", default="tb", help="Label dir for TB GA-XGB models.")
+    parser.add_argument(
+        "--ga-probs-mode",
+        choices=["xgb", "frame", "hybrid"],
+        default="xgb",
+        help=(
+            "Source for GA probability features during replay: "
+            "'xgb' uses live GA boosters, 'frame' uses stored OOF/test GA probability parquet, "
+            "'hybrid' prefers frame values and falls back to live XGB."
+        ),
+    )
     parser.add_argument("--meta-model-root", default="Data/models/meta_xgboost/10min", help="Meta-XGB model root.")
     parser.add_argument(
         "--meta-entry-threshold",
@@ -798,6 +938,41 @@ def main() -> None:
             df = df.tail(keep_n).copy()
 
     inference_mode = "none" if args.no_agent else str(args.inference_mode).strip().lower()
+    ga_probs_mode = str(args.ga_probs_mode or "xgb").strip().lower()
+    include_pivot_probs = not args.no_pivot_probs
+    include_tb_probs = not args.no_tb_probs
+    ga_probs_frame = None
+    if (
+        inference_mode != "none"
+        and ga_probs_mode in {"frame", "hybrid"}
+        and (include_pivot_probs or include_tb_probs)
+    ):
+        try:
+            ga_probs_frame = _build_replay_ga_probs_frame(
+                raw_df=df,
+                symbols=symbols,
+                interval_minutes=int(args.interval),
+                resample_label=args.resample_label,
+                resample_closed=args.resample_closed,
+                tz=args.tz,
+                assume_tz=args.assume_tz,
+                ga_model_root=args.ga_model_root,
+                pivot_label_dir=args.ga_pivot_label_dir,
+                tb_label_dir=args.ga_tb_label_dir,
+                include_pivot_probs=include_pivot_probs,
+                include_tb_probs=include_tb_probs,
+            )
+            if ga_probs_frame is None or ga_probs_frame.empty:
+                print("[replay] GA prob frame mode requested, but no aligned OOS GA probabilities were built.")
+            else:
+                print(
+                    f"[replay] GA prob frame loaded: rows={len(ga_probs_frame):,} "
+                    f"mode={ga_probs_mode}"
+                )
+        except Exception as exc:
+            print(f"[replay] Warning: failed to load GA prob frame ({exc}); using XGB mode instead.")
+            ga_probs_mode = "xgb"
+            ga_probs_frame = None
     agent = None
     if inference_mode != "none" and args.ga_feature_list is None and not (args.no_pivot_probs and args.no_tb_probs):
         try:
@@ -837,6 +1012,8 @@ def main() -> None:
             ga_feature_list_path=args.ga_feature_list,
             ga_pivot_label_dir=args.ga_pivot_label_dir,
             ga_tb_label_dir=args.ga_tb_label_dir,
+            ga_probs_frame=ga_probs_frame,
+            ga_probs_mode=ga_probs_mode,
             resample_label=args.resample_label,
             resample_closed=args.resample_closed,
             label_timeframe_rule=f"{args.interval}min",
@@ -861,6 +1038,8 @@ def main() -> None:
             resample_label=args.resample_label,
             resample_closed=args.resample_closed,
             label_timeframe_rule=f"{args.interval}min",
+            ga_probs_frame=ga_probs_frame,
+            ga_probs_mode=ga_probs_mode,
             trail_activate_atr=float(args.meta_trail_activate_atr),
             trail_atr=float(args.meta_trail_atr),
             trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
@@ -870,7 +1049,7 @@ def main() -> None:
         )
         print(
             f"[replay] Meta-XGB inference enabled: model_root={args.meta_model_root} "
-            f"timeframe={args.interval}min"
+            f"timeframe={args.interval}min ga_probs_mode={ga_probs_mode}"
         )
 
     inference = LiveInferenceEngine(
@@ -985,6 +1164,8 @@ def main() -> None:
             raw_df=df,
             symbols=symbols,
             agent=agent,
+            ga_probs_frame=ga_probs_frame,
+            ga_probs_mode=ga_probs_mode,
             trace_df=trace_df,
             interval_minutes=int(args.interval),
             resample_label=args.resample_label,
