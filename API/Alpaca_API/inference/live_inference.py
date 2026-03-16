@@ -5,7 +5,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 import warnings
 
 import numpy as np
@@ -65,7 +65,7 @@ def _resolve_device(device: str) -> torch.device:
 
 
 @contextlib.contextmanager
-def _quiet_feature_ops() -> None:
+def _quiet_feature_ops() -> Iterator[None]:
     """
     Suppress noisy indicator/progress output during live/replay feature builds.
     """
@@ -123,7 +123,7 @@ def build_tree_feature_frame_from_1m(
     feature_timeframes: dict[str, str] | None = None,
     include_custom: bool = True,
     include_date_features: bool = True,
-    include_htf_date_features: bool = False,
+    include_htf_date_features: bool = True,
     shift_htf_bars: int = 1,
     resample_label: str = "left",
     resample_closed: str = "left",
