@@ -189,6 +189,48 @@ def _load_history(path: Path, *, assume_tz: str = "UTC") -> pd.DataFrame:
     return df
 
 
+def _load_ga_probs_frame_from_path(
+    path: Path,
+    *,
+    tz: str | None,
+    assume_tz: str,
+) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing GA probs frame: {path}")
+
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        df = pd.read_parquet(path)
+    elif suffix == ".csv":
+        df = pd.read_csv(path)
+    else:
+        raise ValueError("GA probs frame must be .csv or .parquet")
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        ts_col = None
+        for candidate in ("timestamp", "date", "datetime", "index"):
+            if candidate in df.columns:
+                ts_col = candidate
+                break
+        if ts_col is None:
+            raise ValueError("GA probs frame must have a DatetimeIndex or timestamp/date column")
+        df[ts_col] = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
+        df = df.dropna(subset=[ts_col]).set_index(ts_col)
+
+    idx = pd.DatetimeIndex(pd.to_datetime(df.index, utc=True, errors="coerce"))
+    df = df.loc[idx.notna()].copy()
+    df.index = idx[idx.notna()]
+    if tz is not None:
+        df.index = df.index.tz_convert(tz)
+
+    prob_cols = ("p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short")
+    out = pd.DataFrame(index=df.index)
+    for col in prob_cols:
+        if col in df.columns:
+            out[col] = pd.to_numeric(df[col], errors="coerce")
+    return out.sort_index()
+
+
 def _apply_regular_hours(df: pd.DataFrame, *, tz: str = "America/New_York") -> pd.DataFrame:
     ts = df["timestamp"].dt.tz_convert(tz)
     minutes = ts.dt.hour * 60 + ts.dt.minute
@@ -537,8 +579,14 @@ def _dump_live_inference_matrices(
             print(f"[replay] Dumped live GA tree matrix (selected): {x_tree_sel_path}")
 
         ga_probs = pd.DataFrame(index=x_tree.index)
-        if ga_predictor is not None and not x_tree.empty:
+        if ga_probs_frame is not None and ga_probs_mode in {"frame", "hybrid"}:
+            base = ga_probs_frame
+            if isinstance(base.index, pd.DatetimeIndex):
+                ga_probs = base.reindex(x_tree.index)
+        elif ga_predictor is not None and not x_tree.empty:
             ga_probs = ga_predictor.predict_frame(x_tree)
+
+        if not ga_probs.empty:
             ga_probs_path = _write_frame(
                 ga_probs,
                 path_no_ext=symbol_dir / "live_ga_probs",
@@ -770,6 +818,11 @@ def _parse_args() -> argparse.Namespace:
             "'hybrid' prefers frame values and falls back to live XGB."
         ),
     )
+    parser.add_argument(
+        "--ga-probs-frame-path",
+        default=None,
+        help="Optional path to a saved GA probability frame (for example live_ga_probs.parquet) to reuse during replay.",
+    )
     parser.add_argument("--meta-model-root", default="Data/models/meta_xgboost/10min", help="Meta-XGB model root.")
     parser.add_argument(
         "--meta-entry-threshold",
@@ -948,26 +1001,34 @@ def main() -> None:
         and (include_pivot_probs or include_tb_probs)
     ):
         try:
-            ga_probs_frame = _build_replay_ga_probs_frame(
-                raw_df=df,
-                symbols=symbols,
-                interval_minutes=int(args.interval),
-                resample_label=args.resample_label,
-                resample_closed=args.resample_closed,
-                tz=args.tz,
-                assume_tz=args.assume_tz,
-                ga_model_root=args.ga_model_root,
-                pivot_label_dir=args.ga_pivot_label_dir,
-                tb_label_dir=args.ga_tb_label_dir,
-                include_pivot_probs=include_pivot_probs,
-                include_tb_probs=include_tb_probs,
-            )
-            if ga_probs_frame is None or ga_probs_frame.empty:
-                print("[replay] GA prob frame mode requested, but no aligned OOS GA probabilities were built.")
+            if args.ga_probs_frame_path:
+                ga_probs_frame = _load_ga_probs_frame_from_path(
+                    Path(args.ga_probs_frame_path),
+                    tz=args.tz,
+                    assume_tz=args.assume_tz,
+                )
             else:
+                ga_probs_frame = _build_replay_ga_probs_frame(
+                    raw_df=df,
+                    symbols=symbols,
+                    interval_minutes=int(args.interval),
+                    resample_label=args.resample_label,
+                    resample_closed=args.resample_closed,
+                    tz=args.tz,
+                    assume_tz=args.assume_tz,
+                    ga_model_root=args.ga_model_root,
+                    pivot_label_dir=args.ga_pivot_label_dir,
+                    tb_label_dir=args.ga_tb_label_dir,
+                    include_pivot_probs=include_pivot_probs,
+                    include_tb_probs=include_tb_probs,
+                )
+            if ga_probs_frame is None or ga_probs_frame.empty:
+                print("[replay] GA prob frame mode requested, but no aligned GA probabilities were loaded.")
+            else:
+                src = args.ga_probs_frame_path if args.ga_probs_frame_path else "model-root OOS prob parquet"
                 print(
                     f"[replay] GA prob frame loaded: rows={len(ga_probs_frame):,} "
-                    f"mode={ga_probs_mode}"
+                    f"mode={ga_probs_mode} source={src}"
                 )
         except Exception as exc:
             print(f"[replay] Warning: failed to load GA prob frame ({exc}); using XGB mode instead.")
