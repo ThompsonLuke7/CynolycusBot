@@ -47,9 +47,9 @@ class AgentFeatureConfig:
     include_state_placeholders: bool = True
     include_vix_features: bool = True
     vix_ticker: str = "VIXY"
-    vix_parquet_path: str | Path | None = "Data/raw/vix/vixy_15min.parquet"
+    vix_parquet_path: str | Path | None = "Data/raw/vix/vixy_10min.parquet"
     vix_fetch_if_missing: bool = True
-    vix_fetch_timeframe: str = "15Min"
+    vix_fetch_timeframe: str = "10Min"
     vix_fetch_limit: int = 100000
     vix_fetch_start: str | None = None
     vix_fetch_end: str | None = None
