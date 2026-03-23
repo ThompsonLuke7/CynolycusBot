@@ -779,6 +779,7 @@ class LiveMetaXGBAgent:
         exit_threshold_override: float | None = None,
         ga_probs_frame: pd.DataFrame | None = None,
         ga_probs_mode: str = "xgb",
+        precomputed_base_frame: pd.DataFrame | None = None,
     ) -> None:
         self._model_root = Path(model_root)
         self._include_pivot_probs = bool(include_pivot_probs)
@@ -800,6 +801,7 @@ class LiveMetaXGBAgent:
         self._use_tp_to_tighten_trail = bool(use_tp_to_tighten_trail)
         self._ga_probs_frame = ga_probs_frame
         self._ga_probs_mode = str(ga_probs_mode or "xgb").strip().lower()
+        self._precomputed_base_frame = precomputed_base_frame
         self._entry_threshold_override = (
             float(entry_threshold_override)
             if entry_threshold_override is not None and np.isfinite(entry_threshold_override)
@@ -891,6 +893,8 @@ class LiveMetaXGBAgent:
         )
 
     def _build_base_frame(self, *, df_1m: pd.DataFrame) -> pd.DataFrame:
+        if isinstance(self._precomputed_base_frame, pd.DataFrame) and not self._precomputed_base_frame.empty:
+            return self._precomputed_base_frame
         return build_meta_feature_frame_from_1m(
             df_1m,
             rule=self._label_timeframe_rule,
@@ -1145,12 +1149,14 @@ class LiveMetaXGBAgent:
     ) -> Optional[float]:
         del df_15m
         base_frame = self._build_base_frame(df_1m=df_1m)
-        if base_frame.empty or len(base_frame) < self._min_bars:
-            return None
 
         ts = target_ts
         if ts is not None:
             ts = self._normalize_ts(pd.to_datetime(ts, utc=True, errors="coerce"), assume_tz=self._assume_tz, tz=self._tz)
+            if ts in base_frame.index:
+                base_frame = base_frame.loc[:ts]
+        if base_frame.empty or len(base_frame) < self._min_bars:
+            return None
         row_df = base_frame.loc[[ts]] if ts is not None and ts in base_frame.index else base_frame.tail(1)
         row = row_df.iloc[-1].copy()
         self._last_prob_sources = self._extract_last_prob_sources(base_frame, row.name)
@@ -1901,6 +1907,24 @@ class LiveInferenceEngine:
         self._assume_tz = assume_tz
 
     def on_15m_close(self, *, df_1m: pd.DataFrame, closed_bar: dict | None = None) -> object:
+        target_ts = None
+        if closed_bar and "timestamp" in closed_bar:
+            target_ts = closed_bar["timestamp"]
+
+        if self._agent is not None:
+            if isinstance(self._agent, LiveMetaXGBAgent):
+                return self._agent.act(df_1m=df_1m, df_15m=pd.DataFrame(), target_ts=target_ts)
+            df_15m = build_15m(
+                df_1m,
+                rule=self._rule,
+                label=self._label,
+                closed=self._closed,
+                tz=self._tz,
+                assume_tz=self._assume_tz,
+            )
+            if df_15m.empty:
+                return None
+            return self._agent.act(df_1m=df_1m, df_15m=df_15m, target_ts=target_ts)
         df_15m = build_15m(
             df_1m,
             rule=self._rule,
@@ -1911,13 +1935,6 @@ class LiveInferenceEngine:
         )
         if df_15m.empty:
             return None
-
-        target_ts = None
-        if closed_bar and "timestamp" in closed_bar:
-            target_ts = closed_bar["timestamp"]
-
-        if self._agent is not None:
-            return self._agent.act(df_1m=df_1m, df_15m=df_15m, target_ts=target_ts)
         if self._feature_fn is None or self._predict_fn is None:
             return None
         features = self._feature_fn(df_15m)

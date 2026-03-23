@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from ..inference.live_inference import (
+    LiveGAXGBPredictor,
     LiveInferenceEngine,
     LiveMetaXGBAgent,
     LivePPOAgent,
@@ -19,6 +20,7 @@ from .live_runner import (
     _format_ts_local,
     _load_test_split_warmup_1m,
     _make_1m_handler,
+    _use_meta_direct_execution,
 )
 from Policy.execution_latch import DirectionExecutionLatch
 from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
@@ -152,6 +154,78 @@ def _build_replay_ga_probs_frame(
     return out
 
 
+def _prefill_policy_state(
+    *,
+    raw_df: pd.DataFrame,
+    symbols: list[str],
+    order_policies: dict[str, OptionOrderPolicy],
+    start_ts: pd.Timestamp,
+    interval_minutes: int,
+    resample_label: str,
+    resample_closed: str,
+) -> None:
+    prefill_1m_bars = max(390, int(interval_minutes) * 32)
+    prefill_df = raw_df[raw_df["timestamp"] < start_ts].copy()
+    if prefill_df.empty:
+        return
+
+    prefill_df["timestamp"] = pd.to_datetime(prefill_df["timestamp"], utc=True, errors="coerce")
+    prefill_df = prefill_df.dropna(subset=["timestamp"]).sort_values("timestamp")
+
+    for symbol in symbols:
+        policy = order_policies.get(symbol)
+        if policy is None:
+            continue
+        sym_df = prefill_df[prefill_df["symbol"].astype(str).str.upper() == str(symbol).upper()].copy()
+        if sym_df.empty:
+            continue
+        sym_df = sym_df.tail(prefill_1m_bars).copy()
+        for row in sym_df.itertuples(index=False):
+            policy.prefill_1m_bar(
+                bar={
+                    "timestamp": getattr(row, "timestamp"),
+                    "open": float(getattr(row, "open")),
+                    "high": float(getattr(row, "high")),
+                    "low": float(getattr(row, "low")),
+                    "close": float(getattr(row, "close")),
+                    "volume": float(getattr(row, "volume")),
+                    "symbol": getattr(row, "symbol"),
+                }
+            )
+
+        one_min = sym_df[["timestamp", "open", "high", "low", "close", "volume"]].copy().set_index("timestamp")
+        rule = f"{int(interval_minutes)}min"
+        interval_df = (
+            one_min.resample(rule, label=resample_label, closed=resample_closed)
+            .agg(
+                {
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                }
+            )
+            .dropna(subset=["open", "high", "low", "close"])
+        )
+        for ts, row in interval_df.iterrows():
+            policy.on_interval_bar(
+                closed_bar={
+                    "symbol": symbol,
+                    "timestamp": ts,
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                }
+            )
+        print(
+            f"[replay] Prefilled policy state for {symbol}: "
+            f"{len(sym_df):,} 1m bars, {len(interval_df):,} interval bars before {start_ts}"
+        )
+
+
 def _load_history(path: Path, *, assume_tz: str = "UTC") -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Missing history file: {path}")
@@ -231,6 +305,44 @@ def _load_ga_probs_frame_from_path(
     return out.sort_index()
 
 
+def _load_meta_matrix_frame_from_path(
+    path: Path,
+    *,
+    tz: str | None,
+    assume_tz: str,
+) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing meta matrix frame: {path}")
+
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        df = pd.read_parquet(path)
+    elif suffix == ".csv":
+        df = pd.read_csv(path)
+    else:
+        raise ValueError("Meta matrix frame must be .csv or .parquet")
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        ts_col = None
+        for candidate in ("timestamp", "date", "datetime", "index"):
+            if candidate in df.columns:
+                ts_col = candidate
+                break
+        if ts_col is None:
+            raise ValueError("Meta matrix frame must have a DatetimeIndex or timestamp/date column")
+        df[ts_col] = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
+        if df[ts_col].dt.tz is None:
+            df[ts_col] = df[ts_col].dt.tz_localize(assume_tz)
+        df = df.dropna(subset=[ts_col]).set_index(ts_col)
+
+    idx = pd.DatetimeIndex(pd.to_datetime(df.index, utc=True, errors="coerce"))
+    df = df.loc[idx.notna()].copy()
+    df.index = idx[idx.notna()]
+    if tz is not None:
+        df.index = df.index.tz_convert(tz)
+    return df.sort_index()
+
+
 def _apply_regular_hours(df: pd.DataFrame, *, tz: str = "America/New_York") -> pd.DataFrame:
     ts = df["timestamp"].dt.tz_convert(tz)
     minutes = ts.dt.hour * 60 + ts.dt.minute
@@ -255,6 +367,10 @@ def _print_meta_prob_log(*, prefix: str, probs: dict[str, float | None] | None, 
 def _print_trace_prob_diagnostics(trace_df: pd.DataFrame) -> None:
     if trace_df.empty:
         return
+    if "trace_kind" in trace_df.columns:
+        trace_df = trace_df[trace_df["trace_kind"].fillna("meta_10m") != "policy_1m"].copy()
+        if trace_df.empty:
+            return
 
     prob_cols = (
         "p_enter_long",
@@ -313,6 +429,7 @@ def _save_trace_plot(
         return
     try:
         import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
     except Exception as exc:  # noqa: BLE001
         print(f"[replay] Plot skipped (matplotlib unavailable): {exc}")
         return
@@ -339,97 +456,78 @@ def _save_trace_plot(
         sdf = df[df["symbol"].astype(str) == str(symbol)].copy()
         if sdf.empty:
             continue
+        if "trace_kind" not in sdf.columns:
+            sdf["trace_kind"] = "meta_10m"
+        else:
+            sdf["trace_kind"] = sdf["trace_kind"].fillna("meta_10m")
 
-        sdf["timestamp"] = pd.to_datetime(sdf["timestamp"], utc=True, errors="coerce")
-        sdf = sdf.dropna(subset=["timestamp"]).sort_values("timestamp")
-        if sdf.empty:
+        meta_df = sdf[sdf["trace_kind"].astype(str) != "policy_1m"].copy()
+        price_df = sdf[sdf["trace_kind"].astype(str) == "policy_1m"].copy()
+        if price_df.empty:
+            price_df = meta_df.copy()
+        if meta_df.empty and price_df.empty:
             continue
 
-        plot_df = sdf.copy()
-        plot_df["ts_local"] = plot_df["timestamp"].dt.tz_convert(tz)
-        plot_df = plot_df.dropna(subset=["ts_local"]).sort_values("ts_local")
-        plot_df = plot_df.drop_duplicates(subset=["ts_local"], keep="last").set_index("ts_local")
-        if plot_df.empty:
+        for frame in (meta_df, price_df):
+            if frame.empty:
+                continue
+            frame["ts_local"] = frame["timestamp"].dt.tz_convert(tz)
+            frame.dropna(subset=["ts_local"], inplace=True)
+            frame.sort_values("ts_local", inplace=True)
+            frame.drop_duplicates(subset=["ts_local"], keep="last", inplace=True)
+            frame.set_index("ts_local", inplace=True)
+
+        if price_df.empty:
             continue
 
         ax_price = axes[row_idx * 2]
         ax_probs = axes[row_idx * 2 + 1]
 
-        pos = np.arange(len(plot_df))
-        close = pd.to_numeric(plot_df["close"], errors="coerce").to_numpy()
-        open_ = pd.to_numeric(plot_df.get("open"), errors="coerce").to_numpy() if "open" in plot_df.columns else None
-        high = pd.to_numeric(plot_df.get("high"), errors="coerce").to_numpy() if "high" in plot_df.columns else None
-        low = pd.to_numeric(plot_df.get("low"), errors="coerce").to_numpy() if "low" in plot_df.columns else None
-        has_ohlc = open_ is not None and high is not None and low is not None
-
-        if has_ohlc:
-            valid_mask = np.isfinite(open_) & np.isfinite(high) & np.isfinite(low) & np.isfinite(close)
-        else:
-            valid_mask = np.isfinite(close)
+        price_x = price_df.index.to_pydatetime()
+        price_close = pd.to_numeric(price_df["close"], errors="coerce").to_numpy()
+        valid_mask = np.isfinite(price_close)
         if not valid_mask.any():
             continue
 
-        if has_ohlc:
-            up = close >= open_
-            up_mask = up & valid_mask
-            down_mask = (~up) & valid_mask
-            ax_price.vlines(pos[valid_mask], low[valid_mask], high[valid_mask], color="#4a4a4a", linewidth=1.0, zorder=1)
-            ax_price.bar(
-                pos[up_mask],
-                close[up_mask] - open_[up_mask],
-                width=0.8,
-                bottom=open_[up_mask],
-                color="#1976D2",
-                edgecolor="none",
-                zorder=1.2,
-                label="bull candle",
-            )
-            ax_price.bar(
-                pos[down_mask],
-                close[down_mask] - open_[down_mask],
-                width=0.8,
-                bottom=open_[down_mask],
-                color="#E53935",
-                edgecolor="none",
-                zorder=1.2,
-                label="bear candle",
-            )
-            spread = (high - low)[valid_mask]
-            marker_offset = np.nanmedian(spread)
-            if not np.isfinite(marker_offset) or marker_offset <= 0:
-                marker_offset = np.nanmax(high[valid_mask]) * 0.002
-            y_enter_long = low - marker_offset * 1.8
-            y_exit_long = high + marker_offset * 1.2
-            y_enter_short = high + marker_offset * 1.8
-            y_exit_short = low - marker_offset * 1.2
-        else:
-            ax_price.plot(pos, close, color="#1f77b4", linewidth=1.4, label="close")
-            clean_close = close[valid_mask]
-            marker_offset = np.nanmedian(np.abs(np.diff(clean_close)))
-            if not np.isfinite(marker_offset) or marker_offset <= 0:
-                marker_offset = np.nanmax(clean_close) * 0.002
-            y_enter_long = close - marker_offset * 1.8
-            y_exit_long = close + marker_offset * 1.2
-            y_enter_short = close + marker_offset * 1.8
-            y_exit_short = close - marker_offset * 1.2
+        ax_price.plot(price_x, price_close, color="#1f77b4", linewidth=1.2, label="close")
+        clean_close = price_close[valid_mask]
+        marker_offset = np.nanmedian(np.abs(np.diff(clean_close)))
+        if not np.isfinite(marker_offset) or marker_offset <= 0:
+            marker_offset = np.nanmax(clean_close) * 0.002
+        y_enter_long = price_close - marker_offset * 1.8
+        y_exit_long = price_close + marker_offset * 1.2
+        y_enter_short = price_close + marker_offset * 1.8
+        y_exit_short = price_close - marker_offset * 1.2
 
-        exec_pos = pd.to_numeric(plot_df.get("exec_pos"), errors="coerce").fillna(0.0).astype(int)
-        prev_exec = exec_pos.shift(1).fillna(0).astype(int)
-        entry_long_mask = ((exec_pos == 1) & (prev_exec != 1)).to_numpy() & valid_mask
-        exit_long_mask = ((prev_exec == 1) & (exec_pos != 1)).to_numpy() & valid_mask
-        entry_short_mask = ((exec_pos == -1) & (prev_exec != -1)).to_numpy() & valid_mask
-        exit_short_mask = ((prev_exec == -1) & (exec_pos != -1)).to_numpy() & valid_mask
+        if "policy_long_contracts" in price_df.columns and "policy_short_contracts" in price_df.columns:
+            long_pos = pd.to_numeric(price_df["policy_long_contracts"], errors="coerce").fillna(0.0).astype(int)
+            short_pos = pd.to_numeric(price_df["policy_short_contracts"], errors="coerce").fillna(0.0).astype(int)
+            prev_long = long_pos.shift(1).fillna(0).astype(int)
+            prev_short = short_pos.shift(1).fillna(0).astype(int)
+            entry_long_mask = ((long_pos > 0) & (prev_long <= 0)).to_numpy() & valid_mask
+            exit_long_mask = ((prev_long > 0) & (long_pos <= 0)).to_numpy() & valid_mask
+            entry_short_mask = ((short_pos > 0) & (prev_short <= 0)).to_numpy() & valid_mask
+            exit_short_mask = ((prev_short > 0) & (short_pos <= 0)).to_numpy() & valid_mask
+            price_title = f"{symbol} | policy execution"
+        else:
+            meta_pos = pd.to_numeric(meta_df.get("exec_pos"), errors="coerce").fillna(0.0).astype(int)
+            prev_meta = meta_pos.shift(1).fillna(0).astype(int)
+            entry_long_mask = ((meta_pos == 1) & (prev_meta != 1)).to_numpy()[: len(price_df)] & valid_mask
+            exit_long_mask = ((prev_meta == 1) & (meta_pos != 1)).to_numpy()[: len(price_df)] & valid_mask
+            entry_short_mask = ((meta_pos == -1) & (prev_meta != -1)).to_numpy()[: len(price_df)] & valid_mask
+            exit_short_mask = ((prev_meta == -1) & (meta_pos != -1)).to_numpy()[: len(price_df)] & valid_mask
+            price_title = f"{symbol} | meta entries/exits"
 
         if entry_long_mask.any():
-            ax_price.scatter(pos[entry_long_mask], y_enter_long[entry_long_mask], color="#2E7D32", marker="^", s=58, label="enter long", zorder=2.1)
+            ax_price.scatter(np.asarray(price_x)[entry_long_mask], y_enter_long[entry_long_mask], color="#2E7D32", marker="^", s=58, label="enter long", zorder=2.1)
         if exit_long_mask.any():
-            ax_price.scatter(pos[exit_long_mask], y_exit_long[exit_long_mask], color="#8c564b", marker="v", s=54, label="exit long", zorder=2.1)
+            ax_price.scatter(np.asarray(price_x)[exit_long_mask], y_exit_long[exit_long_mask], color="#8c564b", marker="v", s=54, label="exit long", zorder=2.1)
         if entry_short_mask.any():
-            ax_price.scatter(pos[entry_short_mask], y_enter_short[entry_short_mask], color="#C62828", marker="v", s=58, label="enter short", zorder=2.1)
+            ax_price.scatter(np.asarray(price_x)[entry_short_mask], y_enter_short[entry_short_mask], color="#C62828", marker="v", s=58, label="enter short", zorder=2.1)
         if exit_short_mask.any():
-            ax_price.scatter(pos[exit_short_mask], y_exit_short[exit_short_mask], color="#9467bd", marker="^", s=54, label="exit short", zorder=2.1)
+            ax_price.scatter(np.asarray(price_x)[exit_short_mask], y_exit_short[exit_short_mask], color="#9467bd", marker="^", s=54, label="exit short", zorder=2.1)
 
-        ax_price.set_title(f"{symbol} | meta entries/exits")
+        ax_price.set_title(price_title)
         ax_price.set_ylabel("Price")
         ax_price.grid(True, alpha=0.25)
         ax_price.legend(loc="upper left", fontsize=8)
@@ -447,15 +545,16 @@ def _save_trace_plot(
             ("thr_exit_short", "#ff7f0e", "thr_exit_short"),
         )
         plotted_any = False
+        prob_x = meta_df.index.to_pydatetime()
         for col, color, label in prob_specs:
-            if col in plot_df:
-                series = pd.to_numeric(plot_df[col], errors="coerce").to_numpy()
+            if col in meta_df:
+                series = pd.to_numeric(meta_df[col], errors="coerce").to_numpy()
                 if np.isfinite(series).any():
-                    ax_probs.plot(pos, series, color=color, linewidth=1.3, label=label)
+                    ax_probs.plot(prob_x, series, color=color, linewidth=1.3, label=label)
                     plotted_any = True
         for col, color, label in thr_specs:
-            if col in plot_df:
-                series = pd.to_numeric(plot_df[col], errors="coerce")
+            if col in meta_df:
+                series = pd.to_numeric(meta_df[col], errors="coerce")
                 finite = series[np.isfinite(series)]
                 if finite.size:
                     ax_probs.axhline(
@@ -473,24 +572,23 @@ def _save_trace_plot(
         ax_probs.set_title(f"{symbol} | meta probabilities")
         ax_probs.set_ylabel("Probability")
         ax_probs.grid(True, alpha=0.25)
+        ax_probs.set_xlabel("Session")
 
-        dates = pd.Series(plot_df.index)
-        day_start = dates.dt.normalize().ne(dates.dt.normalize().shift())
-        tick_positions = pos[day_start.to_numpy()]
-        tick_labels = dates[day_start].dt.strftime("%Y-%m-%d").to_list()
-        if len(tick_positions) > 25:
-            step = int(np.ceil(len(tick_positions) / 25))
-            tick_positions = tick_positions[::step]
-            tick_labels = tick_labels[::step]
-        if len(tick_positions) > 0:
-            ax_probs.set_xticks(tick_positions)
-            ax_probs.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
-            ax_probs.set_xlabel("Session")
-            for x in tick_positions:
-                ax_price.axvline(x, color="#cfd8dc", linestyle="--", linewidth=0.8, alpha=0.7, zorder=0.5)
-                ax_probs.axvline(x, color="#cfd8dc", linestyle="--", linewidth=0.8, alpha=0.7, zorder=0.5)
-        else:
-            ax_probs.set_xlabel("Bar")
+        x_candidates = []
+        if not price_df.empty:
+            x_candidates.extend([price_df.index.min(), price_df.index.max()])
+        if not meta_df.empty:
+            x_candidates.extend([meta_df.index.min(), meta_df.index.max()])
+        if x_candidates:
+            xmin = min(x_candidates).to_pydatetime()
+            xmax = max(x_candidates).to_pydatetime()
+            ax_price.set_xlim(xmin, xmax)
+            ax_probs.set_xlim(xmin, xmax)
+        locator = mdates.AutoDateLocator(minticks=6, maxticks=12)
+        formatter = mdates.DateFormatter("%Y-%m-%d\n%H:%M", tz=price_df.index.tz if not price_df.empty else None)
+        ax_probs.xaxis.set_major_locator(locator)
+        ax_probs.xaxis.set_major_formatter(formatter)
+        ax_price.tick_params(axis="x", labelbottom=False)
 
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -621,6 +719,8 @@ def _dump_live_inference_matrices(
         if trace_df is None or trace_df.empty:
             continue
         trace_symbol = trace_df[trace_df["symbol"].astype(str) == str(symbol)].copy()
+        if "trace_kind" in trace_symbol.columns:
+            trace_symbol = trace_symbol[trace_symbol["trace_kind"].fillna("meta_10m") != "policy_1m"].copy()
         if trace_symbol.empty:
             continue
         trace_ts = pd.to_datetime(trace_symbol["timestamp"], utc=True, errors="coerce").dropna()
@@ -670,14 +770,19 @@ def _make_close_handler(
                 f"l={closed_bar.get('low')} c={closed_bar.get('close')} v={closed_bar.get('volume')}"
             )
         if order_policies is not None and symbol in order_policies:
-            order_policies[symbol].on_15m_bar(closed_bar=closed_bar)
+            order_policies[symbol].on_interval_bar(closed_bar=closed_bar)
         action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=closed_bar)
         if action is not None:
             ts = _format_ts_local(closed_bar.get("timestamp"), tz=print_tz)
             raw_action = float(action)
             raw_pos = _action_to_position(raw_action)
-            gate = execution_latches[symbol].step(raw_pos)
-            exec_pos = int(gate.executed_pos)
+            if _use_meta_direct_execution(inference):
+                exec_pos = int(raw_pos)
+                gate_status = "meta_direct"
+            else:
+                gate = execution_latches[symbol].step(raw_pos)
+                exec_pos = int(gate.executed_pos)
+                gate_status = str(gate.status)
             probs = inference.last_probs() or {}
             prob_sources = inference.last_prob_sources() or {}
             thresholds = inference.last_thresholds() or {}
@@ -689,11 +794,12 @@ def _make_close_handler(
                 )
                 print(
                     f"{symbol} inference ts={ts} raw={raw_action:+.4f} raw_pos={raw_pos:+d} "
-                    f"exec={exec_pos:+d} gate={gate.status}"
+                    f"exec={exec_pos:+d} gate={gate_status}"
                 )
             if trace_rows is not None:
                 trace_rows.append(
                     {
+                        "trace_kind": "meta_10m",
                         "symbol": symbol,
                         "timestamp": closed_bar.get("timestamp"),
                         "open": closed_bar.get("open"),
@@ -704,7 +810,7 @@ def _make_close_handler(
                         "raw_action": raw_action,
                         "raw_pos": int(raw_pos),
                         "exec_pos": int(exec_pos),
-                        "gate_status": str(gate.status),
+                        "gate_status": str(gate_status),
                         "p_enter_long": probs.get("p_enter_long"),
                         "p_enter_short": probs.get("p_enter_short"),
                         "p_exit_long": probs.get("p_exit_long"),
@@ -735,13 +841,163 @@ def _make_close_handler(
                     }
                 )
                 result = order_policies[symbol].on_decision(
-                    action=float(exec_pos),
+                    action=float(raw_action if _use_meta_direct_execution(inference) else exec_pos),
                     closed_bar=policy_bar,
                     update_bar_state=False,
                 )
                 event = str(result.get("event", "unknown"))
-                if event not in {"hold", "no_change"}:
+                if event not in {"hold", "no_change", "intent_update"}:
                     print(f"{symbol} order_policy event={event} details={result}")
+
+    return _handler
+
+
+def _make_policy_only_close_handler(
+    *,
+    interval_minutes: int,
+    print_close: bool,
+    print_tz: str,
+    quiet_inference_logs: bool,
+    cached_meta_by_symbol: dict[str, pd.DataFrame],
+    cached_meta_inference_by_symbol: dict[str, LiveInferenceEngine] | None,
+    order_policies: dict[str, OptionOrderPolicy],
+    trace_rows: list[dict] | None = None,
+):
+    missing_warned: set[tuple[str, str]] = set()
+
+    def _handler(symbol: str, closed_bar: dict, _buffer) -> None:
+        if print_close:
+            ts = _format_ts_local(closed_bar.get("timestamp"), tz=print_tz)
+            print(
+                f"{symbol} {interval_minutes}m closed: {ts} "
+                f"o={closed_bar.get('open')} h={closed_bar.get('high')} "
+                f"l={closed_bar.get('low')} c={closed_bar.get('close')} v={closed_bar.get('volume')}"
+            )
+
+        policy = order_policies.get(symbol)
+        if policy is None:
+            return
+        policy.on_interval_bar(closed_bar=closed_bar)
+
+        meta_frame = cached_meta_by_symbol.get(str(symbol).upper())
+        if meta_frame is None or meta_frame.empty:
+            key = (str(symbol).upper(), "no_frame")
+            if key not in missing_warned:
+                print(f"[replay] Warning: no cached meta frame rows available for {symbol}; skipping policy-only intent updates.")
+                missing_warned.add(key)
+            return
+
+        ts = pd.to_datetime(closed_bar.get("timestamp"), utc=True, errors="coerce")
+        if pd.isna(ts):
+            return
+        if meta_frame.index.tz is not None:
+            ts_key = ts.tz_convert(meta_frame.index.tz)
+        else:
+            ts_key = ts.tz_localize(None)
+        if ts_key not in meta_frame.index:
+            key = (str(symbol).upper(), str(ts_key))
+            if key not in missing_warned:
+                print(f"[replay] Warning: cached meta row missing for {symbol} ts={ts_key}; skipping this intent update.")
+                missing_warned.add(key)
+            return
+
+        row = meta_frame.loc[ts_key]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[-1]
+
+        has_direct_meta_probs = all(
+            key in row.index for key in ("p_enter_long", "p_enter_short", "thr_enter_long", "thr_enter_short")
+        )
+        if has_direct_meta_probs:
+            probs = {
+                "p_enter_long": row.get("p_enter_long"),
+                "p_enter_short": row.get("p_enter_short"),
+                "p_exit_long": row.get("p_exit_long"),
+                "p_exit_short": row.get("p_exit_short"),
+                "p_pivot_long": row.get("p_pivot_long"),
+                "p_pivot_short": row.get("p_pivot_short"),
+                "p_tb_long": row.get("p_tb_long"),
+                "p_tb_short": row.get("p_tb_short"),
+            }
+            thresholds = {
+                "enter_long": row.get("thr_enter_long", row.get("enter_long_threshold")),
+                "enter_short": row.get("thr_enter_short", row.get("enter_short_threshold")),
+                "exit_long": row.get("thr_exit_long", row.get("exit_long_threshold")),
+                "exit_short": row.get("thr_exit_short", row.get("exit_short_threshold")),
+            }
+        else:
+            inference = (cached_meta_inference_by_symbol or {}).get(str(symbol).upper())
+            if inference is None:
+                key = (str(symbol).upper(), "no_inference")
+                if key not in missing_warned:
+                    print(f"[replay] Warning: cached meta row for {symbol} lacks scored meta probs and no scorer is available.")
+                    missing_warned.add(key)
+                return
+            _ = inference.on_15m_close(df_1m=pd.DataFrame(), closed_bar=closed_bar)
+            probs = inference.last_probs() or {}
+            thresholds = inference.last_thresholds() or {}
+        if not quiet_inference_logs:
+            ts_local = _format_ts_local(closed_bar.get("timestamp"), tz=print_tz)
+            _print_meta_prob_log(
+                prefix=f"{symbol} meta-policy [{ts_local}]:",
+                probs=probs,
+                thresholds=thresholds,
+            )
+
+        if trace_rows is not None:
+            trace_rows.append(
+                {
+                    "trace_kind": "meta_10m",
+                    "symbol": symbol,
+                    "timestamp": closed_bar.get("timestamp"),
+                    "open": closed_bar.get("open"),
+                    "high": closed_bar.get("high"),
+                    "low": closed_bar.get("low"),
+                    "close": closed_bar.get("close"),
+                    "volume": closed_bar.get("volume"),
+                    "raw_action": None,
+                    "raw_pos": None,
+                    "exec_pos": None,
+                    "gate_status": "policy_only",
+                    "p_enter_long": probs.get("p_enter_long"),
+                    "p_enter_short": probs.get("p_enter_short"),
+                    "p_exit_long": probs.get("p_exit_long"),
+                    "p_exit_short": probs.get("p_exit_short"),
+                    "p_pivot_long": probs.get("p_pivot_long"),
+                    "p_pivot_short": probs.get("p_pivot_short"),
+                    "p_tb_long": probs.get("p_tb_long"),
+                    "p_tb_short": probs.get("p_tb_short"),
+                    "p_pivot_long_source": row.get("p_pivot_long_source"),
+                    "p_pivot_short_source": row.get("p_pivot_short_source"),
+                    "p_tb_long_source": row.get("p_tb_long_source"),
+                    "p_tb_short_source": row.get("p_tb_short_source"),
+                    "thr_enter_long": thresholds.get("enter_long"),
+                    "thr_enter_short": thresholds.get("enter_short"),
+                    "thr_exit_long": thresholds.get("exit_long"),
+                    "thr_exit_short": thresholds.get("exit_short"),
+                }
+            )
+
+        policy_bar = dict(closed_bar)
+        for key, value in probs.items():
+            if value is not None:
+                policy_bar[key] = value
+        policy_bar.update(
+            {
+                "thr_enter_long": thresholds.get("enter_long"),
+                "thr_enter_short": thresholds.get("enter_short"),
+                "thr_exit_long": thresholds.get("exit_long"),
+                "thr_exit_short": thresholds.get("exit_short"),
+            }
+        )
+        result = policy.on_decision(
+            action=0.0,
+            closed_bar=policy_bar,
+            update_bar_state=False,
+        )
+        event = str(result.get("event", "unknown"))
+        if event not in {"hold", "no_change", "intent_update"}:
+            print(f"{symbol} order_policy event={event} details={result}")
 
     return _handler
 
@@ -779,7 +1035,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Suppress per-bar inference/probability logs and keep summary output only.",
     )
-    parser.add_argument("--buffer-size", type=int, default=5000, help="Ring buffer size.")
+    parser.add_argument(
+        "--buffer-size",
+        type=int,
+        default=0,
+        help="Ring buffer size in 1m bars. Use 0 for unlimited history in memory (default for replay).",
+    )
     parser.add_argument("--print-1m", action="store_true", help="Print each 1m bar.")
     parser.add_argument("--print-15m", action="store_true", help="Print completed interval bars.")
     parser.add_argument("--resample-label", default="left", help="Resample label (left/right).")
@@ -825,6 +1086,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--meta-model-root", default="Data/models/meta_xgboost/10min", help="Meta-XGB model root.")
     parser.add_argument(
+        "--policy-only-meta-matrix",
+        default=None,
+        help="Optional cached meta matrix path for policy-only replay. Skips model inference and reuses saved 10min meta rows.",
+    )
+    parser.add_argument(
         "--meta-entry-threshold",
         type=float,
         default=None,
@@ -836,15 +1102,15 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional execution threshold override for both meta long/short exits.",
     )
-    parser.add_argument("--meta-trail-activate-atr", type=float, default=2.0, help="Trail activation ATR used to build live exit context.")
-    parser.add_argument("--meta-trail-atr", type=float, default=1.0, help="Base trail ATR used to build live exit context.")
-    parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.8, help="Tightened trail ATR after TP is seen.")
+    parser.add_argument("--meta-trail-activate-atr", type=float, default=0.75, help="Trail activation ATR used to build live exit context.")
+    parser.add_argument("--meta-trail-atr", type=float, default=0.8, help="Base trail ATR used to build live exit context.")
+    parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.5, help="Tightened trail ATR after TP is seen.")
     parser.add_argument("--meta-use-tp-to-tighten-trail", action=argparse.BooleanOptionalAction, default=True, help="Mirror training trail-tightening behavior in replay exit context.")
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
     parser.add_argument(
         "--enable-option-orders",
         action="store_true",
-        help="Enable option order policy execution on each 15m inference action.",
+        help="Enable option order policy execution on each completed interval bar.",
     )
     parser.add_argument(
         "--option-order-qty",
@@ -931,6 +1197,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    policy_only_mode = bool(args.policy_only_meta_matrix)
 
     df = _load_history(Path(args.data_path), assume_tz=args.assume_tz)
     if args.regular_only:
@@ -942,6 +1209,7 @@ def main() -> None:
         df["symbol"] = symbols[0]
     df["symbol"] = df["symbol"].astype(str).str.upper()
     df = df[df["symbol"].isin(symbols)]
+    raw_df_all = df.copy()
 
     if args.start:
         start = pd.to_datetime(args.start, utc=True, errors="coerce")
@@ -990,7 +1258,103 @@ def main() -> None:
         if keep_n > 0:
             df = df.tail(keep_n).copy()
 
+    if not df.empty:
+        ts_min = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").min()
+        ts_max = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").max()
+        print(
+            f"[replay] Loaded history: rows={len(df):,} "
+            f"symbols={','.join(symbols)} start={ts_min} end={ts_max}"
+        )
+
+    if int(args.buffer_size) > 0 and not df.empty:
+        for symbol in symbols:
+            sym_count = int((df["symbol"].astype(str) == str(symbol)).sum())
+            if sym_count > int(args.buffer_size):
+                approx_days = float(args.buffer_size) / 390.0
+                print(
+                    f"[replay] Warning: --buffer-size={int(args.buffer_size):,} truncates {symbol} "
+                    f"history from {sym_count:,} to the most recent {int(args.buffer_size):,} 1m bars "
+                    f"(about {approx_days:.1f} trading days). This can break HTF warmup parity."
+                )
+
     inference_mode = "none" if args.no_agent else str(args.inference_mode).strip().lower()
+    cached_meta_by_symbol: dict[str, pd.DataFrame] = {}
+    cached_meta_inference_by_symbol: dict[str, LiveInferenceEngine] = {}
+    if policy_only_mode:
+        if not args.enable_option_orders:
+            raise ValueError("--policy-only-meta-matrix requires --enable-option-orders.")
+        inference_mode = "none"
+        cached_meta_frame = _load_meta_matrix_frame_from_path(
+            Path(args.policy_only_meta_matrix),
+            tz=args.tz,
+            assume_tz=args.assume_tz,
+        )
+        if "symbol" in cached_meta_frame.columns:
+            cached_meta_frame["symbol"] = cached_meta_frame["symbol"].astype(str).str.upper()
+            for symbol in symbols:
+                sym_frame = cached_meta_frame[cached_meta_frame["symbol"] == symbol].copy()
+                if not sym_frame.empty:
+                    cached_meta_by_symbol[symbol] = sym_frame
+        else:
+            if len(symbols) != 1:
+                raise ValueError("Policy-only replay without a symbol column in the cached meta matrix only supports a single symbol.")
+            cached_meta_by_symbol[symbols[0]] = cached_meta_frame.copy()
+        loaded_rows = sum(len(frame) for frame in cached_meta_by_symbol.values())
+        if loaded_rows <= 0:
+            raise ValueError("Policy-only replay loaded zero cached meta rows for the requested symbols.")
+        print(
+            f"[replay] Policy-only meta replay enabled: rows={loaded_rows:,} "
+            f"symbols={','.join(sorted(cached_meta_by_symbol))} source={args.policy_only_meta_matrix}"
+        )
+        for symbol, meta_frame in cached_meta_by_symbol.items():
+            if meta_frame.empty:
+                continue
+            has_direct_meta_probs = all(
+                key in meta_frame.columns for key in ("p_enter_long", "p_enter_short", "thr_enter_long", "thr_enter_short")
+            )
+            if has_direct_meta_probs:
+                continue
+            agent = LiveMetaXGBAgent(
+                model_root=args.meta_model_root,
+                ga_model_root=None,
+                ga_feature_list_path=None,
+                include_pivot_probs=not args.no_pivot_probs,
+                include_tb_probs=not args.no_tb_probs,
+                pivot_label_dir=args.ga_pivot_label_dir,
+                tb_label_dir=args.ga_tb_label_dir,
+                tz=args.tz or "America/New_York",
+                assume_tz=args.assume_tz,
+                session_open=args.session_open,
+                session_close=args.session_close,
+                min_15m_bars=1,
+                fill_missing_prob=args.fill_missing_prob,
+                resample_label=args.resample_label,
+                resample_closed=args.resample_closed,
+                label_timeframe_rule=f"{args.interval}min",
+                ga_probs_frame=None,
+                ga_probs_mode="frame",
+                trail_activate_atr=float(args.meta_trail_activate_atr),
+                trail_atr=float(args.meta_trail_atr),
+                trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
+                use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
+                entry_threshold_override=args.meta_entry_threshold,
+                exit_threshold_override=args.meta_exit_threshold,
+                precomputed_base_frame=meta_frame,
+            )
+            cached_meta_inference_by_symbol[symbol] = LiveInferenceEngine(
+                agent=agent,
+                label=args.resample_label,
+                closed=args.resample_closed,
+                rule=f"{args.interval}min",
+                tz=args.tz,
+                assume_tz=args.assume_tz,
+            )
+        if cached_meta_inference_by_symbol:
+            print(
+                f"[replay] Policy-only meta scorers initialized for symbols: "
+                f"{', '.join(sorted(cached_meta_inference_by_symbol))}"
+            )
+
     ga_probs_mode = str(args.ga_probs_mode or "xgb").strip().lower()
     include_pivot_probs = not args.no_pivot_probs
     include_tb_probs = not args.no_tb_probs
@@ -1056,6 +1420,55 @@ def main() -> None:
     if inference_mode != "none" and args.ga_feature_list is None and not (args.no_pivot_probs and args.no_tb_probs):
         print("[replay] Warning: GA-XGB feature list not found; pivot/TB probs will be filled with defaults.")
 
+    precomputed_meta_frame = None
+    if inference_mode == "meta" and len(symbols) == 1:
+        try:
+            symbol = str(symbols[0]).upper()
+            one_min = df[df["symbol"].astype(str).str.upper() == symbol].copy()
+            if not one_min.empty:
+                print(
+                    f"[replay] Precomputing meta base frame cache for {symbol} "
+                    f"(this may take a while on long replays)..."
+                )
+                one_min["timestamp"] = pd.to_datetime(one_min["timestamp"], utc=True, errors="coerce")
+                one_min = one_min.dropna(subset=["timestamp"]).sort_values("timestamp")
+                one_min = one_min[["timestamp", "open", "high", "low", "close", "volume"]].set_index("timestamp")
+                ga_predictor = None
+                if args.ga_feature_list and (include_pivot_probs or include_tb_probs):
+                    ga_predictor = LiveGAXGBPredictor(
+                        model_root=args.ga_model_root,
+                        feature_list_path=args.ga_feature_list,
+                        include_pivot_probs=include_pivot_probs,
+                        include_tb_probs=include_tb_probs,
+                        pivot_label_dir=args.ga_pivot_label_dir,
+                        tb_label_dir=args.ga_tb_label_dir,
+                    )
+                precomputed_meta_frame = build_meta_feature_frame_from_1m(
+                    one_min,
+                    rule=f"{int(args.interval)}min",
+                    label=args.resample_label,
+                    closed=args.resample_closed,
+                    tz=args.tz or "America/New_York",
+                    assume_tz=args.assume_tz,
+                    include_pivot_probs=include_pivot_probs,
+                    include_tb_probs=include_tb_probs,
+                    include_vix_features=True,
+                    fill_missing_prob=float(args.fill_missing_prob),
+                    session_open=args.session_open,
+                    session_close=args.session_close,
+                    ga_predictor=ga_predictor,
+                    ga_probs_frame=ga_probs_frame,
+                    ga_probs_mode=ga_probs_mode,
+                )
+                if precomputed_meta_frame is not None and not precomputed_meta_frame.empty:
+                    print(
+                        f"[replay] Precomputed meta base frame cache: rows={len(precomputed_meta_frame):,} "
+                        f"symbol={symbol}"
+                    )
+        except Exception as exc:
+            print(f"[replay] Warning: failed to precompute meta base frame cache ({exc}); using per-bar rebuilds.")
+            precomputed_meta_frame = None
+
     if inference_mode == "ppo":
         agent = LivePPOAgent(
             model_path=args.model_path,
@@ -1107,20 +1520,23 @@ def main() -> None:
             use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
             entry_threshold_override=args.meta_entry_threshold,
             exit_threshold_override=args.meta_exit_threshold,
+            precomputed_base_frame=precomputed_meta_frame,
         )
         print(
             f"[replay] Meta-XGB inference enabled: model_root={args.meta_model_root} "
             f"timeframe={args.interval}min ga_probs_mode={ga_probs_mode}"
         )
 
-    inference = LiveInferenceEngine(
-        agent=agent,
-        label=args.resample_label,
-        closed=args.resample_closed,
-        rule=f"{args.interval}min",
-        tz=args.tz,
-        assume_tz=args.assume_tz,
-    )
+    inference = None
+    if not policy_only_mode:
+        inference = LiveInferenceEngine(
+            agent=agent,
+            label=args.resample_label,
+            closed=args.resample_closed,
+            rule=f"{args.interval}min",
+            tz=args.tz,
+            assume_tz=args.assume_tz,
+        )
     execution_latches: dict[str, DirectionExecutionLatch] = {
         symbol: DirectionExecutionLatch(
             entry_confirm_bars=max(1, int(args.exec_entry_confirm_bars)),
@@ -1159,8 +1575,44 @@ def main() -> None:
             order_policies[symbol] = OptionOrderPolicy(cfg)
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
         print(f"[replay] Option order policy enabled ({mode}) for symbols: {', '.join(symbols)}")
+        if policy_only_mode and args.start:
+            start_prefill = pd.to_datetime(args.start, utc=True, errors="coerce")
+            if pd.notna(start_prefill):
+                _prefill_policy_state(
+                    raw_df=raw_df_all,
+                    symbols=symbols,
+                    order_policies=order_policies,
+                    start_ts=start_prefill,
+                    interval_minutes=int(args.interval),
+                    resample_label=args.resample_label,
+                    resample_closed=args.resample_closed,
+                )
 
     trace_rows: list[dict] | None = [] if (args.trace_out or args.plot_out) else None
+
+    close_handler = (
+        _make_policy_only_close_handler(
+            interval_minutes=int(args.interval),
+            print_close=args.print_15m,
+            print_tz=args.tz or "America/New_York",
+            quiet_inference_logs=bool(args.quiet_inference_logs),
+            cached_meta_by_symbol=cached_meta_by_symbol,
+            cached_meta_inference_by_symbol=cached_meta_inference_by_symbol,
+            order_policies=order_policies or {},
+            trace_rows=trace_rows,
+        )
+        if policy_only_mode
+        else _make_close_handler(
+            inference=inference,
+            interval_minutes=int(args.interval),
+            print_close=args.print_15m,
+            print_tz=args.tz or "America/New_York",
+            quiet_inference_logs=bool(args.quiet_inference_logs),
+            execution_latches=execution_latches,
+            order_policies=order_policies,
+            trace_rows=trace_rows,
+        )
+    )
 
     processor = LiveBarProcessor(
         interval_minutes=args.interval,
@@ -1171,20 +1623,12 @@ def main() -> None:
                 print_tz=args.tz or "America/New_York",
                 print_1m=bool(args.print_1m),
                 order_policies=order_policies,
+                trace_rows=trace_rows,
             )
             if (args.print_1m or order_policies is not None)
             else None
         ),
-        on_15m_close=_make_close_handler(
-            inference=inference,
-            interval_minutes=int(args.interval),
-            print_close=args.print_15m,
-            print_tz=args.tz or "America/New_York",
-            quiet_inference_logs=bool(args.quiet_inference_logs),
-            execution_latches=execution_latches,
-            order_policies=order_policies,
-            trace_rows=trace_rows,
-        ),
+        on_15m_close=close_handler,
     )
 
     count = 0
@@ -1220,7 +1664,9 @@ def main() -> None:
             _save_trace_plot(trace_df=trace_df, save_path=plot_path, tz=args.tz or "America/New_York")
             print(f"[replay] Saved plot: {plot_path}")
 
-    if args.dump_live_matrix_dir:
+    if args.dump_live_matrix_dir and policy_only_mode:
+        print("[replay] Skipping live matrix dump in policy-only mode (no feature/model rebuild was run).")
+    elif args.dump_live_matrix_dir:
         _dump_live_inference_matrices(
             raw_df=df,
             symbols=symbols,

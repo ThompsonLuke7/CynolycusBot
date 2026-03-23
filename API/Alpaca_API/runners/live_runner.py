@@ -28,13 +28,13 @@ class LiveBarProcessor:
         self,
         *,
         interval_minutes: int = 15,
-        buffer_size: int = 5000,
+        buffer_size: int | None = 5000,
         agg_label: str = "left",
         on_1m: Optional[Callable[[str, dict, BarRingBuffer], None]] = None,
         on_15m_close: Optional[Callable[[str, dict, BarRingBuffer], None]] = None,
     ) -> None:
         self._interval_minutes = interval_minutes
-        self._buffer_size = buffer_size
+        self._buffer_size = None if buffer_size is None or int(buffer_size) <= 0 else int(buffer_size)
         self._agg_label = agg_label
         self._on_1m = on_1m
         self._on_15m_close = on_15m_close
@@ -135,16 +135,46 @@ def _action_to_position(action: float | int, *, deadband: float = 0.0) -> int:
     return 1 if a > 0.0 else -1
 
 
+def _use_meta_direct_execution(inference: LiveInferenceEngine) -> bool:
+    agent = getattr(inference, "_agent", None)
+    return isinstance(agent, LiveMetaXGBAgent)
+
+
 def _make_1m_handler(
     *,
     print_tz: str,
     print_1m: bool,
     order_policies: dict[str, OptionOrderPolicy] | None = None,
+    trace_rows: list[dict] | None = None,
 ) -> Callable[[str, dict, BarRingBuffer], None]:
     def _handler(symbol: str, bar: dict, _buffer: BarRingBuffer) -> None:
         if order_policies is not None and symbol in order_policies:
             result = order_policies[symbol].on_1m_bar(bar=bar)
             event = str(result.get("event", "unknown"))
+            if trace_rows is not None:
+                trace_rows.append(
+                    {
+                        "trace_kind": "policy_1m",
+                        "symbol": symbol,
+                        "timestamp": bar.get("timestamp"),
+                        "open": bar.get("open"),
+                        "high": bar.get("high"),
+                        "low": bar.get("low"),
+                        "close": bar.get("close"),
+                        "volume": bar.get("volume"),
+                        "policy_event": event,
+                        "policy_mode": result.get("mode"),
+                        "policy_reason": result.get("reason"),
+                        "policy_position": result.get("position"),
+                        "policy_signed_contracts": result.get("signed_contracts"),
+                        "policy_long_contracts": result.get("long_contracts"),
+                        "policy_short_contracts": result.get("short_contracts"),
+                        "policy_open_long_symbol": result.get("open_long_symbol"),
+                        "policy_open_short_symbol": result.get("open_short_symbol"),
+                        "target_long_contracts": result.get("target_long_contracts"),
+                        "target_short_contracts": result.get("target_short_contracts"),
+                    }
+                )
             if event not in {"hold", "no_change"}:
                 print(f"{symbol} order_policy 1m event={event} details={result}")
         if print_1m:
@@ -159,6 +189,7 @@ def _make_1m_handler(
 def _make_15m_handler(
     *,
     inference: LiveInferenceEngine,
+    interval_minutes: int,
     print_15m: bool,
     print_tz: str,
     execution_latches: dict[str, DirectionExecutionLatch],
@@ -168,17 +199,22 @@ def _make_15m_handler(
         if print_15m:
             ts = _format_ts_local(bar15.get("timestamp"), tz=print_tz)
             print(
-                f"{symbol} 15m closed: {ts} o={bar15.get('open')} h={bar15.get('high')} "
+                f"{symbol} {interval_minutes}m closed: {ts} o={bar15.get('open')} h={bar15.get('high')} "
                 f"l={bar15.get('low')} c={bar15.get('close')} v={bar15.get('volume')}"
             )
         if order_policies is not None and symbol in order_policies:
-            order_policies[symbol].on_15m_bar(closed_bar=bar15)
+            order_policies[symbol].on_interval_bar(closed_bar=bar15)
         action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
         if action is not None:
             raw_action = float(action)
             raw_pos = _action_to_position(raw_action)
-            gate = execution_latches[symbol].step(raw_pos)
-            exec_pos = int(gate.executed_pos)
+            if _use_meta_direct_execution(inference):
+                exec_pos = int(raw_pos)
+                gate_status = "meta_direct"
+            else:
+                gate = execution_latches[symbol].step(raw_pos)
+                exec_pos = int(gate.executed_pos)
+                gate_status = str(gate.status)
             probs = inference.last_probs() or {}
             thresholds = inference.last_thresholds() or {}
             _print_meta_prob_log(
@@ -188,7 +224,7 @@ def _make_15m_handler(
             )
             print(
                 f"{symbol} inference raw={raw_action:+.4f} raw_pos={raw_pos:+d} "
-                f"exec={exec_pos:+d} gate={gate.status}"
+                f"exec={exec_pos:+d} gate={gate_status}"
             )
             if order_policies is not None and symbol in order_policies:
                 policy_bar = dict(bar15)
@@ -202,12 +238,12 @@ def _make_15m_handler(
                     }
                 )
                 result = order_policies[symbol].on_decision(
-                    action=float(exec_pos),
+                    action=float(raw_action if _use_meta_direct_execution(inference) else exec_pos),
                     closed_bar=policy_bar,
                     update_bar_state=False,
                 )
                 event = str(result.get("event", "unknown"))
-                if event not in {"hold", "no_change"}:
+                if event not in {"hold", "no_change", "intent_update"}:
                     print(f"{symbol} order_policy event={event} details={result}")
     return _handler
 
@@ -259,18 +295,21 @@ def _prefill_buffers(
         return
 
     df = df.sort_values("timestamp")
-    effective_tail = int(tail) if tail is not None else int(processor._buffer_size)
+    effective_tail = int(tail) if tail is not None else (
+        int(processor._buffer_size) if processor._buffer_size is not None else None
+    )
     for symbol in symbols:
         sym_df = df[df["symbol"] == symbol]
         if sym_df.empty:
             continue
-        if effective_tail > 0:
+        if effective_tail is not None and effective_tail > 0:
             sym_df = sym_df.tail(effective_tail)
         bars = sym_df[required + ["symbol"]].to_dict("records")
         processor.prefill(symbol, bars)
+        cap_text = "unlimited" if effective_tail is None else f"{effective_tail:,}"
         print(
             f"[live] Prefilled {len(bars):,} bars for {symbol} "
-            f"(cap={effective_tail:,})."
+            f"(cap={cap_text})."
         )
 
 
@@ -287,9 +326,11 @@ def _prefill_from_alpaca(
     feed: DataFeed = DataFeed.IEX,
 ) -> None:
     feed_enum = feed if isinstance(feed, DataFeed) else _parse_feed(str(feed))
-    effective_tail = int(tail) if tail is not None else int(processor._buffer_size)
+    effective_tail = int(tail) if tail is not None else (
+        int(processor._buffer_size) if processor._buffer_size is not None else None
+    )
     warmup_target = max(0, int(prepend_warmup_bars))
-    if effective_tail > 0:
+    if effective_tail is not None and effective_tail > 0:
         warmup_target = min(warmup_target, effective_tail)
     for symbol in symbols:
         fetched_df = fetch_intraday(
@@ -325,7 +366,7 @@ def _prefill_from_alpaca(
             fetched_df = _normalize_prefill_1m_frame(fetched_df, symbol=symbol)
             raw_fetched_count = int(len(fetched_df))
             fetched_latest_df = fetched_df
-            if effective_tail > 0:
+            if effective_tail is not None and effective_tail > 0:
                 fetch_tail_cap = max(effective_tail - used_warmup_count, 0)
                 if fetch_tail_cap > 0:
                     fetched_df = fetched_df.tail(fetch_tail_cap)
@@ -361,7 +402,7 @@ def _prefill_from_alpaca(
         combined = combined.dropna(subset=["timestamp"])
         combined = combined.sort_values("timestamp")
         combined = combined.drop_duplicates(subset=["symbol", "timestamp"], keep="first")
-        if effective_tail > 0 and len(combined) > effective_tail:
+        if effective_tail is not None and effective_tail > 0 and len(combined) > effective_tail:
             warmup_keep = min(used_warmup_count, len(combined), effective_tail)
             remaining_cap = max(effective_tail - warmup_keep, 0)
             keep_warmup = combined.head(warmup_keep) if warmup_keep > 0 else combined.iloc[0:0]
@@ -383,6 +424,59 @@ def _prefill_from_alpaca(
             f"alpaca_fetch(raw={raw_fetched_count:,}, used={used_fetched_count:,}), "
             f"combined_used={used_combined_count:,}, cap={effective_tail:,}"
         )
+
+
+def _extend_prefill_with_alpaca_gap(
+    *,
+    df: pd.DataFrame,
+    symbols: list[str],
+    feed: DataFeed,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out_frames: list[pd.DataFrame] = [df.copy()]
+    for symbol in symbols:
+        sym_df = df[df["symbol"].astype(str).str.upper() == symbol].copy() if "symbol" in df.columns else df.copy()
+        if sym_df.empty:
+            continue
+        latest_ts = pd.to_datetime(sym_df["timestamp"], utc=True, errors="coerce").dropna().max()
+        if pd.isna(latest_ts):
+            continue
+        fetch_start = latest_ts + pd.Timedelta(minutes=1)
+        now_utc = pd.Timestamp.now(tz="UTC")
+        if fetch_start >= now_utc:
+            print(f"[live] Prefill gap bridge {symbol}: local history already up to date ({latest_ts}).")
+            continue
+        fetched_df = fetch_intraday(
+            ticker=symbol,
+            start=fetch_start.isoformat(),
+            timeframe="1Min",
+            limit=100000,
+            feed=feed,
+            save_path=None,
+        )
+        if fetched_df is None or fetched_df.empty:
+            print(f"[live] Prefill gap bridge {symbol}: no newer Alpaca 1m bars after {latest_ts}.")
+            continue
+        fetched_df = _normalize_prefill_1m_frame(fetched_df, symbol=symbol)
+        fetched_df = fetched_df[fetched_df["timestamp"] > latest_ts].copy()
+        if fetched_df.empty:
+            print(f"[live] Prefill gap bridge {symbol}: fetched bars were all duplicates.")
+            continue
+        out_frames.append(fetched_df)
+        print(
+            f"[live] Prefill gap bridge {symbol}: appended {len(fetched_df):,} "
+            f"1m bars from {fetched_df['timestamp'].min()} to {fetched_df['timestamp'].max()}."
+        )
+    combined = pd.concat(out_frames, axis=0, ignore_index=True)
+    combined["timestamp"] = pd.to_datetime(combined["timestamp"], utc=True, errors="coerce")
+    combined = combined.dropna(subset=["timestamp"]).sort_values("timestamp")
+    if "symbol" in combined.columns:
+        combined["symbol"] = combined["symbol"].astype(str).str.upper()
+        combined = combined.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+    else:
+        combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
+    return combined.sort_values("timestamp").reset_index(drop=True)
 
 
 def _normalize_prefill_1m_frame(df: pd.DataFrame, *, symbol: str) -> pd.DataFrame:
@@ -476,7 +570,7 @@ def _warmup_order_policies_from_prefill(
             closed, _current = agg.update(bar)
             if closed:
                 last_closed = closed
-                last_atr = policy.on_15m_bar(closed_bar=closed)
+                last_atr = policy.on_interval_bar(closed_bar=closed)
                 closed_count += 1
 
         if closed_count == 0:
@@ -544,7 +638,9 @@ def _run_startup_catchup_decision(
         action_pos = _action_to_position(action_raw)
         gate_status = "disabled"
         exec_pos = action_pos
-        if execution_latches is not None and symbol in execution_latches:
+        if _use_meta_direct_execution(inference):
+            gate_status = "meta_direct"
+        elif execution_latches is not None and symbol in execution_latches:
             gate = execution_latches[symbol].step(action_pos)
             exec_pos = int(gate.executed_pos)
             gate_status = str(gate.status)
@@ -572,12 +668,12 @@ def _run_startup_catchup_decision(
             }
         )
         result = order_policies[symbol].on_decision(
-            action=float(exec_pos),
+            action=float(action_raw if _use_meta_direct_execution(inference) else exec_pos),
             closed_bar=policy_bar,
             update_bar_state=False,
         )
         event = str(result.get("event", "unknown"))
-        if event not in {"hold", "no_change"}:
+        if event not in {"hold", "no_change", "intent_update"}:
             print(f"[live] Startup catch-up {symbol} order_policy event={event} details={result}")
 
 
@@ -648,11 +744,16 @@ def _replay_warmup_actions_from_prefill(
                 continue
             raw_action = float(rec.get("action", 0.0))
             raw_pos = _action_to_position(raw_action)
-            gate = execution_latches[symbol].step(raw_pos)
-            exec_pos = int(gate.executed_pos)
+            if isinstance(agent, LiveMetaXGBAgent):
+                exec_pos = int(raw_pos)
+                gate_status = "meta_direct"
+            else:
+                gate = execution_latches[symbol].step(raw_pos)
+                exec_pos = int(gate.executed_pos)
+                gate_status = str(gate.status)
             print(
                 f"[live] warmup {symbol} 15m={_format_ts_local(ts, tz=print_tz)} "
-                f"raw={raw_action:+.4f} raw_pos={raw_pos:+d} exec={exec_pos:+d} gate={gate.status}"
+                f"raw={raw_action:+.4f} raw_pos={raw_pos:+d} exec={exec_pos:+d} gate={gate_status}"
             )
             action_count += 1
 
@@ -790,7 +891,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--symbols", default="SPY", help="Comma-separated symbols.")
     parser.add_argument("--feed", default="IEX", help="IEX or SIP.")
     parser.add_argument("--interval", type=int, default=10, help="Aggregation interval in minutes.")
-    parser.add_argument("--buffer-size", type=int, default=5000, help="Ring buffer size in 1m bars.")
+    parser.add_argument(
+        "--buffer-size",
+        type=int,
+        default=5000,
+        help="Ring buffer size in 1m bars. Use 0 for unlimited history in memory.",
+    )
     parser.add_argument("--queue-size", type=int, default=5000, help="Max queued bars before dropping.")
     parser.add_argument("--print-1m", action="store_true", help="Print each 1m bar.")
     parser.add_argument("--print-15m", action="store_true", help="Print completed 15m bars.")
@@ -832,15 +938,15 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional execution threshold override for both meta long/short exits.",
     )
-    parser.add_argument("--meta-trail-activate-atr", type=float, default=2.0, help="Trail activation ATR used to build live exit context.")
-    parser.add_argument("--meta-trail-atr", type=float, default=1.0, help="Base trail ATR used to build live exit context.")
-    parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.8, help="Tightened trail ATR after TP is seen.")
+    parser.add_argument("--meta-trail-activate-atr", type=float, default=0.75, help="Trail activation ATR used to build live exit context.")
+    parser.add_argument("--meta-trail-atr", type=float, default=0.8, help="Base trail ATR used to build live exit context.")
+    parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.5, help="Tightened trail ATR after TP is seen.")
     parser.add_argument("--meta-use-tp-to-tighten-trail", action=argparse.BooleanOptionalAction, default=True, help="Mirror training trail-tightening behavior in live exit context.")
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
     parser.add_argument(
         "--prefill-path",
         default=None,
-        help="Optional CSV/Parquet path to prefill the 1m buffer for warm start.",
+        help="Optional CSV/Parquet path to prefill the 1m buffer for warm start. If --no-prefill-fetch is not set, Alpaca will only fetch and append the missing gap after the latest local bar.",
     )
     parser.add_argument(
         "--prefill-start",
@@ -850,7 +956,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-prefill-fetch",
         action="store_true",
-        help="Disable automatic historical prefill fetch (unless --prefill-path is provided).",
+        help="Disable all Alpaca historical prefill fetching, including gap-bridging on top of --prefill-path.",
+    )
+    parser.add_argument(
+        "--meta-execution-mode",
+        choices=["interval", "intrabar"],
+        default="interval",
+        help="For meta option execution: interval=execute on 10min close, intrabar=cache 10min intent and execute via 1m monitoring.",
     )
     parser.add_argument(
         "--prefill-tail",
@@ -1093,6 +1205,8 @@ def main() -> None:
                 meta_trail_atr=float(args.meta_trail_atr),
                 meta_trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
                 meta_use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
+                meta_execute_on_interval_close=str(args.meta_execution_mode).strip().lower() == "interval",
+                meta_intrabar_execution_enabled=str(args.meta_execution_mode).strip().lower() == "intrabar",
             )
             order_policies[symbol] = OptionOrderPolicy(cfg)
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
@@ -1120,6 +1234,7 @@ def main() -> None:
     )
     on_15m = _make_15m_handler(
         inference=inference,
+        interval_minutes=int(args.interval),
         print_15m=args.print_15m,
         print_tz=args.tz or "America/New_York",
         execution_latches=execution_latches,
@@ -1135,6 +1250,15 @@ def main() -> None:
     )
     if args.prefill_path:
         prefill_df = _load_prefill_frame(Path(args.prefill_path))
+        if not args.no_prefill_fetch:
+            try:
+                prefill_df = _extend_prefill_with_alpaca_gap(
+                    df=prefill_df,
+                    symbols=symbols,
+                    feed=feed,
+                )
+            except Exception as exc:
+                print(f"[live] Prefill gap bridge failed: {exc}")
         if args.prefill_tail and args.prefill_tail > args.buffer_size:
             print("[live] Warning: prefill-tail exceeds buffer-size; oldest rows will be dropped.")
         _prefill_buffers(

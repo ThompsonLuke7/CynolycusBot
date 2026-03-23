@@ -694,9 +694,13 @@ def _add_vix_feature_suite(
     vix_high = vix_high.reindex(df.index)
     vix_low = vix_low.reindex(df.index)
 
-    vix_ret_1 = vix_close.pct_change(1)
-    vix_ret_4 = vix_close.pct_change(4)
-    vix_ret_16 = vix_close.pct_change(16)
+    # Preserve the historical behavior explicitly: forward-fill prior observed
+    # VIX values first, then compute pct_change without pandas' deprecated
+    # implicit fill_method default.
+    vix_close_ffill = vix_close.ffill()
+    vix_ret_1 = vix_close_ffill.pct_change(1, fill_method=None)
+    vix_ret_4 = vix_close_ffill.pct_change(4, fill_method=None)
+    vix_ret_16 = vix_close_ffill.pct_change(16, fill_method=None)
     vix_range_pct = (vix_high - vix_low) / vix_close.replace(0, np.nan)
     # Use a direct ATR implementation to avoid TA statefulness turning nearly all rows NaN.
     vix_prev_close = vix_close.shift(1)

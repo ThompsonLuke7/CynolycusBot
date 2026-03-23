@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Iterable
+from typing import Iterable, Optional
 
 import pandas as pd
 
@@ -16,7 +16,7 @@ class BarRingBuffer:
       - symbol (optional)
     """
 
-    def __init__(self, maxlen: int = 5000) -> None:
+    def __init__(self, maxlen: Optional[int] = 5000) -> None:
         self._buf: deque[dict] = deque(maxlen=maxlen)
 
     def __len__(self) -> int:
