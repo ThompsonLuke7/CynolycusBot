@@ -17,7 +17,13 @@ from alpaca.data.enums import DataFeed
 from ..market_data.bar_aggregator import OhlcvAggregator
 from ..market_data.bar_buffer import BarRingBuffer
 from ..market_data.fetch_intraday import fetch_intraday
-from ..inference.live_inference import LiveInferenceEngine, LiveMetaXGBAgent, LivePPOAgent, build_15m
+from ..inference.live_inference import (
+    LiveIndependentMetaXGBAgent,
+    LiveInferenceEngine,
+    LiveMetaXGBAgent,
+    LivePPOAgent,
+    build_15m,
+)
 from ..market_data.live_stream import AlpacaBarStreamer
 from Policy.execution_latch import DirectionExecutionLatch
 from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
@@ -137,7 +143,7 @@ def _action_to_position(action: float | int, *, deadband: float = 0.0) -> int:
 
 def _use_meta_direct_execution(inference: LiveInferenceEngine) -> bool:
     agent = getattr(inference, "_agent", None)
-    return isinstance(agent, LiveMetaXGBAgent)
+    return isinstance(agent, (LiveMetaXGBAgent, LiveIndependentMetaXGBAgent))
 
 
 def _make_1m_handler(
@@ -780,7 +786,7 @@ def _replay_warmup_actions_from_prefill(
                 continue
             raw_action = float(rec.get("action", 0.0))
             raw_pos = _action_to_position(raw_action)
-            if isinstance(agent, LiveMetaXGBAgent):
+            if isinstance(agent, (LiveMetaXGBAgent, LiveIndependentMetaXGBAgent)):
                 exec_pos = int(raw_pos)
                 gate_status = "meta_direct"
             else:
@@ -964,7 +970,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--meta-model-root", default="Data/models/meta_xgboost/10min", help="Meta-XGB model root.")
     parser.add_argument(
         "--meta-base-frame-path",
-        default="Data/inference/{symbol_lower}/10min/debug_matrices_warmup/{symbol_lower}/live_meta_matrix_on_trace_ts.parquet",
+        default="Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_24.parquet",
         help="Optional cached 10m meta feature matrix path. Supports {symbol} and {symbol_lower}.",
     )
     parser.add_argument(
@@ -992,7 +998,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
     parser.add_argument(
         "--prefill-path",
-        default=None,
+        default="Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet",
         help="Optional CSV/Parquet path to prefill the 1m buffer for warm start. If --no-prefill-fetch is not set, Alpaca will only fetch and append the missing gap after the latest local bar.",
     )
     parser.add_argument(
@@ -1196,7 +1202,7 @@ def main() -> None:
                     )
             except Exception as exc:
                 print(f"[live] Cached meta base frame unavailable: {exc}")
-        agent = LiveMetaXGBAgent(
+        agent = LiveIndependentMetaXGBAgent(
             model_root=args.meta_model_root,
             ga_model_root=args.ga_model_root if ga_feature_list else None,
             ga_feature_list_path=ga_feature_list,
@@ -1221,6 +1227,8 @@ def main() -> None:
             exit_threshold_override=args.meta_exit_threshold,
             precomputed_base_frame=precomputed_meta_frame,
             precomputed_append_lookback_days=int(args.meta_base_frame_append_lookback_days),
+            min_hold_bars=2,
+            exit_entry_delta=0.15,
         )
         print(
             f"[live] Meta-XGB inference enabled: model_root={args.meta_model_root} "

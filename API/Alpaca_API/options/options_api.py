@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -152,13 +153,50 @@ class AlpacaOptionsClient:
 
     def get_option_quotes(self, **params: Any) -> Any:
         """
-        GET /v2/options/quotes
+        GET options quotes.
 
         Example params:
           symbols="SPY240216C00475000" or symbol_or_symbols="..."
         """
-        url = f"{self._data_base}/v2/options/quotes"
-        return self._request("GET", url, params=params)
+        attempts: list[tuple[str, dict[str, Any]]] = []
+        clean_params = {k: v for k, v in params.items() if v is not None}
+        symbols = clean_params.get("symbols") or clean_params.get("symbol_or_symbols")
+        base_params = dict(clean_params)
+        if symbols is not None:
+            params_symbols = dict(base_params)
+            params_symbols["symbols"] = symbols
+            params_symbols.pop("symbol_or_symbols", None)
+            params_symbol_or_symbols = dict(base_params)
+            params_symbol_or_symbols["symbol_or_symbols"] = symbols
+            params_symbol_or_symbols.pop("symbols", None)
+        else:
+            params_symbols = dict(base_params)
+            params_symbol_or_symbols = dict(base_params)
+
+        attempts.extend(
+            [
+                (f"{self._data_base}/v1beta1/options/quotes/latest", params_symbols),
+                (f"{self._data_base}/v1beta1/options/quotes/latest", params_symbol_or_symbols),
+                (f"{self._data_base}/v2/options/quotes", params_symbols),
+                (f"{self._data_base}/v2/options/quotes", params_symbol_or_symbols),
+            ]
+        )
+
+        last_exc: Exception | None = None
+        for url, req_params in attempts:
+            try:
+                return self._request("GET", url, params=req_params)
+            except urllib.error.HTTPError as exc:
+                last_exc = exc
+                if exc.code == 404:
+                    continue
+                raise
+            except Exception as exc:
+                last_exc = exc
+                raise
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("option_quote_request_failed")
 
     def submit_option_order(
         self,

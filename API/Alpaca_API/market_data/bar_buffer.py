@@ -38,6 +38,15 @@ class BarRingBuffer:
         new_bar = dict(bar)
         new_bar["timestamp"] = ts
 
+        if self._buf:
+            last_ts = self._buf[-1].get("timestamp")
+            if last_ts == ts:
+                self._buf[-1] = new_bar
+                return
+            if last_ts is not None and ts > last_ts:
+                self._buf.append(new_bar)
+                return
+
         # If we already have a bar for this timestamp, replace it (keep latest).
         for idx in range(len(self._buf) - 1, -1, -1):
             existing = self._buf[idx]

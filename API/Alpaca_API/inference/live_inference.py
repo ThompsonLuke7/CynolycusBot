@@ -1346,6 +1346,271 @@ class LiveMetaXGBAgent:
         }
 
 
+class LiveIndependentMetaXGBAgent:
+    """
+    Replay-compatible independent long/short meta scorer for live use.
+
+    This keeps separate long and short trade state so exit probabilities are
+    computed the same way as the independent offline replay, instead of being
+    tied to one signed position state.
+    """
+
+    def __init__(
+        self,
+        *,
+        model_root: str | Path,
+        ga_model_root: str | None = None,
+        ga_feature_list_path: str | None = None,
+        include_pivot_probs: bool = True,
+        include_tb_probs: bool = True,
+        include_vix_features: bool = True,
+        pivot_label_dir: str = "swing",
+        tb_label_dir: str = "tb",
+        tz: str | None = "America/New_York",
+        assume_tz: str = "UTC",
+        session_open: str = "09:30",
+        session_close: str = "16:00",
+        min_15m_bars: int = 20,
+        fill_missing_prob: float = 0.0,
+        resample_label: str = "left",
+        resample_closed: str = "left",
+        label_timeframe_rule: str = "10min",
+        a_tp: float = 1.6,
+        trail_activate_atr: float = 2.0,
+        trail_atr: float = 1.0,
+        trail_atr_after_tp: float = 0.8,
+        use_tp_to_tighten_trail: bool = True,
+        entry_threshold_override: float | None = None,
+        exit_threshold_override: float | None = None,
+        ga_probs_frame: pd.DataFrame | None = None,
+        ga_probs_mode: str = "xgb",
+        precomputed_base_frame: pd.DataFrame | None = None,
+        precomputed_append_lookback_days: int = 120,
+        min_hold_bars: int = 2,
+        exit_entry_delta: float = 0.15,
+    ) -> None:
+        common_kwargs = dict(
+            model_root=model_root,
+            ga_model_root=ga_model_root,
+            ga_feature_list_path=ga_feature_list_path,
+            include_pivot_probs=include_pivot_probs,
+            include_tb_probs=include_tb_probs,
+            include_vix_features=include_vix_features,
+            pivot_label_dir=pivot_label_dir,
+            tb_label_dir=tb_label_dir,
+            tz=tz,
+            assume_tz=assume_tz,
+            session_open=session_open,
+            session_close=session_close,
+            min_15m_bars=min_15m_bars,
+            fill_missing_prob=fill_missing_prob,
+            resample_label=resample_label,
+            resample_closed=resample_closed,
+            label_timeframe_rule=label_timeframe_rule,
+            a_tp=a_tp,
+            trail_activate_atr=trail_activate_atr,
+            trail_atr=trail_atr,
+            trail_atr_after_tp=trail_atr_after_tp,
+            use_tp_to_tighten_trail=use_tp_to_tighten_trail,
+            entry_threshold_override=entry_threshold_override,
+            exit_threshold_override=exit_threshold_override,
+            ga_probs_frame=ga_probs_frame,
+            ga_probs_mode=ga_probs_mode,
+            precomputed_base_frame=precomputed_base_frame,
+            precomputed_append_lookback_days=precomputed_append_lookback_days,
+        )
+        self._base_agent = LiveMetaXGBAgent(**common_kwargs)
+        self._long_agent = LiveMetaXGBAgent(**common_kwargs)
+        self._short_agent = LiveMetaXGBAgent(**common_kwargs)
+        self._min_bars = int(self._base_agent._min_bars)
+        self._min_hold_bars = max(0, int(min_hold_bars))
+        self._exit_entry_delta = float(exit_entry_delta)
+        self._entry_thresholds = dict(self._base_agent._entry_thresholds)
+        self._exit_thresholds = dict(self._base_agent._exit_thresholds)
+        self._long_active = False
+        self._short_active = False
+        self._long_bars_held = -1
+        self._short_bars_held = -1
+        self._last_probs: dict[str, float | None] | None = None
+        self._last_prob_sources: dict[str, str | None] | None = None
+        self._last_processed_ts: pd.Timestamp | None = None
+
+    def _reset_state(self) -> None:
+        self._long_agent._reset_trade_state()
+        self._short_agent._reset_trade_state()
+        self._long_active = False
+        self._short_active = False
+        self._long_bars_held = -1
+        self._short_bars_held = -1
+        self._last_probs = None
+        self._last_prob_sources = None
+        self._last_processed_ts = None
+
+    def _row_with_entries(self, base_frame: pd.DataFrame, row: pd.Series) -> tuple[pd.Series, float, float]:
+        p_enter_long = self._base_agent._entry_long.predict_row(base_frame, target_ts=row.name)
+        p_enter_short = self._base_agent._entry_short.predict_row(base_frame, target_ts=row.name)
+        work_row = row.copy()
+        work_row["p_enter_long_oof"] = p_enter_long
+        work_row["p_enter_short_oof"] = p_enter_short
+        return work_row, float(p_enter_long), float(p_enter_short)
+
+    def _score_row(self, base_frame: pd.DataFrame, row: pd.Series) -> tuple[pd.Series, dict[str, float | None]]:
+        work_row, p_enter_long, p_enter_short = self._row_with_entries(base_frame, row)
+        if self._long_active:
+            exit_row_long = self._long_agent._annotate_current_context(work_row)
+            exit_df_long = pd.DataFrame([exit_row_long], index=[row.name])
+            p_exit_long = float(self._base_agent._exit_long.predict_row(exit_df_long, target_ts=row.name))
+        else:
+            p_exit_long = float("nan")
+        if self._short_active:
+            exit_row_short = self._short_agent._annotate_current_context(work_row)
+            exit_df_short = pd.DataFrame([exit_row_short], index=[row.name])
+            p_exit_short = float(self._base_agent._exit_short.predict_row(exit_df_short, target_ts=row.name))
+        else:
+            p_exit_short = float("nan")
+        probs = {
+            "p_pivot_long": float(row.get("p_pivot_long", np.nan)),
+            "p_pivot_short": float(row.get("p_pivot_short", np.nan)),
+            "p_tb_long": float(row.get("p_tb_long", np.nan)),
+            "p_tb_short": float(row.get("p_tb_short", np.nan)),
+            "p_enter_long": p_enter_long,
+            "p_enter_short": p_enter_short,
+            "p_exit_long": p_exit_long,
+            "p_exit_short": p_exit_short,
+        }
+        return work_row, probs
+
+    def _advance_independent_state(self, *, work_row: pd.Series, probs: dict[str, float | None]) -> int:
+        p_enter_long = float(probs.get("p_enter_long", np.nan))
+        p_enter_short = float(probs.get("p_enter_short", np.nan))
+        p_exit_long = float(probs.get("p_exit_long", np.nan))
+        p_exit_short = float(probs.get("p_exit_short", np.nan))
+
+        long_exit_threshold_hit = bool(
+            self._long_active and np.isfinite(p_exit_long) and p_exit_long >= float(self._exit_thresholds["exit_long"])
+        )
+        short_exit_threshold_hit = bool(
+            self._short_active and np.isfinite(p_exit_short) and p_exit_short >= float(self._exit_thresholds["exit_short"])
+        )
+        long_hold_ready = bool(self._long_active and self._long_bars_held >= self._min_hold_bars)
+        short_hold_ready = bool(self._short_active and self._short_bars_held >= self._min_hold_bars)
+
+        long_entry_still_supports = bool(
+            np.isfinite(p_enter_long)
+            and p_enter_long >= float(self._entry_thresholds["enter_long"])
+            and (not np.isfinite(p_exit_long) or (p_exit_long - p_enter_long) < self._exit_entry_delta)
+        )
+        short_entry_still_supports = bool(
+            np.isfinite(p_enter_short)
+            and p_enter_short >= float(self._entry_thresholds["enter_short"])
+            and (not np.isfinite(p_exit_short) or (p_exit_short - p_enter_short) < self._exit_entry_delta)
+        )
+
+        do_exit_long = bool(long_exit_threshold_hit and long_hold_ready and not long_entry_still_supports)
+        do_exit_short = bool(short_exit_threshold_hit and short_hold_ready and not short_entry_still_supports)
+        do_entry_long = bool((not self._long_active) and np.isfinite(p_enter_long) and p_enter_long >= float(self._entry_thresholds["enter_long"]))
+        do_entry_short = bool((not self._short_active) and np.isfinite(p_enter_short) and p_enter_short >= float(self._entry_thresholds["enter_short"]))
+
+        next_long_active = bool((self._long_active and not do_exit_long) or do_entry_long)
+        next_short_active = bool((self._short_active and not do_exit_short) or do_entry_short)
+
+        self._long_agent._advance_state(action=1 if next_long_active else 0, row=work_row)
+        self._short_agent._advance_state(action=-1 if next_short_active else 0, row=work_row)
+        self._long_active = next_long_active
+        self._short_active = next_short_active
+        if do_entry_long:
+            self._long_bars_held = 0
+        elif self._long_active:
+            self._long_bars_held = max(0, self._long_bars_held + 1)
+        else:
+            self._long_bars_held = -1
+        if do_entry_short:
+            self._short_bars_held = 0
+        elif self._short_active:
+            self._short_bars_held = max(0, self._short_bars_held + 1)
+        else:
+            self._short_bars_held = -1
+
+        if self._long_active and not self._short_active:
+            return 1
+        if self._short_active and not self._long_active:
+            return -1
+        return 0
+
+    def _process_rows(self, *, base_frame: pd.DataFrame, rows: pd.DataFrame) -> list[dict[str, object]]:
+        out: list[dict[str, object]] = []
+        for _, row in rows.iterrows():
+            work_row, probs = self._score_row(base_frame, row)
+            self._last_probs = {
+                key: (None if not np.isfinite(val) else float(val))
+                for key, val in probs.items()
+            }
+            self._last_prob_sources = self._base_agent._extract_last_prob_sources(base_frame, row.name)
+            action = self._advance_independent_state(work_row=work_row, probs=probs)
+            self._last_processed_ts = pd.Timestamp(row.name)
+            out.append({"timestamp": row.name, "action": float(action), "close": float(row.get("close", np.nan))})
+        return out
+
+    def replay_warmup_actions(
+        self,
+        *,
+        df_1m: pd.DataFrame,
+        df_15m: pd.DataFrame,
+        apply_ga_probs: bool = True,
+    ) -> list[dict[str, object]]:
+        del df_15m, apply_ga_probs
+        base_frame = self._base_agent._build_base_frame(df_1m=df_1m)
+        if base_frame.empty or len(base_frame) < self._min_bars:
+            return []
+        self._reset_state()
+        return self._process_rows(base_frame=base_frame, rows=base_frame)
+
+    def act(self, *, df_1m: pd.DataFrame, df_15m: pd.DataFrame, target_ts: pd.Timestamp | None = None) -> float | None:
+        del df_15m
+        base_frame = self._base_agent._build_base_frame(df_1m=df_1m)
+        if base_frame.empty or len(base_frame) < self._min_bars:
+            return None
+        if target_ts is not None:
+            ts = pd.to_datetime(target_ts, utc=True, errors="coerce")
+            if pd.isna(ts) or ts not in base_frame.index:
+                rows = base_frame.tail(1)
+            else:
+                rows = base_frame.loc[base_frame.index > self._last_processed_ts] if self._last_processed_ts is not None else base_frame
+                rows = rows.loc[rows.index <= ts]
+                if rows.empty:
+                    rows = base_frame.loc[[ts]]
+        else:
+            rows = base_frame.loc[base_frame.index > self._last_processed_ts] if self._last_processed_ts is not None else base_frame.tail(1)
+            if rows.empty:
+                rows = base_frame.tail(1)
+        actions = self._process_rows(base_frame=base_frame, rows=rows)
+        if not actions:
+            return None
+        return float(actions[-1]["action"])
+
+    def snapshot_state(self) -> dict[str, object]:
+        return {
+            "position": float((1 if self._long_active else 0) + (-1 if self._short_active else 0)),
+            "long_active": int(self._long_active),
+            "short_active": int(self._short_active),
+            "long_bars_held": int(self._long_bars_held),
+            "short_bars_held": int(self._short_bars_held),
+            "last_probs": self._last_probs,
+            "last_prob_sources": self._last_prob_sources,
+        }
+
+    def last_probs(self) -> dict[str, float | None] | None:
+        return self._last_probs
+
+    def last_thresholds(self) -> dict[str, float] | None:
+        return {
+            "enter_long": float(self._entry_thresholds.get("enter_long", float("nan"))),
+            "enter_short": float(self._entry_thresholds.get("enter_short", float("nan"))),
+            "exit_long": float(self._exit_thresholds.get("exit_long", float("nan"))),
+            "exit_short": float(self._exit_thresholds.get("exit_short", float("nan"))),
+        }
+
+
 @dataclass
 class _PositionState:
     position: float = 0.0
@@ -1996,7 +2261,7 @@ class LiveInferenceEngine:
             target_ts = closed_bar["timestamp"]
 
         if self._agent is not None:
-            if isinstance(self._agent, LiveMetaXGBAgent):
+            if isinstance(self._agent, (LiveMetaXGBAgent, LiveIndependentMetaXGBAgent)):
                 return self._agent.act(df_1m=df_1m, df_15m=pd.DataFrame(), target_ts=target_ts)
             df_15m = build_15m(
                 df_1m,

@@ -24,7 +24,12 @@ from Policy.execution_latch import DirectionExecutionLatch
 UI_BUILD = "2026-03-02-dashboard-meta-10min"
 
 if TYPE_CHECKING:
-    from API.Alpaca_API.inference.live_inference import LiveInferenceEngine, LiveMetaXGBAgent, LivePPOAgent
+    from API.Alpaca_API.inference.live_inference import (
+        LiveIndependentMetaXGBAgent,
+        LiveInferenceEngine,
+        LiveMetaXGBAgent,
+        LivePPOAgent,
+    )
     from API.Alpaca_API.market_data.live_stream import AlpacaBarStreamer
     from Policy.order_policy import OptionOrderPolicy
 
@@ -543,7 +548,7 @@ class SessionConfig:
     assume_tz: str = "UTC"
     model_path: str = "Data/outputs/agent/ppo_model.pt"
     meta_model_root: str = "Data/models/meta_xgboost/10min"
-    meta_base_frame_path: str = "Data/inference/{symbol_lower}/10min/debug_matrices_warmup/{symbol_lower}/live_meta_matrix_on_trace_ts.parquet"
+    meta_base_frame_path: str = "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_24.parquet"
     meta_base_frame_append_lookback_days: int = 120
     no_agent: bool = False
     stochastic: bool = False
@@ -567,7 +572,7 @@ class SessionConfig:
     meta_trail_atr_after_tp: float = 0.8
     meta_use_tp_to_tighten_trail: bool = True
     env_file: str = ".env"
-    prefill_path: str | None = "Data/raw/spy/spy_intraday_1min.parquet"
+    prefill_path: str | None = "Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet"
     prefill_start: str = "2026-01-30"
     no_prefill_fetch: bool = False
     prefill_tail: int | None = None
@@ -617,7 +622,7 @@ class SessionConfig:
             meta_base_frame_path=str(
                 payload.get(
                     "meta_base_frame_path",
-                    "Data/inference/{symbol_lower}/10min/debug_matrices_warmup/{symbol_lower}/live_meta_matrix_on_trace_ts.parquet",
+                    "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_24.parquet",
                 )
             ),
             meta_base_frame_append_lookback_days=max(
@@ -646,7 +651,7 @@ class SessionConfig:
             meta_trail_atr_after_tp=_coerce_float(payload.get("meta_trail_atr_after_tp"), 0.8),
             meta_use_tp_to_tighten_trail=_coerce_bool(payload.get("meta_use_tp_to_tighten_trail"), True),
             env_file=str(payload.get("env_file", ".env")),
-            prefill_path=payload.get("prefill_path", "Data/raw/spy/spy_intraday_1min.parquet"),
+            prefill_path=payload.get("prefill_path", "Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet"),
             prefill_start=str(payload.get("prefill_start", "2026-01-30")),
             no_prefill_fetch=_coerce_bool(payload.get("no_prefill_fetch"), False),
             prefill_tail=(
@@ -1032,10 +1037,15 @@ class LiveSession:
         execution_latches: dict[str, DirectionExecutionLatch] | None = None,
         last_exec_action_by_symbol: dict[str, int] | None = None,
     ) -> None:
-        from API.Alpaca_API.inference.live_inference import build_15m
+        from API.Alpaca_API.inference.live_inference import LiveIndependentMetaXGBAgent, LiveMetaXGBAgent, build_15m
 
         seeded_counts: dict[str, int] = {}
         warmup_action_counts: dict[str, int] = {}
+        skip_meta_warmup_replay = bool(
+            isinstance(agent, LiveMetaXGBAgent)
+            and isinstance(getattr(agent, "_precomputed_base_frame", None), pd.DataFrame)
+            and not getattr(agent, "_precomputed_base_frame").empty
+        )
         for symbol in cfg.symbols:
             buffer = processor._buffers.get(symbol)
             if buffer is None:
@@ -1100,7 +1110,7 @@ class LiveSession:
                 count += 1
 
             warmup_actions = 0
-            if inference is not None and agent is not None:
+            if inference is not None and agent is not None and not skip_meta_warmup_replay:
                 try:
                     warmup_records = agent.replay_warmup_actions(
                         df_1m=df_1m_utc,
@@ -1176,6 +1186,14 @@ class LiveSession:
                 {
                     "symbol": "SYSTEM",
                     "message": f"[live] seeded warmup action history from prefill: {warmup_action_counts}",
+                },
+            )
+        elif skip_meta_warmup_replay:
+            self._emit(
+                "log",
+                {
+                    "symbol": "SYSTEM",
+                    "message": "[live] skipped warmup action replay because cached meta base frame is loaded.",
                 },
             )
 
@@ -1289,7 +1307,12 @@ class LiveSession:
         inference_mode = "none" if cfg.no_agent else str(cfg.inference_mode or "meta").strip().lower()
         if inference_mode != "none":
             self._emit_status(running=True, message=f"replay loading {inference_mode} agent")
-            from API.Alpaca_API.inference.live_inference import LiveInferenceEngine, LiveMetaXGBAgent, LivePPOAgent
+            from API.Alpaca_API.inference.live_inference import (
+                LiveIndependentMetaXGBAgent,
+                LiveInferenceEngine,
+                LiveMetaXGBAgent,
+                LivePPOAgent,
+            )
 
             ga_feature_list = self._resolve_ga_feature_list(cfg)
             ga_probs_frame = _load_agent_matrix_probs(symbol=symbols[0], dataset_name=cfg.ga_dataset_name)
@@ -1797,7 +1820,12 @@ class LiveSession:
             if mode != "live":
                 raise ValueError(f"Unknown runner_mode: {cfg.runner_mode}")
 
-            from API.Alpaca_API.inference.live_inference import LiveInferenceEngine, LiveMetaXGBAgent, LivePPOAgent
+            from API.Alpaca_API.inference.live_inference import (
+                LiveIndependentMetaXGBAgent,
+                LiveInferenceEngine,
+                LiveMetaXGBAgent,
+                LivePPOAgent,
+            )
             from API.Alpaca_API.market_data.live_stream import AlpacaBarStreamer
             from API.Alpaca_API.runners import live_runner as lr
             from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
@@ -1817,7 +1845,7 @@ class LiveSession:
             precomputed_meta_frame = None
 
             inference_mode = "none" if cfg.no_agent else str(cfg.inference_mode or "meta").strip().lower()
-            agent: LivePPOAgent | LiveMetaXGBAgent | None = None
+            agent: LivePPOAgent | LiveMetaXGBAgent | LiveIndependentMetaXGBAgent | None = None
             if inference_mode != "none":
                 ga_feature_list = self._resolve_ga_feature_list(cfg)
                 ga_probs_frame = (
@@ -1894,7 +1922,7 @@ class LiveSession:
                                     "message": f"[live] Cached meta base frame unavailable: {exc}",
                                 },
                             )
-                    agent = LiveMetaXGBAgent(
+                    agent = LiveIndependentMetaXGBAgent(
                         model_root=cfg.meta_model_root,
                         ga_model_root=cfg.ga_model_root if ga_feature_list else None,
                         ga_feature_list_path=ga_feature_list,
@@ -1921,6 +1949,8 @@ class LiveSession:
                         exit_threshold_override=cfg.meta_exit_threshold,
                         precomputed_base_frame=precomputed_meta_frame,
                         precomputed_append_lookback_days=int(cfg.meta_base_frame_append_lookback_days),
+                        min_hold_bars=2,
+                        exit_entry_delta=0.15,
                     )
                     self._emit(
                         "log",
@@ -2165,6 +2195,14 @@ class LiveSession:
                 self._store.set_policy_state(symbol, policy_state)
                 broker_snap = policy.snapshot_broker_state(orders_limit=20)
                 self._store.set_broker_state(symbol, broker_snap)
+                policy_pos = int(policy_state.get("position", 0) or 0)
+                self._store.set_last_action(
+                    symbol,
+                    action=float(policy_pos),
+                    action_class=policy_pos,
+                    ts=bar15.get("timestamp"),
+                    close=bar15.get("close"),
+                )
                 event_payload = {
                     "symbol": symbol,
                     "timestamp": _ts_iso(bar15.get("timestamp")),
@@ -2195,8 +2233,24 @@ class LiveSession:
                     },
                 )
             if cfg.prefill_path:
+                self._emit_status(running=True, message="loading prefill file")
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": f"[live] loading prefill file: {cfg.prefill_path}",
+                    },
+                )
                 prefill_df = lr._load_prefill_frame(Path(cfg.prefill_path))
                 if not cfg.no_prefill_fetch:
+                    self._emit_status(running=True, message="gap-bridging prefill from Alpaca")
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": "[live] gap-bridging prefill from Alpaca...",
+                        },
+                    )
                     try:
                         prefill_df = lr._extend_prefill_with_alpaca_gap(
                             df=prefill_df,
@@ -2211,6 +2265,15 @@ class LiveSession:
                                 "message": f"[live] Prefill gap bridge failed: {exc}",
                             },
                         )
+                else:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": "[live] skipping Alpaca prefill fetch because no_prefill_fetch is enabled.",
+                        },
+                    )
+                self._emit_status(running=True, message="seeding live buffers from prefill")
                 lr._prefill_buffers(
                     processor=processor,
                     df=prefill_df,
