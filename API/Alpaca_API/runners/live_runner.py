@@ -270,6 +270,42 @@ def _load_prefill_frame(path: Path) -> pd.DataFrame:
     return df
 
 
+def _resolve_symbolized_path(template: str | Path, *, symbol: str) -> Path:
+    text = str(template)
+    return Path(
+        text.format(
+            symbol=symbol.upper(),
+            symbol_lower=symbol.lower(),
+        )
+    )
+
+
+def _load_precomputed_meta_frame(path: Path, *, tz: str = "America/New_York") -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing meta base frame file: {path}")
+    if path.suffix.lower() == ".parquet":
+        df = pd.read_parquet(path)
+    elif path.suffix.lower() == ".csv":
+        df = pd.read_csv(path)
+    else:
+        raise ValueError("Meta base frame must be .csv or .parquet")
+
+    if "timestamp" in df.columns:
+        ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        df = df.loc[ts.notna()].copy()
+        df.index = ts[ts.notna()]
+    elif not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("Meta base frame must include a timestamp column or DatetimeIndex.")
+
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
+    if tz:
+        df.index = df.index.tz_convert(tz)
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    return df
+
+
 def _prefill_buffers(
     *,
     processor: LiveBarProcessor,
@@ -894,7 +930,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--buffer-size",
         type=int,
-        default=5000,
+        default=0,
         help="Ring buffer size in 1m bars. Use 0 for unlimited history in memory.",
     )
     parser.add_argument("--queue-size", type=int, default=5000, help="Max queued bars before dropping.")
@@ -926,6 +962,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ga-pivot-label-dir", default="swing", help="Label dir for pivot GA-XGB models.")
     parser.add_argument("--ga-tb-label-dir", default="tb", help="Label dir for TB GA-XGB models.")
     parser.add_argument("--meta-model-root", default="Data/models/meta_xgboost/10min", help="Meta-XGB model root.")
+    parser.add_argument(
+        "--meta-base-frame-path",
+        default="Data/inference/{symbol_lower}/10min/debug_matrices_warmup/{symbol_lower}/live_meta_matrix_on_trace_ts.parquet",
+        help="Optional cached 10m meta feature matrix path. Supports {symbol} and {symbol_lower}.",
+    )
+    parser.add_argument(
+        "--meta-base-frame-append-lookback-days",
+        type=int,
+        default=120,
+        help="When live bars extend past the cached matrix, recompute only this many days of 1m history and append.",
+    )
     parser.add_argument(
         "--meta-entry-threshold",
         type=float,
@@ -1084,6 +1131,7 @@ def main() -> None:
     stop_event = threading.Event()
 
     agent = None
+    precomputed_meta_frame: pd.DataFrame | None = None
     ga_feature_list = args.ga_feature_list
     if inference_mode != "none" and ga_feature_list is None:
         try:
@@ -1133,6 +1181,21 @@ def main() -> None:
     elif inference_mode == "meta":
         if int(args.interval) != 10:
             print(f"[live] Warning: meta inference is trained for 10min bars; current --interval={args.interval}.")
+        if args.meta_base_frame_path:
+            try:
+                meta_base_path = _resolve_symbolized_path(args.meta_base_frame_path, symbol=symbols[0])
+                precomputed_meta_frame = _load_precomputed_meta_frame(
+                    meta_base_path,
+                    tz=args.tz or "America/New_York",
+                )
+                if not precomputed_meta_frame.empty:
+                    print(
+                        f"[live] Loaded cached meta base frame: rows={len(precomputed_meta_frame):,} "
+                        f"range={precomputed_meta_frame.index.min()}..{precomputed_meta_frame.index.max()} "
+                        f"path={meta_base_path}"
+                    )
+            except Exception as exc:
+                print(f"[live] Cached meta base frame unavailable: {exc}")
         agent = LiveMetaXGBAgent(
             model_root=args.meta_model_root,
             ga_model_root=args.ga_model_root if ga_feature_list else None,
@@ -1156,6 +1219,8 @@ def main() -> None:
             use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
             entry_threshold_override=args.meta_entry_threshold,
             exit_threshold_override=args.meta_exit_threshold,
+            precomputed_base_frame=precomputed_meta_frame,
+            precomputed_append_lookback_days=int(args.meta_base_frame_append_lookback_days),
         )
         print(
             f"[live] Meta-XGB inference enabled: model_root={args.meta_model_root} "
@@ -1259,7 +1324,7 @@ def main() -> None:
                 )
             except Exception as exc:
                 print(f"[live] Prefill gap bridge failed: {exc}")
-        if args.prefill_tail and args.prefill_tail > args.buffer_size:
+        if args.buffer_size and args.buffer_size > 0 and args.prefill_tail and args.prefill_tail > args.buffer_size:
             print("[live] Warning: prefill-tail exceeds buffer-size; oldest rows will be dropped.")
         _prefill_buffers(
             processor=processor,
@@ -1268,7 +1333,7 @@ def main() -> None:
             tail=args.prefill_tail,
         )
     elif args.prefill_start and not args.no_prefill_fetch:
-        if args.prefill_tail and args.prefill_tail > args.buffer_size:
+        if args.buffer_size and args.buffer_size > 0 and args.prefill_tail and args.prefill_tail > args.buffer_size:
             print("[live] Warning: prefill-tail exceeds buffer-size; oldest rows will be dropped.")
         try:
             _prefill_from_alpaca(

@@ -535,7 +535,7 @@ class SessionConfig:
     inference_mode: str = "meta"
     feed: str = "IEX"
     interval: int = 10
-    buffer_size: int = 5000
+    buffer_size: int = 0
     queue_size: int = 5000
     resample_label: str = "left"
     resample_closed: str = "left"
@@ -543,6 +543,8 @@ class SessionConfig:
     assume_tz: str = "UTC"
     model_path: str = "Data/outputs/agent/ppo_model.pt"
     meta_model_root: str = "Data/models/meta_xgboost/10min"
+    meta_base_frame_path: str = "Data/inference/{symbol_lower}/10min/debug_matrices_warmup/{symbol_lower}/live_meta_matrix_on_trace_ts.parquet"
+    meta_base_frame_append_lookback_days: int = 120
     no_agent: bool = False
     stochastic: bool = False
     device: str = "auto"
@@ -565,7 +567,7 @@ class SessionConfig:
     meta_trail_atr_after_tp: float = 0.8
     meta_use_tp_to_tighten_trail: bool = True
     env_file: str = ".env"
-    prefill_path: str | None = None
+    prefill_path: str | None = "Data/raw/spy/spy_intraday_1min.parquet"
     prefill_start: str = "2026-01-30"
     no_prefill_fetch: bool = False
     prefill_tail: int | None = None
@@ -604,7 +606,7 @@ class SessionConfig:
             inference_mode=str(payload.get("inference_mode", "meta")).strip().lower(),
             feed=str(payload.get("feed", "IEX")).upper(),
             interval=max(1, _coerce_int(payload.get("interval"), 10)),
-            buffer_size=max(100, _coerce_int(payload.get("buffer_size"), 5000)),
+            buffer_size=max(0, _coerce_int(payload.get("buffer_size"), 0)),
             queue_size=max(100, _coerce_int(payload.get("queue_size"), 5000)),
             resample_label=str(payload.get("resample_label", "left")).strip().lower(),
             resample_closed=str(payload.get("resample_closed", "left")).strip().lower(),
@@ -612,6 +614,16 @@ class SessionConfig:
             assume_tz=str(payload.get("assume_tz", "UTC")),
             model_path=str(payload.get("model_path", "Data/outputs/agent/ppo_model.pt")),
             meta_model_root=str(payload.get("meta_model_root", "Data/models/meta_xgboost/10min")),
+            meta_base_frame_path=str(
+                payload.get(
+                    "meta_base_frame_path",
+                    "Data/inference/{symbol_lower}/10min/debug_matrices_warmup/{symbol_lower}/live_meta_matrix_on_trace_ts.parquet",
+                )
+            ),
+            meta_base_frame_append_lookback_days=max(
+                1,
+                _coerce_int(payload.get("meta_base_frame_append_lookback_days"), 120),
+            ),
             no_agent=_coerce_bool(payload.get("no_agent"), False),
             stochastic=_coerce_bool(payload.get("stochastic"), False),
             device=str(payload.get("device", "auto")),
@@ -634,7 +646,7 @@ class SessionConfig:
             meta_trail_atr_after_tp=_coerce_float(payload.get("meta_trail_atr_after_tp"), 0.8),
             meta_use_tp_to_tighten_trail=_coerce_bool(payload.get("meta_use_tp_to_tighten_trail"), True),
             env_file=str(payload.get("env_file", ".env")),
-            prefill_path=payload.get("prefill_path"),
+            prefill_path=payload.get("prefill_path", "Data/raw/spy/spy_intraday_1min.parquet"),
             prefill_start=str(payload.get("prefill_start", "2026-01-30")),
             no_prefill_fetch=_coerce_bool(payload.get("no_prefill_fetch"), False),
             prefill_tail=(
@@ -1802,6 +1814,7 @@ class LiveSession:
             }
             feed = lr._parse_feed(cfg.feed)
             bar_queue: queue_mod.Queue = queue_mod.Queue(maxsize=cfg.queue_size)
+            precomputed_meta_frame = None
 
             inference_mode = "none" if cfg.no_agent else str(cfg.inference_mode or "meta").strip().lower()
             agent: LivePPOAgent | LiveMetaXGBAgent | None = None
@@ -1854,6 +1867,33 @@ class LiveSession:
                             },
                         )
                 if inference_mode == "meta":
+                    if cfg.meta_base_frame_path:
+                        try:
+                            meta_base_path = lr._resolve_symbolized_path(cfg.meta_base_frame_path, symbol=symbols[0])
+                            precomputed_meta_frame = lr._load_precomputed_meta_frame(
+                                meta_base_path,
+                                tz=cfg.tz or "America/New_York",
+                            )
+                            if not precomputed_meta_frame.empty:
+                                self._emit(
+                                    "log",
+                                    {
+                                        "symbol": "SYSTEM",
+                                        "message": (
+                                            f"[live] Loaded cached meta base frame: rows={len(precomputed_meta_frame):,} "
+                                            f"range={_ts_iso(precomputed_meta_frame.index.min())}..{_ts_iso(precomputed_meta_frame.index.max())} "
+                                            f"path={meta_base_path}"
+                                        ),
+                                    },
+                                )
+                        except Exception as exc:
+                            self._emit(
+                                "log",
+                                {
+                                    "symbol": "SYSTEM",
+                                    "message": f"[live] Cached meta base frame unavailable: {exc}",
+                                },
+                            )
                     agent = LiveMetaXGBAgent(
                         model_root=cfg.meta_model_root,
                         ga_model_root=cfg.ga_model_root if ga_feature_list else None,
@@ -1879,6 +1919,8 @@ class LiveSession:
                         use_tp_to_tighten_trail=bool(cfg.meta_use_tp_to_tighten_trail),
                         entry_threshold_override=cfg.meta_entry_threshold,
                         exit_threshold_override=cfg.meta_exit_threshold,
+                        precomputed_base_frame=precomputed_meta_frame,
+                        precomputed_append_lookback_days=int(cfg.meta_base_frame_append_lookback_days),
                     )
                     self._emit(
                         "log",
@@ -2144,7 +2186,7 @@ class LiveSession:
                 on_15m_close=_on_15m,
             )
 
-            if cfg.prefill_tail and cfg.prefill_tail > cfg.buffer_size:
+            if cfg.buffer_size and cfg.buffer_size > 0 and cfg.prefill_tail and cfg.prefill_tail > cfg.buffer_size:
                 self._emit(
                     "log",
                     {
@@ -2154,6 +2196,21 @@ class LiveSession:
                 )
             if cfg.prefill_path:
                 prefill_df = lr._load_prefill_frame(Path(cfg.prefill_path))
+                if not cfg.no_prefill_fetch:
+                    try:
+                        prefill_df = lr._extend_prefill_with_alpaca_gap(
+                            df=prefill_df,
+                            symbols=symbols,
+                            feed=feed,
+                        )
+                    except Exception as exc:
+                        self._emit(
+                            "log",
+                            {
+                                "symbol": "SYSTEM",
+                                "message": f"[live] Prefill gap bridge failed: {exc}",
+                            },
+                        )
                 lr._prefill_buffers(
                     processor=processor,
                     df=prefill_df,

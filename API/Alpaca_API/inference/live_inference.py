@@ -780,6 +780,7 @@ class LiveMetaXGBAgent:
         ga_probs_frame: pd.DataFrame | None = None,
         ga_probs_mode: str = "xgb",
         precomputed_base_frame: pd.DataFrame | None = None,
+        precomputed_append_lookback_days: int = 120,
     ) -> None:
         self._model_root = Path(model_root)
         self._include_pivot_probs = bool(include_pivot_probs)
@@ -801,7 +802,8 @@ class LiveMetaXGBAgent:
         self._use_tp_to_tighten_trail = bool(use_tp_to_tighten_trail)
         self._ga_probs_frame = ga_probs_frame
         self._ga_probs_mode = str(ga_probs_mode or "xgb").strip().lower()
-        self._precomputed_base_frame = precomputed_base_frame
+        self._precomputed_base_frame = self._normalize_precomputed_base_frame(precomputed_base_frame)
+        self._precomputed_append_lookback_days = max(1, int(precomputed_append_lookback_days))
         self._entry_threshold_override = (
             float(entry_threshold_override)
             if entry_threshold_override is not None and np.isfinite(entry_threshold_override)
@@ -873,6 +875,24 @@ class LiveMetaXGBAgent:
             ts = ts.tz_convert(tz)
         return ts
 
+    def _normalize_precomputed_base_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame | None:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return None
+        out = frame.copy()
+        if "timestamp" in out.columns:
+            ts = pd.to_datetime(out["timestamp"], utc=True, errors="coerce")
+            out = out.loc[ts.notna()].copy()
+            out.index = ts[ts.notna()]
+        elif not isinstance(out.index, pd.DatetimeIndex):
+            return None
+        if out.index.tz is None:
+            out.index = out.index.tz_localize(self._assume_tz)
+        if self._tz is not None:
+            out.index = out.index.tz_convert(self._tz)
+        out = out.sort_index()
+        out = out[~out.index.duplicated(keep="last")]
+        return out
+
     def _reset_trade_state(self) -> None:
         self._state = _MetaTradeState()
 
@@ -894,7 +914,71 @@ class LiveMetaXGBAgent:
 
     def _build_base_frame(self, *, df_1m: pd.DataFrame) -> pd.DataFrame:
         if isinstance(self._precomputed_base_frame, pd.DataFrame) and not self._precomputed_base_frame.empty:
-            return self._precomputed_base_frame
+            pre = self._precomputed_base_frame
+            if df_1m is None or df_1m.empty:
+                return pre
+
+            if not isinstance(df_1m.index, pd.DatetimeIndex):
+                if "timestamp" not in df_1m.columns:
+                    return pre
+                raw = df_1m.copy()
+                raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True, errors="coerce")
+                raw = raw.dropna(subset=["timestamp"]).set_index("timestamp")
+            else:
+                raw = df_1m.copy()
+
+            if raw.index.tz is None:
+                raw.index = raw.index.tz_localize(self._assume_tz)
+            if self._tz is not None:
+                raw.index = raw.index.tz_convert(self._tz)
+            raw = raw.sort_index()
+            if raw.empty:
+                return pre
+
+            try:
+                latest_base_ts = build_15m(
+                    raw,
+                    rule=self._label_timeframe_rule,
+                    label=self._resample_label,
+                    closed=self._resample_closed,
+                    tz=self._tz,
+                    assume_tz=self._assume_tz,
+                ).index.max()
+            except Exception:
+                latest_base_ts = None
+
+            cached_max = pre.index.max()
+            if latest_base_ts is None or pd.isna(latest_base_ts) or latest_base_ts <= cached_max:
+                return pre
+
+            overlap_start = cached_max - pd.Timedelta(days=self._precomputed_append_lookback_days)
+            raw_tail = raw.loc[raw.index >= overlap_start].copy()
+            computed_tail = build_meta_feature_frame_from_1m(
+                raw_tail,
+                rule=self._label_timeframe_rule,
+                label=self._resample_label,
+                closed=self._resample_closed,
+                tz=self._tz,
+                assume_tz=self._assume_tz,
+                include_pivot_probs=self._include_pivot_probs,
+                include_tb_probs=self._include_tb_probs,
+                include_vix_features=self._include_vix_features,
+                fill_missing_prob=self._fill_missing_prob,
+                session_open=self._session_open,
+                session_close=self._session_close,
+                ga_predictor=self._ga_predictor,
+                ga_probs_frame=self._ga_probs_frame,
+                ga_probs_mode=self._ga_probs_mode,
+            )
+            if computed_tail.empty:
+                return pre
+            merged = pd.concat(
+                [pre.loc[pre.index < computed_tail.index.min()], computed_tail],
+                axis=0,
+            ).sort_index()
+            merged = merged[~merged.index.duplicated(keep="last")]
+            self._precomputed_base_frame = merged
+            return merged
         return build_meta_feature_frame_from_1m(
             df_1m,
             rule=self._label_timeframe_rule,

@@ -206,7 +206,9 @@
         <div class="field"><label>Interval (min)</label><input id="interval" type="number" value="10" min="1" /></div>
         <div class="field"><label>Signal Model</label><input value="Meta-XGB (10min)" disabled /></div>
         <div class="field"><label>Meta Model Root</label><input id="metaModelRoot" value="Data/models/meta_xgboost/10min" /></div>
+        <div class="field"><label>Meta Matrix Path</label><input id="metaBaseFramePath" value="Data/inference/{symbol_lower}/10min/debug_matrices_warmup/{symbol_lower}/live_meta_matrix_on_trace_ts.parquet" /></div>
         <div class="field"><label>Live Prefill Start</label><input id="prefillStart" value="2026-01-30" /></div>
+        <div class="field"><label>Prefill Path</label><input id="prefillPath" value="Data/raw/spy/spy_intraday_1min.parquet" /></div>
         <div class="field"><label>Env File</label><input id="envFile" value=".env" /></div>
         <div class="field"><label>Replay Data Path</label><input id="replayDataPath" value="Data/raw/spy/inference_buffer_1m.parquet" /></div>
         <div class="field"><label>Replay Start</label><input id="replayStart" value="2026-01-30T00:00:00Z" placeholder="optional ISO datetime" /></div>
@@ -1092,6 +1094,8 @@
         interval: Number(document.getElementById("interval").value),
         model_path: null,
         meta_model_root: document.getElementById("metaModelRoot").value,
+        meta_base_frame_path: document.getElementById("metaBaseFramePath").value,
+        prefill_path: document.getElementById("prefillPath").value,
         prefill_start: document.getElementById("prefillStart").value,
         replay_data_path: document.getElementById("replayDataPath").value,
         replay_start: document.getElementById("replayStart").value || null,
