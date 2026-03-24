@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pandas as pd
 from alpaca.data.enums import DataFeed
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
 from API.Alpaca_API.runners.live_runner import _normalize_prefill_1m_frame
