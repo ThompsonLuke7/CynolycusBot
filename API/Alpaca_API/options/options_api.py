@@ -144,6 +144,16 @@ class AlpacaOptionsClient:
         url = f"{self._trading_base}/v2/orders/{oid}"
         return self._request("GET", url)
 
+    def cancel_order(self, order_id: str) -> Any:
+        """
+        DELETE /v2/orders/{order_id}
+        """
+        oid = str(order_id).strip()
+        if not oid:
+            raise ValueError("order_id is required")
+        url = f"{self._trading_base}/v2/orders/{oid}"
+        return self._request("DELETE", url)
+
     def get_account(self) -> Any:
         """
         GET /v2/account
@@ -162,6 +172,7 @@ class AlpacaOptionsClient:
         clean_params = {k: v for k, v in params.items() if v is not None}
         symbols = clean_params.get("symbols") or clean_params.get("symbol_or_symbols")
         base_params = dict(clean_params)
+        latest_base_params = {k: v for k, v in base_params.items() if k != "limit"}
         if symbols is not None:
             params_symbols = dict(base_params)
             params_symbols["symbols"] = symbols
@@ -169,14 +180,22 @@ class AlpacaOptionsClient:
             params_symbol_or_symbols = dict(base_params)
             params_symbol_or_symbols["symbol_or_symbols"] = symbols
             params_symbol_or_symbols.pop("symbols", None)
+            latest_params_symbols = dict(latest_base_params)
+            latest_params_symbols["symbols"] = symbols
+            latest_params_symbols.pop("symbol_or_symbols", None)
+            latest_params_symbol_or_symbols = dict(latest_base_params)
+            latest_params_symbol_or_symbols["symbol_or_symbols"] = symbols
+            latest_params_symbol_or_symbols.pop("symbols", None)
         else:
             params_symbols = dict(base_params)
             params_symbol_or_symbols = dict(base_params)
+            latest_params_symbols = dict(latest_base_params)
+            latest_params_symbol_or_symbols = dict(latest_base_params)
 
         attempts.extend(
             [
-                (f"{self._data_base}/v1beta1/options/quotes/latest", params_symbols),
-                (f"{self._data_base}/v1beta1/options/quotes/latest", params_symbol_or_symbols),
+                (f"{self._data_base}/v1beta1/options/quotes/latest", latest_params_symbols),
+                (f"{self._data_base}/v1beta1/options/quotes/latest", latest_params_symbol_or_symbols),
                 (f"{self._data_base}/v2/options/quotes", params_symbols),
                 (f"{self._data_base}/v2/options/quotes", params_symbol_or_symbols),
             ]

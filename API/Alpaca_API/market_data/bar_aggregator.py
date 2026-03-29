@@ -74,6 +74,23 @@ class OhlcvAggregator:
         self._bucket_start = None
         self._agg = None
 
+    def flush_current(self) -> Optional[dict]:
+        """
+        Force-close the in-progress bucket.
+
+        This is useful at known session boundaries where no subsequent bar will
+        arrive to roll the bucket naturally.
+        """
+        if self._agg is None:
+            return None
+        closed = self._agg.to_dict()
+        if self._label == "right":
+            closed["timestamp"] = closed["timestamp"] + timedelta(
+                minutes=self.interval_minutes
+            )
+        self.reset()
+        return closed
+
     def update(self, bar: dict) -> tuple[Optional[dict], Optional[dict]]:
         """
         Update aggregation with a new 1m bar.

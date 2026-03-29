@@ -1322,7 +1322,25 @@ class LiveMetaXGBAgent:
                     self._last_probs[key] = None
             self._last_prob_sources = self._extract_last_prob_sources(base_frame, row.name)
             self._advance_state(action=action, row=row)
-            out.append({"timestamp": row.name, "action": float(action), "close": float(row.get("close", np.nan))})
+            out.append(
+                {
+                    "timestamp": row.name,
+                    "action": float(action),
+                    "close": float(row.get("close", np.nan)),
+                    "p_pivot_long": self._last_probs.get("p_pivot_long") if self._last_probs else None,
+                    "p_pivot_short": self._last_probs.get("p_pivot_short") if self._last_probs else None,
+                    "p_tb_long": self._last_probs.get("p_tb_long") if self._last_probs else None,
+                    "p_tb_short": self._last_probs.get("p_tb_short") if self._last_probs else None,
+                    "p_enter_long": self._last_probs.get("p_enter_long") if self._last_probs else None,
+                    "p_enter_short": self._last_probs.get("p_enter_short") if self._last_probs else None,
+                    "p_exit_long": self._last_probs.get("p_exit_long") if self._last_probs else None,
+                    "p_exit_short": self._last_probs.get("p_exit_short") if self._last_probs else None,
+                    "thr_enter_long": float(self._entry_thresholds.get("enter_long", float("nan"))),
+                    "thr_enter_short": float(self._entry_thresholds.get("enter_short", float("nan"))),
+                    "thr_exit_long": float(self._exit_thresholds.get("exit_long", float("nan"))),
+                    "thr_exit_short": float(self._exit_thresholds.get("exit_short", float("nan"))),
+                }
+            )
         return out
 
     def snapshot_state(self) -> dict[str, object]:
@@ -1388,6 +1406,13 @@ class LiveIndependentMetaXGBAgent:
         precomputed_append_lookback_days: int = 120,
         min_hold_bars: int = 2,
         exit_entry_delta: float = 0.15,
+        soft_exit_confirm_bars: int = 2,
+        urgent_exit_prob: float = 0.85,
+        urgent_exit_delta: float = 0.30,
+        profit_protect_enabled: bool = False,
+        profit_protect_arm_atr: float = 2.0,
+        profit_protect_giveback_atr_long: float = 0.75,
+        profit_protect_giveback_atr_short: float = 1.0,
     ) -> None:
         common_kwargs = dict(
             model_root=model_root,
@@ -1425,12 +1450,21 @@ class LiveIndependentMetaXGBAgent:
         self._min_bars = int(self._base_agent._min_bars)
         self._min_hold_bars = max(0, int(min_hold_bars))
         self._exit_entry_delta = float(exit_entry_delta)
+        self._soft_exit_confirm_bars = max(1, int(soft_exit_confirm_bars))
+        self._urgent_exit_prob = float(urgent_exit_prob)
+        self._urgent_exit_delta = float(urgent_exit_delta)
+        self._profit_protect_enabled = bool(profit_protect_enabled)
+        self._profit_protect_arm_atr = float(profit_protect_arm_atr)
+        self._profit_protect_giveback_atr_long = float(profit_protect_giveback_atr_long)
+        self._profit_protect_giveback_atr_short = float(profit_protect_giveback_atr_short)
         self._entry_thresholds = dict(self._base_agent._entry_thresholds)
         self._exit_thresholds = dict(self._base_agent._exit_thresholds)
         self._long_active = False
         self._short_active = False
         self._long_bars_held = -1
         self._short_bars_held = -1
+        self._long_soft_exit_count = 0
+        self._short_soft_exit_count = 0
         self._last_probs: dict[str, float | None] | None = None
         self._last_prob_sources: dict[str, str | None] | None = None
         self._last_processed_ts: pd.Timestamp | None = None
@@ -1442,6 +1476,8 @@ class LiveIndependentMetaXGBAgent:
         self._short_active = False
         self._long_bars_held = -1
         self._short_bars_held = -1
+        self._long_soft_exit_count = 0
+        self._short_soft_exit_count = 0
         self._last_probs = None
         self._last_prob_sources = None
         self._last_processed_ts = None
@@ -1486,28 +1522,78 @@ class LiveIndependentMetaXGBAgent:
         p_exit_long = float(probs.get("p_exit_long", np.nan))
         p_exit_short = float(probs.get("p_exit_short", np.nan))
 
-        long_exit_threshold_hit = bool(
-            self._long_active and np.isfinite(p_exit_long) and p_exit_long >= float(self._exit_thresholds["exit_long"])
-        )
-        short_exit_threshold_hit = bool(
-            self._short_active and np.isfinite(p_exit_short) and p_exit_short >= float(self._exit_thresholds["exit_short"])
-        )
         long_hold_ready = bool(self._long_active and self._long_bars_held >= self._min_hold_bars)
         short_hold_ready = bool(self._short_active and self._short_bars_held >= self._min_hold_bars)
 
-        long_entry_still_supports = bool(
-            np.isfinite(p_enter_long)
-            and p_enter_long >= float(self._entry_thresholds["enter_long"])
-            and (not np.isfinite(p_exit_long) or (p_exit_long - p_enter_long) < self._exit_entry_delta)
+        long_soft_exit_condition = bool(
+            self._long_active
+            and long_hold_ready
+            and np.isfinite(p_enter_long)
+            and p_enter_long < float(self._entry_thresholds["enter_long"])
         )
-        short_entry_still_supports = bool(
-            np.isfinite(p_enter_short)
-            and p_enter_short >= float(self._entry_thresholds["enter_short"])
-            and (not np.isfinite(p_exit_short) or (p_exit_short - p_enter_short) < self._exit_entry_delta)
+        short_soft_exit_condition = bool(
+            self._short_active
+            and short_hold_ready
+            and np.isfinite(p_enter_short)
+            and p_enter_short < float(self._entry_thresholds["enter_short"])
+        )
+        self._long_soft_exit_count = self._long_soft_exit_count + 1 if long_soft_exit_condition else 0
+        self._short_soft_exit_count = self._short_soft_exit_count + 1 if short_soft_exit_condition else 0
+
+        long_urgent_exit = bool(
+            self._long_active
+            and long_hold_ready
+            and (
+                (np.isfinite(p_exit_long) and p_exit_long >= self._urgent_exit_prob)
+                or (
+                    np.isfinite(p_exit_long)
+                    and np.isfinite(p_enter_long)
+                    and (p_exit_long - p_enter_long) >= self._urgent_exit_delta
+                )
+            )
+        )
+        short_urgent_exit = bool(
+            self._short_active
+            and short_hold_ready
+            and (
+                (np.isfinite(p_exit_short) and p_exit_short >= self._urgent_exit_prob)
+                or (
+                    np.isfinite(p_exit_short)
+                    and np.isfinite(p_enter_short)
+                    and (p_exit_short - p_enter_short) >= self._urgent_exit_delta
+                )
+            )
         )
 
-        do_exit_long = bool(long_exit_threshold_hit and long_hold_ready and not long_entry_still_supports)
-        do_exit_short = bool(short_exit_threshold_hit and short_hold_ready and not short_entry_still_supports)
+        if self._profit_protect_enabled and self._profit_protect_arm_atr > 0.0:
+            close = float(work_row.get("close", np.nan))
+            high = float(work_row.get("high", np.nan))
+            low = float(work_row.get("low", np.nan))
+            if self._long_active:
+                state = self._long_agent._state
+                entry = float(state.entry_price)
+                atr = float(state.entry_atr)
+                favorable = max(float(state.favorable_anchor), high) if np.isfinite(high) else float(state.favorable_anchor)
+                if np.isfinite(entry) and np.isfinite(atr) and atr > 0.0 and np.isfinite(favorable) and np.isfinite(close):
+                    mfe_atr = (favorable - entry) / atr
+                    realized_run_atr = (close - entry) / atr
+                    giveback_atr = mfe_atr - realized_run_atr
+                    if mfe_atr >= self._profit_protect_arm_atr and giveback_atr >= self._profit_protect_giveback_atr_long:
+                        long_urgent_exit = True
+            if self._short_active:
+                state = self._short_agent._state
+                entry = float(state.entry_price)
+                atr = float(state.entry_atr)
+                favorable = min(float(state.favorable_anchor), low) if np.isfinite(low) else float(state.favorable_anchor)
+                if np.isfinite(entry) and np.isfinite(atr) and atr > 0.0 and np.isfinite(favorable) and np.isfinite(close):
+                    mfe_atr = (entry - favorable) / atr
+                    realized_run_atr = (entry - close) / atr
+                    giveback_atr = mfe_atr - realized_run_atr
+                    if mfe_atr >= self._profit_protect_arm_atr and giveback_atr >= self._profit_protect_giveback_atr_short:
+                        short_urgent_exit = True
+
+        do_exit_long = bool(long_urgent_exit or self._long_soft_exit_count >= self._soft_exit_confirm_bars)
+        do_exit_short = bool(short_urgent_exit or self._short_soft_exit_count >= self._soft_exit_confirm_bars)
         do_entry_long = bool((not self._long_active) and np.isfinite(p_enter_long) and p_enter_long >= float(self._entry_thresholds["enter_long"]))
         do_entry_short = bool((not self._short_active) and np.isfinite(p_enter_short) and p_enter_short >= float(self._entry_thresholds["enter_short"]))
 
@@ -1520,16 +1606,20 @@ class LiveIndependentMetaXGBAgent:
         self._short_active = next_short_active
         if do_entry_long:
             self._long_bars_held = 0
+            self._long_soft_exit_count = 0
         elif self._long_active:
             self._long_bars_held = max(0, self._long_bars_held + 1)
         else:
             self._long_bars_held = -1
+            self._long_soft_exit_count = 0
         if do_entry_short:
             self._short_bars_held = 0
+            self._short_soft_exit_count = 0
         elif self._short_active:
             self._short_bars_held = max(0, self._short_bars_held + 1)
         else:
             self._short_bars_held = -1
+            self._short_soft_exit_count = 0
 
         if self._long_active and not self._short_active:
             return 1
@@ -1548,7 +1638,25 @@ class LiveIndependentMetaXGBAgent:
             self._last_prob_sources = self._base_agent._extract_last_prob_sources(base_frame, row.name)
             action = self._advance_independent_state(work_row=work_row, probs=probs)
             self._last_processed_ts = pd.Timestamp(row.name)
-            out.append({"timestamp": row.name, "action": float(action), "close": float(row.get("close", np.nan))})
+            out.append(
+                {
+                    "timestamp": row.name,
+                    "action": float(action),
+                    "close": float(row.get("close", np.nan)),
+                    "p_pivot_long": self._last_probs.get("p_pivot_long") if self._last_probs else None,
+                    "p_pivot_short": self._last_probs.get("p_pivot_short") if self._last_probs else None,
+                    "p_tb_long": self._last_probs.get("p_tb_long") if self._last_probs else None,
+                    "p_tb_short": self._last_probs.get("p_tb_short") if self._last_probs else None,
+                    "p_enter_long": self._last_probs.get("p_enter_long") if self._last_probs else None,
+                    "p_enter_short": self._last_probs.get("p_enter_short") if self._last_probs else None,
+                    "p_exit_long": self._last_probs.get("p_exit_long") if self._last_probs else None,
+                    "p_exit_short": self._last_probs.get("p_exit_short") if self._last_probs else None,
+                    "thr_enter_long": float(self._entry_thresholds.get("enter_long", float("nan"))),
+                    "thr_enter_short": float(self._entry_thresholds.get("enter_short", float("nan"))),
+                    "thr_exit_long": float(self._exit_thresholds.get("exit_long", float("nan"))),
+                    "thr_exit_short": float(self._exit_thresholds.get("exit_short", float("nan"))),
+                }
+            )
         return out
 
     def replay_warmup_actions(

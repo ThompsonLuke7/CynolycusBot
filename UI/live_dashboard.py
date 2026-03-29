@@ -128,6 +128,27 @@ def _normalize_bar(bar: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _default_runtime_policy_cache_path(prefill_path: Path) -> Path:
+    suffix = prefill_path.suffix or ".json"
+    if suffix.lower() != ".json":
+        suffix = ".json"
+    return prefill_path.with_name(f"{prefill_path.stem}_runtime_policy_state{suffix}")
+
+
+def _load_runtime_policy_cache(cache_path: Path) -> dict[str, Any]:
+    if not cache_path.exists():
+        return {}
+    try:
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _persist_runtime_policy_cache(cache_path: Path, payload: dict[str, Any]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(_json_safe(payload), indent=2), encoding="utf-8")
+
+
 def _action_to_position(action: float | int, *, deadband: float = 0.0) -> int:
     a = _coerce_float(action, float("nan"))
     if not np.isfinite(a):
@@ -536,7 +557,7 @@ class ReplayBarProcessor:
 @dataclass(frozen=True)
 class SessionConfig:
     symbols: list[str]
-    runner_mode: str = "live"
+    runner_mode: str = "replay"
     inference_mode: str = "meta"
     feed: str = "IEX"
     interval: int = 10
@@ -576,11 +597,11 @@ class SessionConfig:
     prefill_start: str = "2026-01-30"
     no_prefill_fetch: bool = False
     prefill_tail: int | None = None
-    enable_option_orders: bool = False
+    enable_option_orders: bool = True
     no_startup_sync: bool = False
     option_order_qty: int = 1
     option_atr_mult: float = 1.0
-    option_dte_cutoff: str = "14:00"
+    option_dte_cutoff: str = "13:00"
     simulate_orders: bool = True
     option_no_close_on_flat: bool = False
     option_no_close_on_flip: bool = False
@@ -590,9 +611,9 @@ class SessionConfig:
     exec_exit_confirm_bars: int = 2
     exec_flip_abs_threshold: float = 0.05
     use_execution_latch: bool = False
-    replay_data_path: str = "Data/raw/spy/inference_buffer_1m.parquet"
-    replay_start: str | None = "2026-01-30T00:00:00Z"
-    replay_end: str | None = None
+    replay_data_path: str = "Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet"
+    replay_start: str | None = "2026-03-14T00:00:00Z"
+    replay_end: str | None = "2026-03-23T23:59:59Z"
     replay_regular_only: bool = False
     replay_sleep: float = 0.0
     replay_max_bars: int | None = None
@@ -607,7 +628,7 @@ class SessionConfig:
             symbols = ["SPY"]
         return cls(
             symbols=symbols,
-            runner_mode=str(payload.get("runner_mode", "live")).strip().lower(),
+            runner_mode=str(payload.get("runner_mode", "replay")).strip().lower(),
             inference_mode=str(payload.get("inference_mode", "meta")).strip().lower(),
             feed=str(payload.get("feed", "IEX")).upper(),
             interval=max(1, _coerce_int(payload.get("interval"), 10)),
@@ -659,11 +680,11 @@ class SessionConfig:
                 if payload.get("prefill_tail") in (None, "")
                 else max(50, _coerce_int(payload.get("prefill_tail"), 0))
             ),
-            enable_option_orders=_coerce_bool(payload.get("enable_option_orders"), False),
+            enable_option_orders=_coerce_bool(payload.get("enable_option_orders"), True),
             no_startup_sync=_coerce_bool(payload.get("no_startup_sync"), False),
             option_order_qty=max(1, _coerce_int(payload.get("option_order_qty"), 1)),
             option_atr_mult=max(0.0, _coerce_float(payload.get("option_atr_mult"), 1.0)),
-            option_dte_cutoff=str(payload.get("option_dte_cutoff", "14:00")),
+            option_dte_cutoff=str(payload.get("option_dte_cutoff", "13:00")),
             simulate_orders=_coerce_bool(payload.get("simulate_orders"), True),
             option_no_close_on_flat=_coerce_bool(payload.get("option_no_close_on_flat"), False),
             option_no_close_on_flip=_coerce_bool(payload.get("option_no_close_on_flip"), False),
@@ -673,9 +694,9 @@ class SessionConfig:
             exec_exit_confirm_bars=max(1, _coerce_int(payload.get("exec_exit_confirm_bars"), 2)),
             exec_flip_abs_threshold=max(0.0, _coerce_float(payload.get("exec_flip_abs_threshold"), 0.05)),
             use_execution_latch=_coerce_bool(payload.get("use_execution_latch"), False),
-            replay_data_path=str(payload.get("replay_data_path", "Data/raw/spy/inference_buffer_1m.parquet")),
-            replay_start=payload.get("replay_start", "2026-01-30T00:00:00Z"),
-            replay_end=payload.get("replay_end"),
+            replay_data_path=str(payload.get("replay_data_path", "Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet")),
+            replay_start=payload.get("replay_start", "2026-03-14T00:00:00Z"),
+            replay_end=payload.get("replay_end", "2026-03-23T23:59:59Z"),
             replay_regular_only=_coerce_bool(payload.get("replay_regular_only"), False),
             replay_sleep=max(0.0, _coerce_float(payload.get("replay_sleep"), 0.0)),
             replay_max_bars=(
@@ -870,7 +891,9 @@ class DashboardStore:
 
     def add_log_event(self, payload: dict[str, Any]) -> None:
         with self._lock:
-            self._log_events.append(_json_safe(payload))
+            data = dict(payload or {})
+            data.setdefault("timestamp", _ts_iso(datetime.now(timezone.utc)))
+            self._log_events.append(_json_safe(data))
 
     def seed_from_buffers(self, buffers: dict[str, Any]) -> None:
         with self._lock:
@@ -1041,11 +1064,7 @@ class LiveSession:
 
         seeded_counts: dict[str, int] = {}
         warmup_action_counts: dict[str, int] = {}
-        skip_meta_warmup_replay = bool(
-            isinstance(agent, LiveMetaXGBAgent)
-            and isinstance(getattr(agent, "_precomputed_base_frame", None), pd.DataFrame)
-            and not getattr(agent, "_precomputed_base_frame").empty
-        )
+        skip_meta_warmup_replay = False
         for symbol in cfg.symbols:
             buffer = processor._buffers.get(symbol)
             if buffer is None:
@@ -1092,24 +1111,8 @@ class LiveSession:
                 df_plot = df_plot.reset_index(drop=True)
             df_plot = df_plot.tail(self._store._max_bars)
 
-            count = 0
-            for row in df_plot.to_dict("records"):
-                bar = {
-                    "symbol": symbol,
-                    "timestamp": row.get("timestamp"),
-                    "open": row.get("open"),
-                    "high": row.get("high"),
-                    "low": row.get("low"),
-                    "close": row.get("close"),
-                    "volume": row.get("volume"),
-                }
-                for key in ("p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short"):
-                    if key in row:
-                        bar[key] = row.get(key)
-                self._store.add_15m_bar(symbol, bar)
-                count += 1
-
             warmup_actions = 0
+            warmup_by_ts: dict[pd.Timestamp, dict[str, Any]] = {}
             if inference is not None and agent is not None and not skip_meta_warmup_replay:
                 try:
                     warmup_records = agent.replay_warmup_actions(
@@ -1119,6 +1122,11 @@ class LiveSession:
                     )
                 except Exception:
                     warmup_records = []
+                warmup_by_ts = {
+                    pd.to_datetime(rec.get("timestamp"), utc=True, errors="coerce"): rec
+                    for rec in warmup_records
+                    if pd.notna(pd.to_datetime(rec.get("timestamp"), utc=True, errors="coerce"))
+                }
                 for rec in warmup_records:
                     action_raw = _coerce_float(rec.get("action"), float("nan"))
                     prev_exec_action = (
@@ -1166,6 +1174,40 @@ class LiveSession:
                     warmup_actions += 1
                 if warmup_actions > 0:
                     self._store.set_agent_state(agent.snapshot_state())
+
+            count = 0
+            for row in df_plot.to_dict("records"):
+                ts = pd.to_datetime(row.get("timestamp"), utc=True, errors="coerce")
+                rec = warmup_by_ts.get(ts)
+                bar = {
+                    "symbol": symbol,
+                    "timestamp": row.get("timestamp"),
+                    "open": row.get("open"),
+                    "high": row.get("high"),
+                    "low": row.get("low"),
+                    "close": row.get("close"),
+                    "volume": row.get("volume"),
+                }
+                for key in (
+                    "p_pivot_long",
+                    "p_pivot_short",
+                    "p_tb_long",
+                    "p_tb_short",
+                    "p_enter_long",
+                    "p_enter_short",
+                    "p_exit_long",
+                    "p_exit_short",
+                    "thr_enter_long",
+                    "thr_enter_short",
+                    "thr_exit_long",
+                    "thr_exit_short",
+                ):
+                    if rec is not None and key in rec:
+                        bar[key] = rec.get(key)
+                    elif key in row:
+                        bar[key] = row.get(key)
+                self._store.add_15m_bar(symbol, bar)
+                count += 1
 
             if count > 0:
                 seeded_counts[symbol] = count
@@ -1389,8 +1431,39 @@ class LiveSession:
                         "message": "[replay] GA-XGB feature list missing; pivot/TB probs will be zeros.",
                     },
                 )
+            precomputed_meta_frame = None
+            if inference_mode == "meta" and cfg.meta_base_frame_path:
+                try:
+                    from API.Alpaca_API.runners import live_runner as lr
+
+                    meta_base_path = lr._resolve_symbolized_path(cfg.meta_base_frame_path, symbol=symbols[0])
+                    precomputed_meta_frame = lr._load_precomputed_meta_frame(
+                        meta_base_path,
+                        tz=cfg.tz or "America/New_York",
+                    )
+                    if not precomputed_meta_frame.empty:
+                        self._emit(
+                            "log",
+                            {
+                                "symbol": "SYSTEM",
+                                "message": (
+                                    f"[replay] loaded cached meta base frame: rows={len(precomputed_meta_frame):,} "
+                                    f"range={_ts_iso(precomputed_meta_frame.index.min())}..{_ts_iso(precomputed_meta_frame.index.max())} "
+                                    f"path={meta_base_path}"
+                                ),
+                            },
+                        )
+                except Exception as exc:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": f"[replay] cached meta base frame unavailable: {exc}",
+                        },
+                    )
+
             if inference_mode == "meta":
-                agent = LiveMetaXGBAgent(
+                agent = LiveIndependentMetaXGBAgent(
                     model_root=cfg.meta_model_root,
                     ga_model_root=cfg.ga_model_root if ga_feature_list else None,
                     ga_feature_list_path=ga_feature_list,
@@ -1415,6 +1488,17 @@ class LiveSession:
                     use_tp_to_tighten_trail=bool(cfg.meta_use_tp_to_tighten_trail),
                     entry_threshold_override=cfg.meta_entry_threshold,
                     exit_threshold_override=cfg.meta_exit_threshold,
+                    precomputed_base_frame=precomputed_meta_frame,
+                    precomputed_append_lookback_days=int(cfg.meta_base_frame_append_lookback_days),
+                    min_hold_bars=2,
+                    exit_entry_delta=0.15,
+                    soft_exit_confirm_bars=2,
+                    urgent_exit_prob=0.85,
+                    urgent_exit_delta=0.30,
+                    profit_protect_enabled=False,
+                    profit_protect_arm_atr=2.0,
+                    profit_protect_giveback_atr_long=0.75,
+                    profit_protect_giveback_atr_short=1.0,
                 )
                 self._emit(
                     "log",
@@ -1487,6 +1571,16 @@ class LiveSession:
                     opposite_confirm_bars=1,
                     opposite_min_abs_action=float(cfg.exec_flip_abs_threshold),
                     opposite_min_prob_edge=0.0,
+                    meta_execute_on_interval_close=False,
+                    meta_intrabar_execution_enabled=True,
+                    meta_intrabar_breakout_entry_only=False,
+                    meta_soft_exit_confirm_bars=2,
+                    meta_urgent_exit_prob=0.85,
+                    meta_urgent_exit_delta=0.30,
+                    meta_profit_protect_enabled=False,
+                    meta_profit_protect_arm_atr=2.0,
+                    meta_profit_protect_giveback_atr_long=0.75,
+                    meta_profit_protect_giveback_atr_short=1.0,
                     submit_orders=False,
                 )
                 policy = OptionOrderPolicy(pol_cfg)
@@ -1596,6 +1690,32 @@ class LiveSession:
                     "buffer_size": size,
                 },
             )
+            if order_policies is None or symbol not in order_policies:
+                return
+            policy = order_policies[symbol]
+            result = policy.on_1m_bar(bar=bar, logger=self._policy_logger(symbol))
+            ts_iso = _ts_iso(bar.get("timestamp"))
+            _record_sim_orders(symbol, result, ts_iso)
+            policy_state = policy.snapshot_state()
+            self._store.set_policy_state(symbol, policy_state)
+            broker_state = _set_sim_broker_state(symbol)
+            event_payload = {
+                "symbol": symbol,
+                "timestamp": ts_iso,
+                "result": result,
+                "policy_state": policy_state,
+                "broker_state": broker_state,
+            }
+            self._emit("order_policy", event_payload)
+            if str(result.get("event", "")).strip().lower() not in {"hold", "no_change", "intent_update"}:
+                self._store.set_last_action(
+                    symbol,
+                    action=float(policy_state.get("position", 0) or 0),
+                    action_class=int(policy_state.get("position", 0) or 0),
+                    ts=bar.get("timestamp"),
+                    close=bar.get("close"),
+                )
+                self._store.add_trade_event(event_payload)
 
         def _on_15m(symbol: str, bar15: dict, buffer: Any) -> None:
             if order_policies is not None and symbol in order_policies:
@@ -1738,7 +1858,7 @@ class LiveSession:
             policy = order_policies[symbol]
             result = policy.on_decision(
                 action=float(selected_action),
-                closed_bar=bar15,
+                closed_bar=bar_payload,
                 update_bar_state=False,
                 logger=self._policy_logger(symbol),
             )
@@ -1746,6 +1866,14 @@ class LiveSession:
             _record_sim_orders(symbol, result, ts_iso)
             policy_state = policy.snapshot_state()
             self._store.set_policy_state(symbol, policy_state)
+            policy_pos = int(policy_state.get("position", 0) or 0)
+            self._store.set_last_action(
+                symbol,
+                action=float(policy_pos),
+                action_class=policy_pos,
+                ts=bar15.get("timestamp"),
+                close=bar15.get("close"),
+            )
             broker_state = _set_sim_broker_state(symbol)
             event_payload = {
                 "symbol": symbol,
@@ -1951,6 +2079,13 @@ class LiveSession:
                         precomputed_append_lookback_days=int(cfg.meta_base_frame_append_lookback_days),
                         min_hold_bars=2,
                         exit_entry_delta=0.15,
+                        soft_exit_confirm_bars=2,
+                        urgent_exit_prob=0.85,
+                        urgent_exit_delta=0.30,
+                        profit_protect_enabled=False,
+                        profit_protect_arm_atr=2.0,
+                        profit_protect_giveback_atr_long=0.75,
+                        profit_protect_giveback_atr_short=1.0,
                     )
                     self._emit(
                         "log",
@@ -2000,6 +2135,8 @@ class LiveSession:
             )
 
             order_policies: dict[str, OptionOrderPolicy] | None = None
+            runtime_policy_cache_path: Path | None = None
+            runtime_policy_cache: dict[str, Any] = {}
             if cfg.enable_option_orders:
                 order_policies = {}
                 for symbol in symbols:
@@ -2015,6 +2152,16 @@ class LiveSession:
                         opposite_confirm_bars=1,
                         opposite_min_abs_action=float(cfg.exec_flip_abs_threshold),
                         opposite_min_prob_edge=0.0,
+                        meta_execute_on_interval_close=False,
+                        meta_intrabar_execution_enabled=True,
+                        meta_intrabar_breakout_entry_only=False,
+                        meta_soft_exit_confirm_bars=2,
+                        meta_urgent_exit_prob=0.85,
+                        meta_urgent_exit_delta=0.30,
+                        meta_profit_protect_enabled=False,
+                        meta_profit_protect_arm_atr=2.0,
+                        meta_profit_protect_giveback_atr_long=0.75,
+                        meta_profit_protect_giveback_atr_short=1.0,
                         submit_orders=not cfg.simulate_orders,
                     )
                     policy = OptionOrderPolicy(pol_cfg)
@@ -2024,6 +2171,23 @@ class LiveSession:
                     self._store.set_broker_state(symbol, broker_snap)
                     self._emit("broker_state", {"symbol": symbol, "state": broker_snap})
 
+                cache_base = Path(cfg.prefill_path or cfg.replay_data_path or "Data/raw/spy/live_runtime_policy_state.json")
+                runtime_policy_cache_path = _default_runtime_policy_cache_path(cache_base)
+                runtime_policy_cache = _load_runtime_policy_cache(runtime_policy_cache_path)
+
+                def _persist_policy_runtime_cache() -> None:
+                    if order_policies is None or runtime_policy_cache_path is None:
+                        return
+                    payload = {
+                        "symbols": list(symbols),
+                        "updated_at": _ts_iso(datetime.now(timezone.utc)),
+                        "policies": {
+                            sym: pol.export_runtime_state()
+                            for sym, pol in order_policies.items()
+                        },
+                    }
+                    _persist_runtime_policy_cache(runtime_policy_cache_path, payload)
+
                 if not cfg.no_startup_sync:
                     for symbol in symbols:
                         policy = order_policies[symbol]
@@ -2031,6 +2195,7 @@ class LiveSession:
                         if cfg.use_execution_latch:
                             execution_latches[symbol].set_position(policy.snapshot_state().get("position", 0))
                         self._store.set_policy_state(symbol, policy.snapshot_state())
+                        _persist_policy_runtime_cache()
                         self._emit("startup_sync", {"symbol": symbol, "result": sync_result})
                         broker_snap = policy.snapshot_broker_state(orders_limit=20)
                         self._store.set_broker_state(symbol, broker_snap)
@@ -2047,12 +2212,41 @@ class LiveSession:
                         "buffer_size": size,
                     },
                 )
+                if order_policies is None or symbol not in order_policies:
+                    return
+                policy = order_policies[symbol]
+                result = policy.on_1m_bar(bar=bar, logger=self._policy_logger(symbol))
+                policy_state = policy.snapshot_state()
+                self._store.set_policy_state(symbol, policy_state)
+                _persist_policy_runtime_cache()
+                broker_snap = policy.snapshot_broker_state(orders_limit=20)
+                self._store.set_broker_state(symbol, broker_snap)
+                self._emit("broker_state", {"symbol": symbol, "state": broker_snap})
+                event_payload = {
+                    "symbol": symbol,
+                    "timestamp": _ts_iso(bar.get("timestamp")),
+                    "result": result,
+                    "policy_state": policy_state,
+                    "broker_state": broker_snap,
+                }
+                self._emit("order_policy", event_payload)
+                event_key = str(result.get("event", "")).strip().lower()
+                if event_key not in {"hold", "no_change", "intent_update"}:
+                    self._store.set_last_action(
+                        symbol,
+                        action=float(policy_state.get("position", 0) or 0),
+                        action_class=int(policy_state.get("position", 0) or 0),
+                        ts=bar.get("timestamp"),
+                        close=bar.get("close"),
+                    )
+                    self._store.add_trade_event(event_payload)
 
             def _on_15m(symbol: str, bar15: dict, buffer: Any) -> None:
                 if order_policies is not None and symbol in order_policies:
                     policy = order_policies[symbol]
                     policy.on_15m_bar(closed_bar=bar15)
                     self._store.set_policy_state(symbol, policy.snapshot_state())
+                    _persist_policy_runtime_cache()
 
                 action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
                 if action is None:
@@ -2187,12 +2381,13 @@ class LiveSession:
                 policy = order_policies[symbol]
                 result = policy.on_decision(
                     action=float(selected_action),
-                    closed_bar=bar15,
+                    closed_bar=bar_payload,
                     update_bar_state=False,
                     logger=self._policy_logger(symbol),
                 )
                 policy_state = policy.snapshot_state()
                 self._store.set_policy_state(symbol, policy_state)
+                _persist_policy_runtime_cache()
                 broker_snap = policy.snapshot_broker_state(orders_limit=20)
                 self._store.set_broker_state(symbol, broker_snap)
                 policy_pos = int(policy_state.get("position", 0) or 0)
@@ -2222,6 +2417,20 @@ class LiveSession:
                 agg_label=cfg.resample_label,
                 on_1m=_on_1m,
                 on_15m_close=_on_15m,
+                regular_hours_only=True,
+                tz_name=cfg.tz or "America/New_York",
+                session_open=cfg.session_open,
+                session_close=cfg.session_close,
+            )
+            self._emit(
+                "log",
+                {
+                    "symbol": "SYSTEM",
+                    "message": (
+                        f"[live] RTH-only live bar filter enabled: "
+                        f"{cfg.session_open}-{cfg.session_close} {cfg.tz or 'America/New_York'}"
+                    ),
+                },
             )
 
             if cfg.buffer_size and cfg.buffer_size > 0 and cfg.prefill_tail and cfg.prefill_tail > cfg.buffer_size:
@@ -2234,14 +2443,25 @@ class LiveSession:
                 )
             if cfg.prefill_path:
                 self._emit_status(running=True, message="loading prefill file")
+                configured_prefill_path = Path(cfg.prefill_path)
+                runtime_prefill_cache_path = lr._default_runtime_prefill_cache_path(configured_prefill_path)
+                prefill_source_path = runtime_prefill_cache_path if runtime_prefill_cache_path.exists() else configured_prefill_path
+                if prefill_source_path == runtime_prefill_cache_path:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": f"[live] using runtime prefill cache: {runtime_prefill_cache_path}",
+                        },
+                    )
                 self._emit(
                     "log",
                     {
                         "symbol": "SYSTEM",
-                        "message": f"[live] loading prefill file: {cfg.prefill_path}",
+                        "message": f"[live] loading prefill file: {prefill_source_path}",
                     },
                 )
-                prefill_df = lr._load_prefill_frame(Path(cfg.prefill_path))
+                prefill_df = lr._load_prefill_frame(prefill_source_path)
                 if not cfg.no_prefill_fetch:
                     self._emit_status(running=True, message="gap-bridging prefill from Alpaca")
                     self._emit(
@@ -2262,9 +2482,9 @@ class LiveSession:
                             "log",
                             {
                                 "symbol": "SYSTEM",
-                                "message": f"[live] Prefill gap bridge failed: {exc}",
-                            },
-                        )
+                            "message": f"[live] Prefill gap bridge failed: {exc}",
+                        },
+                    )
                 else:
                     self._emit(
                         "log",
@@ -2273,10 +2493,41 @@ class LiveSession:
                             "message": "[live] skipping Alpaca prefill fetch because no_prefill_fetch is enabled.",
                         },
                     )
+                compact_prefill_df = lr._prepare_runtime_prefill_frame(
+                    df=prefill_df,
+                    precomputed_meta_frame=precomputed_meta_frame,
+                    append_lookback_days=int(cfg.meta_base_frame_append_lookback_days),
+                    tz_name=cfg.tz or "America/New_York",
+                    session_open=cfg.session_open,
+                    session_close=cfg.session_close,
+                )
+                try:
+                    lr._persist_runtime_prefill_cache(
+                        df=compact_prefill_df,
+                        cache_path=runtime_prefill_cache_path,
+                    )
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": (
+                                f"[live] updated runtime prefill cache: {runtime_prefill_cache_path} "
+                                f"rows={len(compact_prefill_df):,}"
+                            ),
+                        },
+                    )
+                except Exception as exc:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": f"[live] runtime prefill cache update failed: {exc}",
+                        },
+                    )
                 self._emit_status(running=True, message="seeding live buffers from prefill")
                 lr._prefill_buffers(
                     processor=processor,
-                    df=prefill_df,
+                    df=compact_prefill_df,
                     symbols=symbols,
                     tail=cfg.prefill_tail,
                 )
@@ -2354,6 +2605,23 @@ class LiveSession:
                 )
                 for symbol in symbols:
                     self._store.set_policy_state(symbol, order_policies[symbol].snapshot_state())
+                saved_policy_states = runtime_policy_cache.get("policies") if isinstance(runtime_policy_cache, dict) else None
+                if isinstance(saved_policy_states, dict):
+                    restored_symbols: list[str] = []
+                    for symbol in symbols:
+                        saved_state = saved_policy_states.get(symbol)
+                        if order_policies[symbol].load_runtime_state(saved_state, logger=self._policy_logger(symbol)):
+                            restored_symbols.append(symbol)
+                            self._store.set_policy_state(symbol, order_policies[symbol].snapshot_state())
+                    if restored_symbols:
+                        self._emit(
+                            "log",
+                            {
+                                "symbol": "SYSTEM",
+                                "message": f"[live] restored runtime policy state cache for: {', '.join(restored_symbols)}",
+                            },
+                        )
+                _persist_policy_runtime_cache()
                 if cfg.startup_catchup_order:
                     lr._run_startup_catchup_decision(
                         processor=processor,
@@ -2367,6 +2635,7 @@ class LiveSession:
                     )
                     for symbol in symbols:
                         self._store.set_policy_state(symbol, order_policies[symbol].snapshot_state())
+                    _persist_policy_runtime_cache()
 
             streamer = AlpacaBarStreamer(
                 symbols=symbols,
@@ -2395,6 +2664,28 @@ class LiveSession:
                     if now - last_broker_poll >= 30.0:
                         last_broker_poll = now
                         for symbol, policy in order_policies.items():
+                            if policy.has_pending_broker_reconcile():
+                                reconcile_result = policy.reconcile_pending_broker_order(
+                                    logger=self._policy_logger(symbol)
+                                )
+                                if cfg.use_execution_latch:
+                                    execution_latches[symbol].set_position(
+                                        policy.snapshot_state().get("position", 0)
+                                    )
+                                self._store.set_policy_state(symbol, policy.snapshot_state())
+                                _persist_policy_runtime_cache()
+                                self._emit(
+                                    "order_policy",
+                                    {
+                                        "symbol": symbol,
+                                        "timestamp": _ts_iso(datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))),
+                                        "result": {
+                                            "event": "broker_reconcile",
+                                            "pending_reconcile_result": reconcile_result,
+                                        },
+                                        "policy_state": policy.snapshot_state(),
+                                    },
+                                )
                             broker_snap = policy.snapshot_broker_state(orders_limit=20)
                             self._store.set_broker_state(symbol, broker_snap)
                             self._emit("broker_state", {"symbol": symbol, "state": broker_snap})
@@ -2453,11 +2744,11 @@ class DashboardApp:
             if self.session.is_running():
                 raise RuntimeError("Existing session is still running; stop it first.")
         self.session.start(cfg)
-        return self.store.snapshot()
+        return self.snapshot()
 
     def stop(self) -> dict[str, Any]:
         self.session.stop()
-        return self.store.snapshot()
+        return self.snapshot()
 
     def snapshot(self) -> dict[str, Any]:
         snap = self.store.snapshot()

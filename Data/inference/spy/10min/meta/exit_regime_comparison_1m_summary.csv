@@ -1,0 +1,3 @@
+regime,long_entries,long_exits,short_entries,short_exits,long_trades_closed,short_trades_closed,long_win_rate,short_win_rate,long_equity_end,short_equity_end,combined_full_gross_end
+current_1m_exit_logic,47.0,47.0,40.0,39.0,47.0,39.0,0.9361702127659575,0.8717948717948718,1.184248154924989,1.20295217185892,1.3872003267839093
+entry_falls_below_threshold_1m_exit,52.0,52.0,53.0,52.0,52.0,52.0,0.8846153846153846,0.8653846153846154,1.208117443475408,1.2426823262051392,1.4507997696805472

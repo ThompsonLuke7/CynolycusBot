@@ -1156,7 +1156,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--option-dte-cutoff",
-        default="14:00",
+        default="13:00",
         help="Local HH:MM cutoff; before cutoff use 0DTE, otherwise 1DTE.",
     )
     parser.add_argument(
@@ -1571,6 +1571,16 @@ def main() -> None:
                 meta_trail_atr=float(args.meta_trail_atr),
                 meta_trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
                 meta_use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
+                meta_execute_on_interval_close=False,
+                meta_intrabar_execution_enabled=True,
+                meta_intrabar_breakout_entry_only=False,
+                meta_soft_exit_confirm_bars=2,
+                meta_urgent_exit_prob=0.85,
+                meta_urgent_exit_delta=0.30,
+                meta_profit_protect_enabled=False,
+                meta_profit_protect_arm_atr=2.0,
+                meta_profit_protect_giveback_atr_long=0.75,
+                meta_profit_protect_giveback_atr_short=1.0,
             )
             order_policies[symbol] = OptionOrderPolicy(cfg)
         mode = "SIMULATED" if args.simulate_orders else "LIVE"

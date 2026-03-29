@@ -1,0 +1,3 @@
+regime,long_entries,long_exits,short_entries,short_exits,long_trades_closed,short_trades_closed,long_win_rate,short_win_rate,long_equity_end,short_equity_end,combined_full_gross_end,intrabar_tp_exit_count
+baseline_hybrid_next_open_exit_next_open,72.0,72.0,69.0,68.0,72.0,68.0,0.9722222222222222,0.9558823529411765,1.2726990118323187,1.2778656746333108,1.5505646864656297,0.0
+hybrid_plus_intrabar_tp_2.00atr,81.0,81.0,85.0,84.0,81.0,84.0,0.9876543209876543,0.9642857142857143,1.2712859097997644,1.2974233486427695,1.5687092584425342,71.0

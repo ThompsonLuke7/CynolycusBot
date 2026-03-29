@@ -38,12 +38,20 @@ class LiveBarProcessor:
         agg_label: str = "left",
         on_1m: Optional[Callable[[str, dict, BarRingBuffer], None]] = None,
         on_15m_close: Optional[Callable[[str, dict, BarRingBuffer], None]] = None,
+        regular_hours_only: bool = False,
+        tz_name: str = "America/New_York",
+        session_open: str = "09:30",
+        session_close: str = "16:00",
     ) -> None:
         self._interval_minutes = interval_minutes
         self._buffer_size = None if buffer_size is None or int(buffer_size) <= 0 else int(buffer_size)
         self._agg_label = agg_label
         self._on_1m = on_1m
         self._on_15m_close = on_15m_close
+        self._regular_hours_only = bool(regular_hours_only)
+        self._tz_name = str(tz_name)
+        self._session_open = str(session_open)
+        self._session_close = str(session_close)
         self._buffers: dict[str, BarRingBuffer] = {}
         self._aggregators: dict[str, OhlcvAggregator] = {}
 
@@ -64,10 +72,30 @@ class LiveBarProcessor:
         if not bars:
             return
         buffer = self._get_buffer(symbol)
+        if self._regular_hours_only:
+            bars = [
+                bar
+                for bar in bars
+                if _bar_in_regular_session(
+                    bar,
+                    tz_name=self._tz_name,
+                    session_open=self._session_open,
+                    session_close=self._session_close,
+                )
+            ]
+            if not bars:
+                return
         buffer.extend(bars)
 
     def handle_bar(self, bar: dict) -> None:
         symbol = str(bar.get("symbol", ""))
+        if self._regular_hours_only and not _bar_in_regular_session(
+            bar,
+            tz_name=self._tz_name,
+            session_open=self._session_open,
+            session_close=self._session_close,
+        ):
+            return
         buffer = self._get_buffer(symbol)
         agg = self._get_aggregator(symbol)
 
@@ -78,6 +106,18 @@ class LiveBarProcessor:
         closed, _current = agg.update(bar)
         if closed and self._on_15m_close is not None:
             self._on_15m_close(symbol, closed, buffer)
+        if (
+            self._regular_hours_only
+            and self._on_15m_close is not None
+            and _bar_is_session_last_minute(
+                bar,
+                tz_name=self._tz_name,
+                session_close=self._session_close,
+            )
+        ):
+            final_closed = agg.flush_current()
+            if final_closed is not None:
+                self._on_15m_close(symbol, final_closed, buffer)
 
 
 def _parse_feed(feed: str) -> DataFeed:
@@ -99,6 +139,48 @@ def _format_ts_local(ts: object, *, tz: str = "America/New_York") -> str:
         return t.isoformat()
     except Exception:
         return str(ts)
+
+
+def _hhmm_to_minutes(hhmm: str, *, default: int) -> int:
+    try:
+        parts = str(hhmm).strip().split(":")
+        if len(parts) != 2:
+            return int(default)
+        return max(0, min(24 * 60, int(parts[0]) * 60 + int(parts[1])))
+    except Exception:
+        return int(default)
+
+
+def _bar_in_regular_session(
+    bar: dict,
+    *,
+    tz_name: str = "America/New_York",
+    session_open: str = "09:30",
+    session_close: str = "16:00",
+) -> bool:
+    ts = pd.to_datetime(bar.get("timestamp"), utc=True, errors="coerce")
+    if pd.isna(ts):
+        return False
+    local_ts = ts.tz_convert(tz_name)
+    minutes = int(local_ts.hour) * 60 + int(local_ts.minute)
+    open_min = _hhmm_to_minutes(session_open, default=570)
+    close_min = _hhmm_to_minutes(session_close, default=960)
+    return open_min <= minutes < close_min
+
+
+def _bar_is_session_last_minute(
+    bar: dict,
+    *,
+    tz_name: str = "America/New_York",
+    session_close: str = "16:00",
+) -> bool:
+    ts = pd.to_datetime(bar.get("timestamp"), utc=True, errors="coerce")
+    if pd.isna(ts):
+        return False
+    local_ts = ts.tz_convert(tz_name)
+    minutes = int(local_ts.hour) * 60 + int(local_ts.minute)
+    close_min = _hhmm_to_minutes(session_close, default=960)
+    return minutes == (close_min - 1)
 
 
 def _fmt_prob(value: object) -> str:
@@ -274,6 +356,69 @@ def _load_prefill_frame(path: Path) -> pd.DataFrame:
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
     df = df.dropna(subset=["timestamp"])
     return df
+
+
+def _default_runtime_prefill_cache_path(prefill_path: Path) -> Path:
+    suffix = prefill_path.suffix.lower()
+    if suffix not in {".parquet", ".csv"}:
+        suffix = ".parquet"
+    return prefill_path.with_name(f"{prefill_path.stem}_runtime_rth_cache{suffix}")
+
+
+def _prepare_runtime_prefill_frame(
+    *,
+    df: pd.DataFrame,
+    precomputed_meta_frame: pd.DataFrame | None,
+    append_lookback_days: int,
+    tz_name: str = "America/New_York",
+    session_open: str = "09:30",
+    session_close: str = "16:00",
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True, errors="coerce")
+    out = out.dropna(subset=["timestamp"])
+    if "symbol" in out.columns:
+        out["symbol"] = out["symbol"].astype(str).str.upper()
+
+    ts_local = out["timestamp"].dt.tz_convert(tz_name)
+    minutes = ts_local.dt.hour * 60 + ts_local.dt.minute
+    open_min = _hhmm_to_minutes(session_open, default=570)
+    close_min = _hhmm_to_minutes(session_close, default=960)
+    out = out.loc[minutes.between(open_min, close_min)].copy()
+    if out.empty:
+        return out
+
+    if isinstance(precomputed_meta_frame, pd.DataFrame) and not precomputed_meta_frame.empty:
+        cached_max = precomputed_meta_frame.index.max()
+        if isinstance(cached_max, pd.Timestamp) and not pd.isna(cached_max):
+            if cached_max.tz is None:
+                cached_max = cached_max.tz_localize(tz_name)
+            keep_start_local = cached_max - pd.Timedelta(days=max(1, int(append_lookback_days)))
+            keep_start_utc = keep_start_local.tz_convert("UTC")
+            out = out.loc[out["timestamp"] >= keep_start_utc].copy()
+
+    out = out.sort_values("timestamp")
+    if "symbol" in out.columns:
+        out = out.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+    else:
+        out = out.drop_duplicates(subset=["timestamp"], keep="last")
+    return out.reset_index(drop=True)
+
+
+def _persist_runtime_prefill_cache(
+    *,
+    df: pd.DataFrame,
+    cache_path: Path,
+) -> None:
+    if df is None or df.empty:
+        return
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if cache_path.suffix.lower() == ".csv":
+        df.to_csv(cache_path, index=False)
+    else:
+        df.to_parquet(cache_path, index=False)
 
 
 def _resolve_symbolized_path(template: str | Path, *, symbol: str) -> Path:
@@ -1014,7 +1159,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--meta-execution-mode",
         choices=["interval", "intrabar"],
-        default="interval",
+        default="intrabar",
         help="For meta option execution: interval=execute on 10min close, intrabar=cache 10min intent and execute via 1m monitoring.",
     )
     parser.add_argument(
@@ -1083,7 +1228,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--option-dte-cutoff",
-        default="14:00",
+        default="13:00",
         help="Local HH:MM cutoff; before cutoff use 0DTE, otherwise 1DTE.",
     )
     parser.add_argument(
@@ -1229,6 +1374,13 @@ def main() -> None:
             precomputed_append_lookback_days=int(args.meta_base_frame_append_lookback_days),
             min_hold_bars=2,
             exit_entry_delta=0.15,
+            soft_exit_confirm_bars=2,
+            urgent_exit_prob=0.85,
+            urgent_exit_delta=0.30,
+            profit_protect_enabled=False,
+            profit_protect_arm_atr=2.0,
+            profit_protect_giveback_atr_long=0.75,
+            profit_protect_giveback_atr_short=1.0,
         )
         print(
             f"[live] Meta-XGB inference enabled: model_root={args.meta_model_root} "
@@ -1280,6 +1432,13 @@ def main() -> None:
                 meta_use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
                 meta_execute_on_interval_close=str(args.meta_execution_mode).strip().lower() == "interval",
                 meta_intrabar_execution_enabled=str(args.meta_execution_mode).strip().lower() == "intrabar",
+                meta_soft_exit_confirm_bars=2,
+                meta_urgent_exit_prob=0.85,
+                meta_urgent_exit_delta=0.30,
+                meta_profit_protect_enabled=False,
+                meta_profit_protect_arm_atr=2.0,
+                meta_profit_protect_giveback_atr_long=0.75,
+                meta_profit_protect_giveback_atr_short=1.0,
             )
             order_policies[symbol] = OptionOrderPolicy(cfg)
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
@@ -1320,9 +1479,22 @@ def main() -> None:
         agg_label=args.resample_label,
         on_1m=on_1m,
         on_15m_close=on_15m,
+        regular_hours_only=True,
+        tz_name=args.tz or "America/New_York",
+        session_open=args.session_open,
+        session_close=args.session_close,
+    )
+    print(
+        f"[live] RTH-only live bar filter enabled: "
+        f"{args.session_open}-{args.session_close} {args.tz or 'America/New_York'}"
     )
     if args.prefill_path:
-        prefill_df = _load_prefill_frame(Path(args.prefill_path))
+        configured_prefill_path = Path(args.prefill_path)
+        runtime_prefill_cache_path = _default_runtime_prefill_cache_path(configured_prefill_path)
+        prefill_source_path = runtime_prefill_cache_path if runtime_prefill_cache_path.exists() else configured_prefill_path
+        if prefill_source_path == runtime_prefill_cache_path:
+            print(f"[live] Using runtime prefill cache: {runtime_prefill_cache_path}")
+        prefill_df = _load_prefill_frame(prefill_source_path)
         if not args.no_prefill_fetch:
             try:
                 prefill_df = _extend_prefill_with_alpaca_gap(
@@ -1332,11 +1504,30 @@ def main() -> None:
                 )
             except Exception as exc:
                 print(f"[live] Prefill gap bridge failed: {exc}")
+        compact_prefill_df = _prepare_runtime_prefill_frame(
+            df=prefill_df,
+            precomputed_meta_frame=precomputed_meta_frame,
+            append_lookback_days=int(args.meta_base_frame_append_lookback_days),
+            tz_name=args.tz or "America/New_York",
+            session_open=args.session_open,
+            session_close=args.session_close,
+        )
+        try:
+            _persist_runtime_prefill_cache(
+                df=compact_prefill_df,
+                cache_path=runtime_prefill_cache_path,
+            )
+            print(
+                f"[live] Updated runtime prefill cache: {runtime_prefill_cache_path} "
+                f"rows={len(compact_prefill_df):,}"
+            )
+        except Exception as exc:
+            print(f"[live] Runtime prefill cache update failed: {exc}")
         if args.buffer_size and args.buffer_size > 0 and args.prefill_tail and args.prefill_tail > args.buffer_size:
             print("[live] Warning: prefill-tail exceeds buffer-size; oldest rows will be dropped.")
         _prefill_buffers(
             processor=processor,
-            df=prefill_df,
+            df=compact_prefill_df,
             symbols=symbols,
             tail=args.prefill_tail,
         )
@@ -1417,7 +1608,20 @@ def main() -> None:
         pass
 
     try:
+        last_broker_poll = 0.0
         while not stop_event.is_set():
+            if order_policies is not None:
+                now = time.monotonic()
+                if now - last_broker_poll >= 30.0:
+                    last_broker_poll = now
+                    for symbol, policy in order_policies.items():
+                        if policy.has_pending_broker_reconcile():
+                            reconcile_result = policy.reconcile_pending_broker_order(logger=print)
+                            if args.use_execution_latch:
+                                execution_latches[symbol].set_position(
+                                    policy.snapshot_state().get("position", 0)
+                                )
+                            print(f"[live] Broker reconcile {symbol}: {reconcile_result}")
             try:
                 bar = bar_queue.get(timeout=0.5)
             except queue_mod.Empty:
