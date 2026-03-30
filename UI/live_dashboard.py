@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import queue as queue_mod
 import threading
@@ -21,7 +22,7 @@ from API.Alpaca_API.market_data.bar_aggregator import OhlcvAggregator
 from API.Alpaca_API.market_data.bar_buffer import BarRingBuffer
 from Policy.execution_latch import DirectionExecutionLatch
 
-UI_BUILD = "2026-03-02-dashboard-meta-10min"
+UI_BUILD = "2026-03-30-dashboard-meta-10min-sync"
 
 if TYPE_CHECKING:
     from API.Alpaca_API.inference.live_inference import (
@@ -146,6 +147,118 @@ def _load_runtime_policy_cache(cache_path: Path) -> dict[str, Any]:
 
 def _persist_runtime_policy_cache(cache_path: Path, payload: dict[str, Any]) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(_json_safe(payload), indent=2), encoding="utf-8")
+
+
+def _default_replay_snapshot_cache_dir() -> Path:
+    return Path("Data") / "inference" / "dashboard_cache"
+
+
+def _path_fingerprint(raw_path: str | None) -> dict[str, Any]:
+    if not raw_path:
+        return {"path": None, "exists": False}
+    path = Path(raw_path)
+    try:
+        stat = path.stat()
+        return {
+            "path": str(path),
+            "exists": True,
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+    except Exception:
+        return {"path": str(path), "exists": False}
+
+
+def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
+    semantic_cfg = {
+        "runner_mode": str(cfg.runner_mode),
+        "symbols": list(cfg.symbols),
+        "inference_mode": str(cfg.inference_mode),
+        "interval": int(cfg.interval),
+        "resample_label": str(cfg.resample_label),
+        "resample_closed": str(cfg.resample_closed),
+        "tz": str(cfg.tz),
+        "assume_tz": str(cfg.assume_tz),
+        "meta_model_root": str(cfg.meta_model_root),
+        "meta_base_frame_append_lookback_days": int(cfg.meta_base_frame_append_lookback_days),
+        "no_agent": bool(cfg.no_agent),
+        "no_pivot_probs": bool(cfg.no_pivot_probs),
+        "no_tb_probs": bool(cfg.no_tb_probs),
+        "fill_missing_prob": float(cfg.fill_missing_prob),
+        "session_open": str(cfg.session_open),
+        "session_close": str(cfg.session_close),
+        "ga_model_root": str(cfg.ga_model_root),
+        "ga_feature_list": cfg.ga_feature_list,
+        "ga_dataset_name": str(cfg.ga_dataset_name),
+        "split_x_filename": str(cfg.split_x_filename),
+        "ga_pivot_label_dir": str(cfg.ga_pivot_label_dir),
+        "ga_tb_label_dir": str(cfg.ga_tb_label_dir),
+        "meta_entry_threshold": cfg.meta_entry_threshold,
+        "meta_exit_threshold": cfg.meta_exit_threshold,
+        "meta_trail_activate_atr": float(cfg.meta_trail_activate_atr),
+        "meta_trail_atr": float(cfg.meta_trail_atr),
+        "meta_trail_atr_after_tp": float(cfg.meta_trail_atr_after_tp),
+        "meta_use_tp_to_tighten_trail": bool(cfg.meta_use_tp_to_tighten_trail),
+        "enable_option_orders": bool(cfg.enable_option_orders),
+        "simulate_orders": bool(cfg.simulate_orders),
+        "option_order_qty": int(cfg.option_order_qty),
+        "option_atr_mult": float(cfg.option_atr_mult),
+        "option_dte_cutoff": str(cfg.option_dte_cutoff),
+        "option_no_close_on_flat": bool(cfg.option_no_close_on_flat),
+        "option_no_close_on_flip": bool(cfg.option_no_close_on_flip),
+        "startup_catchup_order": bool(cfg.startup_catchup_order),
+        "startup_catchup_max_age_min": int(cfg.startup_catchup_max_age_min),
+        "exec_entry_confirm_bars": int(cfg.exec_entry_confirm_bars),
+        "exec_exit_confirm_bars": int(cfg.exec_exit_confirm_bars),
+        "exec_flip_abs_threshold": float(cfg.exec_flip_abs_threshold),
+        "use_execution_latch": bool(cfg.use_execution_latch),
+        "replay_start": cfg.replay_start,
+        "replay_end": cfg.replay_end,
+        "replay_regular_only": bool(cfg.replay_regular_only),
+        "replay_max_bars": cfg.replay_max_bars,
+        "replay_no_prepend_split_test_warmup": bool(cfg.replay_no_prepend_split_test_warmup),
+        "eval_parity_mode": bool(cfg.eval_parity_mode),
+    }
+    return {
+        "ui_build": UI_BUILD,
+        "semantic_cfg": semantic_cfg,
+        "replay_data": _path_fingerprint(cfg.replay_data_path),
+        "meta_base_frame": _path_fingerprint(cfg.meta_base_frame_path),
+    }
+
+
+def _default_replay_snapshot_cache_path(cfg: "SessionConfig") -> Path:
+    sig = _replay_snapshot_signature(cfg)
+    digest = hashlib.sha256(
+        json.dumps(_json_safe(sig), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return _default_replay_snapshot_cache_dir() / f"replay_snapshot_{digest}.json"
+
+
+def _load_replay_snapshot_cache(cache_path: Path, *, cfg: "SessionConfig") -> dict[str, Any]:
+    if not cache_path.exists():
+        return {}
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    expected = _replay_snapshot_signature(cfg)
+    if payload.get("signature") != _json_safe(expected):
+        return {}
+    state = payload.get("state")
+    if not isinstance(state, dict):
+        return {}
+    return payload
+
+
+def _persist_replay_snapshot_cache(cache_path: Path, *, cfg: "SessionConfig", state: dict[str, Any]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "saved_at": _ts_iso(datetime.now(timezone.utc)),
+        "signature": _replay_snapshot_signature(cfg),
+        "state": _json_safe(state),
+    }
     cache_path.write_text(json.dumps(_json_safe(payload), indent=2), encoding="utf-8")
 
 
@@ -747,6 +860,7 @@ class EventBroker:
 class DashboardStore:
     def __init__(self, *, max_bars: int = 1000, max_events: int = 250) -> None:
         self._max_bars = int(max_bars)
+        self._max_bars_1m = int(max_bars) * 20
         self._lock = threading.Lock()
         self._running = False
         self._started_at: str | None = None
@@ -778,7 +892,7 @@ class DashboardStore:
             self._status_message = "starting"
             self._config = _json_safe(config.__dict__)
             self._symbols = symbols
-            self._bars_1m = {s: deque(maxlen=self._max_bars) for s in symbols}
+            self._bars_1m = {s: deque(maxlen=self._max_bars_1m) for s in symbols}
             self._bars_15m = {s: deque(maxlen=self._max_bars) for s in symbols}
             self._last_actions = {}
             self._agent_state = None
@@ -808,7 +922,7 @@ class DashboardStore:
         if buffer_size is not None:
             payload["buffer_size"] = int(buffer_size)
         with self._lock:
-            self._bars_1m.setdefault(symbol, deque(maxlen=self._max_bars)).append(payload)
+            self._bars_1m.setdefault(symbol, deque(maxlen=self._max_bars_1m)).append(payload)
 
     def add_15m_bar(self, symbol: str, bar: dict[str, Any]) -> None:
         payload = _normalize_bar(bar)
@@ -905,8 +1019,8 @@ class DashboardStore:
                     continue
                 if "timestamp" not in df.columns:
                     df = df.reset_index()
-                records = df.tail(self._max_bars).to_dict("records")
-                target = self._bars_1m.setdefault(symbol, deque(maxlen=self._max_bars))
+                records = df.tail(self._max_bars_1m).to_dict("records")
+                target = self._bars_1m.setdefault(symbol, deque(maxlen=self._max_bars_1m))
                 target.clear()
                 for row in records:
                     target.append(
@@ -944,6 +1058,37 @@ class DashboardStore:
                 "trade_events": list(self._trade_events),
                 "logs": list(self._log_events),
             }
+
+    def restore_snapshot(
+        self,
+        snap: dict[str, Any],
+        *,
+        running: bool,
+        status_message: str,
+    ) -> None:
+        with self._lock:
+            self._running = bool(running)
+            self._started_at = _ts_iso(datetime.now(timezone.utc))
+            self._stopped_at = None
+            self._last_error = None
+            self._status_message = str(status_message)
+            self._config = _json_safe(snap.get("config", self._config or {}))
+            self._symbols = [str(x).upper() for x in (snap.get("symbols") or [])]
+            self._bars_1m = {
+                str(symbol).upper(): deque((rows or []), maxlen=self._max_bars_1m)
+                for symbol, rows in (snap.get("bars_1m") or {}).items()
+            }
+            self._bars_15m = {
+                str(symbol).upper(): deque((rows or []), maxlen=self._max_bars)
+                for symbol, rows in (snap.get("bars_15m") or {}).items()
+            }
+            self._last_actions = _json_safe(snap.get("last_actions") or {})
+            self._agent_state = _json_safe(snap.get("agent_state"))
+            self._policy_state = _json_safe(snap.get("policy_state") or {})
+            self._broker_state = _json_safe(snap.get("broker_state") or {})
+            self._action_events = deque((snap.get("action_events") or []), maxlen=self._action_events.maxlen)
+            self._trade_events = deque((snap.get("trade_events") or []), maxlen=self._trade_events.maxlen)
+            self._log_events = deque((snap.get("logs") or []), maxlen=self._log_events.maxlen)
 
 
 class LiveSession:
@@ -1241,6 +1386,34 @@ class LiveSession:
 
     def _run_replay(self, *, cfg: SessionConfig, stop_event: threading.Event) -> None:
         symbols = cfg.symbols
+        replay_snapshot_cache_path = _default_replay_snapshot_cache_path(cfg)
+        can_use_snapshot_cache = float(cfg.replay_sleep or 0.0) <= 0.0
+        if can_use_snapshot_cache:
+            cached = _load_replay_snapshot_cache(replay_snapshot_cache_path, cfg=cfg)
+            cached_state = cached.get("state") if isinstance(cached, dict) else None
+            if isinstance(cached_state, dict):
+                self._store.restore_snapshot(
+                    cached_state,
+                    running=True,
+                    status_message="replay cache loaded",
+                )
+                self._store.add_log_event(
+                    {
+                        "symbol": "SYSTEM",
+                        "message": f"[replay] loaded cached dashboard replay snapshot: {replay_snapshot_cache_path}",
+                    }
+                )
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": f"[replay] loaded cached dashboard replay snapshot: {replay_snapshot_cache_path}",
+                    },
+                )
+                self._emit_status(running=True, message="replay cache loaded")
+                self._emit_state_sync()
+                return
+
         self._emit_status(running=True, message=f"replay loading {cfg.replay_data_path}")
         self._store.add_log_event(
             {
@@ -1930,6 +2103,40 @@ class LiveSession:
                 "message": f"[replay] done. bars processed: {count:,}.",
             },
         )
+        if can_use_snapshot_cache and not stop_event.is_set():
+            try:
+                _persist_replay_snapshot_cache(
+                    replay_snapshot_cache_path,
+                    cfg=cfg,
+                    state=self._store.snapshot(),
+                )
+                self._store.add_log_event(
+                    {
+                        "symbol": "SYSTEM",
+                        "message": f"[replay] saved dashboard replay snapshot: {replay_snapshot_cache_path}",
+                    }
+                )
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": f"[replay] saved dashboard replay snapshot: {replay_snapshot_cache_path}",
+                    },
+                )
+            except Exception as exc:
+                self._store.add_log_event(
+                    {
+                        "symbol": "SYSTEM",
+                        "message": f"[replay] replay snapshot cache save failed: {exc}",
+                    }
+                )
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": f"[replay] replay snapshot cache save failed: {exc}",
+                    },
+                )
         self._emit_status(running=True, message=f"replay complete ({count:,} bars)")
         self._emit_state_sync()
 

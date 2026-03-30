@@ -265,7 +265,9 @@
     const state = { running: false, status_message: "idle", symbols: [], bars_1m: {}, bars_15m: {}, last_actions: {}, action_events: [], policy_state: {}, broker_state: {}, trade_events: [], logs: [], agent_state: null, chart_view: {} };
     const hover = { active: false, x: 0, y: 0 };
     let eventSource = null;
-    const MAX_POINTS = 900;
+    const MAX_POINTS_SIGNAL = 900;
+    const ONE_MINUTE_POINTS_PER_SIGNAL_BAR = 20;
+    const MAX_POINTS_1M = MAX_POINTS_SIGNAL * ONE_MINUTE_POINTS_PER_SIGNAL_BAR;
     const CHART_WINDOW_10M = 140;
     const CHART_WINDOW_1M_FALLBACK = 220;
     const CHART_WHEEL_STEP_BARS = 6;
@@ -338,10 +340,10 @@
       return { ok: true, status: res.status, data: body, state: body?.state };
     }
 
-    function pushLimited(bucket, symbol, item) {
+    function pushLimited(bucket, symbol, item, maxPoints = MAX_POINTS_SIGNAL) {
       if (!bucket[symbol]) bucket[symbol] = [];
       bucket[symbol].push(item);
-      if (bucket[symbol].length > MAX_POINTS) bucket[symbol] = bucket[symbol].slice(-MAX_POINTS);
+      if (bucket[symbol].length > maxPoints) bucket[symbol] = bucket[symbol].slice(-maxPoints);
     }
 
     function escapeHtml(value) {
@@ -548,6 +550,21 @@
       return bestIdx;
     }
 
+    function timestampMs(value) {
+      const tms = new Date(value).getTime();
+      return Number.isFinite(tms) ? tms : Number.NaN;
+    }
+
+    function deriveTimeDomain(series, barIntervalMs) {
+      if (!series.length) return null;
+      const startMs = series[0].t.getTime();
+      const lastMs = series[series.length - 1].t.getTime();
+      if (!Number.isFinite(startMs) || !Number.isFinite(lastMs)) return null;
+      const endMs = lastMs + Math.max(1, Number(barIntervalMs) || 1);
+      if (!(endMs > startMs)) return null;
+      return { startMs, endMs };
+    }
+
     function getChartView(sym) {
       state.chart_view = state.chart_view || {};
       if (!state.chart_view[sym]) state.chart_view[sym] = { offset_10m_bars: 0 };
@@ -574,15 +591,18 @@
       const start10m = Math.max(0, end10m - CHART_WINDOW_10M);
       const visible10mRaw = raw10m.slice(start10m, end10m);
 
+      let sharedTimeDomain = null;
       let visible1mRaw = raw1m.slice(-CHART_WINDOW_1M_FALLBACK);
       if (visible10mRaw.length) {
-        const visibleStartMs = new Date(visible10mRaw[0].timestamp).getTime();
-        const visibleEndMs = new Date(visible10mRaw[visible10mRaw.length - 1].timestamp).getTime() + intervalMs;
-        const filtered = raw1m.filter((row) => {
-          const tms = new Date(row.timestamp).getTime();
+        const visibleStartMs = timestampMs(visible10mRaw[0].timestamp);
+        const visibleEndMs = timestampMs(visible10mRaw[visible10mRaw.length - 1].timestamp) + intervalMs;
+        if (Number.isFinite(visibleStartMs) && Number.isFinite(visibleEndMs) && visibleEndMs > visibleStartMs) {
+          sharedTimeDomain = { startMs: visibleStartMs, endMs: visibleEndMs };
+        }
+        visible1mRaw = raw1m.filter((row) => {
+          const tms = timestampMs(row.timestamp);
           return Number.isFinite(tms) && tms >= visibleStartMs && tms <= visibleEndMs;
         });
-        if (filtered.length) visible1mRaw = filtered;
       }
 
       const one = visible1mRaw.map((x) => ({
@@ -611,6 +631,10 @@
         p_tb_short: Number(x.p_tb_short)
       })).filter((x) => !Number.isNaN(x.t.getTime()));
 
+      const pane1Domain = sharedTimeDomain || deriveTimeDomain(one, 60 * 1000);
+      const pane2Domain = sharedTimeDomain || deriveTimeDomain(fifteen, intervalMs);
+      const pane3Domain = pane2Domain || deriveTimeDomain(probs, intervalMs);
+
       const ctx = chart.getContext("2d");
       const dpr = window.devicePixelRatio || 1;
       const w = chart.clientWidth;
@@ -638,7 +662,10 @@
       const pane2Y = top + pane1H + gap;
       const pane3Y = pane2Y + pane2H + gap;
 
-      function drawPane(series, y0, paneHeight, label, showXAxis) {
+      function drawPane(series, y0, paneHeight, label, options = {}) {
+        const showXAxis = !!options.showXAxis;
+        const xDomain = options.xDomain || deriveTimeDomain(series, options.barIntervalMs || 60 * 1000);
+        const barIntervalMs = Math.max(1, Number(options.barIntervalMs) || 60 * 1000);
         if (!series.length) {
           ctx.fillStyle = "#8ca6c5";
           ctx.font = "12px Consolas, monospace";
@@ -657,7 +684,16 @@
         maxP += yPad;
         minP -= yPad;
         const toY = (p) => y0 + ((maxP - p) / (maxP - minP)) * paneHeight;
-        const toX = (idx) => left + ((idx + 0.5) / Math.max(1, series.length)) * plotW;
+        const domainStartMs = xDomain?.startMs ?? series[0].t.getTime();
+        const domainEndMs = xDomain?.endMs ?? (series[series.length - 1].t.getTime() + barIntervalMs);
+        const domainSpanMs = Math.max(barIntervalMs, domainEndMs - domainStartMs);
+        const toXTime = (tms) => left + (((tms - domainStartMs) / domainSpanMs) * plotW);
+        const xToTime = (x) => domainStartMs + (((x - left) / Math.max(1, plotW)) * domainSpanMs);
+        const toX = (idx) => {
+          const row = series[idx];
+          const rowMs = row ? row.t.getTime() : domainStartMs;
+          return toXTime(rowMs + barIntervalMs / 2);
+        };
 
         ctx.strokeStyle = "#214160";
         ctx.lineWidth = 1;
@@ -684,8 +720,7 @@
         ctx.lineTo(w - right, y0 + paneHeight);
         ctx.stroke();
 
-        const spacing = plotW / Math.max(1, series.length);
-        const bodyW = Math.max(1, Math.min(10, spacing * 0.72));
+        const bodyW = Math.max(1, Math.min(10, (plotW * (barIntervalMs / domainSpanMs)) * 0.72));
         series.forEach((c, i) => {
           const x = toX(i);
           const yH = toY(c.high);
@@ -713,35 +748,42 @@
         ctx.fillText(label, left + 6, y0 + 2);
 
         if (showXAxis) {
-          const minTs = series[0].t.getTime();
-          const maxTs = series[series.length - 1].t.getTime();
-          const spanMs = Math.max(1, maxTs - minTs);
           const xTicks = 6;
           ctx.textAlign = "center";
           ctx.textBaseline = "top";
           for (let i = 0; i < xTicks; i += 1) {
             const frac = i / (xTicks - 1);
-            const idx = Math.round(frac * (series.length - 1));
-            const x = toX(idx);
+            const tickMs = domainStartMs + frac * domainSpanMs;
+            const x = toXTime(tickMs);
             const labelX = Math.max(left + 28, Math.min(w - right - 28, x));
-            const t = series[idx].t;
+            const t = new Date(tickMs);
             ctx.beginPath();
             ctx.moveTo(x, y0 + paneHeight);
             ctx.lineTo(x, y0 + paneHeight + 4);
             ctx.strokeStyle = "#365272";
             ctx.stroke();
             ctx.fillStyle = "#8ca6c5";
-            ctx.fillText(fmtTickTime(t, spanMs), labelX, y0 + paneHeight + 6);
+            ctx.fillText(fmtTickTime(t, domainSpanMs), labelX, y0 + paneHeight + 6);
           }
         }
         const fromY = (y) => maxP - ((y - y0) / paneHeight) * (maxP - minP);
-        return { series, toX, toY, fromY, y0, paneHeight };
+        return { series, toX, toXTime, xToTime, toY, fromY, y0, paneHeight, domainStartMs, domainEndMs, barIntervalMs };
       }
 
-      const pane1 = drawPane(one, pane1Y, pane1H, "Top: 1m candles", false);
-      const pane2 = drawPane(fifteen, pane2Y, pane2H, "Middle: 10m candles", true);
+      const pane1 = drawPane(one, pane1Y, pane1H, "Top: 1m candles", {
+        showXAxis: false,
+        xDomain: pane1Domain,
+        barIntervalMs: 60 * 1000
+      });
+      const pane2 = drawPane(fifteen, pane2Y, pane2H, "Middle: 10m candles", {
+        showXAxis: true,
+        xDomain: pane2Domain,
+        barIntervalMs: intervalMs
+      });
 
-      function drawProbPane(series, y0, paneHeight, label) {
+      function drawProbPane(series, y0, paneHeight, label, options = {}) {
+        const xDomain = options.xDomain || deriveTimeDomain(series, options.barIntervalMs || intervalMs);
+        const barIntervalMs = Math.max(1, Number(options.barIntervalMs) || intervalMs);
         if (!series.length) {
           ctx.fillStyle = "#8ca6c5";
           ctx.font = "12px Consolas, monospace";
@@ -751,7 +793,16 @@
           return null;
         }
         const toY = (p) => y0 + (1 - p) * paneHeight;
-        const toX = (idx) => left + ((idx + 0.5) / Math.max(1, series.length)) * plotW;
+        const domainStartMs = xDomain?.startMs ?? series[0].t.getTime();
+        const domainEndMs = xDomain?.endMs ?? (series[series.length - 1].t.getTime() + barIntervalMs);
+        const domainSpanMs = Math.max(barIntervalMs, domainEndMs - domainStartMs);
+        const toXTime = (tms) => left + (((tms - domainStartMs) / domainSpanMs) * plotW);
+        const xToTime = (x) => domainStartMs + (((x - left) / Math.max(1, plotW)) * domainSpanMs);
+        const toX = (idx) => {
+          const row = series[idx];
+          const rowMs = row ? row.t.getTime() : domainStartMs;
+          return toXTime(rowMs + barIntervalMs / 2);
+        };
 
         ctx.strokeStyle = "#214160";
         ctx.lineWidth = 1;
@@ -822,25 +873,22 @@
         ctx.font = "11px Consolas, monospace";
         ctx.fillText(label, left + 6, y0 + 2);
 
-        const minTs = series[0].t.getTime();
-        const maxTs = series[series.length - 1].t.getTime();
-        const spanMs = Math.max(1, maxTs - minTs);
         const xTicks = 6;
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
         for (let i = 0; i < xTicks; i += 1) {
           const frac = i / (xTicks - 1);
-          const idx = Math.round(frac * (series.length - 1));
-          const x = toX(idx);
+          const tickMs = domainStartMs + frac * domainSpanMs;
+          const x = toXTime(tickMs);
           const labelX = Math.max(left + 28, Math.min(w - right - 28, x));
-          const t = series[idx].t;
+          const t = new Date(tickMs);
           ctx.beginPath();
           ctx.moveTo(x, y0 + paneHeight);
           ctx.lineTo(x, y0 + paneHeight + 4);
           ctx.strokeStyle = "#365272";
           ctx.stroke();
           ctx.fillStyle = "#8ca6c5";
-          ctx.fillText(fmtTickTime(t, spanMs), labelX, y0 + paneHeight + 6);
+          ctx.fillText(fmtTickTime(t, domainSpanMs), labelX, y0 + paneHeight + 6);
         }
 
         ctx.textAlign = "left";
@@ -854,7 +902,7 @@
           ctx.fillText(key, legendX + 14, legendY - 2);
           legendX += 120;
         });
-        return { series, toX, toY, y0, paneHeight, keys, colors };
+        return { series, toX, toXTime, xToTime, toY, y0, paneHeight, keys, colors, domainStartMs, domainEndMs, barIntervalMs };
       }
 
       const hasMetaProbSeries = probs.some((row) =>
@@ -864,7 +912,8 @@
         probs,
         pane3Y,
         pane3H,
-        hasMetaProbSeries ? "Bottom: 10m meta probs" : "Bottom: 10m GA probs"
+        hasMetaProbSeries ? "Bottom: 10m meta probs" : "Bottom: 10m GA probs",
+        { xDomain: pane3Domain, barIntervalMs: intervalMs }
       );
 
       const actionsAll = (state.action_events || [])
@@ -937,8 +986,8 @@
 
       function drawActionMarkers(pane) {
         if (!pane || !pane.series.length) return;
-        const firstTs = pane.series[0].t.getTime();
-        const lastTs = pane.series[pane.series.length - 1].t.getTime();
+        const firstTs = pane.domainStartMs;
+        const lastTs = pane.domainEndMs;
         actions.forEach((a) => {
           const t = new Date(a.timestamp);
           const tms = t.getTime();
@@ -991,8 +1040,8 @@
 
       function drawPolicyMarkers(pane) {
         if (!pane || !pane.series.length || !policyActions.length) return;
-        const firstTs = pane.series[0].t.getTime();
-        const lastTs = pane.series[pane.series.length - 1].t.getTime();
+        const firstTs = pane.domainStartMs;
+        const lastTs = pane.domainEndMs;
         policyActions.forEach((a) => {
           const t = new Date(a.timestamp);
           const tms = t.getTime();
@@ -1034,8 +1083,8 @@
 
       function drawOrderMarkers(pane) {
         if (!pane || !pane.series.length || !orderMarkers.length) return;
-        const firstTs = pane.series[0].t.getTime();
-        const lastTs = pane.series[pane.series.length - 1].t.getTime();
+        const firstTs = pane.domainStartMs;
+        const lastTs = pane.domainEndMs;
         orderMarkers.forEach((m) => {
           const t = new Date(m.timestamp);
           const tms = t.getTime();
@@ -1077,12 +1126,12 @@
 
       function drawPositionSegments(pane) {
         if (!pane || !pane.series.length || !positionSegments.length) return;
-        const firstTs = pane.series[0].t.getTime();
-        const lastTs = pane.series[pane.series.length - 1].t.getTime();
+        const firstTs = pane.domainStartMs;
+        const lastTs = pane.domainEndMs;
         positionSegments.forEach((seg) => {
           if (!Number.isFinite(seg.price)) return;
           const startDate = new Date(seg.start);
-          const endDate = seg.end ? new Date(seg.end) : pane.series[pane.series.length - 1].t;
+          const endDate = seg.end ? new Date(seg.end) : new Date(lastTs);
           const startMs = startDate.getTime();
           const endMs = endDate.getTime();
           if (Number.isNaN(startMs) || Number.isNaN(endMs)) return;
@@ -1134,9 +1183,7 @@
         const xMax = w - right;
         const xClamped = Math.max(xMin, Math.min(xMax, hover.x));
         const yClamped = Math.max(paneTop, Math.min(paneBottom, hover.y));
-        const n = pane.series.length;
-        const frac = (xClamped - left) / Math.max(1, plotW);
-        const idx = Math.max(0, Math.min(n - 1, Math.round(frac * n - 0.5)));
+        const idx = nearestIndexByTime(pane.series, pane.xToTime(xClamped));
         const xBar = pane.toX(idx);
         const candle = pane.series[idx];
         if (!candle) return;
@@ -1198,9 +1245,7 @@
         const xMax = w - right;
         const xClamped = Math.max(xMin, Math.min(xMax, hover.x));
         const yClamped = Math.max(paneTop, Math.min(paneBottom, hover.y));
-        const n = pane.series.length;
-        const frac = (xClamped - left) / Math.max(1, plotW);
-        const idx = Math.max(0, Math.min(n - 1, Math.round(frac * n - 0.5)));
+        const idx = nearestIndexByTime(pane.series, pane.xToTime(xClamped));
         const xBar = pane.toX(idx);
         const row = pane.series[idx];
         if (!row) return;
@@ -1336,9 +1381,9 @@
           if (p.message) state.logs = [...(state.logs || []), { symbol: "SYSTEM", message: p.message }].slice(-400);
         } else if (evt.type === "bar_1m") {
           state.symbols = state.symbols?.length ? state.symbols : [p.symbol];
-          pushLimited(state.bars_1m, p.symbol, p.bar);
+          pushLimited(state.bars_1m, p.symbol, p.bar, MAX_POINTS_1M);
         } else if (evt.type === "bar_15m") {
-          pushLimited(state.bars_15m, p.symbol, p.bar);
+          pushLimited(state.bars_15m, p.symbol, p.bar, MAX_POINTS_SIGNAL);
         } else if (evt.type === "action") {
           state.last_actions = state.last_actions || {};
           state.last_actions[p.symbol] = {

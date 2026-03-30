@@ -1,0 +1,62 @@
+{
+  "symbols": [
+    "SPY"
+  ],
+  "updated_at": "2026-03-30T19:55:59.869636+00:00",
+  "policies": {
+    "SPY": {
+      "latest_meta_side_snapshot": {
+        "timestamp": "2026-03-30T19:40:00+00:00",
+        "signal_close": 631.04,
+        "signal_high": 631.46,
+        "signal_low": 630.22,
+        "signal_atr": 1.098364066263422,
+        "p_enter_long": 0.07255984842777252,
+        "p_enter_short": 0.8700874447822571,
+        "p_exit_long": null,
+        "p_exit_short": 0.7926028966903687,
+        "thr_enter_long": 0.5,
+        "thr_enter_short": 0.5,
+        "thr_exit_long": 0.65,
+        "thr_exit_short": 0.65
+      },
+      "meta_side_soft_exit_count": {
+        "long": 0,
+        "short": 0
+      },
+      "meta_intrabar_entry_intent_active": {
+        "long": false,
+        "short": false
+      },
+      "meta_intrabar_entry_ref": {
+        "long": null,
+        "short": null
+      },
+      "meta_side_reason": {
+        "long": "below_entry_threshold",
+        "short": "hold_same_side_enter_still_valid"
+      },
+      "meta_side_entry_armed": {
+        "long": true,
+        "short": false
+      },
+      "meta_side_bars_held": {
+        "long": -1,
+        "short": 365
+      },
+      "meta_side_cooldown_until": {
+        "long": "2026-03-30T09:51:00-04:00",
+        "short": "2026-03-30T09:59:00-04:00"
+      },
+      "prev_1m_close": 632.085,
+      "last_1m_close": 632.35,
+      "recent_1m_closes": [
+        631.77,
+        631.56,
+        631.8,
+        632.085,
+        632.35
+      ]
+    }
+  }
+}
