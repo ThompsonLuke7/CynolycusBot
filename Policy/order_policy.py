@@ -6,6 +6,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
 
 import math
+import pandas as pd
 import re
 import time as time_mod
 from zoneinfo import ZoneInfo

@@ -2,19 +2,19 @@
   "symbols": [
     "SPY"
   ],
-  "updated_at": "2026-03-31T13:42:30.158492+00:00",
+  "updated_at": "2026-04-01T18:00:59.488632+00:00",
   "policies": {
     "SPY": {
       "latest_meta_side_snapshot": {
-        "timestamp": "2026-03-31T13:30:00+00:00",
-        "signal_close": 639.84,
-        "signal_high": 639.87,
-        "signal_low": 638.41,
-        "signal_atr": 1.653754856358334,
-        "p_enter_long": 0.030752096325159073,
-        "p_enter_short": 0.9745553731918335,
+        "timestamp": "2026-04-01T17:40:00+00:00",
+        "signal_close": 657.6,
+        "signal_high": 658.23,
+        "signal_low": 657.59,
+        "signal_atr": 0.9605063756667571,
+        "p_enter_long": 0.08514614403247833,
+        "p_enter_short": 0.9461097121238708,
         "p_exit_long": null,
-        "p_exit_short": 0.8609285354614258,
+        "p_exit_short": 0.09582370519638062,
         "thr_enter_long": 0.5,
         "thr_enter_short": 0.5,
         "thr_exit_long": 0.65,
@@ -34,28 +34,32 @@
       },
       "meta_side_reason": {
         "long": "below_entry_threshold",
-        "short": "urgent_exit_prob"
+        "short": "hold_same_side_enter_still_valid"
       },
       "meta_side_entry_armed": {
         "long": true,
-        "short": false
+        "short": true
       },
       "meta_side_bars_held": {
         "long": -1,
-        "short": 2
+        "short": 31
+      },
+      "meta_side_entry_signal_ts": {
+        "long": null,
+        "short": "2026-04-01T12:50:00-04:00"
       },
       "meta_side_cooldown_until": {
         "long": null,
-        "short": "2026-03-31T09:51:00-04:00"
+        "short": "2026-04-01T13:16:00-04:00"
       },
-      "prev_1m_close": 640.04,
-      "last_1m_close": 639.95,
+      "prev_1m_close": 656.785,
+      "last_1m_close": 656.58,
       "recent_1m_closes": [
-        639.32,
-        639.49,
-        639.84,
-        640.04,
-        639.95
+        657.45,
+        657.14,
+        656.84,
+        656.785,
+        656.58
       ],
       "entry_lockout_until": null,
       "entry_lockout_reason": null

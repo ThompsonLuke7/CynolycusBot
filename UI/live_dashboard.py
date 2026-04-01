@@ -1066,6 +1066,10 @@ class DashboardStore:
                 if isinstance(last_prob_sources, dict):
                     for key, value in last_prob_sources.items():
                         safe[key] = value
+                last_vix_status = safe.get("last_vix_status")
+                if isinstance(last_vix_status, dict):
+                    for key, value in last_vix_status.items():
+                        safe[f"vix_{key}"] = value
                 last_thresholds = safe.get("last_thresholds")
                 if isinstance(last_thresholds, dict):
                     for key, value in last_thresholds.items():
@@ -2323,19 +2327,26 @@ class LiveSession:
             feed = lr._parse_feed(cfg.feed)
             bar_queue: queue_mod.Queue = queue_mod.Queue(maxsize=cfg.queue_size)
             precomputed_meta_frame = None
-
             inference_mode = "none" if cfg.no_agent else str(cfg.inference_mode or "meta").strip().lower()
+            live_vix_symbol = "VIXY"
+            live_vix_enabled = inference_mode != "none"
+            vix_runtime_cache_path = lr._default_runtime_vix_cache_path()
+            vix_runtime_cache_df: pd.DataFrame | None = None
+
             agent: LivePPOAgent | LiveMetaXGBAgent | LiveIndependentMetaXGBAgent | None = None
             if inference_mode != "none":
                 ga_feature_list = self._resolve_ga_feature_list(cfg)
-                ga_probs_frame = (
-                    _load_agent_matrix_probs(symbol=symbols[0], dataset_name=cfg.ga_dataset_name)
-                    if cfg.eval_parity_mode and inference_mode == "ppo"
-                    else None
+                ga_probs_frame = _load_agent_matrix_probs(
+                    symbol=symbols[0],
+                    dataset_name=cfg.ga_dataset_name,
                 )
                 if cfg.eval_parity_mode and inference_mode == "ppo" and ga_probs_frame is not None and ga_feature_list:
                     ga_probs_mode = "hybrid"
                 elif cfg.eval_parity_mode and inference_mode == "ppo" and ga_probs_frame is not None:
+                    ga_probs_mode = "frame"
+                elif ga_probs_frame is not None and ga_feature_list:
+                    ga_probs_mode = "hybrid"
+                elif ga_probs_frame is not None:
                     ga_probs_mode = "frame"
                 else:
                     ga_probs_mode = "xgb"
@@ -2347,7 +2358,7 @@ class LiveSession:
                             "message": "[live] eval parity mode requested, but no agent_matrix probs were found; falling back to XGB probs.",
                         },
                     )
-                if cfg.eval_parity_mode and inference_mode == "ppo" and ga_probs_frame is not None:
+                if ga_probs_frame is not None:
                     try:
                         src = ga_probs_frame.attrs.get("source_paths", [])
                         rng_min = ga_probs_frame.index.min()
@@ -2366,7 +2377,7 @@ class LiveSession:
                         )
                     except Exception:
                         pass
-                    if ga_probs_mode == "frame":
+                    if cfg.eval_parity_mode and inference_mode == "ppo" and ga_probs_mode == "frame":
                         self._emit(
                             "log",
                             {
@@ -2814,6 +2825,92 @@ class LiveSession:
                 session_open=cfg.session_open,
                 session_close=cfg.session_close,
             )
+
+            def _log_vix_runtime_cache(message_prefix: str) -> None:
+                if vix_runtime_cache_df is None or vix_runtime_cache_df.empty:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": f"[live] {message_prefix}: no VIX runtime cache rows available.",
+                        },
+                    )
+                    return
+                ts = pd.to_datetime(vix_runtime_cache_df["timestamp"], utc=True, errors="coerce").dropna()
+                if ts.empty:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": f"[live] {message_prefix}: VIX runtime cache has no valid timestamps.",
+                        },
+                    )
+                    return
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": (
+                            f"[live] {message_prefix}: {vix_runtime_cache_path} "
+                            f"rows={len(vix_runtime_cache_df):,} "
+                            f"range={_ts_iso(ts.min())}..{_ts_iso(ts.max())}"
+                        ),
+                    },
+                )
+
+            def _on_vix_interval(symbol: str, bar_tf: dict, _buffer: Any) -> None:
+                nonlocal vix_runtime_cache_df
+                bar_df = pd.DataFrame(
+                    [
+                        {
+                            "timestamp": pd.to_datetime(bar_tf.get("timestamp"), utc=True, errors="coerce"),
+                            "open": bar_tf.get("open"),
+                            "high": bar_tf.get("high"),
+                            "low": bar_tf.get("low"),
+                            "close": bar_tf.get("close"),
+                            "volume": bar_tf.get("volume"),
+                            "symbol": symbol,
+                        }
+                    ]
+                )
+                if vix_runtime_cache_df is None or vix_runtime_cache_df.empty:
+                    merged_vix = bar_df
+                else:
+                    merged_vix = pd.concat([vix_runtime_cache_df, bar_df], axis=0, ignore_index=True)
+                vix_runtime_cache_df = lr._prepare_runtime_vix_frame(
+                    df=merged_vix,
+                    tz_name=cfg.tz or "America/New_York",
+                    session_open=cfg.session_open,
+                    session_close=cfg.session_close,
+                )
+                try:
+                    lr._persist_runtime_vix_cache(
+                        df=vix_runtime_cache_df,
+                        cache_path=vix_runtime_cache_path,
+                    )
+                except Exception as exc:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": f"[live] runtime VIX cache update failed: {exc}",
+                        },
+                    )
+
+            vix_processor = (
+                lr.LiveBarProcessor(
+                    interval_minutes=cfg.interval,
+                    buffer_size=2048,
+                    agg_label=cfg.resample_label,
+                    on_15m_close=_on_vix_interval,
+                    regular_hours_only=True,
+                    tz_name=cfg.tz or "America/New_York",
+                    session_open=cfg.session_open,
+                    session_close=cfg.session_close,
+                )
+                if live_vix_enabled
+                else None
+            )
             self._emit(
                 "log",
                 {
@@ -2824,6 +2921,57 @@ class LiveSession:
                     ),
                 },
             )
+
+            if live_vix_enabled:
+                vix_source_path = vix_runtime_cache_path if vix_runtime_cache_path.exists() else (Path("Data") / "raw" / "vix" / "vixy_10min.parquet")
+                try:
+                    vix_runtime_cache_df = lr._load_runtime_vix_frame(vix_source_path)
+                except Exception as exc:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": f"[live] VIX runtime cache load failed from {vix_source_path}: {exc}",
+                        },
+                    )
+                    vix_runtime_cache_df = None
+                if vix_runtime_cache_df is not None and not vix_runtime_cache_df.empty and not cfg.no_prefill_fetch:
+                    try:
+                        vix_runtime_cache_df = lr._extend_vix_with_alpaca_gap(
+                            df=vix_runtime_cache_df,
+                            feed=feed,
+                            ticker=live_vix_symbol,
+                            timeframe=f"{int(cfg.interval)}Min",
+                        )
+                    except Exception as exc:
+                        self._emit(
+                            "log",
+                            {
+                                "symbol": "SYSTEM",
+                                "message": f"[live] VIX gap bridge failed: {exc}",
+                            },
+                        )
+                if vix_runtime_cache_df is not None and not vix_runtime_cache_df.empty:
+                    vix_runtime_cache_df = lr._prepare_runtime_vix_frame(
+                        df=vix_runtime_cache_df,
+                        tz_name=cfg.tz or "America/New_York",
+                        session_open=cfg.session_open,
+                        session_close=cfg.session_close,
+                    )
+                    try:
+                        lr._persist_runtime_vix_cache(
+                            df=vix_runtime_cache_df,
+                            cache_path=vix_runtime_cache_path,
+                        )
+                        _log_vix_runtime_cache("prepared runtime VIX cache")
+                    except Exception as exc:
+                        self._emit(
+                            "log",
+                            {
+                                "symbol": "SYSTEM",
+                                "message": f"[live] runtime VIX cache persist failed: {exc}",
+                            },
+                        )
 
             if cfg.buffer_size and cfg.buffer_size > 0 and cfg.prefill_tail and cfg.prefill_tail > cfg.buffer_size:
                 self._emit(
@@ -3029,8 +3177,12 @@ class LiveSession:
                         self._store.set_policy_state(symbol, order_policies[symbol].snapshot_state())
                     _persist_policy_runtime_cache()
 
+            stream_symbols = list(symbols)
+            if live_vix_enabled and live_vix_symbol not in stream_symbols:
+                stream_symbols.append(live_vix_symbol)
+
             streamer = AlpacaBarStreamer(
-                symbols=symbols,
+                symbols=stream_symbols,
                 feed=feed,
                 env_file=cfg.env_file,
                 queue=bar_queue,
@@ -3122,6 +3274,10 @@ class LiveSession:
                 try:
                     bar = bar_queue.get(timeout=0.5)
                 except queue_mod.Empty:
+                    continue
+                bar_symbol = str(bar.get("symbol", "")).upper()
+                if live_vix_enabled and vix_processor is not None and bar_symbol == live_vix_symbol:
+                    vix_processor.handle_bar(bar)
                     continue
                 processor.handle_bar(bar)
 

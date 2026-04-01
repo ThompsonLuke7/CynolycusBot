@@ -55,6 +55,35 @@
     }
     .status.running { background: #123a2c; border-color: #2b8f65; color: #cef6e3; }
     .status.error { background: #4a1f20; border-color: #a84648; color: #ffd8d8; }
+    .status-stack {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+    .warmup {
+      font-size: 0.78rem;
+      padding: 5px 10px;
+      border-radius: 999px;
+      border: 1px solid #6a5220;
+      background: #3c2a0e;
+      color: #ffe3a8;
+      white-space: nowrap;
+      display: none;
+    }
+    .warmup.running {
+      display: inline-block;
+      background: #3c2a0e;
+      border-color: #a67a22;
+      color: #ffe3a8;
+    }
+    .warmup.done {
+      display: inline-block;
+      background: #173452;
+      border-color: #2d5783;
+      color: #d7e8ff;
+    }
 
     .card {
       background: linear-gradient(180deg, var(--panel), var(--panel-2));
@@ -195,7 +224,10 @@
   <div class="page">
     <div class="top">
       <h1>10min Meta Runner Dashboard</h1>
-      <div id="statusBadge" class="status">idle</div>
+      <div class="status-stack">
+        <div id="warmupBadge" class="warmup">warmup 00:00</div>
+        <div id="statusBadge" class="status">idle</div>
+      </div>
     </div>
 
     <div class="card">
@@ -264,6 +296,8 @@
   <script>
     const state = { running: false, status_message: "idle", symbols: [], bars_1m: {}, bars_15m: {}, last_actions: {}, action_events: [], policy_state: {}, broker_state: {}, trade_events: [], logs: [], agent_state: null, chart_view: {} };
     const hover = { active: false, x: 0, y: 0 };
+    const WARMUP_STORAGE_KEY = "cynolycus_live_warmup_timer";
+    const LIVE_STREAM_READY_PREFIX = "live stream started";
     let eventSource = null;
     const MAX_POINTS_SIGNAL = 900;
     const ONE_MINUTE_POINTS_PER_SIGNAL_BAR = 20;
@@ -273,6 +307,7 @@
     const CHART_WHEEL_STEP_BARS = 6;
 
     const statusBadge = document.getElementById("statusBadge");
+    const warmupBadge = document.getElementById("warmupBadge");
     const symbolSelect = document.getElementById("symbolSelect");
     const chart = document.getElementById("chart");
     const metaEl = document.getElementById("meta");
@@ -281,6 +316,12 @@
     const logList = document.getElementById("logList");
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
+    const warmupTimer = {
+      active: false,
+      startMs: null,
+      durationMs: null,
+      intervalId: null
+    };
 
     function applyModeUi() {
       const mode = document.getElementById("runnerMode").value;
@@ -307,6 +348,127 @@
     function updateStatus(text, mode = "idle") {
       statusBadge.textContent = text;
       statusBadge.className = `status ${mode}`;
+    }
+
+    function getRunnerModeValue() {
+      return String(state.config?.runner_mode || document.getElementById("runnerMode")?.value || "live").toLowerCase();
+    }
+
+    function formatDurationMs(durationMs) {
+      const totalSeconds = Math.max(0, Math.floor(Number(durationMs || 0) / 1000));
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    }
+
+    function persistWarmupTimer() {
+      const payload = {
+        active: !!warmupTimer.active,
+        startMs: Number.isFinite(warmupTimer.startMs) ? warmupTimer.startMs : null,
+        durationMs: Number.isFinite(warmupTimer.durationMs) ? warmupTimer.durationMs : null
+      };
+      try {
+        sessionStorage.setItem(WARMUP_STORAGE_KEY, JSON.stringify(payload));
+      } catch (_err) {}
+    }
+
+    function loadWarmupTimer() {
+      try {
+        const raw = sessionStorage.getItem(WARMUP_STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        warmupTimer.active = !!parsed?.active;
+        warmupTimer.startMs = Number.isFinite(Number(parsed?.startMs)) ? Number(parsed.startMs) : null;
+        warmupTimer.durationMs = Number.isFinite(Number(parsed?.durationMs)) ? Number(parsed.durationMs) : null;
+      } catch (_err) {}
+    }
+
+    function ensureWarmupInterval() {
+      if (warmupTimer.intervalId != null) return;
+      warmupTimer.intervalId = window.setInterval(() => {
+        if (!warmupTimer.active) return;
+        renderStatusArea();
+      }, 250);
+    }
+
+    function clearWarmupIntervalIfIdle() {
+      if (warmupTimer.active) return;
+      if (warmupTimer.intervalId == null) return;
+      window.clearInterval(warmupTimer.intervalId);
+      warmupTimer.intervalId = null;
+    }
+
+    function beginWarmupTimer(forceReset = false) {
+      if (forceReset || !Number.isFinite(warmupTimer.startMs)) {
+        warmupTimer.startMs = Date.now();
+      }
+      warmupTimer.active = true;
+      warmupTimer.durationMs = null;
+      persistWarmupTimer();
+      ensureWarmupInterval();
+    }
+
+    function completeWarmupTimer() {
+      if (warmupTimer.active && Number.isFinite(warmupTimer.startMs)) {
+        warmupTimer.durationMs = Math.max(0, Date.now() - warmupTimer.startMs);
+      }
+      warmupTimer.active = false;
+      persistWarmupTimer();
+      clearWarmupIntervalIfIdle();
+    }
+
+    function resetWarmupTimer() {
+      warmupTimer.active = false;
+      warmupTimer.startMs = null;
+      warmupTimer.durationMs = null;
+      persistWarmupTimer();
+      clearWarmupIntervalIfIdle();
+    }
+
+    function syncWarmupTimerFromState() {
+      const mode = getRunnerModeValue();
+      const running = !!(state.running || state.session_alive);
+      const message = String(state.status_message || "");
+      if (mode !== "live") {
+        resetWarmupTimer();
+        return;
+      }
+      if (!running) {
+        if (!message || message === "idle" || message === "stopped" || message.startsWith("error:")) {
+          resetWarmupTimer();
+        }
+        return;
+      }
+      if (message.toLowerCase().startsWith(LIVE_STREAM_READY_PREFIX)) {
+        completeWarmupTimer();
+        return;
+      }
+      beginWarmupTimer(false);
+    }
+
+    function renderWarmupBadge() {
+      const running = !!(state.running || state.session_alive);
+      if (getRunnerModeValue() !== "live" || (!warmupTimer.active && !Number.isFinite(warmupTimer.durationMs))) {
+        warmupBadge.style.display = "none";
+        warmupBadge.className = "warmup";
+        return;
+      }
+      const durationMs = warmupTimer.active
+        ? Math.max(0, Date.now() - (Number(warmupTimer.startMs) || Date.now()))
+        : Number(warmupTimer.durationMs || 0);
+      const label = warmupTimer.active ? "warmup" : "warmup done";
+      warmupBadge.textContent = `${label} ${formatDurationMs(durationMs)}`;
+      warmupBadge.className = `warmup ${warmupTimer.active && running ? "running" : "done"}`;
+      warmupBadge.style.display = "inline-block";
+    }
+
+    function renderStatusArea() {
+      const running = !!(state.running || state.session_alive);
+      startBtn.disabled = running;
+      stopBtn.disabled = !running;
+      if (state.last_error) updateStatus(`error: ${state.last_error}`, "error");
+      else updateStatus(state.status_message || (running ? "running" : "idle"), running ? "running" : "idle");
+      renderWarmupBadge();
     }
 
     async function api(path, method = "GET", payload = null) {
@@ -524,17 +686,70 @@
       return Number.isFinite(x) ? x.toFixed(2) : "-";
     }
 
+    const nyChartPartsFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      weekday: "short",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+
+    function getNyDateParts(dateObj) {
+      if (!(dateObj instanceof Date) || Number.isNaN(dateObj.getTime())) return null;
+      const out = {};
+      nyChartPartsFormatter.formatToParts(dateObj).forEach((part) => {
+        if (part.type !== "literal") out[part.type] = part.value;
+      });
+      return out;
+    }
+
+    function parseSessionMinutes(hhmm, fallbackMinutes) {
+      const text = String(hhmm || "").trim();
+      const match = text.match(/^(\d{1,2}):(\d{2})$/);
+      if (!match) return fallbackMinutes;
+      const hours = Number(match[1]);
+      const minutes = Number(match[2]);
+      if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return fallbackMinutes;
+      return Math.max(0, Math.min((24 * 60) - 1, (hours * 60) + minutes));
+    }
+
+    function getChartSessionConfig() {
+      const cfg = state.config || {};
+      return {
+        openMinutes: parseSessionMinutes(cfg.session_open, 9 * 60 + 30),
+        closeMinutes: parseSessionMinutes(cfg.session_close, 16 * 60),
+      };
+    }
+
+    function isRegularSessionTimestamp(value) {
+      const dt = value instanceof Date ? value : new Date(value);
+      const parts = getNyDateParts(dt);
+      if (!parts) return false;
+      if (parts.weekday === "Sat" || parts.weekday === "Sun") return false;
+      const session = getChartSessionConfig();
+      const minutes = (Number(parts.hour) * 60) + Number(parts.minute);
+      return Number.isFinite(minutes) && minutes >= session.openMinutes && minutes < session.closeMinutes;
+    }
+
+    function filterRegularSessionRows(rows) {
+      return (rows || []).filter((row) => row?.timestamp && isRegularSessionTimestamp(row.timestamp));
+    }
+
     function fmtTickTime(dateObj, spanMs) {
-      if (!(dateObj instanceof Date) || Number.isNaN(dateObj.getTime())) return "";
+      const parts = getNyDateParts(dateObj);
+      if (!parts) return "";
       if (spanMs > 24 * 60 * 60 * 1000) {
-        return `${String(dateObj.getMonth() + 1).padStart(2, "0")}/${String(dateObj.getDate()).padStart(2, "0")} ${String(dateObj.getHours()).padStart(2, "0")}:${String(dateObj.getMinutes()).padStart(2, "0")}`;
+        return `${parts.month}/${parts.day} ${parts.hour}:${parts.minute}`;
       }
-      return `${String(dateObj.getHours()).padStart(2, "0")}:${String(dateObj.getMinutes()).padStart(2, "0")}`;
+      return `${parts.hour}:${parts.minute}`;
     }
 
     function fmtHoverTime(dateObj) {
-      if (!(dateObj instanceof Date) || Number.isNaN(dateObj.getTime())) return "";
-      return `${String(dateObj.getMonth() + 1).padStart(2, "0")}/${String(dateObj.getDate()).padStart(2, "0")} ${String(dateObj.getHours()).padStart(2, "0")}:${String(dateObj.getMinutes()).padStart(2, "0")}`;
+      const parts = getNyDateParts(dateObj);
+      if (!parts) return "";
+      return `${parts.month}/${parts.day} ${parts.hour}:${parts.minute} ET`;
     }
 
     function nearestIndexByTime(series, targetMs) {
@@ -571,9 +786,11 @@
       return state.chart_view[sym];
     }
 
-    function clampChartOffset(sym) {
+    function clampChartOffset(sym, totalBarsOverride = null) {
       const view = getChartView(sym);
-      const totalBars = (state.bars_15m?.[sym] || []).length;
+      const totalBars = totalBarsOverride != null && Number.isFinite(Number(totalBarsOverride))
+        ? Number(totalBarsOverride)
+        : (state.bars_15m?.[sym] || []).length;
       const maxOffset = Math.max(0, totalBars - CHART_WINDOW_10M);
       const raw = Number(view.offset_10m_bars || 0);
       view.offset_10m_bars = Math.max(0, Math.min(maxOffset, Number.isFinite(raw) ? Math.round(raw) : 0));
@@ -582,11 +799,11 @@
 
     function renderChart() {
       const sym = symbolSelect.value || state.symbols?.[0];
-      const { view, totalBars, maxOffset } = clampChartOffset(sym || "SPY");
       const signalIntervalMin = Math.max(1, Number(document.getElementById("interval")?.value || 10));
       const intervalMs = signalIntervalMin * 60 * 1000;
-      const raw1m = state.bars_1m?.[sym] || [];
-      const raw10m = state.bars_15m?.[sym] || [];
+      const raw1m = filterRegularSessionRows(state.bars_1m?.[sym] || []);
+      const raw10m = filterRegularSessionRows(state.bars_15m?.[sym] || []);
+      const { view, totalBars, maxOffset } = clampChartOffset(sym || "SPY", raw10m.length);
       const end10m = Math.max(0, totalBars - view.offset_10m_bars);
       const start10m = Math.max(0, end10m - CHART_WINDOW_10M);
       const visible10mRaw = raw10m.slice(start10m, end10m);
@@ -665,7 +882,6 @@
 
       function drawPane(series, y0, paneHeight, label, options = {}) {
         const showXAxis = !!options.showXAxis;
-        const xDomain = options.xDomain || deriveTimeDomain(series, options.barIntervalMs || 60 * 1000);
         const barIntervalMs = Math.max(1, Number(options.barIntervalMs) || 60 * 1000);
         if (!series.length) {
           ctx.fillStyle = "#8ca6c5";
@@ -685,15 +901,19 @@
         maxP += yPad;
         minP -= yPad;
         const toY = (p) => y0 + ((maxP - p) / (maxP - minP)) * paneHeight;
-        const domainStartMs = xDomain?.startMs ?? series[0].t.getTime();
-        const domainEndMs = xDomain?.endMs ?? (series[series.length - 1].t.getTime() + barIntervalMs);
+        const domainStartMs = series[0].t.getTime();
+        const domainEndMs = series[series.length - 1].t.getTime() + barIntervalMs;
         const domainSpanMs = Math.max(barIntervalMs, domainEndMs - domainStartMs);
-        const toXTime = (tms) => left + (((tms - domainStartMs) / domainSpanMs) * plotW);
-        const xToTime = (x) => domainStartMs + (((x - left) / Math.max(1, plotW)) * domainSpanMs);
-        const toX = (idx) => {
-          const row = series[idx];
-          const rowMs = row ? row.t.getTime() : domainStartMs;
-          return toXTime(rowMs + barIntervalMs / 2);
+        const xToIndex = (x) => {
+          const frac = (x - left) / Math.max(1, plotW);
+          const idx = Math.round((frac * series.length) - 0.5);
+          return Math.max(0, Math.min(series.length - 1, idx));
+        };
+        const toX = (idx) => left + ((((Math.max(0, Math.min(series.length - 1, idx)) + 0.5) / Math.max(1, series.length))) * plotW);
+        const toXTime = (tms) => toX(nearestIndexByTime(series, tms));
+        const xToTime = (x) => {
+          const row = series[xToIndex(x)];
+          return row ? row.t.getTime() : domainStartMs;
         };
 
         ctx.strokeStyle = "#214160";
@@ -721,7 +941,7 @@
         ctx.lineTo(w - right, y0 + paneHeight);
         ctx.stroke();
 
-        const bodyW = Math.max(1, Math.min(10, (plotW * (barIntervalMs / domainSpanMs)) * 0.72));
+        const bodyW = Math.max(1, Math.min(10, (plotW / Math.max(1, series.length)) * 0.72));
         series.forEach((c, i) => {
           const x = toX(i);
           const yH = toY(c.high);
@@ -753,11 +973,12 @@
           ctx.textAlign = "center";
           ctx.textBaseline = "top";
           for (let i = 0; i < xTicks; i += 1) {
-            const frac = i / (xTicks - 1);
-            const tickMs = domainStartMs + frac * domainSpanMs;
-            const x = toXTime(tickMs);
+            const idx = Math.round((i / Math.max(1, xTicks - 1)) * Math.max(0, series.length - 1));
+            const row = series[idx];
+            if (!row) continue;
+            const x = toX(idx);
             const labelX = Math.max(left + 28, Math.min(w - right - 28, x));
-            const t = new Date(tickMs);
+            const t = row.t;
             ctx.beginPath();
             ctx.moveTo(x, y0 + paneHeight);
             ctx.lineTo(x, y0 + paneHeight + 4);
@@ -768,7 +989,7 @@
           }
         }
         const fromY = (y) => maxP - ((y - y0) / paneHeight) * (maxP - minP);
-        return { series, toX, toXTime, xToTime, toY, fromY, y0, paneHeight, domainStartMs, domainEndMs, barIntervalMs };
+        return { series, toX, toXTime, xToTime, xToIndex, toY, fromY, y0, paneHeight, domainStartMs, domainEndMs, barIntervalMs };
       }
 
       const pane1 = drawPane(one, pane1Y, pane1H, "Top: 1m candles", {
@@ -783,7 +1004,6 @@
       });
 
       function drawProbPane(series, y0, paneHeight, label, options = {}) {
-        const xDomain = options.xDomain || deriveTimeDomain(series, options.barIntervalMs || intervalMs);
         const barIntervalMs = Math.max(1, Number(options.barIntervalMs) || intervalMs);
         if (!series.length) {
           ctx.fillStyle = "#8ca6c5";
@@ -794,15 +1014,19 @@
           return null;
         }
         const toY = (p) => y0 + (1 - p) * paneHeight;
-        const domainStartMs = xDomain?.startMs ?? series[0].t.getTime();
-        const domainEndMs = xDomain?.endMs ?? (series[series.length - 1].t.getTime() + barIntervalMs);
+        const domainStartMs = series[0].t.getTime();
+        const domainEndMs = series[series.length - 1].t.getTime() + barIntervalMs;
         const domainSpanMs = Math.max(barIntervalMs, domainEndMs - domainStartMs);
-        const toXTime = (tms) => left + (((tms - domainStartMs) / domainSpanMs) * plotW);
-        const xToTime = (x) => domainStartMs + (((x - left) / Math.max(1, plotW)) * domainSpanMs);
-        const toX = (idx) => {
-          const row = series[idx];
-          const rowMs = row ? row.t.getTime() : domainStartMs;
-          return toXTime(rowMs + barIntervalMs / 2);
+        const xToIndex = (x) => {
+          const frac = (x - left) / Math.max(1, plotW);
+          const idx = Math.round((frac * series.length) - 0.5);
+          return Math.max(0, Math.min(series.length - 1, idx));
+        };
+        const toX = (idx) => left + ((((Math.max(0, Math.min(series.length - 1, idx)) + 0.5) / Math.max(1, series.length))) * plotW);
+        const toXTime = (tms) => toX(nearestIndexByTime(series, tms));
+        const xToTime = (x) => {
+          const row = series[xToIndex(x)];
+          return row ? row.t.getTime() : domainStartMs;
         };
 
         ctx.strokeStyle = "#214160";
@@ -878,11 +1102,12 @@
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
         for (let i = 0; i < xTicks; i += 1) {
-          const frac = i / (xTicks - 1);
-          const tickMs = domainStartMs + frac * domainSpanMs;
-          const x = toXTime(tickMs);
+          const idx = Math.round((i / Math.max(1, xTicks - 1)) * Math.max(0, series.length - 1));
+          const row = series[idx];
+          if (!row) continue;
+          const x = toX(idx);
           const labelX = Math.max(left + 28, Math.min(w - right - 28, x));
-          const t = new Date(tickMs);
+          const t = row.t;
           ctx.beginPath();
           ctx.moveTo(x, y0 + paneHeight);
           ctx.lineTo(x, y0 + paneHeight + 4);
@@ -903,7 +1128,7 @@
           ctx.fillText(key, legendX + 14, legendY - 2);
           legendX += 120;
         });
-        return { series, toX, toXTime, xToTime, toY, y0, paneHeight, keys, colors, domainStartMs, domainEndMs, barIntervalMs };
+        return { series, toX, toXTime, xToTime, xToIndex, toY, y0, paneHeight, keys, colors, domainStartMs, domainEndMs, barIntervalMs };
       }
 
       const hasMetaProbSeries = probs.some((row) =>
@@ -1184,7 +1409,9 @@
         const xMax = w - right;
         const xClamped = Math.max(xMin, Math.min(xMax, hover.x));
         const yClamped = Math.max(paneTop, Math.min(paneBottom, hover.y));
-        const idx = nearestIndexByTime(pane.series, pane.xToTime(xClamped));
+        const idx = typeof pane.xToIndex === "function"
+          ? pane.xToIndex(xClamped)
+          : nearestIndexByTime(pane.series, pane.xToTime(xClamped));
         const xBar = pane.toX(idx);
         const candle = pane.series[idx];
         if (!candle) return;
@@ -1246,7 +1473,9 @@
         const xMax = w - right;
         const xClamped = Math.max(xMin, Math.min(xMax, hover.x));
         const yClamped = Math.max(paneTop, Math.min(paneBottom, hover.y));
-        const idx = nearestIndexByTime(pane.series, pane.xToTime(xClamped));
+        const idx = typeof pane.xToIndex === "function"
+          ? pane.xToIndex(xClamped)
+          : nearestIndexByTime(pane.series, pane.xToTime(xClamped));
         const xBar = pane.toX(idx);
         const row = pane.series[idx];
         if (!row) return;
@@ -1344,17 +1573,13 @@
     }
 
     function renderAll() {
-      const running = !!(state.running || state.session_alive);
       syncSymbolSelect();
       renderMeta();
       renderBroker();
       renderTrades();
       renderLogs();
       renderChart();
-      startBtn.disabled = running;
-      stopBtn.disabled = !running;
-      if (state.last_error) updateStatus(`error: ${state.last_error}`, "error");
-      else updateStatus(state.status_message || (running ? "running" : "idle"), running ? "running" : "idle");
+      renderStatusArea();
     }
 
     function applySnapshot(snap) {
@@ -1363,6 +1588,7 @@
         state.last_error = "outdated dashboard server detected; restart python -m UI.live_dashboard";
         state.status_message = "server restart required";
       }
+      syncWarmupTimerFromState();
       renderAll();
     }
 
@@ -1380,6 +1606,7 @@
           if (p.running) state.last_error = null;
           if (p.error) state.last_error = p.error;
           if (p.message) state.logs = [...(state.logs || []), { symbol: "SYSTEM", message: p.message }].slice(-400);
+          syncWarmupTimerFromState();
         } else if (evt.type === "bar_1m") {
           state.symbols = state.symbols?.length ? state.symbols : [p.symbol];
           pushLimited(state.bars_1m, p.symbol, p.bar, MAX_POINTS_1M);
@@ -1483,8 +1710,15 @@
     }
 
     document.getElementById("startBtn").addEventListener("click", async () => {
+      if (document.getElementById("runnerMode").value === "live") {
+        beginWarmupTimer(true);
+        renderStatusArea();
+      } else {
+        resetWarmupTimer();
+      }
       const out = await api("/api/start", "POST", currentPayload());
       if (!out.ok) {
+        resetWarmupTimer();
         state.last_error = `start failed (${out.status}): ${out.error || "unknown"}`;
         state.status_message = "start failed";
         renderAll();
@@ -1500,6 +1734,7 @@
         renderAll();
         return;
       }
+      resetWarmupTimer();
       applySnapshot(out.state || out.data?.state || out.data);
     });
     document.getElementById("refreshBtn").addEventListener("click", async () => {
@@ -1514,6 +1749,10 @@
     });
     symbolSelect.addEventListener("change", renderAll);
     document.getElementById("runnerMode").addEventListener("change", applyModeUi);
+    document.getElementById("runnerMode").addEventListener("change", () => {
+      syncWarmupTimerFromState();
+      renderStatusArea();
+    });
     chart.addEventListener("mousemove", (ev) => {
       const rect = chart.getBoundingClientRect();
       hover.active = true;
@@ -1528,7 +1767,8 @@
     chart.addEventListener("wheel", (ev) => {
       const sym = symbolSelect.value || state.symbols?.[0];
       if (!sym) return;
-      const { view, maxOffset } = clampChartOffset(sym);
+      const totalBars = filterRegularSessionRows(state.bars_15m?.[sym] || []).length;
+      const { view, maxOffset } = clampChartOffset(sym, totalBars);
       if (maxOffset <= 0) return;
       ev.preventDefault();
       const steps = Math.max(1, Math.round(Math.abs(ev.deltaY) / 80));
@@ -1540,6 +1780,8 @@
     window.addEventListener("resize", renderChart);
 
     (async function init() {
+      loadWarmupTimer();
+      if (warmupTimer.active) ensureWarmupInterval();
       const out = await api("/api/state");
       if (out.ok) applySnapshot(out.data);
       else {

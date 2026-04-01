@@ -43,6 +43,7 @@ from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
 
 
 _EMITTED_RUNTIME_WARNINGS: set[str] = set()
+_LIVE_VIX_RANGE_CACHE: dict[str, tuple[int, pd.Timestamp | None, pd.Timestamp | None]] = {}
 
 
 def _warn_once(message: str) -> None:
@@ -50,6 +51,59 @@ def _warn_once(message: str) -> None:
         return
     _EMITTED_RUNTIME_WARNINGS.add(message)
     print(message)
+
+
+def _merge_frame_attrs(target: pd.DataFrame, *sources: pd.DataFrame | None) -> pd.DataFrame:
+    for source in sources:
+        if not isinstance(source, pd.DataFrame):
+            continue
+        attrs = getattr(source, "attrs", None)
+        if not isinstance(attrs, dict):
+            continue
+        for key, value in attrs.items():
+            target.attrs[key] = value
+    return target
+
+
+def _copy_without_attrs(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    out.attrs = {}
+    return out
+
+
+def _default_live_vix_parquet_path(target_index: pd.DatetimeIndex | None = None) -> str:
+    static_path = Path("Data/raw/vix/vixy_10min.parquet")
+    runtime = Path("Data") / "raw" / "vix" / "vixy_10min_live_runtime.parquet"
+    if not runtime.exists():
+        return str(static_path)
+    if target_index is None or len(target_index) == 0:
+        return str(runtime)
+    try:
+        stat = runtime.stat()
+        cache_key = str(runtime.resolve())
+        cached = _LIVE_VIX_RANGE_CACHE.get(cache_key)
+        if cached is None or cached[0] != int(stat.st_mtime_ns):
+            ts_df = pd.read_parquet(runtime, columns=["timestamp"])
+            ts = pd.to_datetime(ts_df["timestamp"], utc=True, errors="coerce").dropna()
+            ts_min = ts.min() if not ts.empty else None
+            ts_max = ts.max() if not ts.empty else None
+            cached = (int(stat.st_mtime_ns), ts_min, ts_max)
+            _LIVE_VIX_RANGE_CACHE[cache_key] = cached
+        _, ts_min, ts_max = cached
+        target_min = pd.to_datetime(target_index.min(), utc=True, errors="coerce")
+        target_max = pd.to_datetime(target_index.max(), utc=True, errors="coerce")
+        if (
+            ts_min is not None
+            and ts_max is not None
+            and pd.notna(target_min)
+            and pd.notna(target_max)
+            and ts_min <= target_max
+            and ts_max >= target_min
+        ):
+            return str(runtime)
+    except Exception:
+        pass
+    return str(static_path)
 
 
 def _resolve_device(device: str) -> torch.device:
@@ -327,17 +381,39 @@ def build_agent_feature_frame_from_15m(
             session_open=session_open,
             session_close=session_close,
             include_vix_features=True,
+            vix_parquet_path=_default_live_vix_parquet_path(df.index),
             vix_fetch_if_missing=False,
             vix_refetch_if_low_coverage=False,
-            vix_warn_on_missing=False,
+            vix_warn_on_missing=True,
         )
         try:
             vix_ohlcv = _load_align_vix_ohlcv(cfg=vix_cfg, target_index=df.index)
             df = _add_vix_feature_suite(df, vix_ohlcv=vix_ohlcv)
-        except Exception:
+            coverage = float(vix_ohlcv["close"].notna().mean()) if "close" in vix_ohlcv.columns else float("nan")
+            df.attrs["vix_feature_status"] = {
+                "enabled": True,
+                "status": "ok",
+                "coverage_ratio": coverage if np.isfinite(coverage) else None,
+                "source_rows": int(len(vix_ohlcv)),
+                "source_path": str(vix_cfg.vix_parquet_path),
+            }
+        except Exception as exc:
+            _warn_once(f"[live] VIX feature alignment failed; filling VIX features with NaNs: {exc}")
             df = _ensure_vix_feature_cols(df)
+            df.attrs["vix_feature_status"] = {
+                "enabled": True,
+                "status": "missing",
+                "coverage_ratio": 0.0,
+                "error": str(exc),
+                "source_path": str(vix_cfg.vix_parquet_path),
+            }
     else:
         df = _ensure_vix_feature_cols(df)
+        df.attrs["vix_feature_status"] = {
+            "enabled": False,
+            "status": "disabled",
+            "coverage_ratio": None,
+        }
 
     if include_state_placeholders:
         df["current_position"] = 0.0
@@ -547,6 +623,7 @@ def build_meta_feature_frame_from_1m(
     if feat_df.empty:
         return feat_df
     feat_df.attrs["ga_prob_sources"] = prob_sources
+    _merge_frame_attrs(feat_df, df_tf)
 
     if "atr" not in feat_df.columns:
         feat_df["atr"] = ta.atr(feat_df["high"], feat_df["low"], feat_df["close"], length=14)
@@ -817,6 +894,7 @@ class LiveMetaXGBAgent:
         self._state = _MetaTradeState()
         self._last_probs: dict[str, float | None] | None = None
         self._last_prob_sources: dict[str, str | None] | None = None
+        self._last_vix_status: dict[str, object] | None = None
 
         self._ga_predictor: LiveGAXGBPredictor | None = None
         if (self._include_pivot_probs or self._include_tb_probs) and ga_model_root and ga_feature_list_path:
@@ -896,6 +974,10 @@ class LiveMetaXGBAgent:
     def _reset_trade_state(self) -> None:
         self._state = _MetaTradeState()
 
+    def _remember_runtime_status(self, base_frame: pd.DataFrame) -> pd.DataFrame:
+        self._last_vix_status = self._extract_vix_feature_status(base_frame)
+        return base_frame
+
     def _set_trade_entry(self, *, position: int, row: pd.Series, entry_price: float | None = None) -> None:
         close = float(row.get("close", np.nan))
         atr = float(row.get("atr", np.nan))
@@ -916,7 +998,7 @@ class LiveMetaXGBAgent:
         if isinstance(self._precomputed_base_frame, pd.DataFrame) and not self._precomputed_base_frame.empty:
             pre = self._precomputed_base_frame
             if df_1m is None or df_1m.empty:
-                return pre
+                return self._remember_runtime_status(pre)
 
             if not isinstance(df_1m.index, pd.DatetimeIndex):
                 if "timestamp" not in df_1m.columns:
@@ -933,7 +1015,7 @@ class LiveMetaXGBAgent:
                 raw.index = raw.index.tz_convert(self._tz)
             raw = raw.sort_index()
             if raw.empty:
-                return pre
+                return self._remember_runtime_status(pre)
 
             try:
                 latest_base_ts = build_15m(
@@ -949,7 +1031,7 @@ class LiveMetaXGBAgent:
 
             cached_max = pre.index.max()
             if latest_base_ts is None or pd.isna(latest_base_ts) or latest_base_ts <= cached_max:
-                return pre
+                return self._remember_runtime_status(pre)
 
             overlap_start = cached_max - pd.Timedelta(days=self._precomputed_append_lookback_days)
             raw_tail = raw.loc[raw.index >= overlap_start].copy()
@@ -971,15 +1053,18 @@ class LiveMetaXGBAgent:
                 ga_probs_mode=self._ga_probs_mode,
             )
             if computed_tail.empty:
-                return pre
+                return self._remember_runtime_status(pre)
+            pre_prefix = _copy_without_attrs(pre.loc[pre.index < computed_tail.index.min()])
+            computed_tail_plain = _copy_without_attrs(computed_tail)
             merged = pd.concat(
-                [pre.loc[pre.index < computed_tail.index.min()], computed_tail],
+                [pre_prefix, computed_tail_plain],
                 axis=0,
             ).sort_index()
             merged = merged[~merged.index.duplicated(keep="last")]
+            _merge_frame_attrs(merged, pre, computed_tail)
             self._precomputed_base_frame = merged
-            return merged
-        return build_meta_feature_frame_from_1m(
+            return self._remember_runtime_status(merged)
+        return self._remember_runtime_status(build_meta_feature_frame_from_1m(
             df_1m,
             rule=self._label_timeframe_rule,
             label=self._resample_label,
@@ -995,7 +1080,7 @@ class LiveMetaXGBAgent:
             ga_predictor=self._ga_predictor,
             ga_probs_frame=self._ga_probs_frame,
             ga_probs_mode=self._ga_probs_mode,
-        )
+        ))
 
     @staticmethod
     def _extract_last_prob_sources(base_frame: pd.DataFrame, ts: pd.Timestamp) -> dict[str, str | None] | None:
@@ -1012,6 +1097,13 @@ class LiveMetaXGBAgent:
             value = row.get(key)
             out[f"{key}_source"] = None if pd.isna(value) else str(value)
         return out
+
+    @staticmethod
+    def _extract_vix_feature_status(base_frame: pd.DataFrame) -> dict[str, object] | None:
+        status = base_frame.attrs.get("vix_feature_status")
+        if not isinstance(status, dict):
+            return None
+        return dict(status)
 
     def _annotate_current_context(self, row: pd.Series) -> pd.Series:
         out = row.copy()
@@ -1350,6 +1442,7 @@ class LiveMetaXGBAgent:
             "time_in_position": int(self._state.bars_since_entry),
             "last_probs": self._last_probs,
             "last_prob_sources": self._last_prob_sources,
+            "last_vix_status": self._last_vix_status,
         }
 
     def last_probs(self) -> dict[str, float | None] | None:
@@ -1705,6 +1798,7 @@ class LiveIndependentMetaXGBAgent:
             "short_bars_held": int(self._short_bars_held),
             "last_probs": self._last_probs,
             "last_prob_sources": self._last_prob_sources,
+            "last_vix_status": self._base_agent._last_vix_status,
         }
 
     def last_probs(self) -> dict[str, float | None] | None:

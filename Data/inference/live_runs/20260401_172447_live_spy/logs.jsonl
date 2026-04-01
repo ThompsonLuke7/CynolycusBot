@@ -1,0 +1,18 @@
+{"stream":"logs","recorded_at":"2026-04-01T17:24:47.096416+00:00","payload":{"symbol":"SYSTEM","message":"[live] audit trail enabled: Data/inference/live_runs/20260401_172447_live_spy"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:51.518839+00:00","payload":{"symbol":"SYSTEM","message":"[live] loaded agent_matrix probs (rows=50,507, range=2021-01-04T14:30:00+00:00..2026-01-29T21:00:00+00:00, sources=1, mode=hybrid)"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:51.556133+00:00","payload":{"symbol":"SYSTEM","message":"[live] Loaded cached meta base frame: rows=9,868 range=2025-03-21T12:40:00-04:00..2026-03-23T15:50:00-04:00 path=Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_24.parquet"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:53.387468+00:00","payload":{"symbol":"SYSTEM","message":"[live] Meta-XGB inference enabled: model_root=Data/models/meta_xgboost/10min timeframe=10min"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:53.927065+00:00","payload":{"symbol":"SPY","message":"[order_policy] Startup sync: restored long=0 symbol=None short=1 symbol=SPY260402P00657000 signed_contracts=-1"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:54.263346+00:00","payload":{"symbol":"SYSTEM","message":"[live] RTH-only live bar filter enabled: 09:30-16:00 America/New_York"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:54.611111+00:00","payload":{"symbol":"SYSTEM","message":"[live] prepared runtime VIX cache: Data/raw/vix/vixy_10min_live_runtime.parquet rows=9,001 range=2025-03-17T13:30:00+00:00..2026-04-01T17:20:00+00:00"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:54.611639+00:00","payload":{"symbol":"SYSTEM","message":"[live] using runtime prefill cache: Data/raw/spy/spy_intraday_1min_live_2026_03_24_runtime_rth_cache.parquet"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:54.611744+00:00","payload":{"symbol":"SYSTEM","message":"[live] loading prefill file: Data/raw/spy/spy_intraday_1min_live_2026_03_24_runtime_rth_cache.parquet"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:54.626309+00:00","payload":{"symbol":"SYSTEM","message":"[live] gap-bridging prefill from Alpaca..."}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:54.923884+00:00","payload":{"symbol":"SYSTEM","message":"[live] updated runtime prefill cache: Data/raw/spy/spy_intraday_1min_live_2026_03_24_runtime_rth_cache.parquet rows=33,781"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:55.927869+00:00","payload":{"symbol":"SYSTEM","message":"[live] prefill latest 1m for SPY: 2026-04-01T13:23:00-04:00"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:24:55.928631+00:00","payload":{"symbol":"SYSTEM","message":"[live] prefill loaded bars: {'SPY': 33751}"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:33:19.671528+00:00","payload":{"symbol":"SYSTEM","message":"[live] seeded 15m/prob history from prefill: {'SPY': 900}"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:33:19.671586+00:00","payload":{"symbol":"SYSTEM","message":"[live] seeded warmup action history from prefill: {'SPY': 10096}"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:33:20.696326+00:00","payload":{"symbol":"SPY","message":"[order_policy] Loaded runtime policy state cache."}}
+{"stream":"logs","recorded_at":"2026-04-01T17:33:20.696494+00:00","payload":{"symbol":"SYSTEM","message":"[live] restored runtime policy state cache for: SPY"}}
+{"stream":"logs","recorded_at":"2026-04-01T17:33:20.700141+00:00","payload":{"symbol":"SYSTEM","message":"[live] stream connected; waiting for fresh market bars."}}

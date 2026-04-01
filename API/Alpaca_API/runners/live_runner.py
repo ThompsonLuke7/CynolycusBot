@@ -365,6 +365,10 @@ def _default_runtime_prefill_cache_path(prefill_path: Path) -> Path:
     return prefill_path.with_name(f"{prefill_path.stem}_runtime_rth_cache{suffix}")
 
 
+def _default_runtime_vix_cache_path() -> Path:
+    return Path("Data") / "raw" / "vix" / "vixy_10min_live_runtime.parquet"
+
+
 def _prepare_runtime_prefill_frame(
     *,
     df: pd.DataFrame,
@@ -419,6 +423,121 @@ def _persist_runtime_prefill_cache(
         df.to_csv(cache_path, index=False)
     else:
         df.to_parquet(cache_path, index=False)
+
+
+def _load_runtime_vix_frame(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing VIX cache file: {path}")
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        df = pd.read_parquet(path)
+    elif suffix == ".csv":
+        df = pd.read_csv(path)
+    else:
+        raise ValueError("VIX cache file must be .csv or .parquet")
+    return _normalize_runtime_vix_frame(df)
+
+
+def _normalize_runtime_vix_frame(df: pd.DataFrame, *, symbol: str = "VIXY") -> pd.DataFrame:
+    out = df.copy()
+    rename_map = {
+        "Date": "timestamp",
+        "date": "timestamp",
+        "Datetime": "timestamp",
+        "datetime": "timestamp",
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume",
+    }
+    out = out.rename(columns=rename_map)
+    required = ["timestamp", "open", "high", "low", "close"]
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        raise ValueError(f"VIX cache missing required columns: {missing}")
+    out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True, errors="coerce")
+    out = out.dropna(subset=["timestamp"]).copy()
+    if "volume" not in out.columns:
+        out["volume"] = 0.0
+    out["symbol"] = symbol
+    out = out[["timestamp", "open", "high", "low", "close", "volume", "symbol"]].copy()
+    out["symbol"] = out["symbol"].astype(str).str.upper()
+    return out
+
+
+def _prepare_runtime_vix_frame(
+    *,
+    df: pd.DataFrame,
+    tz_name: str = "America/New_York",
+    session_open: str = "09:30",
+    session_close: str = "16:00",
+    max_rows: int = 10000,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = _normalize_runtime_vix_frame(df)
+    ts_local = out["timestamp"].dt.tz_convert(tz_name)
+    minutes = ts_local.dt.hour * 60 + ts_local.dt.minute
+    open_min = _hhmm_to_minutes(session_open, default=570)
+    close_min = _hhmm_to_minutes(session_close, default=960)
+    out = out.loc[minutes.between(open_min, close_min - 1)].copy()
+    out = out.sort_values("timestamp")
+    out = out.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+    if max_rows and max_rows > 0 and len(out) > max_rows:
+        out = out.tail(int(max_rows)).copy()
+    return out.reset_index(drop=True)
+
+
+def _persist_runtime_vix_cache(
+    *,
+    df: pd.DataFrame,
+    cache_path: Path,
+) -> None:
+    if df is None or df.empty:
+        return
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if cache_path.suffix.lower() == ".csv":
+        df.to_csv(cache_path, index=False)
+    else:
+        df.to_parquet(cache_path, index=False)
+
+
+def _extend_vix_with_alpaca_gap(
+    *,
+    df: pd.DataFrame,
+    feed: DataFeed,
+    ticker: str = "VIXY",
+    timeframe: str = "10Min",
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = _normalize_runtime_vix_frame(df, symbol=ticker)
+    latest_ts = pd.to_datetime(out["timestamp"], utc=True, errors="coerce").dropna().max()
+    if pd.isna(latest_ts):
+        return out
+    fetch_start = latest_ts + pd.Timedelta(minutes=10 if str(timeframe).lower() == "10min" else 1)
+    now_utc = pd.Timestamp.now(tz="UTC")
+    if fetch_start >= now_utc:
+        return out
+    fetched_df = fetch_intraday(
+        ticker=ticker,
+        start=fetch_start.isoformat(),
+        timeframe=timeframe,
+        limit=100000,
+        feed=feed,
+        save_path=None,
+    )
+    if fetched_df is None or fetched_df.empty:
+        return out
+    fetched_df = _normalize_runtime_vix_frame(fetched_df, symbol=ticker)
+    fetched_df = fetched_df[fetched_df["timestamp"] > latest_ts].copy()
+    if fetched_df.empty:
+        return out
+    combined = pd.concat([out, fetched_df], axis=0, ignore_index=True)
+    combined = combined.sort_values("timestamp")
+    combined = combined.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+    return combined.reset_index(drop=True)
 
 
 def _resolve_symbolized_path(template: str | Path, *, symbol: str) -> Path:
