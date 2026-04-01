@@ -591,18 +591,19 @@
       const start10m = Math.max(0, end10m - CHART_WINDOW_10M);
       const visible10mRaw = raw10m.slice(start10m, end10m);
 
-      let sharedTimeDomain = null;
       let visible1mRaw = raw1m.slice(-CHART_WINDOW_1M_FALLBACK);
       if (visible10mRaw.length) {
         const visibleStartMs = timestampMs(visible10mRaw[0].timestamp);
         const visibleEndMs = timestampMs(visible10mRaw[visible10mRaw.length - 1].timestamp) + intervalMs;
         if (Number.isFinite(visibleStartMs) && Number.isFinite(visibleEndMs) && visibleEndMs > visibleStartMs) {
-          sharedTimeDomain = { startMs: visibleStartMs, endMs: visibleEndMs };
+          visible1mRaw = raw1m.filter((row) => {
+            const tms = timestampMs(row.timestamp);
+            return Number.isFinite(tms) && tms >= visibleStartMs && tms <= visibleEndMs;
+          });
         }
-        visible1mRaw = raw1m.filter((row) => {
-          const tms = timestampMs(row.timestamp);
-          return Number.isFinite(tms) && tms >= visibleStartMs && tms <= visibleEndMs;
-        });
+      }
+      if (!visible1mRaw.length && raw1m.length) {
+        visible1mRaw = raw1m.slice(-CHART_WINDOW_1M_FALLBACK);
       }
 
       const one = visible1mRaw.map((x) => ({
@@ -631,9 +632,9 @@
         p_tb_short: Number(x.p_tb_short)
       })).filter((x) => !Number.isNaN(x.t.getTime()));
 
-      const pane1Domain = sharedTimeDomain || deriveTimeDomain(one, 60 * 1000);
-      const pane2Domain = sharedTimeDomain || deriveTimeDomain(fifteen, intervalMs);
-      const pane3Domain = pane2Domain || deriveTimeDomain(probs, intervalMs);
+      const pane1Domain = deriveTimeDomain(one, 60 * 1000);
+      const pane2Domain = deriveTimeDomain(fifteen, intervalMs);
+      const pane3Domain = deriveTimeDomain(probs, intervalMs);
 
       const ctx = chart.getContext("2d");
       const dpr = window.devicePixelRatio || 1;
@@ -650,7 +651,7 @@
 
       const left = 58;
       const right = 28;
-      const top = 14;
+      const top = 30;
       const bottom = 28;
       const gap = 24;
       const plotW = Math.max(1, w - left - right);
@@ -1329,7 +1330,7 @@
       ctx.textBaseline = "top";
       ctx.font = "11px Consolas, monospace";
       ctx.fillStyle = "#b7c3d1";
-      ctx.fillText("Markers: dashed arrows=model signals, outlined markers=policy intents/exits, solid markers=actual side state, circles/squares=orders, hold lines=until close.", left + 6, top - 12);
+      ctx.fillText("Markers: dashed arrows=model signals, outlined markers=policy intents/exits, solid markers=actual side state, circles/squares=orders, hold lines=until close.", left + 6, 6);
 
       const olderBars = Math.max(0, Number(view.offset_10m_bars || 0));
       const viewText = olderBars > 0
@@ -1339,7 +1340,7 @@
       ctx.textBaseline = "top";
       ctx.font = "11px Consolas, monospace";
       ctx.fillStyle = olderBars > 0 ? "#f0d27d" : "#8ca6c5";
-      ctx.fillText(viewText, w - right - 4, top - 12);
+      ctx.fillText(viewText, w - right - 4, 6);
     }
 
     function renderAll() {

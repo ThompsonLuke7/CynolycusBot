@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import queue as queue_mod
+import re
 import threading
 import time
 import traceback
@@ -15,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, TYPE_CHECKING, Callable
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -22,7 +24,7 @@ from API.Alpaca_API.market_data.bar_aggregator import OhlcvAggregator
 from API.Alpaca_API.market_data.bar_buffer import BarRingBuffer
 from Policy.execution_latch import DirectionExecutionLatch
 
-UI_BUILD = "2026-03-30-dashboard-meta-10min-sync"
+UI_BUILD = "2026-03-31-dashboard-meta-10min-sync-hotfix"
 
 if TYPE_CHECKING:
     from API.Alpaca_API.inference.live_inference import (
@@ -152,6 +154,16 @@ def _persist_runtime_policy_cache(cache_path: Path, payload: dict[str, Any]) -> 
 
 def _default_replay_snapshot_cache_dir() -> Path:
     return Path("Data") / "inference" / "dashboard_cache"
+
+
+def _default_live_audit_root() -> Path:
+    return Path("Data") / "inference" / "live_runs"
+
+
+def _slugify_token(value: Any, *, default: str = "na") -> str:
+    raw = str(value or "").strip().lower()
+    raw = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+    return raw or default
 
 
 def _path_fingerprint(raw_path: str | None) -> dict[str, Any]:
@@ -732,6 +744,8 @@ class SessionConfig:
     replay_max_bars: int | None = None
     replay_no_prepend_split_test_warmup: bool = False
     eval_parity_mode: bool = False
+    audit_enabled: bool = True
+    audit_root: str = "Data/inference/live_runs"
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "SessionConfig":
@@ -822,7 +836,94 @@ class SessionConfig:
                 False,
             ),
             eval_parity_mode=_coerce_bool(payload.get("eval_parity_mode"), False),
+            audit_enabled=_coerce_bool(payload.get("audit_enabled"), True),
+            audit_root=str(payload.get("audit_root", "Data/inference/live_runs")),
         )
+
+
+class LiveAuditWriter:
+    def __init__(self, session_dir: Path) -> None:
+        self.session_dir = session_dir
+        self._queue: queue_mod.Queue = queue_mod.Queue(maxsize=20000)
+        self._thread: threading.Thread | None = None
+        self._stopped = threading.Event()
+        self._dropped = 0
+        self._lock = threading.Lock()
+        self._meta: dict[str, Any] = {}
+
+    def start(self, *, metadata: dict[str, Any]) -> None:
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self._meta = dict(_json_safe(metadata) or {})
+        self._meta["session_dir"] = str(self.session_dir)
+        self._write_meta()
+        self._thread = threading.Thread(target=self._run, name="live-audit-writer", daemon=True)
+        self._thread.start()
+
+    def enqueue(self, stream: str, payload: dict[str, Any]) -> None:
+        if self._stopped.is_set():
+            return
+        item = {
+            "stream": str(stream),
+            "recorded_at": _ts_iso(datetime.now(timezone.utc)),
+            "payload": _json_safe(payload),
+        }
+        try:
+            self._queue.put_nowait(item)
+        except queue_mod.Full:
+            with self._lock:
+                self._dropped += 1
+            try:
+                self._queue.get_nowait()
+            except queue_mod.Empty:
+                pass
+            try:
+                self._queue.put_nowait(item)
+            except queue_mod.Full:
+                with self._lock:
+                    self._dropped += 1
+
+    def stop(self) -> None:
+        self._stopped.set()
+        try:
+            self._queue.put_nowait(None)
+        except queue_mod.Full:
+            pass
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=3.0)
+        self._meta["stopped_at"] = _ts_iso(datetime.now(timezone.utc))
+        with self._lock:
+            self._meta["dropped_records"] = int(self._dropped)
+        self._write_meta()
+
+    def _write_meta(self) -> None:
+        meta_path = self.session_dir / "session_meta.json"
+        meta_path.write_text(json.dumps(_json_safe(self._meta), indent=2), encoding="utf-8")
+
+    def _run(self) -> None:
+        handles: dict[str, Any] = {}
+        try:
+            while True:
+                try:
+                    item = self._queue.get(timeout=0.5)
+                except queue_mod.Empty:
+                    if self._stopped.is_set():
+                        break
+                    continue
+                if item is None:
+                    break
+                stream = _slugify_token(item.get("stream"), default="events")
+                handle = handles.get(stream)
+                if handle is None:
+                    path = self.session_dir / f"{stream}.jsonl"
+                    handle = path.open("a", encoding="utf-8", buffering=1)
+                    handles[stream] = handle
+                handle.write(json.dumps(_json_safe(item), separators=(",", ":")) + "\n")
+        finally:
+            for handle in handles.values():
+                try:
+                    handle.close()
+                except Exception:
+                    pass
 
 
 class EventBroker:
@@ -1100,6 +1201,7 @@ class LiveSession:
         self._stop_event: threading.Event | None = None
         self._streamer: AlpacaBarStreamer | None = None
         self._config: SessionConfig | None = None
+        self._audit_writer: LiveAuditWriter | None = None
 
     def is_running(self) -> bool:
         with self._lock:
@@ -1148,6 +1250,14 @@ class LiveSession:
             "payload": _json_safe(payload),
         }
         self._broker.publish(event)
+        if event_type == "log":
+            self._audit("logs", payload)
+
+    def _audit(self, stream: str, payload: dict[str, Any]) -> None:
+        writer = self._audit_writer
+        if writer is None:
+            return
+        writer.enqueue(stream, payload)
 
     def _emit_status(self, *, running: bool, message: str, extra: dict[str, Any] | None = None) -> None:
         self._store.set_status_message(message)
@@ -1155,6 +1265,7 @@ class LiveSession:
         if extra:
             payload.update(extra)
         self._emit("status", payload)
+        self._audit("status", payload)
 
     def _emit_state_sync(self) -> None:
         self._emit("state_sync", {"state": self._store.snapshot()})
@@ -2146,8 +2257,42 @@ class LiveSession:
         stop_event = self._stop_event
         if cfg is None or stop_event is None:
             return
+        audit_writer: LiveAuditWriter | None = None
 
         try:
+            if bool(cfg.audit_enabled):
+                started_at = datetime.now(timezone.utc)
+                session_stamp = started_at.strftime("%Y%m%d_%H%M%S")
+                symbols_slug = "-".join(_slugify_token(sym, default="sym") for sym in (cfg.symbols or ["SPY"]))
+                mode_slug = _slugify_token(cfg.runner_mode, default="live")
+                session_dir = Path(cfg.audit_root or _default_live_audit_root()) / f"{session_stamp}_{mode_slug}_{symbols_slug}"
+                audit_writer = LiveAuditWriter(session_dir)
+                audit_writer.start(
+                    metadata={
+                        "started_at": _ts_iso(started_at),
+                        "runner_mode": cfg.runner_mode,
+                        "symbols": list(cfg.symbols),
+                        "config": cfg.__dict__,
+                    }
+                )
+                self._audit_writer = audit_writer
+                self._audit(
+                    "session",
+                    {
+                        "event": "session_started",
+                        "started_at": _ts_iso(started_at),
+                        "runner_mode": cfg.runner_mode,
+                        "symbols": list(cfg.symbols),
+                        "audit_dir": str(session_dir),
+                    },
+                )
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": f"[live] audit trail enabled: {session_dir}",
+                    },
+                )
             mode = str(cfg.runner_mode or "live").strip().lower()
             if mode == "replay":
                 self._run_replay(cfg=cfg, stop_event=stop_event)
@@ -2404,9 +2549,11 @@ class LiveSession:
                         self._store.set_policy_state(symbol, policy.snapshot_state())
                         _persist_policy_runtime_cache()
                         self._emit("startup_sync", {"symbol": symbol, "result": sync_result})
+                        self._audit("startup_sync", {"symbol": symbol, "result": sync_result})
                         broker_snap = policy.snapshot_broker_state(orders_limit=20)
                         self._store.set_broker_state(symbol, broker_snap)
                         self._emit("broker_state", {"symbol": symbol, "state": broker_snap})
+                        self._audit("broker_state", {"symbol": symbol, "state": broker_snap})
 
             def _on_1m(symbol: str, bar: dict, buffer: Any) -> None:
                 size = len(buffer) if buffer is not None else None
@@ -2429,6 +2576,7 @@ class LiveSession:
                 broker_snap = policy.snapshot_broker_state(orders_limit=20)
                 self._store.set_broker_state(symbol, broker_snap)
                 self._emit("broker_state", {"symbol": symbol, "state": broker_snap})
+                self._audit("broker_state", {"symbol": symbol, "state": broker_snap})
                 event_payload = {
                     "symbol": symbol,
                     "timestamp": _ts_iso(bar.get("timestamp")),
@@ -2439,6 +2587,8 @@ class LiveSession:
                 self._emit("order_policy", event_payload)
                 event_key = str(result.get("event", "")).strip().lower()
                 if event_key not in {"hold", "no_change", "intent_update"}:
+                    self._audit("order_policy", event_payload)
+                if event_key not in {"hold", "no_change", "intent_update"}:
                     self._store.set_last_action(
                         symbol,
                         action=float(policy_state.get("position", 0) or 0),
@@ -2447,6 +2597,7 @@ class LiveSession:
                         close=bar.get("close"),
                     )
                     self._store.add_trade_event(event_payload)
+                    self._audit("trade_events", event_payload)
 
             def _on_15m(symbol: str, bar15: dict, buffer: Any) -> None:
                 if order_policies is not None and symbol in order_policies:
@@ -2559,6 +2710,26 @@ class LiveSession:
                         "agent_state": agent_state,
                     },
                 )
+                decision_context = {
+                    "symbol": symbol,
+                    "timestamp": _ts_iso(bar15.get("timestamp")),
+                    "bar": _normalize_bar(bar_payload),
+                    "action": {
+                        "selected_action": float(selected_action),
+                        "selected_action_class": int(selected_action_class),
+                        "action_raw": action_raw if np.isfinite(action_raw) else None,
+                        "raw_action_class": raw_action_pos,
+                        "raw_action_class_model": model_raw_action_pos,
+                        "gate_status": gate_status,
+                        "gate_changed": bool(gate_changed),
+                        "gate_pending_target": gate_pending_target,
+                        "gate_pending_count": int(gate_pending_count),
+                        "flip_abs_threshold": float(cfg.exec_flip_abs_threshold),
+                        "flip_blocked_by_threshold": bool(flip_blocked_by_threshold),
+                    },
+                    "agent_state": agent_state,
+                }
+                self._audit("actions", decision_context)
 
                 if order_policies is None or symbol not in order_policies:
                     event_key = _agent_action_event(prev_exec_action, selected_action_class)
@@ -2583,6 +2754,8 @@ class LiveSession:
                         }
                         self._store.add_trade_event(trade_payload)
                         self._emit("trade_event", trade_payload)
+                        self._audit("trade_events", trade_payload)
+                    self._audit("decision_10m", decision_context)
                     return
 
                 policy = order_policies[symbol]
@@ -2597,6 +2770,7 @@ class LiveSession:
                 _persist_policy_runtime_cache()
                 broker_snap = policy.snapshot_broker_state(orders_limit=20)
                 self._store.set_broker_state(symbol, broker_snap)
+                self._audit("broker_state", {"symbol": symbol, "state": broker_snap})
                 policy_pos = int(policy_state.get("position", 0) or 0)
                 self._store.set_last_action(
                     symbol,
@@ -2614,9 +2788,20 @@ class LiveSession:
                 }
                 self._emit("order_policy", event_payload)
                 self._emit("broker_state", {"symbol": symbol, "state": broker_snap})
+                self._audit("order_policy", event_payload)
                 event_key = str(result.get("event", "")).strip().lower()
                 if event_key not in {"hold", "no_change"}:
                     self._store.add_trade_event(event_payload)
+                    self._audit("trade_events", event_payload)
+                self._audit(
+                    "decision_10m",
+                    {
+                        **decision_context,
+                        "policy_result": result,
+                        "policy_state": policy_state,
+                        "broker_state": broker_snap,
+                    },
+                )
 
             processor = lr.LiveBarProcessor(
                 interval_minutes=cfg.interval,
@@ -2871,6 +3056,7 @@ class LiveSession:
                     if now - last_broker_poll >= 30.0:
                         last_broker_poll = now
                         for symbol, policy in order_policies.items():
+                            reconcile_event: dict[str, Any] | None = None
                             if policy.has_pending_broker_reconcile():
                                 reconcile_result = policy.reconcile_pending_broker_order(
                                     logger=self._policy_logger(symbol)
@@ -2893,9 +3079,46 @@ class LiveSession:
                                         "policy_state": policy.snapshot_state(),
                                     },
                                 )
+                                self._audit(
+                                    "order_policy",
+                                    {
+                                        "symbol": symbol,
+                                        "timestamp": _ts_iso(datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))),
+                                        "result": {
+                                            "event": "broker_reconcile",
+                                            "pending_reconcile_result": reconcile_result,
+                                        },
+                                        "policy_state": policy.snapshot_state(),
+                                    },
+                                )
+                            else:
+                                reconcile_result = policy.reconcile_with_broker(
+                                    logger=self._policy_logger(symbol),
+                                    force=True,
+                                )
+                                if reconcile_result.get("changed"):
+                                    if cfg.use_execution_latch:
+                                        execution_latches[symbol].set_position(
+                                            policy.snapshot_state().get("position", 0)
+                                        )
+                                    self._store.set_policy_state(symbol, policy.snapshot_state())
+                                    _persist_policy_runtime_cache()
+                                    reconcile_event = {
+                                        "symbol": symbol,
+                                        "timestamp": _ts_iso(datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))),
+                                        "result": {
+                                            "event": "broker_sync",
+                                            "broker_sync_result": reconcile_result,
+                                        },
+                                        "policy_state": policy.snapshot_state(),
+                                    }
+                            if reconcile_event is not None:
+                                self._emit("order_policy", reconcile_event)
+                                self._audit("order_policy", reconcile_event)
                             broker_snap = policy.snapshot_broker_state(orders_limit=20)
                             self._store.set_broker_state(symbol, broker_snap)
                             self._emit("broker_state", {"symbol": symbol, "state": broker_snap})
+                            self._audit("broker_state", {"symbol": symbol, "state": broker_snap})
                 try:
                     bar = bar_queue.get(timeout=0.5)
                 except queue_mod.Empty:
@@ -2919,6 +3142,14 @@ class LiveSession:
                     "traceback": traceback.format_exc(limit=12),
                 },
             )
+            self._audit(
+                "session",
+                {
+                    "event": "session_error",
+                    "error": f"{exc}",
+                    "traceback": traceback.format_exc(limit=12),
+                },
+            )
         finally:
             with self._lock:
                 streamer = self._streamer
@@ -2934,6 +3165,17 @@ class LiveSession:
                     pass
             self._store.stop(error=error_message)
             self._emit_status(running=False, message="stopped", extra={"error": error_message})
+            self._audit(
+                "session",
+                {
+                    "event": "session_stopped",
+                    "error": error_message,
+                    "stopped_at": _ts_iso(datetime.now(timezone.utc)),
+                },
+            )
+            if audit_writer is not None:
+                audit_writer.stop()
+            self._audit_writer = None
             with self._lock:
                 self._thread = None
 

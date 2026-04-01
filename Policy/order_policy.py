@@ -60,6 +60,7 @@ class OptionOrderPolicyConfig:
     verify_timeout_sec: float = 2.0
     verify_final_attempt_grace_sec: float = 600.0
     verify_poll_sec: float = 0.5
+    broker_reconcile_max_age_sec: float = 60.0
     resubmit_on_terminal_fail: bool = True
     max_resubmit_attempts: int = 4
     action_deadband: float = 0.05
@@ -96,6 +97,7 @@ class OptionOrderPolicyConfig:
     meta_profit_protect_arm_atr: float = 2.0
     meta_profit_protect_giveback_atr_long: float = 0.75
     meta_profit_protect_giveback_atr_short: float = 1.0
+    expiring_position_exit_hhmm: str | None = "15:40"
 
 
 @dataclass
@@ -126,6 +128,11 @@ class OptionOrderPolicy:
         self.cfg = config
         self._tz = ZoneInfo(config.tz_name)
         self._cutoff = _parse_hhmm(config.dte_cutoff_hhmm)
+        self._expiring_position_exit_cutoff = (
+            _parse_hhmm(config.expiring_position_exit_hhmm)
+            if str(config.expiring_position_exit_hhmm or "").strip()
+            else None
+        )
         self._client = AlpacaOptionsClient(env_file=config.env_file)
 
         self._long_contracts = 0
@@ -154,11 +161,15 @@ class OptionOrderPolicy:
         self._meta_side_enter_above_threshold: dict[str, bool] = {"long": False, "short": False}
         self._meta_side_cooldown_until: dict[str, datetime | None] = {"long": None, "short": None}
         self._meta_side_bars_held: dict[str, int] = {"long": -1, "short": -1}
+        self._meta_side_entry_signal_ts: dict[str, datetime | None] = {"long": None, "short": None}
         self._meta_side_soft_exit_count: dict[str, int] = {"long": 0, "short": 0}
         self._meta_intrabar_entry_intent_active: dict[str, bool] = {"long": False, "short": False}
         self._meta_intrabar_entry_ref: dict[str, float] = {"long": float("nan"), "short": float("nan")}
         self._meta_side_reason: dict[str, str | None] = {"long": None, "short": None}
         self._pending_broker_reconcile: dict[str, Any] | None = None
+        self._last_broker_reconcile_monotonic: float = 0.0
+        self._entry_lockout_until: datetime | None = None
+        self._entry_lockout_reason: str | None = None
 
     def _trail_state(self, side: str) -> _MetaTrailState:
         return self._meta_long_trail if side == "long" else self._meta_short_trail
@@ -572,6 +583,245 @@ class OptionOrderPolicy:
         return m.group(2)
 
     @staticmethod
+    def _option_expiration(symbol: str) -> date | None:
+        m = re.match(r"^[A-Z]+(\d{6})([CP])(\d{8})$", symbol.strip().upper())
+        if not m:
+            return None
+        try:
+            return datetime.strptime(m.group(1), "%y%m%d").date()
+        except ValueError:
+            return None
+
+    def _entry_lockout_active(self, *, local_ts: datetime | None) -> bool:
+        if self._entry_lockout_until is None or local_ts is None:
+            return False
+        if local_ts >= self._entry_lockout_until:
+            self._entry_lockout_until = None
+            self._entry_lockout_reason = None
+            return False
+        return True
+
+    def _set_entry_lockout(self, *, local_ts: datetime, reason: str) -> None:
+        end_of_day = datetime.combine(local_ts.date(), time(23, 59), tzinfo=self._tz)
+        self._entry_lockout_until = end_of_day
+        self._entry_lockout_reason = str(reason)
+
+    def _symbol_expires_today(self, symbol: str | None, *, local_ts: datetime | None) -> bool:
+        if not symbol or local_ts is None:
+            return False
+        expiration = self._option_expiration(symbol)
+        return bool(expiration is not None and expiration == local_ts.date())
+
+    def _latest_meta_snapshot_local_ts(self) -> datetime | None:
+        snapshot = self._latest_meta_side_snapshot or {}
+        raw_ts = snapshot.get("timestamp")
+        if raw_ts in (None, ""):
+            return None
+        try:
+            return self._to_local_ts(raw_ts)
+        except Exception:
+            return None
+
+    def _stale_prior_session_entry_signal(self, *, local_ts: datetime | None) -> bool:
+        """
+        New entries must be confirmed by a fresh same-day 10m snapshot.
+        Cached prior-session snapshots may still inform management of already-open
+        positions, but they cannot open a brand-new position on the next session.
+        """
+        if local_ts is None:
+            return False
+        snapshot_ts = self._latest_meta_snapshot_local_ts()
+        if snapshot_ts is None:
+            return False
+        return snapshot_ts.date() != local_ts.date()
+
+    def _exit_waiting_for_next_snapshot(self, *, side: str) -> bool:
+        side_key = str(side).strip().lower()
+        if side_key not in {"long", "short"}:
+            return False
+        current_qty = self._long_contracts if side_key == "long" else self._short_contracts
+        if current_qty <= 0:
+            return False
+        entry_signal_ts = self._meta_side_entry_signal_ts.get(side_key)
+        latest_snapshot_ts = self._latest_meta_snapshot_local_ts()
+        if entry_signal_ts is None or latest_snapshot_ts is None:
+            return False
+        return latest_snapshot_ts <= entry_signal_ts
+
+    def _read_broker_position_state(self) -> dict[str, Any]:
+        resp = self._client.get_positions()
+        positions = self._extract_positions(resp)
+        under = self.cfg.underlying.strip().upper()
+
+        long_candidates: list[tuple[float, str, float]] = []
+        short_candidates: list[tuple[float, str, float]] = []
+        ignored_short_count = 0
+        for p in positions:
+            symbol = str(p.get("symbol", "")).strip().upper()
+            if not symbol.startswith(under):
+                continue
+            cp = self._option_cp(symbol)
+            if cp is None:
+                continue
+
+            qty_val = _as_float(p.get("qty"))
+            side_raw = str(p.get("side", "")).strip().lower()
+            if self.cfg.long_options_only and side_raw == "short":
+                ignored_short_count += 1
+                continue
+            side_mult = 1
+            if side_raw == "short":
+                side_mult = -1
+            elif side_raw == "long":
+                side_mult = 1
+            elif math.isfinite(qty_val) and qty_val < 0:
+                side_mult = -1
+
+            qty_abs = abs(qty_val) if math.isfinite(qty_val) else 0.0
+            avg_entry = _as_float(p.get("avg_entry_price"))
+            if qty_abs <= 0.0:
+                continue
+
+            if cp == "C" and side_mult > 0:
+                long_candidates.append((qty_abs, symbol, avg_entry))
+            elif cp == "P" and side_mult > 0:
+                short_candidates.append((qty_abs, symbol, avg_entry))
+
+        long_candidates.sort(key=lambda x: x[0], reverse=True)
+        short_candidates.sort(key=lambda x: x[0], reverse=True)
+        long_qty, long_symbol, long_avg_entry = long_candidates[0] if long_candidates else (0.0, None, float("nan"))
+        short_qty, short_symbol, short_avg_entry = short_candidates[0] if short_candidates else (0.0, None, float("nan"))
+        return {
+            "underlying": under,
+            "long_contracts": int(round(long_qty)) if long_symbol else 0,
+            "short_contracts": int(round(short_qty)) if short_symbol else 0,
+            "long_symbol": long_symbol,
+            "short_symbol": short_symbol,
+            "avg_entry_price_long": float(long_avg_entry) if math.isfinite(long_avg_entry) else None,
+            "avg_entry_price_short": float(short_avg_entry) if math.isfinite(short_avg_entry) else None,
+            "qty_long": long_qty if long_symbol else 0.0,
+            "qty_short": short_qty if short_symbol else 0.0,
+            "multiple_positions": (len(long_candidates) > 1 or len(short_candidates) > 1),
+            "ignored_short_positions": ignored_short_count,
+        }
+
+    def _apply_broker_position_state(
+        self,
+        *,
+        broker_state: dict[str, Any],
+        preserve_bars_held: bool,
+        local_ts: datetime | None,
+    ) -> None:
+        prev_long_contracts = int(self._long_contracts)
+        prev_short_contracts = int(self._short_contracts)
+        prev_long_symbol = self._long_symbol
+        prev_short_symbol = self._short_symbol
+
+        next_long_contracts = int(broker_state.get("long_contracts", 0) or 0)
+        next_short_contracts = int(broker_state.get("short_contracts", 0) or 0)
+        next_long_symbol = broker_state.get("long_symbol")
+        next_short_symbol = broker_state.get("short_symbol")
+
+        self._long_contracts = next_long_contracts
+        self._short_contracts = next_short_contracts
+        self._long_symbol = next_long_symbol
+        self._short_symbol = next_short_symbol
+        self._long_avg_entry_price = _as_float(broker_state.get("avg_entry_price_long"))
+        self._short_avg_entry_price = _as_float(broker_state.get("avg_entry_price_short"))
+
+        for side, prev_qty, prev_symbol, next_qty, next_symbol in (
+            ("long", prev_long_contracts, prev_long_symbol, next_long_contracts, next_long_symbol),
+            ("short", prev_short_contracts, prev_short_symbol, next_short_contracts, next_short_symbol),
+        ):
+            if next_qty <= 0:
+                self._meta_side_bars_held[side] = -1
+                self._meta_side_entry_signal_ts[side] = None
+                self._meta_side_soft_exit_count[side] = 0
+                self._reset_trail_state(side)
+                continue
+            if preserve_bars_held and prev_qty > 0 and prev_symbol == next_symbol:
+                self._meta_side_bars_held[side] = max(0, int(self._meta_side_bars_held.get(side, -1)))
+            else:
+                self._meta_side_bars_held[side] = max(0, int(self.cfg.meta_min_hold_bars))
+                self._meta_side_entry_signal_ts[side] = None
+                self._meta_side_soft_exit_count[side] = 0
+                self._reset_trail_state(side)
+                if local_ts is not None and self._symbol_expires_today(next_symbol, local_ts=local_ts):
+                    self._meta_side_entry_armed[side] = False
+
+        self._refresh_legacy_state()
+        self._pending_flat_side = 0
+        self._pending_flat_bars = 0
+        self._pending_opposite_side = 0
+        self._pending_opposite_bars = 0
+
+    def reconcile_with_broker(
+        self,
+        *,
+        logger: Callable[[str], None] = print,
+        local_ts: datetime | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        if local_ts is None:
+            local_ts = datetime.now(tz=self._tz)
+        now_mono = float(time_mod.monotonic())
+        max_age_sec = max(1.0, float(self.cfg.broker_reconcile_max_age_sec))
+        if not force and (now_mono - self._last_broker_reconcile_monotonic) < max_age_sec:
+            return {"checked": False, "skipped": True, "reason": "fresh_enough"}
+
+        prev_state = {
+            "long_contracts": int(self._long_contracts),
+            "short_contracts": int(self._short_contracts),
+            "long_symbol": self._long_symbol,
+            "short_symbol": self._short_symbol,
+        }
+        broker_state = self._read_broker_position_state()
+        self._last_broker_reconcile_monotonic = now_mono
+
+        changed = any(
+            prev_state.get(key) != broker_state.get(key)
+            for key in ("long_contracts", "short_contracts", "long_symbol", "short_symbol")
+        )
+        if not changed:
+            return {"checked": True, "changed": False, "broker_state": broker_state}
+
+        expiring_long_was_open = (
+            prev_state["long_contracts"] > 0
+            and self._symbol_expires_today(prev_state["long_symbol"], local_ts=local_ts)
+        )
+        expiring_short_was_open = (
+            prev_state["short_contracts"] > 0
+            and self._symbol_expires_today(prev_state["short_symbol"], local_ts=local_ts)
+        )
+        self._apply_broker_position_state(
+            broker_state=broker_state,
+            preserve_bars_held=True,
+            local_ts=local_ts,
+        )
+        if self._expiring_position_exit_cutoff and local_ts.time() >= self._expiring_position_exit_cutoff:
+            if (
+                expiring_long_was_open
+                and int(broker_state.get("long_contracts", 0) or 0) <= 0
+            ) or (
+                expiring_short_was_open
+                and int(broker_state.get("short_contracts", 0) or 0) <= 0
+            ):
+                self._set_entry_lockout(local_ts=local_ts, reason="broker_expiration_flattened")
+        logger(
+            "[order_policy] BROKER RECONCILE "
+            f"prev_long={prev_state['long_contracts']} prev_short={prev_state['short_contracts']} "
+            f"next_long={broker_state.get('long_contracts', 0)} next_short={broker_state.get('short_contracts', 0)} "
+            f"next_long_symbol={broker_state.get('long_symbol')} next_short_symbol={broker_state.get('short_symbol')}"
+        )
+        return {
+            "checked": True,
+            "changed": True,
+            "previous_state": prev_state,
+            "broker_state": broker_state,
+            "position": int(self._pos),
+        }
+
+    @staticmethod
     def _extract_buying_power(resp: Any) -> float:
         if not isinstance(resp, dict):
             return float("nan")
@@ -883,99 +1133,24 @@ class OptionOrderPolicy:
         Seed in-memory position state from Alpaca open positions for this underlying.
         """
         try:
-            resp = self._client.get_positions()
-            positions = self._extract_positions(resp)
-            under = self.cfg.underlying.strip().upper()
-
-            long_candidates: list[tuple[float, str, float]] = []
-            short_candidates: list[tuple[float, str, float]] = []
-            ignored_short_count = 0
-            for p in positions:
-                symbol = str(p.get("symbol", "")).strip().upper()
-                if not symbol.startswith(under):
-                    continue
-                cp = self._option_cp(symbol)
-                if cp is None:
-                    continue
-
-                qty_val = _as_float(p.get("qty"))
-                side_raw = str(p.get("side", "")).strip().lower()
-                if self.cfg.long_options_only and side_raw == "short":
-                    ignored_short_count += 1
-                    continue
-                side_mult = 1
-                if side_raw == "short":
-                    side_mult = -1
-                elif side_raw == "long":
-                    side_mult = 1
-                elif math.isfinite(qty_val) and qty_val < 0:
-                    side_mult = -1
-
-                qty_abs = abs(qty_val) if math.isfinite(qty_val) else 0.0
-                avg_entry = _as_float(p.get("avg_entry_price"))
-                if qty_abs <= 0.0:
-                    continue
-
-                # Long call => bullish bucket, long put => bearish bucket.
-                # Short option inventory is ignored when long_options_only=True.
-                if cp == "C" and side_mult > 0:
-                    long_candidates.append((qty_abs, symbol, avg_entry))
-                elif cp == "P" and side_mult > 0:
-                    short_candidates.append((qty_abs, symbol, avg_entry))
-
-            if not long_candidates and not short_candidates:
-                self._long_contracts = 0
-                self._short_contracts = 0
-                self._long_symbol = None
-                self._short_symbol = None
-                self._meta_side_bars_held["long"] = -1
-                self._meta_side_bars_held["short"] = -1
-                self._refresh_legacy_state()
-                self._pending_flat_side = 0
-                self._pending_flat_bars = 0
-                self._pending_opposite_side = 0
-                self._pending_opposite_bars = 0
-                logger(f"[order_policy] Startup sync: no open {under} long option positions found.")
-                return {
-                    "synced": True,
-                    "position": 0,
-                    "signed_contracts": 0,
-                    "long_contracts": 0,
-                    "short_contracts": 0,
-                    "long_symbol": None,
-                    "short_symbol": None,
-                    "avg_entry_price_long": None,
-                    "avg_entry_price_short": None,
-                    "ignored_short_positions": ignored_short_count,
-                }
-
-            long_candidates.sort(key=lambda x: x[0], reverse=True)
-            short_candidates.sort(key=lambda x: x[0], reverse=True)
-            long_qty, long_symbol, long_avg_entry = long_candidates[0] if long_candidates else (0.0, None, float("nan"))
-            short_qty, short_symbol, short_avg_entry = short_candidates[0] if short_candidates else (0.0, None, float("nan"))
-            self._long_contracts = int(round(long_qty)) if long_symbol else 0
-            self._short_contracts = int(round(short_qty)) if short_symbol else 0
-            self._long_symbol = long_symbol
-            self._short_symbol = short_symbol
-            self._long_avg_entry_price = float(long_avg_entry) if math.isfinite(long_avg_entry) else float("nan")
-            self._short_avg_entry_price = float(short_avg_entry) if math.isfinite(short_avg_entry) else float("nan")
-            # Restored broker positions were not just opened now. Seed hold
-            # counters as already eligible for exit logic so a restart into an
-            # existing weekend/overnight position does not re-impose min-hold.
-            min_hold_ready = max(0, int(self.cfg.meta_min_hold_bars))
-            self._meta_side_bars_held["long"] = min_hold_ready if self._long_contracts > 0 else -1
-            self._meta_side_bars_held["short"] = min_hold_ready if self._short_contracts > 0 else -1
-            self._refresh_legacy_state()
-            self._pending_flat_side = 0
-            self._pending_flat_bars = 0
-            self._pending_opposite_side = 0
-            self._pending_opposite_bars = 0
-
-            if len(long_candidates) > 1 or len(short_candidates) > 1:
+            broker_state = self._read_broker_position_state()
+            self._apply_broker_position_state(
+                broker_state=broker_state,
+                preserve_bars_held=False,
+                local_ts=datetime.now(tz=self._tz),
+            )
+            self._last_broker_reconcile_monotonic = float(time_mod.monotonic())
+            if (
+                int(broker_state.get("long_contracts", 0) or 0) <= 0
+                and int(broker_state.get("short_contracts", 0) or 0) <= 0
+            ):
                 logger(
-                    f"[order_policy] Startup sync warning: multiple open {under} option positions "
-                    f"found (long={len(long_candidates)}, short={len(short_candidates)}); "
-                    "using largest qty symbol per side."
+                    f"[order_policy] Startup sync: no open {broker_state.get('underlying')} long option positions found."
+                )
+            elif bool(broker_state.get("multiple_positions")):
+                logger(
+                    f"[order_policy] Startup sync warning: multiple open {broker_state.get('underlying')} option positions "
+                    "found; using largest qty symbol per side."
                 )
             logger(
                 f"[order_policy] Startup sync: restored long={self._long_contracts} symbol={self._long_symbol} "
@@ -990,12 +1165,12 @@ class OptionOrderPolicy:
                 "short_contracts": self._short_contracts,
                 "long_symbol": self._long_symbol,
                 "short_symbol": self._short_symbol,
-                "qty_long": long_qty if long_symbol else 0.0,
-                "qty_short": short_qty if short_symbol else 0.0,
-                "avg_entry_price_long": float(long_avg_entry) if math.isfinite(long_avg_entry) else None,
-                "avg_entry_price_short": float(short_avg_entry) if math.isfinite(short_avg_entry) else None,
-                "multiple_positions": (len(long_candidates) > 1 or len(short_candidates) > 1),
-                "ignored_short_positions": ignored_short_count,
+                "qty_long": broker_state.get("qty_long", 0.0),
+                "qty_short": broker_state.get("qty_short", 0.0),
+                "avg_entry_price_long": broker_state.get("avg_entry_price_long"),
+                "avg_entry_price_short": broker_state.get("avg_entry_price_short"),
+                "multiple_positions": bool(broker_state.get("multiple_positions")),
+                "ignored_short_positions": int(broker_state.get("ignored_short_positions", 0) or 0),
             }
         except Exception as exc:
             logger(f"[order_policy] Startup sync failed: {exc}")
@@ -1240,6 +1415,77 @@ class OptionOrderPolicy:
             return {"resolved": False, "timed_out": True, "sync_result": sync_result}
 
         return {"resolved": False, "timed_out": False, "sync_result": sync_result}
+
+    def _maybe_force_close_expiring_positions(
+        self,
+        *,
+        local_ts: datetime,
+        logger: Callable[[str], None] = print,
+    ) -> dict[str, Any] | None:
+        cutoff = self._expiring_position_exit_cutoff
+        if cutoff is None or local_ts.time() < cutoff:
+            return None
+
+        orders: list[dict[str, Any]] = []
+        for side, qty, symbol in (
+            ("long", int(self._long_contracts), self._long_symbol),
+            ("short", int(self._short_contracts), self._short_symbol),
+        ):
+            if qty <= 0 or not symbol or not self._symbol_expires_today(symbol, local_ts=local_ts):
+                continue
+            close_resp = self._submit_order(
+                symbol=symbol,
+                side="sell",
+                intent="close",
+                qty=qty,
+                logger=logger,
+            )
+            orders.append(
+                {
+                    "type": f"forced_close_{side}",
+                    "side_key": side,
+                    "symbol": symbol,
+                    "qty": qty,
+                    "response": close_resp,
+                }
+            )
+            if side == "long":
+                self._long_contracts = 0
+                self._long_symbol = None
+                self._long_avg_entry_price = float("nan")
+            else:
+                self._short_contracts = 0
+                self._short_symbol = None
+                self._short_avg_entry_price = float("nan")
+            self._meta_side_bars_held[side] = -1
+            self._meta_side_soft_exit_count[side] = 0
+            self._meta_side_entry_armed[side] = False
+            self._reset_trail_state(side)
+
+        if not orders:
+            return None
+
+        self._set_entry_lockout(local_ts=local_ts, reason="expiring_position_exit_cutoff")
+        self._refresh_legacy_state()
+        self._pending_flat_side = 0
+        self._pending_flat_bars = 0
+        self._pending_opposite_side = 0
+        self._pending_opposite_bars = 0
+        logger(
+            "[order_policy] EXPIRING POSITION CUT-OFF FLATTEN "
+            f"cutoff={cutoff.strftime('%H:%M')} positions_closed={len(orders)}"
+        )
+        return {
+            "event": "expiration_cutoff_flatten",
+            "position": int(self._pos),
+            "signed_contracts": int(self._signed_contracts),
+            "long_contracts": int(self._long_contracts),
+            "short_contracts": int(self._short_contracts),
+            "open_long_symbol": self._long_symbol,
+            "open_short_symbol": self._short_symbol,
+            "entry_lockout_until": self._entry_lockout_until.isoformat() if self._entry_lockout_until else None,
+            "orders": orders,
+        }
 
     def _cancel_order_if_needed(
         self,
@@ -1498,6 +1744,16 @@ class OptionOrderPolicy:
             "short_contracts": int(self._short_contracts),
             "long_bars_held": int(self._meta_side_bars_held.get("long", -1)),
             "short_bars_held": int(self._meta_side_bars_held.get("short", -1)),
+            "long_entry_signal_time": (
+                self._meta_side_entry_signal_ts.get("long").isoformat()
+                if isinstance(self._meta_side_entry_signal_ts.get("long"), datetime)
+                else None
+            ),
+            "short_entry_signal_time": (
+                self._meta_side_entry_signal_ts.get("short").isoformat()
+                if isinstance(self._meta_side_entry_signal_ts.get("short"), datetime)
+                else None
+            ),
             "open_long_symbol": self._long_symbol,
             "open_short_symbol": self._short_symbol,
             "avg_entry_price_long": float(self._long_avg_entry_price) if math.isfinite(self._long_avg_entry_price) else None,
@@ -1530,6 +1786,8 @@ class OptionOrderPolicy:
                 if isinstance(self._pending_broker_reconcile, dict)
                 else None
             ),
+            "entry_lockout_until": self._entry_lockout_until.isoformat() if self._entry_lockout_until else None,
+            "entry_lockout_reason": self._entry_lockout_reason,
         }
 
     def export_runtime_state(self) -> dict[str, Any]:
@@ -1541,6 +1799,10 @@ class OptionOrderPolicy:
             "meta_side_reason": dict(self._meta_side_reason),
             "meta_side_entry_armed": dict(self._meta_side_entry_armed),
             "meta_side_bars_held": dict(self._meta_side_bars_held),
+            "meta_side_entry_signal_ts": {
+                key: (_ts.isoformat() if isinstance(_ts, datetime) else None)
+                for key, _ts in self._meta_side_entry_signal_ts.items()
+            },
             "meta_side_cooldown_until": {
                 key: (_ts.isoformat() if isinstance(_ts, datetime) else None)
                 for key, _ts in self._meta_side_cooldown_until.items()
@@ -1550,6 +1812,8 @@ class OptionOrderPolicy:
             "recent_1m_closes": [
                 float(x) for x in list(self._recent_1m_closes) if math.isfinite(_as_float(x))
             ],
+            "entry_lockout_until": self._entry_lockout_until.isoformat() if self._entry_lockout_until else None,
+            "entry_lockout_reason": self._entry_lockout_reason,
         }
 
     def load_runtime_state(
@@ -1598,6 +1862,18 @@ class OptionOrderPolicy:
                     saved = int(bars_held.get(side, self._meta_side_bars_held.get(side, -1)))
                     self._meta_side_bars_held[side] = max(int(self._meta_side_bars_held.get(side, -1)), saved)
 
+            entry_signal_ts = state.get("meta_side_entry_signal_ts")
+            if isinstance(entry_signal_ts, dict):
+                for side in ("long", "short"):
+                    raw = entry_signal_ts.get(side)
+                    if raw in (None, ""):
+                        self._meta_side_entry_signal_ts[side] = None
+                        continue
+                    parsed = datetime.fromisoformat(str(raw))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=self._tz)
+                    self._meta_side_entry_signal_ts[side] = parsed.astimezone(self._tz)
+
             cooldown_until = state.get("meta_side_cooldown_until")
             if isinstance(cooldown_until, dict):
                 for side in ("long", "short"):
@@ -1621,6 +1897,16 @@ class OptionOrderPolicy:
                     v = _as_float(value)
                     if math.isfinite(v):
                         self._recent_1m_closes.append(float(v))
+            raw_lockout_until = state.get("entry_lockout_until")
+            if raw_lockout_until in (None, ""):
+                self._entry_lockout_until = None
+            else:
+                parsed = datetime.fromisoformat(str(raw_lockout_until))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=self._tz)
+                self._entry_lockout_until = parsed.astimezone(self._tz)
+            raw_lockout_reason = state.get("entry_lockout_reason")
+            self._entry_lockout_reason = str(raw_lockout_reason) if raw_lockout_reason not in (None, "") else None
             logger("[order_policy] Loaded runtime policy state cache.")
             return True
         except Exception as exc:
@@ -1727,16 +2013,17 @@ class OptionOrderPolicy:
         if bool(self.cfg.meta_replay_compatible_mode):
             bars_held = int(self._meta_side_bars_held.get(side_key, -1))
             if current_qty > 0:
-                if not bool(allow_exits):
-                    self._meta_side_reason[side_key] = "exit_waiting_for_1m_confirmation"
-                    return desired_qty
-                hard_stop_signal = False
-                if not (math.isfinite(exit_prob) and math.isfinite(exit_thr)):
-                    hard_stop_signal = self._hard_stop_hit(side=side_key, close=close, high=high, low=low)
+                hard_stop_signal = self._hard_stop_hit(side=side_key, close=close, high=high, low=low)
                 if hard_stop_signal:
                     self._meta_side_soft_exit_count[side_key] = 0
                     self._meta_side_reason[side_key] = "hard_stop"
                     return 0
+                if not bool(allow_exits):
+                    self._meta_side_reason[side_key] = "exit_waiting_for_1m_confirmation"
+                    return desired_qty
+                if self._exit_waiting_for_next_snapshot(side=side_key):
+                    self._meta_side_reason[side_key] = "waiting_next_10m_exit_signal"
+                    return desired_qty
                 hold_ready = bool(bars_held >= max(0, int(self.cfg.meta_min_hold_bars)))
                 soft_exit_condition = bool(
                     hold_ready
@@ -1793,6 +2080,12 @@ class OptionOrderPolicy:
             if not bool(allow_new_entries):
                 self._meta_side_reason[side_key] = "entry_waiting_for_1m_confirmation"
                 return 0
+            if self._stale_prior_session_entry_signal(local_ts=local_ts):
+                self._meta_side_reason[side_key] = "waiting_same_day_10m_confirmation"
+                return 0
+            if self._entry_lockout_active(local_ts=local_ts):
+                self._meta_side_reason[side_key] = self._entry_lockout_reason or "entry_lockout_active"
+                return 0
             if math.isfinite(enter_prob) and math.isfinite(enter_thr) and enter_prob >= enter_thr:
                 self._meta_side_reason[side_key] = "enter_threshold_met"
                 return desired_qty
@@ -1821,6 +2114,14 @@ class OptionOrderPolicy:
             self._reset_trail_state(side_key)
         if current_qty > 0:
             hard_stop_signal = self._hard_stop_hit(side=side_key, close=close, high=high, low=low)
+            if hard_stop_signal:
+                return 0
+            if not bool(allow_exits):
+                self._meta_side_reason[side_key] = "exit_waiting_for_1m_confirmation"
+                return desired_qty
+            if self._exit_waiting_for_next_snapshot(side=side_key):
+                self._meta_side_reason[side_key] = "waiting_next_10m_exit_signal"
+                return desired_qty
             has_meta_exit_prob = (
                 math.isfinite(exit_prob)
                 and math.isfinite(exit_thr)
@@ -1831,8 +2132,6 @@ class OptionOrderPolicy:
                 stale_signal = self._stale_trade_exit_hit(side=side_key, close=close, local_ts=local_ts)
                 trail_signal = self._trail_stop_hit(side=side_key, close=close, high=high, low=low)
                 fallback_exit_signal = bool(stale_signal or trail_signal)
-            if hard_stop_signal:
-                return 0
             if not (exit_signal or fallback_exit_signal):
                 return desired_qty
             if enforce_trend_gate and not self._trend_gate_passed(
@@ -1846,6 +2145,12 @@ class OptionOrderPolicy:
             return 0
         if math.isfinite(enter_prob) and math.isfinite(enter_thr) and enter_prob >= enter_thr:
             if not bool(self._meta_side_entry_armed.get(side_key, True)):
+                return 0
+            if self._stale_prior_session_entry_signal(local_ts=local_ts):
+                self._meta_side_reason[side_key] = "waiting_same_day_10m_confirmation"
+                return 0
+            if self._entry_lockout_active(local_ts=local_ts):
+                self._meta_side_reason[side_key] = self._entry_lockout_reason or "entry_lockout_active"
                 return 0
             if self._side_reentry_cooldown_active(side=side_key, local_ts=local_ts):
                 return 0
@@ -2000,6 +2305,7 @@ class OptionOrderPolicy:
                     if target_qty == 0:
                         self._long_symbol = None
                         self._long_avg_entry_price = float("nan")
+                        self._meta_side_entry_signal_ts["long"] = None
                         self._reset_trail_state("long")
                         self._meta_side_soft_exit_count["long"] = 0
                         self._meta_side_entry_armed["long"] = False
@@ -2012,6 +2318,7 @@ class OptionOrderPolicy:
                     if target_qty == 0:
                         self._short_symbol = None
                         self._short_avg_entry_price = float("nan")
+                        self._meta_side_entry_signal_ts["short"] = None
                         self._reset_trail_state("short")
                         self._meta_side_soft_exit_count["short"] = 0
                         self._meta_side_entry_armed["short"] = False
@@ -2099,6 +2406,7 @@ class OptionOrderPolicy:
                 self._long_contracts = desired_final
                 self._long_symbol = symbol
                 if current_qty <= 0 and desired_final > 0:
+                    self._meta_side_entry_signal_ts["long"] = self._latest_meta_snapshot_local_ts() or local_ts
                     self._seed_trail_state(side="long", close=close, atr=atr, high=high, low=low)
                 filled_avg = self._extract_filled_avg_price(open_resp.get("verification", {}).get("order") if isinstance(open_resp, dict) else None)
                 if not math.isfinite(filled_avg):
@@ -2109,6 +2417,7 @@ class OptionOrderPolicy:
                 self._short_contracts = desired_final
                 self._short_symbol = symbol
                 if current_qty <= 0 and desired_final > 0:
+                    self._meta_side_entry_signal_ts["short"] = self._latest_meta_snapshot_local_ts() or local_ts
                     self._seed_trail_state(side="short", close=close, atr=atr, high=high, low=low)
                 filled_avg = self._extract_filled_avg_price(open_resp.get("verification", {}).get("order") if isinstance(open_resp, dict) else None)
                 if not math.isfinite(filled_avg):
@@ -2128,6 +2437,7 @@ class OptionOrderPolicy:
                 self._meta_side_bars_held[side] = max(0, int(self._meta_side_bars_held.get(side, -1)) + 1)
             else:
                 self._meta_side_bars_held[side] = -1
+                self._meta_side_entry_signal_ts[side] = None
                 self._meta_side_soft_exit_count[side] = 0
         if not orders:
             return {
@@ -2184,12 +2494,18 @@ class OptionOrderPolicy:
         close = _as_float(bar.get("close"))
         high = _as_float(bar.get("high"))
         low = _as_float(bar.get("low"))
+        local_ts = self._to_local_ts(bar.get("timestamp"))
+        self.reconcile_with_broker(logger=logger, local_ts=local_ts, force=False)
         if not math.isfinite(close):
             return {"event": "hold", "mode": "intrabar_meta", "reason": "invalid_close"}
         if self.has_pending_broker_reconcile():
             self._meta_side_reason["long"] = "pending_broker_reconcile"
             self._meta_side_reason["short"] = "pending_broker_reconcile"
             return {"event": "hold", "mode": "intrabar_meta", "reason": "pending_broker_reconcile"}
+        forced_flat = self._maybe_force_close_expiring_positions(local_ts=local_ts, logger=logger)
+        if forced_flat is not None:
+            forced_flat.setdefault("mode", "intrabar_meta")
+            return forced_flat
 
         self._prev_1m_close = self._last_1m_close
         self._last_1m_close = float(close)
@@ -2201,7 +2517,6 @@ class OptionOrderPolicy:
         if not self._latest_meta_side_snapshot:
             return {"event": "hold", "mode": "intrabar_meta", "reason": "no_meta_snapshot"}
 
-        local_ts = self._to_local_ts(bar.get("timestamp"))
         atr = self._compute_atr()
         side_bar = dict(self._latest_meta_side_snapshot)
         side_bar.update(
@@ -2267,6 +2582,8 @@ class OptionOrderPolicy:
           hold | enter | rebalance | flip | flat | error
         """
         try:
+            local_ts = self._to_local_ts(closed_bar.get("timestamp"))
+            self.reconcile_with_broker(logger=logger, local_ts=local_ts, force=False)
             if self.has_pending_broker_reconcile():
                 self._meta_side_reason["long"] = "pending_broker_reconcile"
                 self._meta_side_reason["short"] = "pending_broker_reconcile"
@@ -2286,12 +2603,15 @@ class OptionOrderPolicy:
             self._action_ema = smooth_action
             self._action_effective = effective_action
 
-            local_ts = self._to_local_ts(closed_bar.get("timestamp"))
             close = _as_float(closed_bar.get("close"))
             atr = self._update_bar_state(closed_bar) if update_bar_state else self._compute_atr()
 
             if not math.isfinite(close):
                 return {"event": "error", "reason": "invalid_close"}
+            forced_flat = self._maybe_force_close_expiring_positions(local_ts=local_ts, logger=logger)
+            if forced_flat is not None:
+                forced_flat.setdefault("mode", "interval_policy")
+                return forced_flat
             if self._has_meta_side_thresholds(closed_bar):
                 self._cache_meta_side_snapshot(closed_bar=closed_bar, atr=atr)
                 if bool(self.cfg.meta_intrabar_execution_enabled) and bool(self.cfg.meta_intrabar_breakout_entry_only):
@@ -2340,6 +2660,8 @@ class OptionOrderPolicy:
             self._latest_meta_side_snapshot = None
             current_signed = int(self._signed_contracts)
             current_pos = 1 if current_signed > 0 else (-1 if current_signed < 0 else 0)
+            if current_signed == 0 and desired_pos != 0 and self._entry_lockout_active(local_ts=local_ts):
+                desired_pos = 0
 
             flat_blocked = False
             flip_blocked = False

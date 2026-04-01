@@ -1622,6 +1622,14 @@ def main() -> None:
                                     policy.snapshot_state().get("position", 0)
                                 )
                             print(f"[live] Broker reconcile {symbol}: {reconcile_result}")
+                        else:
+                            reconcile_result = policy.reconcile_with_broker(logger=print, force=True)
+                            if reconcile_result.get("changed"):
+                                if args.use_execution_latch:
+                                    execution_latches[symbol].set_position(
+                                        policy.snapshot_state().get("position", 0)
+                                    )
+                                print(f"[live] Broker sync {symbol}: {reconcile_result}")
             try:
                 bar = bar_queue.get(timeout=0.5)
             except queue_mod.Empty:
