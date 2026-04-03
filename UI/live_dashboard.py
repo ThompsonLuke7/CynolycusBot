@@ -1283,8 +1283,21 @@ class LiveSession:
         return _logger
 
     def _resolve_ga_feature_list(self, cfg: SessionConfig) -> str | None:
-        if cfg.ga_feature_list:
-            return cfg.ga_feature_list
+        try:
+            from API.Alpaca_API.runners import live_runner as lr
+
+            shared = lr._resolve_ga_feature_list_path(
+                symbol=cfg.symbols[0],
+                dataset_name=cfg.ga_dataset_name,
+                ga_feature_list=cfg.ga_feature_list,
+                inference_enabled=not cfg.no_agent,
+                include_pivot_probs=not cfg.no_pivot_probs,
+                include_tb_probs=not cfg.no_tb_probs,
+            )
+            if shared:
+                return shared
+        except Exception:
+            pass
         try:
             from Data.load_data import get_ticker_processed_base_dir
             from Data.retrieve_data import normalize_ticker
@@ -1637,12 +1650,8 @@ class LiveSession:
         inference_mode = "none" if cfg.no_agent else str(cfg.inference_mode or "meta").strip().lower()
         if inference_mode != "none":
             self._emit_status(running=True, message=f"replay loading {inference_mode} agent")
-            from API.Alpaca_API.inference.live_inference import (
-                LiveIndependentMetaXGBAgent,
-                LiveInferenceEngine,
-                LiveMetaXGBAgent,
-                LivePPOAgent,
-            )
+            from API.Alpaca_API.inference.live_inference import LiveInferenceEngine
+            from API.Alpaca_API.runners import live_runner as lr
 
             ga_feature_list = self._resolve_ga_feature_list(cfg)
             ga_probs_frame = _load_agent_matrix_probs(symbol=symbols[0], dataset_name=cfg.ga_dataset_name)
@@ -1722,8 +1731,6 @@ class LiveSession:
             precomputed_meta_frame = None
             if inference_mode == "meta" and cfg.meta_base_frame_path:
                 try:
-                    from API.Alpaca_API.runners import live_runner as lr
-
                     meta_base_path = lr._resolve_symbolized_path(cfg.meta_base_frame_path, symbol=symbols[0])
                     precomputed_meta_frame = lr._load_precomputed_meta_frame(
                         meta_base_path,
@@ -1751,9 +1758,10 @@ class LiveSession:
                     )
 
             if inference_mode == "meta":
-                agent = LiveIndependentMetaXGBAgent(
+                agent = lr._build_meta_agent(
+                    symbol=symbols[0],
                     model_root=cfg.meta_model_root,
-                    ga_model_root=cfg.ga_model_root if ga_feature_list else None,
+                    ga_model_root=cfg.ga_model_root,
                     ga_feature_list_path=ga_feature_list,
                     ga_probs_frame=ga_probs_frame,
                     ga_probs_mode=ga_probs_mode,
@@ -1796,7 +1804,7 @@ class LiveSession:
                     },
                 )
             else:
-                agent = LivePPOAgent(
+                agent = lr._build_ppo_agent(
                     model_path=cfg.model_path,
                     deterministic=not cfg.stochastic,
                     device=cfg.device,
@@ -1808,7 +1816,7 @@ class LiveSession:
                     session_close=cfg.session_close,
                     min_15m_bars=cfg.min_15m_bars,
                     fill_missing_prob=cfg.fill_missing_prob,
-                    ga_model_root=cfg.ga_model_root if ga_feature_list else None,
+                    ga_model_root=cfg.ga_model_root,
                     ga_feature_list_path=ga_feature_list,
                     ga_pivot_label_dir=cfg.ga_pivot_label_dir,
                     ga_tb_label_dir=cfg.ga_tb_label_dir,
@@ -1843,25 +1851,30 @@ class LiveSession:
             for symbol in symbols
         }
         if cfg.enable_option_orders:
-            from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
+            from Policy.order_policy import OptionOrderPolicy
 
             order_policies = {}
             for symbol in symbols:
-                pol_cfg = OptionOrderPolicyConfig(
-                    underlying=symbol,
+                policy = lr._build_option_order_policy(
+                    symbol=symbol,
                     env_file=cfg.env_file,
-                    tz_name=cfg.tz or "America/New_York",
+                    tz_name=cfg.tz,
                     atr_multiplier=float(cfg.option_atr_mult),
                     dte_cutoff_hhmm=cfg.option_dte_cutoff,
                     qty=int(cfg.option_order_qty),
                     close_on_flat=not cfg.option_no_close_on_flat,
                     close_on_flip=not cfg.option_no_close_on_flip,
+                    submit_orders=False,
                     opposite_confirm_bars=1,
                     opposite_min_abs_action=float(cfg.exec_flip_abs_threshold),
                     opposite_min_prob_edge=0.0,
                     meta_execute_on_interval_close=False,
                     meta_intrabar_execution_enabled=True,
                     meta_intrabar_breakout_entry_only=False,
+                    meta_trail_activate_atr=float(cfg.meta_trail_activate_atr),
+                    meta_trail_atr=float(cfg.meta_trail_atr),
+                    meta_trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
+                    meta_use_tp_to_tighten_trail=bool(cfg.meta_use_tp_to_tighten_trail),
                     meta_soft_exit_confirm_bars=2,
                     meta_urgent_exit_prob=0.85,
                     meta_urgent_exit_delta=0.30,
@@ -1869,9 +1882,7 @@ class LiveSession:
                     meta_profit_protect_arm_atr=2.0,
                     meta_profit_protect_giveback_atr_long=0.75,
                     meta_profit_protect_giveback_atr_short=1.0,
-                    submit_orders=False,
                 )
-                policy = OptionOrderPolicy(pol_cfg)
                 order_policies[symbol] = policy
                 simulated_orders[symbol] = deque(maxlen=20)
                 self._store.set_policy_state(symbol, policy.snapshot_state())
@@ -2304,15 +2315,10 @@ class LiveSession:
             if mode != "live":
                 raise ValueError(f"Unknown runner_mode: {cfg.runner_mode}")
 
-            from API.Alpaca_API.inference.live_inference import (
-                LiveIndependentMetaXGBAgent,
-                LiveInferenceEngine,
-                LiveMetaXGBAgent,
-                LivePPOAgent,
-            )
+            from API.Alpaca_API.inference.live_inference import LiveInferenceEngine
             from API.Alpaca_API.market_data.live_stream import AlpacaBarStreamer
             from API.Alpaca_API.runners import live_runner as lr
-            from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
+            from Policy.order_policy import OptionOrderPolicy
 
             symbols = cfg.symbols
             last_exec_action_by_symbol: dict[str, int] = {}
@@ -2413,9 +2419,10 @@ class LiveSession:
                                     "message": f"[live] Cached meta base frame unavailable: {exc}",
                                 },
                             )
-                    agent = LiveIndependentMetaXGBAgent(
+                    agent = lr._build_meta_agent(
+                        symbol=symbols[0],
                         model_root=cfg.meta_model_root,
-                        ga_model_root=cfg.ga_model_root if ga_feature_list else None,
+                        ga_model_root=cfg.ga_model_root,
                         ga_feature_list_path=ga_feature_list,
                         ga_probs_frame=ga_probs_frame,
                         ga_probs_mode=ga_probs_mode,
@@ -2458,7 +2465,7 @@ class LiveSession:
                         },
                     )
                 else:
-                    agent = LivePPOAgent(
+                    agent = lr._build_ppo_agent(
                         model_path=cfg.model_path,
                         deterministic=not cfg.stochastic,
                         device=cfg.device,
@@ -2470,11 +2477,7 @@ class LiveSession:
                         session_close=cfg.session_close,
                         min_15m_bars=cfg.min_15m_bars,
                         fill_missing_prob=cfg.fill_missing_prob,
-                        ga_model_root=(
-                            cfg.ga_model_root
-                            if (ga_feature_list and ga_probs_mode != "frame")
-                            else None
-                        ),
+                        ga_model_root=cfg.ga_model_root,
                         ga_feature_list_path=ga_feature_list,
                         ga_pivot_label_dir=cfg.ga_pivot_label_dir,
                         ga_tb_label_dir=cfg.ga_tb_label_dir,
@@ -2503,21 +2506,26 @@ class LiveSession:
             if cfg.enable_option_orders:
                 order_policies = {}
                 for symbol in symbols:
-                    pol_cfg = OptionOrderPolicyConfig(
-                        underlying=symbol,
+                    policy = lr._build_option_order_policy(
+                        symbol=symbol,
                         env_file=cfg.env_file,
-                        tz_name=cfg.tz or "America/New_York",
+                        tz_name=cfg.tz,
                         atr_multiplier=float(cfg.option_atr_mult),
                         dte_cutoff_hhmm=cfg.option_dte_cutoff,
                         qty=int(cfg.option_order_qty),
                         close_on_flat=not cfg.option_no_close_on_flat,
                         close_on_flip=not cfg.option_no_close_on_flip,
+                        submit_orders=not cfg.simulate_orders,
                         opposite_confirm_bars=1,
                         opposite_min_abs_action=float(cfg.exec_flip_abs_threshold),
                         opposite_min_prob_edge=0.0,
                         meta_execute_on_interval_close=False,
                         meta_intrabar_execution_enabled=True,
                         meta_intrabar_breakout_entry_only=False,
+                        meta_trail_activate_atr=float(cfg.meta_trail_activate_atr),
+                        meta_trail_atr=float(cfg.meta_trail_atr),
+                        meta_trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
+                        meta_use_tp_to_tighten_trail=bool(cfg.meta_use_tp_to_tighten_trail),
                         meta_soft_exit_confirm_bars=2,
                         meta_urgent_exit_prob=0.85,
                         meta_urgent_exit_delta=0.30,
@@ -2525,9 +2533,7 @@ class LiveSession:
                         meta_profit_protect_arm_atr=2.0,
                         meta_profit_protect_giveback_atr_long=0.75,
                         meta_profit_protect_giveback_atr_short=1.0,
-                        submit_orders=not cfg.simulate_orders,
                     )
-                    policy = OptionOrderPolicy(pol_cfg)
                     order_policies[symbol] = policy
                     self._store.set_policy_state(symbol, policy.snapshot_state())
                     broker_snap = policy.snapshot_broker_state(orders_limit=20)

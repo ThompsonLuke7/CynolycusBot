@@ -228,6 +228,241 @@ def _use_meta_direct_execution(inference: LiveInferenceEngine) -> bool:
     return isinstance(agent, (LiveMetaXGBAgent, LiveIndependentMetaXGBAgent))
 
 
+def _resolve_ga_feature_list_path(
+    *,
+    symbol: str,
+    dataset_name: str,
+    ga_feature_list: str | None,
+    inference_enabled: bool,
+    include_pivot_probs: bool,
+    include_tb_probs: bool,
+) -> str | None:
+    if not inference_enabled:
+        return ga_feature_list
+    if ga_feature_list is not None:
+        return str(ga_feature_list)
+    if not (include_pivot_probs or include_tb_probs):
+        return None
+    try:
+        from Data.load_data import get_ticker_processed_base_dir
+        from Data.retrieve_data import normalize_ticker
+
+        ticker = normalize_ticker(symbol)
+        candidate = (
+            get_ticker_processed_base_dir(ticker)
+            / "datasets"
+            / dataset_name
+            / f"features_X_{dataset_name}_tree.txt"
+        )
+        if candidate.exists():
+            return str(candidate)
+    except Exception:
+        return None
+    return None
+
+
+def _build_meta_agent(
+    *,
+    symbol: str,
+    model_root: str,
+    ga_model_root: str | None,
+    ga_feature_list_path: str | None,
+    include_pivot_probs: bool,
+    include_tb_probs: bool,
+    pivot_label_dir: str,
+    tb_label_dir: str,
+    tz: str | None,
+    assume_tz: str,
+    session_open: str,
+    session_close: str,
+    min_15m_bars: int,
+    fill_missing_prob: float,
+    resample_label: str,
+    resample_closed: str,
+    label_timeframe_rule: str,
+    trail_activate_atr: float,
+    trail_atr: float,
+    trail_atr_after_tp: float,
+    use_tp_to_tighten_trail: bool,
+    entry_threshold_override: float | None,
+    exit_threshold_override: float | None,
+    ga_probs_frame: pd.DataFrame | None = None,
+    ga_probs_mode: str = "xgb",
+    precomputed_base_frame: pd.DataFrame | None = None,
+    precomputed_append_lookback_days: int = 120,
+    min_hold_bars: int = 2,
+    exit_entry_delta: float = 0.15,
+    soft_exit_confirm_bars: int = 2,
+    urgent_exit_prob: float = 0.85,
+    urgent_exit_delta: float = 0.30,
+    profit_protect_enabled: bool = False,
+    profit_protect_arm_atr: float = 2.0,
+    profit_protect_giveback_atr_long: float = 0.75,
+    profit_protect_giveback_atr_short: float = 1.0,
+) -> LiveIndependentMetaXGBAgent:
+    del symbol
+    return LiveIndependentMetaXGBAgent(
+        model_root=model_root,
+        ga_model_root=ga_model_root if ga_feature_list_path else None,
+        ga_feature_list_path=ga_feature_list_path,
+        ga_probs_frame=ga_probs_frame,
+        ga_probs_mode=ga_probs_mode,
+        include_pivot_probs=include_pivot_probs,
+        include_tb_probs=include_tb_probs,
+        pivot_label_dir=pivot_label_dir,
+        tb_label_dir=tb_label_dir,
+        tz=tz or "America/New_York",
+        assume_tz=assume_tz,
+        session_open=session_open,
+        session_close=session_close,
+        min_15m_bars=min_15m_bars,
+        fill_missing_prob=fill_missing_prob,
+        resample_label=resample_label,
+        resample_closed=resample_closed,
+        label_timeframe_rule=label_timeframe_rule,
+        trail_activate_atr=float(trail_activate_atr),
+        trail_atr=float(trail_atr),
+        trail_atr_after_tp=float(trail_atr_after_tp),
+        use_tp_to_tighten_trail=bool(use_tp_to_tighten_trail),
+        entry_threshold_override=entry_threshold_override,
+        exit_threshold_override=exit_threshold_override,
+        precomputed_base_frame=precomputed_base_frame,
+        precomputed_append_lookback_days=int(precomputed_append_lookback_days),
+        min_hold_bars=int(min_hold_bars),
+        exit_entry_delta=float(exit_entry_delta),
+        soft_exit_confirm_bars=int(soft_exit_confirm_bars),
+        urgent_exit_prob=float(urgent_exit_prob),
+        urgent_exit_delta=float(urgent_exit_delta),
+        profit_protect_enabled=bool(profit_protect_enabled),
+        profit_protect_arm_atr=float(profit_protect_arm_atr),
+        profit_protect_giveback_atr_long=float(profit_protect_giveback_atr_long),
+        profit_protect_giveback_atr_short=float(profit_protect_giveback_atr_short),
+    )
+
+
+def _build_ppo_agent(
+    *,
+    model_path: str,
+    deterministic: bool,
+    device: str,
+    include_pivot_probs: bool,
+    include_tb_probs: bool,
+    tz: str | None,
+    assume_tz: str,
+    session_open: str,
+    session_close: str,
+    min_15m_bars: int,
+    fill_missing_prob: float,
+    ga_model_root: str | None,
+    ga_feature_list_path: str | None,
+    ga_pivot_label_dir: str,
+    ga_tb_label_dir: str,
+    ga_probs_frame: pd.DataFrame | None = None,
+    ga_probs_mode: str = "xgb",
+    require_probs: bool = False,
+    resample_label: str = "left",
+    resample_closed: str = "left",
+    label_timeframe_rule: str = "10min",
+) -> LivePPOAgent:
+    return LivePPOAgent(
+        model_path=model_path,
+        deterministic=bool(deterministic),
+        device=device,
+        include_pivot_probs=include_pivot_probs,
+        include_tb_probs=include_tb_probs,
+        tz=tz or "America/New_York",
+        assume_tz=assume_tz,
+        session_open=session_open,
+        session_close=session_close,
+        min_15m_bars=min_15m_bars,
+        fill_missing_prob=fill_missing_prob,
+        ga_model_root=ga_model_root if ga_feature_list_path and ga_probs_mode != "frame" else None,
+        ga_feature_list_path=ga_feature_list_path,
+        ga_pivot_label_dir=ga_pivot_label_dir,
+        ga_tb_label_dir=ga_tb_label_dir,
+        ga_probs_frame=ga_probs_frame,
+        ga_probs_mode=ga_probs_mode,
+        require_probs=bool(require_probs),
+        resample_label=resample_label,
+        resample_closed=resample_closed,
+        label_timeframe_rule=label_timeframe_rule,
+    )
+
+
+def _build_option_order_policy(
+    *,
+    symbol: str,
+    env_file: str,
+    tz_name: str | None,
+    atr_multiplier: float,
+    dte_cutoff_hhmm: str,
+    qty: int,
+    close_on_flat: bool,
+    close_on_flip: bool,
+    submit_orders: bool,
+    opposite_confirm_bars: int = 2,
+    opposite_min_abs_action: float = 0.10,
+    opposite_min_prob_edge: float = 0.05,
+    ema_alpha: float = 0.85,
+    rebalance_deadband: float = 0.10,
+    max_step_contracts: int = 2,
+    price_mode: str = "ask",
+    max_contracts_fallback: int = 1,
+    max_contracts_cap: int = 0,
+    meta_execute_on_interval_close: bool = False,
+    meta_intrabar_execution_enabled: bool = True,
+    meta_intrabar_breakout_entry_only: bool = False,
+    meta_trailing_stop_enabled: bool = True,
+    meta_trail_activate_atr: float = 0.75,
+    meta_trail_atr: float = 0.8,
+    meta_trail_atr_after_tp: float = 0.5,
+    meta_use_tp_to_tighten_trail: bool = True,
+    meta_soft_exit_confirm_bars: int = 2,
+    meta_urgent_exit_prob: float = 0.85,
+    meta_urgent_exit_delta: float = 0.30,
+    meta_profit_protect_enabled: bool = False,
+    meta_profit_protect_arm_atr: float = 2.0,
+    meta_profit_protect_giveback_atr_long: float = 0.75,
+    meta_profit_protect_giveback_atr_short: float = 1.0,
+) -> OptionOrderPolicy:
+    cfg = OptionOrderPolicyConfig(
+        underlying=symbol,
+        env_file=env_file,
+        tz_name=tz_name or "America/New_York",
+        atr_multiplier=float(atr_multiplier),
+        dte_cutoff_hhmm=dte_cutoff_hhmm,
+        qty=int(qty),
+        close_on_flat=bool(close_on_flat),
+        close_on_flip=bool(close_on_flip),
+        opposite_confirm_bars=int(opposite_confirm_bars),
+        opposite_min_abs_action=float(opposite_min_abs_action),
+        opposite_min_prob_edge=float(opposite_min_prob_edge),
+        submit_orders=bool(submit_orders),
+        ema_alpha=float(ema_alpha),
+        rebalance_deadband=float(rebalance_deadband),
+        max_step_contracts=int(max_step_contracts),
+        price_mode=str(price_mode),
+        max_contracts_fallback=int(max_contracts_fallback),
+        max_contracts_cap=int(max_contracts_cap),
+        meta_trailing_stop_enabled=bool(meta_trailing_stop_enabled),
+        meta_trail_activate_atr=float(meta_trail_activate_atr),
+        meta_trail_atr=float(meta_trail_atr),
+        meta_trail_atr_after_tp=float(meta_trail_atr_after_tp),
+        meta_use_tp_to_tighten_trail=bool(meta_use_tp_to_tighten_trail),
+        meta_execute_on_interval_close=bool(meta_execute_on_interval_close),
+        meta_intrabar_execution_enabled=bool(meta_intrabar_execution_enabled),
+        meta_intrabar_breakout_entry_only=bool(meta_intrabar_breakout_entry_only),
+        meta_soft_exit_confirm_bars=int(meta_soft_exit_confirm_bars),
+        meta_urgent_exit_prob=float(meta_urgent_exit_prob),
+        meta_urgent_exit_delta=float(meta_urgent_exit_delta),
+        meta_profit_protect_enabled=bool(meta_profit_protect_enabled),
+        meta_profit_protect_arm_atr=float(meta_profit_protect_arm_atr),
+        meta_profit_protect_giveback_atr_long=float(meta_profit_protect_giveback_atr_long),
+        meta_profit_protect_giveback_atr_short=float(meta_profit_protect_giveback_atr_short),
+    )
+    return OptionOrderPolicy(cfg)
+
+
 def _make_1m_handler(
     *,
     print_tz: str,
@@ -1402,24 +1637,14 @@ def main() -> None:
 
     agent = None
     precomputed_meta_frame: pd.DataFrame | None = None
-    ga_feature_list = args.ga_feature_list
-    if inference_mode != "none" and ga_feature_list is None:
-        try:
-            from Data.load_data import get_ticker_processed_base_dir
-            from Data.retrieve_data import normalize_ticker
-
-            ticker = normalize_ticker(symbols[0])
-            dataset_name = args.ga_dataset_name
-            candidate = (
-                get_ticker_processed_base_dir(ticker)
-                / "datasets"
-                / dataset_name
-                / f"features_X_{dataset_name}_tree.txt"
-            )
-            if candidate.exists():
-                ga_feature_list = str(candidate)
-        except Exception:
-            ga_feature_list = None
+    ga_feature_list = _resolve_ga_feature_list_path(
+        symbol=symbols[0],
+        dataset_name=args.ga_dataset_name,
+        ga_feature_list=args.ga_feature_list,
+        inference_enabled=inference_mode != "none",
+        include_pivot_probs=not args.no_pivot_probs,
+        include_tb_probs=not args.no_tb_probs,
+    )
 
     if inference_mode != "none" and ga_feature_list is None and not (args.no_pivot_probs and args.no_tb_probs):
         print("[live] Warning: GA-XGB feature list not found; pivot/TB probs will be filled with defaults.")
@@ -1428,7 +1653,7 @@ def main() -> None:
         model_path = args.model_path
         if not model_path:
             raise SystemExit("Missing --model-path for PPO inference.")
-        agent = LivePPOAgent(
+        agent = _build_ppo_agent(
             model_path=model_path,
             deterministic=not args.stochastic,
             device=args.device,
@@ -1440,10 +1665,11 @@ def main() -> None:
             session_close=args.session_close,
             min_15m_bars=args.min_15m_bars,
             fill_missing_prob=args.fill_missing_prob,
-            ga_model_root=args.ga_model_root if ga_feature_list else None,
+            ga_model_root=args.ga_model_root,
             ga_feature_list_path=ga_feature_list,
             ga_pivot_label_dir=args.ga_pivot_label_dir,
             ga_tb_label_dir=args.ga_tb_label_dir,
+            ga_probs_mode="xgb",
             resample_label=args.resample_label,
             resample_closed=args.resample_closed,
             label_timeframe_rule=f"{args.interval}min",
@@ -1466,9 +1692,10 @@ def main() -> None:
                     )
             except Exception as exc:
                 print(f"[live] Cached meta base frame unavailable: {exc}")
-        agent = LiveIndependentMetaXGBAgent(
+        agent = _build_meta_agent(
+            symbol=symbols[0],
             model_root=args.meta_model_root,
-            ga_model_root=args.ga_model_root if ga_feature_list else None,
+            ga_model_root=args.ga_model_root,
             ga_feature_list_path=ga_feature_list,
             include_pivot_probs=not args.no_pivot_probs,
             include_tb_probs=not args.no_tb_probs,
@@ -1483,6 +1710,7 @@ def main() -> None:
             resample_label=args.resample_label,
             resample_closed=args.resample_closed,
             label_timeframe_rule=f"{args.interval}min",
+            ga_probs_mode="xgb",
             trail_activate_atr=float(args.meta_trail_activate_atr),
             trail_atr=float(args.meta_trail_atr),
             trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
@@ -1528,10 +1756,10 @@ def main() -> None:
     if args.enable_option_orders:
         order_policies = {}
         for symbol in symbols:
-            cfg = OptionOrderPolicyConfig(
-                underlying=symbol,
+            order_policies[symbol] = _build_option_order_policy(
+                symbol=symbol,
                 env_file=args.env_file,
-                tz_name=args.tz or "America/New_York",
+                tz_name=args.tz,
                 atr_multiplier=float(args.option_atr_mult),
                 dte_cutoff_hhmm=args.option_dte_cutoff,
                 qty=int(args.option_order_qty),
@@ -1544,13 +1772,12 @@ def main() -> None:
                 price_mode=str(args.option_price_mode),
                 max_contracts_fallback=int(args.option_order_qty),
                 max_contracts_cap=int(args.option_max_contracts_cap),
-                meta_trailing_stop_enabled=True,
+                meta_execute_on_interval_close=str(args.meta_execution_mode).strip().lower() == "interval",
+                meta_intrabar_execution_enabled=str(args.meta_execution_mode).strip().lower() == "intrabar",
                 meta_trail_activate_atr=float(args.meta_trail_activate_atr),
                 meta_trail_atr=float(args.meta_trail_atr),
                 meta_trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
                 meta_use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
-                meta_execute_on_interval_close=str(args.meta_execution_mode).strip().lower() == "interval",
-                meta_intrabar_execution_enabled=str(args.meta_execution_mode).strip().lower() == "intrabar",
                 meta_soft_exit_confirm_bars=2,
                 meta_urgent_exit_prob=0.85,
                 meta_urgent_exit_delta=0.30,
@@ -1559,7 +1786,6 @@ def main() -> None:
                 meta_profit_protect_giveback_atr_long=0.75,
                 meta_profit_protect_giveback_atr_short=1.0,
             )
-            order_policies[symbol] = OptionOrderPolicy(cfg)
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
         print(f"[live] Option order policy enabled ({mode}) for symbols: {', '.join(symbols)}")
         if not args.no_startup_sync:

@@ -1078,15 +1078,68 @@ def _save_series(
     index: pd.Index | None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    np.save(output_dir / f"{prefix}_oof_train.npy", train_oof)
-    np.save(output_dir / f"{prefix}_test.npy", test_probs)
-    np.save(output_dir / f"{prefix}_full.npy", full_probs)
+    oof_npy_path = output_dir / f"{prefix}_oof_train.npy"
+    test_npy_path = output_dir / f"{prefix}_test.npy"
+    full_npy_path = output_dir / f"{prefix}_full.npy"
+
+    oof_to_save = train_oof
+    if oof_npy_path.exists():
+        current_has_signal = train_oof.size and np.isfinite(train_oof).any()
+        if not current_has_signal:
+            prev_oof = np.load(oof_npy_path)
+            if prev_oof.size and np.isfinite(prev_oof).any():
+                oof_to_save = prev_oof
+                print(
+                    f"[GA-XGB] Preserving existing OOF array in {oof_npy_path.name} "
+                    "during full-fit overwrite."
+                )
+
+    test_to_save = test_probs
+    if test_npy_path.exists():
+        current_has_signal = test_probs.size and np.isfinite(test_probs).any()
+        if not current_has_signal:
+            prev_test = np.load(test_npy_path)
+            if prev_test.size and np.isfinite(prev_test).any():
+                test_to_save = prev_test
+                print(
+                    f"[GA-XGB] Preserving existing test array in {test_npy_path.name} "
+                    "during full-fit overwrite."
+                )
+
+    np.save(oof_npy_path, oof_to_save)
+    np.save(test_npy_path, test_to_save)
+    np.save(full_npy_path, full_probs)
 
     if index is not None:
         oof_full = np.full_like(full_probs, np.nan, dtype=np.float32)
         test_full = np.full_like(full_probs, np.nan, dtype=np.float32)
-        oof_full[train_idx] = train_oof
-        test_full[test_idx] = test_probs
+        if train_idx.size and train_oof.size:
+            oof_full[train_idx] = train_oof
+        if test_idx.size and test_probs.size:
+            test_full[test_idx] = test_probs
+        parquet_path = output_dir / f"{prefix}_probs.parquet"
+        if (
+            parquet_path.exists()
+            and not np.isfinite(oof_full).any()
+            and not np.isfinite(test_full).any()
+        ):
+            existing = pd.read_parquet(parquet_path)
+            existing = existing.reindex(index[: full_probs.shape[0]])
+            prev_oof = pd.to_numeric(
+                existing.get(f"{prefix}_oof_train", pd.Series(index=existing.index, dtype=float)),
+                errors="coerce",
+            ).to_numpy(dtype=np.float32)
+            prev_test = pd.to_numeric(
+                existing.get(f"{prefix}_test", pd.Series(index=existing.index, dtype=float)),
+                errors="coerce",
+            ).to_numpy(dtype=np.float32)
+            if np.isfinite(prev_oof).any() or np.isfinite(prev_test).any():
+                oof_full = prev_oof
+                test_full = prev_test
+                print(
+                    f"[GA-XGB] Preserving existing OOF/test probability columns in "
+                    f"{parquet_path.name} during full-fit overwrite."
+                )
         df = pd.DataFrame(
             {
                 f"{prefix}_oof_train": oof_full,
@@ -1095,7 +1148,7 @@ def _save_series(
             },
             index=index[: full_probs.shape[0]],
         )
-        df.to_parquet(output_dir / f"{prefix}_probs.parquet")
+        df.to_parquet(parquet_path)
 
 
 def main() -> None:

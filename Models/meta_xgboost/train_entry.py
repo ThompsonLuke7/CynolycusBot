@@ -91,6 +91,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-root", type=str, default=None)
     p.add_argument("--pivot-label-dir", type=str, default=PipelineConfig.pivot_label_dir)
     p.add_argument("--tb-label-dir", type=str, default=PipelineConfig.tb_label_dir)
+    p.add_argument("--include-tb-probs", action=argparse.BooleanOptionalAction, default=PipelineConfig.include_tb_probs)
     p.add_argument("--include-vix-features", action=argparse.BooleanOptionalAction, default=PipelineConfig.include_vix_features)
     p.add_argument("--a-tp", type=float, default=PipelineConfig.a_tp)
     p.add_argument("--b-sl", type=float, default=PipelineConfig.b_sl)
@@ -131,6 +132,7 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
         model_root=args.model_root,
         pivot_label_dir=args.pivot_label_dir,
         tb_label_dir=args.tb_label_dir,
+        include_tb_probs=bool(args.include_tb_probs),
         include_vix_features=bool(args.include_vix_features),
         a_tp=float(args.a_tp),
         b_sl=float(args.b_sl),

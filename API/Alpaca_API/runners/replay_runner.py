@@ -8,7 +8,6 @@ import pandas as pd
 from ..inference.live_inference import (
     LiveGAXGBPredictor,
     LiveInferenceEngine,
-    LiveMetaXGBAgent,
     LivePPOAgent,
     build_meta_feature_frame_from_1m,
     build_tree_feature_frame_from_1m,
@@ -16,14 +15,18 @@ from ..inference.live_inference import (
 from .live_runner import (
     LiveBarProcessor,
     _action_to_position,
+    _build_meta_agent,
+    _build_option_order_policy,
+    _build_ppo_agent,
     _fmt_prob,
     _format_ts_local,
     _load_test_split_warmup_1m,
     _make_1m_handler,
+    _resolve_ga_feature_list_path,
     _use_meta_direct_execution,
 )
 from Policy.execution_latch import DirectionExecutionLatch
-from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
+from Policy.order_policy import OptionOrderPolicy
 
 
 def _ga_prob_parquet_path(
@@ -1314,7 +1317,8 @@ def main() -> None:
             )
             if has_direct_meta_probs:
                 continue
-            agent = LiveMetaXGBAgent(
+            agent = _build_meta_agent(
+                symbol=symbol,
                 model_root=args.meta_model_root,
                 ga_model_root=None,
                 ga_feature_list_path=None,
@@ -1331,7 +1335,6 @@ def main() -> None:
                 resample_label=args.resample_label,
                 resample_closed=args.resample_closed,
                 label_timeframe_rule=f"{args.interval}min",
-                ga_probs_frame=None,
                 ga_probs_mode="frame",
                 trail_activate_atr=float(args.meta_trail_activate_atr),
                 trail_atr=float(args.meta_trail_atr),
@@ -1399,23 +1402,14 @@ def main() -> None:
             ga_probs_mode = "xgb"
             ga_probs_frame = None
     agent = None
-    if inference_mode != "none" and args.ga_feature_list is None and not (args.no_pivot_probs and args.no_tb_probs):
-        try:
-            from Data.load_data import get_ticker_processed_base_dir
-            from Data.retrieve_data import normalize_ticker
-
-            ticker = normalize_ticker(symbols[0])
-            dataset_name = args.ga_dataset_name
-            candidate = (
-                get_ticker_processed_base_dir(ticker)
-                / "datasets"
-                / dataset_name
-                / f"features_X_{dataset_name}_tree.txt"
-            )
-            if candidate.exists():
-                args.ga_feature_list = str(candidate)
-        except Exception:
-            args.ga_feature_list = None
+    args.ga_feature_list = _resolve_ga_feature_list_path(
+        symbol=symbols[0],
+        dataset_name=args.ga_dataset_name,
+        ga_feature_list=args.ga_feature_list,
+        inference_enabled=inference_mode != "none",
+        include_pivot_probs=not args.no_pivot_probs,
+        include_tb_probs=not args.no_tb_probs,
+    )
 
     if inference_mode != "none" and args.ga_feature_list is None and not (args.no_pivot_probs and args.no_tb_probs):
         print("[replay] Warning: GA-XGB feature list not found; pivot/TB probs will be filled with defaults.")
@@ -1470,7 +1464,7 @@ def main() -> None:
             precomputed_meta_frame = None
 
     if inference_mode == "ppo":
-        agent = LivePPOAgent(
+        agent = _build_ppo_agent(
             model_path=args.model_path,
             deterministic=not args.stochastic,
             device=args.device,
@@ -1482,12 +1476,13 @@ def main() -> None:
             session_close=args.session_close,
             min_15m_bars=args.min_15m_bars,
             fill_missing_prob=args.fill_missing_prob,
-            ga_model_root=args.ga_model_root if args.ga_feature_list else None,
+            ga_model_root=args.ga_model_root,
             ga_feature_list_path=args.ga_feature_list,
             ga_pivot_label_dir=args.ga_pivot_label_dir,
             ga_tb_label_dir=args.ga_tb_label_dir,
             ga_probs_frame=ga_probs_frame,
             ga_probs_mode=ga_probs_mode,
+            require_probs=False,
             resample_label=args.resample_label,
             resample_closed=args.resample_closed,
             label_timeframe_rule=f"{args.interval}min",
@@ -1495,9 +1490,10 @@ def main() -> None:
     elif inference_mode == "meta":
         if int(args.interval) != 10:
             print(f"[replay] Warning: meta inference is trained for 10min bars; current --interval={args.interval}.")
-        agent = LiveMetaXGBAgent(
+        agent = _build_meta_agent(
+            symbol=symbols[0],
             model_root=args.meta_model_root,
-            ga_model_root=args.ga_model_root if args.ga_feature_list else None,
+            ga_model_root=args.ga_model_root,
             ga_feature_list_path=args.ga_feature_list,
             include_pivot_probs=not args.no_pivot_probs,
             include_tb_probs=not args.no_tb_probs,
@@ -1521,6 +1517,16 @@ def main() -> None:
             entry_threshold_override=args.meta_entry_threshold,
             exit_threshold_override=args.meta_exit_threshold,
             precomputed_base_frame=precomputed_meta_frame,
+            precomputed_append_lookback_days=120,
+            min_hold_bars=2,
+            exit_entry_delta=0.15,
+            soft_exit_confirm_bars=2,
+            urgent_exit_prob=0.85,
+            urgent_exit_delta=0.30,
+            profit_protect_enabled=False,
+            profit_protect_arm_atr=2.0,
+            profit_protect_giveback_atr_long=0.75,
+            profit_protect_giveback_atr_short=1.0,
         )
         print(
             f"[replay] Meta-XGB inference enabled: model_root={args.meta_model_root} "
@@ -1550,30 +1556,32 @@ def main() -> None:
     if args.enable_option_orders:
         order_policies = {}
         for symbol in symbols:
-            cfg = OptionOrderPolicyConfig(
-                underlying=symbol,
+            order_policies[symbol] = _build_option_order_policy(
+                symbol=symbol,
                 env_file=args.env_file,
-                tz_name=args.tz or "America/New_York",
+                tz_name=args.tz,
                 atr_multiplier=float(args.option_atr_mult),
                 dte_cutoff_hhmm=args.option_dte_cutoff,
                 qty=int(args.option_order_qty),
                 close_on_flat=not args.option_no_close_on_flat,
                 close_on_flip=not args.option_no_close_on_flip,
                 submit_orders=not args.simulate_orders,
+                opposite_confirm_bars=1,
+                opposite_min_abs_action=0.0,
+                opposite_min_prob_edge=0.0,
                 ema_alpha=float(args.option_action_ema_alpha),
                 rebalance_deadband=float(args.option_rebalance_deadband),
                 max_step_contracts=int(args.option_max_step_contracts),
                 price_mode=str(args.option_price_mode),
                 max_contracts_fallback=int(args.option_order_qty),
                 max_contracts_cap=int(args.option_max_contracts_cap),
-                meta_trailing_stop_enabled=True,
+                meta_execute_on_interval_close=False,
+                meta_intrabar_execution_enabled=True,
+                meta_intrabar_breakout_entry_only=False,
                 meta_trail_activate_atr=float(args.meta_trail_activate_atr),
                 meta_trail_atr=float(args.meta_trail_atr),
                 meta_trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
                 meta_use_tp_to_tighten_trail=bool(args.meta_use_tp_to_tighten_trail),
-                meta_execute_on_interval_close=False,
-                meta_intrabar_execution_enabled=True,
-                meta_intrabar_breakout_entry_only=False,
                 meta_soft_exit_confirm_bars=2,
                 meta_urgent_exit_prob=0.85,
                 meta_urgent_exit_delta=0.30,
@@ -1582,7 +1590,6 @@ def main() -> None:
                 meta_profit_protect_giveback_atr_long=0.75,
                 meta_profit_protect_giveback_atr_short=1.0,
             )
-            order_policies[symbol] = OptionOrderPolicy(cfg)
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
         print(f"[replay] Option order policy enabled ({mode}) for symbols: {', '.join(symbols)}")
         if policy_only_mode and args.start:

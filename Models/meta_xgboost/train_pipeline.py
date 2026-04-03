@@ -15,6 +15,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-root", type=str, default=None)
     p.add_argument("--pivot-label-dir", type=str, default="swing")
     p.add_argument("--tb-label-dir", type=str, default="tb")
+    p.add_argument("--include-tb-probs", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--include-vix-features", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--a-tp", type=float, default=1.6)
     p.add_argument("--b-sl", type=float, default=0.8)
@@ -44,6 +45,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--xgb-sample-type", choices=["uniform", "weighted"], default=None)
     p.add_argument("--xgb-normalize-type", choices=["tree", "forest"], default=None)
     p.add_argument("--n-estimators", type=int, default=None)
+    p.add_argument("--early-stopping-rounds", type=int, default=200)
+    p.add_argument("--early-stopping-val-fraction", type=float, default=0.20)
+    p.add_argument("--early-stopping-min-val-rows", type=int, default=100)
     p.add_argument("--random-state", type=int, default=42)
     return p.parse_args()
 

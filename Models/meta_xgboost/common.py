@@ -63,6 +63,7 @@ class PipelineConfig:
     model_root: str | None = None
     pivot_label_dir: str = "swing"
     tb_label_dir: str = "tb"
+    include_tb_probs: bool = True
     include_vix_features: bool = True
     session_tz: str = "America/New_York"
     atr_col: str = "atr"
@@ -206,6 +207,7 @@ def _replace_meta_prob_features_with_oos(
     model_root: Path,
     pivot_label_dir: str,
     tb_label_dir: str,
+    include_tb_probs: bool,
     min_coverage: float,
 ) -> pd.DataFrame:
     out = feat_df.copy()
@@ -225,21 +227,26 @@ def _replace_meta_prob_features_with_oos(
             prefix="p_short",
             target_index=target_index,
         ),
-        "p_tb_long": _load_ga_oos_prob_series(
-            model_root=model_root,
-            side="long",
-            label_dir=tb_label_dir,
-            prefix="p_long",
-            target_index=target_index,
-        ),
-        "p_tb_short": _load_ga_oos_prob_series(
-            model_root=model_root,
-            side="short",
-            label_dir=tb_label_dir,
-            prefix="p_short",
-            target_index=target_index,
-        ),
     }
+    if include_tb_probs:
+        replacements.update(
+            {
+                "p_tb_long": _load_ga_oos_prob_series(
+                    model_root=model_root,
+                    side="long",
+                    label_dir=tb_label_dir,
+                    prefix="p_long",
+                    target_index=target_index,
+                ),
+                "p_tb_short": _load_ga_oos_prob_series(
+                    model_root=model_root,
+                    side="short",
+                    label_dir=tb_label_dir,
+                    prefix="p_short",
+                    target_index=target_index,
+                ),
+            }
+        )
     def _fmt_index_value(idx: pd.Index, pos: int | None) -> str:
         if pos is None or pos < 0 or pos >= len(idx):
             return "None"
@@ -326,7 +333,7 @@ def build_base_feature_frame(cfg: PipelineConfig) -> pd.DataFrame:
         pivot_label_dir=cfg.pivot_label_dir,
         tb_label_dir=cfg.tb_label_dir,
         include_pivot_probs=True,
-        include_tb_probs=True,
+        include_tb_probs=bool(cfg.include_tb_probs),
         include_state_placeholders=False,
         include_vix_features=bool(cfg.include_vix_features),
         drop_na=False,
@@ -338,6 +345,7 @@ def build_base_feature_frame(cfg: PipelineConfig) -> pd.DataFrame:
         model_root=ga_model_root,
         pivot_label_dir=cfg.pivot_label_dir,
         tb_label_dir=cfg.tb_label_dir,
+        include_tb_probs=bool(cfg.include_tb_probs),
         min_coverage=float(cfg.min_oos_prob_coverage),
     )
     needed = {"open", "high", "low", "close"}
