@@ -525,6 +525,7 @@ def load_model_artifacts(
     side: str,
     *,
     label_dir: str,
+    feature_names: list[str] | None = None,
 ) -> tuple[np.ndarray, dict, dict]:
     side_dir = _artifact_side_dir(model_root, side, label_dir)
     mask_path = side_dir / "best_mask.npy"
@@ -535,6 +536,45 @@ def load_model_artifacts(
     mask = np.load(mask_path).astype(bool)
     meta = json.loads(meta_path.read_text())
     xgb_params = dict(meta.get("xgb_params", {}))
+    if feature_names is not None and mask.size != len(feature_names):
+        selected_path = side_dir / "selected_features.txt"
+        if not selected_path.exists():
+            raise ValueError(
+                f"{side.upper()} mask expects {mask.size} features but current dataset has "
+                f"{len(feature_names)}, and {selected_path.name} is missing for remap."
+            )
+        selected_names = [
+            line.strip()
+            for line in selected_path.read_text().splitlines()
+            if line.strip()
+        ]
+        feature_lookup = {name: idx for idx, name in enumerate(feature_names)}
+        remapped = np.zeros(len(feature_names), dtype=bool)
+        matched = 0
+        missing: list[str] = []
+        for name in selected_names:
+            idx = feature_lookup.get(name)
+            if idx is None:
+                missing.append(name)
+                continue
+            remapped[idx] = True
+            matched += 1
+        if matched == 0:
+            raise ValueError(
+                f"{side.upper()} artifact remap failed: none of the saved selected features "
+                f"were found in the current dataset."
+            )
+        msg = (
+            f"[GA-XGB] Remapped {side.upper()} {label_dir} mask by feature name: "
+            f"old_n_features={mask.size}, new_n_features={len(feature_names)}, "
+            f"matched={matched}"
+        )
+        if missing:
+            preview = ", ".join(missing[:5])
+            extra = "" if len(missing) <= 5 else f", ... (+{len(missing) - 5} more)"
+            msg += f", dropped={len(missing)} [{preview}{extra}]"
+        print(msg)
+        mask = remapped
     return mask, xgb_params, meta
 
 
@@ -1403,11 +1443,17 @@ def main() -> None:
             try:
                 if run_long:
                     load_model_artifacts(
-                        model_dataset_root, "long", label_dir=artifact_label_dir
+                        model_dataset_root,
+                        "long",
+                        label_dir=artifact_label_dir,
+                        feature_names=feature_names,
                     )
                 if run_short:
                     load_model_artifacts(
-                        model_dataset_root, "short", label_dir=artifact_label_dir
+                        model_dataset_root,
+                        "short",
+                        label_dir=artifact_label_dir,
+                        feature_names=feature_names,
                     )
             except FileNotFoundError:
                 need_refresh = True
@@ -1432,12 +1478,18 @@ def main() -> None:
             )
         if run_long:
             long_mask, long_params, long_meta = load_model_artifacts(
-                model_dataset_root, "long", label_dir=artifact_label_dir
+                model_dataset_root,
+                "long",
+                label_dir=artifact_label_dir,
+                feature_names=feature_names,
             )
             long_params = _sanitize_xgb_params(long_params)
         if run_short:
             short_mask, short_params, short_meta = load_model_artifacts(
-                model_dataset_root, "short", label_dir=artifact_label_dir
+                model_dataset_root,
+                "short",
+                label_dir=artifact_label_dir,
+                feature_names=feature_names,
             )
             short_params = _sanitize_xgb_params(short_params)
         if xgb_overrides:
