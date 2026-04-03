@@ -646,6 +646,9 @@ def build_meta_feature_frame_from_1m(
 
 
 class LiveGAXGBPredictor:
+    _NONCAUSAL_FEATURE_PREFIXES: tuple[str, ...] = ("DPO_",)
+    _NEUTRAL_PROBABILITY: float = 0.5
+
     def __init__(
         self,
         *,
@@ -673,11 +676,55 @@ class LiveGAXGBPredictor:
             self._tb_long = self._load_model("long", label_dir=tb_label_dir)
             self._tb_short = self._load_model("short", label_dir=tb_label_dir)
 
+        self._tb_guard_features = self._collect_noncausal_selected_features(
+            self._tb_long,
+            self._tb_short,
+        )
+        if self._tb_guard_features:
+            preview = ", ".join(self._tb_guard_features[:6])
+            if len(self._tb_guard_features) > 6:
+                preview += ", ..."
+            _warn_once(
+                "[live] GA-XGB TB models selected non-causal features "
+                f"({preview}); live rows missing them will be neutralized to 0.5."
+            )
+
     @staticmethod
     def _load_feature_list(path: Path) -> list[str]:
         if not path.exists():
             raise FileNotFoundError(f"Missing GA-XGB feature list: {path}")
         return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+
+    @classmethod
+    def _is_noncausal_feature(cls, feature_name: str) -> bool:
+        root = str(feature_name).split("__", 1)[0].upper()
+        return any(root.startswith(prefix) for prefix in cls._NONCAUSAL_FEATURE_PREFIXES)
+
+    def _collect_noncausal_selected_features(
+        self,
+        *artifacts: tuple[np.ndarray, xgb.Booster] | None,
+    ) -> tuple[str, ...]:
+        selected: set[str] = set()
+        for artifact in artifacts:
+            if artifact is None:
+                continue
+            mask, _model = artifact
+            for feature_name, keep in zip(self._feature_list, mask):
+                if keep and self._is_noncausal_feature(feature_name):
+                    selected.add(feature_name)
+        return tuple(sorted(selected))
+
+    def _guard_rows_for_features(
+        self,
+        x_aligned: pd.DataFrame,
+        guard_features: tuple[str, ...],
+    ) -> np.ndarray:
+        if x_aligned.empty or not guard_features:
+            return np.zeros(len(x_aligned), dtype=bool)
+        cols = [col for col in guard_features if col in x_aligned.columns]
+        if not cols:
+            return np.zeros(len(x_aligned), dtype=bool)
+        return x_aligned.loc[:, cols].isna().any(axis=1).to_numpy(dtype=bool, copy=False)
 
     def _load_model(self, side: str, *, label_dir: str | None = None) -> tuple[np.ndarray, xgb.Booster]:
         candidates = []
@@ -732,6 +779,7 @@ class LiveGAXGBPredictor:
         x_mat = x_aligned.to_numpy(dtype=np.float32)
         if x_mat.ndim != 2:
             x_mat = np.atleast_2d(x_mat)
+        tb_guard_rows = self._guard_rows_for_features(x_aligned, self._tb_guard_features)
 
         out: dict[str, np.ndarray] = {}
         if self._include_pivot and self._pivot_long and self._pivot_short:
@@ -744,6 +792,14 @@ class LiveGAXGBPredictor:
             out["p_tb_long"] = self._predict_many(x_mat, mask, model)
             mask, model = self._tb_short
             out["p_tb_short"] = self._predict_many(x_mat, mask, model)
+            if tb_guard_rows.any():
+                out["p_tb_long"][tb_guard_rows] = np.float32(self._NEUTRAL_PROBABILITY)
+                out["p_tb_short"][tb_guard_rows] = np.float32(self._NEUTRAL_PROBABILITY)
+                _warn_once(
+                    "[live] Neutralizing GA-XGB TB probabilities on live-edge rows with "
+                    "missing non-causal DPO features. Retrain without DPO or run with --no-tb-probs "
+                    "for a cleaner long-term fix."
+                )
 
         if not out:
             return pd.DataFrame(index=x_aligned.index)

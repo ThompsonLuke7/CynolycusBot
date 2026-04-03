@@ -3,6 +3,14 @@ import pandas_ta as ta
 from typing import Iterable, List, Optional, Set
 
 
+_CAUSAL_INDICATOR_DEFAULTS: dict[str, dict] = {
+    # pandas_ta defaults DPO to centered=True, which shifts future information
+    # back onto the current row. Keep the same output column name while forcing
+    # the leakage-safe variant.
+    "dpo": {"length": 20, "centered": False},
+}
+
+
 def prepare_ohlcv_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Rename common OHLCV column names to the lowercase names that pandas_ta
@@ -88,6 +96,11 @@ def add_all_pandasta_indicators(
             continue
 
         try:
+            if lname in _CAUSAL_INDICATOR_DEFAULTS:
+                func(append=True, **_CAUSAL_INDICATOR_DEFAULTS[lname])
+                if verbose:
+                    print(f"[OK] {name} (causal override)")
+                continue
             func(append=True)
             if verbose:
                 print(f"[OK] {name}")

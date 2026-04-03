@@ -2,19 +2,19 @@
   "symbols": [
     "SPY"
   ],
-  "updated_at": "2026-04-01T18:00:59.488632+00:00",
+  "updated_at": "2026-04-02T19:24:00.232762+00:00",
   "policies": {
     "SPY": {
       "latest_meta_side_snapshot": {
-        "timestamp": "2026-04-01T17:40:00+00:00",
-        "signal_close": 657.6,
-        "signal_high": 658.23,
-        "signal_low": 657.59,
-        "signal_atr": 0.9605063756667571,
-        "p_enter_long": 0.08514614403247833,
-        "p_enter_short": 0.9461097121238708,
+        "timestamp": "2026-04-02T19:10:00+00:00",
+        "signal_close": 654.55,
+        "signal_high": 655.25,
+        "signal_low": 654.28,
+        "signal_atr": 1.143400357074308,
+        "p_enter_long": 0.15973684191703796,
+        "p_enter_short": 0.6749472618103027,
         "p_exit_long": null,
-        "p_exit_short": 0.09582370519638062,
+        "p_exit_short": 0.13234509527683258,
         "thr_enter_long": 0.5,
         "thr_enter_short": 0.5,
         "thr_exit_long": 0.65,
@@ -38,28 +38,28 @@
       },
       "meta_side_entry_armed": {
         "long": true,
-        "short": true
+        "short": false
       },
       "meta_side_bars_held": {
         "long": -1,
-        "short": 31
+        "short": 253
       },
       "meta_side_entry_signal_ts": {
         "long": null,
-        "short": "2026-04-01T12:50:00-04:00"
+        "short": "2026-04-02T10:20:00-04:00"
       },
       "meta_side_cooldown_until": {
         "long": null,
-        "short": "2026-04-01T13:16:00-04:00"
+        "short": "2026-04-02T10:47:00-04:00"
       },
-      "prev_1m_close": 656.785,
-      "last_1m_close": 656.58,
+      "prev_1m_close": 654.59,
+      "last_1m_close": 654.8,
       "recent_1m_closes": [
-        657.45,
-        657.14,
-        656.84,
-        656.785,
-        656.58
+        654.55,
+        654.495,
+        654.3,
+        654.59,
+        654.8
       ],
       "entry_lockout_until": null,
       "entry_lockout_reason": null
