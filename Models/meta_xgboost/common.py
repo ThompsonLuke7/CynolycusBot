@@ -82,6 +82,8 @@ class PipelineConfig:
     threshold_step: float = 0.05
     threshold_objective: str = "f0_5"
     min_oos_prob_coverage: float = 0.95
+    drop_high_corr_features: bool = True
+    high_corr_threshold: float = 0.95
     xgb_booster: str | None = None
     xgb_rate_drop: float | None = None
     xgb_skip_drop: float | None = None
@@ -369,6 +371,9 @@ def build_base_feature_frame(cfg: PipelineConfig) -> pd.DataFrame:
         write_phase_columns=True,
         use_hazard_exit_labels=False,
     )
+    # trend_phase_ret duplicates ret_1 for the current meta frame, so keep the simpler base return feature.
+    if "trend_phase_ret" in feat_df.columns:
+        feat_df = feat_df.drop(columns=["trend_phase_ret"])
     feat_df["session_date"] = derive_session_date(feat_df.index, tz=cfg.session_tz)
     return feat_df
 
@@ -577,6 +582,8 @@ def select_numeric_feature_columns(
     df: pd.DataFrame,
     *,
     exclude: set[str] | None = None,
+    corr_threshold: float | None = None,
+    log_prefix: str = "[META-XGB]",
 ) -> list[str]:
     blocked = set(exclude or set())
     cols: list[str] = []
@@ -587,7 +594,44 @@ def select_numeric_feature_columns(
             cols.append(col)
     if not cols:
         raise ValueError("No numeric feature columns available.")
-    return cols
+    if corr_threshold is None:
+        return cols
+
+    threshold = float(corr_threshold)
+    if not np.isfinite(threshold) or threshold <= 0.0 or threshold >= 1.0:
+        raise ValueError("corr_threshold must be between 0 and 1.")
+
+    corr = df.loc[:, cols].corr().abs()
+    kept: list[str] = []
+    dropped: list[tuple[str, str, float]] = []
+    for col in cols:
+        drop_with: tuple[str, float] | None = None
+        for kept_col in kept:
+            corr_val = corr.at[col, kept_col]
+            if pd.notna(corr_val) and float(corr_val) > threshold:
+                drop_with = (kept_col, float(corr_val))
+                break
+        if drop_with is None:
+            kept.append(col)
+            continue
+        dropped.append((col, drop_with[0], drop_with[1]))
+
+    if dropped:
+        print(
+            f"{log_prefix} Correlation prune: dropped {len(dropped)} of {len(cols)} "
+            f"numeric features with abs(corr) > {threshold:.2f}."
+        )
+        for dropped_col, kept_col, corr_val in dropped:
+            print(
+                f"{log_prefix} Correlation prune drop: {dropped_col} "
+                f"(corr={corr_val:.4f} with kept {kept_col})"
+            )
+    else:
+        print(
+            f"{log_prefix} Correlation prune: dropped 0 of {len(cols)} numeric features "
+            f"with abs(corr) > {threshold:.2f}."
+        )
+    return kept
 
 
 def build_day_folds(

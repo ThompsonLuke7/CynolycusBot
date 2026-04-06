@@ -607,7 +607,6 @@ dow_thu__30m
 dow_fri__30m
 is_opening_30m_flag__30m
 is_power_hour_flag__30m
-vix_close__30m
 vix_ret_1__30m
 vix_ret_4__30m
 vix_ret_16__30m
@@ -918,8 +917,6 @@ vix_z_20__1h
 vix_vol_of_vol_20__1h
 ret_1_x_vix__1h
 ABER_ATR_5_15__4h
-ACCBL_20__4h
-ACCBU_20__4h
 AD__4h
 ADOSC_3_10__4h
 ADX_14__4h
@@ -1221,6 +1218,16 @@ dow_wed__4h
 dow_thu__4h
 dow_fri__4h
 is_power_hour_flag__4h
+vix_close__4h
+vix_ret_1__4h
+vix_ret_4__4h
+vix_ret_16__4h
+vix_range_pct__4h
+vix_atr_pct__4h
+vix_trend_ema_8_21__4h
+vix_z_20__4h
+vix_vol_of_vol_20__4h
+ret_1_x_vix__4h
 ABER_ATR_5_15__1d
 ACCBL_20__1d
 ACCBU_20__1d
@@ -1316,10 +1323,8 @@ CMO_14__1d
 COPC_11_14_10__1d
 CRSI_3_2_100__1d
 CTI_12__1d
-LDECAY_1__1d
 DEC_1__1d
 DCL_20_20__1d
-DCU_20_20__1d
 DPO_20__1d
 EBSW_40_10__1d
 EFI_13__1d
@@ -1402,6 +1407,7 @@ SQZ_ON__1d
 SQZ_OFF__1d
 SQZ_NO__1d
 SQZPRO_ON_WIDE__1d
+SQZPRO_ON_NARROW__1d
 SQZPRO_OFF__1d
 STC_10_12_26_0.5__1d
 STCstoch_10_12_26_0.5__1d

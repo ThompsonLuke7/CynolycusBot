@@ -28,6 +28,63 @@ VIX_FEATURE_COLUMNS = [
     "atr_pct_x_vix",
 ]
 
+MARKET_BREADTH_FEATURE_COLUMNS = [
+    "breadth_agreement",
+]
+
+CROSS_ASSET_FEATURE_COLUMNS = [
+    "qqq_ret_1",
+    "qqq_ret_5",
+    "iwm_ret_1",
+    "iwm_ret_5",
+    "tlt_ret_1",
+    "tlt_ret_5",
+    "dxy_ret_1",
+    "dxy_ret_5",
+    "qqq_rel_1",
+    "qqq_rel_5",
+    "iwm_rel_1",
+    "iwm_rel_5",
+    "risk_off_1",
+    "risk_off_5",
+]
+
+ORDER_FLOW_PROXY_FEATURE_COLUMNS = [
+    "volume_spike_20",
+    "volume_spike_50",
+    "range_expansion",
+    "effort_vs_result",
+    "impulse_strength",
+    "vwap_reclaim",
+]
+
+REGIME_STABILITY_FEATURE_COLUMNS = [
+    "trend_persistence",
+    "chop_score_20",
+    "chop_score_50",
+    "direction_entropy_20",
+    "trend_consistency_20",
+]
+
+POSITIONING_FEATURE_COLUMNS = [
+    "vwap_z_20",
+    "session_mid",
+    "dist_to_mid",
+    "range_position",
+    "price_percentile_50",
+    "price_percentile_100",
+]
+
+META_INTERACTION_FEATURE_COLUMNS = [
+    "p_long_trend",
+    "p_short_trend",
+    "p_long_chop_adj",
+    "p_short_chop_adj",
+    "ret_vix_interaction",
+    "volume_vol_interaction",
+    "trend_breadth_interact",
+]
+
 
 @dataclass(frozen=True)
 class AgentFeatureConfig:
@@ -62,6 +119,21 @@ class AgentFeatureConfig:
     vix_allow_daily_fallback: bool = True
     vix_daily_symbol: str = "VIXY"
     vix_daily_max_lag: str = "7d"
+    external_warn_on_missing: bool = True
+    external_max_lag: str = "30min"
+    external_ffill_limit: int | None = 3
+    add_ticker: str = "ADD"
+    add_parquet_path: str | Path | None = None
+    tick_ticker: str = "TICK"
+    tick_parquet_path: str | Path | None = None
+    qqq_ticker: str = "QQQ"
+    qqq_parquet_path: str | Path | None = None
+    iwm_ticker: str = "IWM"
+    iwm_parquet_path: str | Path | None = None
+    tlt_ticker: str = "TLT"
+    tlt_parquet_path: str | Path | None = None
+    dxy_ticker: str = "UUP"
+    dxy_parquet_path: str | Path | None = None
 
 
 def _series_from_ta(
@@ -275,7 +347,7 @@ def _rolling_zscore(
     return (series - rolling_mean) / rolling_std.replace(0.0, np.nan)
 
 
-def _rolling_last_percentile(
+def _rolling_percentile_rank(
     series: pd.Series,
     *,
     window: int,
@@ -296,6 +368,154 @@ def _rolling_last_percentile(
         return float((valid <= last).sum()) / float(valid.size)
 
     return series.rolling(win, min_periods=minp).apply(_percentile_last, raw=True)
+
+
+def _rolling_last_percentile(
+    series: pd.Series,
+    *,
+    window: int,
+    min_periods: int | None = None,
+) -> pd.Series:
+    return _rolling_percentile_rank(series, window=window, min_periods=min_periods)
+
+
+def _rolling_entropy_of_sign(
+    series: pd.Series,
+    *,
+    window: int,
+    min_periods: int | None = None,
+) -> pd.Series:
+    win = max(2, int(window))
+    minp = int(min_periods) if min_periods is not None else win
+
+    def _entropy(arr: np.ndarray) -> float:
+        valid = arr[np.isfinite(arr)]
+        if valid.size == 0:
+            return np.nan
+        signed = np.sign(valid)
+        counts = np.array(
+            [
+                float(np.sum(signed < 0.0)),
+                float(np.sum(signed == 0.0)),
+                float(np.sum(signed > 0.0)),
+            ],
+            dtype=float,
+        )
+        total = counts.sum()
+        if total <= 0.0:
+            return np.nan
+        probs = counts[counts > 0.0] / total
+        entropy = -np.sum(probs * np.log(probs))
+        return float(entropy / np.log(3.0))
+
+    return series.rolling(win, min_periods=minp).apply(_entropy, raw=True)
+
+
+def _bars_since_sign_change(series: pd.Series) -> pd.Series:
+    values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float, copy=False)
+    signs = np.sign(values)
+    out = np.full(signs.shape[0], np.nan, dtype=float)
+    prev_sign = np.nan
+    bars = np.nan
+
+    for i, sign_val in enumerate(signs):
+        if not np.isfinite(sign_val):
+            prev_sign = np.nan
+            bars = np.nan
+            continue
+        if not np.isfinite(prev_sign) or sign_val != prev_sign:
+            bars = 0.0
+        else:
+            bars = float(bars + 1.0)
+        out[i] = bars
+        prev_sign = sign_val
+    return pd.Series(out, index=series.index, name="trend_persistence")
+
+
+def _session_running_high_low(
+    *,
+    high: pd.Series,
+    low: pd.Series,
+    index: pd.DatetimeIndex,
+    tz: str | None,
+) -> tuple[pd.Series, pd.Series]:
+    idx_local = _localize_index(index, tz)
+    session_key = pd.Series(idx_local.normalize(), index=index)
+    return high.groupby(session_key).cummax(), low.groupby(session_key).cummin()
+
+
+def _safe_divide(
+    numerator: pd.Series,
+    denominator: pd.Series,
+    *,
+    epsilon: float = 1e-6,
+) -> pd.Series:
+    denom = pd.to_numeric(denominator, errors="coerce")
+    return pd.to_numeric(numerator, errors="coerce") / (denom + float(epsilon))
+
+
+def _load_align_optional_ohlcv(
+    *,
+    ticker: str,
+    parquet_path: str | Path | None,
+    target_index: pd.DatetimeIndex,
+    tz: str | None,
+    max_lag: str | None,
+    ffill_limit: int | None,
+    warn_on_missing: bool,
+    label: str,
+) -> pd.DataFrame | None:
+    try:
+        if parquet_path is not None:
+            source = load_ticker_parquet(ticker, parquet_path=str(_resolve_path(parquet_path)))
+        else:
+            source = load_ticker_parquet(ticker)
+    except Exception as exc:  # noqa: BLE001
+        if warn_on_missing:
+            print(f"[agent_matrix] Skipping {label} features: {exc}")
+        return None
+
+    if not isinstance(source.index, pd.DatetimeIndex):
+        if warn_on_missing:
+            print(f"[agent_matrix] Skipping {label} features: source is missing a DatetimeIndex.")
+        return None
+
+    out = source.sort_index().copy()
+    if tz:
+        if out.index.tz is None:
+            out.index = out.index.tz_localize(tz)
+        else:
+            out.index = out.index.tz_convert(tz)
+
+    target_max = pd.to_datetime(target_index.max(), errors="coerce") if len(target_index) else None
+    if target_max is not None and not pd.isna(target_max):
+        cutoff = target_max
+        if out.index.tz is not None:
+            if getattr(cutoff, "tzinfo", None) is None:
+                cutoff = cutoff.tz_localize(out.index.tz)
+            else:
+                cutoff = cutoff.tz_convert(out.index.tz)
+        out = out.loc[out.index <= cutoff]
+
+    tolerance = pd.Timedelta(max_lag) if max_lag else None
+    aligned = out.reindex(
+        target_index,
+        method="ffill",
+        limit=ffill_limit,
+        tolerance=tolerance,
+    )
+    coverage = (
+        float(aligned["close"].notna().mean())
+        if "close" in aligned.columns and len(aligned)
+        else 0.0
+    )
+    if coverage <= 0.0:
+        if warn_on_missing:
+            print(f"[agent_matrix] Skipping {label} features: no aligned rows after reindex.")
+        return None
+    if warn_on_missing:
+        print(f"[agent_matrix] {label} aligned coverage={coverage:.1%}")
+    return aligned
 
 
 def _add_probability_confidence_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -327,7 +547,7 @@ def _add_probability_confidence_features(df: pd.DataFrame) -> pd.DataFrame:
 def _add_volatility_regime_features(df: pd.DataFrame) -> pd.DataFrame:
     atr_pct = pd.to_numeric(df.get("atr_pct"), errors="coerce")
     df["atr_pct_z_64"] = _rolling_zscore(atr_pct, window=64, min_periods=32)
-    df["atr_pct_rank_64"] = _rolling_last_percentile(atr_pct, window=64, min_periods=32)
+    df["atr_pct_rank_64"] = _rolling_percentile_rank(atr_pct, window=64, min_periods=32)
 
     ret_1 = pd.to_numeric(df.get("ret_1"), errors="coerce")
     df["realized_vol_4"] = ret_1.rolling(4, min_periods=4).std(ddof=0)
@@ -352,6 +572,178 @@ def _add_volatility_regime_features(df: pd.DataFrame) -> pd.DataFrame:
     tr_avg_32 = tr_pct.rolling(32, min_periods=16).mean()
     df["range_regime_8_32"] = tr_ema_fast / tr_ema_slow.replace(0.0, np.nan) - 1.0
     df["range_expansion_32"] = tr_pct / tr_avg_32.replace(0.0, np.nan) - 1.0
+    return df
+
+
+def _add_market_breadth_features(
+    df: pd.DataFrame,
+    *,
+    cfg: AgentFeatureConfig,
+) -> pd.DataFrame:
+    ret_spy_1 = pd.to_numeric(df.get("ret_1"), errors="coerce")
+    ret_qqq_1 = pd.to_numeric(df.get("qqq_ret_1"), errors="coerce")
+    ret_iwm_1 = pd.to_numeric(df.get("iwm_ret_1"), errors="coerce")
+    if isinstance(ret_spy_1, pd.Series) and isinstance(ret_qqq_1, pd.Series) and isinstance(ret_iwm_1, pd.Series):
+        df["breadth_agreement"] = (
+            np.sign(ret_spy_1) + np.sign(ret_qqq_1) + np.sign(ret_iwm_1)
+        ) / 3.0
+    return df
+
+
+def _add_cross_asset_features(
+    df: pd.DataFrame,
+    *,
+    cfg: AgentFeatureConfig,
+) -> pd.DataFrame:
+    close = pd.to_numeric(df.get("close"), errors="coerce").replace(0.0, np.nan)
+    ret_spy_1 = pd.to_numeric(df.get("ret_1"), errors="coerce")
+    ret_spy_5 = close.pct_change(5, fill_method=None)
+    asset_specs = [
+        ("qqq", cfg.qqq_ticker, cfg.qqq_parquet_path, "QQQ"),
+        ("iwm", cfg.iwm_ticker, cfg.iwm_parquet_path, "IWM"),
+        ("tlt", cfg.tlt_ticker, cfg.tlt_parquet_path, "TLT"),
+        ("dxy", cfg.dxy_ticker, cfg.dxy_parquet_path, "UUP(DXY proxy)"),
+    ]
+
+    for prefix, ticker, parquet_path, label in asset_specs:
+        aligned = _load_align_optional_ohlcv(
+            ticker=ticker,
+            parquet_path=parquet_path,
+            target_index=df.index,
+            tz=cfg.tz,
+            max_lag=cfg.external_max_lag,
+            ffill_limit=cfg.external_ffill_limit,
+            warn_on_missing=cfg.external_warn_on_missing,
+            label=label,
+        )
+        if aligned is None or "close" not in aligned.columns:
+            continue
+        asset_close = pd.to_numeric(aligned["close"], errors="coerce").reindex(df.index).replace(0.0, np.nan)
+        df[f"{prefix}_ret_1"] = asset_close.pct_change(1, fill_method=None)
+        df[f"{prefix}_ret_5"] = asset_close.pct_change(5, fill_method=None)
+
+    if {"qqq_ret_1", "qqq_ret_5"}.issubset(df.columns):
+        df["qqq_rel_1"] = ret_spy_1 - pd.to_numeric(df["qqq_ret_1"], errors="coerce")
+        df["qqq_rel_5"] = ret_spy_5 - pd.to_numeric(df["qqq_ret_5"], errors="coerce")
+    if {"iwm_ret_1", "iwm_ret_5"}.issubset(df.columns):
+        df["iwm_rel_1"] = ret_spy_1 - pd.to_numeric(df["iwm_ret_1"], errors="coerce")
+        df["iwm_rel_5"] = ret_spy_5 - pd.to_numeric(df["iwm_ret_5"], errors="coerce")
+    if {"tlt_ret_1", "tlt_ret_5"}.issubset(df.columns):
+        df["risk_off_1"] = pd.to_numeric(df["tlt_ret_1"], errors="coerce") - ret_spy_1
+        df["risk_off_5"] = pd.to_numeric(df["tlt_ret_5"], errors="coerce") - ret_spy_5
+    return df
+
+
+def _add_order_flow_proxy_features(
+    df: pd.DataFrame,
+    *,
+    epsilon: float = 1e-6,
+) -> pd.DataFrame:
+    volume = pd.to_numeric(df.get("volume"), errors="coerce")
+    high = pd.to_numeric(df.get("high"), errors="coerce")
+    low = pd.to_numeric(df.get("low"), errors="coerce")
+    close = pd.to_numeric(df.get("close"), errors="coerce")
+    ret_1 = pd.to_numeric(df.get("ret_1"), errors="coerce")
+    vwap = pd.to_numeric(df.get("vwap"), errors="coerce")
+    bar_range = high - low
+    volume_mean_20 = volume.rolling(20, min_periods=20).mean()
+    volume_mean_50 = volume.rolling(50, min_periods=50).mean()
+    range_mean_20 = bar_range.rolling(20, min_periods=20).mean()
+
+    df["volume_spike_20"] = _safe_divide(volume, volume_mean_20, epsilon=epsilon)
+    df["volume_spike_50"] = _safe_divide(volume, volume_mean_50, epsilon=epsilon)
+    df["range_expansion"] = _safe_divide(bar_range, range_mean_20, epsilon=epsilon)
+    df["effort_vs_result"] = _safe_divide(volume, ret_1.abs(), epsilon=epsilon)
+    df["impulse_strength"] = pd.to_numeric(df["range_expansion"], errors="coerce") * pd.to_numeric(
+        df["volume_spike_20"], errors="coerce"
+    )
+
+    vwap_dist = close - vwap
+    prev_vwap_dist = vwap_dist.shift(1)
+    reclaim = np.where(
+        vwap_dist.notna() & prev_vwap_dist.notna(),
+        (np.sign(vwap_dist) != np.sign(prev_vwap_dist)).astype(float),
+        np.nan,
+    )
+    df["vwap_reclaim"] = pd.Series(reclaim, index=df.index, dtype=float)
+    return df
+
+
+def _add_regime_stability_features(df: pd.DataFrame) -> pd.DataFrame:
+    ret_1 = pd.to_numeric(df.get("ret_1"), errors="coerce")
+    ret_sign = np.sign(ret_1)
+    df["trend_persistence"] = _bars_since_sign_change(ret_1)
+    df["chop_score_20"] = ret_sign.rolling(20, min_periods=20).std(ddof=0)
+    df["chop_score_50"] = ret_sign.rolling(50, min_periods=50).std(ddof=0)
+    df["direction_entropy_20"] = _rolling_entropy_of_sign(ret_1, window=20, min_periods=20)
+    df["trend_consistency_20"] = ret_sign.rolling(20, min_periods=20).mean()
+    return df
+
+
+def _add_positioning_features(
+    df: pd.DataFrame,
+    *,
+    tz: str | None,
+    epsilon: float = 1e-6,
+) -> pd.DataFrame:
+    close = pd.to_numeric(df.get("close"), errors="coerce")
+    high = pd.to_numeric(df.get("high"), errors="coerce")
+    low = pd.to_numeric(df.get("low"), errors="coerce")
+    vwap = pd.to_numeric(df.get("vwap"), errors="coerce")
+    vwap_dist = pd.to_numeric(df.get("vwap_dist"), errors="coerce")
+    if "vwap_dist" not in df.columns:
+        vwap_dist = close - vwap
+        df["vwap_dist"] = vwap_dist
+
+    session_high_so_far, session_low_so_far = _session_running_high_low(
+        high=high,
+        low=low,
+        index=df.index,
+        tz=tz,
+    )
+    session_range = session_high_so_far - session_low_so_far
+    session_mid = (session_high_so_far + session_low_so_far) / 2.0
+    vwap_dist_std_20 = vwap_dist.rolling(20, min_periods=20).std(ddof=0)
+
+    df["vwap_z_20"] = _safe_divide(vwap_dist, vwap_dist_std_20, epsilon=epsilon)
+    df["session_mid"] = session_mid
+    df["dist_to_mid"] = close - session_mid
+    df["range_position"] = _safe_divide(close - session_low_so_far, session_range, epsilon=epsilon)
+    df["price_percentile_50"] = _rolling_percentile_rank(close, window=50, min_periods=50)
+    df["price_percentile_100"] = _rolling_percentile_rank(close, window=100, min_periods=100)
+    return df
+
+
+def _add_meta_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
+    p_long = pd.to_numeric(df.get("p_long"), errors="coerce")
+    p_short = pd.to_numeric(df.get("p_short"), errors="coerce")
+    if "p_long" not in df.columns and "p_pivot_long" in df.columns:
+        p_long = pd.to_numeric(df.get("p_pivot_long"), errors="coerce")
+    if "p_short" not in df.columns and "p_pivot_short" in df.columns:
+        p_short = pd.to_numeric(df.get("p_pivot_short"), errors="coerce")
+
+    trend_strength = pd.to_numeric(df.get("trend_strength"), errors="coerce")
+    chop_score_20 = pd.to_numeric(df.get("chop_score_20"), errors="coerce")
+    ret_1 = pd.to_numeric(df.get("ret_1"), errors="coerce")
+    vix_z_20 = pd.to_numeric(df.get("vix_z_20"), errors="coerce")
+    volume_spike_20 = pd.to_numeric(df.get("volume_spike_20"), errors="coerce")
+    atr_pct = pd.to_numeric(df.get("atr_pct"), errors="coerce")
+    breadth_agreement = pd.to_numeric(df.get("breadth_agreement"), errors="coerce")
+
+    if isinstance(p_long, pd.Series) and isinstance(trend_strength, pd.Series):
+        df["p_long_trend"] = p_long * trend_strength
+    if isinstance(p_short, pd.Series) and isinstance(trend_strength, pd.Series):
+        df["p_short_trend"] = p_short * trend_strength
+    if isinstance(p_long, pd.Series) and isinstance(chop_score_20, pd.Series):
+        df["p_long_chop_adj"] = p_long * (1.0 - chop_score_20)
+    if isinstance(p_short, pd.Series) and isinstance(chop_score_20, pd.Series):
+        df["p_short_chop_adj"] = p_short * (1.0 - chop_score_20)
+    if isinstance(ret_1, pd.Series) and isinstance(vix_z_20, pd.Series):
+        df["ret_vix_interaction"] = ret_1 * vix_z_20
+    if isinstance(volume_spike_20, pd.Series) and isinstance(atr_pct, pd.Series):
+        df["volume_vol_interaction"] = volume_spike_20 * atr_pct
+    if isinstance(trend_strength, pd.Series) and isinstance(breadth_agreement, pd.Series):
+        df["trend_breadth_interact"] = trend_strength * breadth_agreement
     return df
 
 
@@ -824,6 +1216,7 @@ def build_agent_feature_matrix(
     df["atr_pct"] = atr / df["close"].replace(0, np.nan)
 
     vwap = _series_from_ta(df.ta.vwap(append=False, anchor="D"))
+    df["vwap"] = vwap
     df["dist_to_vwap"] = (df["close"] - vwap) / df["close"].replace(0, np.nan)
 
     pdh = _compute_prior_day_high(df)
@@ -843,10 +1236,15 @@ def build_agent_feature_matrix(
     df["day_id"] = pd.Series(df.index.normalize()).factorize()[0]
 
     close = df["close"].replace(0, np.nan).astype(float)
-    for lag in (1, 2, 4, 8, 16):
+    for lag in (1, 2, 4, 5, 8, 16):
         df[f"ret_{lag}"] = close.pct_change(lag)
 
     df = _add_volatility_regime_features(df)
+    df = _add_cross_asset_features(df, cfg=cfg)
+    df = _add_market_breadth_features(df, cfg=cfg)
+    df = _add_order_flow_proxy_features(df)
+    df = _add_regime_stability_features(df)
+    df = _add_positioning_features(df, tz=cfg.tz)
 
     if cfg.include_vix_features:
         try:
@@ -856,6 +1254,8 @@ def build_agent_feature_matrix(
             if cfg.vix_warn_on_missing:
                 print(f"[agent_matrix] VIX feature suite unavailable: {exc}")
             df = _ensure_vix_feature_cols(df)
+
+    df = _add_meta_interaction_features(df)
 
     if cfg.include_state_placeholders:
         df["current_position"] = 0.0
@@ -875,7 +1275,6 @@ def build_agent_feature_matrix(
         "sin_time_of_day",
         "cos_time_of_day",
         "minutes_since_open",
-        "minutes_to_close",
         "day_of_week_sin",
         "day_of_week_cos",
         "atr_pct",
@@ -899,6 +1298,11 @@ def build_agent_feature_matrix(
         "range_regime_8_32",
         "range_expansion_32",
     ]
+    cols.extend([col for col in MARKET_BREADTH_FEATURE_COLUMNS if col in df.columns])
+    cols.extend([col for col in CROSS_ASSET_FEATURE_COLUMNS if col in df.columns])
+    cols.extend([col for col in ORDER_FLOW_PROXY_FEATURE_COLUMNS if col in df.columns])
+    cols.extend([col for col in REGIME_STABILITY_FEATURE_COLUMNS if col in df.columns])
+    cols.extend([col for col in POSITIONING_FEATURE_COLUMNS if col in df.columns])
     if cfg.include_pivot_probs:
         cols.extend(
             [
@@ -942,6 +1346,7 @@ def build_agent_feature_matrix(
         )
     if cfg.include_vix_features:
         cols.extend(VIX_FEATURE_COLUMNS)
+    cols.extend([col for col in META_INTERACTION_FEATURE_COLUMNS if col in df.columns])
 
     if cfg.include_state_placeholders:
         cols.extend(

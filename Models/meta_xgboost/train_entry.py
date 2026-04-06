@@ -107,6 +107,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threshold-step", type=float, default=PipelineConfig.threshold_step)
     p.add_argument("--threshold-objective", type=str, default=PipelineConfig.threshold_objective)
     p.add_argument("--min-oos-prob-coverage", type=float, default=PipelineConfig.min_oos_prob_coverage)
+    p.add_argument("--drop-high-corr-features", action=argparse.BooleanOptionalAction, default=PipelineConfig.drop_high_corr_features)
+    p.add_argument("--high-corr-threshold", type=float, default=PipelineConfig.high_corr_threshold)
     p.add_argument("--sides", choices=["both", "long", "short"], default="both")
     p.add_argument("--plot-only", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--xgb-booster", choices=["gbtree", "dart"], default=None)
@@ -148,6 +150,8 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
         threshold_step=float(args.threshold_step),
         threshold_objective=str(args.threshold_objective),
         min_oos_prob_coverage=float(args.min_oos_prob_coverage),
+        drop_high_corr_features=bool(args.drop_high_corr_features),
+        high_corr_threshold=float(args.high_corr_threshold),
         xgb_booster=args.xgb_booster,
         xgb_rate_drop=args.xgb_rate_drop,
         xgb_skip_drop=args.xgb_skip_drop,
@@ -244,7 +248,12 @@ def run_entry_pipeline(
         "y_exit_long", "y_exit_short", "y_exit_long_point", "y_exit_short_point",
         "exit_reason_long", "exit_reason_short", "tp_hit_before_exit_long", "tp_hit_before_exit_short",
     }
-    feature_cols = select_numeric_feature_columns(frame, exclude=exclude)
+    feature_cols = select_numeric_feature_columns(
+        frame,
+        exclude=exclude,
+        corr_threshold=float(cfg.high_corr_threshold) if bool(cfg.drop_high_corr_features) else None,
+        log_prefix="[META-ENTRY]",
+    )
     xgb_params = xgb_params_from_config(cfg)
     session_dates = frame["session_date"]
 

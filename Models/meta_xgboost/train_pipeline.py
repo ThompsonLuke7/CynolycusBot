@@ -32,6 +32,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threshold-step", type=float, default=0.05)
     p.add_argument("--threshold-objective", type=str, default="f1")
     p.add_argument("--min-oos-prob-coverage", type=float, default=0.85)
+    p.add_argument("--drop-high-corr-features", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--high-corr-threshold", type=float, default=0.95)
     p.add_argument("--fixed-long-threshold", type=float, default=None)
     p.add_argument("--fixed-short-threshold", type=float, default=None)
     p.add_argument("--trail-activate-atr", type=float, default=2.0)
