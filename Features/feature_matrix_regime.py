@@ -122,7 +122,6 @@ class AgentFeatureConfig:
     external_warn_on_missing: bool = True
     external_max_lag: str = "30min"
     external_ffill_limit: int | None = 3
-    external_min_coverage_ratio: float = 0.90
     add_ticker: str = "ADD"
     add_parquet_path: str | Path | None = None
     tick_ticker: str = "TICK"
@@ -463,7 +462,6 @@ def _load_align_optional_ohlcv(
     tz: str | None,
     max_lag: str | None,
     ffill_limit: int | None,
-    min_coverage_ratio: float,
     warn_on_missing: bool,
     label: str,
 ) -> pd.DataFrame | None:
@@ -514,14 +512,6 @@ def _load_align_optional_ohlcv(
     if coverage <= 0.0:
         if warn_on_missing:
             print(f"[agent_matrix] Skipping {label} features: no aligned rows after reindex.")
-        return None
-    required_coverage = float(np.clip(min_coverage_ratio, 0.0, 1.0))
-    if coverage < required_coverage:
-        if warn_on_missing:
-            print(
-                f"[agent_matrix] Skipping {label} features: aligned coverage "
-                f"{coverage:.1%} is below required {required_coverage:.1%}."
-            )
         return None
     if warn_on_missing:
         print(f"[agent_matrix] {label} aligned coverage={coverage:.1%}")
@@ -623,7 +613,6 @@ def _add_cross_asset_features(
             tz=cfg.tz,
             max_lag=cfg.external_max_lag,
             ffill_limit=cfg.external_ffill_limit,
-            min_coverage_ratio=cfg.external_min_coverage_ratio,
             warn_on_missing=cfg.external_warn_on_missing,
             label=label,
         )
