@@ -113,6 +113,16 @@ def _resolve_targets(spec: str) -> list[str]:
     return out
 
 
+def _sanitize_feature_matrix_for_xgboost(X: np.ndarray) -> np.ndarray:
+    if X.dtype != np.float32:
+        X = X.astype(np.float32, copy=False)
+    if np.isfinite(X).all():
+        return X
+    X = X.copy()
+    X[~np.isfinite(X)] = np.nan
+    return X
+
+
 def _load_split_indices(
     ticker: str,
     dataset_name: str,
@@ -336,9 +346,9 @@ def _train_one_target(
     xgb_params: dict,
     early_stopping_rounds: int,
 ) -> dict:
-    X = df[feature_cols].to_numpy(dtype=np.float32)
+    X = _sanitize_feature_matrix_for_xgboost(df[feature_cols].to_numpy(dtype=np.float32))
     y = pd.to_numeric(df[target_col], errors="coerce").fillna(0).astype(np.int8).to_numpy()
-    valid_rows = np.isfinite(X).all(axis=1) & ((y == 0) | (y == 1))
+    valid_rows = ((y == 0) | (y == 1))
 
     idx_train = splits["train"][valid_rows[splits["train"]]]
     idx_val = splits["val"][valid_rows[splits["val"]]]

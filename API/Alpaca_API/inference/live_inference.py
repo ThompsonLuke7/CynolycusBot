@@ -26,10 +26,22 @@ from Features.feature_matrix import (
 )
 from Features.feature_matrix_regime import (
     AgentFeatureConfig,
+    CROSS_ASSET_FEATURE_COLUMNS,
+    MARKET_BREADTH_FEATURE_COLUMNS,
+    META_INTERACTION_FEATURE_COLUMNS,
+    ORDER_FLOW_PROXY_FEATURE_COLUMNS,
+    POSITIONING_FEATURE_COLUMNS,
+    REGIME_STABILITY_FEATURE_COLUMNS,
     VIX_FEATURE_COLUMNS,
+    _add_cross_asset_features,
     _add_intraday_sr_distance_features,
+    _add_market_breadth_features,
+    _add_meta_interaction_features,
+    _add_order_flow_proxy_features,
     _add_pivot_features,
+    _add_positioning_features,
     _add_probability_confidence_features,
+    _add_regime_stability_features,
     _add_vix_feature_suite,
     _add_volatility_regime_features,
     _compute_prior_day_high,
@@ -101,6 +113,39 @@ def _default_live_vix_parquet_path(target_index: pd.DatetimeIndex | None = None)
             and ts_max >= target_min
         ):
             return str(runtime)
+    except Exception:
+        pass
+    return str(static_path)
+
+
+def _default_live_external_parquet_path(
+    symbol: str,
+    target_index: pd.DatetimeIndex | None = None,
+) -> str:
+    clean = str(symbol or "").strip().upper()
+    slug = clean.lower()
+    static_path = Path("Data") / "raw" / slug / f"{slug}_intraday_10min.parquet"
+    runtime_path = Path("Data") / "raw" / slug / f"{slug}_10min_live_runtime.parquet"
+    if not runtime_path.exists():
+        return str(static_path)
+    if target_index is None or len(target_index) == 0:
+        return str(runtime_path)
+    try:
+        ts_df = pd.read_parquet(runtime_path, columns=["timestamp"])
+        ts = pd.to_datetime(ts_df["timestamp"], utc=True, errors="coerce").dropna()
+        if ts.empty:
+            return str(static_path)
+        ts_min = ts.min()
+        ts_max = ts.max()
+        target_min = pd.to_datetime(target_index.min(), utc=True, errors="coerce")
+        target_max = pd.to_datetime(target_index.max(), utc=True, errors="coerce")
+        if (
+            pd.notna(target_min)
+            and pd.notna(target_max)
+            and ts_min <= target_max
+            and ts_max >= target_min
+        ):
+            return str(runtime_path)
     except Exception:
         pass
     return str(static_path)
@@ -374,20 +419,32 @@ def build_agent_feature_frame_from_15m(
         df[f"ret_{lag}"] = close.pct_change(lag)
     df = _add_volatility_regime_features(df)
 
+    external_cfg = AgentFeatureConfig(
+        dataset_name="live",
+        tz=tz,
+        session_open=session_open,
+        session_close=session_close,
+        include_vix_features=include_vix_features,
+        vix_parquet_path=_default_live_vix_parquet_path(df.index),
+        vix_fetch_if_missing=False,
+        vix_refetch_if_low_coverage=False,
+        vix_warn_on_missing=True,
+        external_warn_on_missing=True,
+        qqq_parquet_path=_default_live_external_parquet_path("QQQ", df.index),
+        iwm_parquet_path=_default_live_external_parquet_path("IWM", df.index),
+        tlt_parquet_path=_default_live_external_parquet_path("TLT", df.index),
+        dxy_ticker="UUP",
+        dxy_parquet_path=_default_live_external_parquet_path("UUP", df.index),
+    )
+    df = _add_cross_asset_features(df, cfg=external_cfg)
+    df = _add_market_breadth_features(df, cfg=external_cfg)
+    df = _add_order_flow_proxy_features(df)
+    df = _add_regime_stability_features(df)
+    df = _add_positioning_features(df, tz=tz)
+
     if include_vix_features:
-        vix_cfg = AgentFeatureConfig(
-            dataset_name="live",
-            tz=tz,
-            session_open=session_open,
-            session_close=session_close,
-            include_vix_features=True,
-            vix_parquet_path=_default_live_vix_parquet_path(df.index),
-            vix_fetch_if_missing=False,
-            vix_refetch_if_low_coverage=False,
-            vix_warn_on_missing=True,
-        )
         try:
-            vix_ohlcv = _load_align_vix_ohlcv(cfg=vix_cfg, target_index=df.index)
+            vix_ohlcv = _load_align_vix_ohlcv(cfg=external_cfg, target_index=df.index)
             df = _add_vix_feature_suite(df, vix_ohlcv=vix_ohlcv)
             coverage = float(vix_ohlcv["close"].notna().mean()) if "close" in vix_ohlcv.columns else float("nan")
             df.attrs["vix_feature_status"] = {
@@ -395,7 +452,7 @@ def build_agent_feature_frame_from_15m(
                 "status": "ok",
                 "coverage_ratio": coverage if np.isfinite(coverage) else None,
                 "source_rows": int(len(vix_ohlcv)),
-                "source_path": str(vix_cfg.vix_parquet_path),
+                "source_path": str(external_cfg.vix_parquet_path),
             }
         except Exception as exc:
             _warn_once(f"[live] VIX feature alignment failed; filling VIX features with NaNs: {exc}")
@@ -405,7 +462,7 @@ def build_agent_feature_frame_from_15m(
                 "status": "missing",
                 "coverage_ratio": 0.0,
                 "error": str(exc),
-                "source_path": str(vix_cfg.vix_parquet_path),
+                "source_path": str(external_cfg.vix_parquet_path),
             }
     else:
         df = _ensure_vix_feature_cols(df)
@@ -433,7 +490,6 @@ def build_agent_feature_frame_from_15m(
         "sin_time_of_day",
         "cos_time_of_day",
         "minutes_since_open",
-        "minutes_to_close",
         "day_of_week_sin",
         "day_of_week_cos",
         "atr_pct",
@@ -457,6 +513,11 @@ def build_agent_feature_frame_from_15m(
         "range_regime_8_32",
         "range_expansion_32",
     ]
+    cols.extend([col for col in MARKET_BREADTH_FEATURE_COLUMNS if col in df.columns])
+    cols.extend([col for col in CROSS_ASSET_FEATURE_COLUMNS if col in df.columns])
+    cols.extend([col for col in ORDER_FLOW_PROXY_FEATURE_COLUMNS if col in df.columns])
+    cols.extend([col for col in REGIME_STABILITY_FEATURE_COLUMNS if col in df.columns])
+    cols.extend([col for col in POSITIONING_FEATURE_COLUMNS if col in df.columns])
     if include_pivot_probs:
         cols.extend(
             [
@@ -495,6 +556,7 @@ def build_agent_feature_frame_from_15m(
         cols.extend(["edge_disagreement_abs", "edge_sign_disagreement"])
     if include_vix_features:
         cols.extend(VIX_FEATURE_COLUMNS)
+    cols.extend([col for col in META_INTERACTION_FEATURE_COLUMNS if col in df.columns])
 
     if include_state_placeholders:
         cols.extend(
@@ -642,6 +704,8 @@ def build_meta_feature_frame_from_1m(
         write_phase_columns=True,
         use_hazard_exit_labels=False,
     )
+    if "trend_phase_ret" in feat_df.columns:
+        feat_df = feat_df.drop(columns=["trend_phase_ret"])
     return feat_df
 
 

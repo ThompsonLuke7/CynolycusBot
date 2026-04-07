@@ -84,6 +84,7 @@ class PipelineConfig:
     min_oos_prob_coverage: float = 0.95
     drop_high_corr_features: bool = True
     high_corr_threshold: float = 0.95
+    full_fit_only: bool = False
     xgb_booster: str | None = None
     xgb_rate_drop: float | None = None
     xgb_skip_drop: float | None = None
@@ -788,6 +789,28 @@ def _fit_booster(
     return model, None, params_local, num_boost_round
 
 
+def _sanitize_feature_matrix_for_xgboost(X: np.ndarray) -> np.ndarray:
+    """Allow NaNs to pass through to XGBoost, but normalize infinities first."""
+    if X.dtype != np.float32:
+        X = X.astype(np.float32, copy=False)
+    if np.isfinite(X).all():
+        return X
+    X = X.copy()
+    X[~np.isfinite(X)] = np.nan
+    return X
+
+
+def _build_training_valid_mask(
+    *,
+    y: np.ndarray,
+    condition_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    valid_mask = ((y == 0) | (y == 1))
+    if condition_mask is not None:
+        valid_mask &= np.asarray(condition_mask, dtype=bool)
+    return valid_mask
+
+
 def build_final_eval_history(
     *,
     X: np.ndarray,
@@ -893,11 +916,9 @@ def train_walkforward_binary(
     condition_mask: np.ndarray | None = None,
     embargo_end_idx: np.ndarray | None = None,
 ) -> TrainResult:
-    X = df[feature_cols].to_numpy(dtype=np.float32)
+    X = _sanitize_feature_matrix_for_xgboost(df[feature_cols].to_numpy(dtype=np.float32))
     y = pd.to_numeric(df[target_col], errors="coerce").fillna(0).astype(np.int8).to_numpy()
-    valid_mask = np.isfinite(X).all(axis=1) & ((y == 0) | (y == 1))
-    if condition_mask is not None:
-        valid_mask &= np.asarray(condition_mask, dtype=bool)
+    valid_mask = _build_training_valid_mask(y=y, condition_mask=condition_mask)
     print(
         f"[META-XGB] {target_col}: rows={len(df)} valid_rows={int(np.sum(valid_mask))} "
         f"pos_rate={float(np.mean(y[valid_mask])):.4f}" if np.any(valid_mask) else
@@ -1003,6 +1024,64 @@ def train_walkforward_binary(
         full_probs=full_probs,
         coverage=coverage,
         fold_rows=fold_rows,
+        eval_history=eval_history,
+    )
+
+
+def train_full_fit_binary(
+    *,
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    target_col: str,
+    cfg: PipelineConfig,
+    xgb_params: dict[str, Any],
+    condition_mask: np.ndarray | None = None,
+) -> TrainResult:
+    X = _sanitize_feature_matrix_for_xgboost(df[feature_cols].to_numpy(dtype=np.float32))
+    y = pd.to_numeric(df[target_col], errors="coerce").fillna(0).astype(np.int8).to_numpy()
+    valid_mask = _build_training_valid_mask(y=y, condition_mask=condition_mask)
+    print(
+        f"[META-XGB] {target_col}: full-fit-only rows={len(df)} valid_rows={int(np.sum(valid_mask))} "
+        f"pos_rate={float(np.mean(y[valid_mask])):.4f}" if np.any(valid_mask) else
+        f"[META-XGB] {target_col}: full-fit-only rows={len(df)} valid_rows=0"
+    )
+    model_full, constant_prob_full, params_full, num_boost_round = _fit_booster(
+        X[valid_mask],
+        y[valid_mask],
+        params=xgb_params,
+        seed=int(cfg.random_state) + 10_000,
+        early_stopping_rounds=cfg.early_stopping_rounds,
+        early_stopping_val_fraction=cfg.early_stopping_val_fraction,
+        early_stopping_min_val_rows=cfg.early_stopping_min_val_rows,
+    )
+    full_probs = np.full(len(df), np.nan, dtype=np.float32)
+    full_probs[valid_mask] = predict_probs(
+        model_full,
+        X[valid_mask],
+        constant_prob=constant_prob_full,
+    )
+    oof_probs = np.full(len(df), np.nan, dtype=np.float32)
+    eval_history = build_final_eval_history(
+        X=X,
+        y=y,
+        session_dates=pd.Series(np.arange(len(df))),
+        valid_mask=valid_mask,
+        params=xgb_params,
+        seed=int(cfg.random_state) + 20_000,
+        validation_fraction=float(cfg.early_stopping_val_fraction),
+        early_stopping_rounds=cfg.early_stopping_rounds,
+    )
+    return TrainResult(
+        target_col=target_col,
+        model=model_full,
+        constant_prob=constant_prob_full,
+        params=params_full,
+        num_boost_round=num_boost_round,
+        valid_mask=valid_mask,
+        oof_probs=oof_probs,
+        full_probs=full_probs,
+        coverage=0.0,
+        fold_rows=[],
         eval_history=eval_history,
     )
 
@@ -1136,11 +1215,20 @@ def save_booster_artifacts(
     feature_cols: list[str],
     oof_name: str,
     full_name: str,
+    preserve_existing_oof: bool = False,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     if result.model is not None:
         result.model.save_model(str(out_dir / "xgb_model.json"))
-    np.save(out_dir / f"{oof_name}.npy", result.oof_probs)
+    oof_path = out_dir / f"{oof_name}.npy"
+    oof_to_save = result.oof_probs
+    if preserve_existing_oof and (not np.isfinite(result.oof_probs).any()) and oof_path.exists():
+        try:
+            oof_to_save = np.load(oof_path)
+            print(f"[META-XGB] Preserving existing OOF array in {oof_path.name} during full-fit-only overwrite.")
+        except Exception:
+            oof_to_save = result.oof_probs
+    np.save(oof_path, oof_to_save)
     np.save(out_dir / f"{full_name}.npy", result.full_probs)
     (out_dir / "feature_columns.txt").write_text("\n".join(feature_cols), encoding="utf-8")
     meta = {

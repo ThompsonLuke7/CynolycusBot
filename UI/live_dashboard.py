@@ -1070,6 +1070,14 @@ class DashboardStore:
                 if isinstance(last_vix_status, dict):
                     for key, value in last_vix_status.items():
                         safe[f"vix_{key}"] = value
+                last_context_status = safe.get("last_context_status")
+                if isinstance(last_context_status, dict):
+                    for symbol, payload in last_context_status.items():
+                        sym = str(symbol or "").strip().lower()
+                        if not sym or not isinstance(payload, dict):
+                            continue
+                        for key, value in payload.items():
+                            safe[f"ctx_{sym}_{key}"] = value
                 last_thresholds = safe.get("last_thresholds")
                 if isinstance(last_thresholds, dict):
                     for key, value in last_thresholds.items():
@@ -2338,6 +2346,9 @@ class LiveSession:
             live_vix_enabled = inference_mode != "none"
             vix_runtime_cache_path = lr._default_runtime_vix_cache_path()
             vix_runtime_cache_df: pd.DataFrame | None = None
+            live_context_symbols: list[str] = []
+            context_runtime_cache_by_symbol: dict[str, pd.DataFrame | None] = {}
+            context_processors: dict[str, lr.LiveBarProcessor] = {}
 
             agent: LivePPOAgent | LiveMetaXGBAgent | LiveIndependentMetaXGBAgent | None = None
             if inference_mode != "none":
@@ -2488,8 +2499,12 @@ class LiveSession:
                         resample_closed=cfg.resample_closed,
                         label_timeframe_rule=f"{cfg.interval}min",
                     )
-                self._store.set_agent_state(agent.snapshot_state())
-                self._emit("agent_state", {"state": agent.snapshot_state()})
+                initial_agent_state = agent.snapshot_state()
+                if isinstance(initial_agent_state, dict):
+                    initial_agent_state = dict(initial_agent_state)
+                    initial_agent_state["last_context_status"] = _build_live_context_status()
+                self._store.set_agent_state(initial_agent_state)
+                self._emit("agent_state", {"state": initial_agent_state})
 
             inference = LiveInferenceEngine(
                 agent=agent,
@@ -2702,6 +2717,8 @@ class LiveSession:
                     agent_state = dict(agent_state)
                     agent_state["last_thresholds"] = thresholds
                 if agent_state is not None:
+                    agent_state = dict(agent_state)
+                    agent_state["last_context_status"] = _build_live_context_status(bar15.get("timestamp"))
                     self._store.set_agent_state(agent_state)
                 self._emit(
                     "action",
@@ -2864,6 +2881,83 @@ class LiveSession:
                     },
                 )
 
+            def _log_context_runtime_cache(message_prefix: str, symbol: str) -> None:
+                cache_df = context_runtime_cache_by_symbol.get(symbol)
+                cache_path = lr._default_runtime_context_cache_path(symbol)
+                if cache_df is None or cache_df.empty:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": f"[live] {message_prefix} {symbol}: no runtime cache rows available.",
+                        },
+                    )
+                    return
+                ts = pd.to_datetime(cache_df["timestamp"], utc=True, errors="coerce").dropna()
+                if ts.empty:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": f"[live] {message_prefix} {symbol}: runtime cache has no valid timestamps.",
+                        },
+                    )
+                    return
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": (
+                            f"[live] {message_prefix} {symbol}: {cache_path} "
+                            f"rows={len(cache_df):,} range={_ts_iso(ts.min())}..{_ts_iso(ts.max())}"
+                        ),
+                    },
+                )
+
+            def _build_live_context_status(target_ts: object | None = None) -> dict[str, dict[str, object]]:
+                target = pd.to_datetime(target_ts, utc=True, errors="coerce") if target_ts is not None else pd.NaT
+                out: dict[str, dict[str, object]] = {}
+
+                def _status_from_df(df: pd.DataFrame | None) -> dict[str, object]:
+                    if df is None or df.empty or "timestamp" not in df.columns:
+                        return {"status": "missing", "last_ts": None, "rows": 0}
+                    ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dropna()
+                    if ts.empty:
+                        return {"status": "missing", "last_ts": None, "rows": int(len(df))}
+                    last_ts = ts.max()
+                    label = "present" if pd.isna(target) or last_ts >= target else "stale"
+                    return {
+                        "status": label,
+                        "last_ts": _ts_iso(last_ts),
+                        "rows": int(len(df)),
+                    }
+
+                if live_vix_enabled:
+                    out[live_vix_symbol] = _status_from_df(vix_runtime_cache_df)
+                for symbol in live_context_symbols:
+                    out[symbol] = _status_from_df(context_runtime_cache_by_symbol.get(symbol))
+                if "QQQ" in out and "IWM" in out:
+                    qqq_status = str(out["QQQ"].get("status") or "").lower()
+                    iwm_status = str(out["IWM"].get("status") or "").lower()
+                    breadth_last = min(
+                        [ts for ts in (out["QQQ"].get("last_ts"), out["IWM"].get("last_ts")) if ts],
+                        default=None,
+                    )
+                    breadth_rows = min(
+                        [
+                            int(val)
+                            for val in (out["QQQ"].get("rows"), out["IWM"].get("rows"))
+                            if isinstance(val, (int, float))
+                        ],
+                        default=0,
+                    )
+                    out["BREADTH_PROXY"] = {
+                        "status": "present" if qqq_status == "present" and iwm_status == "present" else "stale",
+                        "last_ts": breadth_last,
+                        "rows": breadth_rows,
+                    }
+                return out
+
             def _on_vix_interval(symbol: str, bar_tf: dict, _buffer: Any) -> None:
                 nonlocal vix_runtime_cache_df
                 bar_df = pd.DataFrame(
@@ -2902,6 +2996,47 @@ class LiveSession:
                             "message": f"[live] runtime VIX cache update failed: {exc}",
                         },
                     )
+
+            def _make_context_interval_handler(symbol: str, cache_path: Path):
+                def _handler(_symbol: str, bar_tf: dict, _buffer: Any) -> None:
+                    current_df = context_runtime_cache_by_symbol.get(symbol)
+                    bar_df = pd.DataFrame(
+                        [
+                            {
+                                "timestamp": pd.to_datetime(bar_tf.get("timestamp"), utc=True, errors="coerce"),
+                                "open": bar_tf.get("open"),
+                                "high": bar_tf.get("high"),
+                                "low": bar_tf.get("low"),
+                                "close": bar_tf.get("close"),
+                                "volume": bar_tf.get("volume"),
+                                "symbol": symbol,
+                            }
+                        ]
+                    )
+                    merged_df = bar_df if current_df is None or current_df.empty else pd.concat([current_df, bar_df], axis=0, ignore_index=True)
+                    prepared_df = lr._prepare_runtime_context_frame(
+                        df=merged_df,
+                        symbol=symbol,
+                        tz_name=cfg.tz or "America/New_York",
+                        session_open=cfg.session_open,
+                        session_close=cfg.session_close,
+                    )
+                    context_runtime_cache_by_symbol[symbol] = prepared_df
+                    try:
+                        lr._persist_runtime_context_cache(
+                            df=prepared_df,
+                            cache_path=cache_path,
+                        )
+                    except Exception as exc:
+                        self._emit(
+                            "log",
+                            {
+                                "symbol": "SYSTEM",
+                                "message": f"[live] runtime cache update failed for {symbol}: {exc}",
+                            },
+                        )
+
+                return _handler
 
             vix_processor = (
                 lr.LiveBarProcessor(
@@ -2972,12 +3107,85 @@ class LiveSession:
                         _log_vix_runtime_cache("prepared runtime VIX cache")
                     except Exception as exc:
                         self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": f"[live] runtime VIX cache persist failed: {exc}",
+                        },
+                    )
+
+                live_context_symbols = []
+                for context_symbol in lr.META_CONTEXT_SYMBOLS:
+                    clean = str(context_symbol).upper()
+                    if clean in symbols or clean in live_context_symbols:
+                        continue
+                    live_context_symbols.append(clean)
+
+                for context_symbol in live_context_symbols:
+                    cache_path = lr._default_runtime_context_cache_path(context_symbol)
+                    source_path = cache_path if cache_path.exists() else lr._default_static_context_cache_path(context_symbol)
+                    try:
+                        context_df = lr._load_runtime_context_frame(source_path, symbol=context_symbol)
+                    except Exception as exc:
+                        self._emit(
                             "log",
                             {
                                 "symbol": "SYSTEM",
-                                "message": f"[live] runtime VIX cache persist failed: {exc}",
+                                "message": f"[live] runtime cache load failed for {context_symbol} from {source_path}: {exc}",
                             },
                         )
+                        context_df = None
+                    if context_df is not None and not context_df.empty and not cfg.no_prefill_fetch:
+                        try:
+                            context_df = lr._extend_context_with_alpaca_gap(
+                                df=context_df,
+                                feed=feed,
+                                ticker=context_symbol,
+                                timeframe=f"{int(cfg.interval)}Min",
+                            )
+                        except Exception as exc:
+                            self._emit(
+                                "log",
+                                {
+                                    "symbol": "SYSTEM",
+                                    "message": f"[live] runtime gap bridge failed for {context_symbol}: {exc}",
+                                },
+                            )
+                    if context_df is not None and not context_df.empty:
+                        prepared_context_df = lr._prepare_runtime_context_frame(
+                            df=context_df,
+                            symbol=context_symbol,
+                            tz_name=cfg.tz or "America/New_York",
+                            session_open=cfg.session_open,
+                            session_close=cfg.session_close,
+                        )
+                        context_runtime_cache_by_symbol[context_symbol] = prepared_context_df
+                        try:
+                            lr._persist_runtime_context_cache(
+                                df=prepared_context_df,
+                                cache_path=cache_path,
+                            )
+                            _log_context_runtime_cache("prepared runtime cache", context_symbol)
+                        except Exception as exc:
+                            self._emit(
+                                "log",
+                                {
+                                    "symbol": "SYSTEM",
+                                    "message": f"[live] runtime cache persist failed for {context_symbol}: {exc}",
+                                },
+                            )
+                    else:
+                        context_runtime_cache_by_symbol[context_symbol] = context_df
+                    context_processors[context_symbol] = lr.LiveBarProcessor(
+                        interval_minutes=cfg.interval,
+                        buffer_size=2048,
+                        agg_label=cfg.resample_label,
+                        on_15m_close=_make_context_interval_handler(context_symbol, cache_path),
+                        regular_hours_only=True,
+                        tz_name=cfg.tz or "America/New_York",
+                        session_open=cfg.session_open,
+                        session_close=cfg.session_close,
+                    )
 
             if cfg.buffer_size and cfg.buffer_size > 0 and cfg.prefill_tail and cfg.prefill_tail > cfg.buffer_size:
                 self._emit(
@@ -3186,6 +3394,9 @@ class LiveSession:
             stream_symbols = list(symbols)
             if live_vix_enabled and live_vix_symbol not in stream_symbols:
                 stream_symbols.append(live_vix_symbol)
+            for context_symbol in context_processors:
+                if context_symbol not in stream_symbols:
+                    stream_symbols.append(context_symbol)
 
             streamer = AlpacaBarStreamer(
                 symbols=stream_symbols,
@@ -3282,6 +3493,10 @@ class LiveSession:
                 except queue_mod.Empty:
                     continue
                 bar_symbol = str(bar.get("symbol", "")).upper()
+                context_processor = context_processors.get(bar_symbol)
+                if context_processor is not None:
+                    context_processor.handle_bar(bar)
+                    continue
                 if live_vix_enabled and vix_processor is not None and bar_symbol == live_vix_symbol:
                     vix_processor.handle_bar(bar)
                     continue

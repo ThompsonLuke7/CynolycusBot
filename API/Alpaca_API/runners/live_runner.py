@@ -28,6 +28,8 @@ from ..market_data.live_stream import AlpacaBarStreamer
 from Policy.execution_latch import DirectionExecutionLatch
 from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
 
+META_CONTEXT_SYMBOLS: tuple[str, ...] = ("QQQ", "IWM", "TLT", "UUP")
+
 
 class LiveBarProcessor:
     def __init__(
@@ -604,6 +606,20 @@ def _default_runtime_vix_cache_path() -> Path:
     return Path("Data") / "raw" / "vix" / "vixy_10min_live_runtime.parquet"
 
 
+def _default_runtime_context_cache_path(symbol: str) -> Path:
+    clean = str(symbol or "").strip().upper()
+    slug = clean.lower()
+    return Path("Data") / "raw" / slug / f"{slug}_10min_live_runtime.parquet"
+
+
+def _default_static_context_cache_path(symbol: str) -> Path:
+    clean = str(symbol or "").strip().upper()
+    if clean == "VIXY":
+        return Path("Data") / "raw" / "vix" / "vixy_10min.parquet"
+    slug = clean.lower()
+    return Path("Data") / "raw" / slug / f"{slug}_intraday_10min.parquet"
+
+
 def _prepare_runtime_prefill_frame(
     *,
     df: pd.DataFrame,
@@ -673,6 +689,19 @@ def _load_runtime_vix_frame(path: Path) -> pd.DataFrame:
     return _normalize_runtime_vix_frame(df)
 
 
+def _load_runtime_context_frame(path: Path, *, symbol: str) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing runtime cache file: {path}")
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        df = pd.read_parquet(path)
+    elif suffix == ".csv":
+        df = pd.read_csv(path)
+    else:
+        raise ValueError("Runtime cache file must be .csv or .parquet")
+    return _normalize_runtime_vix_frame(df, symbol=symbol)
+
+
 def _normalize_runtime_vix_frame(df: pd.DataFrame, *, symbol: str = "VIXY") -> pd.DataFrame:
     out = df.copy()
     rename_map = {
@@ -724,7 +753,45 @@ def _prepare_runtime_vix_frame(
     return out.reset_index(drop=True)
 
 
+def _prepare_runtime_context_frame(
+    *,
+    df: pd.DataFrame,
+    symbol: str,
+    tz_name: str = "America/New_York",
+    session_open: str = "09:30",
+    session_close: str = "16:00",
+    max_rows: int = 10000,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = _normalize_runtime_vix_frame(df, symbol=symbol)
+    ts_local = out["timestamp"].dt.tz_convert(tz_name)
+    minutes = ts_local.dt.hour * 60 + ts_local.dt.minute
+    open_min = _hhmm_to_minutes(session_open, default=570)
+    close_min = _hhmm_to_minutes(session_close, default=960)
+    out = out.loc[minutes.between(open_min, close_min - 1)].copy()
+    out = out.sort_values("timestamp")
+    out = out.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+    if max_rows and max_rows > 0 and len(out) > max_rows:
+        out = out.tail(int(max_rows)).copy()
+    return out.reset_index(drop=True)
+
+
 def _persist_runtime_vix_cache(
+    *,
+    df: pd.DataFrame,
+    cache_path: Path,
+) -> None:
+    if df is None or df.empty:
+        return
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if cache_path.suffix.lower() == ".csv":
+        df.to_csv(cache_path, index=False)
+    else:
+        df.to_parquet(cache_path, index=False)
+
+
+def _persist_runtime_context_cache(
     *,
     df: pd.DataFrame,
     cache_path: Path,
@@ -743,6 +810,43 @@ def _extend_vix_with_alpaca_gap(
     df: pd.DataFrame,
     feed: DataFeed,
     ticker: str = "VIXY",
+    timeframe: str = "10Min",
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = _normalize_runtime_vix_frame(df, symbol=ticker)
+    latest_ts = pd.to_datetime(out["timestamp"], utc=True, errors="coerce").dropna().max()
+    if pd.isna(latest_ts):
+        return out
+    fetch_start = latest_ts + pd.Timedelta(minutes=10 if str(timeframe).lower() == "10min" else 1)
+    now_utc = pd.Timestamp.now(tz="UTC")
+    if fetch_start >= now_utc:
+        return out
+    fetched_df = fetch_intraday(
+        ticker=ticker,
+        start=fetch_start.isoformat(),
+        timeframe=timeframe,
+        limit=100000,
+        feed=feed,
+        save_path=None,
+    )
+    if fetched_df is None or fetched_df.empty:
+        return out
+    fetched_df = _normalize_runtime_vix_frame(fetched_df, symbol=ticker)
+    fetched_df = fetched_df[fetched_df["timestamp"] > latest_ts].copy()
+    if fetched_df.empty:
+        return out
+    combined = pd.concat([out, fetched_df], axis=0, ignore_index=True)
+    combined = combined.sort_values("timestamp")
+    combined = combined.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+    return combined.reset_index(drop=True)
+
+
+def _extend_context_with_alpaca_gap(
+    *,
+    df: pd.DataFrame,
+    feed: DataFeed,
+    ticker: str,
     timeframe: str = "10Min",
 ) -> pd.DataFrame:
     if df is None or df.empty:
@@ -1833,6 +1937,104 @@ def main() -> None:
         f"[live] RTH-only live bar filter enabled: "
         f"{args.session_open}-{args.session_close} {args.tz or 'America/New_York'}"
     )
+    aux_runtime_cache_by_symbol: dict[str, pd.DataFrame | None] = {}
+    aux_processors: dict[str, LiveBarProcessor] = {}
+    if inference is not None:
+        aux_symbols: list[str] = []
+        for symbol in ("VIXY", *META_CONTEXT_SYMBOLS):
+            clean = str(symbol).upper()
+            if clean in symbols or clean in aux_symbols:
+                continue
+            aux_symbols.append(clean)
+
+        def _make_aux_interval_handler(symbol: str, cache_path: Path) -> Callable[[str, dict, BarRingBuffer], None]:
+            def _handler(_symbol: str, bar_tf: dict, _buffer: BarRingBuffer) -> None:
+                current_df = aux_runtime_cache_by_symbol.get(symbol)
+                bar_df = pd.DataFrame(
+                    [
+                        {
+                            "timestamp": pd.to_datetime(bar_tf.get("timestamp"), utc=True, errors="coerce"),
+                            "open": bar_tf.get("open"),
+                            "high": bar_tf.get("high"),
+                            "low": bar_tf.get("low"),
+                            "close": bar_tf.get("close"),
+                            "volume": bar_tf.get("volume"),
+                            "symbol": symbol,
+                        }
+                    ]
+                )
+                merged = bar_df if current_df is None or current_df.empty else pd.concat([current_df, bar_df], axis=0, ignore_index=True)
+                prepared = _prepare_runtime_context_frame(
+                    df=merged,
+                    symbol=symbol,
+                    tz_name=args.tz or "America/New_York",
+                    session_open=args.session_open,
+                    session_close=args.session_close,
+                )
+                aux_runtime_cache_by_symbol[symbol] = prepared
+                try:
+                    _persist_runtime_context_cache(df=prepared, cache_path=cache_path)
+                except Exception as exc:
+                    print(f"[live] Runtime cache update failed for {symbol}: {exc}")
+
+            return _handler
+
+        for aux_symbol in aux_symbols:
+            cache_path = _default_runtime_vix_cache_path() if aux_symbol == "VIXY" else _default_runtime_context_cache_path(aux_symbol)
+            source_path = cache_path if cache_path.exists() else (
+                Path("Data") / "raw" / "vix" / "vixy_10min.parquet"
+                if aux_symbol == "VIXY"
+                else _default_static_context_cache_path(aux_symbol)
+            )
+            try:
+                base_df = _load_runtime_vix_frame(source_path) if aux_symbol == "VIXY" else _load_runtime_context_frame(source_path, symbol=aux_symbol)
+            except Exception as exc:
+                print(f"[live] Runtime cache load failed for {aux_symbol} from {source_path}: {exc}")
+                base_df = None
+            if base_df is not None and not base_df.empty and not args.no_prefill_fetch:
+                try:
+                    if aux_symbol == "VIXY":
+                        base_df = _extend_vix_with_alpaca_gap(
+                            df=base_df,
+                            feed=feed,
+                            ticker=aux_symbol,
+                            timeframe=f"{int(args.interval)}Min",
+                        )
+                    else:
+                        base_df = _extend_context_with_alpaca_gap(
+                            df=base_df,
+                            feed=feed,
+                            ticker=aux_symbol,
+                            timeframe=f"{int(args.interval)}Min",
+                        )
+                except Exception as exc:
+                    print(f"[live] Runtime gap bridge failed for {aux_symbol}: {exc}")
+            if base_df is not None and not base_df.empty:
+                prepared_df = _prepare_runtime_context_frame(
+                    df=base_df,
+                    symbol=aux_symbol,
+                    tz_name=args.tz or "America/New_York",
+                    session_open=args.session_open,
+                    session_close=args.session_close,
+                )
+                aux_runtime_cache_by_symbol[aux_symbol] = prepared_df
+                try:
+                    _persist_runtime_context_cache(df=prepared_df, cache_path=cache_path)
+                except Exception as exc:
+                    print(f"[live] Runtime cache persist failed for {aux_symbol}: {exc}")
+            else:
+                aux_runtime_cache_by_symbol[aux_symbol] = base_df
+            aux_processors[aux_symbol] = LiveBarProcessor(
+                interval_minutes=args.interval,
+                buffer_size=2048,
+                agg_label=args.resample_label,
+                on_15m_close=_make_aux_interval_handler(aux_symbol, cache_path),
+                regular_hours_only=True,
+                tz_name=args.tz or "America/New_York",
+                session_open=args.session_open,
+                session_close=args.session_close,
+            )
+
     if args.prefill_path:
         configured_prefill_path = Path(args.prefill_path)
         runtime_prefill_cache_path = _default_runtime_prefill_cache_path(configured_prefill_path)
@@ -1933,8 +2135,13 @@ def main() -> None:
                 max_age_min=int(args.startup_catchup_max_age_min),
             )
 
+    stream_symbols = list(symbols)
+    for aux_symbol in aux_processors:
+        if aux_symbol not in stream_symbols:
+            stream_symbols.append(aux_symbol)
+
     streamer = AlpacaBarStreamer(
-        symbols=symbols,
+        symbols=stream_symbols,
         feed=feed,
         env_file=args.env_file,
         queue=bar_queue,
@@ -1978,6 +2185,11 @@ def main() -> None:
             try:
                 bar = bar_queue.get(timeout=0.5)
             except queue_mod.Empty:
+                continue
+            bar_symbol = str(bar.get("symbol", "")).upper()
+            aux_processor = aux_processors.get(bar_symbol)
+            if aux_processor is not None:
+                aux_processor.handle_bar(bar)
                 continue
             processor.handle_bar(bar)
     except KeyboardInterrupt:

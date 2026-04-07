@@ -551,6 +551,17 @@
           out[key] = value;
         });
       }
+      const lastContextStatus = out.last_context_status;
+      if (lastContextStatus && typeof lastContextStatus === "object") {
+        Object.entries(lastContextStatus).forEach(([symbol, payload]) => {
+          if (!payload || typeof payload !== "object") return;
+          const sym = String(symbol || "").trim().toLowerCase();
+          if (!sym) return;
+          Object.entries(payload).forEach(([key, value]) => {
+            out[`ctx_${sym}_${key}`] = value;
+          });
+        });
+      }
       return out;
     }
 
@@ -611,6 +622,12 @@
         ["thr_enter_short", ag.thr_enter_short ?? "-"],
         ["thr_exit_long", ag.thr_exit_long ?? "-"],
         ["thr_exit_short", ag.thr_exit_short ?? "-"],
+        ["VIXY Context", `${ag.ctx_vixy_status ?? "-"}${ag.ctx_vixy_last_ts ? ` @ ${formatEventTs(ag.ctx_vixy_last_ts)}` : ""}`],
+        ["QQQ Context", `${ag.ctx_qqq_status ?? "-"}${ag.ctx_qqq_last_ts ? ` @ ${formatEventTs(ag.ctx_qqq_last_ts)}` : ""}`],
+        ["IWM Context", `${ag.ctx_iwm_status ?? "-"}${ag.ctx_iwm_last_ts ? ` @ ${formatEventTs(ag.ctx_iwm_last_ts)}` : ""}`],
+        ["TLT Context", `${ag.ctx_tlt_status ?? "-"}${ag.ctx_tlt_last_ts ? ` @ ${formatEventTs(ag.ctx_tlt_last_ts)}` : ""}`],
+        ["UUP Context", `${ag.ctx_uup_status ?? "-"}${ag.ctx_uup_last_ts ? ` @ ${formatEventTs(ag.ctx_uup_last_ts)}` : ""}`],
+        ["Breadth Proxy Inputs", `${ag.ctx_breadth_proxy_status ?? "-"}${ag.ctx_breadth_proxy_last_ts ? ` @ ${formatEventTs(ag.ctx_breadth_proxy_last_ts)}` : ""}`],
         ["Unrealized PnL", ag.unrealized_pnl ?? "-"],
         ["Realized Today", ag.realized_pnl_today ?? "-"],
         ["Realized Total", ag.realized_pnl_total ?? "-"],

@@ -1889,7 +1889,7 @@ class OptionOrderPolicy:
             self._prev_1m_close = prev_close if math.isfinite(prev_close) else float("nan")
             last_close = _as_float(state.get("last_1m_close"))
             self._last_1m_close = last_close if math.isfinite(last_close) else float("nan")
-
+            
             recent_closes = state.get("recent_1m_closes")
             if isinstance(recent_closes, list):
                 self._recent_1m_closes.clear()

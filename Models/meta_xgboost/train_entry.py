@@ -26,6 +26,7 @@ from Models.meta_xgboost.common import (
     save_train_val_loss_plot,
     select_numeric_feature_columns,
     sweep_thresholds,
+    train_full_fit_binary,
     train_walkforward_binary,
     xgb_params_from_config,
 )
@@ -109,6 +110,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-oos-prob-coverage", type=float, default=PipelineConfig.min_oos_prob_coverage)
     p.add_argument("--drop-high-corr-features", action=argparse.BooleanOptionalAction, default=PipelineConfig.drop_high_corr_features)
     p.add_argument("--high-corr-threshold", type=float, default=PipelineConfig.high_corr_threshold)
+    p.add_argument("--full-fit-only", action=argparse.BooleanOptionalAction, default=PipelineConfig.full_fit_only)
     p.add_argument("--sides", choices=["both", "long", "short"], default="both")
     p.add_argument("--plot-only", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--xgb-booster", choices=["gbtree", "dart"], default=None)
@@ -152,6 +154,7 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
         min_oos_prob_coverage=float(args.min_oos_prob_coverage),
         drop_high_corr_features=bool(args.drop_high_corr_features),
         high_corr_threshold=float(args.high_corr_threshold),
+        full_fit_only=bool(args.full_fit_only),
         xgb_booster=args.xgb_booster,
         xgb_rate_drop=args.xgb_rate_drop,
         xgb_skip_drop=args.xgb_skip_drop,
@@ -278,21 +281,46 @@ def run_entry_pipeline(
 
     for target_col, prob_prefix, key in target_specs:
         print(f"[META-ENTRY] Training {key}")
-        embargo_end_idx = compute_entry_embargo_end_idx(frame, cfg, target_col=target_col)
-        result = train_walkforward_binary(
-            df=frame,
-            feature_cols=feature_cols,
-            target_col=target_col,
-            session_dates=session_dates,
-            cfg=cfg,
-            xgb_params=xgb_params,
-            embargo_end_idx=embargo_end_idx,
-        )
+        if bool(cfg.full_fit_only):
+            result = train_full_fit_binary(
+                df=frame,
+                feature_cols=feature_cols,
+                target_col=target_col,
+                cfg=cfg,
+                xgb_params=xgb_params,
+            )
+        else:
+            embargo_end_idx = compute_entry_embargo_end_idx(frame, cfg, target_col=target_col)
+            result = train_walkforward_binary(
+                df=frame,
+                feature_cols=feature_cols,
+                target_col=target_col,
+                session_dates=session_dates,
+                cfg=cfg,
+                xgb_params=xgb_params,
+                embargo_end_idx=embargo_end_idx,
+            )
         y = pd.to_numeric(frame[target_col], errors="coerce").fillna(0).astype(np.int8).to_numpy()
-        sweep = sweep_thresholds(y_true=y[result.valid_mask], probs=result.oof_probs[result.valid_mask], cfg=cfg)
-        threshold, best_row = choose_threshold(sweep, objective=cfg.threshold_objective)
+        if bool(cfg.full_fit_only):
+            existing_thresholds: dict[str, dict[str, float | None]] = {}
+            thresholds_path = entry_root / "entry_thresholds.json"
+            if thresholds_path.exists():
+                loaded = json.loads(thresholds_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing_thresholds = loaded
+            threshold_payload = existing_thresholds.get(key, {})
+            threshold = float(threshold_payload.get("threshold", 0.5))
+            best_row = dict(threshold_payload)
+            sweep = pd.DataFrame()
+        else:
+            sweep = sweep_thresholds(y_true=y[result.valid_mask], probs=result.oof_probs[result.valid_mask], cfg=cfg)
+            threshold, best_row = choose_threshold(sweep, objective=cfg.threshold_objective)
         train_metrics = binary_metrics(y[result.valid_mask], result.full_probs[result.valid_mask], threshold=threshold)
-        oof_metrics = binary_metrics(y[result.valid_mask], result.oof_probs[result.valid_mask], threshold=threshold)
+        oof_metrics = (
+            binary_metrics(y[result.valid_mask], result.oof_probs[result.valid_mask], threshold=threshold)
+            if np.isfinite(result.oof_probs[result.valid_mask]).any()
+            else {}
+        )
         metrics_summary[key] = {"full": train_metrics, "oof": oof_metrics}
         threshold_summary[key] = {"threshold": float(threshold), **best_row}
         loss_histories[key] = result.eval_history
@@ -318,8 +346,10 @@ def run_entry_pipeline(
             feature_cols=feature_cols,
             oof_name=f"{prob_prefix}_oof",
             full_name=f"{prob_prefix}_full",
+            preserve_existing_oof=bool(cfg.full_fit_only),
         )
-        sweep.to_csv(side_dir / "threshold_sweep.csv", index=False)
+        if not sweep.empty:
+            sweep.to_csv(side_dir / "threshold_sweep.csv", index=False)
         combined_cols[f"{prob_prefix}_oof"] = result.oof_probs
         combined_cols[f"{prob_prefix}_full"] = result.full_probs
 
@@ -328,7 +358,7 @@ def run_entry_pipeline(
     if prob_path.exists():
         existing_probs = load_prob_frame(prob_path).reindex(frame.index)
         for col in existing_probs.columns:
-            if col not in merged_prob_cols:
+            if col not in merged_prob_cols or (bool(cfg.full_fit_only) and col.endswith("_oof")):
                 merged_prob_cols[col] = pd.to_numeric(existing_probs[col], errors="coerce").to_numpy(dtype=float)
     prob_path = save_prob_frame(prob_path, index=frame.index, columns=merged_prob_cols)
 
