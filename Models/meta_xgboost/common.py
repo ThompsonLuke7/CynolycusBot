@@ -175,6 +175,113 @@ def _ga_prob_parquet_path(
     raise FileNotFoundError(f"Missing GA probability parquet for {side}/{label_dir}: {searched}")
 
 
+def _ga_prob_manifest_path(
+    *,
+    model_root: Path,
+    side: str,
+    label_dir: str,
+    prefix: str,
+) -> Path:
+    side_root = model_root / side.lower()
+    probe_dirs = [
+        side_root / label_dir,
+        side_root / "probs" / label_dir,
+        side_root,
+        side_root / "probs",
+    ]
+    for base in probe_dirs:
+        path = base / f"{prefix}_oos_manifest.json"
+        if path.exists():
+            return path
+    searched = ", ".join(str(base / f"{prefix}_oos_manifest.json") for base in probe_dirs)
+    raise FileNotFoundError(
+        "Missing GA OOS provenance manifest. "
+        f"Expected one of: {searched}. Rerun the GA OOF/test training for this label set before meta training."
+    )
+
+
+def _load_ga_oos_manifest(
+    *,
+    model_root: Path,
+    side: str,
+    label_dir: str,
+    prefix: str,
+) -> dict[str, Any]:
+    path = _ga_prob_manifest_path(
+        model_root=model_root,
+        side=side,
+        label_dir=label_dir,
+        prefix=prefix,
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"Failed to parse GA OOS provenance manifest: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"GA OOS provenance manifest must be a JSON object: {path}")
+    return payload
+
+
+def _validate_ga_oos_manifest_group(
+    *,
+    model_root: Path,
+    label_dir: str,
+    items: list[tuple[str, str]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    manifests = {
+        (side, prefix): _load_ga_oos_manifest(
+            model_root=model_root,
+            side=side,
+            label_dir=label_dir,
+            prefix=prefix,
+        )
+        for side, prefix in items
+    }
+    run_ids = {
+        str(manifest.get("run_id")).strip()
+        for manifest in manifests.values()
+        if manifest.get("run_id")
+    }
+    if len(run_ids) != 1:
+        details = ", ".join(
+            f"{side}/{prefix}={manifests[(side, prefix)].get('run_id')!r}"
+            for side, prefix in items
+        )
+        raise ValueError(
+            "GA OOS probability manifests disagree within the requested label set. "
+            f"label_dir={label_dir}; {details}. "
+            "Rerun both GA OOF/test sides so meta training uses a coherent artifact set."
+        )
+    for side, prefix, manifest in (
+        (side, prefix, manifests[(side, prefix)]) for side, prefix in items
+    ):
+        status = str(manifest.get("provenance_status") or "ok").strip().lower()
+        if status not in {"ok", "fresh", ""}:
+            raise ValueError(
+                "GA OOS probability provenance is not trusted enough for meta training. "
+                f"{side}/{prefix} {label_dir} manifest status={status!r}. "
+                "Regenerate the GA OOF/test artifacts so the manifest records a concrete run_id."
+            )
+        if str(manifest.get("label_dir") or "").strip().lower() != str(label_dir).strip().lower():
+            raise ValueError(
+                "GA OOS probability manifest label_dir mismatch. "
+                f"Expected {label_dir!r}, found {manifest.get('label_dir')!r} in {side}/{prefix} manifest."
+            )
+        if str(manifest.get("prefix") or "").strip() != str(prefix).strip():
+            raise ValueError(
+                "GA OOS probability manifest prefix mismatch. "
+                f"Expected {prefix!r}, found {manifest.get('prefix')!r} in {side}/{prefix} manifest."
+            )
+        oof_count = int(manifest.get("oof_finite_count") or 0)
+        test_count = int(manifest.get("test_finite_count") or 0)
+        if (oof_count + test_count) <= 0:
+            raise ValueError(
+                "GA OOS probability manifest reports zero OOF/test coverage. "
+                f"{side}/{prefix} {label_dir} manifest={_ga_prob_manifest_path(model_root=model_root, side=side, label_dir=label_dir, prefix=prefix)}"
+            )
+    return manifests
+
+
 def _load_ga_oos_prob_series(
     *,
     model_root: Path,
@@ -218,6 +325,11 @@ def _replace_meta_prob_features_with_oos(
 ) -> pd.DataFrame:
     out = feat_df.copy()
     target_index = out.index
+    _validate_ga_oos_manifest_group(
+        model_root=model_root,
+        label_dir=pivot_label_dir,
+        items=[("long", "p_long"), ("short", "p_short")],
+    )
     replacements = {
         "p_pivot_long": _load_ga_oos_prob_series(
             model_root=model_root,
@@ -235,6 +347,11 @@ def _replace_meta_prob_features_with_oos(
         ),
     }
     if include_tb_probs:
+        _validate_ga_oos_manifest_group(
+            model_root=model_root,
+            label_dir=tb_label_dir,
+            items=[("long", "p_long"), ("short", "p_short")],
+        )
         replacements.update(
             {
                 "p_tb_long": _load_ga_oos_prob_series(

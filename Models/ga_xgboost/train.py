@@ -5,6 +5,7 @@ import json
 import shutil
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Tuple
 
@@ -114,6 +115,36 @@ DART_DEFAULTS: dict[str, object] = {
     "sample_type": "uniform",
     "normalize_type": "tree",
 }
+
+
+def _utc_iso(ts: datetime | None = None) -> str:
+    if ts is None:
+        ts = datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _safe_run_token(raw: str) -> str:
+    token = "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in str(raw))
+    return token.strip("._") or "run"
+
+
+def _make_run_id(*, run_name: str, ts: datetime | None = None) -> str:
+    stamp = datetime.now(timezone.utc) if ts is None else ts
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return f"{stamp.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{_safe_run_token(run_name)}"
+
+
+def _read_json(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _extract_ga_params(selector: GAXGBoostFeatureSelector) -> dict:
@@ -1076,16 +1107,20 @@ def _save_series(
     train_idx: np.ndarray,
     test_idx: np.ndarray,
     index: pd.Index | None,
+    oos_manifest: dict | None = None,
+    full_manifest: dict | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     oof_npy_path = output_dir / f"{prefix}_oof_train.npy"
     test_npy_path = output_dir / f"{prefix}_test.npy"
     full_npy_path = output_dir / f"{prefix}_full.npy"
+    oos_manifest_path = output_dir / f"{prefix}_oos_manifest.json"
+    full_manifest_path = output_dir / f"{prefix}_full_manifest.json"
 
     oof_to_save = train_oof
+    current_oof_has_signal = train_oof.size and np.isfinite(train_oof).any()
     if oof_npy_path.exists():
-        current_has_signal = train_oof.size and np.isfinite(train_oof).any()
-        if not current_has_signal:
+        if not current_oof_has_signal:
             prev_oof = np.load(oof_npy_path)
             if prev_oof.size and np.isfinite(prev_oof).any():
                 oof_to_save = prev_oof
@@ -1095,9 +1130,9 @@ def _save_series(
                 )
 
     test_to_save = test_probs
+    current_test_has_signal = test_probs.size and np.isfinite(test_probs).any()
     if test_npy_path.exists():
-        current_has_signal = test_probs.size and np.isfinite(test_probs).any()
-        if not current_has_signal:
+        if not current_test_has_signal:
             prev_test = np.load(test_npy_path)
             if prev_test.size and np.isfinite(prev_test).any():
                 test_to_save = prev_test
@@ -1150,8 +1185,65 @@ def _save_series(
         )
         df.to_parquet(parquet_path)
 
+    saved_oos_has_signal = bool(np.isfinite(oof_to_save).any() or np.isfinite(test_to_save).any())
+    current_oos_has_signal = bool(current_oof_has_signal or current_test_has_signal)
+    if full_manifest is not None:
+        full_payload = dict(full_manifest)
+        full_payload.update(
+            {
+                "artifact_kind": "ga_xgboost_full_probabilities",
+                "prefix": prefix,
+                "full_npy_path": str(full_npy_path),
+                "full_parquet_path": str(output_dir / f"{prefix}_probs.parquet") if index is not None else None,
+                "full_finite_count": int(np.isfinite(full_probs).sum()),
+                "row_count": int(full_probs.shape[0]),
+            }
+        )
+        full_manifest_path.write_text(json.dumps(full_payload, indent=2), encoding="utf-8")
+
+    if current_oos_has_signal and oos_manifest is not None:
+        oos_payload = dict(oos_manifest)
+        oos_payload.update(
+            {
+                "artifact_kind": "ga_xgboost_oos_probabilities",
+                "prefix": prefix,
+                "oof_npy_path": str(oof_npy_path),
+                "test_npy_path": str(test_npy_path),
+                "oos_parquet_path": str(output_dir / f"{prefix}_probs.parquet") if index is not None else None,
+                "oof_finite_count": int(np.isfinite(train_oof).sum()),
+                "test_finite_count": int(np.isfinite(test_probs).sum()),
+                "row_count": int(full_probs.shape[0]),
+            }
+        )
+        oos_manifest_path.write_text(json.dumps(oos_payload, indent=2), encoding="utf-8")
+    elif saved_oos_has_signal and oos_manifest_path.exists():
+        print(
+            f"[GA-XGB] Preserving existing OOS manifest in {oos_manifest_path.name} "
+            "during full-fit overwrite."
+        )
+    elif saved_oos_has_signal:
+        legacy_payload = {
+            "artifact_kind": "ga_xgboost_oos_probabilities",
+            "prefix": prefix,
+            "provenance_status": "legacy_unknown",
+            "run_id": None,
+            "created_at_utc": None,
+            "oof_npy_path": str(oof_npy_path),
+            "test_npy_path": str(test_npy_path),
+            "oos_parquet_path": str(output_dir / f"{prefix}_probs.parquet") if index is not None else None,
+            "oof_finite_count": int(np.isfinite(oof_to_save).sum()),
+            "test_finite_count": int(np.isfinite(test_to_save).sum()),
+            "row_count": int(full_probs.shape[0]),
+        }
+        oos_manifest_path.write_text(json.dumps(legacy_payload, indent=2), encoding="utf-8")
+
 
 def main() -> None:
+    run_ts = datetime.now(timezone.utc)
+    run_name = "ga_xgboost_train"
+    artifact_run_id = _make_run_id(run_name=run_name, ts=run_ts)
+    artifact_created_at = _utc_iso(run_ts)
+
     parser = argparse.ArgumentParser(description="Generate leakage-safe OOF probs for GA-XGB.")
     parser.add_argument(
         "--ticker",
@@ -1805,6 +1897,17 @@ def main() -> None:
 
     probs_root = model_dataset_root
     label_dir = label_dir_probs
+    base_artifact_manifest = {
+        "run_id": artifact_run_id,
+        "run_name": run_name,
+        "created_at_utc": artifact_created_at,
+        "ticker": normalize_ticker(cfg.ticker),
+        "dataset_name": cfg.dataset_name,
+        "label_mode": cfg.label_mode,
+        "label_dir": label_dir,
+        "full_fit": bool(args.full_fit),
+        "model_dataset_root": str(model_dataset_root),
+    }
     if run_long:
         _save_series(
             output_dir=probs_root / "long" / label_dir,
@@ -1815,6 +1918,8 @@ def main() -> None:
             train_idx=train_val_idx,
             test_idx=test_idx,
             index=plot_index,
+            oos_manifest={**base_artifact_manifest, "side": "long"},
+            full_manifest={**base_artifact_manifest, "side": "long"},
         )
     if run_short:
         _save_series(
@@ -1826,6 +1931,8 @@ def main() -> None:
             train_idx=train_val_idx,
             test_idx=test_idx,
             index=plot_index,
+            oos_manifest={**base_artifact_manifest, "side": "short"},
+            full_manifest={**base_artifact_manifest, "side": "short"},
         )
 
     missing_long = int(np.isnan(long_oof).sum()) if run_long else 0
@@ -1916,7 +2023,7 @@ def main() -> None:
         "short_selector_best_score": short_meta.get("best_score") if run_short else None,
     }
     log_paths = log_training_run(
-        run_name="ga_xgboost_train",
+        run_name=run_name,
         output_dir=probs_root,
         hyperparameters=hyperparams,
         train_metrics=train_metrics,
