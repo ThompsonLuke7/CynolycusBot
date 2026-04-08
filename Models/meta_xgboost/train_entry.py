@@ -34,6 +34,32 @@ from Models.meta_xgboost.common import (
 ENTRY_SIDES = ("long", "short")
 
 
+def _build_entry_candidate_mask(
+    frame: pd.DataFrame,
+    *,
+    side: str,
+    cfg: PipelineConfig,
+) -> np.ndarray | None:
+    thr = cfg.entry_candidate_min_pivot_prob
+    if thr is None:
+        return None
+    threshold = float(thr)
+    if threshold <= 0.0:
+        return None
+    side_key = str(side).strip().lower()
+    if side_key not in ENTRY_SIDES:
+        raise ValueError(f"Unsupported side: {side}")
+    prob_col = f"p_pivot_{side_key}"
+    if prob_col not in frame.columns:
+        raise KeyError(f"Missing candidate probability column: {prob_col}")
+    lookback = max(0, int(cfg.entry_candidate_lookback_bars))
+    prob_s = pd.to_numeric(frame[prob_col], errors="coerce")
+    if lookback > 0:
+        prob_s = prob_s.rolling(window=lookback + 1, min_periods=1).max()
+    mask = prob_s.ge(threshold).fillna(False).to_numpy(dtype=bool)
+    return mask
+
+
 def _save_entry_eval_plot(
     *,
     frame: pd.DataFrame,
@@ -96,6 +122,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--include-vix-features", action=argparse.BooleanOptionalAction, default=PipelineConfig.include_vix_features)
     p.add_argument("--a-tp", type=float, default=PipelineConfig.a_tp)
     p.add_argument("--b-sl", type=float, default=PipelineConfig.b_sl)
+    p.add_argument("--entry-max-holding-bars", type=int, default=PipelineConfig.entry_max_holding_bars)
     p.add_argument("--cost-bps", type=float, default=PipelineConfig.cost_bps)
     p.add_argument("--use-next-open", action=argparse.BooleanOptionalAction, default=PipelineConfig.use_next_open)
     p.add_argument("--allow-cross-day", action=argparse.BooleanOptionalAction, default=PipelineConfig.allow_cross_day)
@@ -111,6 +138,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--drop-high-corr-features", action=argparse.BooleanOptionalAction, default=PipelineConfig.drop_high_corr_features)
     p.add_argument("--high-corr-threshold", type=float, default=PipelineConfig.high_corr_threshold)
     p.add_argument("--full-fit-only", action=argparse.BooleanOptionalAction, default=PipelineConfig.full_fit_only)
+    p.add_argument("--entry-candidate-min-pivot-prob", type=float, default=PipelineConfig.entry_candidate_min_pivot_prob)
+    p.add_argument("--entry-candidate-lookback-bars", type=int, default=PipelineConfig.entry_candidate_lookback_bars)
     p.add_argument("--sides", choices=["both", "long", "short"], default="both")
     p.add_argument("--plot-only", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--xgb-booster", choices=["gbtree", "dart"], default=None)
@@ -140,6 +169,7 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
         include_vix_features=bool(args.include_vix_features),
         a_tp=float(args.a_tp),
         b_sl=float(args.b_sl),
+        entry_max_holding_bars=int(args.entry_max_holding_bars),
         cost_bps=float(args.cost_bps),
         use_next_open=bool(args.use_next_open),
         allow_cross_day=bool(args.allow_cross_day),
@@ -155,6 +185,8 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
         drop_high_corr_features=bool(args.drop_high_corr_features),
         high_corr_threshold=float(args.high_corr_threshold),
         full_fit_only=bool(args.full_fit_only),
+        entry_candidate_min_pivot_prob=args.entry_candidate_min_pivot_prob,
+        entry_candidate_lookback_bars=int(args.entry_candidate_lookback_bars),
         xgb_booster=args.xgb_booster,
         xgb_rate_drop=args.xgb_rate_drop,
         xgb_skip_drop=args.xgb_skip_drop,
@@ -258,6 +290,11 @@ def run_entry_pipeline(
         log_prefix="[META-ENTRY]",
     )
     xgb_params = xgb_params_from_config(cfg)
+    # Deploy the saved entry model as a stable full-data gbtree fit with no
+    # internal tail-split early stopping. The label and feature set stay
+    # unchanged; only the final inference fit differs.
+    deployed_fit_cfg = replace(cfg, xgb_booster="gbtree", early_stopping_rounds=None)
+    deployed_fit_xgb_params = xgb_params_from_config(deployed_fit_cfg)
     session_dates = frame["session_date"]
 
     entry_root = resolve_meta_dataset_root(cfg) / "entry"
@@ -281,13 +318,24 @@ def run_entry_pipeline(
 
     for target_col, prob_prefix, key in target_specs:
         print(f"[META-ENTRY] Training {key}")
+        side = "long" if target_col.endswith("long") else "short"
+        condition_mask = _build_entry_candidate_mask(frame, side=side, cfg=cfg)
+        if condition_mask is not None:
+            print(
+                f"[META-ENTRY] {key}: candidate training enabled "
+                f"(thr={float(cfg.entry_candidate_min_pivot_prob):.3f}, "
+                f"lookback_bars={int(cfg.entry_candidate_lookback_bars)}, "
+                f"coverage={float(np.mean(condition_mask)):.2%})"
+            )
         if bool(cfg.full_fit_only):
             result = train_full_fit_binary(
                 df=frame,
                 feature_cols=feature_cols,
                 target_col=target_col,
                 cfg=cfg,
-                xgb_params=xgb_params,
+                xgb_params=deployed_fit_xgb_params,
+                fit_early_stopping_rounds=deployed_fit_cfg.early_stopping_rounds,
+                condition_mask=condition_mask,
             )
         else:
             embargo_end_idx = compute_entry_embargo_end_idx(frame, cfg, target_col=target_col)
@@ -298,6 +346,9 @@ def run_entry_pipeline(
                 session_dates=session_dates,
                 cfg=cfg,
                 xgb_params=xgb_params,
+                full_fit_xgb_params=deployed_fit_xgb_params,
+                full_fit_early_stopping_rounds=deployed_fit_cfg.early_stopping_rounds,
+                condition_mask=condition_mask,
                 embargo_end_idx=embargo_end_idx,
             )
         y = pd.to_numeric(frame[target_col], errors="coerce").fillna(0).astype(np.int8).to_numpy()
@@ -401,6 +452,8 @@ def run_entry_pipeline(
         output_dir=entry_root,
         hyperparameters={
             **asdict(cfg),
+            "deployed_full_fit_xgb_booster": deployed_fit_cfg.xgb_booster,
+            "deployed_full_fit_early_stopping_rounds": deployed_fit_cfg.early_stopping_rounds,
             "feature_count": len(feature_cols),
             "feature_columns": feature_cols,
             "feature_count_by_target": {k: len(v) for k, v in feature_columns_by_target.items()},

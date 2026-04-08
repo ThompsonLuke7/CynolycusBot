@@ -69,6 +69,7 @@ class PipelineConfig:
     atr_col: str = "atr"
     a_tp: float = 1.6
     b_sl: float = 0.8
+    entry_max_holding_bars: int = 8
     cost_bps: float = 2.0
     use_next_open: bool = True
     allow_cross_day: bool = True
@@ -85,6 +86,8 @@ class PipelineConfig:
     drop_high_corr_features: bool = True
     high_corr_threshold: float = 0.95
     full_fit_only: bool = False
+    entry_candidate_min_pivot_prob: float | None = None
+    entry_candidate_lookback_bars: int = 0
     xgb_booster: str | None = None
     xgb_rate_drop: float | None = None
     xgb_skip_drop: float | None = None
@@ -392,6 +395,7 @@ def add_entry_targets(frame: pd.DataFrame, cfg: PipelineConfig) -> pd.DataFrame:
         atr_col=cfg.atr_col,
         a_tp=cfg.a_tp,
         b_sl=cfg.b_sl,
+        max_holding_bars=cfg.entry_max_holding_bars,
         use_next_open=cfg.use_next_open,
         cost_bps=cfg.cost_bps,
         day_col="session_date",
@@ -442,6 +446,7 @@ def compute_entry_embargo_end_idx(
         entry_offset = 1 if bool(cfg.use_next_open) else 0
         tp_mult = float(cfg.a_tp)
         sl_mult = float(cfg.b_sl)
+        max_holding = max(1, int(cfg.entry_max_holding_bars))
 
         for s, e in _session_spans(frame, allow_cross_day=cfg.allow_cross_day):
             if (e - s) <= entry_offset:
@@ -458,24 +463,27 @@ def compute_entry_embargo_end_idx(
                 sl_dist = sl_mult * atr_i
                 if tp_dist <= 0.0 or sl_dist <= 0.0:
                     continue
+                last_idx = min(entry_idx + max_holding, e - 1)
+                if last_idx <= entry_idx:
+                    continue
                 if side == "long":
                     tp = entry + tp_dist
                     sl = entry - sl_dist
-                    for j in range(entry_idx + 1, e):
+                    for j in range(entry_idx + 1, last_idx + 1):
                         if high_px[j] >= tp or low_px[j] <= sl:
                             out[i] = int(j)
                             break
                     else:
-                        out[i] = int(e - 1)
+                        out[i] = int(last_idx)
                 else:
                     tp = entry - tp_dist
                     sl = entry + sl_dist
-                    for j in range(entry_idx + 1, e):
+                    for j in range(entry_idx + 1, last_idx + 1):
                         if low_px[j] <= tp or high_px[j] >= sl:
                             out[i] = int(j)
                             break
                     else:
-                        out[i] = int(e - 1)
+                        out[i] = int(last_idx)
         return out
 
     if mode != "phase":
@@ -913,6 +921,8 @@ def train_walkforward_binary(
     session_dates: pd.Series | np.ndarray,
     cfg: PipelineConfig,
     xgb_params: dict[str, Any],
+    full_fit_xgb_params: dict[str, Any] | None = None,
+    full_fit_early_stopping_rounds: int | None = None,
     condition_mask: np.ndarray | None = None,
     embargo_end_idx: np.ndarray | None = None,
 ) -> TrainResult:
@@ -983,12 +993,18 @@ def train_walkforward_binary(
             }
         )
 
+    params_for_full_fit = xgb_params if full_fit_xgb_params is None else full_fit_xgb_params
+    full_fit_es_rounds = (
+        cfg.early_stopping_rounds
+        if full_fit_early_stopping_rounds is None
+        else full_fit_early_stopping_rounds
+    )
     model_full, constant_prob_full, params_full, num_boost_round = _fit_booster(
         X[valid_mask],
         y[valid_mask],
-        params=xgb_params,
+        params=params_for_full_fit,
         seed=int(cfg.random_state) + 10_000,
-        early_stopping_rounds=cfg.early_stopping_rounds,
+        early_stopping_rounds=full_fit_es_rounds,
         early_stopping_val_fraction=cfg.early_stopping_val_fraction,
         early_stopping_min_val_rows=cfg.early_stopping_min_val_rows,
     )
@@ -1035,6 +1051,7 @@ def train_full_fit_binary(
     target_col: str,
     cfg: PipelineConfig,
     xgb_params: dict[str, Any],
+    fit_early_stopping_rounds: int | None = None,
     condition_mask: np.ndarray | None = None,
 ) -> TrainResult:
     X = _sanitize_feature_matrix_for_xgboost(df[feature_cols].to_numpy(dtype=np.float32))
@@ -1050,7 +1067,11 @@ def train_full_fit_binary(
         y[valid_mask],
         params=xgb_params,
         seed=int(cfg.random_state) + 10_000,
-        early_stopping_rounds=cfg.early_stopping_rounds,
+        early_stopping_rounds=(
+            cfg.early_stopping_rounds
+            if fit_early_stopping_rounds is None
+            else fit_early_stopping_rounds
+        ),
         early_stopping_val_fraction=cfg.early_stopping_val_fraction,
         early_stopping_min_val_rows=cfg.early_stopping_min_val_rows,
     )

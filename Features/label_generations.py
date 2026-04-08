@@ -1507,6 +1507,7 @@ def build_meta_entry_labels(
     atr_col="atr",
     a_tp=1.6,
     b_sl=0.8,
+    max_holding_bars: int = 8,
     use_next_open=True,
     cost_bps=2.0,
     day_col="session_date",
@@ -1540,9 +1541,9 @@ def build_meta_entry_labels(
     Modes
     -----
     - entry_mode='tp' (default):
-      event-based TP-before-SL labeling within the same session. TP labels are
-      left raw so the exit simulator can choose the first valid re-entry after
-      flat.
+      event-based TP-before-SL labeling within the configured max holding
+      horizon. TP labels are left raw so the exit simulator can choose the
+      first valid re-entry after flat.
     - entry_mode='phase':
       phase/gate labeling from ignition/expansion + prob/TB filters.
     """
@@ -1592,6 +1593,7 @@ def build_meta_entry_labels(
         entry_offset = 1 if bool(use_next_open) else 0
         tp_mult = float(a_tp)
         sl_mult = float(b_sl)
+        max_holding = max(1, int(max_holding_bars))
         cost_bps = max(0.0, float(cost_bps))
         if tp_mult <= 0.0:
             raise ValueError("a_tp must be > 0.")
@@ -1631,8 +1633,12 @@ def build_meta_entry_labels(
                 if scan_start >= e:
                     continue
 
-                high_fwd = high_px[scan_start:e]
-                low_fwd = low_px[scan_start:e]
+                scan_end = min(scan_start + max_holding, e)
+                if scan_start >= scan_end:
+                    continue
+
+                high_fwd = high_px[scan_start:scan_end]
+                low_fwd = low_px[scan_start:scan_end]
 
                 long_tp = entry + tp_dist
                 long_sl = entry - sl_dist
