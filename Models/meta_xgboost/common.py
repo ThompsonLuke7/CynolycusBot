@@ -911,6 +911,10 @@ def _fit_booster(
     if early_stopping is not None:
         train_kwargs["early_stopping_rounds"] = int(early_stopping)
     model = xgb.train(**train_kwargs)
+    if model is not None:
+        model.set_attr(
+            codex_early_stopping_used="1" if early_stopping is not None else "0"
+        )
     return model, None, params_local, num_boost_round
 
 
@@ -1015,14 +1019,16 @@ def predict_probs(
         p = 0.0 if constant_prob is None else float(constant_prob)
         return np.full(X.shape[0], p, dtype=np.float32)
     dmat = xgb.DMatrix(X)
+    attrs = model.attributes() if hasattr(model, "attributes") else {}
+    use_best_iteration = str(attrs.get("codex_early_stopping_used", "")).strip() == "1"
     best_iteration = getattr(model, "best_iteration", None)
-    if best_iteration is not None and int(best_iteration) >= 0:
+    if use_best_iteration and best_iteration is not None and int(best_iteration) >= 0:
         try:
             return model.predict(dmat, iteration_range=(0, int(best_iteration) + 1)).astype(np.float32)
         except TypeError:
             pass
     best_ntree_limit = getattr(model, "best_ntree_limit", None)
-    if best_ntree_limit is not None and int(best_ntree_limit) > 0:
+    if use_best_iteration and best_ntree_limit is not None and int(best_ntree_limit) > 0:
         try:
             return model.predict(dmat, ntree_limit=int(best_ntree_limit)).astype(np.float32)
         except TypeError:

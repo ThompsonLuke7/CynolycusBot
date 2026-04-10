@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from Data.retrieve_data import normalize_ticker
+from Features.label_generations import _apply_leg_reset_bridge
 
 if TYPE_CHECKING:
     from xgboost import XGBClassifier
@@ -1124,6 +1125,19 @@ def plot_continuation_strength(
     close_col: str = "close",
     strength_long_col: str = "cont_strength_long",
     strength_short_col: str = "cont_strength_short",
+    leg_label_col: str = "atr_leg_label",
+    momentum_col: str = "trend_phase_m",
+    accel_col: str = "trend_phase_a",
+    exit_long_col: str = "trend_phase_exit_long",
+    exit_short_col: str = "trend_phase_exit_short",
+    candidate_long_col: str = "tb_cont_candidate_long",
+    candidate_short_col: str = "tb_cont_candidate_short",
+    label_col: str = "tb_cont_label",
+    min_cont_strength: float = 0.35,
+    use_accel_filter: bool = True,
+    leg_reset_grace_bars: int = 0,
+    leg_reset_counter_atr: float = 0.0,
+    leg_reset_requires_both: bool = False,
     tail: int | None = _PLOT_TAIL_BARS,
     random_window: bool = False,
     seed: int | None = None,
@@ -1131,10 +1145,16 @@ def plot_continuation_strength(
 ) -> None:
     """
     Plot close price with a subplot showing continuation strength (0..1).
+    When TB-cont diagnostics columns are present, also print a factor breakdown
+    and plot candidate / realized label markers for easier tuning.
     """
     df = _select_plot_window(df, window=tail, random_window=random_window, seed=seed)
-    fig, (ax_price, ax_bar) = plt.subplots(
-        2, 1, figsize=(18, 8), sharex=True, gridspec_kw={"height_ratios": [2.2, 1]}
+    fig, (ax_price, ax_bar, ax_diag) = plt.subplots(
+        3,
+        1,
+        figsize=(18, 10),
+        sharex=True,
+        gridspec_kw={"height_ratios": [2.0, 1.0, 0.8]},
     )
 
     date_index = df.index
@@ -1176,6 +1196,107 @@ def plot_continuation_strength(
     _print_stats(strength_long_col, cont_long)
     _print_stats(strength_short_col, cont_short)
 
+    leg = (
+        pd.to_numeric(df[leg_label_col], errors="coerce").fillna(0).to_numpy(dtype=float)
+        if leg_label_col in df.columns
+        else np.zeros(len(df), dtype=float)
+    )
+    momentum = (
+        pd.to_numeric(df[momentum_col], errors="coerce").to_numpy(dtype=float)
+        if momentum_col in df.columns
+        else np.full(len(df), np.nan, dtype=float)
+    )
+    accel = (
+        pd.to_numeric(df[accel_col], errors="coerce").to_numpy(dtype=float)
+        if accel_col in df.columns
+        else np.full(len(df), np.nan, dtype=float)
+    )
+    exit_long = (
+        pd.to_numeric(df[exit_long_col], errors="coerce").fillna(0).astype(int).to_numpy() == 1
+        if exit_long_col in df.columns
+        else np.zeros(len(df), dtype=bool)
+    )
+    exit_short = (
+        pd.to_numeric(df[exit_short_col], errors="coerce").fillna(0).astype(int).to_numpy() == 1
+        if exit_short_col in df.columns
+        else np.zeros(len(df), dtype=bool)
+    )
+    candidate_long = (
+        pd.to_numeric(df[candidate_long_col], errors="coerce").fillna(0).astype(int).to_numpy() == 1
+        if candidate_long_col in df.columns
+        else np.zeros(len(df), dtype=bool)
+    )
+    candidate_short = (
+        pd.to_numeric(df[candidate_short_col], errors="coerce").fillna(0).astype(int).to_numpy() == 1
+        if candidate_short_col in df.columns
+        else np.zeros(len(df), dtype=bool)
+    )
+    labels = (
+        pd.to_numeric(df[label_col], errors="coerce").fillna(0).to_numpy(dtype=float)
+        if label_col in df.columns
+        else np.zeros(len(df), dtype=float)
+    )
+    atr = (
+        pd.to_numeric(df["atr"], errors="coerce").to_numpy(dtype=float)
+        if "atr" in df.columns
+        else np.full(len(df), np.nan, dtype=float)
+    )
+    leg = _apply_leg_reset_bridge(
+        leg,
+        close=close_y,
+        atr=atr,
+        grace_bars=leg_reset_grace_bars,
+        counter_atr=leg_reset_counter_atr,
+        requires_both=leg_reset_requires_both,
+    )
+
+    a_abs = np.abs(accel[np.isfinite(accel)])
+    a_zero_band = float(np.nanquantile(a_abs, 0.35)) if a_abs.size else 0.0
+    accel_tolerance = max(1e-12, 0.1 * a_zero_band)
+    leg_up = leg == 2.0
+    leg_down = leg == 1.0
+    long_strength_pass = leg_up & np.isfinite(cont_long) & (cont_long >= float(min_cont_strength))
+    short_strength_pass = leg_down & np.isfinite(cont_short) & (cont_short >= float(min_cont_strength))
+    long_momentum_pass = long_strength_pass & np.isfinite(momentum) & (momentum > 0.0)
+    short_momentum_pass = short_strength_pass & np.isfinite(momentum) & (momentum < 0.0)
+    if bool(use_accel_filter):
+        long_accel_pass = long_momentum_pass & (~np.isfinite(accel) | (accel >= -accel_tolerance))
+        short_accel_pass = short_momentum_pass & (~np.isfinite(accel) | (accel <= accel_tolerance))
+    else:
+        long_accel_pass = long_momentum_pass.copy()
+        short_accel_pass = short_momentum_pass.copy()
+    long_exit_pass = long_accel_pass & (~exit_long)
+    short_exit_pass = short_accel_pass & (~exit_short)
+
+    print(
+        "[continuation] factor_counts: "
+        f"leg_up={int(leg_up.sum())}, leg_down={int(leg_down.sum())}, "
+        f"long_strength>={min_cont_strength:.2f}={int(long_strength_pass.sum())}, "
+        f"short_strength>={min_cont_strength:.2f}={int(short_strength_pass.sum())}, "
+        f"long_momentum={int(long_momentum_pass.sum())}, "
+        f"short_momentum={int(short_momentum_pass.sum())}, "
+        f"long_accel={int(long_accel_pass.sum())}, "
+        f"short_accel={int(short_accel_pass.sum())}, "
+        f"long_exit_pass={int(long_exit_pass.sum())}, "
+        f"short_exit_pass={int(short_exit_pass.sum())}, "
+        f"cand_long={int(candidate_long.sum())}, cand_short={int(candidate_short.sum())}, "
+        f"label_long={int((labels >= 0.5).sum())}, label_short={int((labels <= -0.5).sum())}, "
+        f"use_accel_filter={bool(use_accel_filter)}, "
+        f"leg_reset_grace_bars={int(leg_reset_grace_bars)}, "
+        f"leg_reset_counter_atr={float(leg_reset_counter_atr):.3f}, "
+        f"leg_reset_requires_both={bool(leg_reset_requires_both)}"
+    )
+    if candidate_long.any():
+        print(
+            "[continuation] long_candidate_win_rate: "
+            f"{float(np.mean(labels[candidate_long] >= 0.5)):.4f}"
+        )
+    if candidate_short.any():
+        print(
+            "[continuation] short_candidate_win_rate: "
+            f"{float(np.mean(labels[candidate_short] <= -0.5)):.4f}"
+        )
+
     long_plot = np.where(np.isfinite(cont_long), cont_long, 0.0)
     short_plot = np.where(np.isfinite(cont_short), cont_short, 0.0)
     width = 0.4
@@ -1199,9 +1320,66 @@ def plot_continuation_strength(
     ax_bar.set_ylim(0.0, 1.0)
     ax_bar.legend(loc="upper left", ncol=2)
 
+    mom_scale = float(np.nanpercentile(np.abs(momentum[np.isfinite(momentum)]), 90)) if np.isfinite(momentum).any() else 1.0
+    acc_scale = float(np.nanpercentile(np.abs(accel[np.isfinite(accel)]), 90)) if np.isfinite(accel).any() else 1.0
+    mom_norm = np.clip(momentum / max(mom_scale, 1e-12), -1.0, 1.0)
+    acc_norm = np.clip(accel / max(acc_scale, 1e-12), -1.0, 1.0)
+    ax_diag.axhline(0.0, color="#9E9E9E", linewidth=0.8, alpha=0.8)
+    ax_diag.plot(pos, mom_norm, color="#1565C0", linewidth=1.2, label="momentum_norm")
+    ax_diag.plot(pos, acc_norm, color="#6A1B9A", linewidth=1.0, alpha=0.85, label="accel_norm")
+    if candidate_long.any():
+        ax_diag.scatter(
+            pos[candidate_long],
+            np.full(int(candidate_long.sum()), 0.82),
+            color="#43A047",
+            marker="o",
+            s=20,
+            alpha=0.8,
+            label=candidate_long_col,
+            zorder=2.1,
+        )
+    if candidate_short.any():
+        ax_diag.scatter(
+            pos[candidate_short],
+            np.full(int(candidate_short.sum()), -0.82),
+            color="#FB8C00",
+            marker="o",
+            s=20,
+            alpha=0.8,
+            label=candidate_short_col,
+            zorder=2.1,
+        )
+    mask_long_label = labels >= 0.5
+    mask_short_label = labels <= -0.5
+    if mask_long_label.any():
+        ax_diag.scatter(
+            pos[mask_long_label],
+            np.full(int(mask_long_label.sum()), 0.45),
+            color="#2E7D32",
+            marker="^",
+            s=36,
+            alpha=0.95,
+            label=f"{label_col}=+1",
+            zorder=2.2,
+        )
+    if mask_short_label.any():
+        ax_diag.scatter(
+            pos[mask_short_label],
+            np.full(int(mask_short_label.sum()), -0.45),
+            color="#C62828",
+            marker="v",
+            s=36,
+            alpha=0.95,
+            label=f"{label_col}=-1",
+            zorder=2.2,
+        )
+    ax_diag.set_ylabel("Diag")
+    ax_diag.set_ylim(-1.05, 1.05)
+    ax_diag.legend(loc="upper left", ncol=4, fontsize=9)
+
     tick_positions, tick_labels = _compute_time_ticks(date_index, pos)
-    _apply_time_ticks(ax_bar, tick_positions, tick_labels)
-    _draw_day_lines([ax_price, ax_bar], tick_positions)
+    _apply_time_ticks(ax_diag, tick_positions, tick_labels)
+    _draw_day_lines([ax_price, ax_bar, ax_diag], tick_positions)
 
     _finalize_plot(
         fig,

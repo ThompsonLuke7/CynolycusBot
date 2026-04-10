@@ -44,6 +44,7 @@ from Data.load_data import (
 from Data.retrieve_data import normalize_ticker
 from Data.plots.plots import get_default_model_inference_plot_path, plot_model_inference
 from Features.feature_scaling import apply_scaler_from_stats
+from Features.feature_matrix_regime import AgentFeatureConfig, build_agent_feature_matrix
 from Models.ga_xgboost.ga_xgboost import GAXGBoostFeatureSelector
 from Policy.training_logging import log_training_run
 
@@ -88,6 +89,7 @@ class TrainConfig:
     xgb_one_drop: bool | None = None
     xgb_sample_type: str | None = None
     xgb_normalize_type: str | None = None
+    append_meta_context_to_swing: bool = True
 
 
 _GA_PARAM_FIELDS: tuple[str, ...] = (
@@ -240,6 +242,10 @@ def _normalize_ga_label_dir(label_mode_or_dir: str) -> str:
         return "pivots"
     if token == "tb":
         return "tb"
+    if token in {"tb_cont", "tb_sparse", "continuation_tb"}:
+        return "tb_cont"
+    if token in {"entry_edge", "edge", "entry_quality"}:
+        return "entry_edge"
     if token == "swing":
         return "swing"
     return token
@@ -387,6 +393,48 @@ def _load_norm_stats(
     return json.loads(stats_path.read_text())
 
 
+def _build_swing_meta_context_frame(
+    *,
+    ticker: str,
+    dataset_name: str,
+    processed_root: Path | None = None,
+) -> pd.DataFrame:
+    agent_cfg = AgentFeatureConfig(
+        ticker=normalize_ticker(ticker),
+        dataset_name=dataset_name,
+        processed_root=processed_root,
+        include_pivot_probs=False,
+        include_tb_probs=False,
+        include_state_placeholders=False,
+        drop_na=False,
+    )
+    ctx = build_agent_feature_matrix(config=agent_cfg)
+    blocked = {
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "p_pivot_long",
+        "p_pivot_short",
+        "p_tb_long",
+        "p_tb_short",
+        "pivot_edge",
+        "pivot_edge_abs",
+        "tb_edge",
+        "tb_edge_abs",
+        "edge_disagreement_abs",
+        "edge_sign_disagreement",
+        "current_position",
+        "time_in_position",
+        "bars_since_last_trade",
+        "unrealized_pnl",
+        "realized_pnl_today",
+    }
+    keep_cols = [col for col in ctx.columns if col not in blocked]
+    return ctx.loc[:, keep_cols].copy()
+
+
 def load_dataset(
     *,
     ticker: str,
@@ -397,6 +445,7 @@ def load_dataset(
     super_pivot_weight: float = 1.0,
     processed_root: Path | None = None,
     stats_root: Path | None = None,
+    append_meta_context_to_swing: bool = False,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -404,6 +453,8 @@ def load_dataset(
     pd.DataFrame | None,
     np.ndarray | None,
     np.ndarray | None,
+    list[str] | None,
+    list[str],
 ]:
     clean = normalize_ticker(ticker)
     if processed_root is None:
@@ -453,6 +504,29 @@ def load_dataset(
             x_stem = Path(x_filename).stem
             stats_path = stats_dir / f"norm_stats_{dataset_name}_{x_stem}_train.json"
             print(f"No scaler stats found at {stats_path}; using raw features.")
+
+    appended_meta_feature_names: list[str] = []
+    if label_mode == "swing" and bool(append_meta_context_to_swing):
+        ctx_df = _build_swing_meta_context_frame(
+            ticker=clean,
+            dataset_name=dataset_name,
+            processed_root=processed_root,
+        )
+        if len(ctx_df) != len(X_df):
+            raise ValueError(
+                "Meta context frame length does not match swing dataset length: "
+                f"{len(ctx_df)} != {len(X_df)}"
+            )
+        if not X_df.index.equals(ctx_df.index):
+            ctx_df = ctx_df.reindex(X_df.index)
+        append_cols = [col for col in ctx_df.columns if col not in X_df.columns]
+        if append_cols:
+            X_df = pd.concat([X_df, ctx_df.loc[:, append_cols]], axis=1)
+            appended_meta_feature_names = list(append_cols)
+            print(
+                f"[GA-XGB] Appended {len(appended_meta_feature_names)} meta-context features "
+                "to the swing training matrix."
+            )
 
     X = X_df.to_numpy(dtype=np.float32)
 
@@ -508,10 +582,37 @@ def load_dataset(
             )
         y_long = y_df[long_col].to_numpy(dtype=np.int64)
         y_short = y_df[short_col].to_numpy(dtype=np.int64)
+    elif label_mode in {"tb_cont", "tb_sparse", "continuation_tb"}:
+        long_col, short_col = "tb_cont_long_label", "tb_cont_short_label"
+        missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
+        if missing_cols:
+            raise KeyError(
+                f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
+            )
+        y_long = pd.to_numeric(y_df[long_col], errors="coerce").fillna(0).to_numpy(dtype=np.int64)
+        y_short = pd.to_numeric(y_df[short_col], errors="coerce").fillna(0).to_numpy(dtype=np.int64)
+    elif label_mode in {"entry_edge", "edge", "entry_quality"}:
+        long_col, short_col = "entry_edge_long_label", "entry_edge_short_label"
+        missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
+        if missing_cols:
+            raise KeyError(
+                f"Missing label columns in {y_path.name}: {', '.join(missing_cols)}"
+            )
+        y_long = pd.to_numeric(y_df[long_col], errors="coerce").fillna(0).to_numpy(dtype=np.int64)
+        y_short = pd.to_numeric(y_df[short_col], errors="coerce").fillna(0).to_numpy(dtype=np.int64)
     else:
         raise ValueError(f"Unknown label_mode: {label_mode}")
 
-    return X, y_long, y_short, plot_df, sample_weight_long, sample_weight_short
+    return (
+        X,
+        y_long,
+        y_short,
+        plot_df,
+        sample_weight_long,
+        sample_weight_short,
+        list(X_df.columns),
+        appended_meta_feature_names,
+    )
 
 
 def _load_split_indices(
@@ -557,6 +658,7 @@ def load_model_artifacts(
     *,
     label_dir: str,
     feature_names: list[str] | None = None,
+    always_include_features: set[str] | None = None,
 ) -> tuple[np.ndarray, dict, dict]:
     side_dir = _artifact_side_dir(model_root, side, label_dir)
     mask_path = side_dir / "best_mask.npy"
@@ -604,8 +706,31 @@ def load_model_artifacts(
             preview = ", ".join(missing[:5])
             extra = "" if len(missing) <= 5 else f", ... (+{len(missing) - 5} more)"
             msg += f", dropped={len(missing)} [{preview}{extra}]"
+        if always_include_features:
+            forced = 0
+            for name in always_include_features:
+                idx = feature_lookup.get(name)
+                if idx is not None and not remapped[idx]:
+                    remapped[idx] = True
+                    forced += 1
+            if forced:
+                msg += f", force_included_appended={forced}"
         print(msg)
         mask = remapped
+    elif feature_names is not None and always_include_features:
+        feature_lookup = {name: idx for idx, name in enumerate(feature_names)}
+        forced = 0
+        mask = mask.copy()
+        for name in always_include_features:
+            idx = feature_lookup.get(name)
+            if idx is not None and not mask[idx]:
+                mask[idx] = True
+                forced += 1
+        if forced:
+            print(
+                f"[GA-XGB] Expanded {side.upper()} {label_dir} mask with "
+                f"{forced} appended meta-context features."
+            )
     return mask, xgb_params, meta
 
 
@@ -1277,7 +1402,7 @@ def main() -> None:
         "--label-mode",
         type=str,
         default=None,
-        choices=["swing", "pivot", "tb"],
+        choices=["swing", "pivot", "tb", "tb_cont", "entry_edge"],
         help="Label mode to use (default: swing).",
     )
     parser.add_argument(
@@ -1410,6 +1535,15 @@ def main() -> None:
         default=None,
         help="DART: normalization mode after dropout.",
     )
+    parser.add_argument(
+        "--append-meta-context-to-swing",
+        action=argparse.BooleanOptionalAction,
+        default=TrainConfig.append_meta_context_to_swing,
+        help=(
+            "For swing training, append the meta/regime context block to the base TA "
+            "matrix while keeping the existing GA-selected TA subset."
+        ),
+    )
     args = parser.parse_args()
 
     cfg = TrainConfig(
@@ -1445,6 +1579,7 @@ def main() -> None:
         xgb_one_drop=args.xgb_one_drop,
         xgb_sample_type=args.xgb_sample_type,
         xgb_normalize_type=args.xgb_normalize_type,
+        append_meta_context_to_swing=bool(args.append_meta_context_to_swing),
     )
     ga_kwargs = _ga_kwargs_from_config(cfg)
     xgb_overrides = _xgb_overrides_from_config(cfg)
@@ -1464,7 +1599,7 @@ def main() -> None:
     stats_root = Path(cfg.stats_root) if cfg.stats_root else None
     model_root_override = Path(cfg.model_root) if cfg.model_root else None
 
-    X, y_long, y_short, plot_df, w_long, w_short = load_dataset(
+    X, y_long, y_short, plot_df, w_long, w_short, feature_names, appended_meta_feature_names = load_dataset(
         ticker=cfg.ticker,
         dataset_name=cfg.dataset_name,
         x_filename=cfg.x_filename,
@@ -1473,6 +1608,7 @@ def main() -> None:
         super_pivot_weight=cfg.super_pivot_weight,
         processed_root=processed_root,
         stats_root=stats_root,
+        append_meta_context_to_swing=bool(cfg.append_meta_context_to_swing),
     )
     plot_index = plot_df.index if plot_df is not None else None
 
@@ -1498,18 +1634,22 @@ def main() -> None:
     model_root = model_root / cfg.model_dirname
     model_dataset_root = model_root / cfg.dataset_name
     _maybe_migrate_legacy_tree(model_dataset_root, label_dir=artifact_label_dir)
-    feature_names = load_feature_names(
-        cfg.ticker,
-        cfg.dataset_name,
-        cfg.x_filename,
-        processed_root=processed_root,
-    )
+    if feature_names is None:
+        feature_names = load_feature_names(
+            cfg.ticker,
+            cfg.dataset_name,
+            cfg.x_filename,
+            processed_root=processed_root,
+        )
     common_meta = {
         "ticker": cfg.ticker,
         "dataset_name": cfg.dataset_name,
         "label_mode": cfg.label_mode,
         "super_pivot_weight": cfg.super_pivot_weight,
         "side_mode": side_mode,
+        "append_meta_context_to_swing": bool(cfg.append_meta_context_to_swing),
+        "appended_meta_feature_count": int(len(appended_meta_feature_names)),
+        "appended_meta_feature_names": list(appended_meta_feature_names),
     }
 
     train_val_idx = np.sort(np.concatenate([train_idx, val_idx]))
@@ -1592,6 +1732,7 @@ def main() -> None:
                         "long",
                         label_dir=artifact_label_dir,
                         feature_names=feature_names,
+                        always_include_features=set(appended_meta_feature_names),
                     )
                 if run_short:
                     load_model_artifacts(
@@ -1599,6 +1740,7 @@ def main() -> None:
                         "short",
                         label_dir=artifact_label_dir,
                         feature_names=feature_names,
+                        always_include_features=set(appended_meta_feature_names),
                     )
             except FileNotFoundError:
                 need_refresh = True
@@ -1627,6 +1769,7 @@ def main() -> None:
                 "long",
                 label_dir=artifact_label_dir,
                 feature_names=feature_names,
+                always_include_features=set(appended_meta_feature_names),
             )
             long_params = _sanitize_xgb_params(long_params)
         if run_short:
@@ -1635,6 +1778,7 @@ def main() -> None:
                 "short",
                 label_dir=artifact_label_dir,
                 feature_names=feature_names,
+                always_include_features=set(appended_meta_feature_names),
             )
             short_params = _sanitize_xgb_params(short_params)
         if xgb_overrides:

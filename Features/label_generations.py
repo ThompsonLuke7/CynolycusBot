@@ -17,6 +17,100 @@ from Features.feature_sets.feature_constants import SWING_LABEL_COLUMNS
 from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
 
 
+def _apply_leg_reset_bridge(
+    raw_leg_state: np.ndarray,
+    *,
+    close: np.ndarray | None = None,
+    atr: np.ndarray | None = None,
+    grace_bars: int = 0,
+    counter_atr: float = 0.0,
+    requires_both: bool = False,
+    leg_down_value: float = 1.0,
+    leg_up_value: float = 2.0,
+) -> np.ndarray:
+    grace = max(0, int(grace_bars))
+    counter_thr = max(0.0, float(counter_atr))
+    if raw_leg_state.size == 0 or (grace <= 0 and counter_thr <= 0.0):
+        return raw_leg_state.copy()
+
+    effective = raw_leg_state.copy()
+    current = raw_leg_state[0]
+    pending = None
+    pending_count = 0
+    pending_anchor_close = np.nan
+
+    for i, raw in enumerate(raw_leg_state):
+        if i == 0:
+            effective[i] = current
+            continue
+        if raw == current:
+            pending = None
+            pending_count = 0
+            pending_anchor_close = np.nan
+            effective[i] = current
+            continue
+
+        if pending != raw:
+            pending = raw
+            pending_count = 1
+            if close is not None and i - 1 >= 0 and np.isfinite(close[i - 1]):
+                pending_anchor_close = float(close[i - 1])
+            elif close is not None and np.isfinite(close[i]):
+                pending_anchor_close = float(close[i])
+            else:
+                pending_anchor_close = np.nan
+        else:
+            pending_count += 1
+
+        if current == 0.0:
+            current = raw
+            pending = None
+            pending_count = 0
+            pending_anchor_close = np.nan
+            effective[i] = current
+            continue
+
+        time_ok = grace > 0 and pending_count >= grace
+        counter_ok = False
+        if (
+            counter_thr > 0.0
+            and close is not None
+            and atr is not None
+            and np.isfinite(pending_anchor_close)
+            and np.isfinite(close[i])
+        ):
+            atr_ref = np.nan
+            if np.isfinite(atr[i]) and atr[i] > 0.0:
+                atr_ref = float(atr[i])
+            elif i - 1 >= 0 and np.isfinite(atr[i - 1]) and atr[i - 1] > 0.0:
+                atr_ref = float(atr[i - 1])
+            if np.isfinite(atr_ref) and atr_ref > 0.0:
+                if current == leg_up_value:
+                    adverse_move_atr = max(0.0, pending_anchor_close - float(close[i])) / atr_ref
+                elif current == leg_down_value:
+                    adverse_move_atr = max(0.0, float(close[i]) - pending_anchor_close) / atr_ref
+                else:
+                    adverse_move_atr = 0.0
+                counter_ok = adverse_move_atr >= counter_thr
+
+        if grace > 0 and counter_thr > 0.0:
+            reset_ok = (time_ok and counter_ok) if bool(requires_both) else (time_ok or counter_ok)
+        elif grace > 0:
+            reset_ok = time_ok
+        else:
+            reset_ok = counter_ok
+
+        if reset_ok:
+            current = raw
+            pending = None
+            pending_count = 0
+            pending_anchor_close = np.nan
+
+        effective[i] = current
+
+    return effective
+
+
 def _get_prob_array(
     df: pd.DataFrame,
     prob_col: str,
@@ -526,11 +620,19 @@ def add_atr_leg_segmentation_labels(
 def add_atr_continuation_strength_labels(
     df: pd.DataFrame,
     *,
+    close_col: str = "close",
+    atr_col: str = "atr",
+    atr_length: int = 14,
     pivot_down_col: str = "pivot_down",
     pivot_up_col: str = "pivot_up",
     leg_state_col: str | None = "atr_leg_label",
     max_holding: int = 20,
     exclude_pivot_bar: bool = True,
+    leg_reset_grace_bars: int = 0,
+    leg_reset_counter_atr: float = 0.0,
+    leg_reset_requires_both: bool = False,
+    continuation_floor: float = 0.05,
+    continuation_tau: float | None = None,
     strength_long_col: str = "cont_strength_long",
     strength_short_col: str = "cont_strength_short",
     combined_col: str = "cont_strength",
@@ -540,8 +642,8 @@ def add_atr_continuation_strength_labels(
 
     Interpretation:
       1.0  -> very early in leg (strong continuation)
-      0.5  -> mid-leg
-      0.0  -> late / exhausted / invalid
+      0.5  -> mature but still active continuation
+      floor -> old but still intact continuation
 
     This is a STATE label, not an EVENT label.
     """
@@ -549,59 +651,357 @@ def add_atr_continuation_strength_labels(
     piv_dn = df[pivot_down_col].fillna(0).astype(int).to_numpy()
     piv_up = df[pivot_up_col].fillna(0).astype(int).to_numpy()
     n = len(df)
-
-    # --- find next pivots ---
-    next_up = np.full(n, -1, dtype=int)
-    next_dn = np.full(n, -1, dtype=int)
-    nu, nd = -1, -1
-    for i in range(n - 1, -1, -1):
-        next_up[i] = nu
-        next_dn[i] = nd
-        if piv_up[i] == 1:
-            nu = i
-        if piv_dn[i] == 1:
-            nd = i
+    leg_down_value = 1.0
+    leg_up_value = 2.0
 
     # --- leg state ---
     leg_state = None
     if leg_state_col and leg_state_col in df.columns:
         leg_state = df[leg_state_col].fillna(0).to_numpy(dtype=float)
+        close = (
+            pd.to_numeric(df[close_col], errors="coerce").to_numpy(dtype=float)
+            if close_col in df.columns
+            else None
+        )
+        atr = None
+        if atr_col in df.columns:
+            atr = pd.to_numeric(df[atr_col], errors="coerce").to_numpy(dtype=float)
+        elif all(col in df.columns for col in ("high", "low", close_col)):
+            atr = ta.atr(
+                pd.to_numeric(df["high"], errors="coerce"),
+                pd.to_numeric(df["low"], errors="coerce"),
+                pd.to_numeric(df[close_col], errors="coerce"),
+                length=atr_length,
+            ).to_numpy(dtype=float)
+        leg_state = _apply_leg_reset_bridge(
+            leg_state,
+            close=close,
+            atr=atr,
+            grace_bars=leg_reset_grace_bars,
+            counter_atr=leg_reset_counter_atr,
+            requires_both=leg_reset_requires_both,
+            leg_down_value=leg_down_value,
+            leg_up_value=leg_up_value,
+        )
 
     cont_long = np.full(n, np.nan, dtype=float)
     cont_short = np.full(n, np.nan, dtype=float)
+    max_hold = max(1, int(max_holding))
+    cont_floor = float(np.clip(continuation_floor, 0.0, 0.99))
+    tau = float(continuation_tau) if continuation_tau is not None else max(1.0, max_hold / 2.0)
+    tau = max(1e-6, tau)
 
-    for t in range(n):
-        if exclude_pivot_bar and (piv_up[t] == 1 or piv_dn[t] == 1):
-            continue
+    if leg_state is not None:
+        run_start = 0
+        current_leg = leg_state[0] if leg_state.size else 0.0
+        for t in range(n):
+            raw_leg = leg_state[t]
+            if t == 0:
+                current_leg = raw_leg
+                run_start = 0
+            elif raw_leg != current_leg:
+                current_leg = raw_leg
+                run_start = t
 
-        # LONG continuation: distance to next UP pivot
-        if next_up[t] >= 0:
-            remaining = next_up[t] - t
-            strength = 1.0 - min(remaining, max_holding) / max_holding
-            cont_long[t] = np.clip(1.0 - strength, 0.0, 1.0)
+            if current_leg == 0.0:
+                continue
+            if exclude_pivot_bar and (piv_up[t] == 1 or piv_dn[t] == 1):
+                continue
 
-        # SHORT continuation: distance to next DOWN pivot
-        if next_dn[t] >= 0:
-            remaining = next_dn[t] - t
-            strength = 1.0 - min(remaining, max_holding) / max_holding
-            cont_short[t] = np.clip(1.0 - strength, 0.0, 1.0)
+            age = t - run_start
+            strength = cont_floor + (1.0 - cont_floor) * np.exp(-float(age) / tau)
+            strength = float(np.clip(strength, cont_floor, 1.0))
+            if current_leg == leg_up_value:
+                cont_long[t] = strength
+            elif current_leg == leg_down_value:
+                cont_short[t] = strength
 
     # --- mask to active leg (important) ---
+    # ATR leg labels are encoded as {0=neutral, 1=down, 2=up}.
     if leg_state is not None:
-        cont_long[leg_state != 1] = np.nan
-        cont_short[leg_state != -1] = np.nan
+        cont_long[leg_state != leg_up_value] = np.nan
+        cont_short[leg_state != leg_down_value] = np.nan
 
     # --- combined (direction-aware) ---
     cont = np.full(n, np.nan, dtype=float)
     if leg_state is not None:
-        cont[leg_state == 1] = cont_long[leg_state == 1]
-        cont[leg_state == -1] = cont_short[leg_state == -1]
+        cont[leg_state == leg_up_value] = cont_long[leg_state == leg_up_value]
+        cont[leg_state == leg_down_value] = cont_short[leg_state == leg_down_value]
 
     df[strength_long_col] = cont_long
     df[strength_short_col] = cont_short
     df[combined_col] = cont
 
     return df
+
+
+def add_sparse_continuation_tb_labels(
+    df: pd.DataFrame,
+    *,
+    close_col: str = "close",
+    high_col: str = "high",
+    low_col: str = "low",
+    open_col: str = "open",
+    atr_col: str = "atr",
+    atr_length: int = 14,
+    pivot_up_col: str = "pivot_up",
+    pivot_down_col: str = "pivot_down",
+    leg_state_col: str = "atr_leg_label",
+    cont_strength_long_col: str = "cont_strength_long",
+    cont_strength_short_col: str = "cont_strength_short",
+    momentum_col: str = "trend_phase_m",
+    accel_col: str = "trend_phase_a",
+    exit_long_col: str = "trend_phase_exit_long",
+    exit_short_col: str = "trend_phase_exit_short",
+    max_holding: int = 8,
+    k_up: float = 1.2,
+    k_dn: float = 0.8,
+    tp_mult: float | None = None,
+    sl_mult: float | None = None,
+    min_cont_strength: float = 0.35,
+    leg_reset_grace_bars: int = 0,
+    leg_reset_counter_atr: float = 0.0,
+    leg_reset_requires_both: bool = False,
+    use_accel_filter: bool = True,
+    use_next_open: bool = False,
+    exclude_pivot_bar: bool = True,
+    base_label_col: str = "tb_cont_label",
+    long_label_col: str = "tb_cont_long_label",
+    short_label_col: str = "tb_cont_short_label",
+    candidate_long_col: str = "tb_cont_candidate_long",
+    candidate_short_col: str = "tb_cont_candidate_short",
+    entry_price_col: str = "tb_cont_entry_price",
+    exit_price_col: str = "tb_cont_exit_price",
+    holding_bars_col: str = "tb_cont_holding_bars",
+    realized_ret_col: str = "tb_cont_realized_return",
+) -> pd.DataFrame:
+    """
+    Sparse continuation-oriented triple-barrier labels.
+
+    Unlike dense triple-barrier labels that assign direction to almost every bar,
+    this label only activates on plausible continuation states:
+      - active up/down leg
+      - continuation strength above a minimum threshold
+      - momentum aligned with the leg
+      - no active phase-decay exit trigger
+
+    Barrier logic is direction-aware:
+      - longs: +tp_mult * ATR before -sl_mult * ATR
+      - shorts: -tp_mult * ATR before +sl_mult * ATR
+
+    The legacy k_up/k_dn names are retained as fallbacks when tp_mult/sl_mult
+    are not provided.
+
+    Outputs:
+      base_label_col: {-1, 0, +1}
+      long_label_col / short_label_col: one-vs-rest binaries for current trainers
+    """
+    out = df.copy()
+    if atr_col not in out.columns:
+        out[atr_col] = ta.atr(out[high_col], out[low_col], out[close_col], length=atr_length)
+    if leg_state_col not in out.columns:
+        out = add_atr_leg_segmentation_labels(out, atr_col=atr_col, leg_state_col=leg_state_col)
+    if cont_strength_long_col not in out.columns or cont_strength_short_col not in out.columns:
+        out = add_atr_continuation_strength_labels(
+            out,
+            close_col=close_col,
+            atr_col=atr_col,
+            atr_length=atr_length,
+            leg_state_col=leg_state_col,
+            max_holding=max_holding,
+            leg_reset_grace_bars=leg_reset_grace_bars,
+            leg_reset_counter_atr=leg_reset_counter_atr,
+            leg_reset_requires_both=leg_reset_requires_both,
+            strength_long_col=cont_strength_long_col,
+            strength_short_col=cont_strength_short_col,
+        )
+    need_phase = {momentum_col, accel_col, exit_long_col, exit_short_col}
+    if not need_phase.issubset(out.columns):
+        out = add_trend_phase_labels(
+            out,
+            close_col=close_col,
+            momentum_col=momentum_col,
+            accel_col=accel_col,
+            exit_long_col=exit_long_col,
+            exit_short_col=exit_short_col,
+            write_phase_columns=True,
+            use_hazard_exit_labels=False,
+        )
+
+    leg_down_value = 1.0
+    leg_up_value = 2.0
+
+    close = pd.to_numeric(out[close_col], errors="coerce").to_numpy(dtype=float)
+    high = pd.to_numeric(out[high_col], errors="coerce").to_numpy(dtype=float)
+    low = pd.to_numeric(out[low_col], errors="coerce").to_numpy(dtype=float)
+    open_ = pd.to_numeric(out[open_col], errors="coerce").to_numpy(dtype=float) if open_col in out.columns else None
+    atr = pd.to_numeric(out[atr_col], errors="coerce").to_numpy(dtype=float)
+    leg_state = pd.to_numeric(out[leg_state_col], errors="coerce").fillna(0).to_numpy(dtype=float)
+    leg_state = _apply_leg_reset_bridge(
+        leg_state,
+        close=close,
+        atr=atr,
+        grace_bars=leg_reset_grace_bars,
+        counter_atr=leg_reset_counter_atr,
+        requires_both=leg_reset_requires_both,
+        leg_down_value=leg_down_value,
+        leg_up_value=leg_up_value,
+    )
+    cont_long = pd.to_numeric(out[cont_strength_long_col], errors="coerce").to_numpy(dtype=float)
+    cont_short = pd.to_numeric(out[cont_strength_short_col], errors="coerce").to_numpy(dtype=float)
+    m = pd.to_numeric(out[momentum_col], errors="coerce").to_numpy(dtype=float)
+    a = pd.to_numeric(out[accel_col], errors="coerce").to_numpy(dtype=float)
+    exit_long = pd.to_numeric(out[exit_long_col], errors="coerce").fillna(0).astype(int).to_numpy() == 1
+    exit_short = pd.to_numeric(out[exit_short_col], errors="coerce").fillna(0).astype(int).to_numpy() == 1
+    piv_up = (
+        out[pivot_up_col].fillna(0).astype(int).to_numpy()
+        if pivot_up_col in out.columns
+        else np.zeros(len(out), dtype=int)
+    )
+    piv_dn = (
+        out[pivot_down_col].fillna(0).astype(int).to_numpy()
+        if pivot_down_col in out.columns
+        else np.zeros(len(out), dtype=int)
+    )
+
+    n = len(out)
+    label = np.zeros(n, dtype=float)
+    long_label = np.zeros(n, dtype=np.int8)
+    short_label = np.zeros(n, dtype=np.int8)
+    candidate_long = np.zeros(n, dtype=np.int8)
+    candidate_short = np.zeros(n, dtype=np.int8)
+    entry_price = np.full(n, np.nan)
+    exit_price = np.full(n, np.nan)
+    holding_bars = np.full(n, np.nan)
+    realized_ret = np.full(n, np.nan)
+
+    a_abs = np.abs(a[np.isfinite(a)])
+    a_zero_band = float(np.nanquantile(a_abs, 0.35)) if a_abs.size else 0.0
+    accel_tolerance = max(1e-12, 0.1 * a_zero_band)
+    max_hold = max(1, int(max_holding))
+    entry_offset = 1 if bool(use_next_open) else 0
+    long_tp_mult = float(tp_mult if tp_mult is not None else k_up)
+    long_sl_mult = float(sl_mult if sl_mult is not None else k_dn)
+    short_tp_mult = float(tp_mult if tp_mult is not None else k_up)
+    short_sl_mult = float(sl_mult if sl_mult is not None else k_dn)
+
+    for i in range(n):
+        if exclude_pivot_bar and (piv_up[i] == 1 or piv_dn[i] == 1):
+            continue
+        if not np.isfinite(atr[i]) or atr[i] <= 0.0:
+            continue
+
+        long_candidate = (
+            leg_state[i] == leg_up_value
+            and np.isfinite(cont_long[i])
+            and cont_long[i] >= float(min_cont_strength)
+            and np.isfinite(m[i])
+            and m[i] > 0.0
+            and (
+                (not bool(use_accel_filter))
+                or (not np.isfinite(a[i]))
+                or a[i] >= -accel_tolerance
+            )
+            and not bool(exit_long[i])
+        )
+        short_candidate = (
+            leg_state[i] == leg_down_value
+            and np.isfinite(cont_short[i])
+            and cont_short[i] >= float(min_cont_strength)
+            and np.isfinite(m[i])
+            and m[i] < 0.0
+            and (
+                (not bool(use_accel_filter))
+                or (not np.isfinite(a[i]))
+                or a[i] <= accel_tolerance
+            )
+            and not bool(exit_short[i])
+        )
+
+        candidate_long[i] = int(long_candidate)
+        candidate_short[i] = int(short_candidate)
+        if not long_candidate and not short_candidate:
+            continue
+
+        entry_idx = i + entry_offset
+        if entry_idx >= n:
+            continue
+        ep = open_[entry_idx] if open_ is not None and use_next_open else close[i]
+        if not np.isfinite(ep):
+            continue
+        entry_price[i] = ep
+        last_idx = min(entry_idx + max_hold, n - 1)
+        if last_idx <= entry_idx:
+            continue
+
+        long_tp = ep + long_tp_mult * atr[i]
+        long_sl = ep - long_sl_mult * atr[i]
+        short_tp = ep - short_tp_mult * atr[i]
+        short_sl = ep + short_sl_mult * atr[i]
+        outcome = 0.0
+        hit_exit = close[last_idx] if np.isfinite(close[last_idx]) else ep
+        hit_bars = last_idx - i
+
+        for j in range(entry_idx + 1, last_idx + 1):
+            if long_candidate:
+                hit_tp = np.isfinite(high[j]) and high[j] >= long_tp
+                hit_sl = np.isfinite(low[j]) and low[j] <= long_sl
+                if hit_tp and not hit_sl:
+                    outcome = 1.0
+                    hit_exit = (
+                        long_tp
+                        if open_ is None or not np.isfinite(open_[j]) or open_[j] <= long_tp
+                        else open_[j]
+                    )
+                    hit_bars = j - i
+                    break
+                if hit_sl and not hit_tp:
+                    hit_exit = (
+                        long_sl
+                        if open_ is None or not np.isfinite(open_[j]) or open_[j] >= long_sl
+                        else open_[j]
+                    )
+                    hit_bars = j - i
+                    break
+            if short_candidate:
+                hit_tp = np.isfinite(low[j]) and low[j] <= short_tp
+                hit_sl = np.isfinite(high[j]) and high[j] >= short_sl
+                if hit_tp and not hit_sl:
+                    outcome = -1.0
+                    hit_exit = (
+                        short_tp
+                        if open_ is None or not np.isfinite(open_[j]) or open_[j] >= short_tp
+                        else open_[j]
+                    )
+                    hit_bars = j - i
+                    break
+                if hit_sl and not hit_tp:
+                    hit_exit = (
+                        short_sl
+                        if open_ is None or not np.isfinite(open_[j]) or open_[j] <= short_sl
+                        else open_[j]
+                    )
+                    hit_bars = j - i
+                    break
+
+        label[i] = outcome
+        long_label[i] = int(outcome == 1.0)
+        short_label[i] = int(outcome == -1.0)
+        exit_price[i] = hit_exit
+        holding_bars[i] = hit_bars
+        if np.isfinite(ep) and ep != 0.0 and np.isfinite(hit_exit):
+            realized_ret[i] = hit_exit / ep - 1.0
+
+    out[base_label_col] = label
+    out[long_label_col] = pd.Series(long_label, index=out.index).astype("Int64")
+    out[short_label_col] = pd.Series(short_label, index=out.index).astype("Int64")
+    out[candidate_long_col] = pd.Series(candidate_long, index=out.index).astype("Int64")
+    out[candidate_short_col] = pd.Series(candidate_short, index=out.index).astype("Int64")
+    out[entry_price_col] = entry_price
+    out[exit_price_col] = exit_price
+    out[holding_bars_col] = holding_bars
+    out[realized_ret_col] = realized_ret
+    return out
 
 
 
@@ -716,6 +1116,128 @@ def add_mfe_mae_labels(
         df[mae_up_col] = mae_up
         df[mae_down_col] = mae_dn
     return df
+
+
+def add_forward_entry_edge_labels(
+    df: pd.DataFrame,
+    *,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    open_col: str = "open",
+    atr_col: str = "atr",
+    atr_length: int = 14,
+    horizon: int = 8,
+    use_next_open: bool = True,
+    adverse_weight: float = 0.8,
+    good_threshold: float = 0.25,
+    bad_threshold: float = -0.25,
+    edge_long_col: str = "entry_edge_long_atr",
+    edge_short_col: str = "entry_edge_short_atr",
+    long_label_col: str = "entry_edge_long_label",
+    short_label_col: str = "entry_edge_short_label",
+    long_class_col: str = "entry_edge_long_class",
+    short_class_col: str = "entry_edge_short_class",
+    entry_price_col: str = "entry_edge_entry_price",
+) -> pd.DataFrame:
+    """
+    Fixed-horizon forward entry-quality labels.
+
+    These are label-generation helpers for "is this a good entry here?" rather
+    than state labels. They intentionally use future data.
+
+    long_edge  = forward_mfe_up_atr - adverse_weight * forward_mae_down_atr
+    short_edge = forward_mfe_down_atr - adverse_weight * forward_mae_up_atr
+
+    Derived binary labels expose "good" entries for the current GA-XGB trainer,
+    while the continuous scores remain available for analysis or future
+    regression/ordinal training.
+    """
+    out = df.copy()
+    if atr_col not in out.columns:
+        out[atr_col] = ta.atr(
+            out[high_col], out[low_col], out[close_col], length=atr_length
+        )
+
+    high = pd.to_numeric(out[high_col], errors="coerce").to_numpy(dtype=float)
+    low = pd.to_numeric(out[low_col], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(out[close_col], errors="coerce").to_numpy(dtype=float)
+    open_ = (
+        pd.to_numeric(out[open_col], errors="coerce").to_numpy(dtype=float)
+        if open_col in out.columns
+        else None
+    )
+    atr = pd.to_numeric(out[atr_col], errors="coerce").to_numpy(dtype=float)
+
+    n = len(out)
+    edge_long = np.full(n, np.nan, dtype=float)
+    edge_short = np.full(n, np.nan, dtype=float)
+    edge_long_class = np.full(n, np.nan, dtype=float)
+    edge_short_class = np.full(n, np.nan, dtype=float)
+    long_label = np.zeros(n, dtype=np.int8)
+    short_label = np.zeros(n, dtype=np.int8)
+    entry_price = np.full(n, np.nan, dtype=float)
+
+    horizon = max(1, int(horizon))
+    adverse_weight = float(adverse_weight)
+    good_threshold = float(good_threshold)
+    bad_threshold = float(bad_threshold)
+    entry_offset = 1 if bool(use_next_open) else 0
+
+    for t in range(n):
+        if not np.isfinite(atr[t]) or atr[t] <= 0.0:
+            continue
+        entry_idx = t + entry_offset
+        if entry_idx >= n:
+            continue
+        ep = open_[entry_idx] if open_ is not None and use_next_open else close[t]
+        if not np.isfinite(ep):
+            continue
+        end = min(entry_idx + horizon + 1, n)
+        if entry_idx + 1 >= end:
+            continue
+
+        window_high = high[entry_idx + 1 : end]
+        window_low = low[entry_idx + 1 : end]
+        if not np.isfinite(window_high).any() or not np.isfinite(window_low).any():
+            continue
+
+        entry_price[t] = ep
+        max_high = float(np.nanmax(window_high))
+        min_low = float(np.nanmin(window_low))
+        long_mfe = (max_high - ep) / atr[t]
+        long_mae = (ep - min_low) / atr[t]
+        short_mfe = (ep - min_low) / atr[t]
+        short_mae = (max_high - ep) / atr[t]
+
+        edge_long[t] = long_mfe - adverse_weight * long_mae
+        edge_short[t] = short_mfe - adverse_weight * short_mae
+
+        if np.isfinite(edge_long[t]):
+            if edge_long[t] >= good_threshold:
+                edge_long_class[t] = 1.0
+                long_label[t] = 1
+            elif edge_long[t] <= bad_threshold:
+                edge_long_class[t] = -1.0
+            else:
+                edge_long_class[t] = 0.0
+        if np.isfinite(edge_short[t]):
+            if edge_short[t] >= good_threshold:
+                edge_short_class[t] = 1.0
+                short_label[t] = 1
+            elif edge_short[t] <= bad_threshold:
+                edge_short_class[t] = -1.0
+            else:
+                edge_short_class[t] = 0.0
+
+    out[edge_long_col] = edge_long
+    out[edge_short_col] = edge_short
+    out[long_label_col] = pd.Series(long_label, index=out.index).astype("Int64")
+    out[short_label_col] = pd.Series(short_label, index=out.index).astype("Int64")
+    out[long_class_col] = pd.Series(edge_long_class, index=out.index).astype("Float64")
+    out[short_class_col] = pd.Series(edge_short_class, index=out.index).astype("Float64")
+    out[entry_price_col] = entry_price
+    return out
 
 def add_bars_to_exhaustion_label(
     df: pd.DataFrame,
@@ -2133,6 +2655,8 @@ def add_all_labels(
     swing_state_decay_kwargs: dict | None = None,
     swing_state_machine_kwargs: dict | None = None,
     triple_barrier_kwargs: dict | None = None,
+    sparse_tb_kwargs: dict | None = None,
+    entry_edge_kwargs: dict | None = None,
     continuation_kwargs: dict | None = None,
     mfe_mae_kwargs: dict | None = None,
     bars_to_exhaustion_kwargs: dict | None = None,
@@ -2155,6 +2679,8 @@ def add_all_labels(
     atr_pivot_kwargs = atr_pivot_kwargs or {}
     leg_state_kwargs = leg_state_kwargs or {}
     triple_barrier_kwargs = triple_barrier_kwargs or {}
+    sparse_tb_kwargs = sparse_tb_kwargs or {}
+    entry_edge_kwargs = entry_edge_kwargs or {}
     continuation_kwargs = continuation_kwargs or {}
     mfe_mae_kwargs = mfe_mae_kwargs or {}
     bars_to_exhaustion_kwargs = bars_to_exhaustion_kwargs or {}
@@ -2162,14 +2688,34 @@ def add_all_labels(
     if label_horizon is not None:
         continuation_kwargs.setdefault("max_holding", label_horizon)
         triple_barrier_kwargs.setdefault("max_holding", label_horizon)
+        sparse_tb_kwargs.setdefault("max_holding", label_horizon)
+        entry_edge_kwargs.setdefault("horizon", label_horizon)
         mfe_mae_kwargs.setdefault("horizon", label_horizon)
         bars_to_exhaustion_kwargs.setdefault("max_bars", label_horizon)
+    if "max_holding" in sparse_tb_kwargs:
+        continuation_kwargs.setdefault("max_holding", sparse_tb_kwargs["max_holding"])
+    if "leg_reset_grace_bars" in sparse_tb_kwargs:
+        continuation_kwargs.setdefault(
+            "leg_reset_grace_bars", sparse_tb_kwargs["leg_reset_grace_bars"]
+        )
+    if "leg_reset_counter_atr" in sparse_tb_kwargs:
+        continuation_kwargs.setdefault(
+            "leg_reset_counter_atr", sparse_tb_kwargs["leg_reset_counter_atr"]
+        )
+    if "leg_reset_requires_both" in sparse_tb_kwargs:
+        continuation_kwargs.setdefault(
+            "leg_reset_requires_both", sparse_tb_kwargs["leg_reset_requires_both"]
+        )
 
     df = add_atr_pivot_swing_labels(df, **atr_pivot_kwargs)
     if leg_state_kwargs is not None:
         df = add_atr_leg_segmentation_labels(df, **leg_state_kwargs)
     if triple_barrier_kwargs is not None:
         df = add_triple_barrier_labels_atr(df, **triple_barrier_kwargs)
+    if sparse_tb_kwargs is not None:
+        df = add_sparse_continuation_tb_labels(df, **sparse_tb_kwargs)
+    if entry_edge_kwargs is not None:
+        df = add_forward_entry_edge_labels(df, **entry_edge_kwargs)
 
     if swing_state_decay_kwargs is not None:
         df = add_pivot_swing_state_probabilities(df, **swing_state_decay_kwargs)
@@ -2201,6 +2747,8 @@ def add_all_labels_on_timeframe(
     swing_state_decay_kwargs: dict | None = None,
     swing_state_machine_kwargs: dict | None = None,
     triple_barrier_kwargs: dict | None = None,
+    sparse_tb_kwargs: dict | None = None,
+    entry_edge_kwargs: dict | None = None,
     continuation_kwargs: dict | None = None,
     mfe_mae_kwargs: dict | None = None,
     bars_to_exhaustion_kwargs: dict | None = None,
@@ -2232,6 +2780,8 @@ def add_all_labels_on_timeframe(
         swing_state_decay_kwargs=swing_state_decay_kwargs,
         swing_state_machine_kwargs=swing_state_machine_kwargs,
         triple_barrier_kwargs=triple_barrier_kwargs,
+        sparse_tb_kwargs=sparse_tb_kwargs,
+        entry_edge_kwargs=entry_edge_kwargs,
         continuation_kwargs=continuation_kwargs,
         mfe_mae_kwargs=mfe_mae_kwargs,
         bars_to_exhaustion_kwargs=bars_to_exhaustion_kwargs,

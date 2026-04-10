@@ -1,0 +1,5 @@
+variant,grace_bars,counter_atr,requires_both,tail_label_long,tail_label_short,tail_label_zero,tail_cand_long,tail_cand_short,tail_long_win_rate,tail_short_win_rate,tail_long_strength_pass,tail_short_strength_pass,tail_long_momentum_pass,tail_short_momentum_pass,tail_long_accel_pass,tail_short_accel_pass,tail_long_exit_pass,tail_short_exit_pass
+baseline,0,0.0,False,17,41,242,29,53,0.5862068965517241,0.7735849056603774,75,100,55,79,29,53,29,53
+time_bridge,3,0.0,False,16,39,245,28,54,0.5714285714285714,0.7222222222222222,75,101,56,81,28,54,28,54
+atr_bridge,0,0.6,False,13,35,252,24,52,0.5416666666666666,0.6730769230769231,72,100,56,81,24,52,24,52
+hybrid_bridge,3,0.6,False,16,41,243,27,56,0.5925925925925926,0.7321428571428571,72,102,55,82,27,56,27,56

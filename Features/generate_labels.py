@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pandas as pd
+
+
+def _resolve_repo_root() -> Path:
+    try:
+        return Path(__file__).resolve().parents[1]
+    except NameError:
+        return Path.cwd()
+
+
+REPO_ROOT = _resolve_repo_root()
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from Data.load_data import get_ticker_processed_base_dir
 from Data.retrieve_data import normalize_ticker
@@ -91,7 +104,9 @@ def generate_labels(
 
     y_parquet = dataset_dir / "y.parquet"
     y_csv = dataset_dir / "y.csv"
-    labels_df.to_parquet(y_parquet, index=False)
+    # Preserve the datetime index so downstream joins against plot_frame.parquet
+    # stay aligned by timestamp instead of silently degrading to NaNs.
+    labels_df.to_parquet(y_parquet, index=True)
     labels_df.to_csv(y_csv, index=True)
     return y_parquet
 
