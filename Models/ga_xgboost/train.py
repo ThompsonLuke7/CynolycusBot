@@ -90,6 +90,7 @@ class TrainConfig:
     xgb_sample_type: str | None = None
     xgb_normalize_type: str | None = None
     append_meta_context_to_swing: bool = True
+    swing_single_model: bool = False
 
 
 _GA_PARAM_FIELDS: tuple[str, ...] = (
@@ -1000,6 +1001,67 @@ def _print_binary_metrics(
     }
 
 
+def _build_swing_multiclass_target(
+    y_long: np.ndarray,
+    y_short: np.ndarray,
+) -> np.ndarray:
+    if y_long.shape != y_short.shape:
+        raise ValueError("y_long and y_short must have the same shape.")
+    conflict = (y_long == 1) & (y_short == 1)
+    if np.any(conflict):
+        raise ValueError("Swing labels contain rows marked both long and short.")
+    y_multi = np.ones(y_long.shape[0], dtype=np.int64)  # neutral
+    y_multi[y_short == 1] = 0  # short
+    y_multi[y_long == 1] = 2  # long
+    return y_multi
+
+
+def _print_multiclass_metrics(
+    y_true: np.ndarray,
+    probs: np.ndarray,
+    *,
+    name: str,
+) -> dict[str, float] | None:
+    if probs.size == 0:
+        print(f"[GA-XGB] {name}: empty")
+        return None
+    if probs.ndim != 2 or probs.shape[1] != 3:
+        raise ValueError(f"{name}: expected probs shape (n, 3), got {probs.shape}")
+    mask = np.isfinite(probs).all(axis=1)
+    y = y_true[mask]
+    p = probs[mask]
+    if y.size == 0:
+        print(f"[GA-XGB] {name}: no finite values")
+        return None
+    pred = np.argmax(p, axis=1).astype(np.int64)
+    acc = accuracy_score(y, pred)
+    macro_f1 = f1_score(y, pred, average="macro", zero_division=0)
+    try:
+        ll = log_loss(y, p, labels=[0, 1, 2])
+    except ValueError:
+        ll = float("nan")
+    cm = confusion_matrix(y, pred, labels=[0, 1, 2])
+    print(
+        f"[GA-XGB] {name}: acc={acc:.4f}, macro_f1={macro_f1:.4f}, "
+        f"mlogloss={ll:.4f}, cm={cm.tolist()}"
+    )
+    return {
+        "n": float(y.size),
+        "accuracy": float(acc),
+        "macro_f1": float(macro_f1),
+        "mlogloss": float(ll),
+        "cm_short_short": float(cm[0, 0]),
+        "cm_short_neutral": float(cm[0, 1]),
+        "cm_short_long": float(cm[0, 2]),
+        "cm_neutral_short": float(cm[1, 0]),
+        "cm_neutral_neutral": float(cm[1, 1]),
+        "cm_neutral_long": float(cm[1, 2]),
+        "cm_long_short": float(cm[2, 0]),
+        "cm_long_neutral": float(cm[2, 1]),
+        "cm_long_long": float(cm[2, 2]),
+    }
+
+
 def _find_best_fbeta_threshold(
     y_true: np.ndarray,
     probs: np.ndarray,
@@ -1093,6 +1155,65 @@ def walk_forward_oof_probs(
     return oof
 
 
+def walk_forward_oof_probs_multiclass(
+    *,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    mask: np.ndarray,
+    xgb_params: dict,
+    n_folds: int,
+    initial_train_size: int | None,
+    ga_kwargs: dict | None = None,
+) -> np.ndarray:
+    train_end = X_train.shape[0]
+    if train_end <= 1:
+        raise ValueError("Not enough samples for OOF training.")
+    if n_folds < 1:
+        raise ValueError("n_folds must be >= 1")
+
+    if initial_train_size is None:
+        initial_train_size = max(1, train_end // (n_folds + 1))
+    if initial_train_size >= train_end:
+        raise ValueError("initial_train_size must be < train_end")
+
+    remaining = train_end - initial_train_size
+    fold_size = remaining // n_folds
+    if fold_size <= 0:
+        raise ValueError("Fold size too small; reduce n_folds or initial_train_size.")
+
+    oof = np.full((train_end, 3), np.nan, dtype=np.float32)
+    for fold in range(n_folds):
+        fold_start = initial_train_size + fold * fold_size
+        fold_end = initial_train_size + (fold + 1) * fold_size
+        if fold == n_folds - 1:
+            fold_end = train_end
+        if fold_start >= fold_end:
+            continue
+        print(
+            f"[GA-XGB] MULTI OOF fold {fold + 1}/{n_folds}: "
+            f"fit_rows={fold_start}, pred_rows={fold_end - fold_start}"
+        )
+        X_fit = X_train[:fold_start][:, mask]
+        y_fit = y_train[:fold_start]
+        selector, model = _fit_xgb_with_selector(
+            X_fit,
+            y_fit,
+            xgb_params,
+            ga_kwargs=ga_kwargs,
+        )
+        X_pred = X_train[fold_start:fold_end][:, mask]
+        use_gpu = selector._use_gpu is True
+        dmat = selector._make_dmatrix(X_pred, y=None, use_gpu=use_gpu)
+        probs = selector._to_numpy(model.predict(dmat)).astype(np.float32)
+        if probs.ndim != 2 or probs.shape[1] != 3:
+            raise ValueError(
+                f"Expected multiclass fold predictions of shape (n, 3), got {probs.shape}"
+            )
+        oof[fold_start:fold_end] = probs
+        print(f"[GA-XGB] MULTI OOF fold {fold + 1}/{n_folds}: done")
+    return oof
+
+
 def train_final_and_predict_test(
     *,
     X_train: np.ndarray,
@@ -1142,6 +1263,48 @@ def train_final_and_predict_test(
     use_gpu = selector._use_gpu is True
     dmat = selector._make_dmatrix(X_test, y=None, use_gpu=use_gpu)
     probs = selector._to_numpy(model.predict(dmat)).astype(np.float32)
+    return probs, eval_history
+
+
+def train_final_and_predict_test_multiclass(
+    *,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    mask: np.ndarray,
+    xgb_params: dict,
+    eval_set: tuple[np.ndarray, np.ndarray, np.ndarray | None] | None = None,
+    ga_kwargs: dict | None = None,
+    save_model_path: Path | None = None,
+) -> tuple[np.ndarray, dict | None]:
+    X_fit = X_train[:, mask]
+    eval_selected = None
+    if eval_set is not None:
+        X_val, y_val, w_val = eval_set
+        if X_val.shape[0] > 0:
+            eval_selected = (X_val[:, mask], y_val, w_val)
+    selector, model = _fit_xgb_with_selector(
+        X_fit,
+        y_train,
+        xgb_params,
+        eval_set=eval_selected,
+        ga_kwargs=ga_kwargs,
+    )
+    eval_history = selector.last_evals_result_
+    if save_model_path is not None:
+        save_model_path.parent.mkdir(parents=True, exist_ok=True)
+        if hasattr(model, "save_model"):
+            model.save_model(str(save_model_path))
+        else:
+            model.get_booster().save_model(str(save_model_path))
+    if X_test.size == 0:
+        return np.empty((0, 3), dtype=np.float32), eval_history
+    X_test = X_test[:, mask]
+    use_gpu = selector._use_gpu is True
+    dmat = selector._make_dmatrix(X_test, y=None, use_gpu=use_gpu)
+    probs = selector._to_numpy(model.predict(dmat)).astype(np.float32)
+    if probs.ndim != 2 or probs.shape[1] != 3:
+        raise ValueError(f"Expected multiclass predictions of shape (n, 3), got {probs.shape}")
     return probs, eval_history
 
 
@@ -1363,6 +1526,76 @@ def _save_series(
         oos_manifest_path.write_text(json.dumps(legacy_payload, indent=2), encoding="utf-8")
 
 
+def _save_multiclass_prob_artifacts(
+    *,
+    output_dir: Path,
+    train_oof: np.ndarray,
+    test_probs: np.ndarray,
+    full_probs: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    index: pd.Index | None,
+    oos_manifest: dict | None = None,
+    full_manifest: dict | None = None,
+) -> None:
+    if full_probs.ndim != 2 or full_probs.shape[1] != 3:
+        raise ValueError(f"Expected full_probs shape (n, 3), got {full_probs.shape}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    np.save(output_dir / "p_swing_oof_train.npy", train_oof)
+    np.save(output_dir / "p_swing_test.npy", test_probs)
+    np.save(output_dir / "p_swing_full.npy", full_probs)
+
+    class_names = ("short", "neutral", "long")
+    if index is not None:
+        df = pd.DataFrame(index=index[: full_probs.shape[0]])
+        for class_idx, class_name in enumerate(class_names):
+            oof_full = np.full(full_probs.shape[0], np.nan, dtype=np.float32)
+            test_full = np.full(full_probs.shape[0], np.nan, dtype=np.float32)
+            if train_idx.size and train_oof.size:
+                oof_full[train_idx] = train_oof[:, class_idx]
+            if test_idx.size and test_probs.size:
+                test_full[test_idx] = test_probs[:, class_idx]
+            df[f"p_{class_name}_oof_train"] = oof_full
+            df[f"p_{class_name}_test"] = test_full
+            df[f"p_{class_name}_full"] = full_probs[:, class_idx]
+        parquet_path = output_dir / "p_swing_probs.parquet"
+        df.to_parquet(parquet_path)
+    else:
+        parquet_path = None
+
+    if full_manifest is not None:
+        payload = dict(full_manifest)
+        payload.update(
+            {
+                "artifact_kind": "ga_xgboost_multiclass_full_probabilities",
+                "classes": list(class_names),
+                "row_count": int(full_probs.shape[0]),
+                "full_npy_path": str(output_dir / "p_swing_full.npy"),
+                "full_parquet_path": str(parquet_path) if parquet_path is not None else None,
+            }
+        )
+        (output_dir / "p_swing_full_manifest.json").write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+    if oos_manifest is not None and train_oof.size:
+        payload = dict(oos_manifest)
+        payload.update(
+            {
+                "artifact_kind": "ga_xgboost_multiclass_oos_probabilities",
+                "classes": list(class_names),
+                "row_count": int(full_probs.shape[0]),
+                "oof_npy_path": str(output_dir / "p_swing_oof_train.npy"),
+                "test_npy_path": str(output_dir / "p_swing_test.npy"),
+                "oos_parquet_path": str(parquet_path) if parquet_path is not None else None,
+            }
+        )
+        (output_dir / "p_swing_oos_manifest.json").write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+
+
 def main() -> None:
     run_ts = datetime.now(timezone.utc)
     run_name = "ga_xgboost_train"
@@ -1544,6 +1777,15 @@ def main() -> None:
             "matrix while keeping the existing GA-selected TA subset."
         ),
     )
+    parser.add_argument(
+        "--swing-single-model",
+        action=argparse.BooleanOptionalAction,
+        default=TrainConfig.swing_single_model,
+        help=(
+            "Experimental: for swing labels, train one 3-class XGBoost model "
+            "(short/neutral/long) using the union of the existing long/short GA masks."
+        ),
+    )
     args = parser.parse_args()
 
     cfg = TrainConfig(
@@ -1580,6 +1822,7 @@ def main() -> None:
         xgb_sample_type=args.xgb_sample_type,
         xgb_normalize_type=args.xgb_normalize_type,
         append_meta_context_to_swing=bool(args.append_meta_context_to_swing),
+        swing_single_model=bool(args.swing_single_model),
     )
     ga_kwargs = _ga_kwargs_from_config(cfg)
     xgb_overrides = _xgb_overrides_from_config(cfg)
@@ -1588,6 +1831,11 @@ def main() -> None:
     run_short = side_mode in {"both", "short"}
     if not run_long and not run_short:
         raise ValueError("--side must be one of: both, long, short")
+    if cfg.swing_single_model:
+        if cfg.label_mode != "swing":
+            raise ValueError("--swing-single-model is only supported with --label-mode swing.")
+        if side_mode != "both":
+            raise ValueError("--swing-single-model requires --side both.")
     threshold_beta = float(args.threshold_beta)
     if threshold_beta <= 0:
         raise ValueError("--threshold-beta must be > 0.")
@@ -1645,6 +1893,7 @@ def main() -> None:
         "ticker": cfg.ticker,
         "dataset_name": cfg.dataset_name,
         "label_mode": cfg.label_mode,
+        "swing_single_model": bool(cfg.swing_single_model),
         "super_pivot_weight": cfg.super_pivot_weight,
         "side_mode": side_mode,
         "append_meta_context_to_swing": bool(cfg.append_meta_context_to_swing),
@@ -1841,6 +2090,301 @@ def main() -> None:
     )
     if xgb_overrides:
         print(f"[GA-XGB] XGBoost overrides={xgb_overrides}")
+
+    if cfg.swing_single_model:
+        y_multi_train = _build_swing_multiclass_target(y_long_train, y_short_train)
+        y_multi_train_only = _build_swing_multiclass_target(
+            y_long_train_only, y_short_train_only
+        )
+        y_multi_val = _build_swing_multiclass_target(y_long_val, y_short_val)
+        y_multi_test = _build_swing_multiclass_target(y_long[test_idx], y_short[test_idx])
+
+        combined_mask = long_mask | short_mask
+        combined_selected = int(combined_mask.sum())
+        print(
+            f"[GA-XGB] SINGLE swing model enabled: combined mask selects "
+            f"{combined_selected} / {X.shape[1]} features."
+        )
+        multi_params = _sanitize_xgb_params(GAXGBoostFeatureSelector().xgb_params.copy())
+        if xgb_overrides:
+            multi_params.update(xgb_overrides)
+        multi_params["objective"] = "multi:softprob"
+        multi_params["num_class"] = 3
+        multi_params["eval_metric"] = "mlogloss"
+        multi_params.pop("scale_pos_weight", None)
+        print(
+            f"[GA-XGB] SINGLE swing multiclass objective={multi_params['objective']} "
+            f"eval_metric={multi_params['eval_metric']}"
+        )
+
+        multi_oof = np.full((train_val_idx.size, 3), np.nan, dtype=np.float32)
+        multi_test = np.empty((0, 3), dtype=np.float32)
+        multi_full = np.full((X.shape[0], 3), np.nan, dtype=np.float32)
+        multi_eval_history = None
+        multi_oof_metrics = None
+        multi_test_metrics = None
+        multi_full_train_metrics = None
+
+        single_label_dir = f"{artifact_label_dir}_single"
+        single_dir = model_dataset_root / "single" / single_label_dir
+        single_model_path = single_dir / "xgb_model.json"
+        single_meta_path = single_dir / "meta.json"
+
+        if not args.full_fit:
+            multi_oof = walk_forward_oof_probs_multiclass(
+                X_train=X_train,
+                y_train=y_multi_train,
+                mask=combined_mask,
+                xgb_params=multi_params,
+                n_folds=cfg.n_folds,
+                initial_train_size=cfg.initial_train_size,
+                ga_kwargs=ga_kwargs,
+            )
+            multi_test, multi_eval_history = train_final_and_predict_test_multiclass(
+                X_train=X_train_only,
+                y_train=y_multi_train_only,
+                X_test=X_test,
+                mask=combined_mask,
+                xgb_params=multi_params,
+                eval_set=(X_val, y_multi_val, None) if val_idx.size else None,
+                ga_kwargs=ga_kwargs,
+                save_model_path=single_model_path,
+            )
+            multi_full[train_val_idx] = multi_oof
+            if multi_test.size:
+                multi_full[test_idx] = multi_test
+            multi_oof_metrics = _print_multiclass_metrics(
+                y_multi_train,
+                multi_oof,
+                name="SINGLE swing OOF metrics",
+            )
+            multi_test_metrics = _print_multiclass_metrics(
+                y_multi_test,
+                multi_test,
+                name="SINGLE swing test metrics",
+            )
+        else:
+            multi_full, multi_eval_history = train_final_and_predict_test_multiclass(
+                X_train=X_train,
+                y_train=y_multi_train,
+                X_test=X_train,
+                mask=combined_mask,
+                xgb_params=multi_params,
+                ga_kwargs=ga_kwargs,
+                save_model_path=single_model_path,
+            )
+            multi_full_train_metrics = _print_multiclass_metrics(
+                y_multi_train,
+                multi_full,
+                name="SINGLE swing full-fit train metrics",
+            )
+
+        long_oof = multi_oof[:, 2] if multi_oof.size else np.empty((0,), dtype=np.float32)
+        short_oof = multi_oof[:, 0] if multi_oof.size else np.empty((0,), dtype=np.float32)
+        neutral_oof = multi_oof[:, 1] if multi_oof.size else np.empty((0,), dtype=np.float32)
+        long_test = multi_test[:, 2] if multi_test.size else np.empty((0,), dtype=np.float32)
+        short_test = multi_test[:, 0] if multi_test.size else np.empty((0,), dtype=np.float32)
+        neutral_test = multi_test[:, 1] if multi_test.size else np.empty((0,), dtype=np.float32)
+        long_full = multi_full[:, 2]
+        short_full = multi_full[:, 0]
+        neutral_full = multi_full[:, 1]
+
+        _summarize_probs(long_oof, "SINGLE LONG OOF probs")
+        _summarize_probs(short_oof, "SINGLE SHORT OOF probs")
+        _summarize_probs(neutral_oof, "SINGLE NEUTRAL OOF probs")
+        _summarize_probs(long_test, "SINGLE LONG test probs")
+        _summarize_probs(short_test, "SINGLE SHORT test probs")
+        _summarize_probs(neutral_test, "SINGLE NEUTRAL test probs")
+
+        long_threshold = 0.5
+        short_threshold = 0.5
+        long_oof_metrics = None
+        short_oof_metrics = None
+        long_test_metrics = None
+        short_test_metrics = None
+        if not args.full_fit:
+            long_threshold, long_best_oof_score = _find_best_fbeta_threshold(
+                y_long_train,
+                long_oof,
+                beta=threshold_beta,
+            )
+            short_threshold, short_best_oof_score = _find_best_fbeta_threshold(
+                y_short_train,
+                short_oof,
+                beta=threshold_beta,
+            )
+            print(
+                f"[GA-XGB] SINGLE long best OOF {metric_label} threshold={long_threshold:.4f} "
+                f"({metric_label.lower()}={long_best_oof_score:.4f})"
+            )
+            print(
+                f"[GA-XGB] SINGLE short best OOF {metric_label} threshold={short_threshold:.4f} "
+                f"({metric_label.lower()}={short_best_oof_score:.4f})"
+            )
+            long_oof_metrics = _print_binary_metrics(
+                y_long_train,
+                long_oof,
+                name="SINGLE LONG OOF metrics",
+                threshold=long_threshold,
+                threshold_metric_beta=threshold_beta,
+            )
+            short_oof_metrics = _print_binary_metrics(
+                y_short_train,
+                short_oof,
+                name="SINGLE SHORT OOF metrics",
+                threshold=short_threshold,
+                threshold_metric_beta=threshold_beta,
+            )
+            long_test_metrics = _print_binary_metrics(
+                y_long[test_idx],
+                long_test,
+                name="SINGLE LONG test metrics",
+                threshold=long_threshold,
+                threshold_metric_beta=threshold_beta,
+            )
+            short_test_metrics = _print_binary_metrics(
+                y_short[test_idx],
+                short_test,
+                name="SINGLE SHORT test metrics",
+                threshold=short_threshold,
+                threshold_metric_beta=threshold_beta,
+            )
+
+        single_dir.mkdir(parents=True, exist_ok=True)
+        selected_features = (
+            [name for name, keep in zip(feature_names or [], combined_mask.tolist()) if keep]
+            if feature_names is not None
+            else []
+        )
+        if selected_features:
+            (single_dir / "selected_features.txt").write_text(
+                "\n".join(selected_features),
+                encoding="utf-8",
+            )
+        single_meta = {
+            **common_meta,
+            "mode": "swing_single_model",
+            "classes": ["short", "neutral", "long"],
+            "selected_features": combined_selected,
+            "n_features": int(X.shape[1]),
+            "xgb_params": multi_params,
+            "source_long_meta_path": str(long_meta_path) if long_meta_path else None,
+            "source_short_meta_path": str(short_meta_path) if short_meta_path else None,
+        }
+        single_meta_path.write_text(json.dumps(single_meta, indent=2), encoding="utf-8")
+
+        probs_root = model_dataset_root
+        base_artifact_manifest = {
+            "run_id": artifact_run_id,
+            "run_name": run_name,
+            "created_at_utc": artifact_created_at,
+            "ticker": normalize_ticker(cfg.ticker),
+            "dataset_name": cfg.dataset_name,
+            "label_mode": cfg.label_mode,
+            "label_dir": single_label_dir,
+            "full_fit": bool(args.full_fit),
+            "model_dataset_root": str(model_dataset_root),
+            "side": "single",
+        }
+        _save_multiclass_prob_artifacts(
+            output_dir=single_dir,
+            train_oof=multi_oof,
+            test_probs=multi_test,
+            full_probs=multi_full,
+            train_idx=train_val_idx,
+            test_idx=test_idx,
+            index=plot_index,
+            oos_manifest=base_artifact_manifest,
+            full_manifest=base_artifact_manifest,
+        )
+
+        if plot_df is not None and not args.full_fit:
+            test_df = plot_df.iloc[test_idx]
+            y_long_test_plot = y_long[test_idx]
+            y_short_test_plot = y_short[test_idx]
+            tail = 200
+            if len(test_df) > tail:
+                test_df = test_df.tail(tail)
+                long_test_tail = long_test[-tail:]
+                short_test_tail = short_test[-tail:]
+                y_long_test_plot = y_long_test_plot[-tail:]
+                y_short_test_plot = y_short_test_plot[-tail:]
+            else:
+                long_test_tail = long_test
+                short_test_tail = short_test
+            save_path = get_default_model_inference_plot_path(
+                cfg.ticker, f"ga_xgb_{cfg.label_mode}_single_test"
+            )
+            plot_model_inference(
+                test_df,
+                long_test_tail if long_test_tail.size else None,
+                short_test_tail if short_test_tail.size else None,
+                long_actual=y_long_test_plot if y_long_test_plot.size else None,
+                short_actual=y_short_test_plot if y_short_test_plot.size else None,
+                long_label_name="LONG",
+                short_label_name="SHORT",
+                threshold=0.5,
+                long_threshold=long_threshold,
+                short_threshold=short_threshold,
+                title=f"{normalize_ticker(cfg.ticker)} | GA-XGB swing single-model (test tail)",
+                save_path=str(save_path),
+            )
+
+        hyperparams = {
+            **asdict(cfg),
+            **vars(args),
+            "single_model_mask_selected_features": combined_selected,
+            "single_model_label_dir": single_label_dir,
+            "model_dataset_root": str(model_dataset_root),
+        }
+        train_metrics = (
+            {
+                "multiclass_oof": multi_oof_metrics,
+                "long_oof": long_oof_metrics,
+                "short_oof": short_oof_metrics,
+            }
+            if not args.full_fit
+            else {"multiclass_full_train": multi_full_train_metrics}
+        )
+        validation_metrics = (
+            {
+                "multiclass_test": multi_test_metrics,
+                "long_test": long_test_metrics,
+                "short_test": short_test_metrics,
+                "test_rows": float(test_idx.size),
+                "val_rows": float(val_idx.size),
+            }
+            if not args.full_fit
+            else {"skipped": "--full-fit"}
+        )
+        log_paths = log_training_run(
+            run_name=run_name,
+            output_dir=probs_root,
+            hyperparameters=hyperparams,
+            train_metrics=train_metrics,
+            validation_metrics=validation_metrics,
+            best_validation_metrics={"single_model": None},
+            artifacts={
+                "probs_root": str(probs_root),
+                "single_probs_dir": str(single_dir),
+                "single_model_path": str(single_model_path),
+                "single_meta_path": str(single_meta_path),
+            },
+            extra={
+                "ticker": normalize_ticker(cfg.ticker),
+                "dataset_name": cfg.dataset_name,
+                "label_mode": cfg.label_mode,
+                "feature_count": int(X.shape[1]),
+                "selected_feature_count": int(combined_selected),
+                "train_rows": int(train_idx.size),
+                "val_rows": int(val_idx.size),
+                "test_rows": int(test_idx.size),
+                "swing_single_model": True,
+            },
+        )
+        print(f"Saved single-model probability arrays under {single_dir}")
+        print(f"[GA-XGB] Saved training run summary: {log_paths['latest_path']}")
+        return
 
     long_oof = np.full(train_val_idx.size, np.nan, dtype=np.float32)
     short_oof = np.full(train_val_idx.size, np.nan, dtype=np.float32)

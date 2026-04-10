@@ -196,7 +196,7 @@ def add_atr_pivot_swing_labels(
     pivot_down_col: str = "pivot_down",
     atr_length: int = 14,
     tp_mult: float = 1.0,
-    sl_mult: float = 0.5,
+    sl_mult: float = 0.8,
     max_holding: int = 20,
     base_label_col: str = "atr_swing_label",
 ) -> pd.DataFrame:
@@ -234,7 +234,7 @@ def add_atr_pivot_swing_labels(
         is_pivot_long = pivot_down[i] == 1
 
         if is_pivot_long:
-            ep = low[i]
+            ep = close[i]
 
             tp = ep + tp_mult * atr[i]
             sl = ep - sl_mult * atr[i]
@@ -271,7 +271,7 @@ def add_atr_pivot_swing_labels(
         # SHORT LOGIC (Standard)
         # ============================================================
         elif pivot_up[i] == 1:
-            ep = high[i]
+            ep = close[i]
             tp = ep - tp_mult * atr[i]  # profit target BELOW
             sl = ep + sl_mult * atr[i]  # stop ABOVE
 
