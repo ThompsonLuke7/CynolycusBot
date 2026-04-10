@@ -229,7 +229,8 @@ def _xgb_overrides_from_config(cfg: TrainConfig) -> dict:
 def _sanitize_xgb_params(xgb_params: dict) -> dict:
     params = dict(xgb_params)
     # Force single-metric training behavior across fresh and reused artifacts.
-    params["eval_metric"] = "logloss"
+    objective = str(params.get("objective", "binary:logistic")).lower()
+    params["eval_metric"] = "mlogloss" if objective.startswith("multi:") else "logloss"
     booster = str(params.get("booster", "gbtree")).lower()
     if booster != "dart":
         params.pop("rate_drop", None)

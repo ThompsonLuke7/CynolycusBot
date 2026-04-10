@@ -462,7 +462,8 @@ class GAXGBoostFeatureSelector:
     ) -> tuple[Dict[str, Any], int]:
         params = dict(self.xgb_params)
         # Force single-metric optimization for consistent early-stopping behavior.
-        params["eval_metric"] = "logloss"
+        objective = str(params.get("objective", "binary:logistic")).lower()
+        params["eval_metric"] = "mlogloss" if objective.startswith("multi:") else "logloss"
         booster = str(params.get("booster", "gbtree")).lower()
         if booster != "dart":
             # Keep params clean when using non-DART boosters.
