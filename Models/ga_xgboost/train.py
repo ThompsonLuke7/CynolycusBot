@@ -91,6 +91,9 @@ class TrainConfig:
     xgb_normalize_type: str | None = None
     append_meta_context_to_swing: bool = True
     swing_single_model: bool = False
+    swing_positive_weight: float = 1.0
+    swing_failed_pivot_weight: float = 1.0
+    swing_non_pivot_weight: float = 1.0
 
 
 _GA_PARAM_FIELDS: tuple[str, ...] = (
@@ -447,6 +450,9 @@ def load_dataset(
     processed_root: Path | None = None,
     stats_root: Path | None = None,
     append_meta_context_to_swing: bool = False,
+    swing_positive_weight: float = 1.0,
+    swing_failed_pivot_weight: float = 1.0,
+    swing_non_pivot_weight: float = 1.0,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -543,6 +549,55 @@ def load_dataset(
             )
         y_long = y_df[long_col].to_numpy(dtype=np.int64)
         y_short = y_df[short_col].to_numpy(dtype=np.int64)
+        use_swing_weights = not (
+            np.isclose(float(swing_positive_weight), 1.0)
+            and np.isclose(float(swing_failed_pivot_weight), 1.0)
+            and np.isclose(float(swing_non_pivot_weight), 1.0)
+        )
+        if use_swing_weights:
+            pivot_cols = ("pivot_down", "pivot_up")
+            missing_pivots = [c for c in pivot_cols if c not in y_df.columns]
+            if missing_pivots:
+                raise KeyError(
+                    "Swing sample weighting requires pivot columns in "
+                    f"{y_path.name}: {', '.join(missing_pivots)}"
+                )
+            pivot_down = (
+                pd.to_numeric(y_df["pivot_down"], errors="coerce")
+                .fillna(0)
+                .astype(int)
+                .to_numpy()
+                == 1
+            )
+            pivot_up = (
+                pd.to_numeric(y_df["pivot_up"], errors="coerce")
+                .fillna(0)
+                .astype(int)
+                .to_numpy()
+                == 1
+            )
+            sample_weight_long = np.full(
+                y_long.shape[0],
+                float(swing_non_pivot_weight),
+                dtype=np.float32,
+            )
+            sample_weight_short = np.full(
+                y_short.shape[0],
+                float(swing_non_pivot_weight),
+                dtype=np.float32,
+            )
+            sample_weight_long[pivot_down] = float(swing_failed_pivot_weight)
+            sample_weight_short[pivot_up] = float(swing_failed_pivot_weight)
+            sample_weight_long[y_long == 1] = float(swing_positive_weight)
+            sample_weight_short[y_short == 1] = float(swing_positive_weight)
+            print(
+                "[GA-XGB] Swing sample weights enabled: "
+                f"positive={float(swing_positive_weight):g}, "
+                f"failed_pivot={float(swing_failed_pivot_weight):g}, "
+                f"non_pivot={float(swing_non_pivot_weight):g}, "
+                f"long_failed_pivots={int((pivot_down & (y_long != 1)).sum())}, "
+                f"short_failed_pivots={int((pivot_up & (y_short != 1)).sum())}"
+            )
     elif label_mode == "pivot":
         long_col, short_col = "pivot_down", "pivot_up"
         missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
@@ -937,6 +992,7 @@ def _print_binary_metrics(
     name: str,
     threshold: float = 0.5,
     threshold_metric_beta: float = 1.0,
+    event_match_window_bars: int = 1,
 ) -> dict[str, float] | None:
     if probs.size == 0:
         print(f"[GA-XGB] {name}: empty")
@@ -975,6 +1031,35 @@ def _print_binary_metrics(
         fp = 0
         fn = 0
 
+    event_window = max(0, int(event_match_window_bars))
+    event_precision = float("nan")
+    event_recall = float("nan")
+    event_f1 = float("nan")
+    pred_event_hits = 0
+    actual_event_hits = 0
+    pred_event_count = int(pred.sum())
+    actual_event_count = int((y == 1).sum())
+
+    if event_window > 0:
+        def _dilate(mask_in: np.ndarray, window: int) -> np.ndarray:
+            mask_bool = mask_in.astype(bool)
+            out = mask_bool.copy()
+            for shift in range(1, window + 1):
+                out[shift:] |= mask_bool[:-shift]
+                out[:-shift] |= mask_bool[shift:]
+            return out
+
+        actual = y.astype(bool)
+        predicted = pred.astype(bool)
+        actual_dilated = _dilate(actual, event_window)
+        pred_dilated = _dilate(predicted, event_window)
+        pred_event_hits = int((predicted & actual_dilated).sum())
+        actual_event_hits = int((actual & pred_dilated).sum())
+        event_precision = pred_event_hits / max(pred_event_count, 1)
+        event_recall = actual_event_hits / max(actual_event_count, 1)
+        if event_precision + event_recall > 0:
+            event_f1 = 2.0 * event_precision * event_recall / (event_precision + event_recall)
+
     print(
         f"[GA-XGB] {name} (thr={threshold:.2f}): "
         f"acc={acc:.4f}, prec={prec:.4f}, rec={rec:.4f}, f1={f1:.4f}, "
@@ -982,6 +1067,13 @@ def _print_binary_metrics(
         f"auc={auc:.4f}, ap={ap:.4f}, logloss={ll:.4f}, "
         f"tp={tp}, fp={fp}, tn={tn}, fn={fn}"
     )
+    if event_window > 0:
+        print(
+            f"[GA-XGB] {name} event±{event_window}: "
+            f"prec={event_precision:.4f}, rec={event_recall:.4f}, f1={event_f1:.4f}, "
+            f"pred_hits={pred_event_hits}/{pred_event_count}, "
+            f"actual_hits={actual_event_hits}/{actual_event_count}"
+        )
     return {
         "n": float(y.size),
         "threshold": float(threshold),
@@ -998,6 +1090,14 @@ def _print_binary_metrics(
         "fp": float(fp),
         "tn": float(tn),
         "fn": float(fn),
+        "event_match_window_bars": float(event_window),
+        "event_precision": float(event_precision),
+        "event_recall": float(event_recall),
+        "event_f1": float(event_f1),
+        "pred_event_hits": float(pred_event_hits),
+        "pred_event_count": float(pred_event_count),
+        "actual_event_hits": float(actual_event_hits),
+        "actual_event_count": float(actual_event_count),
     }
 
 
@@ -1163,6 +1263,7 @@ def walk_forward_oof_probs_multiclass(
     xgb_params: dict,
     n_folds: int,
     initial_train_size: int | None,
+    sample_weight: np.ndarray | None = None,
     ga_kwargs: dict | None = None,
 ) -> np.ndarray:
     train_end = X_train.shape[0]
@@ -1170,6 +1271,8 @@ def walk_forward_oof_probs_multiclass(
         raise ValueError("Not enough samples for OOF training.")
     if n_folds < 1:
         raise ValueError("n_folds must be >= 1")
+    if sample_weight is not None and sample_weight.shape[0] != train_end:
+        raise ValueError("sample_weight must match X_train length.")
 
     if initial_train_size is None:
         initial_train_size = max(1, train_end // (n_folds + 1))
@@ -1195,10 +1298,12 @@ def walk_forward_oof_probs_multiclass(
         )
         X_fit = X_train[:fold_start][:, mask]
         y_fit = y_train[:fold_start]
+        w_fit = None if sample_weight is None else sample_weight[:fold_start]
         selector, model = _fit_xgb_with_selector(
             X_fit,
             y_fit,
             xgb_params,
+            sample_weight=w_fit,
             ga_kwargs=ga_kwargs,
         )
         X_pred = X_train[fold_start:fold_end][:, mask]
@@ -1273,10 +1378,13 @@ def train_final_and_predict_test_multiclass(
     X_test: np.ndarray,
     mask: np.ndarray,
     xgb_params: dict,
+    sample_weight: np.ndarray | None = None,
     eval_set: tuple[np.ndarray, np.ndarray, np.ndarray | None] | None = None,
     ga_kwargs: dict | None = None,
     save_model_path: Path | None = None,
 ) -> tuple[np.ndarray, dict | None]:
+    if sample_weight is not None and sample_weight.shape[0] != X_train.shape[0]:
+        raise ValueError("sample_weight must match X_train length.")
     X_fit = X_train[:, mask]
     eval_selected = None
     if eval_set is not None:
@@ -1287,6 +1395,7 @@ def train_final_and_predict_test_multiclass(
         X_fit,
         y_train,
         xgb_params,
+        sample_weight=sample_weight,
         eval_set=eval_selected,
         ga_kwargs=ga_kwargs,
     )
@@ -1786,6 +1895,24 @@ def main() -> None:
             "(short/neutral/long) using the union of the existing long/short GA masks."
         ),
     )
+    parser.add_argument(
+        "--swing-positive-weight",
+        type=float,
+        default=TrainConfig.swing_positive_weight,
+        help="Swing sample weight for successful swing pivot rows.",
+    )
+    parser.add_argument(
+        "--swing-failed-pivot-weight",
+        type=float,
+        default=TrainConfig.swing_failed_pivot_weight,
+        help="Swing sample weight for pivot candidate rows that failed the swing target.",
+    )
+    parser.add_argument(
+        "--swing-non-pivot-weight",
+        type=float,
+        default=TrainConfig.swing_non_pivot_weight,
+        help="Swing sample weight for non-pivot background rows.",
+    )
     args = parser.parse_args()
 
     cfg = TrainConfig(
@@ -1823,6 +1950,9 @@ def main() -> None:
         xgb_normalize_type=args.xgb_normalize_type,
         append_meta_context_to_swing=bool(args.append_meta_context_to_swing),
         swing_single_model=bool(args.swing_single_model),
+        swing_positive_weight=float(args.swing_positive_weight),
+        swing_failed_pivot_weight=float(args.swing_failed_pivot_weight),
+        swing_non_pivot_weight=float(args.swing_non_pivot_weight),
     )
     ga_kwargs = _ga_kwargs_from_config(cfg)
     xgb_overrides = _xgb_overrides_from_config(cfg)
@@ -1857,6 +1987,9 @@ def main() -> None:
         processed_root=processed_root,
         stats_root=stats_root,
         append_meta_context_to_swing=bool(cfg.append_meta_context_to_swing),
+        swing_positive_weight=cfg.swing_positive_weight,
+        swing_failed_pivot_weight=cfg.swing_failed_pivot_weight,
+        swing_non_pivot_weight=cfg.swing_non_pivot_weight,
     )
     plot_index = plot_df.index if plot_df is not None else None
 
@@ -1899,6 +2032,9 @@ def main() -> None:
         "append_meta_context_to_swing": bool(cfg.append_meta_context_to_swing),
         "appended_meta_feature_count": int(len(appended_meta_feature_names)),
         "appended_meta_feature_names": list(appended_meta_feature_names),
+        "swing_positive_weight": float(cfg.swing_positive_weight),
+        "swing_failed_pivot_weight": float(cfg.swing_failed_pivot_weight),
+        "swing_non_pivot_weight": float(cfg.swing_non_pivot_weight),
     }
 
     train_val_idx = np.sort(np.concatenate([train_idx, val_idx]))
@@ -2086,7 +2222,8 @@ def main() -> None:
     print(
         f"[GA-XGB] XGBoost objective="
         f"{(long_params if run_long else short_params).get('objective', 'binary:logistic')} "
-        f"eval_metric={(long_params if run_long else short_params).get('eval_metric', 'logloss')}"
+        f"eval_metric={(long_params if run_long else short_params).get('eval_metric', 'logloss')} "
+        f"booster={(long_params if run_long else short_params).get('booster', 'gbtree')}"
     )
     if xgb_overrides:
         print(f"[GA-XGB] XGBoost overrides={xgb_overrides}")
@@ -2098,6 +2235,14 @@ def main() -> None:
         )
         y_multi_val = _build_swing_multiclass_target(y_long_val, y_short_val)
         y_multi_test = _build_swing_multiclass_target(y_long[test_idx], y_short[test_idx])
+        w_multi_train = None
+        w_multi_train_only = None
+        if w_long_train is not None and w_short_train is not None:
+            w_multi_train = np.maximum(w_long_train, w_short_train).astype(np.float32)
+            w_multi_train_only = np.maximum(
+                w_long_train_only,
+                w_short_train_only,
+            ).astype(np.float32)
 
         combined_mask = long_mask | short_mask
         combined_selected = int(combined_mask.sum())
@@ -2138,6 +2283,7 @@ def main() -> None:
                 xgb_params=multi_params,
                 n_folds=cfg.n_folds,
                 initial_train_size=cfg.initial_train_size,
+                sample_weight=w_multi_train,
                 ga_kwargs=ga_kwargs,
             )
             multi_test, multi_eval_history = train_final_and_predict_test_multiclass(
@@ -2146,6 +2292,7 @@ def main() -> None:
                 X_test=X_test,
                 mask=combined_mask,
                 xgb_params=multi_params,
+                sample_weight=w_multi_train_only,
                 eval_set=(X_val, y_multi_val, None) if val_idx.size else None,
                 ga_kwargs=ga_kwargs,
                 save_model_path=single_model_path,
@@ -2170,6 +2317,7 @@ def main() -> None:
                 X_test=X_train,
                 mask=combined_mask,
                 xgb_params=multi_params,
+                sample_weight=w_multi_train,
                 ga_kwargs=ga_kwargs,
                 save_model_path=single_model_path,
             )
