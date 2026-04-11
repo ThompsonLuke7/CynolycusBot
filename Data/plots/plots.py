@@ -2344,7 +2344,7 @@ def _load_bilstm_split_data(
     X = pd.read_parquet(x_path).to_numpy(dtype=np.float32)
     y_df = pd.read_parquet(y_path)
 
-    if label_mode == "swing":
+    if label_mode in {"swing", "swing_support"}:
         long_col, short_col = "long_swing_label", "short_swing_label"
     elif label_mode == "leg":
         long_col, short_col = "leg_up_label", "leg_down_label"
@@ -2406,6 +2406,8 @@ def _ga_label_dir_from_mode(label_mode: str) -> str | None:
         return "tb"
     if mode == "swing":
         return "swing"
+    if mode in {"swing_support", "swing-support", "support"}:
+        return "swing_support"
     return None
 
 

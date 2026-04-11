@@ -46,6 +46,12 @@ from Data.plots.plots import get_default_model_inference_plot_path, plot_model_i
 from Features.feature_scaling import apply_scaler_from_stats
 from Features.feature_matrix_regime import AgentFeatureConfig, build_agent_feature_matrix
 from Models.ga_xgboost.ga_xgboost import GAXGBoostFeatureSelector
+from Models.ga_xgboost.swing_label_weights import (
+    apply_swing_pivot_zone_weights as _shared_apply_swing_pivot_zone_weights,
+    build_phase3_swing_event_labels,
+    compute_wilder_atr,
+    keep_first_same_side_event,
+)
 from Policy.training_logging import log_training_run
 
 
@@ -94,6 +100,22 @@ class TrainConfig:
     swing_positive_weight: float = 1.0
     swing_failed_pivot_weight: float = 1.0
     swing_non_pivot_weight: float = 1.0
+    swing_zone_positive_window_bars: int = 0
+    swing_zone_ambiguous_window_bars: int = 0
+    swing_zone_neighbor_weight: float = 0.75
+    swing_zone_ambiguous_weight: float = 0.0
+    swing_first_in_run_filter: bool = False
+    swing_phase3_events: bool = False
+    swing_phase3_search_pre_bars: int = 6
+    swing_phase3_search_post_bars: int = 3
+    swing_phase3_horizon_bars: int = 12
+    swing_phase3_tp_atr: float = 1.0
+    swing_phase3_sl_atr: float = 0.8
+    swing_phase3_entry_price: str = "close"
+    swing_phase3_same_leg_non_event_weight: float = 0.0
+    swing_phase3_macro_filter: bool = True
+    swing_phase3_macro_min_leg_atr: float = 2.0
+    swing_phase3_macro_min_leg_bars: int = 6
 
 
 _GA_PARAM_FIELDS: tuple[str, ...] = (
@@ -253,7 +275,18 @@ def _normalize_ga_label_dir(label_mode_or_dir: str) -> str:
         return "entry_edge"
     if token == "swing":
         return "swing"
+    if token in {"swing_support", "swing-support", "support"}:
+        return "swing_support"
     return token
+
+
+def _is_swing_label_mode(label_mode: str) -> bool:
+    return str(label_mode).strip().lower() in {
+        "swing",
+        "swing_support",
+        "swing-support",
+        "support",
+    }
 
 
 def _artifact_side_dir(model_root: Path, side: str, label_dir: str) -> Path:
@@ -454,6 +487,22 @@ def load_dataset(
     swing_positive_weight: float = 1.0,
     swing_failed_pivot_weight: float = 1.0,
     swing_non_pivot_weight: float = 1.0,
+    swing_zone_positive_window_bars: int = 0,
+    swing_zone_ambiguous_window_bars: int = 0,
+    swing_zone_neighbor_weight: float = 0.75,
+    swing_zone_ambiguous_weight: float = 0.0,
+    swing_first_in_run_filter: bool = False,
+    swing_phase3_events: bool = False,
+    swing_phase3_search_pre_bars: int = 6,
+    swing_phase3_search_post_bars: int = 3,
+    swing_phase3_horizon_bars: int = 12,
+    swing_phase3_tp_atr: float = 1.0,
+    swing_phase3_sl_atr: float = 0.8,
+    swing_phase3_entry_price: str = "close",
+    swing_phase3_same_leg_non_event_weight: float = 0.0,
+    swing_phase3_macro_filter: bool = True,
+    swing_phase3_macro_min_leg_atr: float = 2.0,
+    swing_phase3_macro_min_leg_bars: int = 6,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -514,7 +563,13 @@ def load_dataset(
             print(f"No scaler stats found at {stats_path}; using raw features.")
 
     appended_meta_feature_names: list[str] = []
-    if label_mode == "swing" and bool(append_meta_context_to_swing):
+    swing_label_mode = _is_swing_label_mode(label_mode)
+    swing_support_mode = str(label_mode).strip().lower() in {
+        "swing_support",
+        "swing-support",
+        "support",
+    }
+    if swing_label_mode and bool(append_meta_context_to_swing):
         ctx_df = _build_swing_meta_context_frame(
             ticker=clean,
             dataset_name=dataset_name,
@@ -541,7 +596,13 @@ def load_dataset(
     sample_weight_long = None
     sample_weight_short = None
 
-    if label_mode == "swing":
+    if swing_label_mode:
+        if swing_support_mode:
+            swing_first_in_run_filter = True
+            if int(swing_zone_positive_window_bars) <= 0:
+                swing_zone_positive_window_bars = 1
+            if int(swing_zone_ambiguous_window_bars) <= 0:
+                swing_zone_ambiguous_window_bars = 3
         long_col, short_col = "long_swing_label", "short_swing_label"
         missing_cols = [c for c in (long_col, short_col) if c not in y_df.columns]
         if missing_cols:
@@ -550,12 +611,136 @@ def load_dataset(
             )
         y_long = y_df[long_col].to_numpy(dtype=np.int64)
         y_short = y_df[short_col].to_numpy(dtype=np.int64)
+        use_phase3_events = bool(swing_phase3_events)
+        use_first_in_run_filter = bool(swing_first_in_run_filter)
+        use_swing_zone_weights = (
+            int(swing_zone_positive_window_bars) > 0
+            or int(swing_zone_ambiguous_window_bars) > 0
+        )
         use_swing_weights = not (
             np.isclose(float(swing_positive_weight), 1.0)
             and np.isclose(float(swing_failed_pivot_weight), 1.0)
             and np.isclose(float(swing_non_pivot_weight), 1.0)
         )
-        if use_swing_weights:
+        if use_phase3_events and use_swing_weights:
+            print(
+                "[GA-XGB] Swing Phase 3 events enabled; ignoring "
+                "--swing-positive-weight/--swing-failed-pivot-weight/"
+                "--swing-non-pivot-weight for this run."
+            )
+        if use_phase3_events and plot_df is None:
+            raise FileNotFoundError(
+                "Swing Phase 3 event labels require plot_frame.parquet for OHLC."
+            )
+        if use_phase3_events:
+            phase3_positive_window = (
+                int(swing_zone_positive_window_bars)
+                if int(swing_zone_positive_window_bars) > 0
+                else 1
+            )
+            phase3_ambiguous_window = (
+                int(swing_zone_ambiguous_window_bars)
+                if int(swing_zone_ambiguous_window_bars) > 0
+                else 3
+            )
+            phase3_df = plot_df.copy()
+            for col in ("pivot_up", "pivot_down"):
+                if col not in y_df.columns:
+                    raise KeyError(f"Swing Phase 3 requires {col} in {y_path.name}.")
+                phase3_df[col] = pd.to_numeric(
+                    y_df[col].reindex(phase3_df.index),
+                    errors="coerce",
+                ).fillna(0)
+            y_long, y_short, sample_weight_long, sample_weight_short, phase3_meta, phase3_legs, _ = (
+                build_phase3_swing_event_labels(
+                    phase3_df,
+                    positive_window_bars=phase3_positive_window,
+                    ambiguous_window_bars=phase3_ambiguous_window,
+                    neighbor_weight=float(swing_zone_neighbor_weight),
+                    ambiguous_weight=float(swing_zone_ambiguous_weight),
+                    search_pre_bars=int(swing_phase3_search_pre_bars),
+                    search_post_bars=int(swing_phase3_search_post_bars),
+                    horizon_bars=int(swing_phase3_horizon_bars),
+                    tp_atr=float(swing_phase3_tp_atr),
+                    sl_atr=float(swing_phase3_sl_atr),
+                    entry_price_mode=str(swing_phase3_entry_price),
+                    same_leg_non_event_weight=float(swing_phase3_same_leg_non_event_weight),
+                    use_macro_filter=bool(swing_phase3_macro_filter),
+                    macro_min_leg_atr=float(swing_phase3_macro_min_leg_atr),
+                    macro_min_leg_bars=int(swing_phase3_macro_min_leg_bars),
+                    first_in_run_filter=use_first_in_run_filter,
+                )
+            )
+            print(
+                "[GA-XGB] Swing Phase 3 event labels enabled: "
+                f"legs={len(phase3_legs)}, "
+                f"positive_window=+/-{phase3_positive_window}, "
+                f"ambiguous_window=+/-{phase3_ambiguous_window}, "
+                f"macro_filter={bool(swing_phase3_macro_filter)}, "
+                f"macro_min_leg_atr={float(swing_phase3_macro_min_leg_atr):g}, "
+                f"macro_min_leg_bars={int(swing_phase3_macro_min_leg_bars)}, "
+                f"first_in_run_filter={use_first_in_run_filter}, "
+                f"selected_long={int(phase3_meta['is_selected_long_event'].sum())}, "
+                f"selected_short={int(phase3_meta['is_selected_short_event'].sum())}, "
+                f"suppressed_run_long={int(phase3_meta['is_suppressed_long_run_event'].sum())}, "
+                f"suppressed_run_short={int(phase3_meta['is_suppressed_short_run_event'].sum())}, "
+                f"long_zone_pos={int((y_long == 1).sum())}, "
+                f"short_zone_pos={int((y_short == 1).sum())}, "
+                f"long_zero_weight={int((sample_weight_long == 0).sum())}, "
+                f"short_zero_weight={int((sample_weight_short == 0).sum())}"
+            )
+        elif use_swing_zone_weights and use_swing_weights:
+            print(
+                "[GA-XGB] Swing pivot-zone weights enabled; ignoring "
+                "--swing-positive-weight/--swing-failed-pivot-weight/"
+                "--swing-non-pivot-weight for this run."
+            )
+        if use_first_in_run_filter and not use_phase3_events:
+            y_long_orig = y_long.copy()
+            y_short_orig = y_short.copy()
+            y_long, y_short, suppressed_run_long, suppressed_run_short = (
+                keep_first_same_side_event(y_long, y_short)
+            )
+            print(
+                "[GA-XGB] Swing first-in-run filter enabled: "
+                f"long_core_before={int((y_long_orig == 1).sum())}, "
+                f"long_core_after={int((y_long == 1).sum())}, "
+                f"suppressed_run_long={int(suppressed_run_long.sum())}, "
+                f"short_core_before={int((y_short_orig == 1).sum())}, "
+                f"short_core_after={int((y_short == 1).sum())}, "
+                f"suppressed_run_short={int(suppressed_run_short.sum())}"
+            )
+        if use_swing_zone_weights and not use_phase3_events:
+            y_long_orig = y_long.copy()
+            y_short_orig = y_short.copy()
+            y_long, sample_weight_long = _apply_swing_pivot_zone_weights(
+                y_long,
+                positive_window_bars=int(swing_zone_positive_window_bars),
+                ambiguous_window_bars=int(swing_zone_ambiguous_window_bars),
+                neighbor_weight=float(swing_zone_neighbor_weight),
+                ambiguous_weight=float(swing_zone_ambiguous_weight),
+            )
+            y_short, sample_weight_short = _apply_swing_pivot_zone_weights(
+                y_short,
+                positive_window_bars=int(swing_zone_positive_window_bars),
+                ambiguous_window_bars=int(swing_zone_ambiguous_window_bars),
+                neighbor_weight=float(swing_zone_neighbor_weight),
+                ambiguous_weight=float(swing_zone_ambiguous_weight),
+            )
+            print(
+                "[GA-XGB] Swing pivot-zone weights enabled: "
+                f"positive_window=+/-{int(swing_zone_positive_window_bars)} bars, "
+                f"ambiguous_window=+/-{int(swing_zone_ambiguous_window_bars)} bars, "
+                f"core_weight=1, neighbor_weight={float(swing_zone_neighbor_weight):g}, "
+                f"ambiguous_weight={float(swing_zone_ambiguous_weight):g}, "
+                f"long_core={int((y_long_orig == 1).sum())}, "
+                f"long_zone_pos={int((y_long == 1).sum())}, "
+                f"long_zero_weight={int((sample_weight_long == 0).sum())}, "
+                f"short_core={int((y_short_orig == 1).sum())}, "
+                f"short_zone_pos={int((y_short == 1).sum())}, "
+                f"short_zero_weight={int((sample_weight_short == 0).sum())}"
+            )
+        elif use_swing_weights:
             pivot_cols = ("pivot_down", "pivot_up")
             missing_pivots = [c for c in pivot_cols if c not in y_df.columns]
             if missing_pivots:
@@ -986,6 +1171,24 @@ def _summarize_probs(probs: np.ndarray, name: str) -> None:
     )
 
 
+def _apply_swing_pivot_zone_weights(
+    y: np.ndarray,
+    *,
+    positive_window_bars: int,
+    ambiguous_window_bars: int,
+    neighbor_weight: float,
+    ambiguous_weight: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    y_zone, weights, _ = _shared_apply_swing_pivot_zone_weights(
+        y,
+        positive_window_bars=positive_window_bars,
+        ambiguous_window_bars=ambiguous_window_bars,
+        neighbor_weight=neighbor_weight,
+        ambiguous_weight=ambiguous_weight,
+    )
+    return y_zone, weights
+
+
 def _print_binary_metrics(
     y_true: np.ndarray,
     probs: np.ndarray,
@@ -1102,6 +1305,155 @@ def _print_binary_metrics(
     }
 
 
+def _print_signal_trade_metrics(
+    price_df: pd.DataFrame | None,
+    probs: np.ndarray,
+    *,
+    side: str,
+    name: str,
+    threshold: float,
+    horizon_bars: int = 12,
+    tp_atr: float = 1.0,
+    sl_atr: float = 0.8,
+) -> dict[str, float] | None:
+    if price_df is None or probs.size == 0:
+        return None
+    required = ["open", "high", "low", "close"]
+    if any(col not in price_df.columns for col in required):
+        print(f"[GA-XGB] {name} trade metrics: missing OHLC columns")
+        return None
+    if len(price_df) != len(probs):
+        raise ValueError(f"{name}: price_df and probs lengths differ.")
+
+    side = side.lower().strip()
+    if side not in {"long", "short"}:
+        raise ValueError("side must be 'long' or 'short'.")
+
+    open_ = pd.to_numeric(price_df["open"], errors="coerce").to_numpy(dtype=float)
+    high = pd.to_numeric(price_df["high"], errors="coerce").to_numpy(dtype=float)
+    low = pd.to_numeric(price_df["low"], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(price_df["close"], errors="coerce").to_numpy(dtype=float)
+    atr = compute_wilder_atr(high, low, close, length=14)
+    p = np.asarray(probs, dtype=float)
+    finite = (
+        np.isfinite(p)
+        & np.isfinite(open_)
+        & np.isfinite(high)
+        & np.isfinite(low)
+        & np.isfinite(close)
+        & np.isfinite(atr)
+        & (atr > 0)
+    )
+    signal = finite & (p >= float(threshold))
+    if signal.size == 0 or not signal.any():
+        print(f"[GA-XGB] {name} trade metrics: no signals above threshold")
+        return {
+            "trades": 0.0,
+            "trades_per_day": 0.0,
+            "win_rate": float("nan"),
+            "ev_atr": float("nan"),
+            "avg_mfe_atr": float("nan"),
+            "avg_mae_atr": float("nan"),
+        }
+
+    # Treat a contiguous above-threshold cluster as one trade trigger.
+    signal_idx = np.flatnonzero(signal & ~np.r_[False, signal[:-1]])
+    outcomes: list[float] = []
+    mfes: list[float] = []
+    maes: list[float] = []
+    wins = 0
+    losses = 0
+    timeouts = 0
+    horizon = max(1, int(horizon_bars))
+    tp_atr = float(tp_atr)
+    sl_atr = float(sl_atr)
+
+    for idx in signal_idx:
+        entry = close[idx]
+        atr_i = atr[idx]
+        end = min(len(close) - 1, int(idx) + horizon)
+        if end <= idx or not np.isfinite(entry) or not np.isfinite(atr_i) or atr_i <= 0:
+            continue
+        win = False
+        loss = False
+        if side == "long":
+            tp_px = entry + tp_atr * atr_i
+            sl_px = entry - sl_atr * atr_i
+            mfe = (np.nanmax(high[idx + 1 : end + 1]) - entry) / atr_i
+            mae = (entry - np.nanmin(low[idx + 1 : end + 1])) / atr_i
+            for j in range(idx + 1, end + 1):
+                if low[j] <= sl_px:
+                    loss = True
+                    break
+                if high[j] >= tp_px:
+                    win = True
+                    break
+            timeout_ret = (close[end] - entry) / atr_i
+        else:
+            tp_px = entry - tp_atr * atr_i
+            sl_px = entry + sl_atr * atr_i
+            mfe = (entry - np.nanmin(low[idx + 1 : end + 1])) / atr_i
+            mae = (np.nanmax(high[idx + 1 : end + 1]) - entry) / atr_i
+            for j in range(idx + 1, end + 1):
+                if high[j] >= sl_px:
+                    loss = True
+                    break
+                if low[j] <= tp_px:
+                    win = True
+                    break
+            timeout_ret = (entry - close[end]) / atr_i
+        if not np.isfinite(mfe) or not np.isfinite(mae):
+            continue
+        mfes.append(float(mfe))
+        maes.append(float(mae))
+        if win:
+            wins += 1
+            outcomes.append(tp_atr)
+        elif loss:
+            losses += 1
+            outcomes.append(-sl_atr)
+        else:
+            timeouts += 1
+            outcomes.append(float(timeout_ret))
+
+    trades = len(outcomes)
+    if trades == 0:
+        print(f"[GA-XGB] {name} trade metrics: no evaluable signals")
+        return None
+
+    if isinstance(price_df.index, pd.DatetimeIndex):
+        days = max(1, int(pd.Series(price_df.index.normalize()).nunique()))
+    else:
+        # SPY regular session has roughly 39 10-minute bars per day.
+        days = max(1.0, len(price_df) / 39.0)
+    ev = float(np.nanmean(outcomes))
+    win_rate = wins / trades
+    avg_mfe = float(np.nanmean(mfes))
+    avg_mae = float(np.nanmean(maes))
+    trades_per_day = trades / days
+    print(
+        f"[GA-XGB] {name} trade metrics ({side}, thr={threshold:.2f}, H={horizon}, "
+        f"TP={tp_atr:g}ATR, SL={sl_atr:g}ATR): "
+        f"trades={trades}, trades/day={trades_per_day:.2f}, win_rate={win_rate:.4f}, "
+        f"ev_atr={ev:.4f}, avg_mfe_atr={avg_mfe:.4f}, avg_mae_atr={avg_mae:.4f}, "
+        f"wins={wins}, losses={losses}, timeouts={timeouts}"
+    )
+    return {
+        "trades": float(trades),
+        "trades_per_day": float(trades_per_day),
+        "win_rate": float(win_rate),
+        "ev_atr": ev,
+        "avg_mfe_atr": avg_mfe,
+        "avg_mae_atr": avg_mae,
+        "wins": float(wins),
+        "losses": float(losses),
+        "timeouts": float(timeouts),
+        "horizon_bars": float(horizon),
+        "tp_atr": float(tp_atr),
+        "sl_atr": float(sl_atr),
+    }
+
+
 def _build_swing_multiclass_target(
     y_long: np.ndarray,
     y_short: np.ndarray,
@@ -1109,11 +1461,12 @@ def _build_swing_multiclass_target(
     if y_long.shape != y_short.shape:
         raise ValueError("y_long and y_short must have the same shape.")
     conflict = (y_long == 1) & (y_short == 1)
-    if np.any(conflict):
-        raise ValueError("Swing labels contain rows marked both long and short.")
     y_multi = np.ones(y_long.shape[0], dtype=np.int64)  # neutral
     y_multi[y_short == 1] = 0  # short
     y_multi[y_long == 1] = 2  # long
+    # Soft pivot-zone expansion can make long and short neighbor zones overlap.
+    # For the single 3-class model, those rows are not directionally clean.
+    y_multi[conflict] = 1
     return y_multi
 
 
@@ -1745,8 +2098,8 @@ def main() -> None:
         "--label-mode",
         type=str,
         default=None,
-        choices=["swing", "pivot", "tb", "tb_cont", "entry_edge"],
-        help="Label mode to use (default: swing).",
+        choices=["swing", "swing_support", "pivot", "tb", "tb_cont", "entry_edge"],
+        help="Label mode to use (default: swing). swing_support enables first-in-run soft swing labels.",
     )
     parser.add_argument(
         "--side",
@@ -1914,6 +2267,118 @@ def main() -> None:
         default=TrainConfig.swing_non_pivot_weight,
         help="Swing sample weight for non-pivot background rows.",
     )
+    parser.add_argument(
+        "--swing-zone-positive-window-bars",
+        type=int,
+        default=TrainConfig.swing_zone_positive_window_bars,
+        help=(
+            "Swing only: mark +/-N bars around each true swing pivot as lower-weight "
+            "positive examples. Default 0 disables pivot-zone expansion."
+        ),
+    )
+    parser.add_argument(
+        "--swing-zone-ambiguous-window-bars",
+        type=int,
+        default=TrainConfig.swing_zone_ambiguous_window_bars,
+        help=(
+            "Swing only: zero/low-weight +/-N bars around each true pivot that are "
+            "outside the positive zone so near misses stop acting as hard negatives."
+        ),
+    )
+    parser.add_argument(
+        "--swing-zone-neighbor-weight",
+        type=float,
+        default=TrainConfig.swing_zone_neighbor_weight,
+        help="Swing pivot-zone sample weight for positive neighbor bars.",
+    )
+    parser.add_argument(
+        "--swing-zone-ambiguous-weight",
+        type=float,
+        default=TrainConfig.swing_zone_ambiguous_weight,
+        help="Swing pivot-zone sample weight for ambiguous nearby bars.",
+    )
+    parser.add_argument(
+        "--swing-first-in-run-filter",
+        action=argparse.BooleanOptionalAction,
+        default=TrainConfig.swing_first_in_run_filter,
+        help=(
+            "Swing only: keep the first event in each same-side run and suppress "
+            "later same-side events until the opposite side fires."
+        ),
+    )
+    parser.add_argument(
+        "--swing-phase3-events",
+        action=argparse.BooleanOptionalAction,
+        default=TrainConfig.swing_phase3_events,
+        help=(
+            "Swing only: build one tradeable reversal event per zigzag leg, then "
+            "center the soft pivot-zone labels around that selected event."
+        ),
+    )
+    parser.add_argument(
+        "--swing-phase3-search-pre-bars",
+        type=int,
+        default=TrainConfig.swing_phase3_search_pre_bars,
+        help="Swing Phase 3: candidate search bars before the terminal leg pivot.",
+    )
+    parser.add_argument(
+        "--swing-phase3-search-post-bars",
+        type=int,
+        default=TrainConfig.swing_phase3_search_post_bars,
+        help="Swing Phase 3: candidate search bars after the terminal leg pivot.",
+    )
+    parser.add_argument(
+        "--swing-phase3-horizon-bars",
+        type=int,
+        default=TrainConfig.swing_phase3_horizon_bars,
+        help="Swing Phase 3: forward TP-before-SL horizon in bars.",
+    )
+    parser.add_argument(
+        "--swing-phase3-tp-atr",
+        type=float,
+        default=TrainConfig.swing_phase3_tp_atr,
+        help="Swing Phase 3: favorable excursion target in ATR.",
+    )
+    parser.add_argument(
+        "--swing-phase3-sl-atr",
+        type=float,
+        default=TrainConfig.swing_phase3_sl_atr,
+        help="Swing Phase 3: adverse excursion stop in ATR.",
+    )
+    parser.add_argument(
+        "--swing-phase3-entry-price",
+        type=str,
+        choices=["close", "next_open"],
+        default=TrainConfig.swing_phase3_entry_price,
+        help="Swing Phase 3: candidate entry price convention.",
+    )
+    parser.add_argument(
+        "--swing-phase3-same-leg-non-event-weight",
+        type=float,
+        default=TrainConfig.swing_phase3_same_leg_non_event_weight,
+        help=(
+            "Swing Phase 3: sample weight for same-side non-event bars inside "
+            "the active leg after selecting the one valid event."
+        ),
+    )
+    parser.add_argument(
+        "--swing-phase3-macro-filter",
+        action=argparse.BooleanOptionalAction,
+        default=TrainConfig.swing_phase3_macro_filter,
+        help="Swing Phase 3: filter raw fractal pivots into broader ATR-confirmed macro legs.",
+    )
+    parser.add_argument(
+        "--swing-phase3-macro-min-leg-atr",
+        type=float,
+        default=TrainConfig.swing_phase3_macro_min_leg_atr,
+        help="Swing Phase 3: minimum ATR move required to accept an opposite macro pivot.",
+    )
+    parser.add_argument(
+        "--swing-phase3-macro-min-leg-bars",
+        type=int,
+        default=TrainConfig.swing_phase3_macro_min_leg_bars,
+        help="Swing Phase 3: minimum bars required to accept an opposite macro pivot.",
+    )
     args = parser.parse_args()
 
     cfg = TrainConfig(
@@ -1954,6 +2419,22 @@ def main() -> None:
         swing_positive_weight=float(args.swing_positive_weight),
         swing_failed_pivot_weight=float(args.swing_failed_pivot_weight),
         swing_non_pivot_weight=float(args.swing_non_pivot_weight),
+        swing_zone_positive_window_bars=int(args.swing_zone_positive_window_bars),
+        swing_zone_ambiguous_window_bars=int(args.swing_zone_ambiguous_window_bars),
+        swing_zone_neighbor_weight=float(args.swing_zone_neighbor_weight),
+        swing_zone_ambiguous_weight=float(args.swing_zone_ambiguous_weight),
+        swing_first_in_run_filter=bool(args.swing_first_in_run_filter),
+        swing_phase3_events=bool(args.swing_phase3_events),
+        swing_phase3_search_pre_bars=int(args.swing_phase3_search_pre_bars),
+        swing_phase3_search_post_bars=int(args.swing_phase3_search_post_bars),
+        swing_phase3_horizon_bars=int(args.swing_phase3_horizon_bars),
+        swing_phase3_tp_atr=float(args.swing_phase3_tp_atr),
+        swing_phase3_sl_atr=float(args.swing_phase3_sl_atr),
+        swing_phase3_entry_price=str(args.swing_phase3_entry_price),
+        swing_phase3_same_leg_non_event_weight=float(args.swing_phase3_same_leg_non_event_weight),
+        swing_phase3_macro_filter=bool(args.swing_phase3_macro_filter),
+        swing_phase3_macro_min_leg_atr=float(args.swing_phase3_macro_min_leg_atr),
+        swing_phase3_macro_min_leg_bars=int(args.swing_phase3_macro_min_leg_bars),
     )
     ga_kwargs = _ga_kwargs_from_config(cfg)
     xgb_overrides = _xgb_overrides_from_config(cfg)
@@ -1963,16 +2444,52 @@ def main() -> None:
     if not run_long and not run_short:
         raise ValueError("--side must be one of: both, long, short")
     if cfg.swing_single_model:
-        if cfg.label_mode != "swing":
-            raise ValueError("--swing-single-model is only supported with --label-mode swing.")
+        if not _is_swing_label_mode(cfg.label_mode):
+            raise ValueError("--swing-single-model is only supported with swing label modes.")
         if side_mode != "both":
             raise ValueError("--swing-single-model requires --side both.")
+    if cfg.swing_zone_positive_window_bars < 0:
+        raise ValueError("--swing-zone-positive-window-bars must be >= 0.")
+    if cfg.swing_zone_ambiguous_window_bars < 0:
+        raise ValueError("--swing-zone-ambiguous-window-bars must be >= 0.")
+    if cfg.swing_zone_neighbor_weight < 0:
+        raise ValueError("--swing-zone-neighbor-weight must be >= 0.")
+    if cfg.swing_zone_ambiguous_weight < 0:
+        raise ValueError("--swing-zone-ambiguous-weight must be >= 0.")
+    if cfg.swing_phase3_events and not _is_swing_label_mode(cfg.label_mode):
+        raise ValueError("--swing-phase3-events is only supported with swing label modes.")
+    if cfg.swing_phase3_search_pre_bars < 0:
+        raise ValueError("--swing-phase3-search-pre-bars must be >= 0.")
+    if cfg.swing_phase3_search_post_bars < 0:
+        raise ValueError("--swing-phase3-search-post-bars must be >= 0.")
+    if cfg.swing_phase3_horizon_bars <= 0:
+        raise ValueError("--swing-phase3-horizon-bars must be > 0.")
+    if cfg.swing_phase3_tp_atr <= 0:
+        raise ValueError("--swing-phase3-tp-atr must be > 0.")
+    if cfg.swing_phase3_sl_atr <= 0:
+        raise ValueError("--swing-phase3-sl-atr must be > 0.")
+    if cfg.swing_phase3_same_leg_non_event_weight < 0:
+        raise ValueError("--swing-phase3-same-leg-non-event-weight must be >= 0.")
+    if cfg.swing_phase3_macro_min_leg_atr < 0:
+        raise ValueError("--swing-phase3-macro-min-leg-atr must be >= 0.")
+    if cfg.swing_phase3_macro_min_leg_bars < 1:
+        raise ValueError("--swing-phase3-macro-min-leg-bars must be >= 1.")
     threshold_beta = float(args.threshold_beta)
     if threshold_beta <= 0:
         raise ValueError("--threshold-beta must be > 0.")
     metric_label = "F1" if np.isclose(threshold_beta, 1.0) else f"F{threshold_beta:g}"
     label_dir_probs = _normalize_ga_label_dir(cfg.label_mode)
     artifact_label_dir = label_dir_probs
+    mask_label_dir = (
+        "swing"
+        if label_dir_probs == "swing_support" and not bool(cfg.refresh_masks)
+        else artifact_label_dir
+    )
+    if mask_label_dir != artifact_label_dir:
+        print(
+            f"[GA-XGB] {artifact_label_dir} target will reuse {mask_label_dir} GA masks "
+            "(pass --refresh-masks to evolve target-specific masks)."
+        )
     processed_root = Path(cfg.processed_root) if cfg.processed_root else None
     split_root = Path(cfg.split_root) if cfg.split_root else None
     stats_root = Path(cfg.stats_root) if cfg.stats_root else None
@@ -1991,6 +2508,22 @@ def main() -> None:
         swing_positive_weight=cfg.swing_positive_weight,
         swing_failed_pivot_weight=cfg.swing_failed_pivot_weight,
         swing_non_pivot_weight=cfg.swing_non_pivot_weight,
+        swing_zone_positive_window_bars=cfg.swing_zone_positive_window_bars,
+        swing_zone_ambiguous_window_bars=cfg.swing_zone_ambiguous_window_bars,
+        swing_zone_neighbor_weight=cfg.swing_zone_neighbor_weight,
+        swing_zone_ambiguous_weight=cfg.swing_zone_ambiguous_weight,
+        swing_first_in_run_filter=cfg.swing_first_in_run_filter,
+        swing_phase3_events=cfg.swing_phase3_events,
+        swing_phase3_search_pre_bars=cfg.swing_phase3_search_pre_bars,
+        swing_phase3_search_post_bars=cfg.swing_phase3_search_post_bars,
+        swing_phase3_horizon_bars=cfg.swing_phase3_horizon_bars,
+        swing_phase3_tp_atr=cfg.swing_phase3_tp_atr,
+        swing_phase3_sl_atr=cfg.swing_phase3_sl_atr,
+        swing_phase3_entry_price=cfg.swing_phase3_entry_price,
+        swing_phase3_same_leg_non_event_weight=cfg.swing_phase3_same_leg_non_event_weight,
+        swing_phase3_macro_filter=cfg.swing_phase3_macro_filter,
+        swing_phase3_macro_min_leg_atr=cfg.swing_phase3_macro_min_leg_atr,
+        swing_phase3_macro_min_leg_bars=cfg.swing_phase3_macro_min_leg_bars,
     )
     plot_index = plot_df.index if plot_df is not None else None
 
@@ -2027,6 +2560,7 @@ def main() -> None:
         "ticker": cfg.ticker,
         "dataset_name": cfg.dataset_name,
         "label_mode": cfg.label_mode,
+        "mask_label_dir": mask_label_dir,
         "swing_single_model": bool(cfg.swing_single_model),
         "super_pivot_weight": cfg.super_pivot_weight,
         "side_mode": side_mode,
@@ -2036,6 +2570,22 @@ def main() -> None:
         "swing_positive_weight": float(cfg.swing_positive_weight),
         "swing_failed_pivot_weight": float(cfg.swing_failed_pivot_weight),
         "swing_non_pivot_weight": float(cfg.swing_non_pivot_weight),
+        "swing_zone_positive_window_bars": int(cfg.swing_zone_positive_window_bars),
+        "swing_zone_ambiguous_window_bars": int(cfg.swing_zone_ambiguous_window_bars),
+        "swing_zone_neighbor_weight": float(cfg.swing_zone_neighbor_weight),
+        "swing_zone_ambiguous_weight": float(cfg.swing_zone_ambiguous_weight),
+        "swing_first_in_run_filter": bool(cfg.swing_first_in_run_filter),
+        "swing_phase3_events": bool(cfg.swing_phase3_events),
+        "swing_phase3_search_pre_bars": int(cfg.swing_phase3_search_pre_bars),
+        "swing_phase3_search_post_bars": int(cfg.swing_phase3_search_post_bars),
+        "swing_phase3_horizon_bars": int(cfg.swing_phase3_horizon_bars),
+        "swing_phase3_tp_atr": float(cfg.swing_phase3_tp_atr),
+        "swing_phase3_sl_atr": float(cfg.swing_phase3_sl_atr),
+        "swing_phase3_entry_price": str(cfg.swing_phase3_entry_price),
+        "swing_phase3_same_leg_non_event_weight": float(cfg.swing_phase3_same_leg_non_event_weight),
+        "swing_phase3_macro_filter": bool(cfg.swing_phase3_macro_filter),
+        "swing_phase3_macro_min_leg_atr": float(cfg.swing_phase3_macro_min_leg_atr),
+        "swing_phase3_macro_min_leg_bars": int(cfg.swing_phase3_macro_min_leg_bars),
     }
 
     train_val_idx = np.sort(np.concatenate([train_idx, val_idx]))
@@ -2116,7 +2666,7 @@ def main() -> None:
                     load_model_artifacts(
                         model_dataset_root,
                         "long",
-                        label_dir=artifact_label_dir,
+                        label_dir=mask_label_dir,
                         feature_names=feature_names,
                         always_include_features=set(appended_meta_feature_names),
                     )
@@ -2124,7 +2674,7 @@ def main() -> None:
                     load_model_artifacts(
                         model_dataset_root,
                         "short",
-                        label_dir=artifact_label_dir,
+                        label_dir=mask_label_dir,
                         feature_names=feature_names,
                         always_include_features=set(appended_meta_feature_names),
                     )
@@ -2132,6 +2682,7 @@ def main() -> None:
                 need_refresh = True
 
         if need_refresh:
+            mask_label_dir = artifact_label_dir
             refresh_masks_and_params(
                 X_train=X_train,
                 y_long_train=y_long_train,
@@ -2153,7 +2704,7 @@ def main() -> None:
             long_mask, long_params, long_meta = load_model_artifacts(
                 model_dataset_root,
                 "long",
-                label_dir=artifact_label_dir,
+                label_dir=mask_label_dir,
                 feature_names=feature_names,
                 always_include_features=set(appended_meta_feature_names),
             )
@@ -2162,7 +2713,7 @@ def main() -> None:
             short_mask, short_params, short_meta = load_model_artifacts(
                 model_dataset_root,
                 "short",
-                label_dir=artifact_label_dir,
+                label_dir=mask_label_dir,
                 feature_names=feature_names,
                 always_include_features=set(appended_meta_feature_names),
             )
@@ -2188,6 +2739,7 @@ def main() -> None:
                 "mode": long_meta.get("mode", "ga_mask"),
                 "best_score": long_meta.get("best_score"),
                 "ga_params": dict(long_meta.get("ga_params", {})),
+                "mask_label_dir": mask_label_dir,
             },
         )
     if run_short:
@@ -2200,6 +2752,7 @@ def main() -> None:
                 "mode": short_meta.get("mode", "ga_mask"),
                 "best_score": short_meta.get("best_score"),
                 "ga_params": dict(short_meta.get("ga_params", {})),
+                "mask_label_dir": mask_label_dir,
             },
         )
 
@@ -2244,6 +2797,16 @@ def main() -> None:
                 w_long_train_only,
                 w_short_train_only,
             ).astype(np.float32)
+            conflict_train = (y_long_train == 1) & (y_short_train == 1)
+            conflict_train_only = (y_long_train_only == 1) & (y_short_train_only == 1)
+            if np.any(conflict_train):
+                w_multi_train[conflict_train] = 0.0
+                w_multi_train_only[conflict_train_only] = 0.0
+                print(
+                    "[GA-XGB] SINGLE swing neutralized overlapping pivot-zone rows: "
+                    f"train+val={int(conflict_train.sum())}, "
+                    f"train_only={int(conflict_train_only.sum())}"
+                )
 
         combined_mask = long_mask | short_mask
         combined_selected = int(combined_mask.sum())
@@ -2638,6 +3201,17 @@ def main() -> None:
                 threshold=long_threshold,
                 threshold_metric_beta=threshold_beta,
             )
+            long_oof_trade_metrics = _print_signal_trade_metrics(
+                None if plot_df is None else plot_df.iloc[train_val_idx],
+                long_oof,
+                side="long",
+                name="LONG OOF",
+                threshold=long_threshold,
+            )
+            if long_oof_metrics is not None and long_oof_trade_metrics is not None:
+                long_oof_metrics.update(
+                    {f"trade_{k}": v for k, v in long_oof_trade_metrics.items()}
+                )
             long_test_metrics = _print_binary_metrics(
                 y_long[test_idx],
                 long_test,
@@ -2645,6 +3219,17 @@ def main() -> None:
                 threshold=long_threshold,
                 threshold_metric_beta=threshold_beta,
             )
+            long_test_trade_metrics = _print_signal_trade_metrics(
+                None if plot_df is None else plot_df.iloc[test_idx],
+                long_test,
+                side="long",
+                name="LONG test",
+                threshold=long_threshold,
+            )
+            if long_test_metrics is not None and long_test_trade_metrics is not None:
+                long_test_metrics.update(
+                    {f"trade_{k}": v for k, v in long_test_trade_metrics.items()}
+                )
         if run_short:
             short_threshold, short_best_oof_score = _find_best_fbeta_threshold(
                 y_short_train,
@@ -2662,6 +3247,17 @@ def main() -> None:
                 threshold=short_threshold,
                 threshold_metric_beta=threshold_beta,
             )
+            short_oof_trade_metrics = _print_signal_trade_metrics(
+                None if plot_df is None else plot_df.iloc[train_val_idx],
+                short_oof,
+                side="short",
+                name="SHORT OOF",
+                threshold=short_threshold,
+            )
+            if short_oof_metrics is not None and short_oof_trade_metrics is not None:
+                short_oof_metrics.update(
+                    {f"trade_{k}": v for k, v in short_oof_trade_metrics.items()}
+                )
             short_test_metrics = _print_binary_metrics(
                 y_short[test_idx],
                 short_test,
@@ -2669,6 +3265,17 @@ def main() -> None:
                 threshold=short_threshold,
                 threshold_metric_beta=threshold_beta,
             )
+            short_test_trade_metrics = _print_signal_trade_metrics(
+                None if plot_df is None else plot_df.iloc[test_idx],
+                short_test,
+                side="short",
+                name="SHORT test",
+                threshold=short_threshold,
+            )
+            if short_test_metrics is not None and short_test_trade_metrics is not None:
+                short_test_metrics.update(
+                    {f"trade_{k}": v for k, v in short_test_trade_metrics.items()}
+                )
 
     n_total = X.shape[0]
     if args.full_fit:
@@ -2697,6 +3304,17 @@ def main() -> None:
                 name="LONG full-fit train metrics",
                 threshold_metric_beta=threshold_beta,
             )
+            long_full_trade_metrics = _print_signal_trade_metrics(
+                plot_df,
+                long_full,
+                side="long",
+                name="LONG full-fit train",
+                threshold=0.5,
+            )
+            if long_full_train_metrics is not None and long_full_trade_metrics is not None:
+                long_full_train_metrics.update(
+                    {f"trade_{k}": v for k, v in long_full_trade_metrics.items()}
+                )
         if run_short:
             short_full, _ = train_final_and_predict_test(
                 X_train=X_train,
@@ -2720,6 +3338,17 @@ def main() -> None:
                 name="SHORT full-fit train metrics",
                 threshold_metric_beta=threshold_beta,
             )
+            short_full_trade_metrics = _print_signal_trade_metrics(
+                plot_df,
+                short_full,
+                side="short",
+                name="SHORT full-fit train",
+                threshold=0.5,
+            )
+            if short_full_train_metrics is not None and short_full_trade_metrics is not None:
+                short_full_train_metrics.update(
+                    {f"trade_{k}": v for k, v in short_full_trade_metrics.items()}
+                )
     else:
         long_full = np.full(n_total, np.nan, dtype=np.float32)
         short_full = np.full(n_total, np.nan, dtype=np.float32)
@@ -2742,6 +3371,7 @@ def main() -> None:
         "dataset_name": cfg.dataset_name,
         "label_mode": cfg.label_mode,
         "label_dir": label_dir,
+        "mask_label_dir": mask_label_dir,
         "full_fit": bool(args.full_fit),
         "model_dataset_root": str(model_dataset_root),
     }
