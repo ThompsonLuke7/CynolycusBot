@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -501,10 +502,13 @@ def _session_reset_mask(index: pd.Index) -> np.ndarray:
 
 
 def _bar_interval_for_close_timestamp(index: pd.Index, i: int) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
-    if not isinstance(index, pd.DatetimeIndex) or i <= 0 or i >= len(index):
+    if not isinstance(index, pd.DatetimeIndex) or i < 0 or i + 1 >= len(index):
         return None, None
-    start = index[i - 1]
-    end = index[i]
+    # The intraday bars in this project are timestamped by bar start. A setup
+    # scored on bar i is only actionable after that 10-minute bar completes, so
+    # the 1-minute execution window for bar i is [index[i], index[i + 1]).
+    start = index[i]
+    end = index[i + 1]
     if start.normalize() != end.normalize() or end <= start:
         return None, None
     return start, end
@@ -517,7 +521,7 @@ def _find_1m_breakout_touch(
     *,
     side: str,
     stop_price: float,
-    require_directional_close: bool,
+    confirmation: str,
 ) -> tuple[int, float, pd.Timestamp | None] | None:
     if execution_1m is None or not np.isfinite(stop_price):
         return None
@@ -533,15 +537,99 @@ def _find_1m_breakout_touch(
 
     if side == "long":
         hit = window[pd.to_numeric(window["high"], errors="coerce") >= stop_price]
-        if require_directional_close and not hit.empty:
-            hit = hit[pd.to_numeric(hit["close"], errors="coerce") > stop_price]
     else:
         hit = window[pd.to_numeric(window["low"], errors="coerce") <= stop_price]
-        if require_directional_close and not hit.empty:
-            hit = hit[pd.to_numeric(hit["close"], errors="coerce") < stop_price]
+    if hit.empty:
+        return None
+
+    confirmation = str(confirmation).strip().lower()
+    hit_open = pd.to_numeric(hit["open"], errors="coerce")
+    hit_close = pd.to_numeric(hit["close"], errors="coerce")
+    hit_prev_close = pd.to_numeric(window["close"], errors="coerce").shift(1).reindex(hit.index)
+    if confirmation == "close_through":
+        hit = hit[hit_close > stop_price] if side == "long" else hit[hit_close < stop_price]
+    elif confirmation == "body":
+        hit = hit[hit_close > hit_open] if side == "long" else hit[hit_close < hit_open]
+    elif confirmation == "momentum":
+        hit = hit[hit_close > hit_prev_close] if side == "long" else hit[hit_close < hit_prev_close]
+    elif confirmation == "body_or_close_through":
+        if side == "long":
+            hit = hit[(hit_close > hit_open) | (hit_close > stop_price)]
+        else:
+            hit = hit[(hit_close < hit_open) | (hit_close < stop_price)]
+    elif confirmation == "body_and_close_through":
+        if side == "long":
+            hit = hit[(hit_close > hit_open) & (hit_close > stop_price)]
+        else:
+            hit = hit[(hit_close < hit_open) & (hit_close < stop_price)]
+    elif confirmation in {"touch", "none"}:
+        pass
+    else:
+        raise ValueError(f"Unknown 1m breakout confirmation: {confirmation}")
     if hit.empty:
         return None
     return i, float(stop_price), hit.index[0]
+
+
+def _find_1m_micro_reversal(
+    execution_1m: pd.DataFrame | None,
+    feature_index: pd.Index,
+    i: int,
+    *,
+    side: str,
+) -> tuple[int, float, pd.Timestamp | None] | None:
+    if execution_1m is None:
+        return None
+    start, end = _bar_interval_for_close_timestamp(feature_index, i)
+    if start is None or end is None:
+        return None
+    minute_index = execution_1m.index
+    left = minute_index.searchsorted(start, side="right")
+    right = minute_index.searchsorted(end, side="right")
+    window = execution_1m.iloc[left:right].copy()
+    if window.empty:
+        return None
+
+    open_ = pd.to_numeric(window["open"], errors="coerce")
+    high = pd.to_numeric(window["high"], errors="coerce")
+    low = pd.to_numeric(window["low"], errors="coerce")
+    close = pd.to_numeric(window["close"], errors="coerce")
+    if side == "long":
+        hit = window[(close > open_) & (close > high.shift(1))]
+    else:
+        hit = window[(close < open_) & (close < low.shift(1))]
+    if hit.empty:
+        return None
+    return i, float(pd.to_numeric(hit["close"], errors="coerce").iloc[0]), hit.index[0]
+
+
+def _has_1m_adverse_break_before_entry(
+    execution_1m: pd.DataFrame | None,
+    feature_index: pd.Index,
+    setup_idx: int,
+    entry_time: pd.Timestamp | None,
+    *,
+    side: str,
+    threshold: float,
+) -> bool:
+    if execution_1m is None or entry_time is None or pd.isna(entry_time) or not np.isfinite(threshold):
+        return False
+    if not isinstance(feature_index, pd.DatetimeIndex) or setup_idx + 1 >= len(feature_index):
+        return False
+    start = feature_index[setup_idx + 1]
+    end = pd.Timestamp(entry_time)
+    if end <= start:
+        return False
+
+    minute_index = execution_1m.index
+    left = minute_index.searchsorted(start, side="left")
+    right = minute_index.searchsorted(end, side="left")
+    window = execution_1m.iloc[left:right]
+    if window.empty:
+        return False
+    if side == "long":
+        return bool((pd.to_numeric(window["low"], errors="coerce") < threshold).any())
+    return bool((pd.to_numeric(window["high"], errors="coerce") > threshold).any())
 
 
 def _trade_metrics_for_entries(
@@ -576,6 +664,8 @@ def _trade_metrics_for_entries(
         if idx + 1 >= n:
             continue
         entry = entry_prices[idx] if entry_prices is not None else close[idx]
+        if not np.isfinite(entry):
+            entry = close[idx]
         atr_i = atr[idx]
         if not np.isfinite(entry) or not np.isfinite(atr_i) or atr_i <= 0:
             continue
@@ -660,6 +750,154 @@ def _trade_metrics_for_entries(
         "losses": float(losses),
         "timeouts": float(timeouts),
     }
+
+
+def _trace_trades_for_entries(
+    feature_df: pd.DataFrame,
+    entries: np.ndarray,
+    *,
+    side: str,
+    split_name: str,
+    variant: str,
+    mode: str,
+    p_long: np.ndarray,
+    p_short: np.ndarray,
+    setup: np.ndarray,
+    trigger: np.ndarray | None,
+    horizon_bars: int,
+    tp_atr: float,
+    sl_atr: float,
+    entry_prices: np.ndarray | None = None,
+    entry_times: np.ndarray | None = None,
+    execution_1m: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    open_ = pd.to_numeric(feature_df["open"], errors="coerce").to_numpy(dtype=float)
+    high = pd.to_numeric(feature_df["high"], errors="coerce").to_numpy(dtype=float)
+    low = pd.to_numeric(feature_df["low"], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(feature_df["close"], errors="coerce").to_numpy(dtype=float)
+    atr = compute_wilder_atr(high, low, close, length=14)
+    idxs = np.flatnonzero(entries)
+    rows: list[dict[str, float | str | bool]] = []
+    horizon = max(1, int(horizon_bars))
+    tp_atr = float(tp_atr)
+    sl_atr = float(sl_atr)
+    n = len(feature_df)
+
+    for trace_n, idx in enumerate(idxs, start=1):
+        if idx + 1 >= n:
+            continue
+        entry = entry_prices[idx] if entry_prices is not None else close[idx]
+        if not np.isfinite(entry):
+            entry = close[idx]
+        atr_i = atr[idx]
+        if not np.isfinite(entry) or not np.isfinite(atr_i) or atr_i <= 0:
+            continue
+        setup_ts = feature_df.index[idx] if isinstance(feature_df.index, pd.DatetimeIndex) else idx
+        entry_ts = entry_times[idx] if entry_times is not None else pd.NaT
+        if pd.isna(entry_ts):
+            entry_ts = setup_ts
+
+        use_1m = execution_1m is not None and pd.notna(entry_ts)
+        if use_1m:
+            entry_ts = pd.Timestamp(entry_ts)
+            end_ts = entry_ts + pd.Timedelta(minutes=10 * horizon)
+            minute_index = execution_1m.index
+            left = minute_index.searchsorted(entry_ts, side="right")
+            right = minute_index.searchsorted(end_ts, side="right")
+            path = execution_1m.iloc[left:right]
+            if path.empty:
+                continue
+            path_high = pd.to_numeric(path["high"], errors="coerce").to_numpy(dtype=float)
+            path_low = pd.to_numeric(path["low"], errors="coerce").to_numpy(dtype=float)
+            path_close = pd.to_numeric(path["close"], errors="coerce").to_numpy(dtype=float)
+            path_times = list(path.index)
+        else:
+            end = min(n - 1, idx + horizon)
+            if end <= idx:
+                continue
+            path_high = high[idx + 1 : end + 1]
+            path_low = low[idx + 1 : end + 1]
+            path_close = close[idx + 1 : end + 1]
+            if path_close.size == 0:
+                continue
+            if isinstance(feature_df.index, pd.DatetimeIndex):
+                path_times = list(feature_df.index[idx + 1 : end + 1])
+            else:
+                path_times = list(range(idx + 1, end + 1))
+
+        if side == "long":
+            tp_px = entry + tp_atr * atr_i
+            sl_px = entry - sl_atr * atr_i
+            mfe = (np.nanmax(path_high) - entry) / atr_i
+            mae = (entry - np.nanmin(path_low)) / atr_i
+            timeout_ret = (path_close[-1] - entry) / atr_i
+            hit_reason = "timeout"
+            outcome_atr = float(timeout_ret)
+            exit_time = path_times[-1]
+            for t, hi, lo in zip(path_times, path_high, path_low):
+                if lo <= sl_px:
+                    hit_reason = "sl"
+                    outcome_atr = -sl_atr
+                    exit_time = t
+                    break
+                if hi >= tp_px:
+                    hit_reason = "tp"
+                    outcome_atr = tp_atr
+                    exit_time = t
+                    break
+        else:
+            tp_px = entry - tp_atr * atr_i
+            sl_px = entry + sl_atr * atr_i
+            mfe = (entry - np.nanmin(path_low)) / atr_i
+            mae = (np.nanmax(path_high) - entry) / atr_i
+            timeout_ret = (entry - path_close[-1]) / atr_i
+            hit_reason = "timeout"
+            outcome_atr = float(timeout_ret)
+            exit_time = path_times[-1]
+            for t, hi, lo in zip(path_times, path_high, path_low):
+                if hi >= sl_px:
+                    hit_reason = "sl"
+                    outcome_atr = -sl_atr
+                    exit_time = t
+                    break
+                if lo <= tp_px:
+                    hit_reason = "tp"
+                    outcome_atr = tp_atr
+                    exit_time = t
+                    break
+
+        if not np.isfinite(mfe) or not np.isfinite(mae):
+            continue
+        rows.append(
+            {
+                "trace_id": f"{side.upper()}_{trace_n:04d}",
+                "split": split_name,
+                "variant": variant,
+                "mode": mode,
+                "side": side,
+                "bar_index": float(idx),
+                "setup_bar_time": str(setup_ts),
+                "entry_time": str(entry_ts),
+                "exit_time": str(exit_time),
+                "entry_price": float(entry),
+                "tp_price": float(tp_px),
+                "sl_price": float(sl_px),
+                "atr": float(atr_i),
+                "outcome": hit_reason,
+                "outcome_atr": float(outcome_atr),
+                "mfe_atr": float(mfe),
+                "mae_atr": float(mae),
+                "p_long": float(p_long[idx]) if np.isfinite(p_long[idx]) else float("nan"),
+                "p_short": float(p_short[idx]) if np.isfinite(p_short[idx]) else float("nan"),
+                "setup_active": bool(setup[idx]),
+                "trigger_candidate": bool(trigger[idx]) if trigger is not None else bool(entries[idx]),
+                "bar_open": float(open_[idx]),
+                "bar_high": float(high[idx]),
+                "bar_low": float(low[idx]),
+                "bar_close": float(close[idx]),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _merge_side_metrics(
@@ -798,8 +1036,27 @@ def _post_setup_side_candidates(
                     entry_idx = start
                     entry_price = open_[entry_idx]
                     entry_time = feature_df.index[entry_idx] if isinstance(feature_df.index, pd.DatetimeIndex) else None
-        elif policy in {"break_prev_stop", "break_prev_stop_1m_confirm"}:
-            require_directional_close = policy == "break_prev_stop_1m_confirm"
+        elif policy in {
+            "break_prev_stop",
+            "break_prev_stop_1m_confirm",
+            "break_prev_stop_1m_body",
+            "break_prev_stop_1m_momentum",
+            "break_prev_stop_1m_body_or_close",
+            "break_prev_stop_1m_body_and_close",
+            "break_prev_stop_1m_confirm_no_fresh_low",
+            "break_prev_stop_1m_body_and_close_no_fresh_low",
+        }:
+            confirmation = {
+                "break_prev_stop": "touch",
+                "break_prev_stop_1m_confirm": "close_through",
+                "break_prev_stop_1m_body": "body",
+                "break_prev_stop_1m_momentum": "momentum",
+                "break_prev_stop_1m_body_or_close": "body_or_close_through",
+                "break_prev_stop_1m_body_and_close": "body_and_close_through",
+                "break_prev_stop_1m_confirm_no_fresh_low": "close_through",
+                "break_prev_stop_1m_body_and_close_no_fresh_low": "body_and_close_through",
+            }[policy]
+            no_fresh_adverse = policy.endswith("_no_fresh_low")
             for i in range(start, end + 1):
                 if not bool(eval_mask[i]):
                     continue
@@ -810,18 +1067,37 @@ def _post_setup_side_candidates(
                         i,
                         side=side,
                         stop_price=high[i - 1],
-                        require_directional_close=require_directional_close,
+                        confirmation=confirmation,
                     )
                     if touch is not None:
                         entry_idx, entry_price, entry_time = touch
+                        if no_fresh_adverse and _has_1m_adverse_break_before_entry(
+                            execution_1m,
+                            feature_df.index,
+                            setup_idx,
+                            entry_time,
+                            side=side,
+                            threshold=low[setup_idx],
+                        ):
+                            continue
                         break
                     if execution_1m is not None:
                         continue
                 if side == "long" and np.isfinite(high[i - 1]) and high[i] >= high[i - 1]:
-                    if require_directional_close and not (np.isfinite(close[i]) and close[i] > high[i - 1]):
+                    if confirmation == "close_through" and not (np.isfinite(close[i]) and close[i] > high[i - 1]):
+                        continue
+                    if confirmation == "body" and not (np.isfinite(close[i]) and np.isfinite(open_[i]) and close[i] > open_[i]):
+                        continue
+                    if confirmation == "body_and_close_through" and not (
+                        np.isfinite(close[i]) and np.isfinite(open_[i]) and close[i] > open_[i] and close[i] > high[i - 1]
+                    ):
                         continue
                     entry_idx = i
                     entry_price = high[i - 1]
+                    if no_fresh_adverse and i > start and np.nanmin(low[start:i]) < low[setup_idx]:
+                        entry_idx = -1
+                        entry_price = np.nan
+                        continue
                     break
                 if side == "short" and np.isfinite(low[i - 1]):
                     touch = _find_1m_breakout_touch(
@@ -830,7 +1106,7 @@ def _post_setup_side_candidates(
                         i,
                         side=side,
                         stop_price=low[i - 1],
-                        require_directional_close=require_directional_close,
+                        confirmation=confirmation,
                     )
                     if touch is not None:
                         entry_idx, entry_price, entry_time = touch
@@ -838,10 +1114,29 @@ def _post_setup_side_candidates(
                     if execution_1m is not None:
                         continue
                 if side == "short" and np.isfinite(low[i - 1]) and low[i] <= low[i - 1]:
-                    if require_directional_close and not (np.isfinite(close[i]) and close[i] < low[i - 1]):
+                    if confirmation == "close_through" and not (np.isfinite(close[i]) and close[i] < low[i - 1]):
+                        continue
+                    if confirmation == "body" and not (np.isfinite(close[i]) and np.isfinite(open_[i]) and close[i] < open_[i]):
+                        continue
+                    if confirmation == "body_and_close_through" and not (
+                        np.isfinite(close[i]) and np.isfinite(open_[i]) and close[i] < open_[i] and close[i] < low[i - 1]
+                    ):
                         continue
                     entry_idx = i
                     entry_price = low[i - 1]
+                    break
+        elif policy == "micro_reversal_1m":
+            for i in range(start, end + 1):
+                if not bool(eval_mask[i]):
+                    continue
+                touch = _find_1m_micro_reversal(
+                    execution_1m,
+                    feature_df.index,
+                    i,
+                    side=side,
+                )
+                if touch is not None:
+                    entry_idx, entry_price, entry_time = touch
                     break
         elif policy == "trigger_close":
             for i in range(start, end + 1):
@@ -887,20 +1182,24 @@ def _evaluate_post_setup_policy(
     tp_atr: float,
     sl_atr: float,
     execution_1m: pd.DataFrame | None = None,
-) -> tuple[dict[str, float | str | bool], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    dict[str, float | str | bool],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     eval_mask = np.zeros(len(feature_df), dtype=bool)
     eval_mask[eval_idx] = True
     finite = np.isfinite(p_long) & np.isfinite(p_short)
     long_raw_setup = eval_mask & finite & (p_long >= float(long_setup_threshold))
     short_raw_setup = eval_mask & finite & (p_short >= float(short_setup_threshold))
     policy = (
-        "next_open"
-        if policy_name == "post_setup_next_open"
-        else "break_prev_stop_1m_confirm"
-        if policy_name == "post_setup_break_prev_stop_1m_confirm"
-        else "break_prev_stop"
-        if policy_name == "post_setup_break_prev_stop"
-        else "trigger_close"
+        _post_setup_policy_to_internal(policy_name)
     )
 
     long_candidate, long_prices, long_times, long_setup_count, long_trigger_count = _post_setup_side_candidates(
@@ -989,7 +1288,26 @@ def _evaluate_post_setup_policy(
         short_entries,
         long_candidate,
         short_candidate,
+        long_prices,
+        short_prices,
+        long_times,
+        short_times,
     )
+
+
+def _post_setup_policy_to_internal(policy_name: str) -> str:
+    return {
+        "post_setup_next_open": "next_open",
+        "post_setup_break_prev_stop": "break_prev_stop",
+        "post_setup_break_prev_stop_1m_confirm": "break_prev_stop_1m_confirm",
+        "post_setup_break_prev_stop_1m_body": "break_prev_stop_1m_body",
+        "post_setup_break_prev_stop_1m_momentum": "break_prev_stop_1m_momentum",
+        "post_setup_break_prev_stop_1m_body_or_close": "break_prev_stop_1m_body_or_close",
+        "post_setup_break_prev_stop_1m_body_and_close": "break_prev_stop_1m_body_and_close",
+        "post_setup_break_prev_stop_1m_confirm_no_fresh_low": "break_prev_stop_1m_confirm_no_fresh_low",
+        "post_setup_break_prev_stop_1m_body_and_close_no_fresh_low": "break_prev_stop_1m_body_and_close_no_fresh_low",
+        "post_setup_micro_reversal_1m": "micro_reversal_1m",
+    }.get(policy_name, "trigger_close")
 
 
 def _evaluate_asymmetric_policy(
@@ -1003,6 +1321,9 @@ def _evaluate_asymmetric_policy(
     short_setup_threshold: float,
     cooldown_bars: int,
     one_per_setup_cluster: bool,
+    long_policy_name: str,
+    long_policy: str,
+    long_trigger_col: str | None,
     short_policy_name: str,
     short_policy: str,
     short_trigger_col: str | None,
@@ -1011,7 +1332,17 @@ def _evaluate_asymmetric_policy(
     tp_atr: float,
     sl_atr: float,
     execution_1m: pd.DataFrame | None = None,
-) -> tuple[dict[str, float | str | bool], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    dict[str, float | str | bool],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     eval_mask = np.zeros(len(feature_df), dtype=bool)
     eval_mask[eval_idx] = True
     finite = np.isfinite(p_long) & np.isfinite(p_short)
@@ -1023,8 +1354,8 @@ def _evaluate_asymmetric_policy(
         long_raw_setup,
         eval_mask,
         side="long",
-        policy="break_prev_stop",
-        trigger_col=None,
+        policy=long_policy,
+        trigger_col=long_trigger_col,
         max_bars=max_bars,
         execution_1m=execution_1m,
     )
@@ -1078,10 +1409,10 @@ def _evaluate_asymmetric_policy(
     return (
         _merge_side_metrics(
             split_name=split_name,
-            variant=f"asym_long_break_prev_short_{short_policy_name}",
+            variant=f"asym_long_{long_policy_name}_short_{short_policy_name}",
             mode=mode,
             available=True,
-            reason="long post-setup break-prev-high stop; short post-setup confirmation",
+            reason="asymmetric post-setup confirmation",
             long_setup_threshold=long_setup_threshold,
             short_setup_threshold=short_setup_threshold,
             cooldown_bars=cooldown_bars,
@@ -1105,6 +1436,10 @@ def _evaluate_asymmetric_policy(
         short_entries,
         long_candidate,
         short_candidate,
+        long_prices,
+        short_prices,
+        long_times,
+        short_times,
     )
 
 
@@ -1120,7 +1455,17 @@ def _evaluate_sr_breakout_policy(
     tp_atr: float,
     sl_atr: float,
     execution_1m: pd.DataFrame | None = None,
-) -> tuple[dict[str, float | str | bool], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    dict[str, float | str | bool],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     high = pd.to_numeric(feature_df["high"], errors="coerce")
     low = pd.to_numeric(feature_df["low"], errors="coerce")
     lookback = max(2, int(lookback_bars))
@@ -1146,7 +1491,7 @@ def _evaluate_sr_breakout_policy(
                 i,
                 side="long",
                 stop_price=resistance[i],
-                require_directional_close=False,
+                confirmation="touch",
             )
             if touch is not None:
                 entry_idx, entry_price, entry_time = touch
@@ -1164,7 +1509,7 @@ def _evaluate_sr_breakout_policy(
                 i,
                 side="short",
                 stop_price=support[i],
-                require_directional_close=False,
+                confirmation="touch",
             )
             if touch is not None:
                 entry_idx, entry_price, entry_time = touch
@@ -1239,6 +1584,10 @@ def _evaluate_sr_breakout_policy(
         short_entries,
         long_candidate,
         short_candidate,
+        long_prices,
+        short_prices,
+        long_times,
+        short_times,
     )
 
 
@@ -1261,7 +1610,17 @@ def _evaluate_variant(
     horizon_bars: int,
     tp_atr: float,
     sl_atr: float,
-) -> tuple[dict[str, float | str | bool], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    dict[str, float | str | bool],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     n = len(feature_df)
     eval_mask = np.zeros(n, dtype=bool)
     eval_mask[eval_idx] = True
@@ -1302,6 +1661,10 @@ def _evaluate_variant(
 
     long_candidate = long_setup & trigger_long
     short_candidate = short_setup & trigger_short
+    long_prices = np.full(n, np.nan, dtype=float)
+    short_prices = np.full(n, np.nan, dtype=float)
+    long_times = np.full(n, pd.NaT, dtype=object)
+    short_times = np.full(n, pd.NaT, dtype=object)
     long_entries, short_entries, removal_stats = _apply_conflict_cooldown_cluster(
         long_candidate,
         short_candidate,
@@ -1383,7 +1746,17 @@ def _evaluate_variant(
     for prefix, metrics in (("long", long_metrics), ("short", short_metrics)):
         for key, value in metrics.items():
             row[f"{prefix}_{key}"] = value
-    return row, long_entries, short_entries, long_candidate, short_candidate
+    return (
+        row,
+        long_entries,
+        short_entries,
+        long_candidate,
+        short_candidate,
+        long_prices,
+        short_prices,
+        long_times,
+        short_times,
+    )
 
 
 def _plot_diagnostics(
@@ -1540,6 +1913,18 @@ def main() -> None:
         help="Optional comma-separated post-setup policy names to run, e.g. post_setup_break_prev_stop,post_setup_break_prev_stop_1m_confirm.",
     )
     parser.add_argument(
+        "--asym-long-policy-filter",
+        type=str,
+        default=None,
+        help="Optional comma-separated asymmetric long policy names to run, e.g. micro_reversal_1m,break_prev_stop_1m_body_and_close.",
+    )
+    parser.add_argument(
+        "--asym-short-policy-filter",
+        type=str,
+        default=None,
+        help="Optional comma-separated asymmetric short policy names to run, e.g. break_prev_stop_1m_confirm,break_prev_stop_1m_body_and_close.",
+    )
+    parser.add_argument(
         "--setup-invalidation",
         choices=("none", "price", "price_vwap"),
         default="none",
@@ -1617,6 +2002,11 @@ def main() -> None:
         ("post_setup_next_open", None, None),
         ("post_setup_break_prev_stop", None, None),
         ("post_setup_break_prev_stop_1m_confirm", None, None),
+        ("post_setup_break_prev_stop_1m_body", None, None),
+        ("post_setup_break_prev_stop_1m_momentum", None, None),
+        ("post_setup_break_prev_stop_1m_body_or_close", None, None),
+        ("post_setup_break_prev_stop_1m_body_and_close", None, None),
+        ("post_setup_micro_reversal_1m", None, None),
         ("post_setup_trigger_A_break", "trigger_A_long", "trigger_A_short"),
         ("post_setup_trigger_B_break_momentum", "trigger_B_long", "trigger_B_short"),
         ("post_setup_trigger_C_break_body", "trigger_C_long", "trigger_C_short"),
@@ -1630,18 +2020,50 @@ def main() -> None:
     if args.post_setup_policy_filter:
         wanted = {part.strip() for part in str(args.post_setup_policy_filter).split(",") if part.strip()}
         post_setup_policies = [policy for policy in post_setup_policies if policy[0] in wanted]
+    asym_long_policies: list[tuple[str, str, str | None]] = [
+        ("next_open", "next_open", None),
+        ("next_open_direction", "next_open_direction", None),
+        ("break_prev_stop", "break_prev_stop", None),
+        ("break_prev_stop_1m_confirm", "break_prev_stop_1m_confirm", None),
+        ("break_prev_stop_1m_body", "break_prev_stop_1m_body", None),
+        ("break_prev_stop_1m_momentum", "break_prev_stop_1m_momentum", None),
+        ("break_prev_stop_1m_body_or_close", "break_prev_stop_1m_body_or_close", None),
+        ("break_prev_stop_1m_body_and_close", "break_prev_stop_1m_body_and_close", None),
+        ("break_prev_stop_1m_confirm_no_fresh_low", "break_prev_stop_1m_confirm_no_fresh_low", None),
+        (
+            "break_prev_stop_1m_body_and_close_no_fresh_low",
+            "break_prev_stop_1m_body_and_close_no_fresh_low",
+            None,
+        ),
+        ("micro_reversal_1m", "micro_reversal_1m", None),
+        ("H", "trigger_close", "trigger_H_long"),
+        ("G", "trigger_close", "trigger_G_long"),
+        ("E", "trigger_close", "trigger_E_long"),
+        ("I", "trigger_close", "trigger_I_long"),
+    ]
     asym_short_policies: list[tuple[str, str, str | None]] = [
         ("next_open", "next_open", None),
         ("next_open_direction", "next_open_direction", None),
         ("break_prev_stop", "break_prev_stop", None),
         ("break_prev_stop_1m_confirm", "break_prev_stop_1m_confirm", None),
+        ("break_prev_stop_1m_body", "break_prev_stop_1m_body", None),
+        ("break_prev_stop_1m_momentum", "break_prev_stop_1m_momentum", None),
+        ("break_prev_stop_1m_body_or_close", "break_prev_stop_1m_body_or_close", None),
+        ("break_prev_stop_1m_body_and_close", "break_prev_stop_1m_body_and_close", None),
+        ("micro_reversal_1m", "micro_reversal_1m", None),
         ("H", "trigger_close", "trigger_H_short"),
         ("G", "trigger_close", "trigger_G_short"),
         ("E", "trigger_close", "trigger_E_short"),
         ("I", "trigger_close", "trigger_I_short"),
     ]
+    if args.asym_long_policy_filter:
+        wanted = {part.strip() for part in str(args.asym_long_policy_filter).split(",") if part.strip()}
+        asym_long_policies = [policy for policy in asym_long_policies if policy[0] in wanted]
+    if args.asym_short_policy_filter:
+        wanted = {part.strip() for part in str(args.asym_short_policy_filter).split(",") if part.strip()}
+        asym_short_policies = [policy for policy in asym_short_policies if policy[0] in wanted]
     rows: list[dict[str, float | str | bool]] = []
-    entry_maps: dict[tuple[str, str, str], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+    entry_maps: dict[tuple[str, str, str], tuple[np.ndarray, ...]] = {}
 
     split_names = {part.strip().lower() for part in str(args.splits).split(",") if part.strip()}
     selected_splits = [(name, loaded[name]) for name in ("oof", "test") if name in split_names]
@@ -1687,7 +2109,17 @@ def main() -> None:
                 ]
             for long_setup_hold_bars, short_setup_hold_bars in variant_hold_pairs:
                 for mode_name, cooldown_bars, one_per_cluster in modes:
-                    row, long_entries, short_entries, long_trigger, short_trigger = _evaluate_variant(
+                    (
+                        row,
+                        long_entries,
+                        short_entries,
+                        long_trigger,
+                        short_trigger,
+                        long_prices,
+                        short_prices,
+                        long_times,
+                        short_times,
+                    ) = _evaluate_variant(
                         feature_df,
                         p_long,
                         p_short,
@@ -1720,6 +2152,10 @@ def main() -> None:
                         short_entries,
                         long_trigger,
                         short_trigger,
+                        long_prices,
+                        short_prices,
+                        long_times,
+                        short_times,
                     )
 
         if bool(args.include_post_setup):
@@ -1729,7 +2165,17 @@ def main() -> None:
                         ("cooldown_only", int(args.cooldown_bars), False),
                         ("cooldown_cluster", int(args.cooldown_bars), True),
                     ):
-                        row, long_entries, short_entries, long_trigger, short_trigger = _evaluate_post_setup_policy(
+                        (
+                            row,
+                            long_entries,
+                            short_entries,
+                            long_trigger,
+                            short_trigger,
+                            long_prices,
+                            short_prices,
+                            long_times,
+                            short_times,
+                        ) = _evaluate_post_setup_policy(
                             feature_df,
                             p_long,
                             p_short,
@@ -1756,45 +2202,69 @@ def main() -> None:
                             short_entries,
                             long_trigger,
                             short_trigger,
+                            long_prices,
+                            short_prices,
+                            long_times,
+                            short_times,
                         )
 
         if bool(args.include_asym_post_setup):
             for max_bars in post_setup_max_values:
-                for short_policy_name, short_policy, short_trigger_col in asym_short_policies:
-                    if short_trigger_col is not None and short_trigger_col not in feature_df.columns:
+                for long_policy_name, long_policy, long_trigger_col in asym_long_policies:
+                    if long_trigger_col is not None and long_trigger_col not in feature_df.columns:
                         continue
-                    for mode_name, cooldown_bars, one_per_cluster in (
-                        ("cooldown_only", int(args.cooldown_bars), False),
-                        ("cooldown_cluster", int(args.cooldown_bars), True),
-                    ):
-                        row, long_entries, short_entries, long_trigger, short_trigger = _evaluate_asymmetric_policy(
-                            feature_df,
-                            p_long,
-                            p_short,
-                            split_name=split_name,
-                            eval_idx=eval_idx,
-                            long_setup_threshold=float(args.long_setup_threshold),
-                            short_setup_threshold=float(args.short_setup_threshold),
-                            cooldown_bars=cooldown_bars,
-                            one_per_setup_cluster=one_per_cluster,
-                            short_policy_name=short_policy_name,
-                            short_policy=short_policy,
-                            short_trigger_col=short_trigger_col,
-                            max_bars=int(max_bars),
-                            horizon_bars=int(args.horizon_bars),
-                            tp_atr=float(args.tp_atr),
-                            sl_atr=float(args.sl_atr),
-                            execution_1m=execution_1m,
-                        )
-                        row["mode"] = f"{mode_name}_longmax{max_bars}_shortmax{max_bars}"
-                        row["cooldown_bars"] = float(cooldown_bars)
-                        rows.append(row)
-                        entry_maps[(split_name, str(row["variant"]), str(row["mode"]))] = (
-                            long_entries,
-                            short_entries,
-                            long_trigger,
-                            short_trigger,
-                        )
+                    for short_policy_name, short_policy, short_trigger_col in asym_short_policies:
+                        if short_trigger_col is not None and short_trigger_col not in feature_df.columns:
+                            continue
+                        for mode_name, cooldown_bars, one_per_cluster in (
+                            ("cooldown_only", int(args.cooldown_bars), False),
+                            ("cooldown_cluster", int(args.cooldown_bars), True),
+                        ):
+                            (
+                                row,
+                                long_entries,
+                                short_entries,
+                                long_trigger,
+                                short_trigger,
+                                long_prices,
+                                short_prices,
+                                long_times,
+                                short_times,
+                            ) = _evaluate_asymmetric_policy(
+                                feature_df,
+                                p_long,
+                                p_short,
+                                split_name=split_name,
+                                eval_idx=eval_idx,
+                                long_setup_threshold=float(args.long_setup_threshold),
+                                short_setup_threshold=float(args.short_setup_threshold),
+                                cooldown_bars=cooldown_bars,
+                                one_per_setup_cluster=one_per_cluster,
+                                long_policy_name=long_policy_name,
+                                long_policy=long_policy,
+                                long_trigger_col=long_trigger_col,
+                                short_policy_name=short_policy_name,
+                                short_policy=short_policy,
+                                short_trigger_col=short_trigger_col,
+                                max_bars=int(max_bars),
+                                horizon_bars=int(args.horizon_bars),
+                                tp_atr=float(args.tp_atr),
+                                sl_atr=float(args.sl_atr),
+                                execution_1m=execution_1m,
+                            )
+                            row["mode"] = f"{mode_name}_longmax{max_bars}_shortmax{max_bars}"
+                            row["cooldown_bars"] = float(cooldown_bars)
+                            rows.append(row)
+                            entry_maps[(split_name, str(row["variant"]), str(row["mode"]))] = (
+                                long_entries,
+                                short_entries,
+                                long_trigger,
+                                short_trigger,
+                                long_prices,
+                                short_prices,
+                                long_times,
+                                short_times,
+                            )
 
         if bool(args.include_sr_baseline):
             for lookback in sr_lookback_values:
@@ -1802,7 +2272,17 @@ def main() -> None:
                     ("cooldown_only", int(args.cooldown_bars), False),
                     ("cooldown_cluster", int(args.cooldown_bars), True),
                 ):
-                    row, long_entries, short_entries, long_trigger, short_trigger = _evaluate_sr_breakout_policy(
+                    (
+                        row,
+                        long_entries,
+                        short_entries,
+                        long_trigger,
+                        short_trigger,
+                        long_prices,
+                        short_prices,
+                        long_times,
+                        short_times,
+                    ) = _evaluate_sr_breakout_policy(
                         feature_df,
                         split_name=split_name,
                         eval_idx=eval_idx,
@@ -1822,6 +2302,10 @@ def main() -> None:
                         short_entries,
                         long_trigger,
                         short_trigger,
+                        long_prices,
+                        short_prices,
+                        long_times,
+                        short_times,
                     )
 
     scoreboard = pd.DataFrame(rows)
@@ -1865,6 +2349,16 @@ def main() -> None:
     ]
     print("[phase4] TEST scoreboard sorted by total_ev_atr:")
     print(test_scores[show_cols].head(20).to_string(index=False))
+    best_key: tuple[str, str, str] | None = None
+    if not test_scores.empty:
+        best_row = test_scores.iloc[0]
+        best_key = ("test", str(best_row["variant"]), str(best_row["mode"]))
+        best_csv_path = out_dir / "best_phase4_trigger_scoreboard.csv"
+        best_json_path = out_dir / "best_phase4_trigger_scoreboard.json"
+        pd.DataFrame([best_row]).to_csv(best_csv_path, index=False)
+        best_json_path.write_text(json.dumps(json.loads(pd.DataFrame([best_row]).to_json(orient="records"))[0], indent=2))
+        print(f"[phase4] wrote best scoreboard row {best_csv_path}")
+        print(f"[phase4] wrote best scoreboard row {best_json_path}")
 
     p_long_test = loaded["p_long_test"]
     p_short_test = loaded["p_short_test"]
@@ -1878,7 +2372,16 @@ def main() -> None:
         key = ("test", str(row["variant"]), str(row["mode"]))
         if key not in entry_maps:
             continue
-        long_entries, short_entries, long_trigger, short_trigger = entry_maps[key]
+        (
+            long_entries,
+            short_entries,
+            long_trigger,
+            short_trigger,
+            long_prices,
+            short_prices,
+            long_times,
+            short_times,
+        ) = entry_maps[key]
         long_setup_hold = int(row["long_setup_hold_bars"]) if pd.notna(row.get("long_setup_hold_bars", np.nan)) else 0
         short_setup_hold = int(row["short_setup_hold_bars"]) if pd.notna(row.get("short_setup_hold_bars", np.nan)) else 0
         setup_invalidation = str(row.get("setup_invalidation", "none"))
@@ -1911,6 +2414,52 @@ def main() -> None:
         plot_long_setup &= eval_mask
         plot_short_setup &= eval_mask
         plot_path = out_dir / f"phase4_{row['variant']}_{row['mode']}_test_tail.png"
+        long_trace = _trace_trades_for_entries(
+            feature_df,
+            long_entries,
+            side="long",
+            split_name="test",
+            variant=str(row["variant"]),
+            mode=str(row["mode"]),
+            p_long=p_long_test,
+            p_short=p_short_test,
+            setup=plot_long_setup,
+            trigger=long_trigger,
+            horizon_bars=int(args.horizon_bars),
+            tp_atr=float(args.tp_atr),
+            sl_atr=float(args.sl_atr),
+            entry_prices=long_prices,
+            entry_times=long_times,
+            execution_1m=execution_1m,
+        )
+        short_trace = _trace_trades_for_entries(
+            feature_df,
+            short_entries,
+            side="short",
+            split_name="test",
+            variant=str(row["variant"]),
+            mode=str(row["mode"]),
+            p_long=p_long_test,
+            p_short=p_short_test,
+            setup=plot_short_setup,
+            trigger=short_trigger,
+            horizon_bars=int(args.horizon_bars),
+            tp_atr=float(args.tp_atr),
+            sl_atr=float(args.sl_atr),
+            entry_prices=short_prices,
+            entry_times=short_times,
+            execution_1m=execution_1m,
+        )
+        trace_df = pd.concat([long_trace, short_trace], ignore_index=True)
+        if not trace_df.empty:
+            trace_df = trace_df.sort_values(["entry_time", "side", "trace_id"])
+        trace_path = out_dir / f"phase4_{row['variant']}_{row['mode']}_test_trades.csv"
+        trace_df.to_csv(trace_path, index=False)
+        print(f"[phase4] saved trade trace {trace_path}")
+        best_trace_path = out_dir / f"best_phase4_{row['variant']}_{row['mode']}_test_trades.csv"
+        if key == best_key:
+            trace_df.to_csv(best_trace_path, index=False)
+            print(f"[phase4] saved best trade trace {best_trace_path}")
         _plot_diagnostics(
             feature_df,
             p_long_test,
@@ -1932,6 +2481,10 @@ def main() -> None:
             long_setup_threshold=float(args.long_setup_threshold),
             short_setup_threshold=float(args.short_setup_threshold),
         )
+        if key == best_key:
+            best_plot_path = out_dir / f"best_phase4_{row['variant']}_{row['mode']}_test_tail.png"
+            shutil.copy2(plot_path, best_plot_path)
+            print(f"[phase4] saved best plot {best_plot_path}")
 
 
 if __name__ == "__main__":

@@ -23,8 +23,9 @@ import pandas as pd
 from API.Alpaca_API.market_data.bar_aggregator import OhlcvAggregator
 from API.Alpaca_API.market_data.bar_buffer import BarRingBuffer
 from Policy.execution_latch import DirectionExecutionLatch
+from Policy.order_policy import PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1
 
-UI_BUILD = "2026-03-31-dashboard-meta-10min-sync-hotfix"
+UI_BUILD = "2026-04-13-phase4-order-policy"
 
 if TYPE_CHECKING:
     from API.Alpaca_API.inference.live_inference import (
@@ -208,6 +209,10 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "ga_tb_label_dir": str(cfg.ga_tb_label_dir),
         "meta_entry_threshold": cfg.meta_entry_threshold,
         "meta_exit_threshold": cfg.meta_exit_threshold,
+        "meta_intrabar_entry_policy": str(cfg.meta_intrabar_entry_policy),
+        "meta_intrabar_setup_max_bars": int(cfg.meta_intrabar_setup_max_bars),
+        "meta_intrabar_long_setup_threshold": cfg.meta_intrabar_long_setup_threshold,
+        "meta_intrabar_short_setup_threshold": cfg.meta_intrabar_short_setup_threshold,
         "meta_trail_activate_atr": float(cfg.meta_trail_activate_atr),
         "meta_trail_atr": float(cfg.meta_trail_atr),
         "meta_trail_atr_after_tp": float(cfg.meta_trail_atr_after_tp),
@@ -713,6 +718,10 @@ class SessionConfig:
     ga_tb_label_dir: str = "tb"
     meta_entry_threshold: float | None = None
     meta_exit_threshold: float | None = None
+    meta_intrabar_entry_policy: str = PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1
+    meta_intrabar_setup_max_bars: int = 4
+    meta_intrabar_long_setup_threshold: float | None = 0.42
+    meta_intrabar_short_setup_threshold: float | None = 0.15
     meta_trail_activate_atr: float = 2.0
     meta_trail_atr: float = 1.0
     meta_trail_atr_after_tp: float = 0.8
@@ -794,6 +803,16 @@ class SessionConfig:
             ga_tb_label_dir=str(payload.get("ga_tb_label_dir", "tb")),
             meta_entry_threshold=_coerce_optional_float(payload.get("meta_entry_threshold")),
             meta_exit_threshold=_coerce_optional_float(payload.get("meta_exit_threshold")),
+            meta_intrabar_entry_policy=str(
+                payload.get("meta_intrabar_entry_policy", PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1)
+            ),
+            meta_intrabar_setup_max_bars=max(1, _coerce_int(payload.get("meta_intrabar_setup_max_bars"), 4)),
+            meta_intrabar_long_setup_threshold=_coerce_optional_float(
+                payload.get("meta_intrabar_long_setup_threshold", 0.42)
+            ),
+            meta_intrabar_short_setup_threshold=_coerce_optional_float(
+                payload.get("meta_intrabar_short_setup_threshold", 0.15)
+            ),
             meta_trail_activate_atr=_coerce_float(payload.get("meta_trail_activate_atr"), 2.0),
             meta_trail_atr=_coerce_float(payload.get("meta_trail_atr"), 1.0),
             meta_trail_atr_after_tp=_coerce_float(payload.get("meta_trail_atr_after_tp"), 0.8),
@@ -1878,7 +1897,12 @@ class LiveSession:
                     opposite_min_prob_edge=0.0,
                     meta_execute_on_interval_close=False,
                     meta_intrabar_execution_enabled=True,
-                    meta_intrabar_breakout_entry_only=False,
+                    meta_intrabar_breakout_entry_only=True,
+                    meta_intrabar_entry_policy=str(cfg.meta_intrabar_entry_policy),
+                    meta_intrabar_setup_max_bars=int(cfg.meta_intrabar_setup_max_bars),
+                    meta_intrabar_setup_bar_minutes=int(cfg.interval),
+                    meta_intrabar_long_setup_threshold=cfg.meta_intrabar_long_setup_threshold,
+                    meta_intrabar_short_setup_threshold=cfg.meta_intrabar_short_setup_threshold,
                     meta_trail_activate_atr=float(cfg.meta_trail_activate_atr),
                     meta_trail_atr=float(cfg.meta_trail_atr),
                     meta_trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
@@ -2536,7 +2560,12 @@ class LiveSession:
                         opposite_min_prob_edge=0.0,
                         meta_execute_on_interval_close=False,
                         meta_intrabar_execution_enabled=True,
-                        meta_intrabar_breakout_entry_only=False,
+                        meta_intrabar_breakout_entry_only=True,
+                        meta_intrabar_entry_policy=str(cfg.meta_intrabar_entry_policy),
+                        meta_intrabar_setup_max_bars=int(cfg.meta_intrabar_setup_max_bars),
+                        meta_intrabar_setup_bar_minutes=int(cfg.interval),
+                        meta_intrabar_long_setup_threshold=cfg.meta_intrabar_long_setup_threshold,
+                        meta_intrabar_short_setup_threshold=cfg.meta_intrabar_short_setup_threshold,
                         meta_trail_activate_atr=float(cfg.meta_trail_activate_atr),
                         meta_trail_atr=float(cfg.meta_trail_atr),
                         meta_trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),

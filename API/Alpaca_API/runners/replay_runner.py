@@ -26,7 +26,7 @@ from .live_runner import (
     _use_meta_direct_execution,
 )
 from Policy.execution_latch import DirectionExecutionLatch
-from Policy.order_policy import OptionOrderPolicy
+from Policy.order_policy import PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1, OptionOrderPolicy
 
 
 def _ga_prob_parquet_path(
@@ -1109,6 +1109,29 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--meta-trail-atr", type=float, default=0.8, help="Base trail ATR used to build live exit context.")
     parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.5, help="Tightened trail ATR after TP is seen.")
     parser.add_argument("--meta-use-tp-to-tighten-trail", action=argparse.BooleanOptionalAction, default=True, help="Mirror training trail-tightening behavior in replay exit context.")
+    parser.add_argument(
+        "--meta-intrabar-entry-policy",
+        default=PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1,
+        help="Intrabar entry trigger policy used by option-order replay.",
+    )
+    parser.add_argument(
+        "--meta-intrabar-setup-max-bars",
+        type=int,
+        default=4,
+        help="Number of subsequent interval bars a setup may remain pending for 1m confirmation.",
+    )
+    parser.add_argument(
+        "--meta-intrabar-long-setup-threshold",
+        type=float,
+        default=0.42,
+        help="Optional long setup threshold override used by the intrabar policy.",
+    )
+    parser.add_argument(
+        "--meta-intrabar-short-setup-threshold",
+        type=float,
+        default=0.15,
+        help="Optional short setup threshold override used by the intrabar policy.",
+    )
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
     parser.add_argument(
         "--enable-option-orders",
@@ -1577,7 +1600,12 @@ def main() -> None:
                 max_contracts_cap=int(args.option_max_contracts_cap),
                 meta_execute_on_interval_close=False,
                 meta_intrabar_execution_enabled=True,
-                meta_intrabar_breakout_entry_only=False,
+                meta_intrabar_breakout_entry_only=True,
+                meta_intrabar_entry_policy=str(args.meta_intrabar_entry_policy),
+                meta_intrabar_setup_max_bars=int(args.meta_intrabar_setup_max_bars),
+                meta_intrabar_setup_bar_minutes=int(args.interval),
+                meta_intrabar_long_setup_threshold=args.meta_intrabar_long_setup_threshold,
+                meta_intrabar_short_setup_threshold=args.meta_intrabar_short_setup_threshold,
                 meta_trail_activate_atr=float(args.meta_trail_activate_atr),
                 meta_trail_atr=float(args.meta_trail_atr),
                 meta_trail_atr_after_tp=float(args.meta_trail_atr_after_tp),

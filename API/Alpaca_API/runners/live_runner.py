@@ -26,7 +26,11 @@ from ..inference.live_inference import (
 )
 from ..market_data.live_stream import AlpacaBarStreamer
 from Policy.execution_latch import DirectionExecutionLatch
-from Policy.order_policy import OptionOrderPolicy, OptionOrderPolicyConfig
+from Policy.order_policy import (
+    PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1,
+    OptionOrderPolicy,
+    OptionOrderPolicyConfig,
+)
 
 META_CONTEXT_SYMBOLS: tuple[str, ...] = ("QQQ", "IWM", "TLT", "UUP")
 
@@ -414,6 +418,11 @@ def _build_option_order_policy(
     meta_execute_on_interval_close: bool = False,
     meta_intrabar_execution_enabled: bool = True,
     meta_intrabar_breakout_entry_only: bool = False,
+    meta_intrabar_entry_policy: str = "legacy_breakout_touch",
+    meta_intrabar_setup_max_bars: int = 4,
+    meta_intrabar_setup_bar_minutes: int = 10,
+    meta_intrabar_long_setup_threshold: float | None = None,
+    meta_intrabar_short_setup_threshold: float | None = None,
     meta_trailing_stop_enabled: bool = True,
     meta_trail_activate_atr: float = 0.75,
     meta_trail_atr: float = 0.8,
@@ -454,6 +463,11 @@ def _build_option_order_policy(
         meta_execute_on_interval_close=bool(meta_execute_on_interval_close),
         meta_intrabar_execution_enabled=bool(meta_intrabar_execution_enabled),
         meta_intrabar_breakout_entry_only=bool(meta_intrabar_breakout_entry_only),
+        meta_intrabar_entry_policy=str(meta_intrabar_entry_policy),
+        meta_intrabar_setup_max_bars=int(meta_intrabar_setup_max_bars),
+        meta_intrabar_setup_bar_minutes=int(meta_intrabar_setup_bar_minutes),
+        meta_intrabar_long_setup_threshold=meta_intrabar_long_setup_threshold,
+        meta_intrabar_short_setup_threshold=meta_intrabar_short_setup_threshold,
         meta_soft_exit_confirm_bars=int(meta_soft_exit_confirm_bars),
         meta_urgent_exit_prob=float(meta_urgent_exit_prob),
         meta_urgent_exit_delta=float(meta_urgent_exit_delta),
@@ -1621,6 +1635,32 @@ def _parse_args() -> argparse.Namespace:
         help="For meta option execution: interval=execute on 10min close, intrabar=cache 10min intent and execute via 1m monitoring.",
     )
     parser.add_argument(
+        "--meta-intrabar-entry-policy",
+        default=PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1,
+        help=(
+            "Intrabar entry trigger policy. Default is the Phase 4 swing setup "
+            "body+close policy evaluated against 1m bars."
+        ),
+    )
+    parser.add_argument(
+        "--meta-intrabar-setup-max-bars",
+        type=int,
+        default=4,
+        help="Number of subsequent interval bars a setup may remain pending for 1m confirmation.",
+    )
+    parser.add_argument(
+        "--meta-intrabar-long-setup-threshold",
+        type=float,
+        default=0.42,
+        help="Optional long setup threshold override used by the intrabar policy.",
+    )
+    parser.add_argument(
+        "--meta-intrabar-short-setup-threshold",
+        type=float,
+        default=0.15,
+        help="Optional short setup threshold override used by the intrabar policy.",
+    )
+    parser.add_argument(
         "--prefill-tail",
         type=int,
         default=None,
@@ -1878,6 +1918,12 @@ def main() -> None:
                 max_contracts_cap=int(args.option_max_contracts_cap),
                 meta_execute_on_interval_close=str(args.meta_execution_mode).strip().lower() == "interval",
                 meta_intrabar_execution_enabled=str(args.meta_execution_mode).strip().lower() == "intrabar",
+                meta_intrabar_breakout_entry_only=str(args.meta_execution_mode).strip().lower() == "intrabar",
+                meta_intrabar_entry_policy=str(args.meta_intrabar_entry_policy),
+                meta_intrabar_setup_max_bars=int(args.meta_intrabar_setup_max_bars),
+                meta_intrabar_setup_bar_minutes=int(args.interval),
+                meta_intrabar_long_setup_threshold=args.meta_intrabar_long_setup_threshold,
+                meta_intrabar_short_setup_threshold=args.meta_intrabar_short_setup_threshold,
                 meta_trail_activate_atr=float(args.meta_trail_activate_atr),
                 meta_trail_atr=float(args.meta_trail_atr),
                 meta_trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
