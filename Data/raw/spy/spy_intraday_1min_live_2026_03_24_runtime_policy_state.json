@@ -2,21 +2,21 @@
   "symbols": [
     "SPY"
   ],
-  "updated_at": "2026-04-02T19:24:00.232762+00:00",
+  "updated_at": "2026-04-15T04:58:05.311991+00:00",
   "policies": {
     "SPY": {
       "latest_meta_side_snapshot": {
-        "timestamp": "2026-04-02T19:10:00+00:00",
-        "signal_close": 654.55,
-        "signal_high": 655.25,
-        "signal_low": 654.28,
-        "signal_atr": 1.143400357074308,
-        "p_enter_long": 0.15973684191703796,
-        "p_enter_short": 0.6749472618103027,
+        "timestamp": "2026-04-14T19:50:00+00:00",
+        "signal_close": 694.36,
+        "signal_high": 694.41,
+        "signal_low": 693.48,
+        "signal_atr": 0.6367837067838751,
+        "p_enter_long": 0.12110982090234756,
+        "p_enter_short": 0.2191537767648697,
         "p_exit_long": null,
-        "p_exit_short": 0.13234509527683258,
-        "thr_enter_long": 0.5,
-        "thr_enter_short": 0.5,
+        "p_exit_short": null,
+        "thr_enter_long": 0.42,
+        "thr_enter_short": 0.15,
         "thr_exit_long": 0.65,
         "thr_exit_short": 0.65
       },
@@ -32,9 +32,17 @@
         "long": null,
         "short": null
       },
+      "meta_intrabar_entry_setup_ts": {
+        "long": null,
+        "short": null
+      },
+      "meta_intrabar_entry_expires_at": {
+        "long": null,
+        "short": null
+      },
       "meta_side_reason": {
-        "long": "below_entry_threshold",
-        "short": "hold_same_side_enter_still_valid"
+        "long": "entry_waiting_for_1m_confirmation",
+        "short": "entry_waiting_for_1m_confirmation"
       },
       "meta_side_entry_armed": {
         "long": true,
@@ -42,25 +50,33 @@
       },
       "meta_side_bars_held": {
         "long": -1,
-        "short": 253
+        "short": -1
       },
       "meta_side_entry_signal_ts": {
         "long": null,
-        "short": "2026-04-02T10:20:00-04:00"
+        "short": null
       },
       "meta_side_cooldown_until": {
-        "long": null,
+        "long": "2026-04-13T09:50:00-04:00",
         "short": "2026-04-02T10:47:00-04:00"
       },
-      "prev_1m_close": 654.59,
-      "last_1m_close": 654.8,
+      "prev_1m_close": 694.24,
+      "last_1m_close": 694.36,
       "recent_1m_closes": [
-        654.55,
-        654.495,
-        654.3,
-        654.59,
-        654.8
+        693.88,
+        694.02,
+        694.06,
+        694.24,
+        694.36
       ],
+      "option_exit_best_price": {
+        "long": null,
+        "short": null
+      },
+      "option_exit_best_seen_at": {
+        "long": null,
+        "short": null
+      },
       "entry_lockout_until": null,
       "entry_lockout_reason": null
     }

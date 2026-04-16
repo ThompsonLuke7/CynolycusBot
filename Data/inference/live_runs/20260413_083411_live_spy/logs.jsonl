@@ -1,0 +1,4 @@
+{"stream":"logs","recorded_at":"2026-04-13T08:34:11.452956+00:00","payload":{"symbol":"SYSTEM","message":"[live] audit trail enabled: Data/inference/live_runs/20260413_083411_live_spy"}}
+{"stream":"logs","recorded_at":"2026-04-13T08:34:15.325146+00:00","payload":{"symbol":"SYSTEM","message":"[live] loaded agent_matrix probs (rows=52,528, range=2020-12-01T14:30:00+00:00..2026-04-01T20:00:00+00:00, sources=1, mode=hybrid)"}}
+{"stream":"logs","recorded_at":"2026-04-13T08:34:15.367702+00:00","payload":{"symbol":"SYSTEM","message":"[live] Loaded cached meta base frame: rows=9,868 range=2025-03-21T12:40:00-04:00..2026-03-23T15:50:00-04:00 path=Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_24.parquet"}}
+{"stream":"logs","recorded_at":"2026-04-13T08:34:18.224364+00:00","payload":{"symbol":"SYSTEM","message":"[live] Meta-XGB inference enabled: model_root=Data/models/meta_xgboost/10min timeframe=10min"}}

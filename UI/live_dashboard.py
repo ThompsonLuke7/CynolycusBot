@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import queue as queue_mod
 import re
 import threading
@@ -24,8 +25,10 @@ from API.Alpaca_API.market_data.bar_aggregator import OhlcvAggregator
 from API.Alpaca_API.market_data.bar_buffer import BarRingBuffer
 from Policy.execution_latch import DirectionExecutionLatch
 from Policy.order_policy import PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1
+from Policy.replay_option_proxy import ReplayOptionPriceProxy
 
-UI_BUILD = "2026-04-13-phase4-order-policy"
+UI_BUILD = "2026-04-15-sim-replay-offline"
+DEFAULT_SPY_1M_PATH = "Data/raw/spy/1m_train.parquet"
 
 if TYPE_CHECKING:
     from API.Alpaca_API.inference.live_inference import (
@@ -194,6 +197,8 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "tz": str(cfg.tz),
         "assume_tz": str(cfg.assume_tz),
         "meta_model_root": str(cfg.meta_model_root),
+        "meta_entry_prob_source": str(cfg.meta_entry_prob_source),
+        "swing_setup_single_model_dir": str(cfg.swing_setup_single_model_dir),
         "meta_base_frame_append_lookback_days": int(cfg.meta_base_frame_append_lookback_days),
         "no_agent": bool(cfg.no_agent),
         "no_pivot_probs": bool(cfg.no_pivot_probs),
@@ -213,6 +218,7 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "meta_intrabar_setup_max_bars": int(cfg.meta_intrabar_setup_max_bars),
         "meta_intrabar_long_setup_threshold": cfg.meta_intrabar_long_setup_threshold,
         "meta_intrabar_short_setup_threshold": cfg.meta_intrabar_short_setup_threshold,
+        "meta_hard_stop_atr": float(cfg.meta_hard_stop_atr),
         "meta_trail_activate_atr": float(cfg.meta_trail_activate_atr),
         "meta_trail_atr": float(cfg.meta_trail_atr),
         "meta_trail_atr_after_tp": float(cfg.meta_trail_atr_after_tp),
@@ -222,6 +228,23 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "option_order_qty": int(cfg.option_order_qty),
         "option_atr_mult": float(cfg.option_atr_mult),
         "option_dte_cutoff": str(cfg.option_dte_cutoff),
+        "option_exit_policy": str(cfg.option_exit_policy),
+        "option_exit_take_profit_pct": float(cfg.option_exit_take_profit_pct),
+        "option_exit_stop_loss_pct": float(cfg.option_exit_stop_loss_pct),
+        "option_exit_profit_lock_arm_pct": float(cfg.option_exit_profit_lock_arm_pct),
+        "option_exit_profit_lock_floor_pct": float(cfg.option_exit_profit_lock_floor_pct),
+        "option_exit_trailing_arm_pct": float(cfg.option_exit_trailing_arm_pct),
+        "option_exit_trailing_giveback_pct": float(cfg.option_exit_trailing_giveback_pct),
+        "option_exit_time_decay_minutes": int(cfg.option_exit_time_decay_minutes),
+        "option_exit_time_decay_progress_pct": float(cfg.option_exit_time_decay_progress_pct),
+        "option_exit_opposite_prob": float(cfg.option_exit_opposite_prob),
+        "option_exit_quote_mode": str(cfg.option_exit_quote_mode),
+        "replay_option_proxy_mode": str(cfg.replay_option_proxy_mode),
+        "replay_option_proxy_expiry_hhmm": str(cfg.replay_option_proxy_expiry_hhmm),
+        "replay_option_proxy_iv_floor": float(cfg.replay_option_proxy_iv_floor),
+        "replay_option_proxy_iv_ceiling": float(cfg.replay_option_proxy_iv_ceiling),
+        "replay_option_proxy_iv_multiplier": float(cfg.replay_option_proxy_iv_multiplier),
+        "replay_option_proxy_min_dte_minutes": float(cfg.replay_option_proxy_min_dte_minutes),
         "option_no_close_on_flat": bool(cfg.option_no_close_on_flat),
         "option_no_close_on_flip": bool(cfg.option_no_close_on_flip),
         "startup_catchup_order": bool(cfg.startup_catchup_order),
@@ -234,6 +257,7 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "replay_end": cfg.replay_end,
         "replay_regular_only": bool(cfg.replay_regular_only),
         "replay_max_bars": cfg.replay_max_bars,
+        "replay_warmup_bars": int(cfg.replay_warmup_bars),
         "replay_no_prepend_split_test_warmup": bool(cfg.replay_no_prepend_split_test_warmup),
         "eval_parity_mode": bool(cfg.eval_parity_mode),
     }
@@ -641,6 +665,41 @@ def _load_agent_matrix_probs(*, symbol: str, dataset_name: str) -> pd.DataFrame 
         return None
 
 
+def _load_swing_setup_probs_frame(
+    *,
+    model_dir: str | Path,
+    tz: str | None = "America/New_York",
+) -> pd.DataFrame | None:
+    path = Path(model_dir) / "p_swing_probs.parquet"
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_parquet(path)
+        if not isinstance(df.index, pd.DatetimeIndex):
+            ts_col = None
+            for candidate in ("timestamp", "date", "datetime", "index"):
+                if candidate in df.columns:
+                    ts_col = candidate
+                    break
+            if ts_col is None:
+                return None
+            df[ts_col] = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
+            df = df.dropna(subset=[ts_col]).set_index(ts_col)
+        else:
+            idx = pd.to_datetime(df.index, utc=True, errors="coerce")
+            df = df.loc[pd.notna(idx)].copy()
+            df.index = pd.DatetimeIndex(idx[pd.notna(idx)])
+        if df.empty:
+            return None
+        if tz:
+            df.index = pd.DatetimeIndex(df.index).tz_convert(tz)
+        df = df.sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+        return df
+    except Exception:
+        return None
+
+
 class ReplayBarProcessor:
     def __init__(
         self,
@@ -699,7 +758,9 @@ class SessionConfig:
     assume_tz: str = "UTC"
     model_path: str = "Data/outputs/agent/ppo_model.pt"
     meta_model_root: str = "Data/models/meta_xgboost/10min"
-    meta_base_frame_path: str = "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_24.parquet"
+    meta_entry_prob_source: str = "swing_support_single"
+    swing_setup_single_model_dir: str = "Data/models/ga_xgboost/10min/single/swing_support_single"
+    meta_base_frame_path: str = "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet"
     meta_base_frame_append_lookback_days: int = 120
     no_agent: bool = False
     stochastic: bool = False
@@ -722,12 +783,13 @@ class SessionConfig:
     meta_intrabar_setup_max_bars: int = 4
     meta_intrabar_long_setup_threshold: float | None = 0.42
     meta_intrabar_short_setup_threshold: float | None = 0.15
+    meta_hard_stop_atr: float = 0.0
     meta_trail_activate_atr: float = 2.0
     meta_trail_atr: float = 1.0
     meta_trail_atr_after_tp: float = 0.8
     meta_use_tp_to_tighten_trail: bool = True
     env_file: str = ".env"
-    prefill_path: str | None = "Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet"
+    prefill_path: str | None = DEFAULT_SPY_1M_PATH
     prefill_start: str = "2026-01-30"
     no_prefill_fetch: bool = False
     prefill_tail: int | None = None
@@ -736,6 +798,23 @@ class SessionConfig:
     option_order_qty: int = 1
     option_atr_mult: float = 1.0
     option_dte_cutoff: str = "13:00"
+    option_exit_policy: str = "option_adaptive_trail_v1"
+    option_exit_take_profit_pct: float = 0.0
+    option_exit_stop_loss_pct: float = 1.0
+    option_exit_profit_lock_arm_pct: float = 2.0
+    option_exit_profit_lock_floor_pct: float = 0.25
+    option_exit_trailing_arm_pct: float = 2.0
+    option_exit_trailing_giveback_pct: float = 0.25
+    option_exit_time_decay_minutes: int = 80
+    option_exit_time_decay_progress_pct: float = 1.0
+    option_exit_opposite_prob: float = 0.60
+    option_exit_quote_mode: str = "bid"
+    replay_option_proxy_mode: str = "black_scholes"
+    replay_option_proxy_expiry_hhmm: str = "15:40"
+    replay_option_proxy_iv_floor: float = 0.12
+    replay_option_proxy_iv_ceiling: float = 0.90
+    replay_option_proxy_iv_multiplier: float = 1.50
+    replay_option_proxy_min_dte_minutes: float = 1.0
     simulate_orders: bool = True
     option_no_close_on_flat: bool = False
     option_no_close_on_flip: bool = False
@@ -745,12 +824,13 @@ class SessionConfig:
     exec_exit_confirm_bars: int = 2
     exec_flip_abs_threshold: float = 0.05
     use_execution_latch: bool = False
-    replay_data_path: str = "Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet"
+    replay_data_path: str = DEFAULT_SPY_1M_PATH
     replay_start: str | None = "2026-03-14T00:00:00Z"
     replay_end: str | None = "2026-03-23T23:59:59Z"
     replay_regular_only: bool = False
     replay_sleep: float = 0.0
     replay_max_bars: int | None = None
+    replay_warmup_bars: int = 5000
     replay_no_prepend_split_test_warmup: bool = False
     eval_parity_mode: bool = False
     audit_enabled: bool = True
@@ -776,10 +856,17 @@ class SessionConfig:
             assume_tz=str(payload.get("assume_tz", "UTC")),
             model_path=str(payload.get("model_path", "Data/outputs/agent/ppo_model.pt")),
             meta_model_root=str(payload.get("meta_model_root", "Data/models/meta_xgboost/10min")),
+            meta_entry_prob_source=str(payload.get("meta_entry_prob_source", "swing_support_single")).strip().lower(),
+            swing_setup_single_model_dir=str(
+                payload.get(
+                    "swing_setup_single_model_dir",
+                    "Data/models/ga_xgboost/10min/single/swing_support_single",
+                )
+            ),
             meta_base_frame_path=str(
                 payload.get(
                     "meta_base_frame_path",
-                    "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_24.parquet",
+                    "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet",
                 )
             ),
             meta_base_frame_append_lookback_days=max(
@@ -813,12 +900,13 @@ class SessionConfig:
             meta_intrabar_short_setup_threshold=_coerce_optional_float(
                 payload.get("meta_intrabar_short_setup_threshold", 0.15)
             ),
+            meta_hard_stop_atr=max(0.0, _coerce_float(payload.get("meta_hard_stop_atr"), 0.0)),
             meta_trail_activate_atr=_coerce_float(payload.get("meta_trail_activate_atr"), 2.0),
             meta_trail_atr=_coerce_float(payload.get("meta_trail_atr"), 1.0),
             meta_trail_atr_after_tp=_coerce_float(payload.get("meta_trail_atr_after_tp"), 0.8),
             meta_use_tp_to_tighten_trail=_coerce_bool(payload.get("meta_use_tp_to_tighten_trail"), True),
             env_file=str(payload.get("env_file", ".env")),
-            prefill_path=payload.get("prefill_path", "Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet"),
+            prefill_path=payload.get("prefill_path", DEFAULT_SPY_1M_PATH),
             prefill_start=str(payload.get("prefill_start", "2026-01-30")),
             no_prefill_fetch=_coerce_bool(payload.get("no_prefill_fetch"), False),
             prefill_tail=(
@@ -831,6 +919,62 @@ class SessionConfig:
             option_order_qty=max(1, _coerce_int(payload.get("option_order_qty"), 1)),
             option_atr_mult=max(0.0, _coerce_float(payload.get("option_atr_mult"), 1.0)),
             option_dte_cutoff=str(payload.get("option_dte_cutoff", "13:00")),
+            option_exit_policy=str(payload.get("option_exit_policy", "option_adaptive_trail_v1")).strip().lower(),
+            option_exit_take_profit_pct=max(
+                0.0,
+                _coerce_float(payload.get("option_exit_take_profit_pct"), 0.0),
+            ),
+            option_exit_stop_loss_pct=max(
+                0.0,
+                _coerce_float(payload.get("option_exit_stop_loss_pct"), 1.0),
+            ),
+            option_exit_profit_lock_arm_pct=max(
+                0.0,
+                _coerce_float(payload.get("option_exit_profit_lock_arm_pct"), 2.0),
+            ),
+            option_exit_profit_lock_floor_pct=max(
+                0.0,
+                _coerce_float(payload.get("option_exit_profit_lock_floor_pct"), 0.25),
+            ),
+            option_exit_trailing_arm_pct=max(
+                0.0,
+                _coerce_float(payload.get("option_exit_trailing_arm_pct"), 2.0),
+            ),
+            option_exit_trailing_giveback_pct=max(
+                0.0,
+                _coerce_float(payload.get("option_exit_trailing_giveback_pct"), 0.25),
+            ),
+            option_exit_time_decay_minutes=max(
+                0,
+                _coerce_int(payload.get("option_exit_time_decay_minutes"), 80),
+            ),
+            option_exit_time_decay_progress_pct=max(
+                0.0,
+                _coerce_float(payload.get("option_exit_time_decay_progress_pct"), 1.0),
+            ),
+            option_exit_opposite_prob=max(
+                0.0,
+                _coerce_float(payload.get("option_exit_opposite_prob"), 0.60),
+            ),
+            option_exit_quote_mode=str(payload.get("option_exit_quote_mode", "bid")).strip().lower(),
+            replay_option_proxy_mode=str(payload.get("replay_option_proxy_mode", "black_scholes")).strip().lower(),
+            replay_option_proxy_expiry_hhmm=str(payload.get("replay_option_proxy_expiry_hhmm", "15:40")),
+            replay_option_proxy_iv_floor=max(
+                0.0,
+                _coerce_float(payload.get("replay_option_proxy_iv_floor"), 0.12),
+            ),
+            replay_option_proxy_iv_ceiling=max(
+                0.0,
+                _coerce_float(payload.get("replay_option_proxy_iv_ceiling"), 0.90),
+            ),
+            replay_option_proxy_iv_multiplier=max(
+                0.0,
+                _coerce_float(payload.get("replay_option_proxy_iv_multiplier"), 1.50),
+            ),
+            replay_option_proxy_min_dte_minutes=max(
+                0.0,
+                _coerce_float(payload.get("replay_option_proxy_min_dte_minutes"), 1.0),
+            ),
             simulate_orders=_coerce_bool(payload.get("simulate_orders"), True),
             option_no_close_on_flat=_coerce_bool(payload.get("option_no_close_on_flat"), False),
             option_no_close_on_flip=_coerce_bool(payload.get("option_no_close_on_flip"), False),
@@ -840,7 +984,7 @@ class SessionConfig:
             exec_exit_confirm_bars=max(1, _coerce_int(payload.get("exec_exit_confirm_bars"), 2)),
             exec_flip_abs_threshold=max(0.0, _coerce_float(payload.get("exec_flip_abs_threshold"), 0.05)),
             use_execution_latch=_coerce_bool(payload.get("use_execution_latch"), False),
-            replay_data_path=str(payload.get("replay_data_path", "Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet")),
+            replay_data_path=str(payload.get("replay_data_path", DEFAULT_SPY_1M_PATH)),
             replay_start=payload.get("replay_start", "2026-03-14T00:00:00Z"),
             replay_end=payload.get("replay_end", "2026-03-23T23:59:59Z"),
             replay_regular_only=_coerce_bool(payload.get("replay_regular_only"), False),
@@ -850,6 +994,7 @@ class SessionConfig:
                 if payload.get("replay_max_bars") in (None, "")
                 else max(1, _coerce_int(payload.get("replay_max_bars"), 0))
             ),
+            replay_warmup_bars=max(0, _coerce_int(payload.get("replay_warmup_bars"), 5000)),
             replay_no_prepend_split_test_warmup=_coerce_bool(
                 payload.get("replay_no_prepend_split_test_warmup"),
                 False,
@@ -1057,6 +1202,7 @@ class DashboardStore:
         action_class: int | None,
         ts: Any,
         close: Any,
+        record_event: bool = True,
     ) -> None:
         close_val = _coerce_float(close, float("nan"))
         raw_val = _coerce_float(action, float("nan"))
@@ -1071,7 +1217,8 @@ class DashboardStore:
         }
         with self._lock:
             self._last_actions[symbol] = payload
-            self._action_events.append(payload)
+            if record_event:
+                self._action_events.append(payload)
 
     def set_agent_state(self, state: dict[str, Any] | None) -> None:
         with self._lock:
@@ -1588,43 +1735,46 @@ class LiveSession:
             df["symbol"] = symbols[0]
         df["symbol"] = df["symbol"].astype(str).str.upper()
         df = df[df["symbol"].isin(symbols)]
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
+        replay_all_df = df.copy()
 
-        if cfg.replay_start:
-            start = pd.to_datetime(cfg.replay_start, utc=True, errors="coerce")
-            df = df[df["timestamp"] >= start]
-        if cfg.replay_end:
-            end = pd.to_datetime(cfg.replay_end, utc=True, errors="coerce")
-            df = df[df["timestamp"] <= end]
+        start = pd.to_datetime(cfg.replay_start, utc=True, errors="coerce") if cfg.replay_start else pd.NaT
+        end = pd.to_datetime(cfg.replay_end, utc=True, errors="coerce") if cfg.replay_end else pd.NaT
+        visible_df = replay_all_df.copy()
+        if pd.notna(start):
+            visible_df = visible_df[visible_df["timestamp"] >= start]
+        if pd.notna(end):
+            visible_df = visible_df[visible_df["timestamp"] <= end]
 
-        prepend_replay_warmup = (not cfg.replay_no_prepend_split_test_warmup)
-        if prepend_replay_warmup and cfg.replay_start:
-            self._emit(
-                "log",
-                {
-                    "symbol": "SYSTEM",
-                    "message": "[replay] replay_start is set; prepending split-test warmup bars for indicator/meta state seeding before requested start.",
-                },
-            )
+        if cfg.replay_max_bars is not None:
+            keep_n = int(cfg.replay_max_bars)
+            if keep_n > 0:
+                visible_df = visible_df.tail(keep_n).copy()
 
+        visible_start_marker = pd.NaT
+        if not visible_df.empty:
+            visible_start_marker = pd.to_datetime(visible_df["timestamp"], utc=True, errors="coerce").min()
+        elif pd.notna(start):
+            visible_start_marker = start
+
+        warmup_frames: list[pd.DataFrame] = []
+        warmup_n = max(0, int(cfg.replay_warmup_bars))
+        prepend_replay_warmup = (not cfg.replay_no_prepend_split_test_warmup) and warmup_n > 0 and pd.notna(visible_start_marker)
         if prepend_replay_warmup:
-            warm_frames: list[pd.DataFrame] = []
             for symbol in symbols:
-                warm_df = _load_test_split_warmup_1m(
-                    symbol=symbol,
-                    dataset_name=cfg.ga_dataset_name,
-                    x_filename=cfg.split_x_filename,
-                )
-                if warm_df is None or warm_df.empty:
+                sym_warm = replay_all_df[
+                    (replay_all_df["symbol"].astype(str).str.upper() == str(symbol).upper())
+                    & (replay_all_df["timestamp"] < visible_start_marker)
+                ].tail(warmup_n)
+                if sym_warm.empty:
                     continue
-                if cfg.replay_regular_only:
-                    warm_df = _apply_regular_hours(warm_df, tz=cfg.tz)
-                warm_df = warm_df.copy()
-                warm_df["__source"] = "warmup_split"
-                warm_frames.append(warm_df)
-            if warm_frames:
-                warmup = pd.concat(warm_frames, axis=0, ignore_index=True)
-                df = pd.concat([warmup, df], axis=0, ignore_index=True)
-                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+                sym_warm = sym_warm.copy()
+                sym_warm["__source"] = "replay_warmup"
+                warmup_frames.append(sym_warm)
+            if warmup_frames:
+                warmup = pd.concat(warmup_frames, axis=0, ignore_index=True)
+                df = pd.concat([warmup, visible_df], axis=0, ignore_index=True)
                 df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
                 df = df.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
                 self._emit(
@@ -1632,24 +1782,31 @@ class LiveSession:
                     {
                         "symbol": "SYSTEM",
                         "message": (
-                            f"[replay] prepended split-test warmup bars: {len(warmup):,} "
-                            f"(combined rows: {len(df):,})"
+                            f"[replay] prepended same-file warmup bars: {len(warmup):,} "
+                            f"(hidden before visible start {_ts_iso(visible_start_marker)}, requested={warmup_n:,})"
                         ),
                     },
                 )
+            else:
+                df = visible_df.copy()
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": (
+                            "[replay] no same-file bars found before replay visible start; "
+                            "continuing without split-test warmup."
+                        ),
+                    },
+                )
+        else:
+            df = visible_df.copy()
 
         required = ["timestamp", "open", "high", "low", "close", "volume", "symbol"]
         missing = [c for c in required if c not in df.columns]
         if missing:
             raise ValueError(f"Replay data missing required columns: {missing}")
         df = df.sort_values("timestamp")
-
-        # Replay cap is applied to the most recent bars, so N=5000 means
-        # "start ~5000 bars ago and play forward to latest."
-        if cfg.replay_max_bars is not None:
-            keep_n = int(cfg.replay_max_bars)
-            if keep_n > 0:
-                df = df.tail(keep_n).copy()
 
         if "__source" in df.columns:
             src_counts = (
@@ -1671,6 +1828,39 @@ class LiveSession:
                 "message": f"[replay] rows loaded: {len(df):,}.",
             }
         )
+        visible_start_ts = visible_start_marker
+        last_warmup_interval_ts_by_symbol: dict[str, pd.Timestamp] = {}
+        visible_agent_primed: set[str] = set()
+
+        def _is_replay_warmup_bar(ts: Any) -> bool:
+            if pd.isna(visible_start_ts):
+                return False
+            parsed = pd.to_datetime(ts, utc=True, errors="coerce")
+            return bool(pd.notna(parsed) and parsed < visible_start_ts)
+
+        def _to_agent_index_ts(ts: Any) -> pd.Timestamp | None:
+            parsed = pd.to_datetime(ts, utc=True, errors="coerce")
+            if pd.isna(parsed):
+                return None
+            try:
+                return pd.Timestamp(parsed).tz_convert(cfg.tz or "America/New_York")
+            except Exception:
+                return pd.Timestamp(parsed)
+
+        def _prime_agent_at_visible_start(symbol: str) -> None:
+            if symbol in visible_agent_primed:
+                return
+            visible_agent_primed.add(symbol)
+            if agent is None:
+                return
+            last_warmup_ts = last_warmup_interval_ts_by_symbol.get(symbol)
+            if last_warmup_ts is None:
+                return
+            if hasattr(agent, "_last_processed_ts"):
+                try:
+                    setattr(agent, "_last_processed_ts", last_warmup_ts)
+                except Exception:
+                    pass
 
         agent = None
         inference = None
@@ -1784,6 +1974,41 @@ class LiveSession:
                         },
                     )
 
+            swing_setup_probs_frame = None
+            if (
+                inference_mode == "meta"
+                and str(cfg.meta_entry_prob_source or "").strip().lower() == "swing_support_single"
+            ):
+                swing_setup_probs_frame = _load_swing_setup_probs_frame(
+                    model_dir=cfg.swing_setup_single_model_dir,
+                    tz=cfg.tz or "America/New_York",
+                )
+                if swing_setup_probs_frame is not None and not swing_setup_probs_frame.empty:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": (
+                                "[replay] using saved swing setup probabilities "
+                                f"(rows={len(swing_setup_probs_frame):,}, "
+                                f"range={_ts_iso(swing_setup_probs_frame.index.min())}.."
+                                f"{_ts_iso(swing_setup_probs_frame.index.max())}, "
+                                f"path={Path(cfg.swing_setup_single_model_dir) / 'p_swing_probs.parquet'})"
+                            ),
+                        },
+                    )
+                else:
+                    self._emit(
+                        "log",
+                        {
+                            "symbol": "SYSTEM",
+                            "message": (
+                                "[replay] saved swing setup probabilities unavailable; "
+                                "falling back to live feature recomputation."
+                            ),
+                        },
+                    )
+
             if inference_mode == "meta":
                 agent = lr._build_meta_agent(
                     symbol=symbols[0],
@@ -1822,12 +2047,25 @@ class LiveSession:
                     profit_protect_arm_atr=2.0,
                     profit_protect_giveback_atr_long=0.75,
                     profit_protect_giveback_atr_short=1.0,
+                    entry_prob_source=cfg.meta_entry_prob_source,
+                    swing_setup_single_model_dir=cfg.swing_setup_single_model_dir,
+                    swing_setup_probs_frame=swing_setup_probs_frame,
                 )
                 self._emit(
                     "log",
                     {
                         "symbol": "SYSTEM",
-                        "message": f"[replay] Meta-XGB inference enabled: model_root={cfg.meta_model_root} timeframe={cfg.interval}min",
+                        "message": (
+                            (
+                                f"[replay] Swing setup wrapper enabled: model_dir={cfg.swing_setup_single_model_dir} "
+                                f"timeframe={cfg.interval}min"
+                            )
+                            if str(cfg.meta_entry_prob_source or "").strip().lower() == "swing_support_single"
+                            else (
+                                    f"[replay] Legacy probability wrapper enabled: model_root={cfg.meta_model_root} "
+                                f"entry_source={cfg.meta_entry_prob_source} timeframe={cfg.interval}min"
+                            )
+                        ),
                     },
                 )
             else:
@@ -1867,6 +2105,7 @@ class LiveSession:
             )
 
         order_policies = None
+        replay_option_proxies: dict[str, ReplayOptionPriceProxy] = {}
         simulated_orders: dict[str, deque] = {}
         last_exec_action_by_symbol: dict[str, int] = {}
         execution_latches: dict[str, DirectionExecutionLatch] = {
@@ -1903,6 +2142,7 @@ class LiveSession:
                     meta_intrabar_setup_bar_minutes=int(cfg.interval),
                     meta_intrabar_long_setup_threshold=cfg.meta_intrabar_long_setup_threshold,
                     meta_intrabar_short_setup_threshold=cfg.meta_intrabar_short_setup_threshold,
+                    meta_hard_stop_atr=float(cfg.meta_hard_stop_atr),
                     meta_trail_activate_atr=float(cfg.meta_trail_activate_atr),
                     meta_trail_atr=float(cfg.meta_trail_atr),
                     meta_trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
@@ -1914,7 +2154,31 @@ class LiveSession:
                     meta_profit_protect_arm_atr=2.0,
                     meta_profit_protect_giveback_atr_long=0.75,
                     meta_profit_protect_giveback_atr_short=1.0,
+                    option_exit_policy=str(cfg.option_exit_policy),
+                    option_exit_take_profit_pct=float(cfg.option_exit_take_profit_pct),
+                    option_exit_stop_loss_pct=float(cfg.option_exit_stop_loss_pct),
+                    option_exit_profit_lock_arm_pct=float(cfg.option_exit_profit_lock_arm_pct),
+                    option_exit_profit_lock_floor_pct=float(cfg.option_exit_profit_lock_floor_pct),
+                    option_exit_trailing_arm_pct=float(cfg.option_exit_trailing_arm_pct),
+                    option_exit_trailing_giveback_pct=float(cfg.option_exit_trailing_giveback_pct),
+                    option_exit_time_decay_minutes=int(cfg.option_exit_time_decay_minutes),
+                    option_exit_time_decay_progress_pct=float(cfg.option_exit_time_decay_progress_pct),
+                    option_exit_opposite_prob=float(cfg.option_exit_opposite_prob),
+                    option_exit_quote_mode=str(cfg.option_exit_quote_mode),
                 )
+                if str(cfg.replay_option_proxy_mode).lower() == "black_scholes":
+                    proxy = ReplayOptionPriceProxy(
+                        tz_name=cfg.tz,
+                        expiry_hhmm=str(cfg.replay_option_proxy_expiry_hhmm),
+                        iv_floor=float(cfg.replay_option_proxy_iv_floor),
+                        iv_ceiling=float(cfg.replay_option_proxy_iv_ceiling),
+                        iv_multiplier=float(cfg.replay_option_proxy_iv_multiplier),
+                        min_dte_minutes=float(cfg.replay_option_proxy_min_dte_minutes),
+                    )
+                    policy.set_contract_price_provider(
+                        lambda *, symbol, mode=None, proxy=proxy: proxy.price(symbol, mode=mode)
+                    )
+                    replay_option_proxies[symbol] = proxy
                 order_policies[symbol] = policy
                 simulated_orders[symbol] = deque(maxlen=20)
                 self._store.set_policy_state(symbol, policy.snapshot_state())
@@ -1925,6 +2189,14 @@ class LiveSession:
                     "message": "[replay] option orders enabled in SIMULATED mode.",
                 },
             )
+            if replay_option_proxies:
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": "[replay] simulated option pricing uses Black-Scholes proxy from replay bars.",
+                    },
+                )
 
         def _set_sim_broker_state(symbol: str) -> dict[str, Any]:
             if order_policies is None or symbol not in order_policies:
@@ -2011,6 +2283,10 @@ class LiveSession:
                 )
 
         def _on_1m(symbol: str, bar: dict, buffer: Any) -> None:
+            if _is_replay_warmup_bar(bar.get("timestamp")):
+                if order_policies is not None and symbol in order_policies:
+                    order_policies[symbol].prefill_1m_bar(bar=bar)
+                return
             size = len(buffer) if buffer is not None else None
             self._store.add_1m_bar(symbol, bar, buffer_size=size)
             self._emit(
@@ -2045,10 +2321,20 @@ class LiveSession:
                     action_class=int(policy_state.get("position", 0) or 0),
                     ts=bar.get("timestamp"),
                     close=bar.get("close"),
+                    record_event=False,
                 )
                 self._store.add_trade_event(event_payload)
 
         def _on_15m(symbol: str, bar15: dict, buffer: Any) -> None:
+            if _is_replay_warmup_bar(bar15.get("timestamp")):
+                agent_ts = _to_agent_index_ts(bar15.get("timestamp"))
+                if agent_ts is not None:
+                    last_warmup_interval_ts_by_symbol[symbol] = agent_ts
+                if order_policies is not None and symbol in order_policies:
+                    order_policies[symbol].on_interval_bar(closed_bar=bar15)
+                return
+
+            _prime_agent_at_visible_start(symbol)
             if order_policies is not None and symbol in order_policies:
                 order_policies[symbol].on_15m_bar(closed_bar=bar15)
                 self._store.set_policy_state(symbol, order_policies[symbol].snapshot_state())
@@ -2204,6 +2490,7 @@ class LiveSession:
                 action_class=policy_pos,
                 ts=bar15.get("timestamp"),
                 close=bar15.get("close"),
+                record_event=False,
             )
             broker_state = _set_sim_broker_state(symbol)
             event_payload = {
@@ -2245,12 +2532,13 @@ class LiveSession:
                 "close": float(getattr(row, "close")),
                 "volume": float(getattr(row, "volume")),
             }
+            proxy = replay_option_proxies.get(str(bar["symbol"]).upper())
+            if proxy is not None:
+                proxy.update_bar(str(bar["symbol"]).upper(), bar)
             processor.handle_bar(bar)
             count += 1
             if count % 500 == 0:
                 self._emit_status(running=True, message=f"replay processing {count:,}/{total_rows:,} bars")
-            if cfg.replay_max_bars is not None and count >= int(cfg.replay_max_bars):
-                break
             if cfg.replay_sleep > 0.0 and stop_event.wait(timeout=float(cfg.replay_sleep)):
                 break
 
@@ -2374,6 +2662,81 @@ class LiveSession:
             context_runtime_cache_by_symbol: dict[str, pd.DataFrame | None] = {}
             context_processors: dict[str, lr.LiveBarProcessor] = {}
 
+            def _build_live_context_status(target_ts: object | None = None) -> dict[str, dict[str, object]]:
+                target = pd.to_datetime(target_ts, utc=True, errors="coerce") if target_ts is not None else pd.NaT
+                interval_minutes = max(1, int(cfg.interval or 10))
+                soft_lag = pd.Timedelta(minutes=interval_minutes)
+                hard_lag = pd.Timedelta(minutes=interval_minutes * 3)
+                out: dict[str, dict[str, object]] = {}
+
+                def _status_from_df(df: pd.DataFrame | None) -> dict[str, object]:
+                    if df is None or df.empty or "timestamp" not in df.columns:
+                        return {"status": "missing", "last_ts": None, "rows": 0, "lag_min": None}
+                    ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dropna()
+                    if ts.empty:
+                        return {"status": "missing", "last_ts": None, "rows": int(len(df)), "lag_min": None}
+                    last_ts = ts.max()
+                    lag_min: float | None = None
+                    if pd.isna(target):
+                        label = "present"
+                    else:
+                        lag = target - last_ts
+                        lag_min = max(0.0, lag.total_seconds() / 60.0)
+                        if last_ts >= target or lag <= soft_lag:
+                            label = "present"
+                        elif lag <= hard_lag:
+                            label = "lagging"
+                        else:
+                            label = "stale"
+                    return {
+                        "status": label,
+                        "last_ts": _ts_iso(last_ts),
+                        "rows": int(len(df)),
+                        "lag_min": lag_min,
+                    }
+
+                if live_vix_enabled:
+                    out[live_vix_symbol] = _status_from_df(vix_runtime_cache_df)
+                for symbol in live_context_symbols:
+                    out[symbol] = _status_from_df(context_runtime_cache_by_symbol.get(symbol))
+                if "QQQ" in out and "IWM" in out:
+                    qqq_status = str(out["QQQ"].get("status") or "").lower()
+                    iwm_status = str(out["IWM"].get("status") or "").lower()
+                    statuses = {qqq_status, iwm_status}
+                    breadth_last = min(
+                        [ts for ts in (out["QQQ"].get("last_ts"), out["IWM"].get("last_ts")) if ts],
+                        default=None,
+                    )
+                    breadth_rows = min(
+                        [
+                            int(val)
+                            for val in (out["QQQ"].get("rows"), out["IWM"].get("rows"))
+                            if isinstance(val, (int, float))
+                        ],
+                        default=0,
+                    )
+                    breadth_lag = max(
+                        [
+                            float(val)
+                            for val in (out["QQQ"].get("lag_min"), out["IWM"].get("lag_min"))
+                            if isinstance(val, (int, float)) and math.isfinite(float(val))
+                        ],
+                        default=None,
+                    )
+                    if statuses <= {"present"}:
+                        breadth_status = "present"
+                    elif statuses <= {"present", "lagging"}:
+                        breadth_status = "lagging"
+                    else:
+                        breadth_status = "stale"
+                    out["BREADTH_PROXY"] = {
+                        "status": breadth_status,
+                        "last_ts": breadth_last,
+                        "rows": breadth_rows,
+                        "lag_min": breadth_lag,
+                    }
+                return out
+
             agent: LivePPOAgent | LiveMetaXGBAgent | LiveIndependentMetaXGBAgent | None = None
             if inference_mode != "none":
                 ga_feature_list = self._resolve_ga_feature_list(cfg)
@@ -2440,7 +2803,7 @@ class LiveSession:
                                     {
                                         "symbol": "SYSTEM",
                                         "message": (
-                                            f"[live] Loaded cached meta base frame: rows={len(precomputed_meta_frame):,} "
+                                            f"[live] Loaded cached context base frame: rows={len(precomputed_meta_frame):,} "
                                             f"range={_ts_iso(precomputed_meta_frame.index.min())}..{_ts_iso(precomputed_meta_frame.index.max())} "
                                             f"path={meta_base_path}"
                                         ),
@@ -2451,7 +2814,7 @@ class LiveSession:
                                 "log",
                                 {
                                     "symbol": "SYSTEM",
-                                    "message": f"[live] Cached meta base frame unavailable: {exc}",
+                                    "message": f"[live] Cached context base frame unavailable: {exc}",
                                 },
                             )
                     agent = lr._build_meta_agent(
@@ -2491,12 +2854,24 @@ class LiveSession:
                         profit_protect_arm_atr=2.0,
                         profit_protect_giveback_atr_long=0.75,
                         profit_protect_giveback_atr_short=1.0,
+                        entry_prob_source=cfg.meta_entry_prob_source,
+                        swing_setup_single_model_dir=cfg.swing_setup_single_model_dir,
                     )
                     self._emit(
                         "log",
                         {
                             "symbol": "SYSTEM",
-                            "message": f"[live] Meta-XGB inference enabled: model_root={cfg.meta_model_root} timeframe={cfg.interval}min",
+                            "message": (
+                                (
+                                    f"[live] Swing setup wrapper enabled: model_dir={cfg.swing_setup_single_model_dir} "
+                                    f"timeframe={cfg.interval}min"
+                                )
+                                if str(cfg.meta_entry_prob_source or "").strip().lower() == "swing_support_single"
+                                else (
+                                    f"[live] Legacy probability wrapper enabled: model_root={cfg.meta_model_root} "
+                                    f"entry_source={cfg.meta_entry_prob_source} timeframe={cfg.interval}min"
+                                )
+                            ),
                         },
                     )
                 else:
@@ -2566,6 +2941,7 @@ class LiveSession:
                         meta_intrabar_setup_bar_minutes=int(cfg.interval),
                         meta_intrabar_long_setup_threshold=cfg.meta_intrabar_long_setup_threshold,
                         meta_intrabar_short_setup_threshold=cfg.meta_intrabar_short_setup_threshold,
+                        meta_hard_stop_atr=float(cfg.meta_hard_stop_atr),
                         meta_trail_activate_atr=float(cfg.meta_trail_activate_atr),
                         meta_trail_atr=float(cfg.meta_trail_atr),
                         meta_trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
@@ -2577,6 +2953,17 @@ class LiveSession:
                         meta_profit_protect_arm_atr=2.0,
                         meta_profit_protect_giveback_atr_long=0.75,
                         meta_profit_protect_giveback_atr_short=1.0,
+                        option_exit_policy=str(cfg.option_exit_policy),
+                        option_exit_take_profit_pct=float(cfg.option_exit_take_profit_pct),
+                        option_exit_stop_loss_pct=float(cfg.option_exit_stop_loss_pct),
+                        option_exit_profit_lock_arm_pct=float(cfg.option_exit_profit_lock_arm_pct),
+                        option_exit_profit_lock_floor_pct=float(cfg.option_exit_profit_lock_floor_pct),
+                        option_exit_trailing_arm_pct=float(cfg.option_exit_trailing_arm_pct),
+                        option_exit_trailing_giveback_pct=float(cfg.option_exit_trailing_giveback_pct),
+                        option_exit_time_decay_minutes=int(cfg.option_exit_time_decay_minutes),
+                        option_exit_time_decay_progress_pct=float(cfg.option_exit_time_decay_progress_pct),
+                        option_exit_opposite_prob=float(cfg.option_exit_opposite_prob),
+                        option_exit_quote_mode=str(cfg.option_exit_quote_mode),
                     )
                     order_policies[symbol] = policy
                     self._store.set_policy_state(symbol, policy.snapshot_state())
@@ -2656,6 +3043,7 @@ class LiveSession:
                         action_class=int(policy_state.get("position", 0) or 0),
                         ts=bar.get("timestamp"),
                         close=bar.get("close"),
+                        record_event=False,
                     )
                     self._store.add_trade_event(event_payload)
                     self._audit("trade_events", event_payload)
@@ -2841,6 +3229,7 @@ class LiveSession:
                     action_class=policy_pos,
                     ts=bar15.get("timestamp"),
                     close=bar15.get("close"),
+                    record_event=False,
                 )
                 event_payload = {
                     "symbol": symbol,
@@ -2942,50 +3331,6 @@ class LiveSession:
                         ),
                     },
                 )
-
-            def _build_live_context_status(target_ts: object | None = None) -> dict[str, dict[str, object]]:
-                target = pd.to_datetime(target_ts, utc=True, errors="coerce") if target_ts is not None else pd.NaT
-                out: dict[str, dict[str, object]] = {}
-
-                def _status_from_df(df: pd.DataFrame | None) -> dict[str, object]:
-                    if df is None or df.empty or "timestamp" not in df.columns:
-                        return {"status": "missing", "last_ts": None, "rows": 0}
-                    ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dropna()
-                    if ts.empty:
-                        return {"status": "missing", "last_ts": None, "rows": int(len(df))}
-                    last_ts = ts.max()
-                    label = "present" if pd.isna(target) or last_ts >= target else "stale"
-                    return {
-                        "status": label,
-                        "last_ts": _ts_iso(last_ts),
-                        "rows": int(len(df)),
-                    }
-
-                if live_vix_enabled:
-                    out[live_vix_symbol] = _status_from_df(vix_runtime_cache_df)
-                for symbol in live_context_symbols:
-                    out[symbol] = _status_from_df(context_runtime_cache_by_symbol.get(symbol))
-                if "QQQ" in out and "IWM" in out:
-                    qqq_status = str(out["QQQ"].get("status") or "").lower()
-                    iwm_status = str(out["IWM"].get("status") or "").lower()
-                    breadth_last = min(
-                        [ts for ts in (out["QQQ"].get("last_ts"), out["IWM"].get("last_ts")) if ts],
-                        default=None,
-                    )
-                    breadth_rows = min(
-                        [
-                            int(val)
-                            for val in (out["QQQ"].get("rows"), out["IWM"].get("rows"))
-                            if isinstance(val, (int, float))
-                        ],
-                        default=0,
-                    )
-                    out["BREADTH_PROXY"] = {
-                        "status": "present" if qqq_status == "present" and iwm_status == "present" else "stale",
-                        "last_ts": breadth_last,
-                        "rows": breadth_rows,
-                    }
-                return out
 
             def _on_vix_interval(symbol: str, bar_tf: dict, _buffer: Any) -> None:
                 nonlocal vix_runtime_cache_df
@@ -3641,6 +3986,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(int(status))
         self.send_header("Content-Type", f"{content_type}; charset=utf-8")
         self.send_header("Content-Length", str(len(blob)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(blob)
 

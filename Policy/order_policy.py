@@ -80,7 +80,7 @@ class OptionOrderPolicyConfig:
     meta_trail_atr_after_tp: float = 0.5
     meta_trail_tp_atr: float = 1.0
     meta_use_tp_to_tighten_trail: bool = True
-    meta_hard_stop_atr: float = 1.0
+    meta_hard_stop_atr: float = 0.0
     meta_no_chase_atr: float = 1.5
     meta_same_side_reentry_cooldown_bars: int = 10
     meta_stale_no_progress_minutes: int = 20
@@ -106,6 +106,17 @@ class OptionOrderPolicyConfig:
     meta_profit_protect_arm_atr: float = 2.0
     meta_profit_protect_giveback_atr_long: float = 0.75
     meta_profit_protect_giveback_atr_short: float = 1.0
+    option_exit_policy: str = "option_adaptive_trail_v1"
+    option_exit_take_profit_pct: float = 0.0
+    option_exit_stop_loss_pct: float = 1.0
+    option_exit_profit_lock_arm_pct: float = 2.0
+    option_exit_profit_lock_floor_pct: float = 0.25
+    option_exit_trailing_arm_pct: float = 2.0
+    option_exit_trailing_giveback_pct: float = 0.25
+    option_exit_time_decay_minutes: int = 80
+    option_exit_time_decay_progress_pct: float = 1.0
+    option_exit_opposite_prob: float = 0.60
+    option_exit_quote_mode: str = "bid"
     expiring_position_exit_hhmm: str | None = "15:40"
 
 
@@ -150,6 +161,8 @@ class OptionOrderPolicy:
         self._short_symbol: str | None = None
         self._long_avg_entry_price: float = float("nan")
         self._short_avg_entry_price: float = float("nan")
+        self._option_exit_best_price: dict[str, float] = {"long": float("nan"), "short": float("nan")}
+        self._option_exit_best_seen_at: dict[str, datetime | None] = {"long": None, "short": None}
         self._pos = 0
         self._signed_contracts = 0
         self._open_symbol: str | None = None
@@ -168,6 +181,8 @@ class OptionOrderPolicy:
         self._latest_meta_side_snapshot: dict[str, float] | None = None
         self._meta_side_entry_armed: dict[str, bool] = {"long": True, "short": True}
         self._meta_side_enter_above_threshold: dict[str, bool] = {"long": False, "short": False}
+        self._meta_side_enter_peak_prob: dict[str, float] = {"long": float("nan"), "short": float("nan")}
+        self._meta_rearm_session_day: date | None = None
         self._meta_side_cooldown_until: dict[str, datetime | None] = {"long": None, "short": None}
         self._meta_side_bars_held: dict[str, int] = {"long": -1, "short": -1}
         self._meta_side_entry_signal_ts: dict[str, datetime | None] = {"long": None, "short": None}
@@ -181,6 +196,17 @@ class OptionOrderPolicy:
         self._last_broker_reconcile_monotonic: float = 0.0
         self._entry_lockout_until: datetime | None = None
         self._entry_lockout_reason: str | None = None
+        self._contract_price_provider: Callable[..., float] | None = None
+
+    def set_contract_price_provider(self, provider: Callable[..., float] | None) -> None:
+        """
+        Install an external contract pricer for simulated/replay runs.
+
+        Live trading keeps using Alpaca quotes. Replay can inject a deterministic
+        proxy so simulated entries and software exits are priced from historical
+        underlying bars instead of a hardcoded fill.
+        """
+        self._contract_price_provider = provider
 
     def _trail_state(self, side: str) -> _MetaTrailState:
         return self._meta_long_trail if side == "long" else self._meta_short_trail
@@ -405,6 +431,10 @@ class OptionOrderPolicy:
         probe = high if math.isfinite(high) else close
         return math.isfinite(probe) and probe >= stop_level
 
+    def _ohlc_exit_bar_is_after_entry(self, *, side: str, local_ts: datetime | None) -> bool:
+        state = self._trail_state(side)
+        return local_ts is None or state.entry_ts is None or local_ts > state.entry_ts
+
     def _profit_protect_exit_hit(
         self,
         *,
@@ -450,6 +480,93 @@ class OptionOrderPolicy:
             return False
         current_giveback_atr = mfe_atr - realized_run_atr
         return bool(math.isfinite(current_giveback_atr) and current_giveback_atr >= giveback_atr)
+
+    def _option_value_exit_hit(
+        self,
+        *,
+        side: str,
+        logger: Callable[[str], None],
+        closed_bar: dict[str, Any] | None = None,
+        local_ts: datetime | None = None,
+    ) -> bool:
+        policy = str(self.cfg.option_exit_policy or "meta").strip().lower()
+        if policy not in {"option_value_bracket_v1", "software_oco_v1", "option_adaptive_trail_v1"}:
+            return False
+        side_key = str(side).strip().lower()
+        symbol = self._long_symbol if side_key == "long" else self._short_symbol
+        entry_price = self._long_avg_entry_price if side_key == "long" else self._short_avg_entry_price
+        if not symbol or not (math.isfinite(entry_price) and entry_price > 0.0):
+            return False
+        current_price = self._get_contract_price(
+            symbol=symbol,
+            logger=logger,
+            mode=str(self.cfg.option_exit_quote_mode or "bid"),
+        )
+        if not (math.isfinite(current_price) and current_price >= 0.0):
+            return False
+
+        prior_best = _as_float(self._option_exit_best_price.get(side_key))
+        best_price = max(prior_best if math.isfinite(prior_best) else entry_price, float(current_price))
+        if best_price > (prior_best if math.isfinite(prior_best) else entry_price):
+            self._option_exit_best_seen_at[side_key] = local_ts
+        elif self._option_exit_best_seen_at.get(side_key) is None:
+            self._option_exit_best_seen_at[side_key] = local_ts
+        self._option_exit_best_price[side_key] = best_price
+
+        if policy == "option_adaptive_trail_v1":
+            best_profit_pct = (best_price - entry_price) / entry_price
+            current_profit_pct = (float(current_price) - entry_price) / entry_price
+            trail_arm = max(0.0, float(self.cfg.option_exit_trailing_arm_pct))
+            trail_giveback = max(0.0, float(self.cfg.option_exit_trailing_giveback_pct))
+            peak_profit = max(0.0, best_price - entry_price)
+            trail_floor_price = entry_price + peak_profit * (1.0 - min(1.0, trail_giveback))
+            if trail_arm > 0.0 and best_profit_pct >= trail_arm and current_price <= trail_floor_price:
+                self._meta_side_reason[side_key] = "option_adaptive_trail"
+                return True
+
+            stale_minutes = max(0, int(self.cfg.option_exit_time_decay_minutes))
+            best_seen_at = self._option_exit_best_seen_at.get(side_key)
+            stale_for_minutes = float("nan")
+            if stale_minutes > 0 and isinstance(best_seen_at, datetime) and isinstance(local_ts, datetime):
+                stale_for_minutes = (local_ts - best_seen_at).total_seconds() / 60.0
+            time_decay_progress = max(0.0, float(self.cfg.option_exit_time_decay_progress_pct))
+            if (
+                math.isfinite(stale_for_minutes)
+                and stale_for_minutes >= float(stale_minutes)
+                and best_profit_pct < time_decay_progress
+                and current_profit_pct <= 0.0
+            ):
+                self._meta_side_reason[side_key] = "option_time_decay"
+                return True
+
+            opp_thr = max(0.0, float(self.cfg.option_exit_opposite_prob))
+            bar = closed_bar or {}
+            opp_key = "p_enter_short" if side_key == "long" else "p_enter_long"
+            opp_prob = _as_float(bar.get(opp_key))
+            if opp_thr > 0.0 and math.isfinite(opp_prob) and opp_prob >= opp_thr and best_profit_pct >= 1.0:
+                self._meta_side_reason[side_key] = "option_opposite_signal"
+                return True
+            return False
+
+        tp_mult = 1.0 + max(0.0, float(self.cfg.option_exit_take_profit_pct))
+        stop_mult = max(0.0, 1.0 - max(0.0, float(self.cfg.option_exit_stop_loss_pct)))
+        arm_mult = 1.0 + max(0.0, float(self.cfg.option_exit_profit_lock_arm_pct))
+        floor_mult = 1.0 + max(0.0, float(self.cfg.option_exit_profit_lock_floor_pct))
+
+        if tp_mult > 1.0 and current_price >= entry_price * tp_mult:
+            self._meta_side_reason[side_key] = "option_take_profit"
+            return True
+        if stop_mult > 0.0 and current_price <= entry_price * stop_mult:
+            self._meta_side_reason[side_key] = "option_stop_loss"
+            return True
+        if arm_mult > 1.0 and floor_mult > 1.0 and best_price >= entry_price * arm_mult and current_price <= entry_price * floor_mult:
+            self._meta_side_reason[side_key] = "option_profit_lock"
+            return True
+        return False
+
+    def _option_value_exit_policy_enabled(self) -> bool:
+        policy = str(self.cfg.option_exit_policy or "meta").strip().lower()
+        return policy in {"option_value_bracket_v1", "software_oco_v1", "option_adaptive_trail_v1"}
 
     def _refresh_legacy_state(self) -> None:
         self._signed_contracts = int(self._long_contracts) - int(self._short_contracts)
@@ -660,6 +777,29 @@ class OptionOrderPolicy:
         return latest_snapshot_ts <= entry_signal_ts
 
     def _read_broker_position_state(self) -> dict[str, Any]:
+        if not self.cfg.submit_orders:
+            return {
+                "underlying": self.cfg.underlying.strip().upper(),
+                "long_contracts": int(self._long_contracts),
+                "short_contracts": int(self._short_contracts),
+                "long_symbol": self._long_symbol,
+                "short_symbol": self._short_symbol,
+                "avg_entry_price_long": (
+                    float(_as_float(self._long_avg_entry_price))
+                    if math.isfinite(_as_float(self._long_avg_entry_price))
+                    else None
+                ),
+                "avg_entry_price_short": (
+                    float(_as_float(self._short_avg_entry_price))
+                    if math.isfinite(_as_float(self._short_avg_entry_price))
+                    else None
+                ),
+                "qty_long": float(self._long_contracts),
+                "qty_short": float(self._short_contracts),
+                "multiple_positions": False,
+                "ignored_short_positions": 0,
+                "simulated": True,
+            }
         resp = self._client.get_positions()
         positions = self._extract_positions(resp)
         under = self.cfg.underlying.strip().upper()
@@ -749,14 +889,24 @@ class OptionOrderPolicy:
                 self._meta_side_entry_signal_ts[side] = None
                 self._meta_side_soft_exit_count[side] = 0
                 self._reset_trail_state(side)
+                self._option_exit_best_price[side] = float("nan")
+                self._option_exit_best_seen_at[side] = None
                 continue
+            avg_entry = self._long_avg_entry_price if side == "long" else self._short_avg_entry_price
             if preserve_bars_held and prev_qty > 0 and prev_symbol == next_symbol:
                 self._meta_side_bars_held[side] = max(0, int(self._meta_side_bars_held.get(side, -1)))
+                prior_best = _as_float(self._option_exit_best_price.get(side))
+                if not math.isfinite(prior_best) and math.isfinite(avg_entry):
+                    self._option_exit_best_price[side] = float(avg_entry)
+                if self._option_exit_best_seen_at.get(side) is None:
+                    self._option_exit_best_seen_at[side] = local_ts
             else:
                 self._meta_side_bars_held[side] = max(0, int(self.cfg.meta_min_hold_bars))
                 self._meta_side_entry_signal_ts[side] = None
                 self._meta_side_soft_exit_count[side] = 0
                 self._reset_trail_state(side)
+                self._option_exit_best_price[side] = float(avg_entry) if math.isfinite(avg_entry) else float("nan")
+                self._option_exit_best_seen_at[side] = local_ts
                 if local_ts is not None and self._symbol_expires_today(next_symbol, local_ts=local_ts):
                     self._meta_side_entry_armed[side] = False
 
@@ -773,6 +923,13 @@ class OptionOrderPolicy:
         local_ts: datetime | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
+        if not self.cfg.submit_orders:
+            return {
+                "checked": False,
+                "skipped": True,
+                "reason": "simulated_orders",
+                "broker_state": self._read_broker_position_state(),
+            }
         if local_ts is None:
             local_ts = datetime.now(tz=self._tz)
         now_mono = float(time_mod.monotonic())
@@ -932,6 +1089,22 @@ class OptionOrderPolicy:
         logger: Callable[[str], None],
         mode: str | None = None,
     ) -> float:
+        provider = self._contract_price_provider
+        if provider is not None:
+            try:
+                price = provider(symbol=symbol, mode=mode or self.cfg.price_mode)
+            except TypeError:
+                price = provider(symbol)
+            except Exception as exc:
+                logger(f"[order_policy] simulated quote provider failed symbol={symbol}: {exc}")
+                price = float("nan")
+            price_f = _as_float(price)
+            if math.isfinite(price_f) and price_f > 0.0:
+                return price_f
+
+        if not self.cfg.submit_orders:
+            return float("nan")
+
         try:
             resp = self._client.get_option_quotes(symbols=symbol, limit=1)
             quotes = self._extract_quotes(resp, symbol=symbol)
@@ -957,10 +1130,11 @@ class OptionOrderPolicy:
 
     def _contracts_max_for_symbol(self, *, symbol: str, logger: Callable[[str], None]) -> tuple[int, float, float]:
         if not self.cfg.submit_orders:
+            price = self._get_contract_price(symbol=symbol, logger=logger)
             max_ct = max(0, int(self.cfg.max_contracts_fallback))
             if self.cfg.max_contracts_cap and int(self.cfg.max_contracts_cap) > 0:
                 max_ct = min(max_ct, int(self.cfg.max_contracts_cap))
-            return max_ct, float("nan"), float("nan")
+            return max_ct, float("nan"), price
         price = self._get_contract_price(symbol=symbol, logger=logger)
         bp = self._get_buying_power()
         max_ct = 0
@@ -1180,6 +1354,14 @@ class OptionOrderPolicy:
                 self._clear_intrabar_entry_intent(side=side_key, reason="intrabar_setup_not_armed")
 
     def _update_meta_entry_rearm_state(self, *, closed_bar: dict[str, Any]) -> None:
+        snapshot_ts = self._to_local_ts(closed_bar.get("timestamp"))
+        if snapshot_ts is not None:
+            session_day = snapshot_ts.date()
+            if self._meta_rearm_session_day is not None and session_day != self._meta_rearm_session_day:
+                self._meta_side_entry_armed = {"long": True, "short": True}
+                self._meta_side_enter_above_threshold = {"long": False, "short": False}
+                self._meta_side_enter_peak_prob = {"long": float("nan"), "short": float("nan")}
+            self._meta_rearm_session_day = session_day
         for side_key in ("long", "short"):
             enter_prob = _as_float(closed_bar.get(f"p_enter_{side_key}"))
             enter_thr = self._meta_threshold_value(
@@ -1196,14 +1378,20 @@ class OptionOrderPolicy:
             if not is_above:
                 self._meta_side_entry_armed[side_key] = True
                 self._meta_side_enter_above_threshold[side_key] = False
+                self._meta_side_enter_peak_prob[side_key] = float("nan")
                 continue
             if not was_above:
                 self._meta_side_entry_armed[side_key] = True
+                self._meta_side_enter_peak_prob[side_key] = enter_prob
             else:
-                # Phase 4 treats a probability spike as one setup zone. Do not
-                # keep refreshing the trigger reference while the same setup
-                # cluster remains above threshold.
-                self._meta_side_entry_armed[side_key] = False
+                peak_prob = _as_float(self._meta_side_enter_peak_prob.get(side_key))
+                if math.isfinite(enter_prob) and (not math.isfinite(peak_prob) or enter_prob > peak_prob):
+                    self._meta_side_entry_armed[side_key] = True
+                    self._meta_side_enter_peak_prob[side_key] = enter_prob
+                else:
+                    # Keep the setup cluster active, but only refresh the
+                    # trigger reference when confidence makes a new high.
+                    self._meta_side_entry_armed[side_key] = False
             self._meta_side_enter_above_threshold[side_key] = True
 
     def _entry_no_chase_blocked(
@@ -1332,6 +1520,16 @@ class OptionOrderPolicy:
         }
 
     def _has_open_long_position(self, *, symbol: str) -> bool:
+        if not self.cfg.submit_orders:
+            target = str(symbol).strip().upper()
+            return bool(
+                (self._long_symbol and str(self._long_symbol).strip().upper() == target and self._long_contracts > 0)
+                or (
+                    self._short_symbol
+                    and str(self._short_symbol).strip().upper() == target
+                    and self._short_contracts > 0
+                )
+            )
         try:
             resp = self._client.get_positions()
             positions = self._extract_positions(resp)
@@ -1497,6 +1695,9 @@ class OptionOrderPolicy:
         pending = self._pending_broker_reconcile
         if not isinstance(pending, dict):
             return None
+        if not self.cfg.submit_orders:
+            self._pending_broker_reconcile = None
+            return {"resolved": True, "timed_out": False, "simulated": True}
 
         symbol = str(pending.get("symbol", "")).strip().upper()
         intent = str(pending.get("intent", "")).strip().lower()
@@ -1618,6 +1819,8 @@ class OptionOrderPolicy:
         verify_result: dict[str, Any] | None,
         logger: Callable[[str], None],
     ) -> None:
+        if not self.cfg.submit_orders:
+            return
         if not isinstance(verify_result, dict):
             return
         if not bool(verify_result.get("cancel_required")):
@@ -1705,6 +1908,12 @@ class OptionOrderPolicy:
 
         order_qty = int(qty if qty is not None else self.cfg.qty)
         if not self.cfg.submit_orders:
+            sim_mode = "ask" if intent_key == "open" else "bid"
+            sim_price = self._get_contract_price(symbol=symbol, logger=logger, mode=sim_mode)
+            if not math.isfinite(sim_price) or sim_price <= 0.0:
+                sim_price = 1.0
+                sim_mode = "fallback"
+            sim_price = max(0.01, float(sim_price))
             payload = {
                 "symbol": symbol,
                 "qty": order_qty,
@@ -1712,10 +1921,19 @@ class OptionOrderPolicy:
                 "intent": intent_key,
                 "type": "limit",
                 "time_in_force": self.cfg.time_in_force,
-                "limit_price": 1.0,
+                "limit_price": round(sim_price, 4),
+                "price_mode": sim_mode,
             }
             logger(f"[order_policy] SIMULATED ORDER {payload}")
-            return {"simulated": True, "payload": payload}
+            return {
+                "simulated": True,
+                "payload": payload,
+                "response": {
+                    "status": "filled",
+                    "filled_qty": str(order_qty),
+                    "filled_avg_price": str(round(sim_price, 4)),
+                },
+            }
         # Price ladder policy:
         # - start at midpoint
         # - +$0.01 per retry for opens (buy-to-open)
@@ -1883,6 +2101,22 @@ class OptionOrderPolicy:
             "open_short_symbol": self._short_symbol,
             "avg_entry_price_long": float(self._long_avg_entry_price) if math.isfinite(self._long_avg_entry_price) else None,
             "avg_entry_price_short": float(self._short_avg_entry_price) if math.isfinite(self._short_avg_entry_price) else None,
+            "option_exit_policy": str(self.cfg.option_exit_policy),
+            "option_exit_best_price_long": (
+                float(self._option_exit_best_price.get("long", float("nan")))
+                if math.isfinite(_as_float(self._option_exit_best_price.get("long")))
+                else None
+            ),
+            "option_exit_best_price_short": (
+                float(self._option_exit_best_price.get("short", float("nan")))
+                if math.isfinite(_as_float(self._option_exit_best_price.get("short")))
+                else None
+            ),
+            "option_exit_trailing_arm_pct": float(self.cfg.option_exit_trailing_arm_pct),
+            "option_exit_trailing_giveback_pct": float(self.cfg.option_exit_trailing_giveback_pct),
+            "option_exit_time_decay_minutes": int(self.cfg.option_exit_time_decay_minutes),
+            "option_exit_time_decay_progress_pct": float(self.cfg.option_exit_time_decay_progress_pct),
+            "option_exit_opposite_prob": float(self.cfg.option_exit_opposite_prob),
             "atr": float(atr) if math.isfinite(atr) else None,
             "bars_interval": int(len(self._bars_interval)),
             "bars_15m": int(len(self._bars_interval)),
@@ -1902,6 +2136,27 @@ class OptionOrderPolicy:
             "long_soft_exit_count": int(self._meta_side_soft_exit_count.get("long", 0)),
             "short_soft_exit_count": int(self._meta_side_soft_exit_count.get("short", 0)),
             "meta_intrabar_entry_policy": self._intrabar_entry_policy_name(),
+            "meta_intrabar_long_setup_threshold": (
+                float(self.cfg.meta_intrabar_long_setup_threshold)
+                if self.cfg.meta_intrabar_long_setup_threshold is not None
+                else None
+            ),
+            "meta_intrabar_short_setup_threshold": (
+                float(self.cfg.meta_intrabar_short_setup_threshold)
+                if self.cfg.meta_intrabar_short_setup_threshold is not None
+                else None
+            ),
+            "meta_intrabar_setup_max_bars": int(self.cfg.meta_intrabar_setup_max_bars),
+            "long_intrabar_setup_peak_prob": (
+                float(self._meta_side_enter_peak_prob.get("long", float("nan")))
+                if math.isfinite(_as_float(self._meta_side_enter_peak_prob.get("long")))
+                else None
+            ),
+            "short_intrabar_setup_peak_prob": (
+                float(self._meta_side_enter_peak_prob.get("short", float("nan")))
+                if math.isfinite(_as_float(self._meta_side_enter_peak_prob.get("short")))
+                else None
+            ),
             "long_intrabar_intent_active": bool(self._meta_intrabar_entry_intent_active.get("long", False)),
             "short_intrabar_intent_active": bool(self._meta_intrabar_entry_intent_active.get("short", False)),
             "long_intrabar_entry_ref": (
@@ -1952,6 +2207,8 @@ class OptionOrderPolicy:
             },
             "meta_side_reason": dict(self._meta_side_reason),
             "meta_side_entry_armed": dict(self._meta_side_entry_armed),
+            "meta_side_enter_above_threshold": dict(self._meta_side_enter_above_threshold),
+            "meta_side_enter_peak_prob": dict(self._meta_side_enter_peak_prob),
             "meta_side_bars_held": dict(self._meta_side_bars_held),
             "meta_side_entry_signal_ts": {
                 key: (_ts.isoformat() if isinstance(_ts, datetime) else None)
@@ -1966,6 +2223,14 @@ class OptionOrderPolicy:
             "recent_1m_closes": [
                 float(x) for x in list(self._recent_1m_closes) if math.isfinite(_as_float(x))
             ],
+            "option_exit_best_price": {
+                key: (float(value) if math.isfinite(_as_float(value)) else None)
+                for key, value in self._option_exit_best_price.items()
+            },
+            "option_exit_best_seen_at": {
+                key: (_ts.isoformat() if isinstance(_ts, datetime) else None)
+                for key, _ts in self._option_exit_best_seen_at.items()
+            },
             "entry_lockout_until": self._entry_lockout_until.isoformat() if self._entry_lockout_until else None,
             "entry_lockout_reason": self._entry_lockout_reason,
         }
@@ -1998,6 +2263,17 @@ class OptionOrderPolicy:
                 for side in ("long", "short"):
                     ref_val = _as_float(entry_ref.get(side))
                     self._meta_intrabar_entry_ref[side] = ref_val if math.isfinite(ref_val) else float("nan")
+
+            enter_above = state.get("meta_side_enter_above_threshold")
+            if isinstance(enter_above, dict):
+                for side in ("long", "short"):
+                    self._meta_side_enter_above_threshold[side] = bool(enter_above.get(side, False))
+
+            enter_peak = state.get("meta_side_enter_peak_prob")
+            if isinstance(enter_peak, dict):
+                for side in ("long", "short"):
+                    peak_val = _as_float(enter_peak.get(side))
+                    self._meta_side_enter_peak_prob[side] = peak_val if math.isfinite(peak_val) else float("nan")
 
             for state_key, target in (
                 ("meta_intrabar_entry_setup_ts", self._meta_intrabar_entry_setup_ts),
@@ -2065,6 +2341,20 @@ class OptionOrderPolicy:
                     v = _as_float(value)
                     if math.isfinite(v):
                         self._recent_1m_closes.append(float(v))
+            option_best = state.get("option_exit_best_price")
+            if isinstance(option_best, dict):
+                for side in ("long", "short"):
+                    best = _as_float(option_best.get(side))
+                    self._option_exit_best_price[side] = best if math.isfinite(best) else float("nan")
+            option_best_seen = state.get("option_exit_best_seen_at")
+            if isinstance(option_best_seen, dict):
+                for side in ("long", "short"):
+                    raw = option_best_seen.get(side)
+                    if raw in (None, ""):
+                        self._option_exit_best_seen_at[side] = None
+                        continue
+                    parsed = pd.to_datetime(raw, utc=True, errors="coerce")
+                    self._option_exit_best_seen_at[side] = None if pd.isna(parsed) else parsed.to_pydatetime().astimezone(self._tz)
             raw_lockout_until = state.get("entry_lockout_until")
             if raw_lockout_until in (None, ""):
                 self._entry_lockout_until = None
@@ -2092,6 +2382,39 @@ class OptionOrderPolicy:
             "recent_orders": [],
             "ok": True,
         }
+        if not self.cfg.submit_orders:
+            if self._long_symbol and self._long_contracts > 0:
+                out["positions"].append(
+                    {
+                        "symbol": self._long_symbol,
+                        "side": "long",
+                        "qty": float(self._long_contracts),
+                        "avg_entry_price": (
+                            float(_as_float(self._long_avg_entry_price))
+                            if math.isfinite(_as_float(self._long_avg_entry_price))
+                            else None
+                        ),
+                        "market_value": None,
+                        "unrealized_pl": None,
+                    }
+                )
+            if self._short_symbol and self._short_contracts > 0:
+                out["positions"].append(
+                    {
+                        "symbol": self._short_symbol,
+                        "side": "long",
+                        "qty": float(self._short_contracts),
+                        "avg_entry_price": (
+                            float(_as_float(self._short_avg_entry_price))
+                            if math.isfinite(_as_float(self._short_avg_entry_price))
+                            else None
+                        ),
+                        "market_value": None,
+                        "unrealized_pl": None,
+                    }
+                )
+            out["simulation"] = True
+            return out
         try:
             pos_resp = self._client.get_positions()
             positions = self._extract_positions(pos_resp)
@@ -2167,6 +2490,7 @@ class OptionOrderPolicy:
         local_ts: datetime | None = None,
         allow_new_entries: bool = True,
         allow_exits: bool = True,
+        logger: Callable[[str], None] = print,
     ) -> int:
         side_key = str(side).strip().lower()
         if side_key not in {"long", "short"}:
@@ -2181,11 +2505,25 @@ class OptionOrderPolicy:
         if bool(self.cfg.meta_replay_compatible_mode):
             bars_held = int(self._meta_side_bars_held.get(side_key, -1))
             if current_qty > 0:
-                hard_stop_signal = self._hard_stop_hit(side=side_key, close=close, high=high, low=low)
-                if hard_stop_signal:
+                if self._ohlc_exit_bar_is_after_entry(side=side_key, local_ts=local_ts):
+                    hard_stop_signal = self._hard_stop_hit(side=side_key, close=close, high=high, low=low)
+                    if hard_stop_signal:
+                        self._meta_side_soft_exit_count[side_key] = 0
+                        self._meta_side_reason[side_key] = "hard_stop"
+                        return 0
+                option_exit_signal = self._option_value_exit_hit(
+                    side=side_key,
+                    logger=logger,
+                    closed_bar=closed_bar,
+                    local_ts=local_ts,
+                )
+                if option_exit_signal:
                     self._meta_side_soft_exit_count[side_key] = 0
-                    self._meta_side_reason[side_key] = "hard_stop"
                     return 0
+                if self._option_value_exit_policy_enabled():
+                    self._meta_side_reason[side_key] = "hold_option_value_bracket"
+                    self._meta_side_soft_exit_count[side_key] = 0
+                    return desired_qty
                 if not bool(allow_exits):
                     self._meta_side_reason[side_key] = "exit_waiting_for_1m_confirmation"
                     return desired_qty
@@ -2214,7 +2552,10 @@ class OptionOrderPolicy:
                     and math.isfinite(enter_prob)
                     and (exit_prob - enter_prob) >= float(self.cfg.meta_urgent_exit_delta)
                 )
-                profit_protect_hit = bool(self._profit_protect_exit_hit(side=side_key, close=close))
+                profit_protect_hit = bool(
+                    self._ohlc_exit_bar_is_after_entry(side=side_key, local_ts=local_ts)
+                    and self._profit_protect_exit_hit(side=side_key, close=close)
+                )
                 urgent_exit = bool(
                     hold_ready
                     and (
@@ -2281,9 +2622,20 @@ class OptionOrderPolicy:
         else:
             self._reset_trail_state(side_key)
         if current_qty > 0:
-            hard_stop_signal = self._hard_stop_hit(side=side_key, close=close, high=high, low=low)
-            if hard_stop_signal:
+            if self._ohlc_exit_bar_is_after_entry(side=side_key, local_ts=local_ts):
+                hard_stop_signal = self._hard_stop_hit(side=side_key, close=close, high=high, low=low)
+                if hard_stop_signal:
+                    return 0
+            if self._option_value_exit_hit(
+                side=side_key,
+                logger=logger,
+                closed_bar=closed_bar,
+                local_ts=local_ts,
+            ):
                 return 0
+            if self._option_value_exit_policy_enabled():
+                self._meta_side_reason[side_key] = "hold_option_value_bracket"
+                return desired_qty
             if not bool(allow_exits):
                 self._meta_side_reason[side_key] = "exit_waiting_for_1m_confirmation"
                 return desired_qty
@@ -2297,9 +2649,10 @@ class OptionOrderPolicy:
             exit_signal = bool(has_meta_exit_prob and exit_prob >= exit_thr)
             fallback_exit_signal = False
             if not has_meta_exit_prob:
-                stale_signal = self._stale_trade_exit_hit(side=side_key, close=close, local_ts=local_ts)
-                trail_signal = self._trail_stop_hit(side=side_key, close=close, high=high, low=low)
-                fallback_exit_signal = bool(stale_signal or trail_signal)
+                if self._ohlc_exit_bar_is_after_entry(side=side_key, local_ts=local_ts):
+                    stale_signal = self._stale_trade_exit_hit(side=side_key, close=close, local_ts=local_ts)
+                    trail_signal = self._trail_stop_hit(side=side_key, close=close, high=high, low=low)
+                    fallback_exit_signal = bool(stale_signal or trail_signal)
             if not (exit_signal or fallback_exit_signal):
                 return desired_qty
             if enforce_trend_gate and not self._trend_gate_passed(
@@ -2408,6 +2761,7 @@ class OptionOrderPolicy:
             local_ts=local_ts,
             allow_new_entries=allow_new_entries,
             allow_exits=allow_exits,
+            logger=logger,
         )
         target_short = self._target_contracts_for_side(
             side="short",
@@ -2421,6 +2775,7 @@ class OptionOrderPolicy:
             local_ts=local_ts,
             allow_new_entries=allow_new_entries,
             allow_exits=allow_exits,
+            logger=logger,
         )
         current_long = int(self._long_contracts)
         current_short = int(self._short_contracts)
@@ -2473,6 +2828,8 @@ class OptionOrderPolicy:
                     if target_qty == 0:
                         self._long_symbol = None
                         self._long_avg_entry_price = float("nan")
+                        self._option_exit_best_price["long"] = float("nan")
+                        self._option_exit_best_seen_at["long"] = None
                         self._meta_side_entry_signal_ts["long"] = None
                         self._reset_trail_state("long")
                         self._meta_side_soft_exit_count["long"] = 0
@@ -2486,6 +2843,8 @@ class OptionOrderPolicy:
                     if target_qty == 0:
                         self._short_symbol = None
                         self._short_avg_entry_price = float("nan")
+                        self._option_exit_best_price["short"] = float("nan")
+                        self._option_exit_best_seen_at["short"] = None
                         self._meta_side_entry_signal_ts["short"] = None
                         self._reset_trail_state("short")
                         self._meta_side_soft_exit_count["short"] = 0
@@ -2579,8 +2938,12 @@ class OptionOrderPolicy:
                 filled_avg = self._extract_filled_avg_price(open_resp.get("verification", {}).get("order") if isinstance(open_resp, dict) else None)
                 if not math.isfinite(filled_avg):
                     filled_avg = self._extract_filled_avg_price(open_resp.get("response") if isinstance(open_resp, dict) else None)
+                if not math.isfinite(filled_avg) and math.isfinite(contract_price):
+                    filled_avg = float(contract_price)
                 if math.isfinite(filled_avg):
                     self._long_avg_entry_price = float(filled_avg)
+                    self._option_exit_best_price["long"] = float(filled_avg)
+                    self._option_exit_best_seen_at["long"] = local_ts
             else:
                 self._short_contracts = desired_final
                 self._short_symbol = symbol
@@ -2590,8 +2953,12 @@ class OptionOrderPolicy:
                 filled_avg = self._extract_filled_avg_price(open_resp.get("verification", {}).get("order") if isinstance(open_resp, dict) else None)
                 if not math.isfinite(filled_avg):
                     filled_avg = self._extract_filled_avg_price(open_resp.get("response") if isinstance(open_resp, dict) else None)
+                if not math.isfinite(filled_avg) and math.isfinite(contract_price):
+                    filled_avg = float(contract_price)
                 if math.isfinite(filled_avg):
                     self._short_avg_entry_price = float(filled_avg)
+                    self._option_exit_best_price["short"] = float(filled_avg)
+                    self._option_exit_best_seen_at["short"] = local_ts
 
         self._refresh_legacy_state()
         prev_counts = {"long": current_long, "short": current_short}
@@ -2620,6 +2987,7 @@ class OptionOrderPolicy:
                 "target_long_contracts": int(target_long),
                 "target_short_contracts": int(target_short),
                 "meta_trailing_stop_enabled": bool(self.cfg.meta_trailing_stop_enabled),
+                "option_exit_policy": str(self.cfg.option_exit_policy),
                 "buying_power": buying_power if math.isfinite(buying_power) else None,
                 "close": close,
                 "atr": atr,
@@ -2720,7 +3088,6 @@ class OptionOrderPolicy:
                 short_triggered = False
                 self._meta_side_reason["long"] = "intrabar_setup_conflict_skip"
                 self._meta_side_reason["short"] = "intrabar_setup_conflict_skip"
-            allow_exits = False
             if not long_triggered and self._long_contracts <= 0:
                 side_bar["p_enter_long"] = float("nan")
             if not short_triggered and self._short_contracts <= 0:

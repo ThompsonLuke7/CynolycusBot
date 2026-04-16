@@ -27,6 +27,7 @@ from .live_runner import (
 )
 from Policy.execution_latch import DirectionExecutionLatch
 from Policy.order_policy import PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1, OptionOrderPolicy
+from Policy.replay_option_proxy import ReplayOptionPriceProxy
 
 
 def _ga_prob_parquet_path(
@@ -306,6 +307,41 @@ def _load_ga_probs_frame_from_path(
         if col in df.columns:
             out[col] = pd.to_numeric(df[col], errors="coerce")
     return out.sort_index()
+
+
+def _load_swing_setup_probs_frame(
+    *,
+    model_dir: str | Path,
+    tz: str | None,
+) -> pd.DataFrame | None:
+    path = Path(model_dir) / "p_swing_probs.parquet"
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_parquet(path)
+        if not isinstance(df.index, pd.DatetimeIndex):
+            ts_col = None
+            for candidate in ("timestamp", "date", "datetime", "index"):
+                if candidate in df.columns:
+                    ts_col = candidate
+                    break
+            if ts_col is None:
+                return None
+            df[ts_col] = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
+            df = df.dropna(subset=[ts_col]).set_index(ts_col)
+        else:
+            idx = pd.to_datetime(df.index, utc=True, errors="coerce")
+            df = df.loc[pd.notna(idx)].copy()
+            df.index = pd.DatetimeIndex(idx[pd.notna(idx)])
+        if df.empty:
+            return None
+        if tz:
+            df.index = pd.DatetimeIndex(df.index).tz_convert(tz)
+        df = df.sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+        return df
+    except Exception:
+        return None
 
 
 def _load_meta_matrix_frame_from_path(
@@ -1011,7 +1047,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data-path",
-        default="Data/raw/spy/inference_buffer_1m.parquet",
+        default="Data/raw/spy/1m_train.parquet",
         help="CSV/Parquet with 1m bars.",
     )
     parser.add_argument("--symbols", default="SPY", help="Comma-separated symbols.")
@@ -1108,7 +1144,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--meta-trail-activate-atr", type=float, default=0.75, help="Trail activation ATR used to build live exit context.")
     parser.add_argument("--meta-trail-atr", type=float, default=0.8, help="Base trail ATR used to build live exit context.")
     parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.5, help="Tightened trail ATR after TP is seen.")
+    parser.add_argument("--meta-hard-stop-atr", type=float, default=0.0, help="Underlying ATR hard-stop distance for option exits; <=0 disables it.")
     parser.add_argument("--meta-use-tp-to-tighten-trail", action=argparse.BooleanOptionalAction, default=True, help="Mirror training trail-tightening behavior in replay exit context.")
+    parser.add_argument(
+        "--meta-entry-prob-source",
+        choices=["meta", "swing_support_single"],
+        default="swing_support_single",
+        help="Entry/setup probability source. Use swing_support_single for the Phase 4 single-head setup model.",
+    )
+    parser.add_argument(
+        "--swing-setup-single-model-dir",
+        default="Data/models/ga_xgboost/10min/single/swing_support_single",
+        help="Single-head swing support model dir used when --meta-entry-prob-source=swing_support_single.",
+    )
     parser.add_argument(
         "--meta-intrabar-entry-policy",
         default=PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1,
@@ -1186,9 +1234,110 @@ def _parse_args() -> argparse.Namespace:
         help="Local HH:MM cutoff; before cutoff use 0DTE, otherwise 1DTE.",
     )
     parser.add_argument(
+        "--option-exit-policy",
+        default="option_adaptive_trail_v1",
+        choices=["meta", "option_value_bracket_v1", "software_oco_v1", "option_adaptive_trail_v1"],
+        help="Option exit policy: option_adaptive_trail_v1 monitors option value for late trailing/time-decay/opposite-signal exits.",
+    )
+    parser.add_argument(
+        "--option-exit-take-profit-pct",
+        type=float,
+        default=0.0,
+        help="Software option-value take-profit trigger as fractional gain over entry; 0 disables the cap.",
+    )
+    parser.add_argument(
+        "--option-exit-stop-loss-pct",
+        type=float,
+        default=1.0,
+        help="Software option-value stop-loss trigger as fractional loss from entry (1.0 effectively disables for long options).",
+    )
+    parser.add_argument(
+        "--option-exit-profit-lock-arm-pct",
+        type=float,
+        default=2.0,
+        help="Legacy profit-lock arm threshold, and adaptive trail arm default (+2.0 = +200%%).",
+    )
+    parser.add_argument(
+        "--option-exit-profit-lock-floor-pct",
+        type=float,
+        default=0.25,
+        help="Legacy profit-lock floor threshold, and adaptive trail giveback default (0.25 = 25 premium points).",
+    )
+    parser.add_argument(
+        "--option-exit-trailing-arm-pct",
+        type=float,
+        default=2.0,
+        help="Adaptive trail arms after this fractional gain over entry (2.0 = +200%%).",
+    )
+    parser.add_argument(
+        "--option-exit-trailing-giveback-pct",
+        type=float,
+        default=0.25,
+        help="Adaptive trail exits after this giveback from best option value, as a fraction of entry premium.",
+    )
+    parser.add_argument(
+        "--option-exit-time-decay-minutes",
+        type=int,
+        default=80,
+        help="Adaptive time-decay exit after this many minutes without a new option-value peak.",
+    )
+    parser.add_argument(
+        "--option-exit-time-decay-progress-pct",
+        type=float,
+        default=1.0,
+        help="Adaptive time-decay only applies before this MFE threshold (1.0 = before +100%%).",
+    )
+    parser.add_argument(
+        "--option-exit-opposite-prob",
+        type=float,
+        default=0.60,
+        help="Adaptive opposite-signal exit threshold after the trade has seen at least +100%% MFE.",
+    )
+    parser.add_argument(
+        "--option-exit-quote-mode",
+        default="bid",
+        choices=["bid", "mid", "mark", "last", "ask"],
+        help="Option quote field used for software exit checks; bid is conservative for sell-to-close.",
+    )
+    parser.add_argument(
         "--simulate-orders",
         action="store_true",
         help="Do not submit to Alpaca; print intended order payloads only.",
+    )
+    parser.add_argument(
+        "--replay-option-proxy-mode",
+        default="black_scholes",
+        choices=["none", "black_scholes"],
+        help="Pricing source for simulated option orders in replay.",
+    )
+    parser.add_argument(
+        "--replay-option-proxy-expiry-hhmm",
+        default="15:40",
+        help="Local option expiry/forced-exit time used by the replay Black-Scholes proxy.",
+    )
+    parser.add_argument(
+        "--replay-option-proxy-iv-floor",
+        type=float,
+        default=0.12,
+        help="Minimum annualized IV used by the replay option proxy.",
+    )
+    parser.add_argument(
+        "--replay-option-proxy-iv-ceiling",
+        type=float,
+        default=0.90,
+        help="Maximum annualized IV used by the replay option proxy.",
+    )
+    parser.add_argument(
+        "--replay-option-proxy-iv-multiplier",
+        type=float,
+        default=1.50,
+        help="Multiplier applied to rolling realized volatility for the replay option proxy.",
+    )
+    parser.add_argument(
+        "--replay-option-proxy-min-dte-minutes",
+        type=float,
+        default=1.0,
+        help="Minimum time-to-expiry in minutes for replay option pricing.",
     )
     parser.add_argument(
         "--option-no-close-on-flat",
@@ -1304,6 +1453,19 @@ def main() -> None:
                 )
 
     inference_mode = "none" if args.no_agent else str(args.inference_mode).strip().lower()
+    swing_setup_probs_frame = None
+    if str(args.meta_entry_prob_source or "").strip().lower() == "swing_support_single":
+        swing_setup_probs_frame = _load_swing_setup_probs_frame(
+            model_dir=args.swing_setup_single_model_dir,
+            tz=args.tz or "America/New_York",
+        )
+        if swing_setup_probs_frame is not None and not swing_setup_probs_frame.empty:
+            print(
+                f"[replay] Loaded saved swing setup probabilities: rows={len(swing_setup_probs_frame):,} "
+                f"range={swing_setup_probs_frame.index.min()}..{swing_setup_probs_frame.index.max()}"
+            )
+        else:
+            print("[replay] Saved swing setup probabilities unavailable; falling back to live feature recomputation.")
     cached_meta_by_symbol: dict[str, pd.DataFrame] = {}
     cached_meta_inference_by_symbol: dict[str, LiveInferenceEngine] = {}
     if policy_only_mode:
@@ -1366,6 +1528,9 @@ def main() -> None:
                 entry_threshold_override=args.meta_entry_threshold,
                 exit_threshold_override=args.meta_exit_threshold,
                 precomputed_base_frame=meta_frame,
+                entry_prob_source=args.meta_entry_prob_source,
+                swing_setup_single_model_dir=args.swing_setup_single_model_dir,
+                swing_setup_probs_frame=swing_setup_probs_frame,
             )
             cached_meta_inference_by_symbol[symbol] = LiveInferenceEngine(
                 agent=agent,
@@ -1550,6 +1715,9 @@ def main() -> None:
             profit_protect_arm_atr=2.0,
             profit_protect_giveback_atr_long=0.75,
             profit_protect_giveback_atr_short=1.0,
+            entry_prob_source=args.meta_entry_prob_source,
+            swing_setup_single_model_dir=args.swing_setup_single_model_dir,
+            swing_setup_probs_frame=swing_setup_probs_frame,
         )
         print(
             f"[replay] Meta-XGB inference enabled: model_root={args.meta_model_root} "
@@ -1576,6 +1744,7 @@ def main() -> None:
     }
 
     order_policies: dict[str, OptionOrderPolicy] | None = None
+    replay_option_proxies: dict[str, ReplayOptionPriceProxy] = {}
     if args.enable_option_orders:
         order_policies = {}
         for symbol in symbols:
@@ -1606,6 +1775,7 @@ def main() -> None:
                 meta_intrabar_setup_bar_minutes=int(args.interval),
                 meta_intrabar_long_setup_threshold=args.meta_intrabar_long_setup_threshold,
                 meta_intrabar_short_setup_threshold=args.meta_intrabar_short_setup_threshold,
+                meta_hard_stop_atr=float(args.meta_hard_stop_atr),
                 meta_trail_activate_atr=float(args.meta_trail_activate_atr),
                 meta_trail_atr=float(args.meta_trail_atr),
                 meta_trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
@@ -1617,9 +1787,35 @@ def main() -> None:
                 meta_profit_protect_arm_atr=2.0,
                 meta_profit_protect_giveback_atr_long=0.75,
                 meta_profit_protect_giveback_atr_short=1.0,
+                option_exit_policy=str(args.option_exit_policy),
+                option_exit_take_profit_pct=float(args.option_exit_take_profit_pct),
+                option_exit_stop_loss_pct=float(args.option_exit_stop_loss_pct),
+                option_exit_profit_lock_arm_pct=float(args.option_exit_profit_lock_arm_pct),
+                option_exit_profit_lock_floor_pct=float(args.option_exit_profit_lock_floor_pct),
+                option_exit_trailing_arm_pct=float(args.option_exit_trailing_arm_pct),
+                option_exit_trailing_giveback_pct=float(args.option_exit_trailing_giveback_pct),
+                option_exit_time_decay_minutes=int(args.option_exit_time_decay_minutes),
+                option_exit_time_decay_progress_pct=float(args.option_exit_time_decay_progress_pct),
+                option_exit_opposite_prob=float(args.option_exit_opposite_prob),
+                option_exit_quote_mode=str(args.option_exit_quote_mode),
             )
+            if args.simulate_orders and str(args.replay_option_proxy_mode).lower() == "black_scholes":
+                proxy = ReplayOptionPriceProxy(
+                    tz_name=args.tz,
+                    expiry_hhmm=str(args.replay_option_proxy_expiry_hhmm),
+                    iv_floor=float(args.replay_option_proxy_iv_floor),
+                    iv_ceiling=float(args.replay_option_proxy_iv_ceiling),
+                    iv_multiplier=float(args.replay_option_proxy_iv_multiplier),
+                    min_dte_minutes=float(args.replay_option_proxy_min_dte_minutes),
+                )
+                order_policies[symbol].set_contract_price_provider(
+                    lambda *, symbol, mode=None, proxy=proxy: proxy.price(symbol, mode=mode)
+                )
+                replay_option_proxies[symbol] = proxy
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
         print(f"[replay] Option order policy enabled ({mode}) for symbols: {', '.join(symbols)}")
+        if replay_option_proxies:
+            print("[replay] Simulated option pricing: Black-Scholes proxy from replay bars.")
         if policy_only_mode and args.start:
             start_prefill = pd.to_datetime(args.start, utc=True, errors="coerce")
             if pd.notna(start_prefill):
@@ -1687,6 +1883,9 @@ def main() -> None:
             "close": float(getattr(row, "close")),
             "volume": float(getattr(row, "volume")),
         }
+        proxy = replay_option_proxies.get(str(bar["symbol"]).upper())
+        if proxy is not None:
+            proxy.update_bar(str(bar["symbol"]).upper(), bar)
         processor.handle_bar(bar)
         count += 1
         if args.max_bars and count >= args.max_bars:

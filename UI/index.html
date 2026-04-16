@@ -26,9 +26,9 @@
       min-height: 100vh;
     }
     .page {
-      max-width: 1280px;
+      max-width: 1920px;
       margin: 0 auto;
-      padding: 18px 18px 28px;
+      padding: 14px 14px 28px;
       display: grid;
       gap: 14px;
     }
@@ -88,7 +88,7 @@
     .card {
       background: linear-gradient(180deg, var(--panel), var(--panel-2));
       border: 1px solid var(--line);
-      border-radius: 12px;
+      border-radius: 8px;
       padding: 12px;
     }
     .controls {
@@ -156,14 +156,32 @@
     button:hover { filter: brightness(1.08); }
     button.stop { background: #4b1f23; border-color: #8e3f48; }
 
-    .grid {
+    .workspace {
       display: grid;
-      grid-template-columns: 2.1fr 1fr;
+      grid-template-columns: minmax(760px, 1fr) minmax(360px, 440px);
       gap: 12px;
       align-items: start;
     }
-    .grid > .card { min-width: 0; }
-    .chart-wrap { height: 650px; }
+    .left-stack {
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+    .side-panel {
+      max-height: calc(100vh - 64px);
+      overflow: auto;
+      position: sticky;
+      top: 14px;
+    }
+    .chart-wrap {
+      height: clamp(780px, 76vh, 1180px);
+    }
+    .chart-hint {
+      color: var(--muted);
+      font-size: 0.76rem;
+      line-height: 1.25;
+      padding: 0 0 8px;
+    }
     canvas { width: 100%; height: 100%; background: #0a1725; border-radius: 8px; border: 1px solid #233e5b; }
     .meta {
       display: grid;
@@ -215,66 +233,76 @@
       .controls { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
       .checks { grid-column: 1 / -1; }
       .btns { grid-column: 1 / -1; justify-content: flex-start; }
-      .grid { grid-template-columns: 1fr; }
+      .workspace { grid-template-columns: 1fr; }
+      .side-panel { position: static; max-height: none; }
       .logs { grid-template-columns: 1fr; }
+      .chart-wrap { height: 820px; }
     }
   </style>
 </head>
 <body>
   <div class="page">
     <div class="top">
-      <h1>10min Meta Runner Dashboard</h1>
+      <h1>10min Swing Runner Dashboard</h1>
       <div class="status-stack">
         <div id="warmupBadge" class="warmup">warmup 00:00</div>
         <div id="statusBadge" class="status">idle</div>
       </div>
     </div>
 
-    <div class="card">
-      <div class="controls">
-        <div class="field"><label>Mode</label><select id="runnerMode"><option value="live">Live</option><option value="replay" selected>Replay</option></select></div>
-        <div class="field"><label>Symbols</label><input id="symbols" value="SPY" /></div>
-        <div class="field"><label>Feed</label><select id="feed"><option value="IEX">IEX</option><option value="SIP">SIP</option></select></div>
-        <div class="field"><label>Interval (min)</label><input id="interval" type="number" value="10" min="1" /></div>
-        <div class="field"><label>Signal Model</label><input value="Meta-XGB (10min)" disabled /></div>
-        <div class="field"><label>Meta Model Root</label><input id="metaModelRoot" value="Data/models/meta_xgboost/10min" /></div>
-        <div class="field"><label>Meta Matrix Path</label><input id="metaBaseFramePath" value="Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_24.parquet" /></div>
-        <div class="field"><label>Live Prefill Start</label><input id="prefillStart" value="2026-01-30" /></div>
-        <div class="field"><label>Prefill Path</label><input id="prefillPath" value="Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet" /></div>
-        <div class="field"><label>Env File</label><input id="envFile" value=".env" /></div>
-        <div class="field"><label>Replay Data Path</label><input id="replayDataPath" value="Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet" /></div>
-        <div class="field"><label>Replay Start</label><input id="replayStart" value="2026-03-14T00:00:00Z" placeholder="optional ISO datetime" /></div>
-        <div class="field"><label>Replay End</label><input id="replayEnd" value="2026-03-23T23:59:59Z" placeholder="optional ISO datetime" /></div>
-        <div class="field"><label>Replay Sleep (sec)</label><input id="replaySleep" type="number" step="0.01" min="0" value="0.0" /></div>
-        <div class="field"><label>Flip Abs Min</label><input id="execFlipAbsThreshold" type="number" step="0.01" min="0" value="0.05" /></div>
-        <div class="field"><label>Catch-up Max Age (min)</label><input id="startupCatchupMaxAgeMin" type="number" min="0" value="120" /></div>
-        <div class="field"><label>Replay Max Bars</label><input id="replayMaxBars" type="number" min="1" placeholder="all" /></div>
-        <div class="checks">
-          <label><input id="enableOrders" type="checkbox" checked /> Option Orders</label>
-          <label><input id="simulateOrders" type="checkbox" checked /> Simulate</label>
-          <label><input id="noPrefillFetch" type="checkbox" /> No Prefill Fetch</label>
-          <label><input id="startupCatchupOrder" type="checkbox" /> Startup Catch-up Order</label>
-          <label><input id="replayRegularOnly" type="checkbox" /> Replay RTH Only</label>
-          <label><input id="replayNoWarmup" type="checkbox" /> Replay No Warmup</label>
+    <div class="workspace">
+      <div class="left-stack">
+        <div class="card">
+          <div class="controls">
+            <div class="field"><label>Mode</label><select id="runnerMode"><option value="live">Live</option><option value="replay" selected>Replay</option></select></div>
+            <div class="field"><label>Symbols</label><input id="symbols" value="SPY" /></div>
+            <div class="field"><label>Feed</label><select id="feed"><option value="IEX">IEX</option><option value="SIP">SIP</option></select></div>
+            <div class="field"><label>Interval (min)</label><input id="interval" type="number" value="10" min="1" /></div>
+            <div class="field"><label>Signal Model</label><input value="Swing Support Single + Phase4 1m trigger" disabled /></div>
+            <div class="field"><label>Entry Source</label><input value="swing_support_single" disabled /></div>
+            <input id="metaModelRoot" type="hidden" value="Data/models/meta_xgboost/10min" />
+            <input id="metaBaseFramePath" type="hidden" value="Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet" />
+            <div class="field"><label>Live Prefill Start</label><input id="prefillStart" value="2026-01-30" /></div>
+            <div class="field"><label>Prefill Path</label><input id="prefillPath" value="Data/raw/spy/1m_train.parquet" /></div>
+            <div class="field"><label>Env File</label><input id="envFile" value=".env" /></div>
+            <div class="field"><label>Replay Data Path</label><input id="replayDataPath" value="Data/raw/spy/1m_train.parquet" /></div>
+            <div class="field"><label>Replay Start</label><input id="replayStart" value="2026-03-14T00:00:00Z" placeholder="optional ISO datetime" /></div>
+            <div class="field"><label>Replay End</label><input id="replayEnd" value="2026-03-23T23:59:59Z" placeholder="optional ISO datetime" /></div>
+            <div class="field"><label>Replay Sleep (sec)</label><input id="replaySleep" type="number" step="0.01" min="0" value="0.0" /></div>
+            <div class="field"><label>Flip Abs Min</label><input id="execFlipAbsThreshold" type="number" step="0.01" min="0" value="0.05" /></div>
+            <div class="field"><label>Hard Stop ATR</label><input id="metaHardStopAtr" type="number" step="0.1" min="0" value="0.0" /></div>
+            <div class="field"><label>Replay Option Proxy</label><select id="replayOptionProxyMode"><option value="black_scholes" selected>Black-Scholes</option><option value="none">None</option></select></div>
+            <div class="field"><label>Catch-up Max Age (min)</label><input id="startupCatchupMaxAgeMin" type="number" min="0" value="120" /></div>
+            <div class="field"><label>Replay Max Bars</label><input id="replayMaxBars" type="number" min="1" placeholder="all" /></div>
+            <div class="field"><label>Replay Warmup Bars</label><input id="replayWarmupBars" type="number" min="0" value="5000" /></div>
+            <div class="checks">
+              <label><input id="enableOrders" type="checkbox" checked /> Option Orders</label>
+              <label><input id="simulateOrders" type="checkbox" checked /> Simulate</label>
+              <label><input id="noPrefillFetch" type="checkbox" /> No Prefill Fetch</label>
+              <label><input id="startupCatchupOrder" type="checkbox" /> Startup Catch-up Order</label>
+              <label><input id="replayRegularOnly" type="checkbox" /> Replay RTH Only</label>
+              <label><input id="replayNoWarmup" type="checkbox" /> Replay No Warmup</label>
+            </div>
+            <div class="btns">
+              <button id="refreshBtn">Refresh</button>
+              <button id="startBtn">Start</button>
+              <button id="stopBtn" class="stop">Stop</button>
+            </div>
+          </div>
         </div>
-        <div class="btns">
-          <button id="refreshBtn">Refresh</button>
-          <button id="startBtn">Start</button>
-          <button id="stopBtn" class="stop">Stop</button>
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;">
+            <div style="font-weight:700;">Price Buffer</div>
+            <select id="symbolSelect"></select>
+          </div>
+          <div class="chart-hint">
+            Dashed arrows and setup probabilities are plotted when the 10m bar is available, not at the bar open: green long, red short, gray flat. Thin horizontal dashed segments are the armed 1m trigger price and valid window. Hollow markers are armed trigger intents. Filled circles or squares only appear for actual broker orders. Blue is long setup probability; amber is short setup probability.
+          </div>
+          <div class="chart-wrap"><canvas id="chart"></canvas></div>
         </div>
       </div>
-    </div>
-
-    <div class="grid">
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;">
-          <div style="font-weight:700;">Price Buffer</div>
-          <select id="symbolSelect"></select>
-        </div>
-        <div class="chart-wrap"><canvas id="chart"></canvas></div>
-      </div>
-      <div class="card">
-        <div style="font-weight:700;padding-bottom:8px;">Meta / Position State</div>
+      <div class="card side-panel">
+        <div style="font-weight:700;padding-bottom:8px;">Signal / Position State</div>
         <div id="meta" class="meta"></div>
         <div style="font-weight:700;padding:12px 0 8px;">Broker Positions / Orders</div>
         <div id="brokerPanel" class="list"></div>
@@ -565,6 +593,15 @@
       return out;
     }
 
+    function contextStatusText(agentState, key) {
+      const status = agentState[`ctx_${key}_status`] ?? "-";
+      const lastTs = agentState[`ctx_${key}_last_ts`];
+      const lag = Number(agentState[`ctx_${key}_lag_min`]);
+      const lagText = Number.isFinite(lag) && lag > 0.5 ? `, lag ${lag.toFixed(0)}m` : "";
+      const timeText = lastTs ? ` @ ${formatEventTs(lastTs)}` : "";
+      return `${status}${lagText}${timeText}`;
+    }
+
     function renderMeta() {
       const sym = symbolSelect.value || state.symbols?.[0] || "SPY";
       const action = state.last_actions?.[sym];
@@ -592,18 +629,21 @@
         ? `hedged${lastRaw !== null ? ` (${lastRaw})` : ""}`
         : (action ? `${lastClass}${lastRaw !== null ? ` (${lastRaw})` : ""}` : "-");
       const netPositionText = hedged ? "hedged" : (pol.position ?? "-");
+      const usingSwingSetupEntry = [ag.p_enter_long_source, ag.p_enter_short_source].includes("swing_support_single")
+        || Number.isFinite(Number(ag.p_swing_setup_long))
+        || Number.isFinite(Number(ag.p_swing_setup_short));
       const rows = [
           ["Symbol", sym],
           ["Last Action", lastActionText],
           ["Action Time", action ? formatEventTs(action.timestamp) : "-"],
           ["Recent Signal Mix (-1/0/+1)", `${cNeg}/${c0}/${cPos}`],
           ["Net Position", netPositionText],
-          ["Long Decision Reason", pol.long_decision_reason ?? "-"],
-          ["Short Decision Reason", pol.short_decision_reason ?? "-"],
+          ["Long Setup / Trigger", pol.long_decision_reason ?? "-"],
+          ["Short Setup / Trigger", pol.short_decision_reason ?? "-"],
           ["Long Soft Exit Count", pol.long_soft_exit_count ?? "-"],
           ["Short Soft Exit Count", pol.short_soft_exit_count ?? "-"],
-          ["Long 1m Intent Active", pol.long_intrabar_intent_active ?? "-"],
-          ["Short 1m Intent Active", pol.short_intrabar_intent_active ?? "-"],
+          ["Long 1m Trigger Armed", pol.long_intrabar_intent_active ?? "-"],
+          ["Short 1m Trigger Armed", pol.short_intrabar_intent_active ?? "-"],
           ["Open Long", pol.open_long_symbol || "-"],
           ["Open Short", pol.open_short_symbol || "-"],
         ["Long Contracts", pol.long_contracts ?? "-"],
@@ -612,29 +652,38 @@
         ["Entry Price", ag.entry_price ?? "-"],
         ["p_enter_long", ag.p_enter_long ?? "-"],
         ["p_enter_short", ag.p_enter_short ?? "-"],
-        ["p_exit_long", ag.p_exit_long ?? "-"],
-        ["p_exit_short", ag.p_exit_short ?? "-"],
+        ["Order trigger long threshold", pol.meta_intrabar_long_setup_threshold ?? "-"],
+        ["Order trigger short threshold", pol.meta_intrabar_short_setup_threshold ?? "-"],
+        ["Trigger valid bars", pol.meta_intrabar_setup_max_bars ?? "-"],
+        ...(usingSwingSetupEntry ? [] : [
+          ["p_exit_long", ag.p_exit_long ?? "-"],
+          ["p_exit_short", ag.p_exit_short ?? "-"]
+        ]),
         ["p_pivot_long_source", ag.p_pivot_long_source ?? "-"],
         ["p_pivot_short_source", ag.p_pivot_short_source ?? "-"],
         ["p_tb_long_source", ag.p_tb_long_source ?? "-"],
         ["p_tb_short_source", ag.p_tb_short_source ?? "-"],
-        ["thr_enter_long", ag.thr_enter_long ?? "-"],
-        ["thr_enter_short", ag.thr_enter_short ?? "-"],
-        ["thr_exit_long", ag.thr_exit_long ?? "-"],
-        ["thr_exit_short", ag.thr_exit_short ?? "-"],
-        ["VIXY Context", `${ag.ctx_vixy_status ?? "-"}${ag.ctx_vixy_last_ts ? ` @ ${formatEventTs(ag.ctx_vixy_last_ts)}` : ""}`],
-        ["QQQ Context", `${ag.ctx_qqq_status ?? "-"}${ag.ctx_qqq_last_ts ? ` @ ${formatEventTs(ag.ctx_qqq_last_ts)}` : ""}`],
-        ["IWM Context", `${ag.ctx_iwm_status ?? "-"}${ag.ctx_iwm_last_ts ? ` @ ${formatEventTs(ag.ctx_iwm_last_ts)}` : ""}`],
-        ["TLT Context", `${ag.ctx_tlt_status ?? "-"}${ag.ctx_tlt_last_ts ? ` @ ${formatEventTs(ag.ctx_tlt_last_ts)}` : ""}`],
-        ["UUP Context", `${ag.ctx_uup_status ?? "-"}${ag.ctx_uup_last_ts ? ` @ ${formatEventTs(ag.ctx_uup_last_ts)}` : ""}`],
-        ["Breadth Proxy Inputs", `${ag.ctx_breadth_proxy_status ?? "-"}${ag.ctx_breadth_proxy_last_ts ? ` @ ${formatEventTs(ag.ctx_breadth_proxy_last_ts)}` : ""}`],
+        ["Model long threshold", ag.thr_enter_long ?? "-"],
+        ["Model short threshold", ag.thr_enter_short ?? "-"],
+        ...(usingSwingSetupEntry ? [] : [
+          ["thr_exit_long", ag.thr_exit_long ?? "-"],
+          ["thr_exit_short", ag.thr_exit_short ?? "-"]
+        ]),
+        ["VIXY Context", contextStatusText(ag, "vixy")],
+        ["QQQ Context", contextStatusText(ag, "qqq")],
+        ["IWM Context", contextStatusText(ag, "iwm")],
+        ["TLT Context", contextStatusText(ag, "tlt")],
+        ["UUP Context", contextStatusText(ag, "uup")],
+        ["Breadth Proxy Inputs", contextStatusText(ag, "breadth_proxy")],
         ["Unrealized PnL", ag.unrealized_pnl ?? "-"],
         ["Realized Today", ag.realized_pnl_today ?? "-"],
         ["Realized Total", ag.realized_pnl_total ?? "-"],
         ["Broker Positions", (brk.positions || []).length],
         ["Recent Orders", (brk.recent_orders || []).length]
       ];
-      metaEl.innerHTML = rows.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("");
+      metaEl.innerHTML = rows
+        .map(([k, v]) => `<div class="kv"><span>${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></div>`)
+        .join("");
     }
 
     function renderTrades() {
@@ -855,11 +904,13 @@
         close: Number(x.close)
       })).filter((x) => Number.isFinite(x.open) && Number.isFinite(x.high) && Number.isFinite(x.low) && Number.isFinite(x.close) && !Number.isNaN(x.t.getTime()));
       const probs = visible10mRaw.map((x) => ({
-        t: new Date(x.timestamp),
+        t: new Date(timestampMs(x.timestamp) + intervalMs),
         p_enter_long: Number(x.p_enter_long),
         p_enter_short: Number(x.p_enter_short),
         p_exit_long: Number(x.p_exit_long),
         p_exit_short: Number(x.p_exit_short),
+        p_swing_setup_long: Number(x.p_swing_setup_long),
+        p_swing_setup_short: Number(x.p_swing_setup_short),
         p_pivot_long: Number(x.p_pivot_long),
         p_pivot_short: Number(x.p_pivot_short),
         p_tb_long: Number(x.p_tb_long),
@@ -979,12 +1030,6 @@
           ctx.fillRect(x - bodyW / 2, topY, bodyW, bodyH);
         });
 
-        ctx.fillStyle = "#9ec7ef";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "top";
-        ctx.font = "11px Consolas, monospace";
-        ctx.fillText(label, left + 6, y0 + 2);
-
         if (showXAxis) {
           const xTicks = 6;
           ctx.textAlign = "center";
@@ -1009,12 +1054,12 @@
         return { series, toX, toXTime, xToTime, xToIndex, toY, fromY, y0, paneHeight, domainStartMs, domainEndMs, barIntervalMs };
       }
 
-      const pane1 = drawPane(one, pane1Y, pane1H, "Top: 1m candles", {
+      const pane1 = drawPane(one, pane1Y, pane1H, "1m candles", {
         showXAxis: false,
         xDomain: pane1Domain,
         barIntervalMs: 60 * 1000
       });
-      const pane2 = drawPane(fifteen, pane2Y, pane2H, "Middle: 10m candles", {
+      const pane2 = drawPane(fifteen, pane2Y, pane2H, "10m candles", {
         showXAxis: true,
         xDomain: pane2Domain,
         barIntervalMs: intervalMs
@@ -1027,7 +1072,7 @@
           ctx.font = "12px Consolas, monospace";
           ctx.textAlign = "left";
           ctx.textBaseline = "top";
-          ctx.fillText(`${label}: waiting for probs`, left + 6, y0 + 6);
+          ctx.fillText("waiting for setup probabilities", left + 6, y0 + 6);
           return null;
         }
         const toY = (p) => y0 + (1 - p) * paneHeight;
@@ -1071,14 +1116,12 @@
         ctx.lineTo(w - right, y0 + paneHeight);
         ctx.stroke();
 
-        const metaKeys = ["p_enter_long", "p_enter_short", "p_exit_long", "p_exit_short"];
-        const metaPresent = series.some((row) => metaKeys.some((key) => Number.isFinite(row[key])));
-        const colors = metaPresent
+        const entryKeys = ["p_enter_long", "p_enter_short"];
+        const entryPresent = series.some((row) => entryKeys.some((key) => Number.isFinite(row[key])));
+        const colors = entryPresent
           ? {
               p_enter_long: "#3b82f6",
-              p_enter_short: "#f59e0b",
-              p_exit_long: "#10b981",
-              p_exit_short: "#ef4444"
+              p_enter_short: "#f59e0b"
             }
           : {
               p_pivot_long: "#3b82f6",
@@ -1086,8 +1129,8 @@
               p_tb_long: "#10b981",
               p_tb_short: "#ef4444"
             };
-        const keys = metaPresent
-          ? ["p_enter_long", "p_enter_short", "p_exit_long", "p_exit_short"]
+        const keys = entryPresent
+          ? ["p_enter_long", "p_enter_short"]
           : ["p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short"];
         keys.forEach((key) => {
           ctx.strokeStyle = colors[key];
@@ -1109,12 +1152,6 @@
           ctx.stroke();
         });
 
-        ctx.fillStyle = "#9ec7ef";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "top";
-        ctx.font = "11px Consolas, monospace";
-        ctx.fillText(label, left + 6, y0 + 2);
-
         const xTicks = 6;
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
@@ -1134,28 +1171,17 @@
           ctx.fillText(fmtTickTime(t, domainSpanMs), labelX, y0 + paneHeight + 6);
         }
 
-        ctx.textAlign = "left";
-        ctx.textBaseline = "top";
-        let legendX = left + 6;
-        const legendY = y0 + 16;
-        keys.forEach((key) => {
-          ctx.fillStyle = colors[key];
-          ctx.fillRect(legendX, legendY + 2, 10, 3);
-          ctx.fillStyle = "#8ca6c5";
-          ctx.fillText(key, legendX + 14, legendY - 2);
-          legendX += 120;
-        });
         return { series, toX, toXTime, xToTime, xToIndex, toY, y0, paneHeight, keys, colors, domainStartMs, domainEndMs, barIntervalMs };
       }
 
-      const hasMetaProbSeries = probs.some((row) =>
-        ["p_enter_long", "p_enter_short", "p_exit_long", "p_exit_short"].some((key) => Number.isFinite(row[key]))
+      const hasEntryProbSeries = probs.some((row) =>
+        ["p_enter_long", "p_enter_short"].some((key) => Number.isFinite(row[key]))
       );
       const pane3 = drawProbPane(
         probs,
         pane3Y,
         pane3H,
-        hasMetaProbSeries ? "Bottom: 10m meta probs" : "Bottom: 10m GA probs",
+        "10m setup probabilities",
         { xDomain: pane3Domain, barIntervalMs: intervalMs }
       );
 
@@ -1171,15 +1197,89 @@
         const prev = i > 0 ? modelActions[i - 1] : null;
         if (!prev || Number(cur.action) !== Number(prev.action)) actions.push(cur);
       }
+      const decisionMarkerMs = (timestamp) => {
+        const tms = new Date(timestamp).getTime();
+        return Number.isFinite(tms) ? tms + intervalMs : Number.NaN;
+      };
       const orderMarkers = [];
       const positionSegments = [];
+      const triggerWindows = [];
+      const chartPolicyState = state.policy_state?.[sym] || {};
+      const longSetupThreshold = Number(chartPolicyState.meta_intrabar_long_setup_threshold ?? 0.42);
+      const shortSetupThreshold = Number(chartPolicyState.meta_intrabar_short_setup_threshold ?? 0.15);
+      const setupMaxBars = Math.max(1, Number(chartPolicyState.meta_intrabar_setup_max_bars ?? 4));
       const orderEvents = (state.trade_events || [])
         .filter((e) => e && e.symbol === sym && e.timestamp && e.result)
         .slice(-500)
         .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      const triggerWindowKeys = new Set();
+      const addTriggerWindow = (side, ref, startMs, endMs, source) => {
+        if (!Number.isFinite(ref) || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
+        const key = `${side}:${ref.toFixed(4)}:${startMs}:${endMs}`;
+        if (triggerWindowKeys.has(key)) return;
+        triggerWindowKeys.add(key);
+        triggerWindows.push({ side, ref, startMs, endMs, source });
+      };
+      let longWasAbove = false;
+      let shortWasAbove = false;
+      let longPeakProb = Number.NaN;
+      let shortPeakProb = Number.NaN;
+      visible10mRaw.forEach((row) => {
+        const rowStartMs = timestampMs(row.timestamp);
+        if (!Number.isFinite(rowStartMs)) return;
+        const pLong = Number(row.p_enter_long);
+        const pShort = Number(row.p_enter_short);
+        const longAbove = Number.isFinite(pLong) && Number.isFinite(longSetupThreshold) && pLong >= longSetupThreshold;
+        const shortAbove = Number.isFinite(pShort) && Number.isFinite(shortSetupThreshold) && pShort >= shortSetupThreshold;
+        const longMargin = longAbove ? pLong - longSetupThreshold : Number.NEGATIVE_INFINITY;
+        const shortMargin = shortAbove ? pShort - shortSetupThreshold : Number.NEGATIVE_INFINITY;
+        const longValid = longAbove && !(shortAbove && shortMargin > longMargin);
+        const shortValid = shortAbove && !(longAbove && longMargin > shortMargin);
+        const longRefresh = longValid && (!longWasAbove || !Number.isFinite(longPeakProb) || pLong > longPeakProb);
+        const shortRefresh = shortValid && (!shortWasAbove || !Number.isFinite(shortPeakProb) || pShort > shortPeakProb);
+        if (longRefresh) {
+          addTriggerWindow(
+            "long",
+            Number(row.high),
+            rowStartMs + intervalMs,
+            rowStartMs + (setupMaxBars + 1) * intervalMs,
+            "probability"
+          );
+        }
+        if (shortRefresh) {
+          addTriggerWindow(
+            "short",
+            Number(row.low),
+            rowStartMs + intervalMs,
+            rowStartMs + (setupMaxBars + 1) * intervalMs,
+            "probability"
+          );
+        }
+        longPeakProb = longAbove ? (Number.isFinite(longPeakProb) ? Math.max(longPeakProb, pLong) : pLong) : Number.NaN;
+        shortPeakProb = shortAbove ? (Number.isFinite(shortPeakProb) ? Math.max(shortPeakProb, pShort) : pShort) : Number.NaN;
+        longWasAbove = longAbove;
+        shortWasAbove = shortAbove;
+      });
       const openSegments = { long: null, short: null };
       orderEvents.forEach((evt) => {
         const result = evt.result || {};
+        const policyState = evt.policy_state || result.policy_state || {};
+        [
+          {
+            side: "long",
+            ref: Number(policyState.long_intrabar_entry_ref),
+            expiresAt: policyState.long_intrabar_setup_expires_at
+          },
+          {
+            side: "short",
+            ref: Number(policyState.short_intrabar_entry_ref),
+            expiresAt: policyState.short_intrabar_setup_expires_at
+          }
+        ].forEach((win) => {
+          const startMs = decisionMarkerMs(evt.timestamp);
+          const endMs = timestampMs(win.expiresAt);
+          addTriggerWindow(win.side, win.ref, startMs, endMs, "policy");
+        });
         const orders = Array.isArray(result.orders) ? result.orders : [];
         const evtTs = evt.timestamp;
         const evtClose = Number(result?.close);
@@ -1227,13 +1327,69 @@
       if (openSegments.long) positionSegments.push({ ...openSegments.long, end: null });
       if (openSegments.short) positionSegments.push({ ...openSegments.short, end: null });
 
+      function drawTriggerWindows(pane) {
+        if (!pane || !pane.series.length || !triggerWindows.length) return;
+        const firstTs = pane.domainStartMs;
+        const lastTs = pane.domainEndMs;
+        triggerWindows.forEach((win) => {
+          if (win.endMs < firstTs || win.startMs > lastTs) return;
+          const x1 = pane.toXTime(Math.max(win.startMs, firstTs));
+          const x2 = pane.toXTime(Math.min(win.endMs, lastTs));
+          const y = pane.toY(win.ref);
+          if (!Number.isFinite(x1) || !Number.isFinite(x2) || !Number.isFinite(y)) return;
+          const color = win.side === "long" ? "#69e3aa" : "#ff8f8f";
+          const label = `${win.side} active, ref ${fmtPrice(win.ref)}`;
+          const xLeft = Math.min(x1, x2);
+          const width = Math.max(1, Math.abs(x2 - x1));
+
+          ctx.save();
+          ctx.fillStyle = color;
+          ctx.globalAlpha = 0.08;
+          ctx.fillRect(xLeft, pane.y0, width, pane.paneHeight);
+          if (y < pane.y0 - 10 || y > pane.y0 + pane.paneHeight + 10) {
+            ctx.globalAlpha = 0.82;
+            ctx.font = "11px Consolas, monospace";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "top";
+            ctx.fillText(label, Math.max(left + 4, Math.min(w - right - 114, xLeft + 5)), pane.y0 + 6);
+            ctx.restore();
+            return;
+          }
+          ctx.strokeStyle = color;
+          ctx.fillStyle = color;
+          ctx.globalAlpha = 0.9;
+          ctx.lineWidth = 1.8;
+          ctx.setLineDash([6, 4]);
+          ctx.beginPath();
+          ctx.moveTo(x1, y);
+          ctx.lineTo(x2, y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 0.75;
+          ctx.beginPath();
+          ctx.moveTo(x1, y - 5);
+          ctx.lineTo(x1, y + 5);
+          ctx.moveTo(x2, y - 5);
+          ctx.lineTo(x2, y + 5);
+          ctx.stroke();
+          if (Math.abs(x2 - x1) > 74) {
+            ctx.font = "11px Consolas, monospace";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "bottom";
+            const labelX = Math.max(left + 4, Math.min(w - right - 86, Math.min(x1, x2) + 5));
+            const labelY = Math.max(pane.y0 + 12, Math.min(pane.y0 + pane.paneHeight - 2, y - 3));
+            ctx.fillText(label, labelX, labelY);
+          }
+          ctx.restore();
+        });
+      }
+
       function drawActionMarkers(pane) {
         if (!pane || !pane.series.length) return;
         const firstTs = pane.domainStartMs;
         const lastTs = pane.domainEndMs;
         actions.forEach((a) => {
-          const t = new Date(a.timestamp);
-          const tms = t.getTime();
+          const tms = decisionMarkerMs(a.timestamp);
           if (Number.isNaN(tms)) return;
           if (tms < firstTs || tms > lastTs) return;
           const idx = nearestIndexByTime(pane.series, tms);
@@ -1242,6 +1398,7 @@
           const actClass = Number.isFinite(Number(a.action_class))
             ? Number(a.action_class)
             : (Number.isFinite(actRaw) ? (actRaw > 0 ? 1 : (actRaw < 0 ? -1 : 0)) : Number(a.action));
+          if (actClass === 0) return;
           const color = actClass === 1 ? "#2ccf7a" : (actClass === -1 ? "#f05c52" : "#b7c3d1");
 
           ctx.save();
@@ -1286,8 +1443,7 @@
         const firstTs = pane.domainStartMs;
         const lastTs = pane.domainEndMs;
         policyActions.forEach((a) => {
-          const t = new Date(a.timestamp);
-          const tms = t.getTime();
+          const tms = decisionMarkerMs(a.timestamp);
           if (Number.isNaN(tms) || tms < firstTs || tms > lastTs) return;
           const idx = nearestIndexByTime(pane.series, tms);
           const x = pane.toX(idx);
@@ -1409,6 +1565,8 @@
 
       drawPositionSegments(pane1);
       drawPositionSegments(pane2);
+      drawTriggerWindows(pane1);
+      drawTriggerWindows(pane2);
       drawActionMarkers(pane1);
       drawActionMarkers(pane2);
       drawPolicyMarkers(pane1);
@@ -1416,7 +1574,42 @@
       drawOrderMarkers(pane1);
       drawOrderMarkers(pane2);
 
-      function drawHoverCrosshair(pane) {
+      function hoverAnchorTimeMs(...panes) {
+        if (!hover.active) return Number.NaN;
+        const xMin = left;
+        const xMax = w - right;
+        if (hover.x < xMin || hover.x > xMax) return Number.NaN;
+        const xClamped = Math.max(xMin, Math.min(xMax, hover.x));
+        for (const pane of panes) {
+          if (!pane || !pane.series?.length || typeof pane.xToTime !== "function") continue;
+          const paneTop = pane.y0;
+          const paneBottom = pane.y0 + pane.paneHeight;
+          if (hover.y >= paneTop && hover.y <= paneBottom) {
+            return pane.xToTime(xClamped);
+          }
+        }
+        return Number.NaN;
+      }
+
+      function drawSharedVerticalGuide(pane, anchorMs) {
+        if (!pane || !pane.series?.length || !Number.isFinite(anchorMs)) return null;
+        if (anchorMs < pane.domainStartMs || anchorMs > pane.domainEndMs) return null;
+        const xBar = typeof pane.toXTime === "function"
+          ? pane.toXTime(anchorMs)
+          : pane.toX(nearestIndexByTime(pane.series, anchorMs));
+        ctx.save();
+        ctx.setLineDash([5, 5]);
+        ctx.strokeStyle = "#9ec7ef";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(xBar, pane.y0);
+        ctx.lineTo(xBar, pane.y0 + pane.paneHeight);
+        ctx.stroke();
+        ctx.restore();
+        return xBar;
+      }
+
+      function drawHoverCrosshair(pane, anchorMs) {
         if (!hover.active || !pane || !pane.series?.length || typeof pane.fromY !== "function") return;
         const paneTop = pane.y0;
         const paneBottom = pane.y0 + pane.paneHeight;
@@ -1429,7 +1622,9 @@
         const idx = typeof pane.xToIndex === "function"
           ? pane.xToIndex(xClamped)
           : nearestIndexByTime(pane.series, pane.xToTime(xClamped));
-        const xBar = pane.toX(idx);
+        const xBar = Number.isFinite(anchorMs) && anchorMs >= pane.domainStartMs && anchorMs <= pane.domainEndMs
+          ? pane.toXTime(anchorMs)
+          : pane.toX(idx);
         const candle = pane.series[idx];
         if (!candle) return;
 
@@ -1437,10 +1632,6 @@
         ctx.setLineDash([5, 5]);
         ctx.strokeStyle = "#9ec7ef";
         ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(xBar, paneTop);
-        ctx.lineTo(xBar, paneBottom);
-        ctx.stroke();
         ctx.beginPath();
         ctx.moveTo(left, yClamped);
         ctx.lineTo(w - right, yClamped);
@@ -1480,7 +1671,7 @@
         ctx.fillText(timeText, timeX + padX, timeY + labelH / 2);
       }
 
-      function drawProbHoverCrosshair(pane) {
+      function drawProbHoverCrosshair(pane, anchorMs) {
         if (!hover.active || !pane || !pane.series?.length) return;
         const paneTop = pane.y0;
         const paneBottom = pane.y0 + pane.paneHeight;
@@ -1493,7 +1684,9 @@
         const idx = typeof pane.xToIndex === "function"
           ? pane.xToIndex(xClamped)
           : nearestIndexByTime(pane.series, pane.xToTime(xClamped));
-        const xBar = pane.toX(idx);
+        const xBar = Number.isFinite(anchorMs) && anchorMs >= pane.domainStartMs && anchorMs <= pane.domainEndMs
+          ? pane.toXTime(anchorMs)
+          : pane.toX(idx);
         const row = pane.series[idx];
         if (!row) return;
 
@@ -1501,10 +1694,6 @@
         ctx.setLineDash([5, 5]);
         ctx.strokeStyle = "#9ec7ef";
         ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(xBar, paneTop);
-        ctx.lineTo(xBar, paneBottom);
-        ctx.stroke();
         ctx.beginPath();
         ctx.moveTo(left, yClamped);
         ctx.lineTo(w - right, yClamped);
@@ -1567,26 +1756,15 @@
         });
       }
 
-      drawHoverCrosshair(pane1);
-      drawHoverCrosshair(pane2);
-      drawProbHoverCrosshair(pane3);
+      const hoverAnchorMs = hoverAnchorTimeMs(pane1, pane2, pane3);
+      drawSharedVerticalGuide(pane1, hoverAnchorMs);
+      drawSharedVerticalGuide(pane2, hoverAnchorMs);
+      drawSharedVerticalGuide(pane3, hoverAnchorMs);
+      drawHoverCrosshair(pane1, hoverAnchorMs);
+      drawHoverCrosshair(pane2, hoverAnchorMs);
+      drawProbHoverCrosshair(pane3, hoverAnchorMs);
 
-      // Shared marker legend.
-      ctx.textAlign = "left";
-      ctx.textBaseline = "top";
-      ctx.font = "11px Consolas, monospace";
-      ctx.fillStyle = "#b7c3d1";
-      ctx.fillText("Markers: dashed arrows=model signals, outlined markers=policy intents/exits, solid markers=actual side state, circles/squares=orders, hold lines=until close.", left + 6, 6);
-
-      const olderBars = Math.max(0, Number(view.offset_10m_bars || 0));
-      const viewText = olderBars > 0
-        ? `view: ${olderBars} x 10m bars back | wheel down=older, up=newer`
-        : `view: latest | wheel down=older, up=newer`;
-      ctx.textAlign = "right";
-      ctx.textBaseline = "top";
-      ctx.font = "11px Consolas, monospace";
-      ctx.fillStyle = olderBars > 0 ? "#f0d27d" : "#8ca6c5";
-      ctx.fillText(viewText, w - right - 4, 6);
+      // Keep the candle panes free of persistent text so signal markers are never covered.
     }
 
     function renderAll() {
@@ -1657,7 +1835,7 @@
             state.broker_state[p.symbol] = p.broker_state;
           }
           const ev = p?.result?.event || "";
-          if (ev && ev !== "hold" && ev !== "no_change") {
+          if (ev && !["hold", "no_change", "intent_update"].includes(ev)) {
             state.action_events = state.action_events || [];
             state.action_events.push({
               symbol: p.symbol,
@@ -1704,6 +1882,12 @@
         interval: Number(document.getElementById("interval").value),
         model_path: null,
         meta_model_root: document.getElementById("metaModelRoot").value,
+        meta_entry_prob_source: "swing_support_single",
+        swing_setup_single_model_dir: "Data/models/ga_xgboost/10min/single/swing_support_single",
+        meta_intrabar_entry_policy: "phase4_swing_setup_bodyclose_bodyclose_v1",
+        meta_intrabar_long_setup_threshold: 0.42,
+        meta_intrabar_short_setup_threshold: 0.15,
+        meta_hard_stop_atr: Number(document.getElementById("metaHardStopAtr").value || 0),
         meta_base_frame_path: document.getElementById("metaBaseFramePath").value,
         prefill_path: document.getElementById("prefillPath").value,
         prefill_start: document.getElementById("prefillStart").value,
@@ -1713,12 +1897,25 @@
         replay_end: document.getElementById("replayEnd").value || null,
         replay_sleep: Number(document.getElementById("replaySleep").value || 0),
         replay_max_bars: replayMaxRaw ? Number(replayMaxRaw) : null,
+        replay_warmup_bars: Number(document.getElementById("replayWarmupBars").value || 5000),
         replay_regular_only: document.getElementById("replayRegularOnly").checked,
         replay_no_prepend_split_test_warmup: document.getElementById("replayNoWarmup").checked,
         exec_flip_abs_threshold: Number(document.getElementById("execFlipAbsThreshold").value || 0),
         env_file: document.getElementById("envFile").value,
         enable_option_orders: document.getElementById("enableOrders").checked,
         simulate_orders: document.getElementById("simulateOrders").checked,
+        option_exit_policy: "option_adaptive_trail_v1",
+        option_exit_take_profit_pct: 0.0,
+        option_exit_stop_loss_pct: 1.0,
+        option_exit_profit_lock_arm_pct: 2.0,
+        option_exit_profit_lock_floor_pct: 0.25,
+        option_exit_trailing_arm_pct: 2.0,
+        option_exit_trailing_giveback_pct: 0.25,
+        option_exit_time_decay_minutes: 80,
+        option_exit_time_decay_progress_pct: 1.0,
+        option_exit_opposite_prob: 0.60,
+        option_exit_quote_mode: "bid",
+        replay_option_proxy_mode: document.getElementById("replayOptionProxyMode").value,
         no_agent: false,
         eval_parity_mode: false,
         startup_catchup_order: document.getElementById("startupCatchupOrder").checked,

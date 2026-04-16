@@ -1,0 +1,92 @@
+{
+  "symbols": [
+    "SPY"
+  ],
+  "updated_at": "2026-04-15T20:00:01.638914+00:00",
+  "policies": {
+    "SPY": {
+      "latest_meta_side_snapshot": {
+        "timestamp": "2026-04-15T19:50:00+00:00",
+        "signal_close": 699.75,
+        "signal_high": 700.28,
+        "signal_low": 699.52,
+        "signal_atr": 0.6477580966224243,
+        "p_enter_long": 0.19201377034187317,
+        "p_enter_short": 0.44750258326530457,
+        "p_exit_long": null,
+        "p_exit_short": null,
+        "thr_enter_long": 0.42,
+        "thr_enter_short": 0.15,
+        "thr_exit_long": 0.65,
+        "thr_exit_short": 0.65
+      },
+      "meta_side_soft_exit_count": {
+        "long": 0,
+        "short": 0
+      },
+      "meta_intrabar_entry_intent_active": {
+        "long": false,
+        "short": false
+      },
+      "meta_intrabar_entry_ref": {
+        "long": null,
+        "short": null
+      },
+      "meta_intrabar_entry_setup_ts": {
+        "long": null,
+        "short": null
+      },
+      "meta_intrabar_entry_expires_at": {
+        "long": null,
+        "short": null
+      },
+      "meta_side_reason": {
+        "long": "entry_waiting_for_1m_confirmation",
+        "short": "hold_option_value_bracket"
+      },
+      "meta_side_entry_armed": {
+        "long": true,
+        "short": false
+      },
+      "meta_side_enter_above_threshold": {
+        "long": false,
+        "short": true
+      },
+      "meta_side_enter_peak_prob": {
+        "long": null,
+        "short": 0.7430738806724548
+      },
+      "meta_side_bars_held": {
+        "long": -1,
+        "short": 22
+      },
+      "meta_side_entry_signal_ts": {
+        "long": null,
+        "short": "2026-04-15T15:20:00-04:00"
+      },
+      "meta_side_cooldown_until": {
+        "long": null,
+        "short": "2026-04-15T14:26:00-04:00"
+      },
+      "prev_1m_close": 700.095,
+      "last_1m_close": 699.75,
+      "recent_1m_closes": [
+        700.2,
+        700.01,
+        700.14,
+        700.095,
+        699.75
+      ],
+      "option_exit_best_price": {
+        "long": null,
+        "short": 1.94
+      },
+      "option_exit_best_seen_at": {
+        "long": null,
+        "short": "2026-04-15T15:30:00-04:00"
+      },
+      "entry_lockout_until": null,
+      "entry_lockout_reason": null
+    }
+  }
+}

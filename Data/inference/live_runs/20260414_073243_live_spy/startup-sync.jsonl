@@ -1,0 +1,1 @@
+{"stream":"startup_sync","recorded_at":"2026-04-14T07:32:52.059190+00:00","payload":{"symbol":"SPY","result":{"synced":true,"position":0,"signed_contracts":0,"long_contracts":0,"short_contracts":0,"long_symbol":null,"short_symbol":null,"qty_long":0.0,"qty_short":0.0,"avg_entry_price_long":null,"avg_entry_price_short":null,"multiple_positions":false,"ignored_short_positions":0}}}

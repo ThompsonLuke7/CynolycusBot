@@ -35,6 +35,41 @@ from Policy.order_policy import (
 META_CONTEXT_SYMBOLS: tuple[str, ...] = ("QQQ", "IWM", "TLT", "UUP")
 
 
+def _load_swing_setup_probs_frame(
+    *,
+    model_dir: str | Path,
+    tz: str | None,
+) -> pd.DataFrame | None:
+    path = Path(model_dir) / "p_swing_probs.parquet"
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_parquet(path)
+        if not isinstance(df.index, pd.DatetimeIndex):
+            ts_col = None
+            for candidate in ("timestamp", "date", "datetime", "index"):
+                if candidate in df.columns:
+                    ts_col = candidate
+                    break
+            if ts_col is None:
+                return None
+            df[ts_col] = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
+            df = df.dropna(subset=[ts_col]).set_index(ts_col)
+        else:
+            idx = pd.to_datetime(df.index, utc=True, errors="coerce")
+            df = df.loc[pd.notna(idx)].copy()
+            df.index = pd.DatetimeIndex(idx[pd.notna(idx)])
+        if df.empty:
+            return None
+        if tz:
+            df.index = pd.DatetimeIndex(df.index).tz_convert(tz)
+        df = df.sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+        return df
+    except Exception:
+        return None
+
+
 class LiveBarProcessor:
     def __init__(
         self,
@@ -204,13 +239,28 @@ def _print_meta_prob_log(*, prefix: str, probs: dict[str, float | None] | None, 
         return
     probs = probs or {}
     thresholds = thresholds or {}
-    print(
-        f"{prefix} "
-        f"p_enter_long={_fmt_prob(probs.get('p_enter_long'))} thr_enter_long={_fmt_prob(thresholds.get('enter_long'))} "
-        f"p_enter_short={_fmt_prob(probs.get('p_enter_short'))} thr_enter_short={_fmt_prob(thresholds.get('enter_short'))} "
-        f"p_exit_long={_fmt_prob(probs.get('p_exit_long'))} thr_exit_long={_fmt_prob(thresholds.get('exit_long'))} "
-        f"p_exit_short={_fmt_prob(probs.get('p_exit_short'))} thr_exit_short={_fmt_prob(thresholds.get('exit_short'))}"
+    parts = [
+        f"p_enter_long={_fmt_prob(probs.get('p_enter_long'))}",
+        f"thr_enter_long={_fmt_prob(thresholds.get('enter_long'))}",
+        f"p_enter_short={_fmt_prob(probs.get('p_enter_short'))}",
+        f"thr_enter_short={_fmt_prob(thresholds.get('enter_short'))}",
+    ]
+    exit_values = (
+        probs.get("p_exit_long"),
+        probs.get("p_exit_short"),
+        thresholds.get("exit_long"),
+        thresholds.get("exit_short"),
     )
+    if any(_fmt_prob(value) != "NA" for value in exit_values):
+        parts.extend(
+            [
+                f"p_exit_long={_fmt_prob(probs.get('p_exit_long'))}",
+                f"thr_exit_long={_fmt_prob(thresholds.get('exit_long'))}",
+                f"p_exit_short={_fmt_prob(probs.get('p_exit_short'))}",
+                f"thr_exit_short={_fmt_prob(thresholds.get('exit_short'))}",
+            ]
+        )
+    print(f"{prefix} {' '.join(parts)}")
 
 
 def _action_to_position(action: float | int, *, deadband: float = 0.0) -> int:
@@ -305,6 +355,9 @@ def _build_meta_agent(
     profit_protect_arm_atr: float = 2.0,
     profit_protect_giveback_atr_long: float = 0.75,
     profit_protect_giveback_atr_short: float = 1.0,
+    entry_prob_source: str = "swing_support_single",
+    swing_setup_single_model_dir: str | None = "Data/models/ga_xgboost/10min/single/swing_support_single",
+    swing_setup_probs_frame: pd.DataFrame | None = None,
 ) -> LiveIndependentMetaXGBAgent:
     del symbol
     return LiveIndependentMetaXGBAgent(
@@ -343,6 +396,9 @@ def _build_meta_agent(
         profit_protect_arm_atr=float(profit_protect_arm_atr),
         profit_protect_giveback_atr_long=float(profit_protect_giveback_atr_long),
         profit_protect_giveback_atr_short=float(profit_protect_giveback_atr_short),
+        entry_prob_source=entry_prob_source,
+        swing_setup_single_model_dir=swing_setup_single_model_dir,
+        swing_setup_probs_frame=swing_setup_probs_frame,
     )
 
 
@@ -423,6 +479,7 @@ def _build_option_order_policy(
     meta_intrabar_setup_bar_minutes: int = 10,
     meta_intrabar_long_setup_threshold: float | None = None,
     meta_intrabar_short_setup_threshold: float | None = None,
+    meta_hard_stop_atr: float = 0.0,
     meta_trailing_stop_enabled: bool = True,
     meta_trail_activate_atr: float = 0.75,
     meta_trail_atr: float = 0.8,
@@ -435,6 +492,17 @@ def _build_option_order_policy(
     meta_profit_protect_arm_atr: float = 2.0,
     meta_profit_protect_giveback_atr_long: float = 0.75,
     meta_profit_protect_giveback_atr_short: float = 1.0,
+    option_exit_policy: str = "option_adaptive_trail_v1",
+    option_exit_take_profit_pct: float = 0.0,
+    option_exit_stop_loss_pct: float = 1.0,
+    option_exit_profit_lock_arm_pct: float = 2.0,
+    option_exit_profit_lock_floor_pct: float = 0.25,
+    option_exit_trailing_arm_pct: float = 2.0,
+    option_exit_trailing_giveback_pct: float = 0.25,
+    option_exit_time_decay_minutes: int = 80,
+    option_exit_time_decay_progress_pct: float = 1.0,
+    option_exit_opposite_prob: float = 0.60,
+    option_exit_quote_mode: str = "bid",
 ) -> OptionOrderPolicy:
     cfg = OptionOrderPolicyConfig(
         underlying=symbol,
@@ -468,6 +536,7 @@ def _build_option_order_policy(
         meta_intrabar_setup_bar_minutes=int(meta_intrabar_setup_bar_minutes),
         meta_intrabar_long_setup_threshold=meta_intrabar_long_setup_threshold,
         meta_intrabar_short_setup_threshold=meta_intrabar_short_setup_threshold,
+        meta_hard_stop_atr=float(meta_hard_stop_atr),
         meta_soft_exit_confirm_bars=int(meta_soft_exit_confirm_bars),
         meta_urgent_exit_prob=float(meta_urgent_exit_prob),
         meta_urgent_exit_delta=float(meta_urgent_exit_delta),
@@ -475,6 +544,17 @@ def _build_option_order_policy(
         meta_profit_protect_arm_atr=float(meta_profit_protect_arm_atr),
         meta_profit_protect_giveback_atr_long=float(meta_profit_protect_giveback_atr_long),
         meta_profit_protect_giveback_atr_short=float(meta_profit_protect_giveback_atr_short),
+        option_exit_policy=str(option_exit_policy),
+        option_exit_take_profit_pct=float(option_exit_take_profit_pct),
+        option_exit_stop_loss_pct=float(option_exit_stop_loss_pct),
+        option_exit_profit_lock_arm_pct=float(option_exit_profit_lock_arm_pct),
+        option_exit_profit_lock_floor_pct=float(option_exit_profit_lock_floor_pct),
+        option_exit_trailing_arm_pct=float(option_exit_trailing_arm_pct),
+        option_exit_trailing_giveback_pct=float(option_exit_trailing_giveback_pct),
+        option_exit_time_decay_minutes=int(option_exit_time_decay_minutes),
+        option_exit_time_decay_progress_pct=float(option_exit_time_decay_progress_pct),
+        option_exit_opposite_prob=float(option_exit_opposite_prob),
+        option_exit_quote_mode=str(option_exit_quote_mode),
     )
     return OptionOrderPolicy(cfg)
 
@@ -557,7 +637,7 @@ def _make_15m_handler(
             probs = inference.last_probs() or {}
             thresholds = inference.last_thresholds() or {}
             _print_meta_prob_log(
-                prefix=f"{symbol} meta:",
+                prefix=f"{symbol} setup:",
                 probs=probs,
                 thresholds=thresholds,
             )
@@ -1313,7 +1393,7 @@ def _run_startup_catchup_decision(
         probs = inference.last_probs() or {}
         thresholds = inference.last_thresholds() or {}
         _print_meta_prob_log(
-            prefix=f"[live] Startup catch-up {symbol} meta:",
+            prefix=f"[live] Startup catch-up {symbol} setup:",
             probs=probs,
             thresholds=thresholds,
         )
@@ -1448,9 +1528,9 @@ def _seed_agent_from_sync(
                 df_1m=df_1m,
                 entry_price=sync_result.get("avg_entry_price"),
             )
-            print(f"[live] Meta startup seed {symbol}: {seed_result}")
+            print(f"[live] Signal startup seed {symbol}: {seed_result}")
         except Exception as exc:
-            print(f"[live] Meta startup seed {symbol} failed: {exc}")
+            print(f"[live] Signal startup seed {symbol} failed: {exc}")
 
 
 def _resolve_split_test_idx_path(*, split_root: Path, dataset_name: str, x_filename: str) -> Path | None:
@@ -1587,7 +1667,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--meta-model-root", default="Data/models/meta_xgboost/10min", help="Meta-XGB model root.")
     parser.add_argument(
         "--meta-base-frame-path",
-        default="Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_24.parquet",
+        default="Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet",
         help="Optional cached 10m meta feature matrix path. Supports {symbol} and {symbol_lower}.",
     )
     parser.add_argument(
@@ -1611,7 +1691,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--meta-trail-activate-atr", type=float, default=0.75, help="Trail activation ATR used to build live exit context.")
     parser.add_argument("--meta-trail-atr", type=float, default=0.8, help="Base trail ATR used to build live exit context.")
     parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.5, help="Tightened trail ATR after TP is seen.")
+    parser.add_argument("--meta-hard-stop-atr", type=float, default=0.0, help="Underlying ATR hard-stop distance for option exits; <=0 disables it.")
     parser.add_argument("--meta-use-tp-to-tighten-trail", action=argparse.BooleanOptionalAction, default=True, help="Mirror training trail-tightening behavior in live exit context.")
+    parser.add_argument(
+        "--meta-entry-prob-source",
+        choices=["meta", "swing_support_single"],
+        default="swing_support_single",
+        help="Entry/setup probability source. Use swing_support_single for the Phase 4 single-head setup model.",
+    )
+    parser.add_argument(
+        "--swing-setup-single-model-dir",
+        default="Data/models/ga_xgboost/10min/single/swing_support_single",
+        help="Single-head swing support model dir used when --meta-entry-prob-source=swing_support_single.",
+    )
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
     parser.add_argument(
         "--prefill-path",
@@ -1730,6 +1822,72 @@ def _parse_args() -> argparse.Namespace:
         help="Local HH:MM cutoff; before cutoff use 0DTE, otherwise 1DTE.",
     )
     parser.add_argument(
+        "--option-exit-policy",
+        default="option_adaptive_trail_v1",
+        choices=["meta", "option_value_bracket_v1", "software_oco_v1", "option_adaptive_trail_v1"],
+        help="Option exit policy: option_adaptive_trail_v1 monitors option value for late trailing/time-decay/opposite-signal exits.",
+    )
+    parser.add_argument(
+        "--option-exit-take-profit-pct",
+        type=float,
+        default=0.0,
+        help="Software option-value take-profit trigger as fractional gain over entry; 0 disables the cap.",
+    )
+    parser.add_argument(
+        "--option-exit-stop-loss-pct",
+        type=float,
+        default=1.0,
+        help="Software option-value stop-loss trigger as fractional loss from entry (1.0 effectively disables for long options).",
+    )
+    parser.add_argument(
+        "--option-exit-profit-lock-arm-pct",
+        type=float,
+        default=2.0,
+        help="Legacy profit-lock arm threshold, and adaptive trail arm default (+2.0 = +200%).",
+    )
+    parser.add_argument(
+        "--option-exit-profit-lock-floor-pct",
+        type=float,
+        default=0.25,
+        help="Legacy profit-lock floor threshold, and adaptive trail giveback default (0.25 = 25 premium points).",
+    )
+    parser.add_argument(
+        "--option-exit-trailing-arm-pct",
+        type=float,
+        default=2.0,
+        help="Adaptive trail arms after this fractional gain over entry (2.0 = +200%).",
+    )
+    parser.add_argument(
+        "--option-exit-trailing-giveback-pct",
+        type=float,
+        default=0.25,
+        help="Adaptive trail exits after this giveback from best option value, as a fraction of entry premium.",
+    )
+    parser.add_argument(
+        "--option-exit-time-decay-minutes",
+        type=int,
+        default=80,
+        help="Adaptive time-decay exit after this many minutes without a new option-value peak.",
+    )
+    parser.add_argument(
+        "--option-exit-time-decay-progress-pct",
+        type=float,
+        default=1.0,
+        help="Adaptive time-decay only applies before this MFE threshold (1.0 = before +100%).",
+    )
+    parser.add_argument(
+        "--option-exit-opposite-prob",
+        type=float,
+        default=0.60,
+        help="Adaptive opposite-signal exit threshold after the trade has seen at least +100% MFE.",
+    )
+    parser.add_argument(
+        "--option-exit-quote-mode",
+        default="bid",
+        choices=["bid", "mid", "mark", "last", "ask"],
+        help="Option quote field used for software exit checks; bid is conservative for sell-to-close.",
+    )
+    parser.add_argument(
         "--simulate-orders",
         action="store_true",
         help="Do not submit to Alpaca; print intended order payloads only.",
@@ -1830,12 +1988,25 @@ def main() -> None:
                 )
                 if not precomputed_meta_frame.empty:
                     print(
-                        f"[live] Loaded cached meta base frame: rows={len(precomputed_meta_frame):,} "
+                        f"[live] Loaded cached context base frame: rows={len(precomputed_meta_frame):,} "
                         f"range={precomputed_meta_frame.index.min()}..{precomputed_meta_frame.index.max()} "
                         f"path={meta_base_path}"
                     )
             except Exception as exc:
-                print(f"[live] Cached meta base frame unavailable: {exc}")
+                print(f"[live] Cached context base frame unavailable: {exc}")
+        swing_setup_probs_frame = None
+        if str(args.meta_entry_prob_source or "").strip().lower() == "swing_support_single":
+            swing_setup_probs_frame = _load_swing_setup_probs_frame(
+                model_dir=args.swing_setup_single_model_dir,
+                tz=args.tz or "America/New_York",
+            )
+            if swing_setup_probs_frame is not None and not swing_setup_probs_frame.empty:
+                print(
+                    "[live] Loaded saved swing setup probabilities for historical parity: "
+                    f"rows={len(swing_setup_probs_frame):,} "
+                    f"range={swing_setup_probs_frame.index.min()}..{swing_setup_probs_frame.index.max()}"
+                )
+
         agent = _build_meta_agent(
             symbol=symbols[0],
             model_root=args.meta_model_root,
@@ -1872,11 +2043,20 @@ def main() -> None:
             profit_protect_arm_atr=2.0,
             profit_protect_giveback_atr_long=0.75,
             profit_protect_giveback_atr_short=1.0,
+            entry_prob_source=args.meta_entry_prob_source,
+            swing_setup_single_model_dir=args.swing_setup_single_model_dir,
+            swing_setup_probs_frame=swing_setup_probs_frame,
         )
-        print(
-            f"[live] Meta-XGB inference enabled: model_root={args.meta_model_root} "
-            f"timeframe={args.interval}min"
-        )
+        if str(args.meta_entry_prob_source or "").strip().lower() == "swing_support_single":
+            print(
+                "[live] Swing setup wrapper enabled: "
+                f"model_dir={args.swing_setup_single_model_dir} timeframe={args.interval}min"
+            )
+        else:
+            print(
+                f"[live] Legacy probability wrapper enabled: model_root={args.meta_model_root} "
+                f"entry_source={args.meta_entry_prob_source} timeframe={args.interval}min"
+            )
 
     inference = LiveInferenceEngine(
         agent=agent,
@@ -1924,6 +2104,7 @@ def main() -> None:
                 meta_intrabar_setup_bar_minutes=int(args.interval),
                 meta_intrabar_long_setup_threshold=args.meta_intrabar_long_setup_threshold,
                 meta_intrabar_short_setup_threshold=args.meta_intrabar_short_setup_threshold,
+                meta_hard_stop_atr=float(args.meta_hard_stop_atr),
                 meta_trail_activate_atr=float(args.meta_trail_activate_atr),
                 meta_trail_atr=float(args.meta_trail_atr),
                 meta_trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
@@ -1935,6 +2116,17 @@ def main() -> None:
                 meta_profit_protect_arm_atr=2.0,
                 meta_profit_protect_giveback_atr_long=0.75,
                 meta_profit_protect_giveback_atr_short=1.0,
+                option_exit_policy=str(args.option_exit_policy),
+                option_exit_take_profit_pct=float(args.option_exit_take_profit_pct),
+                option_exit_stop_loss_pct=float(args.option_exit_stop_loss_pct),
+                option_exit_profit_lock_arm_pct=float(args.option_exit_profit_lock_arm_pct),
+                option_exit_profit_lock_floor_pct=float(args.option_exit_profit_lock_floor_pct),
+                option_exit_trailing_arm_pct=float(args.option_exit_trailing_arm_pct),
+                option_exit_trailing_giveback_pct=float(args.option_exit_trailing_giveback_pct),
+                option_exit_time_decay_minutes=int(args.option_exit_time_decay_minutes),
+                option_exit_time_decay_progress_pct=float(args.option_exit_time_decay_progress_pct),
+                option_exit_opposite_prob=float(args.option_exit_opposite_prob),
+                option_exit_quote_mode=str(args.option_exit_quote_mode),
             )
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
         print(f"[live] Option order policy enabled ({mode}) for symbols: {', '.join(symbols)}")

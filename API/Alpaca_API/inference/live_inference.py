@@ -90,29 +90,50 @@ def _default_live_vix_parquet_path(target_index: pd.DatetimeIndex | None = None)
         return str(static_path)
     if target_index is None or len(target_index) == 0:
         return str(runtime)
-    try:
-        stat = runtime.stat()
-        cache_key = str(runtime.resolve())
+
+    def _cached_range(path: Path) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+        stat = path.stat()
+        cache_key = str(path.resolve())
         cached = _LIVE_VIX_RANGE_CACHE.get(cache_key)
         if cached is None or cached[0] != int(stat.st_mtime_ns):
-            ts_df = pd.read_parquet(runtime, columns=["timestamp"])
+            ts_df = pd.read_parquet(path, columns=["timestamp"])
             ts = pd.to_datetime(ts_df["timestamp"], utc=True, errors="coerce").dropna()
             ts_min = ts.min() if not ts.empty else None
             ts_max = ts.max() if not ts.empty else None
             cached = (int(stat.st_mtime_ns), ts_min, ts_max)
             _LIVE_VIX_RANGE_CACHE[cache_key] = cached
-        _, ts_min, ts_max = cached
+        return cached[1], cached[2]
+
+    try:
+        runtime_min, runtime_max = _cached_range(runtime)
+        static_min, static_max = _cached_range(static_path) if static_path.exists() else (None, None)
         target_min = pd.to_datetime(target_index.min(), utc=True, errors="coerce")
         target_max = pd.to_datetime(target_index.max(), utc=True, errors="coerce")
-        if (
-            ts_min is not None
-            and ts_max is not None
-            and pd.notna(target_min)
-            and pd.notna(target_max)
-            and ts_min <= target_max
-            and ts_max >= target_min
-        ):
+        if pd.isna(target_min) or pd.isna(target_max):
             return str(runtime)
+        # Intraday files normally end at the final 15:50 bar, while the
+        # resampled target frame can include a 16:00 close bucket.
+        target_max_with_grace = target_max - pd.Timedelta(minutes=10)
+
+        def _covers(ts_min: pd.Timestamp | None, ts_max: pd.Timestamp | None) -> bool:
+            return (
+                ts_min is not None
+                and ts_max is not None
+                and ts_min <= target_min
+                and ts_max >= target_max_with_grace
+            )
+
+        def _covers_end(ts_max: pd.Timestamp | None) -> bool:
+            return ts_max is not None and ts_max >= target_max_with_grace
+
+        if _covers(static_min, static_max):
+            return str(static_path)
+        if _covers(runtime_min, runtime_max):
+            return str(runtime)
+        if _covers_end(runtime_max):
+            return str(runtime)
+        if _covers_end(static_max):
+            return str(static_path)
     except Exception:
         pass
     return str(static_path)
@@ -130,22 +151,43 @@ def _default_live_external_parquet_path(
         return str(static_path)
     if target_index is None or len(target_index) == 0:
         return str(runtime_path)
-    try:
-        ts_df = pd.read_parquet(runtime_path, columns=["timestamp"])
+
+    def _read_range(path: Path) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+        ts_df = pd.read_parquet(path, columns=["timestamp"])
         ts = pd.to_datetime(ts_df["timestamp"], utc=True, errors="coerce").dropna()
         if ts.empty:
-            return str(static_path)
-        ts_min = ts.min()
-        ts_max = ts.max()
+            return None, None
+        return ts.min(), ts.max()
+
+    try:
+        runtime_min, runtime_max = _read_range(runtime_path)
+        static_min, static_max = _read_range(static_path) if static_path.exists() else (None, None)
         target_min = pd.to_datetime(target_index.min(), utc=True, errors="coerce")
         target_max = pd.to_datetime(target_index.max(), utc=True, errors="coerce")
-        if (
-            pd.notna(target_min)
-            and pd.notna(target_max)
-            and ts_min <= target_max
-            and ts_max >= target_min
-        ):
+        if pd.isna(target_min) or pd.isna(target_max):
             return str(runtime_path)
+
+        target_max_with_grace = target_max - pd.Timedelta(minutes=10)
+
+        def _covers(ts_min: pd.Timestamp | None, ts_max: pd.Timestamp | None) -> bool:
+            return (
+                ts_min is not None
+                and ts_max is not None
+                and ts_min <= target_min
+                and ts_max >= target_max_with_grace
+            )
+
+        def _covers_end(ts_max: pd.Timestamp | None) -> bool:
+            return ts_max is not None and ts_max >= target_max_with_grace
+
+        if _covers(static_min, static_max):
+            return str(static_path)
+        if _covers(runtime_min, runtime_max):
+            return str(runtime_path)
+        if _covers_end(runtime_max):
+            return str(runtime_path)
+        if _covers_end(static_max):
+            return str(static_path)
     except Exception:
         pass
     return str(static_path)
@@ -248,6 +290,8 @@ def build_tree_feature_frame_from_1m(
     vix_1m: pd.DataFrame | None = None
     if include_vix_features:
         try:
+            if vix_parquet_path is None:
+                vix_parquet_path = _default_live_vix_parquet_path(df.index)
             vix_1m = _load_vix_1m(
                 vix_ticker=vix_ticker,
                 vix_parquet_path=vix_parquet_path,
@@ -471,6 +515,8 @@ def build_agent_feature_frame_from_15m(
             "status": "disabled",
             "coverage_ratio": None,
         }
+
+    df = _add_meta_interaction_features(df)
 
     if include_state_placeholders:
         df["current_position"] = 0.0
@@ -933,6 +979,66 @@ class _LiveXGBArtifact:
         if preds.size == 0:
             return float("nan")
         return float(preds[-1])
+
+
+class _LiveMulticlassXGBArtifact:
+    def __init__(self, model_dir: Path) -> None:
+        self._model_dir = Path(model_dir)
+        self.feature_cols = self._load_feature_cols()
+        self.classes = ["short", "neutral", "long"]
+        meta_path = self._model_dir / "meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                classes = meta.get("classes")
+                if isinstance(classes, list) and classes:
+                    self.classes = [str(item) for item in classes]
+            except Exception as exc:
+                _warn_once(f"[live] Could not read multiclass XGB metadata from {meta_path}: {exc}")
+        model_path = self._model_dir / "xgb_model.json"
+        if not model_path.exists():
+            raise FileNotFoundError(f"Missing xgb_model.json under {self._model_dir}")
+        booster = xgb.Booster()
+        booster.load_model(str(model_path))
+        self.model = booster
+
+    def _load_feature_cols(self) -> list[str]:
+        for name in ("selected_features.txt", "feature_columns.txt"):
+            path = self._model_dir / name
+            if path.exists():
+                return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        raise FileNotFoundError(f"Missing selected_features.txt or feature_columns.txt under {self._model_dir}")
+
+    def predict_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return pd.DataFrame(columns=self.classes, index=frame.index)
+        aligned = frame.reindex(columns=self.feature_cols)
+        dmat = xgb.DMatrix(aligned.to_numpy(dtype=np.float32), missing=np.nan)
+        preds = np.asarray(self.model.predict(dmat), dtype=np.float32)
+        if preds.ndim == 1:
+            n_classes = max(1, len(self.classes))
+            if preds.size % n_classes != 0:
+                raise ValueError(
+                    f"Unexpected multiclass prediction shape from {self._model_dir}: "
+                    f"size={preds.size}, classes={n_classes}"
+                )
+            preds = preds.reshape((-1, n_classes))
+        columns = list(self.classes)
+        if len(columns) < preds.shape[1]:
+            columns.extend(f"class_{i}" for i in range(len(columns), preds.shape[1]))
+        return pd.DataFrame(preds, index=frame.index, columns=columns[: preds.shape[1]])
+
+    def predict_row(self, frame: pd.DataFrame, *, target_ts: pd.Timestamp | None = None) -> pd.Series:
+        if frame.empty:
+            return pd.Series(dtype=np.float32)
+        if target_ts is not None and target_ts in frame.index:
+            row_df = frame.loc[[target_ts]]
+        else:
+            row_df = frame.tail(1)
+        preds = self.predict_frame(row_df)
+        if preds.empty:
+            return pd.Series(dtype=np.float32)
+        return preds.iloc[-1]
 
 
 @dataclass
@@ -1626,6 +1732,9 @@ class LiveIndependentMetaXGBAgent:
         profit_protect_arm_atr: float = 2.0,
         profit_protect_giveback_atr_long: float = 0.75,
         profit_protect_giveback_atr_short: float = 1.0,
+        entry_prob_source: str = "meta",
+        swing_setup_single_model_dir: str | Path | None = None,
+        swing_setup_probs_frame: pd.DataFrame | None = None,
     ) -> None:
         common_kwargs = dict(
             model_root=model_root,
@@ -1681,6 +1790,87 @@ class LiveIndependentMetaXGBAgent:
         self._last_probs: dict[str, float | None] | None = None
         self._last_prob_sources: dict[str, str | None] | None = None
         self._last_processed_ts: pd.Timestamp | None = None
+        self._entry_prob_source = str(entry_prob_source or "meta").strip().lower()
+        self._swing_setup_single: _LiveMulticlassXGBArtifact | None = None
+        self._swing_setup_probs_frame = self._normalize_swing_setup_probs_frame(swing_setup_probs_frame)
+        self._swing_setup_missing_warned = False
+        self._swing_setup_annotated_cache: pd.DataFrame | None = None
+        self._swing_setup_annotated_cache_key: tuple[int, object, object, int] | None = None
+        if self._entry_prob_source == "swing_support_single":
+            if swing_setup_single_model_dir is None:
+                raise ValueError("swing_setup_single_model_dir is required when entry_prob_source='swing_support_single'")
+            self._swing_setup_single = _LiveMulticlassXGBArtifact(Path(swing_setup_single_model_dir))
+        elif self._entry_prob_source != "meta":
+            raise ValueError(f"Unsupported entry_prob_source={entry_prob_source!r}; expected 'meta' or 'swing_support_single'")
+
+    def _normalize_swing_setup_probs_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame | None:
+        if frame is None or frame.empty:
+            return None
+        out = frame.copy()
+        if not isinstance(out.index, pd.DatetimeIndex):
+            ts_col = None
+            for candidate in ("timestamp", "date", "datetime", "index"):
+                if candidate in out.columns:
+                    ts_col = candidate
+                    break
+            if ts_col is None:
+                return None
+            out[ts_col] = pd.to_datetime(out[ts_col], utc=True, errors="coerce")
+            out = out.dropna(subset=[ts_col]).set_index(ts_col)
+        else:
+            idx = pd.to_datetime(out.index, errors="coerce")
+            out = out.loc[pd.notna(idx)].copy()
+            out.index = pd.DatetimeIndex(idx[pd.notna(idx)])
+
+        if out.empty:
+            return None
+        idx = pd.DatetimeIndex(out.index)
+        if idx.tz is None:
+            idx = idx.tz_localize(self._base_agent._assume_tz)
+        if self._base_agent._tz is not None:
+            idx = idx.tz_convert(self._base_agent._tz)
+        out.index = idx
+        out = out.sort_index()
+        out = out[~out.index.duplicated(keep="last")]
+        return out
+
+    @staticmethod
+    def _pick_swing_prob_column(frame: pd.DataFrame, side: str) -> str | None:
+        side = str(side).strip().lower()
+        candidates = [
+            f"p_{side}_full",
+            f"p_{side}_oof_train",
+            f"p_{side}_test",
+            f"p_swing_setup_{side}",
+            f"p_enter_{side}" if side in {"long", "short"} else "",
+            side,
+        ]
+        for col in candidates:
+            if col and col in frame.columns:
+                return col
+        return None
+
+    def _annotate_swing_setup_probs_from_frame(self, base_frame: pd.DataFrame) -> pd.DataFrame | None:
+        probs_frame = self._swing_setup_probs_frame
+        if probs_frame is None or base_frame.empty:
+            return None
+        short_col = self._pick_swing_prob_column(probs_frame, "short")
+        neutral_col = self._pick_swing_prob_column(probs_frame, "neutral")
+        long_col = self._pick_swing_prob_column(probs_frame, "long")
+        if short_col is None or long_col is None:
+            return None
+
+        aligned = probs_frame.reindex(pd.DatetimeIndex(base_frame.index))
+        out = base_frame.copy()
+        out["p_swing_setup_short"] = pd.to_numeric(aligned[short_col], errors="coerce")
+        if neutral_col is not None:
+            out["p_swing_setup_neutral"] = pd.to_numeric(aligned[neutral_col], errors="coerce")
+        else:
+            out["p_swing_setup_neutral"] = np.nan
+        out["p_swing_setup_long"] = pd.to_numeric(aligned[long_col], errors="coerce")
+
+        has_any = out[["p_swing_setup_short", "p_swing_setup_long"]].notna().any(axis=1).any()
+        return out if has_any else None
 
     def _reset_state(self) -> None:
         self._long_agent._reset_trade_state()
@@ -1694,10 +1884,98 @@ class LiveIndependentMetaXGBAgent:
         self._last_probs = None
         self._last_prob_sources = None
         self._last_processed_ts = None
+        self._swing_setup_annotated_cache = None
+        self._swing_setup_annotated_cache_key = None
+
+    def _build_setup_feature_frame(self, *, df_1m: pd.DataFrame, base_frame: pd.DataFrame) -> pd.DataFrame:
+        if base_frame.empty:
+            return base_frame.copy()
+        tree_frame = build_tree_feature_frame_from_1m(
+            df_1m,
+            label_timeframe=self._base_agent._label_timeframe_rule,
+            resample_label=self._base_agent._resample_label,
+            resample_closed=self._base_agent._resample_closed,
+            tz=self._base_agent._tz,
+            assume_tz=self._base_agent._assume_tz,
+            include_vix_features=self._base_agent._include_vix_features,
+        )
+        if tree_frame.empty:
+            combined = pd.DataFrame(index=base_frame.index)
+        else:
+            combined = tree_frame.copy()
+            if combined.columns.has_duplicates:
+                combined = combined.loc[:, ~combined.columns.duplicated(keep="last")]
+            combined = combined.reindex(base_frame.index)
+
+        for col in base_frame.columns:
+            if col not in combined.columns:
+                combined[col] = base_frame[col]
+        return combined
+
+    def _annotate_swing_setup_probs(self, *, df_1m: pd.DataFrame, base_frame: pd.DataFrame) -> pd.DataFrame:
+        if base_frame.empty:
+            return base_frame
+        cache_key = (
+            int(len(base_frame)),
+            base_frame.index[0],
+            base_frame.index[-1],
+            hash(tuple(str(col) for col in base_frame.columns)),
+        )
+        if (
+            self._swing_setup_annotated_cache_key == cache_key
+            and isinstance(self._swing_setup_annotated_cache, pd.DataFrame)
+            and not self._swing_setup_annotated_cache.empty
+        ):
+            return self._swing_setup_annotated_cache
+
+        frame_probs = self._annotate_swing_setup_probs_from_frame(base_frame)
+        saved_complete_mask = None
+        if frame_probs is not None:
+            saved_required = ["p_swing_setup_short", "p_swing_setup_long"]
+            saved_complete_mask = frame_probs[saved_required].notna().all(axis=1)
+        if frame_probs is not None and bool(saved_complete_mask.all()):
+            self._swing_setup_annotated_cache = frame_probs
+            self._swing_setup_annotated_cache_key = cache_key
+            return frame_probs
+
+        if self._swing_setup_single is None:
+            return frame_probs if frame_probs is not None else base_frame
+        setup_frame = self._build_setup_feature_frame(df_1m=df_1m, base_frame=base_frame)
+        missing = [col for col in self._swing_setup_single.feature_cols if col not in setup_frame.columns]
+        if missing and not self._swing_setup_missing_warned:
+            preview = ", ".join(missing[:12])
+            suffix = "..." if len(missing) > 12 else ""
+            _warn_once(
+                f"[live] swing_support_single setup model is missing {len(missing)} selected features "
+                f"from the live feature frame: {preview}{suffix}"
+            )
+            self._swing_setup_missing_warned = True
+        probs = self._swing_setup_single.predict_frame(setup_frame)
+        out = base_frame.copy()
+        out["p_swing_setup_short"] = probs["short"].reindex(out.index) if "short" in probs.columns else np.nan
+        out["p_swing_setup_neutral"] = probs["neutral"].reindex(out.index) if "neutral" in probs.columns else np.nan
+        out["p_swing_setup_long"] = probs["long"].reindex(out.index) if "long" in probs.columns else np.nan
+        if frame_probs is not None and saved_complete_mask is not None and bool(saved_complete_mask.any()):
+            saved_cols = ["p_swing_setup_short", "p_swing_setup_neutral", "p_swing_setup_long"]
+            overlay_idx = saved_complete_mask[saved_complete_mask].index.intersection(out.index)
+            out.loc[overlay_idx, saved_cols] = frame_probs.loc[overlay_idx, saved_cols]
+        self._swing_setup_annotated_cache = out
+        self._swing_setup_annotated_cache_key = cache_key
+        return out
+
+    def _build_independent_base_frame(self, *, df_1m: pd.DataFrame) -> pd.DataFrame:
+        base_frame = self._base_agent._build_base_frame(df_1m=df_1m)
+        if self._entry_prob_source == "swing_support_single":
+            return self._annotate_swing_setup_probs(df_1m=df_1m, base_frame=base_frame)
+        return base_frame
 
     def _row_with_entries(self, base_frame: pd.DataFrame, row: pd.Series) -> tuple[pd.Series, float, float]:
-        p_enter_long = self._base_agent._entry_long.predict_row(base_frame, target_ts=row.name)
-        p_enter_short = self._base_agent._entry_short.predict_row(base_frame, target_ts=row.name)
+        if self._entry_prob_source == "swing_support_single":
+            p_enter_long = float(row.get("p_swing_setup_long", np.nan))
+            p_enter_short = float(row.get("p_swing_setup_short", np.nan))
+        else:
+            p_enter_long = self._base_agent._entry_long.predict_row(base_frame, target_ts=row.name)
+            p_enter_short = self._base_agent._entry_short.predict_row(base_frame, target_ts=row.name)
         work_row = row.copy()
         work_row["p_enter_long_oof"] = p_enter_long
         work_row["p_enter_short_oof"] = p_enter_short
@@ -1705,23 +1983,30 @@ class LiveIndependentMetaXGBAgent:
 
     def _score_row(self, base_frame: pd.DataFrame, row: pd.Series) -> tuple[pd.Series, dict[str, float | None]]:
         work_row, p_enter_long, p_enter_short = self._row_with_entries(base_frame, row)
-        if self._long_active:
-            exit_row_long = self._long_agent._annotate_current_context(work_row)
-            exit_df_long = pd.DataFrame([exit_row_long], index=[row.name])
-            p_exit_long = float(self._base_agent._exit_long.predict_row(exit_df_long, target_ts=row.name))
-        else:
+        if self._entry_prob_source == "swing_support_single":
             p_exit_long = float("nan")
-        if self._short_active:
-            exit_row_short = self._short_agent._annotate_current_context(work_row)
-            exit_df_short = pd.DataFrame([exit_row_short], index=[row.name])
-            p_exit_short = float(self._base_agent._exit_short.predict_row(exit_df_short, target_ts=row.name))
-        else:
             p_exit_short = float("nan")
+        else:
+            if self._long_active:
+                exit_row_long = self._long_agent._annotate_current_context(work_row)
+                exit_df_long = pd.DataFrame([exit_row_long], index=[row.name])
+                p_exit_long = float(self._base_agent._exit_long.predict_row(exit_df_long, target_ts=row.name))
+            else:
+                p_exit_long = float("nan")
+            if self._short_active:
+                exit_row_short = self._short_agent._annotate_current_context(work_row)
+                exit_df_short = pd.DataFrame([exit_row_short], index=[row.name])
+                p_exit_short = float(self._base_agent._exit_short.predict_row(exit_df_short, target_ts=row.name))
+            else:
+                p_exit_short = float("nan")
         probs = {
             "p_pivot_long": float(row.get("p_pivot_long", np.nan)),
             "p_pivot_short": float(row.get("p_pivot_short", np.nan)),
             "p_tb_long": float(row.get("p_tb_long", np.nan)),
             "p_tb_short": float(row.get("p_tb_short", np.nan)),
+            "p_swing_setup_long": float(row.get("p_swing_setup_long", np.nan)),
+            "p_swing_setup_short": float(row.get("p_swing_setup_short", np.nan)),
+            "p_swing_setup_neutral": float(row.get("p_swing_setup_neutral", np.nan)),
             "p_enter_long": p_enter_long,
             "p_enter_short": p_enter_short,
             "p_exit_long": p_exit_long,
@@ -1849,6 +2134,10 @@ class LiveIndependentMetaXGBAgent:
                 for key, val in probs.items()
             }
             self._last_prob_sources = self._base_agent._extract_last_prob_sources(base_frame, row.name)
+            if self._last_prob_sources is None:
+                self._last_prob_sources = {}
+            self._last_prob_sources["p_enter_long_source"] = self._entry_prob_source
+            self._last_prob_sources["p_enter_short_source"] = self._entry_prob_source
             action = self._advance_independent_state(work_row=work_row, probs=probs)
             self._last_processed_ts = pd.Timestamp(row.name)
             out.append(
@@ -1860,6 +2149,9 @@ class LiveIndependentMetaXGBAgent:
                     "p_pivot_short": self._last_probs.get("p_pivot_short") if self._last_probs else None,
                     "p_tb_long": self._last_probs.get("p_tb_long") if self._last_probs else None,
                     "p_tb_short": self._last_probs.get("p_tb_short") if self._last_probs else None,
+                    "p_swing_setup_long": self._last_probs.get("p_swing_setup_long") if self._last_probs else None,
+                    "p_swing_setup_short": self._last_probs.get("p_swing_setup_short") if self._last_probs else None,
+                    "p_swing_setup_neutral": self._last_probs.get("p_swing_setup_neutral") if self._last_probs else None,
                     "p_enter_long": self._last_probs.get("p_enter_long") if self._last_probs else None,
                     "p_enter_short": self._last_probs.get("p_enter_short") if self._last_probs else None,
                     "p_exit_long": self._last_probs.get("p_exit_long") if self._last_probs else None,
@@ -1880,7 +2172,7 @@ class LiveIndependentMetaXGBAgent:
         apply_ga_probs: bool = True,
     ) -> list[dict[str, object]]:
         del df_15m, apply_ga_probs
-        base_frame = self._base_agent._build_base_frame(df_1m=df_1m)
+        base_frame = self._build_independent_base_frame(df_1m=df_1m)
         if base_frame.empty or len(base_frame) < self._min_bars:
             return []
         self._reset_state()
@@ -1888,7 +2180,7 @@ class LiveIndependentMetaXGBAgent:
 
     def act(self, *, df_1m: pd.DataFrame, df_15m: pd.DataFrame, target_ts: pd.Timestamp | None = None) -> float | None:
         del df_15m
-        base_frame = self._base_agent._build_base_frame(df_1m=df_1m)
+        base_frame = self._build_independent_base_frame(df_1m=df_1m)
         if base_frame.empty or len(base_frame) < self._min_bars:
             return None
         if target_ts is not None:
