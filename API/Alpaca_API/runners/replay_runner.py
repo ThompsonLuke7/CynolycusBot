@@ -1171,13 +1171,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--meta-intrabar-long-setup-threshold",
         type=float,
-        default=0.42,
+        default=0.35,
         help="Optional long setup threshold override used by the intrabar policy.",
     )
     parser.add_argument(
         "--meta-intrabar-short-setup-threshold",
         type=float,
-        default=0.15,
+        default=0.65,
         help="Optional short setup threshold override used by the intrabar policy.",
     )
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")

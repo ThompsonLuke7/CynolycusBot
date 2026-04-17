@@ -56,6 +56,21 @@ NEIGHBOR_WEIGHT = 0.75
 AMBIGUOUS_WEIGHT = 0.0
 FIRST_IN_RUN_FILTER = True
 
+# Shift core label 1 bar earlier than the fractal pivot.
+# Rationale: fractal pivot at T is only CONFIRMED at T+3 (3-bar lookahead).
+# The best practical entry was T-1 — the bar immediately before the reversal
+# bar. The model should learn to fire there, not at T where it's already late.
+# Gap-aware: if T is the first bar of a new session (overnight gap), keep at T
+# because T-1 is a pre-gap bar at a completely different price level.
+LABEL_SHIFT_BARS = 1
+
+# Follow-through check for visual filled/hollow distinction on core markers.
+# "Filled" = price moved at least FOLLOWTHROUGH_MIN_ATR × ATR in the right
+# direction within FOLLOWTHROUGH_BARS bars after entry (open of next bar).
+# This is a plot-only indicator — it does NOT change training labels.
+FOLLOWTHROUGH_MIN_ATR = 1.0   # minimum ATR move required
+FOLLOWTHROUGH_BARS    = 12    # look-forward window (12 × 30m = 6 hours)
+
 
 # ---------------------------------------------------------------------------
 # Session-aware helpers
@@ -66,6 +81,39 @@ def _session_dates(timestamps: pd.DatetimeIndex) -> np.ndarray:
     if timestamps.tz is not None:
         return timestamps.tz_convert("America/New_York").date
     return np.array(timestamps.date)
+
+
+def _shift_pivot_labels_back(
+    pivot_series: pd.Series,
+    timestamps: pd.DatetimeIndex,
+    shift: int = 1,
+) -> pd.Series:
+    """
+    Move each core pivot label `shift` bars earlier, within the same session.
+    If a pivot fires on the first bar of a new day (gap open), keep it at T
+    so we don't cross the overnight gap backward.
+    """
+    if shift <= 0:
+        return (pivot_series > 0).astype(int)
+
+    dates  = _session_dates(timestamps)
+    src    = (pivot_series > 0).to_numpy()
+    out    = np.zeros(len(src), dtype=np.int64)
+    n      = len(src)
+
+    for i in range(n):
+        if not src[i]:
+            continue
+        target = i - shift
+        # Walk backward until we find a bar in the same session (or give up)
+        while target < 0 or dates[target] != dates[i]:
+            target += 1           # can't go that far back — land at T
+            if target >= i:
+                target = i
+                break
+        out[target] = 1
+
+    return pd.Series(out, index=pivot_series.index)
 
 
 def apply_swing_pivot_zone_weights_session_aware(
@@ -213,6 +261,60 @@ def keep_first_same_side_event_session_reset(
 
 
 # ---------------------------------------------------------------------------
+# Follow-through check (plot-only — does NOT affect training labels)
+# ---------------------------------------------------------------------------
+
+def _add_atr(df: pd.DataFrame, length: int = 14) -> pd.DataFrame:
+    """Add atr_14 column if not already present."""
+    if "atr_14" in df.columns:
+        return df
+    hl = df["high"] - df["low"]
+    hc = (df["high"] - df["close"].shift()).abs()
+    lc = (df["low"]  - df["close"].shift()).abs()
+    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    df["atr_14"] = tr.rolling(length).mean()
+    return df
+
+
+def _compute_followthrough_mask(
+    df: pd.DataFrame,
+    core_mask: np.ndarray,
+    direction: str,          # "long" or "short"
+    min_atr: float = FOLLOWTHROUGH_MIN_ATR,
+    max_bars: int  = FOLLOWTHROUGH_BARS,
+) -> np.ndarray:
+    """
+    For each bar where core_mask is True, check whether price moved at least
+    min_atr × ATR in `direction` within max_bars bars after entry (open[i+1]).
+
+    Returns a boolean array, same length as df, True = followed through.
+    """
+    n      = len(df)
+    highs  = df["high"].to_numpy(float)
+    lows   = df["low"].to_numpy(float)
+    opens  = df["open"].to_numpy(float)
+    atr    = df["atr_14"].to_numpy(float)
+    result = np.zeros(n, dtype=bool)
+
+    for i in np.where(core_mask)[0]:
+        if i + 1 >= n:
+            continue
+        ep = opens[i + 1]
+        if np.isnan(ep) or np.isnan(atr[i]) or atr[i] <= 0:
+            continue
+        target = ep + min_atr * atr[i] if direction == "long" else ep - min_atr * atr[i]
+        end = min(i + 1 + max_bars, n)
+        for j in range(i + 1, end):
+            if direction == "long"  and highs[j] >= target:
+                result[i] = True
+                break
+            if direction == "short" and lows[j]  <= target:
+                result[i] = True
+                break
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
@@ -245,9 +347,16 @@ def _load_and_filter_30m(ticker: str, days_back: int) -> pd.DataFrame | None:
     return df
 
 
-def _compute_swing_labels(df: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
+def _compute_swing_labels(
+    df: pd.DataFrame,
+    ticker: str,
+    sequence_count: int = 3,
+    label_shift: int = LABEL_SHIFT_BARS,
+) -> pd.DataFrame | None:
+    df = _add_atr(df)   # needed for follow-through check
+
     try:
-        df = add_fractal_pivots(df)
+        df = add_fractal_pivots(df, sequence_count=sequence_count)
     except Exception as exc:
         logger.warning("[%s] add_fractal_pivots failed: %s", ticker, exc)
         df["pivot_up"]   = 0
@@ -256,9 +365,10 @@ def _compute_swing_labels(df: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
     df["pivot_up"]   = df.get("pivot_up",   pd.Series(0, index=df.index)).fillna(0)
     df["pivot_down"] = df.get("pivot_down", pd.Series(0, index=df.index)).fillna(0)
 
-    # pivot_down → potential long entry; pivot_up → potential short entry
-    df["long_swing_label"]  = (df["pivot_down"] > 0).astype(int)
-    df["short_swing_label"] = (df["pivot_up"]   > 0).astype(int)
+    # Shift core label `label_shift` bars earlier within the same session.
+    # pivot_down → long candidate; pivot_up → short candidate
+    df["long_swing_label"]  = _shift_pivot_labels_back(df["pivot_down"], df.index, label_shift)
+    df["short_swing_label"] = _shift_pivot_labels_back(df["pivot_up"],   df.index, label_shift)
     return df
 
 
@@ -347,14 +457,26 @@ def plot_soft_swing_labels_30m(
     short_neighbor_y_pos= high_y + marker_offset * 0.55
     short_ambig_y_pos   = high_y + marker_offset * 0.25
 
+    # Follow-through masks for core bars (plot-only, no effect on labels)
+    long_ft  = _compute_followthrough_mask(work, long_core,  "long")
+    short_ft = _compute_followthrough_mask(work, short_core, "short")
+    long_core_hit   = long_core  &  long_ft
+    long_core_miss  = long_core  & ~long_ft
+    short_core_hit  = short_core &  short_ft
+    short_core_miss = short_core & ~short_ft
+
     if long_neighbor.any():
         ax_price.scatter(pos[long_neighbor], long_neighbor_y_pos[long_neighbor],
                          marker="^", s=45, color="#66BB6A", alpha=0.8,
                          label=f"LONG neighbor weight={NEIGHBOR_WEIGHT:g}", zorder=3)
-    if long_core.any():
-        ax_price.scatter(pos[long_core], long_y_pos[long_core],
+    if long_core_hit.any():
+        ax_price.scatter(pos[long_core_hit], long_y_pos[long_core_hit],
+                         marker="^", s=100, color="#1B5E20",
+                         label=f"LONG core — followed through (≥{FOLLOWTHROUGH_MIN_ATR}×ATR)", zorder=3.3)
+    if long_core_miss.any():
+        ax_price.scatter(pos[long_core_miss], long_y_pos[long_core_miss],
                          marker="^", s=90, facecolors="none", edgecolors="#1B5E20",
-                         linewidths=1.8, label="LONG core (pivot low) weight=1", zorder=3.2)
+                         linewidths=1.8, label="LONG core — no follow-through", zorder=3.2)
     if long_ambiguous.any():
         ax_price.scatter(pos[long_ambiguous], long_ambig_y_pos[long_ambiguous],
                          marker="x", s=38, color="#9E9E9E", alpha=0.7,
@@ -368,10 +490,14 @@ def plot_soft_swing_labels_30m(
         ax_price.scatter(pos[short_neighbor], short_neighbor_y_pos[short_neighbor],
                          marker="v", s=45, color="#EF5350", alpha=0.8,
                          label=f"SHORT neighbor weight={NEIGHBOR_WEIGHT:g}", zorder=3)
-    if short_core.any():
-        ax_price.scatter(pos[short_core], short_y_pos[short_core],
+    if short_core_hit.any():
+        ax_price.scatter(pos[short_core_hit], short_y_pos[short_core_hit],
+                         marker="v", s=100, color="#B71C1C",
+                         label=f"SHORT core — followed through (≥{FOLLOWTHROUGH_MIN_ATR}×ATR)", zorder=3.3)
+    if short_core_miss.any():
+        ax_price.scatter(pos[short_core_miss], short_y_pos[short_core_miss],
                          marker="v", s=90, facecolors="none", edgecolors="#B71C1C",
-                         linewidths=1.8, label="SHORT core (pivot high) weight=1", zorder=3.2)
+                         linewidths=1.8, label="SHORT core — no follow-through", zorder=3.2)
     if short_ambiguous.any():
         ax_price.scatter(pos[short_ambiguous], short_ambig_y_pos[short_ambiguous],
                          marker="x", s=38, color="#616161", alpha=0.7,
@@ -398,10 +524,13 @@ def plot_soft_swing_labels_30m(
     _draw_day_lines((ax_price, ax_weight), tick_positions, line_color="#d0d0d0")
     _apply_time_ticks(ax_weight, tick_positions, tick_labels)
 
+    n_lhit = int(long_core_hit.sum());  n_lmiss = int(long_core_miss.sum())
+    n_shit = int(short_core_hit.sum()); n_smiss = int(short_core_miss.sum())
     ax_price.set_title(
         f"30m Soft Swing Labels — {ticker}  "
-        f"(gap-aware neighbor ±{POSITIVE_WINDOW_BARS} bar={NEIGHBOR_WEIGHT:g}, "
-        f"session-reset first_in_run={FIRST_IN_RUN_FILTER})"
+        f"(neighbor ±{POSITIVE_WINDOW_BARS}={NEIGHBOR_WEIGHT:g}, first_in_run={FIRST_IN_RUN_FILTER})\n"
+        f"Filled=followed through ≥{FOLLOWTHROUGH_MIN_ATR}×ATR in {FOLLOWTHROUGH_BARS} bars  |  "
+        f"Long: {n_lhit} hit / {n_lmiss} miss   Short: {n_shit} hit / {n_smiss} miss"
     )
     ax_price.set_ylabel("Price")
     ax_weight.set_ylabel("label * weight")
@@ -436,16 +565,22 @@ def plot_soft_swing_labels_30m(
 # Entry points
 # ---------------------------------------------------------------------------
 
-def plot_ticker(ticker: str, days_back: int = 30) -> None:
+def plot_ticker(
+    ticker: str,
+    days_back: int = 30,
+    sequence_count: int = 3,
+    label_shift: int = LABEL_SHIFT_BARS,
+    subdir: str = "soft_swing_30m",
+) -> None:
     df = _load_and_filter_30m(ticker, days_back)
     if df is None:
         return
-    df = _compute_swing_labels(df, ticker)
+    df = _compute_swing_labels(df, ticker, sequence_count=sequence_count, label_shift=label_shift)
     if df is None:
         return
     output_dir = PLOTS_DIR / ticker
     output_dir.mkdir(parents=True, exist_ok=True)
-    plot_soft_swing_labels_30m(df, ticker, save_path=output_dir / "soft_swing_30m.png")
+    plot_soft_swing_labels_30m(df, ticker, save_path=output_dir / f"{subdir}.png")
 
 
 def main():
@@ -456,8 +591,17 @@ def main():
     selected = random.sample(tickers, min(5, len(tickers)))
     logger.info("Selected tickers: %s", selected)
 
+    # --- seq_count=3, label shifted back 1 bar (primary) ---
+    logger.info("=== seq_count=3, label_shift=1 (primary) ===")
     for ticker in selected:
-        plot_ticker(ticker, days_back=30)
+        plot_ticker(ticker, days_back=30, sequence_count=3,
+                    label_shift=1, subdir="soft_swing_30m_seq3_shift1")
+
+    # --- seq_count=2 comparison (noisier, earlier confirmation) ---
+    logger.info("=== seq_count=2 comparison ===")
+    for ticker in selected:
+        plot_ticker(ticker, days_back=30, sequence_count=2,
+                    label_shift=1, subdir="soft_swing_30m_seq2_shift1")
 
     logger.info("Done. Plots saved to %s", PLOTS_DIR)
 

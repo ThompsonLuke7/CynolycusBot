@@ -185,11 +185,10 @@ FEATURE_COLUMNS: list[str] = (
 # ---------------------------------------------------------------------------
 # Label configuration
 # ---------------------------------------------------------------------------
-TRIPLE_BARRIER_CONFIG: dict = {
-    "k_up": 2.5,            # TP in ATR units
-    "k_dn": 2.5,            # SL in ATR units
-    "max_holding": 48,      # 48 × 30min ≈ 3 trading days
-    "chop_atr_mult": 0.5,   # time-expiry label as chop if move < 0.5×ATR
+# Soft swing zone label config (30m primary training target)
+# Mirrors generate_soft_swing_30m_plots.py constants — keep in sync.
+SWING_LABEL_30M_CONFIG: dict = {
+    "sequence_count": 3,  # fractal pivot: 3 bars each side
     "atr_length": 14,
 }
 
@@ -223,20 +222,27 @@ VAL_FRAC   = 0.15
 XGBOOST_CONFIG: dict = {
     "objective":          "multi:softprob",
     "num_class":          3,
-    "n_estimators":       400,
-    "max_depth":          5,
-    "learning_rate":      0.04,
-    "subsample":          0.80,
-    "colsample_bytree":   0.75,
-    "min_child_weight":   10,
+    "n_estimators":       600,    # more trees; early stopping prevents overfit
+    "max_depth":          6,      # slightly deeper for 187-ticker dataset
+    "learning_rate":      0.03,   # lower LR paired with more estimators
+    "subsample":          0.75,   # tighter than 10m; cross-ticker noise
+    "colsample_bytree":   0.70,   # ~70% of ~90 features per tree = ~63
+    "min_child_weight":   20,     # discourage fine splits on noisy pivot labels
     "gamma":              0.1,
-    "reg_alpha":          0.05,
+    "reg_alpha":          0.10,   # L1 sparsity — more features than 10m
     "reg_lambda":         1.0,
     "random_state":       42,
     "n_jobs":             -1,
     "eval_metric":        "mlogloss",
-    "early_stopping_rounds": 40,
+    "early_stopping_rounds": 60,  # more patience at lower LR
 }
+
+# OOF cross-validation folds (time-series sequential)
+OOF_N_FOLDS: int = 5
+
+# Neutral class downweight — neutral is ~56% of bars; multiply its sample
+# weight by this factor so the model doesn't predict neutral for everything.
+NEUTRAL_WEIGHT_FACTOR: float = 0.40
 
 # ---------------------------------------------------------------------------
 # Backtest

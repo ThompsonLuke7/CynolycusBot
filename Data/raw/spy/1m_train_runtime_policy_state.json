@@ -2,21 +2,21 @@
   "symbols": [
     "SPY"
   ],
-  "updated_at": "2026-04-15T20:00:01.638914+00:00",
+  "updated_at": "2026-04-17T20:00:08.557720+00:00",
   "policies": {
     "SPY": {
       "latest_meta_side_snapshot": {
-        "timestamp": "2026-04-15T19:50:00+00:00",
-        "signal_close": 699.75,
-        "signal_high": 700.28,
-        "signal_low": 699.52,
-        "signal_atr": 0.6477580966224243,
-        "p_enter_long": 0.19201377034187317,
-        "p_enter_short": 0.44750258326530457,
+        "timestamp": "2026-04-17T19:50:00+00:00",
+        "signal_close": 710.055,
+        "signal_high": 710.39,
+        "signal_low": 709.69,
+        "signal_atr": 0.7363754953704388,
+        "p_enter_long": 0.02372157573699951,
+        "p_enter_short": 0.3101586699485779,
         "p_exit_long": null,
         "p_exit_short": null,
-        "thr_enter_long": 0.42,
-        "thr_enter_short": 0.15,
+        "thr_enter_long": 0.35,
+        "thr_enter_short": 0.65,
         "thr_exit_long": 0.65,
         "thr_exit_short": 0.65
       },
@@ -46,44 +46,44 @@
       },
       "meta_side_entry_armed": {
         "long": true,
-        "short": false
+        "short": true
       },
       "meta_side_enter_above_threshold": {
         "long": false,
-        "short": true
+        "short": false
       },
       "meta_side_enter_peak_prob": {
         "long": null,
-        "short": 0.7430738806724548
+        "short": null
       },
       "meta_side_bars_held": {
         "long": -1,
-        "short": 22
+        "short": 177
       },
       "meta_side_entry_signal_ts": {
         "long": null,
-        "short": "2026-04-15T15:20:00-04:00"
+        "short": "2026-04-17T12:50:00-04:00"
       },
       "meta_side_cooldown_until": {
         "long": null,
-        "short": "2026-04-15T14:26:00-04:00"
+        "short": "2026-04-17T09:40:00-04:00"
       },
-      "prev_1m_close": 700.095,
-      "last_1m_close": 699.75,
+      "prev_1m_close": 710.185,
+      "last_1m_close": 710.055,
       "recent_1m_closes": [
-        700.2,
-        700.01,
-        700.14,
-        700.095,
-        699.75
+        710.1,
+        710.03,
+        710.15,
+        710.185,
+        710.055
       ],
       "option_exit_best_price": {
         "long": null,
-        "short": 1.94
+        "short": 2.95
       },
       "option_exit_best_seen_at": {
         "long": null,
-        "short": "2026-04-15T15:30:00-04:00"
+        "short": "2026-04-17T13:21:00-04:00"
       },
       "entry_lockout_until": null,
       "entry_lockout_reason": null

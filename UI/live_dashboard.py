@@ -761,7 +761,7 @@ class SessionConfig:
     meta_entry_prob_source: str = "swing_support_single"
     swing_setup_single_model_dir: str = "Data/models/ga_xgboost/10min/single/swing_support_single"
     meta_base_frame_path: str = "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet"
-    meta_base_frame_append_lookback_days: int = 120
+    meta_base_frame_append_lookback_days: int = 900
     no_agent: bool = False
     stochastic: bool = False
     device: str = "auto"
@@ -781,8 +781,8 @@ class SessionConfig:
     meta_exit_threshold: float | None = None
     meta_intrabar_entry_policy: str = PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1
     meta_intrabar_setup_max_bars: int = 4
-    meta_intrabar_long_setup_threshold: float | None = 0.42
-    meta_intrabar_short_setup_threshold: float | None = 0.15
+    meta_intrabar_long_setup_threshold: float | None = 0.35
+    meta_intrabar_short_setup_threshold: float | None = 0.65
     meta_hard_stop_atr: float = 0.0
     meta_trail_activate_atr: float = 2.0
     meta_trail_atr: float = 1.0
@@ -830,7 +830,7 @@ class SessionConfig:
     replay_regular_only: bool = False
     replay_sleep: float = 0.0
     replay_max_bars: int | None = None
-    replay_warmup_bars: int = 5000
+    replay_warmup_bars: int = 250000
     replay_no_prepend_split_test_warmup: bool = False
     eval_parity_mode: bool = False
     audit_enabled: bool = True
@@ -871,7 +871,7 @@ class SessionConfig:
             ),
             meta_base_frame_append_lookback_days=max(
                 1,
-                _coerce_int(payload.get("meta_base_frame_append_lookback_days"), 120),
+                _coerce_int(payload.get("meta_base_frame_append_lookback_days"), 900),
             ),
             no_agent=_coerce_bool(payload.get("no_agent"), False),
             stochastic=_coerce_bool(payload.get("stochastic"), False),
@@ -895,10 +895,10 @@ class SessionConfig:
             ),
             meta_intrabar_setup_max_bars=max(1, _coerce_int(payload.get("meta_intrabar_setup_max_bars"), 4)),
             meta_intrabar_long_setup_threshold=_coerce_optional_float(
-                payload.get("meta_intrabar_long_setup_threshold", 0.42)
+                payload.get("meta_intrabar_long_setup_threshold", 0.35)
             ),
             meta_intrabar_short_setup_threshold=_coerce_optional_float(
-                payload.get("meta_intrabar_short_setup_threshold", 0.15)
+                payload.get("meta_intrabar_short_setup_threshold", 0.65)
             ),
             meta_hard_stop_atr=max(0.0, _coerce_float(payload.get("meta_hard_stop_atr"), 0.0)),
             meta_trail_activate_atr=_coerce_float(payload.get("meta_trail_activate_atr"), 2.0),
@@ -994,7 +994,7 @@ class SessionConfig:
                 if payload.get("replay_max_bars") in (None, "")
                 else max(1, _coerce_int(payload.get("replay_max_bars"), 0))
             ),
-            replay_warmup_bars=max(0, _coerce_int(payload.get("replay_warmup_bars"), 5000)),
+            replay_warmup_bars=max(0, _coerce_int(payload.get("replay_warmup_bars"), 250000)),
             replay_no_prepend_split_test_warmup=_coerce_bool(
                 payload.get("replay_no_prepend_split_test_warmup"),
                 False,
@@ -3573,23 +3573,20 @@ class LiveSession:
                 self._emit_status(running=True, message="loading prefill file")
                 configured_prefill_path = Path(cfg.prefill_path)
                 runtime_prefill_cache_path = lr._default_runtime_prefill_cache_path(configured_prefill_path)
-                prefill_source_path = runtime_prefill_cache_path if runtime_prefill_cache_path.exists() else configured_prefill_path
-                if prefill_source_path == runtime_prefill_cache_path:
-                    self._emit(
-                        "log",
-                        {
-                            "symbol": "SYSTEM",
-                            "message": f"[live] using runtime prefill cache: {runtime_prefill_cache_path}",
-                        },
-                    )
+                prefill_df, prefill_source = lr._load_prefill_with_runtime_cache(
+                    configured_prefill_path=configured_prefill_path,
+                    runtime_prefill_cache_path=runtime_prefill_cache_path,
+                    precomputed_meta_frame=precomputed_meta_frame,
+                    append_lookback_days=int(cfg.meta_base_frame_append_lookback_days),
+                    tz_name=cfg.tz or "America/New_York",
+                )
                 self._emit(
                     "log",
                     {
                         "symbol": "SYSTEM",
-                        "message": f"[live] loading prefill file: {prefill_source_path}",
+                        "message": f"[live] loaded prefill source: {prefill_source}",
                     },
                 )
-                prefill_df = lr._load_prefill_frame(prefill_source_path)
                 if not cfg.no_prefill_fetch:
                     self._emit_status(running=True, message="gap-bridging prefill from Alpaca")
                     self._emit(

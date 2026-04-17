@@ -511,7 +511,7 @@ def _add_cat10_time(df: pd.DataFrame, session_dates: pd.Series) -> pd.DataFrame:
     open_min  = 9 * 60 + 30
     close_min = 15 * 60 + 30
 
-    bar_min = idx_ny.hour * 60 + idx_ny.minute
+    bar_min = pd.Series(idx_ny.hour * 60 + idx_ny.minute, index=df.index)
     df["bars_from_open"] = ((bar_min - open_min) / 30).clip(0, BARS_PER_DAY - 1).astype(float)
     df["bars_to_close"]  = ((close_min - bar_min) / 30).clip(0, BARS_PER_DAY - 1).astype(float)
 
@@ -664,8 +664,12 @@ def _load_context_data(
         if path.exists():
             df = pd.read_parquet(path)
             df.columns = [c.lower() for c in df.columns]
+            if "timestamp" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+                df = df.set_index("timestamp")
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index)
             if df.index.tz is None:
-                df.index = pd.to_datetime(df.index).tz_localize("UTC")
+                df.index = df.index.tz_localize("UTC")
             else:
                 df.index = df.index.tz_convert("UTC")
             ctx[sym] = df.sort_index()

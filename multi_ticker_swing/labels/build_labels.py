@@ -1,12 +1,21 @@
 """
 Label builder for the multi-ticker 30-minute swing pipeline.
 
-Labels computed per ticker:
-  1. Triple-barrier (multi-day swing horizon, adapted from existing logic)
-  2. Swing state machine gate (adapted add_pivot_swing_state_machine)
-  3. Final target: -1 → class 0 (short), 0 → class 1 (neutral), 1 → class 2 (long)
+Primary training label — soft swing zone (same scheme as the 30m plots):
+  - Fractal pivots detected with sequence_count=3 (3 bars each side)
+  - Core label shifted T-1 within the same session (so the model fires
+    one bar before the confirmed reversal bar, not 3 bars after)
+  - Zone weighting: core=1.0, ±1 bar neighbor=0.75, ambiguous=0.0
+  - Session-aware: neighbor/ambiguous window never crosses overnight gap
+  - First-in-run filter with price-progression reset
 
-Saves per-ticker label parquets, then assembles a combined parquet.
+Columns written per ticker:
+  soft_long_label   / soft_short_label   — 0/1 zone membership
+  soft_long_weight  / soft_short_weight  — sample weight (1.0 / 0.75 / 0.0)
+  soft_long_core    / soft_short_core    — 0/1 core (T-1 shifted) bars only
+  target             — 0=short  1=neutral  2=long  (hard class from zone membership)
+  sample_weight      — combined weight for XGBoost fit_params
+  p_long_state_gate / p_short_state_gate — swing state machine gates (analysis)
 """
 from __future__ import annotations
 
@@ -16,23 +25,36 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Existing label functions (reused directly)
-from Features.label_generations import (
-    add_pivot_swing_state_machine,
-    add_triple_barrier_labels_atr,
-)
+from Features.label_generations import add_pivot_swing_state_machine
 from Features.feature_sets.custom_indicators import add_fractal_pivots
 
+# Reuse session-aware helpers and constants directly from the plot script
+# so label logic and plots are guaranteed to be identical.
+from multi_ticker_swing.plots.generate_soft_swing_30m_plots import (
+    AMBIGUOUS_WEIGHT,
+    AMBIGUOUS_WINDOW_BARS,
+    FIRST_IN_RUN_FILTER,
+    FOLLOWTHROUGH_BARS,
+    FOLLOWTHROUGH_MIN_ATR,
+    LABEL_SHIFT_BARS,
+    NEIGHBOR_WEIGHT,
+    POSITIVE_WINDOW_BARS,
+    _compute_followthrough_mask,
+    _shift_pivot_labels_back,
+    apply_swing_pivot_zone_weights_session_aware,
+    keep_first_same_side_event_session_reset,
+)
+
 from multi_ticker_swing.config.pipeline_config import (
+    FEATURES_COMBINED,
     LABELS_COMBINED,
     PROCESSED_30M_DIR,
     PROCESSED_LBL_DIR,
+    SWING_LABEL_30M_CONFIG,
     SWING_STATE_CONFIG,
     TRAINING_MATRIX,
-    TRIPLE_BARRIER_CONFIG,
     UNIVERSE_CSV,
     FEATURE_COLUMNS,
-    FEATURES_COMBINED,
 )
 from multi_ticker_swing.data.fetch_data import load_universe
 from multi_ticker_swing.data.load_data import load_ticker_features
@@ -41,50 +63,142 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Target construction
+# Soft swing zone labels — mirrors generate_soft_swing_30m_plots.py exactly
 # ---------------------------------------------------------------------------
 
-_LABEL_MAP = {-1: 0, 0: 1, 1: 2}   # short → 0, neutral → 1, long → 2
-
-
-def _build_target(df: pd.DataFrame) -> pd.DataFrame:
+def _build_soft_swing_labels(
+    df: pd.DataFrame,
+    ticker: str,
+) -> pd.DataFrame:
     """
-    Map tb_label (-1/0/1) to XGBoost multi-class target (0/1/2).
-    Any NaN tb_label row becomes class 1 (neutral).
+    Compute soft swing zone labels on df (must have a DatetimeIndex and
+    pivot_up / pivot_down columns already set).
+
+    Writes columns:
+      soft_long_core, soft_short_core      — shifted T-1 core pivot bars
+      soft_long_label, soft_short_label    — zone membership (0/1)
+      soft_long_weight, soft_short_weight  — sample weights
     """
-    df["target"] = (
-        df["tb_label"].map(_LABEL_MAP).fillna(1).astype(int)
+    timestamps = df.index
+
+    long_core  = _shift_pivot_labels_back(df["pivot_down"], timestamps, LABEL_SHIFT_BARS)
+    short_core = _shift_pivot_labels_back(df["pivot_up"],   timestamps, LABEL_SHIFT_BARS)
+
+    long_core_arr  = long_core.to_numpy(dtype=np.int64)
+    short_core_arr = short_core.to_numpy(dtype=np.int64)
+
+    if FIRST_IN_RUN_FILTER:
+        lows  = df["low"].to_numpy(float)
+        highs = df["high"].to_numpy(float)
+        long_core_arr, short_core_arr, _, _ = keep_first_same_side_event_session_reset(
+            long_core_arr, short_core_arr, timestamps,
+            lows=lows, highs=highs,
+        )
+
+    # ------------------------------------------------------------------
+    # Follow-through filter: zero out cores that didn't follow through.
+    # A core with no follow-through has no learning signal — training on
+    # it as a directional label adds noise. Its neighbor zone bars are also
+    # zeroed by removing the core before zone computation.
+    # Requires atr_14 column; silently skip if missing.
+    # ------------------------------------------------------------------
+    if "atr_14" in df.columns:
+        long_ft  = _compute_followthrough_mask(df, long_core_arr.astype(bool),  "long",
+                                               min_atr=FOLLOWTHROUGH_MIN_ATR,
+                                               max_bars=FOLLOWTHROUGH_BARS)
+        short_ft = _compute_followthrough_mask(df, short_core_arr.astype(bool), "short",
+                                               min_atr=FOLLOWTHROUGH_MIN_ATR,
+                                               max_bars=FOLLOWTHROUGH_BARS)
+        n_lc_before = int(long_core_arr.sum())
+        n_sc_before = int(short_core_arr.sum())
+        long_core_arr[~long_ft]  = 0   # zero non-follow-through long cores
+        short_core_arr[~short_ft] = 0  # zero non-follow-through short cores
+        logger.info(
+            "[%s] follow-through filter: long %d→%d  short %d→%d  "
+            "(%.0f%% long  %.0f%% short kept)",
+            ticker,
+            n_lc_before, int(long_core_arr.sum()),
+            n_sc_before, int(short_core_arr.sum()),
+            100 * long_ft.mean()  if n_lc_before else 0,
+            100 * short_ft.mean() if n_sc_before else 0,
+        )
+    else:
+        logger.warning("[%s] atr_14 not in df — follow-through filter skipped", ticker)
+
+    long_zone, long_w, _  = apply_swing_pivot_zone_weights_session_aware(
+        long_core_arr, timestamps,
+        positive_window_bars=POSITIVE_WINDOW_BARS,
+        ambiguous_window_bars=AMBIGUOUS_WINDOW_BARS,
+        neighbor_weight=NEIGHBOR_WEIGHT,
+        ambiguous_weight=AMBIGUOUS_WEIGHT,
+    )
+    short_zone, short_w, _ = apply_swing_pivot_zone_weights_session_aware(
+        short_core_arr, timestamps,
+        positive_window_bars=POSITIVE_WINDOW_BARS,
+        ambiguous_window_bars=AMBIGUOUS_WINDOW_BARS,
+        neighbor_weight=NEIGHBOR_WEIGHT,
+        ambiguous_weight=AMBIGUOUS_WEIGHT,
+    )
+
+    df["soft_long_core"]    = long_core_arr.astype(np.int8)
+    df["soft_short_core"]   = short_core_arr.astype(np.int8)
+    df["soft_long_label"]   = long_zone.astype(np.int8)
+    df["soft_short_label"]  = short_zone.astype(np.int8)
+    df["soft_long_weight"]  = long_w.astype(np.float32)
+    df["soft_short_weight"] = short_w.astype(np.float32)
+
+    n_lc = int(long_core_arr.sum());   n_lz = int(long_zone.sum())
+    n_sc = int(short_core_arr.sum());  n_sz = int(short_zone.sum())
+    logger.info(
+        "[%s] soft labels: long core=%d zone=%d  short core=%d zone=%d",
+        ticker, n_lc, n_lz, n_sc, n_sz,
     )
     return df
 
 
-def _add_swing_metrics(df: pd.DataFrame) -> pd.DataFrame:
+# ---------------------------------------------------------------------------
+# Target + sample_weight construction
+# ---------------------------------------------------------------------------
+
+def _build_target(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add swing metrics based on fractal pivots (from add_fractal_pivots).
-    These columns use lookahead and are for label analysis only, not model features.
+    Derive hard XGBoost target and sample_weight from soft zone columns.
+
+    target:
+      2 (long)    if soft_long_label  == 1  (core or neighbor)
+      0 (short)   if soft_short_label == 1
+      1 (neutral) otherwise
+      Conflict (both long + short zone) → neutral, weight=0
+
+    sample_weight:
+      long  core → 1.0,  long  neighbor → 0.75
+      short core → 1.0,  short neighbor → 0.75
+      ambiguous  → 0.0
+      neutral    → 1.0
     """
-    # Binary fractal pivot indicators (from add_fractal_pivots)
-    pivot_long  = df.get("pivot_up", pd.Series(0, index=df.index))
-    pivot_short = df.get("pivot_down", pd.Series(0, index=df.index))
+    long_z  = df["soft_long_label"].to_numpy(np.int8)
+    short_z = df["soft_short_label"].to_numpy(np.int8)
+    long_w  = df["soft_long_weight"].to_numpy(np.float32)
+    short_w = df["soft_short_weight"].to_numpy(np.float32)
 
-    df["fractal_pivot_long"]  = pivot_long
-    df["fractal_pivot_short"] = pivot_short
+    n = len(df)
+    target = np.ones(n, dtype=np.int8)   # default neutral
+    weight = np.ones(n, dtype=np.float32)
 
-    # Bars since last fractal pivot
-    def _bars_since(flag: pd.Series) -> pd.Series:
-        out = []
-        count = 999
-        for v in flag:
-            if v:
-                count = 0
-            else:
-                count = min(count + 1, 999)
-            out.append(count)
-        return pd.Series(out, index=flag.index, dtype=float)
+    long_only  = (long_z  == 1) & (short_z == 0)
+    short_only = (short_z == 1) & (long_z  == 0)
+    conflict   = (long_z  == 1) & (short_z == 1)
 
-    df["bars_since_fractal_long"]  = _bars_since(pivot_long > 0)
-    df["bars_since_fractal_short"] = _bars_since(pivot_short > 0)
+    target[long_only]  = 2
+    target[short_only] = 0
+    target[conflict]   = 1
 
+    weight[long_only]  = long_w[long_only]
+    weight[short_only] = short_w[short_only]
+    weight[conflict]   = 0.0
+
+    df["target"]        = target.astype(int)
+    df["sample_weight"] = weight.astype(np.float32)
     return df
 
 
@@ -97,66 +211,55 @@ def build_ticker_labels(
     df_feat: pd.DataFrame,
 ) -> pd.DataFrame | None:
     """
-    Given a ticker's feature DataFrame (which is causal), compute:
-      - Triple-barrier labels (tb_label, tb_long_label, tb_short_label)
-      - Swing state machine gate (p_long_state_gate, p_short_state_gate) using fractal pivots
-      - Swing setup/metrics using fractal pivots (for analysis, not model features)
-      - Final target column
+    Compute soft swing zone labels + state gate for one ticker.
 
-    Note: Fractal pivots use 3-bar lookahead, which is OK here because:
-      1. They're used only for label generation (labels already look forward)
-      2. They're used for swing metrics/gates (not fed to the model as features)
-      3. Features themselves (in df_feat) are already causal
-
-    Returns a DataFrame with label/gate columns (index-aligned to df_feat).
+    df_feat must have a DatetimeIndex and causal OHLCV + atr_14 columns.
+    Returns a DataFrame of label columns aligned to df_feat's index.
     """
     df = df_feat.copy()
     df.columns = [c.lower() for c in df.columns]
 
+    # Ensure DatetimeIndex (features stage sets this, but be safe)
+    if not isinstance(df.index, pd.DatetimeIndex):
+        for col in ("timestamp", "time", "date"):
+            if col in df.columns:
+                df = df.set_index(col)
+                break
+        df.index = pd.to_datetime(df.index)
+
     required = {"open", "high", "low", "close", "atr_14"}
     missing = required - set(df.columns)
     if missing:
-        logger.warning("[%s] missing columns for labels: %s", ticker, missing)
+        logger.warning("[%s] missing columns: %s", ticker, missing)
         return None
 
     # ------------------------------------------------------------------
-    # 1. Add fractal pivots for swing setup/metrics (OK to have lookahead here)
+    # 1. Fractal pivots (lookahead OK — labels look forward by design)
     # ------------------------------------------------------------------
     try:
-        df = add_fractal_pivots(df)
+        df = add_fractal_pivots(df, sequence_count=SWING_LABEL_30M_CONFIG["sequence_count"])
     except Exception as exc:
         logger.warning("[%s] add_fractal_pivots failed: %s", ticker, exc)
 
-    # Ensure pivots exist for swing state machine
-    if "pivot_up" not in df.columns:
-        df["pivot_up"] = 0
-    if "pivot_down" not in df.columns:
-        df["pivot_down"] = 0
+    if "pivot_up"   not in df.columns: df["pivot_up"]   = 0
+    if "pivot_down" not in df.columns: df["pivot_down"] = 0
 
     # ------------------------------------------------------------------
-    # 2. Triple-barrier labels (multi-day swing horizon)
+    # 2. Soft swing zone labels (mirrors plot script exactly)
     # ------------------------------------------------------------------
     try:
-        df = add_triple_barrier_labels_atr(
-            df,
-            close_col="close",
-            high_col="high",
-            low_col="low",
-            open_col="open",
-            atr_col="atr_14",
-            atr_length=TRIPLE_BARRIER_CONFIG["atr_length"],
-            k_up=TRIPLE_BARRIER_CONFIG["k_up"],
-            k_dn=TRIPLE_BARRIER_CONFIG["k_dn"],
-            max_holding=TRIPLE_BARRIER_CONFIG["max_holding"],
-            chop_atr_mult=TRIPLE_BARRIER_CONFIG["chop_atr_mult"],
-            base_label_col="tb_label",
-        )
+        df = _build_soft_swing_labels(df, ticker)
     except Exception as exc:
-        logger.error("[%s] add_triple_barrier_labels_atr failed: %s", ticker, exc)
+        logger.error("[%s] soft swing labels failed: %s", ticker, exc)
         return None
 
     # ------------------------------------------------------------------
-    # 3. Swing state machine (binary fallback: uses pivot_up/pivot_down)
+    # 3. XGBoost target + sample_weight
+    # ------------------------------------------------------------------
+    df = _build_target(df)
+
+    # ------------------------------------------------------------------
+    # 4. Swing state machine gate (binary fallback; for future Cat5 features)
     # ------------------------------------------------------------------
     try:
         df = add_pivot_swing_state_machine(
@@ -176,45 +279,23 @@ def build_ticker_labels(
             allow_binary_fallback=True,
         )
     except Exception as exc:
-        logger.warning("[%s] swing state machine failed: %s — gate cols will be NaN", ticker, exc)
+        logger.warning("[%s] swing state machine failed: %s", ticker, exc)
         df["p_long_state_gate"]  = np.nan
         df["p_short_state_gate"] = np.nan
         df["p_long_pending"]     = np.nan
         df["p_short_pending"]    = np.nan
 
     # ------------------------------------------------------------------
-    # 4. Add swing setup/metrics based on fractal pivots (for analysis)
-    # These use lookahead but are only for label metrics, not model features
-    # ------------------------------------------------------------------
-    df = _add_swing_metrics(df)
-
-    # ------------------------------------------------------------------
-    # 5. Build target
-    # ------------------------------------------------------------------
-    df = _build_target(df)
-
-    # ------------------------------------------------------------------
-    # Return label columns + swing metrics
+    # Return label columns only
     # ------------------------------------------------------------------
     label_cols = [
-        "tb_label",
-        "tb_long_label",
-        "tb_short_label",
-        "tb_entry_price",
-        "tb_exit_price",
-        "tb_holding_bars",
-        "tb_realized_return",
-        "p_long_state_gate",
-        "p_short_state_gate",
-        "p_long_pending",
-        "p_short_pending",
+        "soft_long_core",  "soft_short_core",
+        "soft_long_label", "soft_short_label",
+        "soft_long_weight","soft_short_weight",
+        "target", "sample_weight",
+        "p_long_state_gate", "p_short_state_gate",
+        "p_long_pending",    "p_short_pending",
         "p_state_id",
-        "target",
-        # Swing metrics (from fractal pivots - lookahead OK for labels)
-        "fractal_pivot_long",
-        "fractal_pivot_short",
-        "bars_since_fractal_long",
-        "bars_since_fractal_short",
     ]
     existing = [c for c in label_cols if c in df.columns]
     return df[existing]
@@ -232,18 +313,14 @@ def build_all_labels(
     combined_path: Path = LABELS_COMBINED,
     force: bool = False,
 ) -> None:
-    """
-    Build labels for every universe ticker using per-ticker feature parquets,
-    save per-ticker label parquets, then combine.
-    """
     if combined_path.exists() and not force:
-        logger.info("Combined labels already exist at %s — skipping.", combined_path)
+        logger.info("Combined labels exist at %s — skipping.", combined_path)
         return
 
     universe = load_universe(universe_csv)
     tickers  = universe["ticker"].tolist()
-
     processed_lbl_dir.mkdir(parents=True, exist_ok=True)
+
     all_frames: list[pd.DataFrame] = []
     n = len(tickers)
 
@@ -252,7 +329,7 @@ def build_all_labels(
 
         per_lbl_path = processed_lbl_dir / f"{ticker}_labels.parquet"
         if per_lbl_path.exists() and not force:
-            logger.info("[%s] label cache hit — loading", ticker)
+            logger.info("[%s] label cache hit", ticker)
             df_lbl = pd.read_parquet(per_lbl_path)
             df_lbl["ticker"] = ticker
             all_frames.append(df_lbl)
@@ -260,7 +337,7 @@ def build_all_labels(
 
         df_feat = load_ticker_features(ticker, processed_30m_dir)
         if df_feat is None:
-            logger.warning("[%s] feature file missing — skipping labels", ticker)
+            logger.warning("[%s] feature file missing — skipping", ticker)
             continue
 
         df_lbl = build_ticker_labels(ticker, df_feat)
@@ -276,14 +353,14 @@ def build_all_labels(
         logger.error("No label frames built.")
         return
 
-    combined = pd.concat(all_frames, axis=0)
+    combined = pd.concat(all_frames)
     combined_path.parent.mkdir(parents=True, exist_ok=True)
     combined.to_parquet(combined_path)
     logger.info("Saved combined labels → %s  (%d rows)", combined_path, len(combined))
 
 
 # ---------------------------------------------------------------------------
-# Training matrix builder (merges features + labels, drops NaNs)
+# Training matrix builder
 # ---------------------------------------------------------------------------
 
 def build_training_matrix(
@@ -294,59 +371,54 @@ def build_training_matrix(
     feature_columns: list[str] = FEATURE_COLUMNS,
     force: bool = False,
 ) -> pd.DataFrame | None:
-    """
-    Inner-join features and labels on (timestamp, ticker), keep only
-    feature_columns + target, drop rows with NaN in any feature column.
-    """
     if output_path.exists() and not force:
-        logger.info("Training matrix already exists at %s — skipping.", output_path)
+        logger.info("Training matrix exists at %s — skipping.", output_path)
         return None
 
-    logger.info("Loading features from %s", features_path)
-    feat = pd.read_parquet(features_path)
-    logger.info("Loading labels from %s", labels_path)
-    lbl  = pd.read_parquet(labels_path)
+    feat = pd.read_parquet(features_path).reset_index()
+    lbl  = pd.read_parquet(labels_path).reset_index()
 
-    # Align index structure: both should have (timestamp, ticker) or similar
-    feat = feat.reset_index()
-    lbl  = lbl.reset_index()
+    feat_ts = _find_ts_col(feat)
+    lbl_ts  = _find_ts_col(lbl)
 
-    # Identify join keys
-    feat_ts_col  = _find_ts_col(feat)
-    lbl_ts_col   = _find_ts_col(lbl)
+    lbl_keep = [lbl_ts, "ticker",
+                "target", "sample_weight",
+                "soft_long_label", "soft_short_label",
+                "soft_long_weight", "soft_short_weight",
+                "soft_long_core", "soft_short_core",
+                "p_long_state_gate", "p_short_state_gate"]
+    lbl_keep = [c for c in lbl_keep if c in lbl.columns]
 
     merged = pd.merge(
         feat,
-        lbl[[ lbl_ts_col, "ticker", "target",
-              "tb_label", "tb_long_label", "tb_short_label",
-              "tb_realized_return", "tb_holding_bars",
-              "p_long_state_gate", "p_short_state_gate" ]],
-        left_on=[feat_ts_col, "ticker"],
-        right_on=[lbl_ts_col, "ticker"],
+        lbl[lbl_keep],
+        left_on=[feat_ts, "ticker"],
+        right_on=[lbl_ts, "ticker"],
         how="inner",
     )
 
-    # Keep only feature columns that exist
-    available_feats = [c for c in feature_columns if c in merged.columns]
-    missing_feats   = set(feature_columns) - set(available_feats)
-    if missing_feats:
-        logger.warning("Features missing from combined matrix: %s", sorted(missing_feats))
+    available = [c for c in feature_columns if c in merged.columns]
+    missing   = set(feature_columns) - set(available)
+    if missing:
+        logger.warning("Features missing from matrix: %s", sorted(missing))
 
-    keep = [feat_ts_col, "ticker"] + available_feats + [
-        "target", "tb_label", "tb_realized_return",
+    keep = [feat_ts, "ticker"] + available + [
+        "target", "sample_weight",
+        "soft_long_label", "soft_short_label",
         "p_long_state_gate", "p_short_state_gate",
     ]
-    keep = [c for c in keep if c in merged.columns]
+    keep   = [c for c in keep if c in merged.columns]
     merged = merged[keep]
 
     before = len(merged)
-    merged = merged.dropna(subset=available_feats)
+    merged = merged.dropna(subset=available)
     after  = len(merged)
     logger.info("Dropped %d NaN rows (%d → %d)", before - after, before, after)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_parquet(output_path, index=False)
-    logger.info("Saved training matrix → %s  (%d rows, %d features)", output_path, after, len(available_feats))
+    logger.info("Saved training matrix → %s  (%d rows, %d features)",
+                output_path, after, len(available))
     return merged
 
 

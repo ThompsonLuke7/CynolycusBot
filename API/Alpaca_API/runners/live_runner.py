@@ -689,6 +689,75 @@ def _load_prefill_frame(path: Path) -> pd.DataFrame:
     return df
 
 
+def _required_prefill_start_utc(
+    *,
+    precomputed_meta_frame: pd.DataFrame | None,
+    append_lookback_days: int,
+    tz_name: str = "America/New_York",
+) -> pd.Timestamp | None:
+    if not isinstance(precomputed_meta_frame, pd.DataFrame) or precomputed_meta_frame.empty:
+        return None
+    cached_max = precomputed_meta_frame.index.max()
+    if not isinstance(cached_max, pd.Timestamp) or pd.isna(cached_max):
+        return None
+    if cached_max.tz is None:
+        cached_max = cached_max.tz_localize(tz_name)
+    required_start = cached_max - pd.Timedelta(days=max(1, int(append_lookback_days)))
+    return required_start.tz_convert("UTC")
+
+
+def _timestamp_range_utc(df: pd.DataFrame) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    if df is None or df.empty:
+        return None, None
+    if "timestamp" in df.columns:
+        ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dropna()
+    elif isinstance(df.index, pd.DatetimeIndex):
+        ts = pd.to_datetime(df.index, utc=True, errors="coerce").dropna()
+    else:
+        return None, None
+    if ts.empty:
+        return None, None
+    return ts.min(), ts.max()
+
+
+def _load_prefill_with_runtime_cache(
+    *,
+    configured_prefill_path: Path,
+    runtime_prefill_cache_path: Path,
+    precomputed_meta_frame: pd.DataFrame | None,
+    append_lookback_days: int,
+    tz_name: str = "America/New_York",
+) -> tuple[pd.DataFrame, str]:
+    required_start = _required_prefill_start_utc(
+        precomputed_meta_frame=precomputed_meta_frame,
+        append_lookback_days=append_lookback_days,
+        tz_name=tz_name,
+    )
+    configured_df: pd.DataFrame | None = None
+    runtime_df: pd.DataFrame | None = None
+
+    if runtime_prefill_cache_path.exists():
+        runtime_df = _load_prefill_frame(runtime_prefill_cache_path)
+        runtime_min, _runtime_max = _timestamp_range_utc(runtime_df)
+        if required_start is None or (runtime_min is not None and runtime_min <= required_start):
+            return runtime_df, str(runtime_prefill_cache_path)
+
+    configured_df = _load_prefill_frame(configured_prefill_path)
+    if runtime_df is None or runtime_df.empty:
+        return configured_df, str(configured_prefill_path)
+
+    merged = pd.concat([configured_df, runtime_df], axis=0, ignore_index=True)
+    merged["timestamp"] = pd.to_datetime(merged["timestamp"], utc=True, errors="coerce")
+    merged = merged.dropna(subset=["timestamp"]).sort_values("timestamp")
+    if "symbol" in merged.columns:
+        merged["symbol"] = merged["symbol"].astype(str).str.upper()
+        merged = merged.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+    else:
+        merged = merged.drop_duplicates(subset=["timestamp"], keep="last")
+    source = f"{configured_prefill_path} + {runtime_prefill_cache_path}"
+    return merged.reset_index(drop=True), source
+
+
 def _default_runtime_prefill_cache_path(prefill_path: Path) -> Path:
     suffix = prefill_path.suffix.lower()
     if suffix not in {".parquet", ".csv"}:
@@ -1673,8 +1742,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--meta-base-frame-append-lookback-days",
         type=int,
-        default=120,
-        help="When live bars extend past the cached matrix, recompute only this many days of 1m history and append.",
+        default=900,
+        help="When live bars extend past the cached matrix, recompute this many days of 1m history and append.",
     )
     parser.add_argument(
         "--meta-entry-threshold",
@@ -1707,7 +1776,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
     parser.add_argument(
         "--prefill-path",
-        default="Data/raw/spy/spy_intraday_1min_live_2026_03_24.parquet",
+        default="Data/raw/spy/1m_train.parquet",
         help="Optional CSV/Parquet path to prefill the 1m buffer for warm start. If --no-prefill-fetch is not set, Alpaca will only fetch and append the missing gap after the latest local bar.",
     )
     parser.add_argument(
@@ -1743,13 +1812,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--meta-intrabar-long-setup-threshold",
         type=float,
-        default=0.42,
+        default=0.35,
         help="Optional long setup threshold override used by the intrabar policy.",
     )
     parser.add_argument(
         "--meta-intrabar-short-setup-threshold",
         type=float,
-        default=0.15,
+        default=0.65,
         help="Optional short setup threshold override used by the intrabar policy.",
     )
     parser.add_argument(
@@ -2276,10 +2345,14 @@ def main() -> None:
     if args.prefill_path:
         configured_prefill_path = Path(args.prefill_path)
         runtime_prefill_cache_path = _default_runtime_prefill_cache_path(configured_prefill_path)
-        prefill_source_path = runtime_prefill_cache_path if runtime_prefill_cache_path.exists() else configured_prefill_path
-        if prefill_source_path == runtime_prefill_cache_path:
-            print(f"[live] Using runtime prefill cache: {runtime_prefill_cache_path}")
-        prefill_df = _load_prefill_frame(prefill_source_path)
+        prefill_df, prefill_source = _load_prefill_with_runtime_cache(
+            configured_prefill_path=configured_prefill_path,
+            runtime_prefill_cache_path=runtime_prefill_cache_path,
+            precomputed_meta_frame=precomputed_meta_frame,
+            append_lookback_days=int(args.meta_base_frame_append_lookback_days),
+            tz_name=args.tz or "America/New_York",
+        )
+        print(f"[live] Loaded prefill source: {prefill_source}")
         if not args.no_prefill_fetch:
             try:
                 prefill_df = _extend_prefill_with_alpaca_gap(

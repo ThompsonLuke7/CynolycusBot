@@ -56,8 +56,8 @@ def _parse_args() -> argparse.Namespace:
         default=str(DEFAULT_ANALYSIS_DIR / "phase4_last_month_10m_probas_entries_exits.png"),
     )
     parser.add_argument("--days", type=int, default=31)
-    parser.add_argument("--long-threshold", type=float, default=0.42)
-    parser.add_argument("--short-threshold", type=float, default=0.15)
+    parser.add_argument("--long-threshold", type=float, default=0.35)
+    parser.add_argument("--short-threshold", type=float, default=0.65)
     return parser.parse_args()
 
 

@@ -274,7 +274,7 @@
             <div class="field"><label>Replay Option Proxy</label><select id="replayOptionProxyMode"><option value="black_scholes" selected>Black-Scholes</option><option value="none">None</option></select></div>
             <div class="field"><label>Catch-up Max Age (min)</label><input id="startupCatchupMaxAgeMin" type="number" min="0" value="120" /></div>
             <div class="field"><label>Replay Max Bars</label><input id="replayMaxBars" type="number" min="1" placeholder="all" /></div>
-            <div class="field"><label>Replay Warmup Bars</label><input id="replayWarmupBars" type="number" min="0" value="5000" /></div>
+            <div class="field"><label>Replay Warmup Bars</label><input id="replayWarmupBars" type="number" min="0" value="250000" /></div>
             <div class="checks">
               <label><input id="enableOrders" type="checkbox" checked /> Option Orders</label>
               <label><input id="simulateOrders" type="checkbox" checked /> Simulate</label>
@@ -1205,8 +1205,8 @@
       const positionSegments = [];
       const triggerWindows = [];
       const chartPolicyState = state.policy_state?.[sym] || {};
-      const longSetupThreshold = Number(chartPolicyState.meta_intrabar_long_setup_threshold ?? 0.42);
-      const shortSetupThreshold = Number(chartPolicyState.meta_intrabar_short_setup_threshold ?? 0.15);
+      const longSetupThreshold = Number(chartPolicyState.meta_intrabar_long_setup_threshold ?? 0.35);
+      const shortSetupThreshold = Number(chartPolicyState.meta_intrabar_short_setup_threshold ?? 0.65);
       const setupMaxBars = Math.max(1, Number(chartPolicyState.meta_intrabar_setup_max_bars ?? 4));
       const orderEvents = (state.trade_events || [])
         .filter((e) => e && e.symbol === sym && e.timestamp && e.result)
@@ -1885,8 +1885,8 @@
         meta_entry_prob_source: "swing_support_single",
         swing_setup_single_model_dir: "Data/models/ga_xgboost/10min/single/swing_support_single",
         meta_intrabar_entry_policy: "phase4_swing_setup_bodyclose_bodyclose_v1",
-        meta_intrabar_long_setup_threshold: 0.42,
-        meta_intrabar_short_setup_threshold: 0.15,
+        meta_intrabar_long_setup_threshold: 0.35,
+        meta_intrabar_short_setup_threshold: 0.65,
         meta_hard_stop_atr: Number(document.getElementById("metaHardStopAtr").value || 0),
         meta_base_frame_path: document.getElementById("metaBaseFramePath").value,
         prefill_path: document.getElementById("prefillPath").value,
@@ -1897,7 +1897,7 @@
         replay_end: document.getElementById("replayEnd").value || null,
         replay_sleep: Number(document.getElementById("replaySleep").value || 0),
         replay_max_bars: replayMaxRaw ? Number(replayMaxRaw) : null,
-        replay_warmup_bars: Number(document.getElementById("replayWarmupBars").value || 5000),
+        replay_warmup_bars: Number(document.getElementById("replayWarmupBars").value || 250000),
         replay_regular_only: document.getElementById("replayRegularOnly").checked,
         replay_no_prepend_split_test_warmup: document.getElementById("replayNoWarmup").checked,
         exec_flip_abs_threshold: Number(document.getElementById("execFlipAbsThreshold").value || 0),
