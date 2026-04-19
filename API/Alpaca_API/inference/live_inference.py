@@ -16,6 +16,8 @@ import xgboost as xgb
 
 from Policy.Agent.env import sincos_time_of_day
 from Policy.Agent.model import ActorCritic
+from Policy.regime_filter import StickyRegimeConfig, add_sticky_trend_regime
+from Policy.regime_probability_filter import RegimeProbabilityCalibrator
 from Features.feature_matrix import (
     DEFAULT_FEATURE_TIMEFRAMES,
     _add_feature_set,
@@ -1735,6 +1737,7 @@ class LiveIndependentMetaXGBAgent:
         entry_prob_source: str = "meta",
         swing_setup_single_model_dir: str | Path | None = None,
         swing_setup_probs_frame: pd.DataFrame | None = None,
+        regime_probability_calibrator: RegimeProbabilityCalibrator | None = None,
     ) -> None:
         common_kwargs = dict(
             model_root=model_root,
@@ -1796,6 +1799,7 @@ class LiveIndependentMetaXGBAgent:
         self._swing_setup_missing_warned = False
         self._swing_setup_annotated_cache: pd.DataFrame | None = None
         self._swing_setup_annotated_cache_key: tuple[int, object, object, int] | None = None
+        self._regime_probability_calibrator = regime_probability_calibrator
         if self._entry_prob_source == "swing_support_single":
             if swing_setup_single_model_dir is None:
                 raise ValueError("swing_setup_single_model_dir is required when entry_prob_source='swing_support_single'")
@@ -1966,7 +1970,12 @@ class LiveIndependentMetaXGBAgent:
     def _build_independent_base_frame(self, *, df_1m: pd.DataFrame) -> pd.DataFrame:
         base_frame = self._base_agent._build_base_frame(df_1m=df_1m)
         if self._entry_prob_source == "swing_support_single":
-            return self._annotate_swing_setup_probs(df_1m=df_1m, base_frame=base_frame)
+            base_frame = self._annotate_swing_setup_probs(df_1m=df_1m, base_frame=base_frame)
+        if self._regime_probability_calibrator is not None and not base_frame.empty:
+            try:
+                base_frame = add_sticky_trend_regime(base_frame, config=StickyRegimeConfig())
+            except Exception:
+                pass
         return base_frame
 
     def _row_with_entries(self, base_frame: pd.DataFrame, row: pd.Series) -> tuple[pd.Series, float, float]:
@@ -1981,7 +1990,7 @@ class LiveIndependentMetaXGBAgent:
         work_row["p_enter_short_oof"] = p_enter_short
         return work_row, float(p_enter_long), float(p_enter_short)
 
-    def _score_row(self, base_frame: pd.DataFrame, row: pd.Series) -> tuple[pd.Series, dict[str, float | None]]:
+    def _score_row(self, base_frame: pd.DataFrame, row: pd.Series) -> tuple[pd.Series, dict[str, object]]:
         work_row, p_enter_long, p_enter_short = self._row_with_entries(base_frame, row)
         if self._entry_prob_source == "swing_support_single":
             p_exit_long = float("nan")
@@ -2012,6 +2021,14 @@ class LiveIndependentMetaXGBAgent:
             "p_exit_long": p_exit_long,
             "p_exit_short": p_exit_short,
         }
+        if self._regime_probability_calibrator is not None:
+            ann_row = row.copy()
+            ann_row["p_enter_long"] = p_enter_long
+            ann_row["p_enter_short"] = p_enter_short
+            try:
+                probs.update(self._regime_probability_calibrator.annotate_row(ann_row))
+            except Exception:
+                pass
         return work_row, probs
 
     def _advance_independent_state(self, *, work_row: pd.Series, probs: dict[str, float | None]) -> int:
@@ -2023,17 +2040,24 @@ class LiveIndependentMetaXGBAgent:
         long_hold_ready = bool(self._long_active and self._long_bars_held >= self._min_hold_bars)
         short_hold_ready = bool(self._short_active and self._short_bars_held >= self._min_hold_bars)
 
+        enter_long_thr = float(probs.get("regime_thr_enter_long", self._entry_thresholds["enter_long"]))
+        enter_short_thr = float(probs.get("regime_thr_enter_short", self._entry_thresholds["enter_short"]))
+        if not np.isfinite(enter_long_thr):
+            enter_long_thr = float(self._entry_thresholds["enter_long"])
+        if not np.isfinite(enter_short_thr):
+            enter_short_thr = float(self._entry_thresholds["enter_short"])
+
         long_soft_exit_condition = bool(
             self._long_active
             and long_hold_ready
             and np.isfinite(p_enter_long)
-            and p_enter_long < float(self._entry_thresholds["enter_long"])
+            and p_enter_long < enter_long_thr
         )
         short_soft_exit_condition = bool(
             self._short_active
             and short_hold_ready
             and np.isfinite(p_enter_short)
-            and p_enter_short < float(self._entry_thresholds["enter_short"])
+            and p_enter_short < enter_short_thr
         )
         self._long_soft_exit_count = self._long_soft_exit_count + 1 if long_soft_exit_condition else 0
         self._short_soft_exit_count = self._short_soft_exit_count + 1 if short_soft_exit_condition else 0
@@ -2092,8 +2116,8 @@ class LiveIndependentMetaXGBAgent:
 
         do_exit_long = bool(long_urgent_exit or self._long_soft_exit_count >= self._soft_exit_confirm_bars)
         do_exit_short = bool(short_urgent_exit or self._short_soft_exit_count >= self._soft_exit_confirm_bars)
-        do_entry_long = bool((not self._long_active) and np.isfinite(p_enter_long) and p_enter_long >= float(self._entry_thresholds["enter_long"]))
-        do_entry_short = bool((not self._short_active) and np.isfinite(p_enter_short) and p_enter_short >= float(self._entry_thresholds["enter_short"]))
+        do_entry_long = bool((not self._long_active) and np.isfinite(p_enter_long) and p_enter_long >= enter_long_thr)
+        do_entry_short = bool((not self._short_active) and np.isfinite(p_enter_short) and p_enter_short >= enter_short_thr)
 
         next_long_active = bool((self._long_active and not do_exit_long) or do_entry_long)
         next_short_active = bool((self._short_active and not do_exit_short) or do_entry_short)
@@ -2129,10 +2153,14 @@ class LiveIndependentMetaXGBAgent:
         out: list[dict[str, object]] = []
         for _, row in rows.iterrows():
             work_row, probs = self._score_row(base_frame, row)
-            self._last_probs = {
-                key: (None if not np.isfinite(val) else float(val))
-                for key, val in probs.items()
-            }
+            self._last_probs = {}
+            for key, val in probs.items():
+                try:
+                    fval = float(val)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    self._last_probs[key] = val if val is not None else None
+                    continue
+                self._last_probs[key] = None if not np.isfinite(fval) else float(fval)
             self._last_prob_sources = self._base_agent._extract_last_prob_sources(base_frame, row.name)
             if self._last_prob_sources is None:
                 self._last_prob_sources = {}
@@ -2158,6 +2186,11 @@ class LiveIndependentMetaXGBAgent:
                     "p_exit_short": self._last_probs.get("p_exit_short") if self._last_probs else None,
                     "thr_enter_long": float(self._entry_thresholds.get("enter_long", float("nan"))),
                     "thr_enter_short": float(self._entry_thresholds.get("enter_short", float("nan"))),
+                    "regime_thr_enter_long": self._last_probs.get("regime_thr_enter_long") if self._last_probs else None,
+                    "regime_thr_enter_short": self._last_probs.get("regime_thr_enter_short") if self._last_probs else None,
+                    "trend_regime": self._last_probs.get("trend_regime") if self._last_probs else None,
+                    "p_enter_long_regime_pctile": self._last_probs.get("p_enter_long_regime_pctile") if self._last_probs else None,
+                    "p_enter_short_regime_pctile": self._last_probs.get("p_enter_short_regime_pctile") if self._last_probs else None,
                     "thr_exit_long": float(self._exit_thresholds.get("exit_long", float("nan"))),
                     "thr_exit_short": float(self._exit_thresholds.get("exit_short", float("nan"))),
                 }
@@ -2220,6 +2253,16 @@ class LiveIndependentMetaXGBAgent:
         return {
             "enter_long": float(self._entry_thresholds.get("enter_long", float("nan"))),
             "enter_short": float(self._entry_thresholds.get("enter_short", float("nan"))),
+            "regime_enter_long": (
+                float(self._last_probs["regime_thr_enter_long"])
+                if self._last_probs and self._last_probs.get("regime_thr_enter_long") is not None
+                else float("nan")
+            ),
+            "regime_enter_short": (
+                float(self._last_probs["regime_thr_enter_short"])
+                if self._last_probs and self._last_probs.get("regime_thr_enter_short") is not None
+                else float("nan")
+            ),
             "exit_long": float(self._exit_thresholds.get("exit_long", float("nan"))),
             "exit_short": float(self._exit_thresholds.get("exit_short", float("nan"))),
         }

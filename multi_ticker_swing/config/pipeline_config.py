@@ -149,11 +149,35 @@ FEATURES_LOCATION = [
 ]
 
 # Cat 10 – Time features
+# Note: hour_sin/hour_cos (24h encoding) removed — RTH spans only hour_cos ∈ [-1, -0.5],
+# providing nearly zero signal.  Replaced with session-relative fraction.
 FEATURES_TIME = [
-    "hour_sin", "hour_cos",
+    "session_frac", "session_frac_sin",
     "day_of_week_sin", "day_of_week_cos",
     "is_monday", "is_friday",
     "bars_from_open", "bars_to_close",
+]
+
+# Cat 12 – Daily (HTF) context — shift(1) applied; no leakage into intraday bars
+FEATURES_DAILY = [
+    "daily_ret_1",
+    "daily_atr_pct",
+    "daily_rsi_14",
+    "daily_ema_dist_20",
+    "daily_ema_dist_50",
+    "daily_trend_state",
+    "daily_range_pos_20",
+    "daily_vol_rel_20",
+]
+
+# Cat 3b – Momentum oscillators
+FEATURES_OSCILLATORS = [
+    "rsi_14",
+    "macd_hist_12_26_9",
+    "bb_pct_b_20",
+    "stoch_k_14",
+    "mfi_14",
+    "chop_14",
 ]
 
 # Cat 11 – Behavioral identity
@@ -173,12 +197,14 @@ FEATURE_COLUMNS: list[str] = (
     FEATURES_PRICE
     + FEATURES_VOL
     + FEATURES_TREND
+    + FEATURES_OSCILLATORS
     + FEATURES_SWING
     + FEATURES_VOLUME
     + FEATURES_GAP
     + FEATURES_RS
     + FEATURES_LOCATION
     + FEATURES_TIME
+    + FEATURES_DAILY
     + FEATURES_BEHAVIORAL
 )
 

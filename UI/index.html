@@ -296,7 +296,7 @@
             <select id="symbolSelect"></select>
           </div>
           <div class="chart-hint">
-            Dashed arrows and setup probabilities are plotted when the 10m bar is available, not at the bar open: green long, red short, gray flat. Thin horizontal dashed segments are the armed 1m trigger price and valid window. Hollow markers are armed trigger intents. Filled circles or squares only appear for actual broker orders. Blue is long setup probability; amber is short setup probability.
+            Setup arrows mark completed 10m bars: green is long setup, red is short setup. Shaded bands plus dashed horizontal lines are armed 1m trigger windows, not positions. Solid horizontal lines show an actual held option position. Hollow triangles are policy intent only. Filled circles are buy/open order legs; filled squares are sell/close order legs. Blue is long setup probability; amber is short setup probability.
           </div>
           <div class="chart-wrap"><canvas id="chart"></canvas></div>
         </div>
@@ -1185,6 +1185,72 @@
         { xDomain: pane3Domain, barIntervalMs: intervalMs }
       );
 
+      function drawLegend() {
+        const items = [
+          { text: "setup bar", color: "#2ccf7a", shape: "triangle" },
+          { text: "armed trigger window", color: "#69e3aa", shape: "dash" },
+          { text: "held position", color: "#40d69a", shape: "solid" },
+          { text: "intent only", color: "#d7e4f7", shape: "hollow" },
+          { text: "buy/open", color: "#40d69a", shape: "circle" },
+          { text: "sell/close", color: "#f0b04f", shape: "square" },
+        ];
+        ctx.save();
+        ctx.font = "11px Consolas, monospace";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        let x = left + 6;
+        const y = 14;
+        items.forEach((item) => {
+          ctx.strokeStyle = item.color;
+          ctx.fillStyle = item.color;
+          ctx.lineWidth = 1.4;
+          if (item.shape === "triangle") {
+            ctx.beginPath();
+            ctx.moveTo(x + 5, y - 5);
+            ctx.lineTo(x, y + 4);
+            ctx.lineTo(x + 10, y + 4);
+            ctx.closePath();
+            ctx.fill();
+            x += 16;
+          } else if (item.shape === "dash") {
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(x + 18, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            x += 24;
+          } else if (item.shape === "solid") {
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(x + 18, y);
+            ctx.stroke();
+            x += 24;
+          } else if (item.shape === "hollow") {
+            ctx.fillStyle = "transparent";
+            ctx.beginPath();
+            ctx.moveTo(x + 5, y - 5);
+            ctx.lineTo(x, y + 4);
+            ctx.lineTo(x + 10, y + 4);
+            ctx.closePath();
+            ctx.stroke();
+            x += 16;
+          } else if (item.shape === "circle") {
+            ctx.beginPath();
+            ctx.arc(x + 5, y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            x += 16;
+          } else if (item.shape === "square") {
+            ctx.fillRect(x + 1, y - 4, 8, 8);
+            x += 16;
+          }
+          ctx.fillStyle = "#9fb8d5";
+          ctx.fillText(item.text, x, y);
+          x += Math.ceil(ctx.measureText(item.text).width) + 16;
+        });
+        ctx.restore();
+      }
+
       const actionsAll = (state.action_events || [])
         .filter((a) => a && a.symbol === sym && a.timestamp)
         .slice(-600)
@@ -1513,7 +1579,7 @@
             ctx.lineTo(x + 4, yBase + 4);
             ctx.lineTo(x - 4, yBase + 4);
             ctx.closePath();
-            ctx.stroke();
+            ctx.fill();
           } else {
             ctx.beginPath();
             ctx.arc(x, yBase, 4, 0, Math.PI * 2);
@@ -1559,6 +1625,16 @@
           ctx.moveTo(x2, y - 5);
           ctx.lineTo(x2, y + 5);
           ctx.stroke();
+          if (Math.abs(x2 - x1) > 58) {
+            ctx.font = "11px Consolas, monospace";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "bottom";
+            ctx.fillStyle = color;
+            const label = `held ${seg.side}`;
+            const labelX = Math.max(left + 4, Math.min(w - right - 68, Math.min(x1, x2) + 5));
+            const labelY = Math.max(pane.y0 + 12, Math.min(pane.y0 + pane.paneHeight - 2, y - 4));
+            ctx.fillText(label, labelX, labelY);
+          }
           ctx.restore();
         });
       }
@@ -1573,6 +1649,7 @@
       drawPolicyMarkers(pane2);
       drawOrderMarkers(pane1);
       drawOrderMarkers(pane2);
+      drawLegend();
 
       function hoverAnchorTimeMs(...panes) {
         if (!hover.active) return Number.NaN;

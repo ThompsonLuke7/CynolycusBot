@@ -24,6 +24,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -49,6 +50,7 @@ from multi_ticker_swing.config.pipeline_config import (
     MODELS_DIR,
     NEUTRAL_WEIGHT_FACTOR,
     OOF_N_FOLDS,
+    RAW_30M_DIR,
     TRAINING_MATRIX,
     TRAIN_FRAC,
     VAL_FRAC,
@@ -140,8 +142,11 @@ def _compute_metrics(y_true: np.ndarray, proba: np.ndarray, split: str) -> dict:
     }
 
 
-def _make_clf(xgb_config: dict) -> XGBClassifier:
-    cfg   = {k: v for k, v in xgb_config.items() if k != "early_stopping_rounds"}
+def _make_clf(xgb_config: dict, early_stopping_rounds: int | None = None) -> XGBClassifier:
+    # XGBoost ≥2.0 requires early_stopping_rounds in the constructor, not fit()
+    cfg = {k: v for k, v in xgb_config.items() if k != "early_stopping_rounds"}
+    if early_stopping_rounds is not None:
+        cfg["early_stopping_rounds"] = early_stopping_rounds
     return XGBClassifier(**cfg, verbosity=1)
 
 
@@ -184,12 +189,11 @@ def run_oof(
         es_start = int(train_end * 0.85)
         X_es, y_es = X_tr[es_start:], y_tr[es_start:]
 
-        clf = _make_clf(xgb_config)
+        clf = _make_clf(xgb_config, early_stopping_rounds=early)
         clf.fit(
             X_tr, y_tr,
             sample_weight=sw_tr,
             eval_set=[(X_es, y_es)],
-            early_stopping_rounds=early,
             verbose=False,
         )
 
@@ -279,13 +283,12 @@ def train(
     # ------------------------------------------------------------------
     logger.info("=== Full fit ===")
     early = xgb_config.get("early_stopping_rounds", 60)
-    clf = _make_clf(xgb_config)
+    clf = _make_clf(xgb_config, early_stopping_rounds=early)
 
     clf.fit(
         X_train, y_train,
         sample_weight=sw_train,
         eval_set=[(X_val, y_val)],
-        early_stopping_rounds=early,
         verbose=50,
     )
 
@@ -321,7 +324,273 @@ def train(
     logger.info("Model   → %s", model_path)
     logger.info("FI      → %s", feature_importance_path)
     logger.info("Metrics → %s", eval_metrics_path)
+
+    # ------------------------------------------------------------------
+    # 6. Plots
+    # ------------------------------------------------------------------
+    test_proba = clf.predict_proba(X_test)
+    _plot_results(
+        y_train=y_train,
+        y_test=y_test,
+        test_proba=test_proba,
+        test_df=test_df,
+        fi_df=fi_df,
+        oof_metrics=all_metrics,
+        plots_dir=MODELS_DIR / "plots",
+    )
+
     return clf
+
+
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
+
+def _plot_results(
+    *,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    test_proba: np.ndarray,
+    test_df: pd.DataFrame,
+    fi_df: pd.DataFrame,
+    oof_metrics: dict,
+    plots_dir: Path,
+) -> None:
+    """
+    Generate and save four diagnostic plots after training:
+      1. Probability distributions by true class (separation quality)
+      2. OOF vs val vs test metric summary bar chart
+      3. Test-set swing setup signals over time (p_long / p_short time series)
+      4. Feature importance (top 30)
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    DARK_BG  = "#0d1117"
+    GRID_COL = "#21262d"
+    TEXT_COL = "#c9d1d9"
+    GREEN    = "#26a641"
+    RED      = "#f85149"
+    BLUE     = "#58a6ff"
+    AMBER    = "#e3b341"
+
+    def _style(fig, axes):
+        fig.patch.set_facecolor(DARK_BG)
+        for ax in (axes if hasattr(axes, "__iter__") else [axes]):
+            ax.set_facecolor(DARK_BG)
+            ax.tick_params(colors=TEXT_COL)
+            ax.xaxis.label.set_color(TEXT_COL)
+            ax.yaxis.label.set_color(TEXT_COL)
+            ax.title.set_color(TEXT_COL)
+            for spine in ax.spines.values():
+                spine.set_edgecolor(GRID_COL)
+            ax.grid(color=GRID_COL, linewidth=0.5)
+
+    # ---- 1. Probability separation by true class -------------------------
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    class_names  = ["short", "neutral", "long"]
+    class_colors = [RED, AMBER, GREEN]
+    true_colors  = [RED, AMBER, GREEN]
+
+    for col_idx, (cls_name, cls_color) in enumerate(zip(class_names, class_colors)):
+        ax = axes[col_idx]
+        for true_cls, tc_name, tc_color in zip([0, 1, 2], class_names, true_colors):
+            mask = y_test == true_cls
+            ax.hist(
+                test_proba[mask, col_idx],
+                bins=50, range=(0, 1),
+                alpha=0.55, color=tc_color,
+                label=f"true={tc_name} (n={mask.sum():,})",
+                density=True,
+            )
+        ax.set_title(f"P({cls_name}) by true class")
+        ax.set_xlabel("predicted probability")
+        ax.set_ylabel("density")
+        ax.legend(fontsize=7, facecolor=DARK_BG, labelcolor=TEXT_COL, edgecolor=GRID_COL)
+    _style(fig, axes)
+    fig.suptitle("Test set — probability separation by true class", color=TEXT_COL, fontsize=11)
+    plt.tight_layout()
+    fig.savefig(plots_dir / "prob_separation.png", dpi=130, bbox_inches="tight",
+                facecolor=DARK_BG)
+    plt.close(fig)
+
+    # ---- 2. Metric summary (OOF / val / test) ----------------------------
+    splits   = ["oof", "val", "test"]
+    metrics  = ["accuracy", "long_precision", "long_wr", "short_precision", "short_wr"]
+    m_labels = ["Accuracy", "Long prec", "Long WR", "Short prec", "Short WR"]
+    m_colors = [BLUE, GREEN, GREEN, RED, RED]
+    x        = np.arange(len(splits))
+    width    = 0.15
+
+    fig, ax = plt.subplots(figsize=(13, 5))
+    for i, (m, label, color) in enumerate(zip(metrics, m_labels, m_colors)):
+        vals = []
+        for sp in splits:
+            key = f"{sp}_{m}"
+            v = oof_metrics.get(key)
+            vals.append(float(v) if v is not None else 0.0)
+        offset = (i - len(metrics) / 2) * width + width / 2
+        bars = ax.bar(x + offset, vals, width, label=label, color=color, alpha=0.8)
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.005,
+                        f"{v:.3f}", ha="center", va="bottom", fontsize=6, color=TEXT_COL)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(["OOF (train)", "Val", "Test"], color=TEXT_COL)
+    ax.set_ylim(0, 1.05)
+    ax.set_title("Key metrics across splits", color=TEXT_COL)
+    ax.legend(fontsize=8, facecolor=DARK_BG, labelcolor=TEXT_COL, edgecolor=GRID_COL)
+    _style(fig, [ax])
+    plt.tight_layout()
+    fig.savefig(plots_dir / "metric_summary.png", dpi=130, bbox_inches="tight",
+                facecolor=DARK_BG)
+    plt.close(fig)
+
+    # ---- 3. Test-set candle + proba overlay (3 random tickers) ----------
+    # Reuses _plot_candles from the shared plotting library.
+    # Top panel:    30m candlestick bars (last 60 bars of each ticker's test window)
+    # Middle panel: P(long) green line + P(short) red line with threshold
+    # Bottom panel: true label colour strip (green=long, red=short, grey=neutral)
+    try:
+        from Data.plots.plots import _plot_candles, _extract_ohlc
+    except ImportError:
+        _plot_candles = None
+
+    # Attach probas + true labels to test_df rows so we can filter by ticker
+    _tdf = test_df.copy()
+    _tdf["_p_long"]  = test_proba[:, 2]
+    _tdf["_p_short"] = test_proba[:, 0]
+    _tdf["_y"]       = y_test
+
+    rng = np.random.default_rng(42)
+    if "ticker" in _tdf.columns:
+        tickers_in_test = _tdf["ticker"].unique().tolist()
+        sample_tickers  = rng.choice(
+            tickers_in_test, size=min(3, len(tickers_in_test)), replace=False
+        ).tolist()
+    else:
+        sample_tickers = []
+
+    PLOT_BARS = 80   # last N 30m bars of each ticker's test window
+
+    for ticker in sample_tickers:
+        t_rows = _tdf[_tdf["ticker"] == ticker].copy()
+        if "timestamp" in t_rows.columns:
+            t_rows = t_rows.sort_values("timestamp")
+            ts_series = pd.to_datetime(t_rows["timestamp"])
+        else:
+            ts_series = None
+
+        # Load raw OHLCV and slice to the same window
+        raw_path = RAW_30M_DIR / f"{ticker}.parquet"
+        if not raw_path.exists() or _plot_candles is None:
+            continue
+
+        raw = pd.read_parquet(raw_path)
+        raw.columns = [c.lower() for c in raw.columns]
+        if "timestamp" in raw.columns and not isinstance(raw.index, pd.DatetimeIndex):
+            raw = raw.set_index("timestamp")
+        if raw.index.tz is None:
+            raw.index = raw.index.tz_localize("UTC")
+
+        # Align: keep only rows whose timestamp appears in the test slice
+        if ts_series is not None:
+            ts_utc = ts_series.dt.tz_localize("UTC") if ts_series.dt.tz is None else ts_series.dt.tz_convert("UTC")
+            raw = raw.loc[raw.index.isin(ts_utc)].copy()
+            t_rows = t_rows.set_index(ts_series.values)
+
+        raw = raw.tail(PLOT_BARS)
+        t_rows = t_rows.tail(PLOT_BARS)
+
+        if len(raw) < 10:
+            continue
+
+        n    = len(raw)
+        pos  = np.arange(n)
+
+        # Tick labels every ~26 bars ≈ 1 trading day
+        tick_step = max(1, n // 8)
+        tick_pos  = pos[::tick_step]
+        tick_lbl  = [raw.index[i].astimezone(
+                        ZoneInfo("America/New_York")
+                     ).strftime("%m/%d %H:%M") for i in range(0, n, tick_step)]
+
+
+        fig = plt.figure(figsize=(20, 10))
+        gs  = fig.add_gridspec(3, 1, height_ratios=[3, 1.5, 0.4], hspace=0.08)
+        ax_price = fig.add_subplot(gs[0])
+        ax_prob  = fig.add_subplot(gs[1], sharex=ax_price)
+        ax_label = fig.add_subplot(gs[2], sharex=ax_price)
+        fig.patch.set_facecolor(DARK_BG)
+
+        # -- candles --
+        o = raw["open"].to_numpy(float)
+        h = raw["high"].to_numpy(float)
+        lo_arr = raw["low"].to_numpy(float)
+        c_arr  = raw["close"].to_numpy(float)
+        _plot_candles(ax_price, pos, o, h, lo_arr, c_arr,
+                      wick_color="#555555", up_color=GREEN, down_color=RED)
+        ax_price.set_ylabel("Price", color=TEXT_COL)
+        ax_price.set_title(f"{ticker}  |  test set (last {PLOT_BARS} bars)  |  candle + model probabilities",
+                           color=TEXT_COL, fontsize=10)
+
+        # -- probabilities --
+        p_long  = t_rows["_p_long"].to_numpy(float)[-n:]
+        p_short = t_rows["_p_short"].to_numpy(float)[-n:]
+        ax_prob.fill_between(pos, 0, p_long,  alpha=0.25, color=GREEN)
+        ax_prob.fill_between(pos, 0, p_short, alpha=0.25, color=RED)
+        ax_prob.plot(pos, p_long,  color=GREEN, lw=1.2, label="P(long)")
+        ax_prob.plot(pos, p_short, color=RED,   lw=1.2, label="P(short)")
+        ax_prob.axhline(0.50, color=BLUE, lw=0.8, ls="--", label="threshold 0.50")
+        ax_prob.set_ylim(0, 1)
+        ax_prob.set_ylabel("probability", color=TEXT_COL)
+        ax_prob.legend(fontsize=8, facecolor=DARK_BG, labelcolor=TEXT_COL,
+                       edgecolor=GRID_COL, loc="upper left")
+
+        # -- true label strip --
+        y_strip = t_rows["_y"].to_numpy(int)[-n:]
+        strip_colors = np.where(y_strip == 2, GREEN, np.where(y_strip == 0, RED, "#333333"))
+        for xi, sc in zip(pos, strip_colors):
+            ax_label.bar(xi, 1, color=sc, width=1.0, align="center")
+        ax_label.set_yticks([])
+        ax_label.set_ylabel("true", color=TEXT_COL, fontsize=7)
+
+        # -- shared x ticks --
+        ax_label.set_xticks(tick_pos)
+        ax_label.set_xticklabels(tick_lbl, rotation=40, ha="right", fontsize=7, color=TEXT_COL)
+        plt.setp(ax_price.get_xticklabels(), visible=False)
+        plt.setp(ax_prob.get_xticklabels(),  visible=False)
+
+        for ax in (ax_price, ax_prob, ax_label):
+            ax.set_facecolor(DARK_BG)
+            ax.tick_params(colors=TEXT_COL)
+            for spine in ax.spines.values():
+                spine.set_edgecolor(GRID_COL)
+            ax.grid(color=GRID_COL, linewidth=0.4, alpha=0.6)
+
+        fig.savefig(plots_dir / f"test_candle_proba_{ticker}.png", dpi=130,
+                    bbox_inches="tight", facecolor=DARK_BG)
+        plt.close(fig)
+        logger.info("Candle+proba plot → %s", plots_dir / f"test_candle_proba_{ticker}.png")
+
+    # ---- 4. Feature importance top 30 ------------------------------------
+    top30 = fi_df.head(30).iloc[::-1]   # reverse so most important is at top
+    fig, ax = plt.subplots(figsize=(10, 10))
+    bars = ax.barh(top30["feature"], top30["importance"], color=BLUE, alpha=0.85)
+    ax.set_xlabel("importance (gain)")
+    ax.set_title("Feature importance — top 30")
+    ax.tick_params(axis="y", labelsize=8)
+    _style(fig, [ax])
+    plt.tight_layout()
+    fig.savefig(plots_dir / "feature_importance.png", dpi=130, bbox_inches="tight",
+                facecolor=DARK_BG)
+    plt.close(fig)
+
+    logger.info("Plots saved → %s", plots_dir)
 
 
 # ---------------------------------------------------------------------------

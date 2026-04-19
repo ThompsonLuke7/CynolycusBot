@@ -98,5 +98,7 @@
     "audit_enabled": true,
     "audit_root": "Data/inference/live_runs"
   },
-  "session_dir": "Data/inference/live_runs/20260417_045215_live_spy"
+  "session_dir": "Data/inference/live_runs/20260417_045215_live_spy",
+  "stopped_at": "2026-04-18T07:05:45.721428+00:00",
+  "dropped_records": 0
 }

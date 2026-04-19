@@ -705,7 +705,13 @@ class OptionOrderPolicy:
         """
         Extract option type (C/P) from OCC symbol, e.g. SPY251031P00680000.
         """
-        m = re.match(r"^[A-Z]+(\d{6})([CP])(\d{8})$", symbol.strip().upper())
+        text = symbol.strip().upper()
+        # Live Alpaca symbols use OCC format. Replay simulation symbols use
+        # .SIM_SPY_YYMMDD_C_STRIKE / .SIM_SPY_YYMMDD_P_STRIKE.
+        sim = re.search(r"(?:^|_)([CP])(?:_|$)", text)
+        if sim:
+            return sim.group(1)
+        m = re.match(r"^[A-Z]+(\d{6})([CP])(\d{8})$", text)
         if not m:
             return None
         return m.group(2)
@@ -1161,6 +1167,19 @@ class OptionOrderPolicy:
             return _as_float(self.cfg.meta_intrabar_short_setup_threshold)
         return float("nan")
 
+    def _effective_intrabar_setup_threshold(self, *, closed_bar: dict[str, Any], side: str) -> float:
+        dynamic = self._meta_threshold_value(
+            closed_bar,
+            f"regime_thr_enter_{side}",
+            f"dynamic_thr_enter_{side}",
+        )
+        if math.isfinite(dynamic):
+            return dynamic
+        override = self._intrabar_setup_threshold_override(side=side)
+        if math.isfinite(override):
+            return override
+        return self._meta_threshold_value(closed_bar, f"thr_enter_{side}", f"enter_{side}_threshold")
+
     def _intrabar_entry_policy_name(self) -> str:
         return str(self.cfg.meta_intrabar_entry_policy or "legacy_breakout_touch").strip().lower()
 
@@ -1265,14 +1284,8 @@ class OptionOrderPolicy:
         return close < prev_close if side_key == "long" else close > prev_close
 
     def _cache_meta_side_snapshot(self, *, closed_bar: dict[str, Any], atr: float) -> None:
-        thr_enter_long = self._meta_threshold_value(closed_bar, "thr_enter_long", "enter_long_threshold")
-        thr_enter_short = self._meta_threshold_value(closed_bar, "thr_enter_short", "enter_short_threshold")
-        intrabar_long_thr = self._intrabar_setup_threshold_override(side="long")
-        intrabar_short_thr = self._intrabar_setup_threshold_override(side="short")
-        if math.isfinite(intrabar_long_thr):
-            thr_enter_long = intrabar_long_thr
-        if math.isfinite(intrabar_short_thr):
-            thr_enter_short = intrabar_short_thr
+        thr_enter_long = self._effective_intrabar_setup_threshold(closed_bar=closed_bar, side="long")
+        thr_enter_short = self._effective_intrabar_setup_threshold(closed_bar=closed_bar, side="short")
 
         self._latest_meta_side_snapshot = {
             "timestamp": closed_bar.get("timestamp"),
@@ -1286,6 +1299,11 @@ class OptionOrderPolicy:
             "p_exit_short": _as_float(closed_bar.get("p_exit_short")),
             "thr_enter_long": thr_enter_long,
             "thr_enter_short": thr_enter_short,
+            "regime_thr_enter_long": self._meta_threshold_value(closed_bar, "regime_thr_enter_long"),
+            "regime_thr_enter_short": self._meta_threshold_value(closed_bar, "regime_thr_enter_short"),
+            "trend_regime": closed_bar.get("trend_regime"),
+            "p_enter_long_regime_pctile": self._meta_threshold_value(closed_bar, "p_enter_long_regime_pctile"),
+            "p_enter_short_regime_pctile": self._meta_threshold_value(closed_bar, "p_enter_short_regime_pctile"),
             "thr_exit_long": self._meta_threshold_value(closed_bar, "thr_exit_long", "exit_long_threshold"),
             "thr_exit_short": self._meta_threshold_value(closed_bar, "thr_exit_short", "exit_short_threshold"),
         }
@@ -1294,8 +1312,8 @@ class OptionOrderPolicy:
     def _meta_side_validity_flags(self, *, closed_bar: dict[str, Any]) -> tuple[bool, bool]:
         p_enter_long = _as_float(closed_bar.get("p_enter_long"))
         p_enter_short = _as_float(closed_bar.get("p_enter_short"))
-        thr_enter_long = self._meta_threshold_value(closed_bar, "thr_enter_long", "enter_long_threshold")
-        thr_enter_short = self._meta_threshold_value(closed_bar, "thr_enter_short", "enter_short_threshold")
+        thr_enter_long = self._effective_intrabar_setup_threshold(closed_bar=closed_bar, side="long")
+        thr_enter_short = self._effective_intrabar_setup_threshold(closed_bar=closed_bar, side="short")
         long_ready = bool(
             math.isfinite(p_enter_long)
             and math.isfinite(thr_enter_long)
@@ -1431,6 +1449,20 @@ class OptionOrderPolicy:
             and math.isfinite(cls._meta_threshold_value(closed_bar, "thr_enter_short", "enter_short_threshold"))
             and math.isfinite(cls._meta_threshold_value(closed_bar, "thr_exit_long", "exit_long_threshold"))
             and math.isfinite(cls._meta_threshold_value(closed_bar, "thr_exit_short", "exit_short_threshold"))
+        )
+
+    def _has_meta_side_entry_thresholds(self, closed_bar: dict[str, Any]) -> bool:
+        long_thr = self._meta_threshold_value(closed_bar, "thr_enter_long", "enter_long_threshold")
+        short_thr = self._meta_threshold_value(closed_bar, "thr_enter_short", "enter_short_threshold")
+        intrabar_long_thr = self._intrabar_setup_threshold_override(side="long")
+        intrabar_short_thr = self._intrabar_setup_threshold_override(side="short")
+        if math.isfinite(intrabar_long_thr):
+            long_thr = intrabar_long_thr
+        if math.isfinite(intrabar_short_thr):
+            short_thr = intrabar_short_thr
+        return (
+            math.isfinite(long_thr)
+            and math.isfinite(short_thr)
         )
 
     def _smooth_action(self, action: float) -> float:
@@ -1686,6 +1718,88 @@ class OptionOrderPolicy:
 
     def has_pending_broker_reconcile(self) -> bool:
         return isinstance(self._pending_broker_reconcile, dict)
+
+    def _pending_open_direction(self, pending: dict[str, Any]) -> str | None:
+        if str(pending.get("intent", "")).strip().lower() != "open":
+            return None
+        cp = self._option_cp(str(pending.get("symbol", "")))
+        if cp == "C":
+            return "long"
+        if cp == "P":
+            return "short"
+        return None
+
+    def _pending_open_invalidated_by_setup(self, *, closed_bar: dict[str, Any]) -> tuple[bool, str]:
+        pending = self._pending_broker_reconcile
+        if not isinstance(pending, dict):
+            return False, "no_pending_reconcile"
+        pending_side = self._pending_open_direction(pending)
+        if pending_side not in {"long", "short"}:
+            return False, "not_pending_open"
+        if not self._has_meta_side_entry_thresholds(closed_bar):
+            return False, "no_setup_thresholds"
+        long_valid, short_valid = self._meta_side_validity_flags(closed_bar=closed_bar)
+        current_valid = long_valid if pending_side == "long" else short_valid
+        opposite_valid = short_valid if pending_side == "long" else long_valid
+        if current_valid:
+            return False, f"pending_{pending_side}_still_valid"
+        if opposite_valid:
+            return True, f"opposite_setup_valid_pending_{pending_side}"
+        return True, f"pending_{pending_side}_setup_no_longer_valid"
+
+    def _cancel_pending_open_if_invalidated(
+        self,
+        *,
+        closed_bar: dict[str, Any],
+        logger: Callable[[str], None],
+    ) -> dict[str, Any] | None:
+        pending = self._pending_broker_reconcile
+        if not isinstance(pending, dict):
+            return None
+        invalidated, reason = self._pending_open_invalidated_by_setup(closed_bar=closed_bar)
+        if not invalidated:
+            return None
+
+        symbol = str(pending.get("symbol", "")).strip().upper()
+        order_id = str(pending.get("order_id", "")).strip() or None
+        pending_side = self._pending_open_direction(pending) or "unknown"
+        if self.cfg.submit_orders and order_id:
+            try:
+                self._client.cancel_order(order_id)
+                logger(
+                    "[order_policy] STALE PENDING OPEN CANCELED "
+                    f"side={pending_side} symbol={symbol} order_id={order_id} reason={reason}"
+                )
+            except Exception as exc:
+                logger(
+                    "[order_policy] stale pending open cancel warning "
+                    f"side={pending_side} symbol={symbol} order_id={order_id}: {exc}"
+                )
+                return {
+                    "event": "hold",
+                    "reason": "stale_pending_open_cancel_failed",
+                    "pending_side": pending_side,
+                    "pending_symbol": symbol,
+                    "pending_order_id": order_id,
+                    "invalidate_reason": reason,
+                    "error": str(exc),
+                }
+        else:
+            logger(
+                "[order_policy] STALE PENDING OPEN CLEARED "
+                f"side={pending_side} symbol={symbol} order_id={order_id or 'n/a'} reason={reason}"
+            )
+
+        sync_result = self.sync_from_broker(logger=logger) if self.cfg.submit_orders else None
+        self._pending_broker_reconcile = None
+        return {
+            "event": "stale_pending_open_canceled",
+            "reason": reason,
+            "pending_side": pending_side,
+            "pending_symbol": symbol,
+            "pending_order_id": order_id,
+            "sync_result": sync_result,
+        }
 
     def reconcile_pending_broker_order(
         self,
@@ -3125,9 +3239,21 @@ class OptionOrderPolicy:
             local_ts = self._to_local_ts(closed_bar.get("timestamp"))
             self.reconcile_with_broker(logger=logger, local_ts=local_ts, force=False)
             if self.has_pending_broker_reconcile():
+                stale_pending_result = self._cancel_pending_open_if_invalidated(
+                    closed_bar=closed_bar,
+                    logger=logger,
+                )
+                if stale_pending_result is not None:
+                    if str(stale_pending_result.get("event", "")).strip().lower() == "hold":
+                        self._meta_side_reason["long"] = stale_pending_result.get("reason", "pending_broker_reconcile")
+                        self._meta_side_reason["short"] = stale_pending_result.get("reason", "pending_broker_reconcile")
+                        return stale_pending_result
+                    # The stale entry was canceled/cleared. Continue processing
+                    # the fresh 10m setup so a newly valid opposite window can arm.
                 self._meta_side_reason["long"] = "pending_broker_reconcile"
                 self._meta_side_reason["short"] = "pending_broker_reconcile"
-                return {"event": "hold", "reason": "pending_broker_reconcile"}
+                if self.has_pending_broker_reconcile():
+                    return {"event": "hold", "reason": "pending_broker_reconcile"}
             raw_action = _as_float(action)
             if not math.isfinite(raw_action):
                 return {"event": "error", "reason": f"invalid_action:{action}"}

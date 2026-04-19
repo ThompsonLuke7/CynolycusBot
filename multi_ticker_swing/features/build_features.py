@@ -125,9 +125,10 @@ def _add_cat3_trend(df: pd.DataFrame) -> pd.DataFrame:
     ema20 = c.ewm(span=20, adjust=False).mean()
     ema50 = c.ewm(span=50, adjust=False).mean()
 
-    df["ema_dist_10"] = (c - ema10) / atr
-    df["ema_dist_20"] = (c - ema20) / atr
-    df["ema_dist_50"] = (c - ema50) / atr
+    # Clip to ±10 ATR — commodity ETFs/volatility products can briefly reach ±13
+    df["ema_dist_10"] = ((c - ema10) / atr).clip(-10, 10)
+    df["ema_dist_20"] = ((c - ema20) / atr).clip(-10, 10)
+    df["ema_dist_50"] = ((c - ema50) / atr).clip(-10, 10)
 
     # EMA slopes (1-bar pct change of the EMA)
     df["ema_slope_10"] = ema10.pct_change(1)
@@ -159,9 +160,15 @@ def _add_cat3_trend(df: pd.DataFrame) -> pd.DataFrame:
         df["dmp_14"] = np.nan
         df["dmn_14"] = np.nan
 
+    # Clip DM indicators to valid [0, 100] range (pandas_ta can overflow on
+    # extremely volatile tickers like UVXY where values reach >5000)
+    for col in ("adx_14", "dmp_14", "dmn_14"):
+        df[col] = df[col].clip(0, 100)
+
     # ADXR = (ADX + ADX[14]) / 2
     adx = df["adx_14"]
     df["adxr_14"] = (adx + adx.shift(14)) / 2
+    df["adxr_14"] = df["adxr_14"].clip(0, 100)
 
     # Trend phase momentum / acceleration (normalized EMA velocity)
     ema_vel = ema20.diff()
@@ -304,15 +311,17 @@ def _add_cat6_volume(df: pd.DataFrame) -> pd.DataFrame:
         (v * c).rolling(252, min_periods=50).rank(pct=True)
     )
 
-    # OBV and Acc/Dist slopes over 10 bars
+    # OBV slope normalized by rolling 20-bar mean volume so the signal is
+    # cross-ticker comparable (raw OBV units depend on share volume scale)
     obv = (np.sign(c.diff()) * v).fillna(0).cumsum()
-    df["obv_slope_10"] = obv.diff(10) / (atr := df["atr_14"].replace(0, np.nan)) / 10
+    df["obv_slope_10"] = obv.diff(10) / roll_mean_20 / 10
 
-    # Acc/Dist: ((close - low) - (high - close)) / range * volume
+    # Acc/Dist slope normalized by rolling 10-bar mean dollar volume
     bar_range = (df["high"] - df["low"]).replace(0, np.nan)
     clv = ((c - df["low"]) - (df["high"] - c)) / bar_range
     ad  = (clv * v).fillna(0).cumsum()
-    df["accdist_slope_10"] = ad.diff(10) / (v * c).rolling(10).mean().replace(0, np.nan) / 10
+    dv_mean_10 = (v * c).rolling(10).mean().replace(0, np.nan)
+    df["accdist_slope_10"] = ad.diff(10) / dv_mean_10 / 10
 
     # Relative volume in the opening window (first 2 bars of session)
     # Defined as current volume / rolling mean of same session-bar-index volume
@@ -493,10 +502,6 @@ def _add_cat9_location(
 def _add_cat10_time(df: pd.DataFrame, session_dates: pd.Series) -> pd.DataFrame:
     """Cat 10 – Time features."""
     idx_ny = df.index.tz_convert("America/New_York")
-    hours  = idx_ny.hour + idx_ny.minute / 60.0
-
-    df["hour_sin"] = np.sin(2 * np.pi * hours / 24)
-    df["hour_cos"] = np.cos(2 * np.pi * hours / 24)
 
     dow = idx_ny.dayofweek.astype(float)
     df["day_of_week_sin"] = np.sin(2 * np.pi * dow / 5)
@@ -506,14 +511,20 @@ def _add_cat10_time(df: pd.DataFrame, session_dates: pd.Series) -> pd.DataFrame:
     df["is_friday"] = (dow == 4).astype(float)
 
     # Bars from open / bars to close within each session
-    session_open  = "09:30"
-    session_close = "15:30"   # last 30-min bar opens at 15:30
-    open_min  = 9 * 60 + 30
-    close_min = 15 * 60 + 30
+    open_min  = 9 * 60 + 30   # 570 minutes from midnight
+    close_min = 15 * 60 + 30  # 930 minutes — last 30-min bar opens at 15:30
+    session_len = close_min - open_min  # 360 minutes (13 bars × 30m = 390m open→close)
 
     bar_min = pd.Series(idx_ny.hour * 60 + idx_ny.minute, index=df.index)
     df["bars_from_open"] = ((bar_min - open_min) / 30).clip(0, BARS_PER_DAY - 1).astype(float)
     df["bars_to_close"]  = ((close_min - bar_min) / 30).clip(0, BARS_PER_DAY - 1).astype(float)
+
+    # Session-relative fraction: 0.0 at open (09:30), 1.0 at session close (15:30).
+    # Replaces the 24h sin/cos encoding where all RTH bars compressed into a tiny
+    # arc of hour_cos ∈ [-1.0, -0.5] — essentially no useful variation.
+    session_frac = ((bar_min - open_min) / session_len).clip(0, 1)
+    df["session_frac"]     = session_frac
+    df["session_frac_sin"] = np.sin(np.pi * session_frac)   # 0→0, 0.5→1, 1→0 (peaks mid-session)
 
     return df
 
@@ -549,6 +560,173 @@ def _add_cat11_behavioral(
     df["stock_beta_bucket"] = pd.cut(
         beta, bins=[-np.inf, 0.5, 1.0, 1.5, np.inf], labels=[0, 1, 2, 3]
     ).astype(float)
+
+    return df
+
+
+def _add_daily_context(df: pd.DataFrame, session_dates: pd.Series) -> pd.DataFrame:
+    """
+    Cat 12 – Daily timeframe features derived by resampling the 30m data.
+
+    Leakage guard: ALL daily values are shifted forward by 1 day before being
+    mapped back to 30m bars.  A bar on day D only ever sees data through the
+    close of day D-1.  Day D's own daily bar is never used while it is still
+    open.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Build daily OHLCV by grouping 30m bars on their session date
+    # ------------------------------------------------------------------
+    daily = (
+        df.assign(_sd=session_dates)
+        .groupby("_sd")
+        .agg(
+            open=("open", "first"),
+            high=("high", "max"),
+            low=("low", "min"),
+            close=("close", "last"),
+            volume=("volume", "sum"),
+        )
+        .sort_index()
+    )
+
+    c  = daily["close"]
+    h  = daily["high"]
+    lo = daily["low"]
+    v  = daily["volume"].replace(0, np.nan)
+
+    # ------------------------------------------------------------------
+    # Step 2: Compute daily indicators (on the full un-shifted daily series)
+    # ------------------------------------------------------------------
+    # Daily True Range / ATR-14
+    c_p = c.shift(1)
+    tr  = pd.concat([(h - lo), (h - c_p).abs(), (lo - c_p).abs()], axis=1).max(axis=1)
+    daily_atr = tr.rolling(14).mean().replace(0, np.nan)
+
+    # Daily return (close-to-close)
+    daily_ret = c.pct_change(1)
+
+    # Daily EMAs
+    ema20d = c.ewm(span=20, adjust=False).mean()
+    ema50d = c.ewm(span=50, adjust=False).mean()
+
+    # Daily ATR pct (daily volatility level relative to price)
+    daily_atr_pct = daily_atr / c.replace(0, np.nan)
+
+    # Daily RSI-14
+    try:
+        import pandas_ta as ta
+        daily_rsi = ta.rsi(c, length=14)
+        if daily_rsi is None:
+            daily_rsi = pd.Series(np.nan, index=daily.index)
+    except Exception:
+        daily_rsi = pd.Series(np.nan, index=daily.index)
+
+    # EMA distances from close, ATR-normalised and clipped to ±10
+    daily_ema_dist_20 = ((c - ema20d) / daily_atr).clip(-10, 10)
+    daily_ema_dist_50 = ((c - ema50d) / daily_atr).clip(-10, 10)
+
+    # Trend state: sign of (ema20 − ema50) → +1 bullish / -1 bearish / 0 flat
+    daily_trend_state = np.sign(ema20d - ema50d)
+
+    # Range position within the 20-day high / low channel [0, 1]
+    roll_high20d = h.rolling(20).max()
+    roll_low20d  = lo.rolling(20).min()
+    roll_range20d = (roll_high20d - roll_low20d).replace(0, np.nan)
+    daily_range_pos = ((c - roll_low20d) / roll_range20d).clip(0, 1)
+
+    # Daily volume relative to 20-day mean
+    vol_mean20d  = v.rolling(20).mean().replace(0, np.nan)
+    daily_vol_rel = (v / vol_mean20d).clip(0, 10)
+
+    # ------------------------------------------------------------------
+    # Step 3: Shift ALL features forward 1 day — bars on day D see D-1 data
+    # ------------------------------------------------------------------
+    feat_daily = pd.DataFrame({
+        "daily_ret_1":        daily_ret.shift(1),
+        "daily_atr_pct":      daily_atr_pct.shift(1),
+        "daily_rsi_14":       daily_rsi.shift(1),
+        "daily_ema_dist_20":  daily_ema_dist_20.shift(1),
+        "daily_ema_dist_50":  daily_ema_dist_50.shift(1),
+        "daily_trend_state":  daily_trend_state.shift(1),
+        "daily_range_pos_20": daily_range_pos.shift(1),
+        "daily_vol_rel_20":   daily_vol_rel.shift(1),
+    }, index=daily.index)
+
+    # ------------------------------------------------------------------
+    # Step 4: Map date-indexed daily features back to 30m bar timestamps
+    # ------------------------------------------------------------------
+    for col in feat_daily.columns:
+        df[col] = session_dates.map(feat_daily[col].to_dict()).values
+
+    return df
+
+
+def _add_oscillators(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cat 3b – Momentum oscillators missing from the original feature set.
+    All values are bounded or normalized so they are cross-ticker comparable.
+    """
+    c  = df["close"]
+    h  = df["high"]
+    lo = df["low"]
+    v  = df["volume"].replace(0, np.nan)
+
+    try:
+        import pandas_ta as ta
+
+        # RSI [0, 100]
+        rsi = ta.rsi(c, length=14)
+        df["rsi_14"] = rsi.values if rsi is not None else np.nan
+
+        # MACD histogram (fast=12, slow=26, signal=9)
+        macd_df = ta.macd(c, fast=12, slow=26, signal=9)
+        if macd_df is not None and not macd_df.empty:
+            # pandas_ta column: MACDh_12_26_9
+            hist_col = [col for col in macd_df.columns if col.startswith("MACDh")]
+            if hist_col:
+                atr = df["atr_14"].replace(0, np.nan)
+                df["macd_hist_12_26_9"] = (macd_df[hist_col[0]].values / atr).clip(-5, 5)
+            else:
+                df["macd_hist_12_26_9"] = np.nan
+        else:
+            df["macd_hist_12_26_9"] = np.nan
+
+        # Bollinger Band %B [0, 1] (values outside 0-1 indicate extreme moves)
+        bb_df = ta.bbands(c, length=20, std=2)
+        if bb_df is not None and not bb_df.empty:
+            pctb_col = [col for col in bb_df.columns if col.startswith("BBP")]
+            if pctb_col:
+                df["bb_pct_b_20"] = bb_df[pctb_col[0]].values
+            else:
+                df["bb_pct_b_20"] = np.nan
+        else:
+            df["bb_pct_b_20"] = np.nan
+
+        # Stochastic %K [0, 100]
+        stoch_df = ta.stoch(h, lo, c, k=14, d=3, smooth_k=3)
+        if stoch_df is not None and not stoch_df.empty:
+            k_col = [col for col in stoch_df.columns if col.startswith("STOCHk")]
+            if k_col:
+                df["stoch_k_14"] = stoch_df[k_col[0]].values
+            else:
+                df["stoch_k_14"] = np.nan
+        else:
+            df["stoch_k_14"] = np.nan
+
+        # Money Flow Index [0, 100]
+        mfi = ta.mfi(h, lo, c, v, length=14)
+        df["mfi_14"] = mfi.values if mfi is not None else np.nan
+
+        # Choppiness Index [0, 100] (100 = max chop, 0 = trending)
+        chop = ta.chop(h, lo, c, length=14)
+        df["chop_14"] = chop.values if chop is not None else np.nan
+
+    except Exception as exc:
+        logger.warning("Oscillator computation failed: %s", exc)
+        for col in ("rsi_14", "macd_hist_12_26_9", "bb_pct_b_20",
+                    "stoch_k_14", "mfi_14", "chop_14"):
+            if col not in df.columns:
+                df[col] = np.nan
 
     return df
 
@@ -637,12 +815,14 @@ def build_ticker_features(
     df = _add_cat1_price(df)
     df = _add_cat2_volatility(df)
     df = _add_cat3_trend(df)
+    df = _add_oscillators(df)                 # momentum oscillators (rsi, macd, bb, stoch, mfi, chop)
     df = _add_cat6_volume(df)                 # volume_rel_20 needed by cat 4
     df = _add_cat4_swing(df)
     df = _add_cat5_model_placeholders(df)
     df = _add_cat7_gap(df, session_dates)
     df = _add_cat8_context(df, ticker, context_data)
     df = _add_cat9_location(df, session_dates)
+    df = _add_daily_context(df, session_dates)   # daily HTF features (shift(1) — no leakage)
     df = _add_cat11_behavioral(df, meta)
     df = _finalize_open_window_vol(df)
 
@@ -690,9 +870,14 @@ def _build_sector_cap_encodings(universe: pd.DataFrame) -> tuple[dict, dict, dic
     caps   = sorted(universe[cap_col].dropna().unique().tolist())
     assets = sorted(universe[type_col].dropna().unique().tolist())
 
+    cap_enc = {c: i for i, c in enumerate(caps)}
+    # ETFs have NaN market_cap_bucket in the universe CSV (they don't have a market cap).
+    # Give them a dedicated bucket rather than silently falling back to index 0 (="Large").
+    cap_enc["ETF"] = len(caps)
+
     return (
         {s: i for i, s in enumerate(sectors)},
-        {c: i for i, c in enumerate(caps)},
+        cap_enc,
         {a: i for i, a in enumerate(assets)},
     )
 
@@ -748,9 +933,15 @@ def build_all_features(
         cap_col = "market_cap_bucket" if "market_cap_bucket" in row.index else "cap_bucket"
         type_col = "type" if "type" in row.index else "asset_type"
 
+        # ETFs have NaN market_cap_bucket — route them to the dedicated ETF bucket
+        if str(row.get(type_col, "Stock")) == "ETF":
+            cap_bucket = cap_enc.get("ETF", len(cap_enc) - 1)
+        else:
+            cap_bucket = cap_enc.get(row[cap_col], 0)
+
         meta = {
             "sector_id":         sector_enc.get(row["sector"], 0),
-            "market_cap_bucket": cap_enc.get(row[cap_col], 0),
+            "market_cap_bucket": cap_bucket,
             "asset_type":        asset_enc.get(row[type_col], 0),
         }
 

@@ -25,10 +25,18 @@ from API.Alpaca_API.market_data.bar_aggregator import OhlcvAggregator
 from API.Alpaca_API.market_data.bar_buffer import BarRingBuffer
 from Policy.execution_latch import DirectionExecutionLatch
 from Policy.order_policy import PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1
+from Policy.regime_probability_filter import (
+    RegimeProbabilityCalibrator,
+    RegimeProbabilityThresholdConfig,
+)
 from Policy.replay_option_proxy import ReplayOptionPriceProxy
 
-UI_BUILD = "2026-04-15-sim-replay-offline"
+UI_BUILD = "2026-04-18-regime-percentile-thresholds"
 DEFAULT_SPY_1M_PATH = "Data/raw/spy/1m_train.parquet"
+DEFAULT_REGIME_PROBABILITY_FRAME = (
+    "Data/models/ga_xgboost/10min/analysis/"
+    "phase4_1m_oof_focused_trigger_sweep_l42_s15_full_1m_train/phase4_signal_frame.parquet"
+)
 
 if TYPE_CHECKING:
     from API.Alpaca_API.inference.live_inference import (
@@ -218,6 +226,14 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "meta_intrabar_setup_max_bars": int(cfg.meta_intrabar_setup_max_bars),
         "meta_intrabar_long_setup_threshold": cfg.meta_intrabar_long_setup_threshold,
         "meta_intrabar_short_setup_threshold": cfg.meta_intrabar_short_setup_threshold,
+        "regime_probability_thresholds_enabled": bool(cfg.regime_probability_thresholds_enabled),
+        "regime_probability_frame": str(cfg.regime_probability_frame),
+        "regime_bullish_long_quantile": float(cfg.regime_bullish_long_quantile),
+        "regime_bullish_short_quantile": float(cfg.regime_bullish_short_quantile),
+        "regime_bearish_long_quantile": float(cfg.regime_bearish_long_quantile),
+        "regime_bearish_short_quantile": float(cfg.regime_bearish_short_quantile),
+        "regime_neutral_long_quantile": float(cfg.regime_neutral_long_quantile),
+        "regime_neutral_short_quantile": float(cfg.regime_neutral_short_quantile),
         "meta_hard_stop_atr": float(cfg.meta_hard_stop_atr),
         "meta_trail_activate_atr": float(cfg.meta_trail_activate_atr),
         "meta_trail_atr": float(cfg.meta_trail_atr),
@@ -700,6 +716,35 @@ def _load_swing_setup_probs_frame(
         return None
 
 
+def _build_regime_probability_calibrator(cfg: "SessionConfig") -> RegimeProbabilityCalibrator | None:
+    if not bool(cfg.regime_probability_thresholds_enabled):
+        return None
+    path = Path(cfg.regime_probability_frame)
+    if not path.exists():
+        return None
+    try:
+        threshold_cfg = RegimeProbabilityThresholdConfig(
+            bullish_long_quantile=float(cfg.regime_bullish_long_quantile),
+            bullish_short_quantile=float(cfg.regime_bullish_short_quantile),
+            bearish_long_quantile=float(cfg.regime_bearish_long_quantile),
+            bearish_short_quantile=float(cfg.regime_bearish_short_quantile),
+            neutral_long_quantile=float(cfg.regime_neutral_long_quantile),
+            neutral_short_quantile=float(cfg.regime_neutral_short_quantile),
+        )
+        return RegimeProbabilityCalibrator.from_signal_frame(path, threshold_config=threshold_cfg)
+    except Exception:
+        return None
+
+
+def _apply_regime_thresholds_to_bar_payload(bar_payload: dict[str, Any]) -> None:
+    long_thr = _coerce_float(bar_payload.get("regime_thr_enter_long"), float("nan"))
+    short_thr = _coerce_float(bar_payload.get("regime_thr_enter_short"), float("nan"))
+    if np.isfinite(long_thr):
+        bar_payload["thr_enter_long"] = float(long_thr)
+    if np.isfinite(short_thr):
+        bar_payload["thr_enter_short"] = float(short_thr)
+
+
 class ReplayBarProcessor:
     def __init__(
         self,
@@ -783,6 +828,14 @@ class SessionConfig:
     meta_intrabar_setup_max_bars: int = 4
     meta_intrabar_long_setup_threshold: float | None = 0.35
     meta_intrabar_short_setup_threshold: float | None = 0.65
+    regime_probability_thresholds_enabled: bool = False
+    regime_probability_frame: str = DEFAULT_REGIME_PROBABILITY_FRAME
+    regime_bullish_long_quantile: float = 0.85
+    regime_bullish_short_quantile: float = 0.98
+    regime_bearish_long_quantile: float = 0.98
+    regime_bearish_short_quantile: float = 0.85
+    regime_neutral_long_quantile: float = 0.95
+    regime_neutral_short_quantile: float = 0.95
     meta_hard_stop_atr: float = 0.0
     meta_trail_activate_atr: float = 2.0
     meta_trail_atr: float = 1.0
@@ -900,6 +953,16 @@ class SessionConfig:
             meta_intrabar_short_setup_threshold=_coerce_optional_float(
                 payload.get("meta_intrabar_short_setup_threshold", 0.65)
             ),
+            regime_probability_thresholds_enabled=_coerce_bool(
+                payload.get("regime_probability_thresholds_enabled"), False
+            ),
+            regime_probability_frame=str(payload.get("regime_probability_frame", DEFAULT_REGIME_PROBABILITY_FRAME)),
+            regime_bullish_long_quantile=_coerce_float(payload.get("regime_bullish_long_quantile"), 0.85),
+            regime_bullish_short_quantile=_coerce_float(payload.get("regime_bullish_short_quantile"), 0.98),
+            regime_bearish_long_quantile=_coerce_float(payload.get("regime_bearish_long_quantile"), 0.98),
+            regime_bearish_short_quantile=_coerce_float(payload.get("regime_bearish_short_quantile"), 0.85),
+            regime_neutral_long_quantile=_coerce_float(payload.get("regime_neutral_long_quantile"), 0.95),
+            regime_neutral_short_quantile=_coerce_float(payload.get("regime_neutral_short_quantile"), 0.95),
             meta_hard_stop_atr=max(0.0, _coerce_float(payload.get("meta_hard_stop_atr"), 0.0)),
             meta_trail_activate_atr=_coerce_float(payload.get("meta_trail_activate_atr"), 2.0),
             meta_trail_atr=_coerce_float(payload.get("meta_trail_atr"), 1.0),
@@ -1646,6 +1709,11 @@ class LiveSession:
                     "p_exit_short",
                     "thr_enter_long",
                     "thr_enter_short",
+                    "regime_thr_enter_long",
+                    "regime_thr_enter_short",
+                    "trend_regime",
+                    "p_enter_long_regime_pctile",
+                    "p_enter_short_regime_pctile",
                     "thr_exit_long",
                     "thr_exit_short",
                 ):
@@ -1653,6 +1721,7 @@ class LiveSession:
                         bar[key] = rec.get(key)
                     elif key in row:
                         bar[key] = row.get(key)
+                _apply_regime_thresholds_to_bar_payload(bar)
                 self._store.add_15m_bar(symbol, bar)
                 count += 1
 
@@ -2009,6 +2078,19 @@ class LiveSession:
                         },
                     )
 
+            regime_probability_calibrator = _build_regime_probability_calibrator(cfg) if inference_mode == "meta" else None
+            if regime_probability_calibrator is not None:
+                self._emit(
+                    "log",
+                    {
+                        "symbol": "SYSTEM",
+                        "message": (
+                            "[replay] regime-percentile entry thresholds enabled "
+                            f"source={cfg.regime_probability_frame}"
+                        ),
+                    },
+                )
+
             if inference_mode == "meta":
                 agent = lr._build_meta_agent(
                     symbol=symbols[0],
@@ -2050,6 +2132,7 @@ class LiveSession:
                     entry_prob_source=cfg.meta_entry_prob_source,
                     swing_setup_single_model_dir=cfg.swing_setup_single_model_dir,
                     swing_setup_probs_frame=swing_setup_probs_frame,
+                    regime_probability_calibrator=regime_probability_calibrator,
                 )
                 self._emit(
                     "log",
@@ -2406,6 +2489,7 @@ class LiveSession:
                         "thr_exit_short": thresholds.get("exit_short"),
                     }
                 )
+            _apply_regime_thresholds_to_bar_payload(bar_payload)
             self._store.add_15m_bar(symbol, bar_payload)
             self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar_payload)})
             self._store.set_last_action(
@@ -2817,6 +2901,18 @@ class LiveSession:
                                     "message": f"[live] Cached context base frame unavailable: {exc}",
                                 },
                             )
+                    regime_probability_calibrator = _build_regime_probability_calibrator(cfg)
+                    if regime_probability_calibrator is not None:
+                        self._emit(
+                            "log",
+                            {
+                                "symbol": "SYSTEM",
+                                "message": (
+                                    "[live] regime-percentile entry thresholds enabled "
+                                    f"source={cfg.regime_probability_frame}"
+                                ),
+                            },
+                        )
                     agent = lr._build_meta_agent(
                         symbol=symbols[0],
                         model_root=cfg.meta_model_root,
@@ -2856,6 +2952,11 @@ class LiveSession:
                         profit_protect_giveback_atr_short=1.0,
                         entry_prob_source=cfg.meta_entry_prob_source,
                         swing_setup_single_model_dir=cfg.swing_setup_single_model_dir,
+                        swing_setup_probs_frame=_load_swing_setup_probs_frame(
+                            model_dir=cfg.swing_setup_single_model_dir,
+                            tz=cfg.tz or "America/New_York",
+                        ),
+                        regime_probability_calibrator=regime_probability_calibrator,
                     )
                     self._emit(
                         "log",
@@ -3118,6 +3219,7 @@ class LiveSession:
                             "thr_exit_short": thresholds.get("exit_short"),
                         }
                     )
+                _apply_regime_thresholds_to_bar_payload(bar_payload)
                 self._store.add_15m_bar(symbol, bar_payload)
                 self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar_payload)})
                 self._store.set_last_action(

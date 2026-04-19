@@ -31,6 +31,7 @@ from Policy.order_policy import (
     OptionOrderPolicy,
     OptionOrderPolicyConfig,
 )
+from Policy.regime_probability_filter import RegimeProbabilityCalibrator
 
 META_CONTEXT_SYMBOLS: tuple[str, ...] = ("QQQ", "IWM", "TLT", "UUP")
 
@@ -358,6 +359,7 @@ def _build_meta_agent(
     entry_prob_source: str = "swing_support_single",
     swing_setup_single_model_dir: str | None = "Data/models/ga_xgboost/10min/single/swing_support_single",
     swing_setup_probs_frame: pd.DataFrame | None = None,
+    regime_probability_calibrator: RegimeProbabilityCalibrator | None = None,
 ) -> LiveIndependentMetaXGBAgent:
     del symbol
     return LiveIndependentMetaXGBAgent(
@@ -399,6 +401,7 @@ def _build_meta_agent(
         entry_prob_source=entry_prob_source,
         swing_setup_single_model_dir=swing_setup_single_model_dir,
         swing_setup_probs_frame=swing_setup_probs_frame,
+        regime_probability_calibrator=regime_probability_calibrator,
     )
 
 
