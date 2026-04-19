@@ -248,7 +248,7 @@ VAL_FRAC   = 0.15
 XGBOOST_CONFIG: dict = {
     "objective":          "multi:softprob",
     "num_class":          3,
-    "n_estimators":       600,    # more trees; early stopping prevents overfit
+    "n_estimators":       1500,   # loss was still descending at 600 — needs more trees
     "max_depth":          6,      # slightly deeper for 187-ticker dataset
     "learning_rate":      0.03,   # lower LR paired with more estimators
     "subsample":          0.75,   # tighter than 10m; cross-ticker noise

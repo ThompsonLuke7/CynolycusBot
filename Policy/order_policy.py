@@ -96,6 +96,14 @@ class OptionOrderPolicyConfig:
     meta_intrabar_long_setup_threshold: float | None = None
     meta_intrabar_short_setup_threshold: float | None = None
     meta_intrabar_opposite_dominance_delta: float = 0.0
+    meta_countertrend_veto_enabled: bool = False
+    meta_countertrend_min_prob: float = 0.65
+    meta_neutral_long_min_prob: float = 0.50
+    meta_neutral_short_min_prob: float = 0.75
+    meta_continuation_entry_enabled: bool = False
+    meta_continuation_source_short_threshold: float = 0.15
+    meta_continuation_source_long_threshold: float = 0.42
+    meta_continuation_pullback_atr: float = 0.75
     meta_replay_compatible_mode: bool = True
     meta_min_hold_bars: int = 2
     meta_exit_entry_delta: float = 0.15
@@ -1297,6 +1305,8 @@ class OptionOrderPolicy:
             "p_enter_short": _as_float(closed_bar.get("p_enter_short")),
             "p_exit_long": _as_float(closed_bar.get("p_exit_long")),
             "p_exit_short": _as_float(closed_bar.get("p_exit_short")),
+            "ema_fast": _as_float(closed_bar.get("ema_fast")),
+            "ema_slow": _as_float(closed_bar.get("ema_slow")),
             "thr_enter_long": thr_enter_long,
             "thr_enter_short": thr_enter_short,
             "regime_thr_enter_long": self._meta_threshold_value(closed_bar, "regime_thr_enter_long"),
@@ -1329,7 +1339,65 @@ class OptionOrderPolicy:
         dominance_delta = max(0.0, float(self.cfg.meta_intrabar_opposite_dominance_delta))
         long_invalidated = bool(short_ready and short_margin > long_margin + dominance_delta)
         short_invalidated = bool(long_ready and long_margin > short_margin + dominance_delta)
-        return bool(long_ready and not long_invalidated), bool(short_ready and not short_invalidated)
+        long_valid = bool(long_ready and not long_invalidated)
+        short_valid = bool(short_ready and not short_invalidated)
+        if bool(self.cfg.meta_countertrend_veto_enabled):
+            regime = str(closed_bar.get("trend_regime") or "").strip().lower()
+            counter_min = max(0.0, float(self.cfg.meta_countertrend_min_prob))
+            if regime == "bullish" and short_valid and p_enter_short < counter_min:
+                short_valid = False
+            elif regime == "bearish" and long_valid and p_enter_long < counter_min:
+                long_valid = False
+            elif regime == "neutral":
+                if long_valid and p_enter_long < max(0.0, float(self.cfg.meta_neutral_long_min_prob)):
+                    long_valid = False
+                if short_valid and p_enter_short < max(0.0, float(self.cfg.meta_neutral_short_min_prob)):
+                    short_valid = False
+        return long_valid, short_valid
+
+    def _continuation_entry_valid(self, *, closed_bar: dict[str, Any], side: str) -> bool:
+        if not bool(self.cfg.meta_continuation_entry_enabled):
+            return False
+        side_key = str(side).strip().lower()
+        regime = str(closed_bar.get("trend_regime") or "").strip().lower()
+        close = _as_float(closed_bar.get("signal_close", closed_bar.get("close")))
+        high = _as_float(closed_bar.get("signal_high", closed_bar.get("high")))
+        low = _as_float(closed_bar.get("signal_low", closed_bar.get("low")))
+        ema_fast = _as_float(closed_bar.get("ema_fast"))
+        ema_slow = _as_float(closed_bar.get("ema_slow"))
+        atr = _as_float(closed_bar.get("signal_atr"))
+        if not math.isfinite(atr) or atr <= 0.0:
+            atr = self._compute_atr()
+        pullback_atr = max(0.0, float(self.cfg.meta_continuation_pullback_atr))
+
+        if side_key == "long" and regime == "bullish":
+            source_prob = _as_float(closed_bar.get("p_enter_short"))
+            if source_prob < max(0.0, float(self.cfg.meta_continuation_source_short_threshold)):
+                return False
+            trend_ok = True
+            shallow = True
+            if math.isfinite(close) and math.isfinite(ema_fast):
+                trend_ok = close >= ema_fast
+            if trend_ok and math.isfinite(ema_fast) and math.isfinite(ema_slow):
+                trend_ok = ema_fast >= ema_slow
+            if math.isfinite(low) and math.isfinite(ema_fast) and math.isfinite(atr):
+                shallow = low >= ema_fast - pullback_atr * atr
+            return bool(trend_ok and shallow and math.isfinite(high))
+
+        if side_key == "short" and regime == "bearish":
+            source_prob = _as_float(closed_bar.get("p_enter_long"))
+            if source_prob < max(0.0, float(self.cfg.meta_continuation_source_long_threshold)):
+                return False
+            trend_ok = True
+            shallow = True
+            if math.isfinite(close) and math.isfinite(ema_fast):
+                trend_ok = close <= ema_fast
+            if trend_ok and math.isfinite(ema_fast) and math.isfinite(ema_slow):
+                trend_ok = ema_fast <= ema_slow
+            if math.isfinite(high) and math.isfinite(ema_fast) and math.isfinite(atr):
+                shallow = high <= ema_fast + pullback_atr * atr
+            return bool(trend_ok and shallow and math.isfinite(low))
+        return False
 
     def _refresh_intrabar_entry_intents(
         self,
@@ -1346,7 +1414,12 @@ class OptionOrderPolicy:
             signal_low = _as_float(closed_bar.get("signal_low"))
         setup_ts = self._to_local_ts(closed_bar.get("timestamp"))
         expires_at = self._intrabar_intent_expires_at(setup_ts=setup_ts)
+        continuation_valid = {
+            "long": self._continuation_entry_valid(closed_bar=closed_bar, side="long"),
+            "short": self._continuation_entry_valid(closed_bar=closed_bar, side="short"),
+        }
         for side_key, valid in (("long", long_valid), ("short", short_valid)):
+            valid = bool(valid or continuation_valid.get(side_key, False))
             current_qty = self._long_contracts if side_key == "long" else self._short_contracts
             if current_qty > 0:
                 self._clear_intrabar_entry_intent(side=side_key, reason="already_in_position")
@@ -1362,7 +1435,10 @@ class OptionOrderPolicy:
                 )
                 self._meta_intrabar_entry_setup_ts[side_key] = setup_ts
                 self._meta_intrabar_entry_expires_at[side_key] = expires_at
-                self._meta_side_reason[side_key] = f"intrabar_setup_armed:{self._intrabar_entry_policy_name()}"
+                entry_kind = "continuation" if continuation_valid.get(side_key, False) and not (long_valid if side_key == "long" else short_valid) else "swing"
+                self._meta_side_reason[side_key] = (
+                    f"intrabar_{entry_kind}_setup_armed:{self._intrabar_entry_policy_name()}"
+                )
             elif (
                 bool(self._meta_intrabar_entry_intent_active.get(side_key, False))
                 and not self._intrabar_entry_intent_expired(side=side_key, local_ts=local_ts)

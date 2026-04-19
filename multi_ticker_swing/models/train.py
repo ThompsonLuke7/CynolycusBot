@@ -31,7 +31,8 @@ import pandas as pd
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s  %(levelname)-8s  %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S")
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                    force=True)   # force=True reconfigures even if Colab/Jupyter already set up the root logger
 logger = logging.getLogger(__name__)
 
 try:

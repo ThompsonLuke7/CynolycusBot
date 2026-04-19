@@ -226,6 +226,14 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "meta_intrabar_setup_max_bars": int(cfg.meta_intrabar_setup_max_bars),
         "meta_intrabar_long_setup_threshold": cfg.meta_intrabar_long_setup_threshold,
         "meta_intrabar_short_setup_threshold": cfg.meta_intrabar_short_setup_threshold,
+        "meta_countertrend_veto_enabled": bool(cfg.meta_countertrend_veto_enabled),
+        "meta_countertrend_min_prob": float(cfg.meta_countertrend_min_prob),
+        "meta_neutral_long_min_prob": float(cfg.meta_neutral_long_min_prob),
+        "meta_neutral_short_min_prob": float(cfg.meta_neutral_short_min_prob),
+        "meta_continuation_entry_enabled": bool(cfg.meta_continuation_entry_enabled),
+        "meta_continuation_source_short_threshold": float(cfg.meta_continuation_source_short_threshold),
+        "meta_continuation_source_long_threshold": float(cfg.meta_continuation_source_long_threshold),
+        "meta_continuation_pullback_atr": float(cfg.meta_continuation_pullback_atr),
         "regime_probability_thresholds_enabled": bool(cfg.regime_probability_thresholds_enabled),
         "regime_probability_frame": str(cfg.regime_probability_frame),
         "regime_bullish_long_quantile": float(cfg.regime_bullish_long_quantile),
@@ -828,6 +836,14 @@ class SessionConfig:
     meta_intrabar_setup_max_bars: int = 4
     meta_intrabar_long_setup_threshold: float | None = 0.35
     meta_intrabar_short_setup_threshold: float | None = 0.65
+    meta_countertrend_veto_enabled: bool = False
+    meta_countertrend_min_prob: float = 0.65
+    meta_neutral_long_min_prob: float = 0.50
+    meta_neutral_short_min_prob: float = 0.75
+    meta_continuation_entry_enabled: bool = False
+    meta_continuation_source_short_threshold: float = 0.15
+    meta_continuation_source_long_threshold: float = 0.42
+    meta_continuation_pullback_atr: float = 0.75
     regime_probability_thresholds_enabled: bool = False
     regime_probability_frame: str = DEFAULT_REGIME_PROBABILITY_FRAME
     regime_bullish_long_quantile: float = 0.85
@@ -953,6 +969,18 @@ class SessionConfig:
             meta_intrabar_short_setup_threshold=_coerce_optional_float(
                 payload.get("meta_intrabar_short_setup_threshold", 0.65)
             ),
+            meta_countertrend_veto_enabled=_coerce_bool(payload.get("meta_countertrend_veto_enabled"), False),
+            meta_countertrend_min_prob=_coerce_float(payload.get("meta_countertrend_min_prob"), 0.65),
+            meta_neutral_long_min_prob=_coerce_float(payload.get("meta_neutral_long_min_prob"), 0.50),
+            meta_neutral_short_min_prob=_coerce_float(payload.get("meta_neutral_short_min_prob"), 0.75),
+            meta_continuation_entry_enabled=_coerce_bool(payload.get("meta_continuation_entry_enabled"), False),
+            meta_continuation_source_short_threshold=_coerce_float(
+                payload.get("meta_continuation_source_short_threshold"), 0.15
+            ),
+            meta_continuation_source_long_threshold=_coerce_float(
+                payload.get("meta_continuation_source_long_threshold"), 0.42
+            ),
+            meta_continuation_pullback_atr=_coerce_float(payload.get("meta_continuation_pullback_atr"), 0.75),
             regime_probability_thresholds_enabled=_coerce_bool(
                 payload.get("regime_probability_thresholds_enabled"), False
             ),
@@ -2225,6 +2253,14 @@ class LiveSession:
                     meta_intrabar_setup_bar_minutes=int(cfg.interval),
                     meta_intrabar_long_setup_threshold=cfg.meta_intrabar_long_setup_threshold,
                     meta_intrabar_short_setup_threshold=cfg.meta_intrabar_short_setup_threshold,
+                    meta_countertrend_veto_enabled=bool(cfg.meta_countertrend_veto_enabled),
+                    meta_countertrend_min_prob=float(cfg.meta_countertrend_min_prob),
+                    meta_neutral_long_min_prob=float(cfg.meta_neutral_long_min_prob),
+                    meta_neutral_short_min_prob=float(cfg.meta_neutral_short_min_prob),
+                    meta_continuation_entry_enabled=bool(cfg.meta_continuation_entry_enabled),
+                    meta_continuation_source_short_threshold=float(cfg.meta_continuation_source_short_threshold),
+                    meta_continuation_source_long_threshold=float(cfg.meta_continuation_source_long_threshold),
+                    meta_continuation_pullback_atr=float(cfg.meta_continuation_pullback_atr),
                     meta_hard_stop_atr=float(cfg.meta_hard_stop_atr),
                     meta_trail_activate_atr=float(cfg.meta_trail_activate_atr),
                     meta_trail_atr=float(cfg.meta_trail_atr),
@@ -3042,6 +3078,14 @@ class LiveSession:
                         meta_intrabar_setup_bar_minutes=int(cfg.interval),
                         meta_intrabar_long_setup_threshold=cfg.meta_intrabar_long_setup_threshold,
                         meta_intrabar_short_setup_threshold=cfg.meta_intrabar_short_setup_threshold,
+                        meta_countertrend_veto_enabled=bool(cfg.meta_countertrend_veto_enabled),
+                        meta_countertrend_min_prob=float(cfg.meta_countertrend_min_prob),
+                        meta_neutral_long_min_prob=float(cfg.meta_neutral_long_min_prob),
+                        meta_neutral_short_min_prob=float(cfg.meta_neutral_short_min_prob),
+                        meta_continuation_entry_enabled=bool(cfg.meta_continuation_entry_enabled),
+                        meta_continuation_source_short_threshold=float(cfg.meta_continuation_source_short_threshold),
+                        meta_continuation_source_long_threshold=float(cfg.meta_continuation_source_long_threshold),
+                        meta_continuation_pullback_atr=float(cfg.meta_continuation_pullback_atr),
                         meta_hard_stop_atr=float(cfg.meta_hard_stop_atr),
                         meta_trail_activate_atr=float(cfg.meta_trail_activate_atr),
                         meta_trail_atr=float(cfg.meta_trail_atr),
