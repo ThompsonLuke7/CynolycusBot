@@ -16,7 +16,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 UNIVERSE_CSV = MODULE_ROOT / "config" / "swing_trader_universe_v3.csv"
 
 RAW_30M_DIR = MODULE_ROOT / "data" / "raw" / "30m"
-RAW_10M_DIR = MODULE_ROOT / "data" / "raw" / "10m"
+RAW_5M_DIR  = MODULE_ROOT / "data" / "raw" / "5m"
+RAW_10M_DIR = MODULE_ROOT / "data" / "raw" / "10m"   # deprecated — switched to 5m for entry confirmation
 PROCESSED_DIR = MODULE_ROOT / "data" / "processed"
 PROCESSED_30M_DIR = PROCESSED_DIR / "30m"        # per-ticker feature parquets
 PROCESSED_LBL_DIR = PROCESSED_DIR / "labels"     # per-ticker label parquets

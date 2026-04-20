@@ -224,7 +224,7 @@ def _update_setups(
             peak[side] = float("nan")
             pending[side] = None
             continue
-        refresh = valid and (not above[side] or not math.isfinite(peak[side]) or prob > peak[side])
+        refresh = valid
         if refresh and math.isfinite(ref):
             setup_ts = row["timestamp"]
             pending[side] = PendingSetup(

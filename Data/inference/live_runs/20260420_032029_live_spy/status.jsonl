@@ -1,0 +1,5 @@
+{"stream":"status","recorded_at":"2026-04-20T03:20:42.646153+00:00","payload":{"running":true,"message":"loading prefill file"}}
+{"stream":"status","recorded_at":"2026-04-20T03:20:42.680786+00:00","payload":{"running":true,"message":"gap-bridging prefill from Alpaca"}}
+{"stream":"status","recorded_at":"2026-04-20T03:20:43.344161+00:00","payload":{"running":true,"message":"seeding live buffers from prefill"}}
+{"stream":"status","recorded_at":"2026-04-20T03:30:33.216690+00:00","payload":{"running":true,"message":"live stream started (waiting for real-time bars)"}}
+{"stream":"status","recorded_at":"2026-04-20T06:35:09.780268+00:00","payload":{"running":false,"message":"stopped","error":null}}

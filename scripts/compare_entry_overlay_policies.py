@@ -292,7 +292,7 @@ def _update_setups(
         allowed = _countertrend_allowed(policy, side=side, row=row)
         if not allowed:
             counts["countertrend_vetoes"] += 1
-        refresh = allowed and valid and (not above[side] or not math.isfinite(peak[side]) or prob > peak[side])
+        refresh = allowed and valid
         if refresh and math.isfinite(ref):
             setup_ts = row["timestamp"]
             pending[side] = PendingSetup(

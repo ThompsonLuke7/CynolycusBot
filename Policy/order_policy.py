@@ -1468,24 +1468,15 @@ class OptionOrderPolicy:
                 and math.isfinite(enter_thr)
                 and enter_prob >= enter_thr
             )
-            was_above = bool(self._meta_side_enter_above_threshold.get(side_key, False))
             if not is_above:
                 self._meta_side_entry_armed[side_key] = True
                 self._meta_side_enter_above_threshold[side_key] = False
                 self._meta_side_enter_peak_prob[side_key] = float("nan")
                 continue
-            if not was_above:
-                self._meta_side_entry_armed[side_key] = True
+            self._meta_side_entry_armed[side_key] = True
+            peak_prob = _as_float(self._meta_side_enter_peak_prob.get(side_key))
+            if math.isfinite(enter_prob) and (not math.isfinite(peak_prob) or enter_prob > peak_prob):
                 self._meta_side_enter_peak_prob[side_key] = enter_prob
-            else:
-                peak_prob = _as_float(self._meta_side_enter_peak_prob.get(side_key))
-                if math.isfinite(enter_prob) and (not math.isfinite(peak_prob) or enter_prob > peak_prob):
-                    self._meta_side_entry_armed[side_key] = True
-                    self._meta_side_enter_peak_prob[side_key] = enter_prob
-                else:
-                    # Keep the setup cluster active, but only refresh the
-                    # trigger reference when confidence makes a new high.
-                    self._meta_side_entry_armed[side_key] = False
             self._meta_side_enter_above_threshold[side_key] = True
 
     def _entry_no_chase_blocked(

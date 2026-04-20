@@ -296,7 +296,7 @@
             <select id="symbolSelect"></select>
           </div>
           <div class="chart-hint">
-            Setup arrows mark completed 10m bars: green is long setup, red is short setup. Shaded bands plus dashed horizontal lines are armed 1m trigger windows, not positions. Solid horizontal lines show an actual held option position. Hollow triangles are policy intent only. Filled circles are buy/open order legs; filled squares are sell/close order legs. Blue is long setup probability; amber is short setup probability.
+            Markers show the order-policy timeline only: setup threshold crossed, 1m trigger window armed, actual option open, held option, and actual close. Setup/action times are plotted when the completed 10m bar is available. Blue is long setup probability; amber is short setup probability.
           </div>
           <div class="chart-wrap"><canvas id="chart"></canvas></div>
         </div>
@@ -1187,12 +1187,15 @@
 
       function drawLegend() {
         const items = [
-          { text: "setup bar", color: "#2ccf7a", shape: "triangle" },
-          { text: "armed trigger window", color: "#69e3aa", shape: "dash" },
-          { text: "held position", color: "#40d69a", shape: "solid" },
-          { text: "intent only", color: "#d7e4f7", shape: "hollow" },
-          { text: "buy/open", color: "#40d69a", shape: "circle" },
-          { text: "sell/close", color: "#f0b04f", shape: "square" },
+          { text: "long setup armed", color: "#2ccf7a", shape: "triangleUp" },
+          { text: "short setup armed", color: "#f05c52", shape: "triangleDown" },
+          { text: "1m trigger ref/window", color: "#ff8f8f", shape: "dash" },
+          { text: "long/call held", color: "#40d69a", shape: "solid" },
+          { text: "short/put held", color: "#ff7a7a", shape: "solid" },
+          { text: "long/call open fill", color: "#40d69a", shape: "circle" },
+          { text: "short/put open fill", color: "#ff6f6f", shape: "circle" },
+          { text: "close fill", color: "#f0b04f", shape: "square" },
+          { text: "unfilled attempt", color: "#9aa8b8", shape: "x" },
         ];
         ctx.save();
         ctx.font = "11px Consolas, monospace";
@@ -1204,11 +1207,19 @@
           ctx.strokeStyle = item.color;
           ctx.fillStyle = item.color;
           ctx.lineWidth = 1.4;
-          if (item.shape === "triangle") {
+          if (item.shape === "triangleUp") {
             ctx.beginPath();
             ctx.moveTo(x + 5, y - 5);
             ctx.lineTo(x, y + 4);
             ctx.lineTo(x + 10, y + 4);
+            ctx.closePath();
+            ctx.fill();
+            x += 16;
+          } else if (item.shape === "triangleDown") {
+            ctx.beginPath();
+            ctx.moveTo(x + 5, y + 5);
+            ctx.lineTo(x, y - 4);
+            ctx.lineTo(x + 10, y - 4);
             ctx.closePath();
             ctx.fill();
             x += 16;
@@ -1242,6 +1253,14 @@
             x += 16;
           } else if (item.shape === "square") {
             ctx.fillRect(x + 1, y - 4, 8, 8);
+            x += 16;
+          } else if (item.shape === "x") {
+            ctx.beginPath();
+            ctx.moveTo(x + 1, y - 4);
+            ctx.lineTo(x + 9, y + 4);
+            ctx.moveTo(x + 9, y - 4);
+            ctx.lineTo(x + 1, y + 4);
+            ctx.stroke();
             x += 16;
           }
           ctx.fillStyle = "#9fb8d5";
@@ -1286,10 +1305,6 @@
         triggerWindowKeys.add(key);
         triggerWindows.push({ side, ref, startMs, endMs, source });
       };
-      let longWasAbove = false;
-      let shortWasAbove = false;
-      let longPeakProb = Number.NaN;
-      let shortPeakProb = Number.NaN;
       visible10mRaw.forEach((row) => {
         const rowStartMs = timestampMs(row.timestamp);
         if (!Number.isFinite(rowStartMs)) return;
@@ -1301,9 +1316,7 @@
         const shortMargin = shortAbove ? pShort - shortSetupThreshold : Number.NEGATIVE_INFINITY;
         const longValid = longAbove && !(shortAbove && shortMargin > longMargin);
         const shortValid = shortAbove && !(longAbove && longMargin > shortMargin);
-        const longRefresh = longValid && (!longWasAbove || !Number.isFinite(longPeakProb) || pLong > longPeakProb);
-        const shortRefresh = shortValid && (!shortWasAbove || !Number.isFinite(shortPeakProb) || pShort > shortPeakProb);
-        if (longRefresh) {
+        if (longValid) {
           addTriggerWindow(
             "long",
             Number(row.high),
@@ -1312,7 +1325,7 @@
             "probability"
           );
         }
-        if (shortRefresh) {
+        if (shortValid) {
           addTriggerWindow(
             "short",
             Number(row.low),
@@ -1321,10 +1334,6 @@
             "probability"
           );
         }
-        longPeakProb = longAbove ? (Number.isFinite(longPeakProb) ? Math.max(longPeakProb, pLong) : pLong) : Number.NaN;
-        shortPeakProb = shortAbove ? (Number.isFinite(shortPeakProb) ? Math.max(shortPeakProb, pShort) : pShort) : Number.NaN;
-        longWasAbove = longAbove;
-        shortWasAbove = shortAbove;
       });
       const openSegments = { long: null, short: null };
       orderEvents.forEach((evt) => {
@@ -1352,8 +1361,28 @@
         if (!orders.length) return;
         orders.forEach((ord, legIdx) => {
           const ordType = String(ord?.type || "order").toLowerCase();
-          const verificationOrder = ord?.response?.verification?.order || {};
-          const submitResp = ord?.response?.response || {};
+          const responseWrap = ord?.response || {};
+          const verification = responseWrap?.verification || {};
+          const verificationOrder = verification?.order || {};
+          const submitResp = responseWrap?.response || {};
+          const status = String(
+            verification?.status
+            || verificationOrder?.status
+            || submitResp?.status
+            || responseWrap?.status
+            || ""
+          ).toLowerCase();
+          const filledQty = Number(
+            verificationOrder?.filled_qty
+            ?? submitResp?.filled_qty
+            ?? responseWrap?.filled_qty
+            ?? 0
+          );
+          const orderFilled = Boolean(responseWrap?.simulated)
+            || Boolean(verification?.verified)
+            || status === "filled"
+            || status === "partially_filled"
+            || filledQty > 0;
           const orderTs =
             verificationOrder?.filled_at
             || verificationOrder?.submitted_at
@@ -1370,8 +1399,11 @@
             type: ordType,
             side: String(sideRaw).toLowerCase(),
             pos: Number(result?.pos),
-            legIdx: Number(legIdx)
+            legIdx: Number(legIdx),
+            filled: orderFilled,
+            status
           });
+          if (!orderFilled) return;
           if (!Number.isFinite(evtClose)) return;
           if (ordType === "open_long") {
             openSegments.long = { start: orderTs, end: null, price: evtClose, side: "long" };
@@ -1404,14 +1436,38 @@
           const y = pane.toY(win.ref);
           if (!Number.isFinite(x1) || !Number.isFinite(x2) || !Number.isFinite(y)) return;
           const color = win.side === "long" ? "#69e3aa" : "#ff8f8f";
-          const label = `${win.side} active, ref ${fmtPrice(win.ref)}`;
+          const setupColor = win.side === "long" ? "#2ccf7a" : "#f05c52";
+          const label = `${win.side} 1m ref ${fmtPrice(win.ref)}`;
           const xLeft = Math.min(x1, x2);
           const width = Math.max(1, Math.abs(x2 - x1));
+          const laneY = pane.y0 + 4;
 
           ctx.save();
+          ctx.globalAlpha = 0.95;
+          ctx.strokeStyle = setupColor;
+          ctx.fillStyle = setupColor;
+          ctx.lineWidth = 1.4;
+          if (win.side === "long") {
+            ctx.beginPath();
+            ctx.moveTo(x1, laneY - 1);
+            ctx.lineTo(x1 - 5, laneY + 9);
+            ctx.lineTo(x1 + 5, laneY + 9);
+            ctx.closePath();
+            ctx.fill();
+          } else {
+            ctx.beginPath();
+            ctx.moveTo(x1, laneY + 9);
+            ctx.lineTo(x1 - 5, laneY - 1);
+            ctx.lineTo(x1 + 5, laneY - 1);
+            ctx.closePath();
+            ctx.fill();
+          }
+
           ctx.fillStyle = color;
-          ctx.globalAlpha = 0.08;
-          ctx.fillRect(xLeft, pane.y0, width, pane.paneHeight);
+          ctx.globalAlpha = 0.13;
+          ctx.fillRect(xLeft, pane.y0, width, 16);
+          ctx.globalAlpha = 0.035;
+          ctx.fillRect(xLeft, pane.y0 + 16, width, pane.paneHeight - 16);
           if (y < pane.y0 - 10 || y > pane.y0 + pane.paneHeight + 10) {
             ctx.globalAlpha = 0.82;
             ctx.font = "11px Consolas, monospace";
@@ -1438,12 +1494,12 @@
           ctx.moveTo(x2, y - 5);
           ctx.lineTo(x2, y + 5);
           ctx.stroke();
-          if (Math.abs(x2 - x1) > 74) {
+          if (Math.abs(x2 - x1) > 96) {
             ctx.font = "11px Consolas, monospace";
             ctx.textAlign = "left";
-            ctx.textBaseline = "bottom";
+            ctx.textBaseline = "top";
             const labelX = Math.max(left + 4, Math.min(w - right - 86, Math.min(x1, x2) + 5));
-            const labelY = Math.max(pane.y0 + 12, Math.min(pane.y0 + pane.paneHeight - 2, y - 3));
+            const labelY = pane.y0 + 17;
             ctx.fillText(label, labelX, labelY);
           }
           ctx.restore();
@@ -1561,7 +1617,9 @@
           const isBuy = m.side === "buy";
           const isSell = m.side === "sell";
           let color = "#b7c3d1";
-          if (isOpen) {
+          if (!m.filled) {
+            color = "#9aa8b8";
+          } else if (isOpen) {
             color = Number.isFinite(m.pos) ? (m.pos >= 0 ? "#40d69a" : "#ff6f6f") : (isBuy ? "#40d69a" : "#ff6f6f");
           } else if (isClose) {
             color = "#f0b04f";
@@ -1572,7 +1630,15 @@
           ctx.strokeStyle = color;
           ctx.fillStyle = color;
           ctx.lineWidth = 1;
-          if (isClose || isSell) {
+          if (!m.filled) {
+            ctx.lineWidth = 1.8;
+            ctx.beginPath();
+            ctx.moveTo(x - 5, yBase - 5);
+            ctx.lineTo(x + 5, yBase + 5);
+            ctx.moveTo(x + 5, yBase - 5);
+            ctx.lineTo(x - 5, yBase + 5);
+            ctx.stroke();
+          } else if (isClose || isSell) {
             ctx.beginPath();
             ctx.moveTo(x - 4, yBase - 4);
             ctx.lineTo(x + 4, yBase - 4);
@@ -1643,10 +1709,6 @@
       drawPositionSegments(pane2);
       drawTriggerWindows(pane1);
       drawTriggerWindows(pane2);
-      drawActionMarkers(pane1);
-      drawActionMarkers(pane2);
-      drawPolicyMarkers(pane1);
-      drawPolicyMarkers(pane2);
       drawOrderMarkers(pane1);
       drawOrderMarkers(pane2);
       drawLegend();

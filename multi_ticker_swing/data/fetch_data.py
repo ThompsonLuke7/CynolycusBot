@@ -14,6 +14,7 @@ import pandas as pd
 from API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
 from multi_ticker_swing.config.pipeline_config import (
     RAW_30M_DIR,
+    RAW_5M_DIR,
     RAW_10M_DIR,
     TRAIN_START,
     TRAIN_END,
@@ -91,11 +92,12 @@ def fetch_all(
     end: str = TRAIN_END,
     universe_csv: Path | str = UNIVERSE_CSV,
     fetch_30m: bool = True,
-    fetch_10m: bool = True,
+    fetch_5m: bool = False,
+    fetch_10m: bool = False,
     force: bool = False,
 ) -> None:
     """
-    Fetch 30m and/or 10m data for every ticker in the universe CSV.
+    Fetch 30m, 5m, and/or 10m data for every ticker in the universe CSV.
     Already-cached files are skipped unless force=True.
     """
     tickers = universe_tickers(universe_csv)
@@ -111,6 +113,16 @@ def fetch_all(
                 end=end,
                 alpaca_timeframe="30Min",
                 base_dir=RAW_30M_DIR,
+                force=force,
+            )
+
+        if fetch_5m:
+            fetch_ticker(
+                ticker,
+                start=start,
+                end=end,
+                alpaca_timeframe="5Min",
+                base_dir=RAW_5M_DIR,
                 force=force,
             )
 

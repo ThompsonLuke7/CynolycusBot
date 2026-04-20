@@ -85,6 +85,16 @@ META_INTERACTION_FEATURE_COLUMNS = [
     "trend_breadth_interact",
 ]
 
+_AGENT_MATRIX_LOGGED_MESSAGES: set[str] = set()
+
+
+def _agent_matrix_log(message: str, *, once: bool = True) -> None:
+    if once:
+        if message in _AGENT_MATRIX_LOGGED_MESSAGES:
+            return
+        _AGENT_MATRIX_LOGGED_MESSAGES.add(message)
+    print(message)
+
 
 @dataclass(frozen=True)
 class AgentFeatureConfig:
@@ -467,17 +477,20 @@ def _load_align_optional_ohlcv(
 ) -> pd.DataFrame | None:
     try:
         if parquet_path is not None:
-            source = load_ticker_parquet(ticker, parquet_path=str(_resolve_path(parquet_path)))
+            source = _load_ticker_parquet_with_live_context(
+                ticker,
+                parquet_path=_resolve_path(parquet_path),
+            )
         else:
             source = load_ticker_parquet(ticker)
     except Exception as exc:  # noqa: BLE001
         if warn_on_missing:
-            print(f"[agent_matrix] Skipping {label} features: {exc}")
+            _agent_matrix_log(f"[agent_matrix] Skipping {label} features: {exc}")
         return None
 
     if not isinstance(source.index, pd.DatetimeIndex):
         if warn_on_missing:
-            print(f"[agent_matrix] Skipping {label} features: source is missing a DatetimeIndex.")
+            _agent_matrix_log(f"[agent_matrix] Skipping {label} features: source is missing a DatetimeIndex.")
         return None
 
     out = source.sort_index().copy()
@@ -511,10 +524,19 @@ def _load_align_optional_ohlcv(
     )
     if coverage <= 0.0:
         if warn_on_missing:
-            print(f"[agent_matrix] Skipping {label} features: no aligned rows after reindex.")
+            source_min = source.index.min() if len(source.index) else None
+            source_max = source.index.max() if len(source.index) else None
+            target_min = target_index.min() if len(target_index) else None
+            target_max = target_index.max() if len(target_index) else None
+            _agent_matrix_log(
+                "[agent_matrix] Skipping "
+                f"{label} features: no aligned rows after reindex "
+                f"(source={source_min}..{source_max}, target={target_min}..{target_max}, "
+                f"max_lag={max_lag}, ffill_limit={ffill_limit})."
+            )
         return None
     if warn_on_missing:
-        print(f"[agent_matrix] {label} aligned coverage={coverage:.1%}")
+        _agent_matrix_log(f"[agent_matrix] {label} aligned coverage={coverage:.1%}")
     return aligned
 
 
@@ -730,20 +752,23 @@ def _add_meta_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
     atr_pct = pd.to_numeric(df.get("atr_pct"), errors="coerce")
     breadth_agreement = pd.to_numeric(df.get("breadth_agreement"), errors="coerce")
 
+    new_cols: dict[str, pd.Series] = {}
     if isinstance(p_long, pd.Series) and isinstance(trend_strength, pd.Series):
-        df["p_long_trend"] = p_long * trend_strength
+        new_cols["p_long_trend"] = p_long * trend_strength
     if isinstance(p_short, pd.Series) and isinstance(trend_strength, pd.Series):
-        df["p_short_trend"] = p_short * trend_strength
+        new_cols["p_short_trend"] = p_short * trend_strength
     if isinstance(p_long, pd.Series) and isinstance(chop_score_20, pd.Series):
-        df["p_long_chop_adj"] = p_long * (1.0 - chop_score_20)
+        new_cols["p_long_chop_adj"] = p_long * (1.0 - chop_score_20)
     if isinstance(p_short, pd.Series) and isinstance(chop_score_20, pd.Series):
-        df["p_short_chop_adj"] = p_short * (1.0 - chop_score_20)
+        new_cols["p_short_chop_adj"] = p_short * (1.0 - chop_score_20)
     if isinstance(ret_1, pd.Series) and isinstance(vix_z_20, pd.Series):
-        df["ret_vix_interaction"] = ret_1 * vix_z_20
+        new_cols["ret_vix_interaction"] = ret_1 * vix_z_20
     if isinstance(volume_spike_20, pd.Series) and isinstance(atr_pct, pd.Series):
-        df["volume_vol_interaction"] = volume_spike_20 * atr_pct
+        new_cols["volume_vol_interaction"] = volume_spike_20 * atr_pct
     if isinstance(trend_strength, pd.Series) and isinstance(breadth_agreement, pd.Series):
-        df["trend_breadth_interact"] = trend_strength * breadth_agreement
+        new_cols["trend_breadth_interact"] = trend_strength * breadth_agreement
+    if new_cols:
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1).copy()
     return df
 
 
@@ -765,6 +790,54 @@ def _resolve_path(path_like: str | Path) -> Path:
     if p.is_absolute():
         return p
     return _repo_root() / p
+
+
+def _context_history_runtime_candidates(
+    *,
+    ticker: str,
+    parquet_path: Path,
+) -> list[Path]:
+    clean = normalize_ticker(ticker).lower()
+    parent = parquet_path.parent
+    names = [
+        f"{clean}_intraday_10min.parquet",
+        f"{clean}_10min.parquet",
+        f"{clean}_10min_live_runtime.parquet",
+    ]
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for name in names:
+        candidate = parent / name
+        try:
+            key = candidate.resolve()
+        except Exception:
+            key = candidate
+        if key in seen or candidate == parquet_path:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            out.append(candidate)
+    return out
+
+
+def _load_ticker_parquet_with_live_context(
+    ticker: str,
+    *,
+    parquet_path: Path,
+) -> pd.DataFrame:
+    frames = [load_ticker_parquet(ticker, parquet_path=str(parquet_path))]
+    for candidate in _context_history_runtime_candidates(ticker=ticker, parquet_path=parquet_path):
+        try:
+            frames.append(load_ticker_parquet(ticker, parquet_path=str(candidate)))
+        except Exception:
+            continue
+    if len(frames) <= 1:
+        return frames[0]
+    combined = pd.concat(frames, axis=0, sort=False)
+    if isinstance(combined.index, pd.DatetimeIndex):
+        combined = combined.sort_index()
+        combined = combined.loc[~combined.index.duplicated(keep="last")]
+    return combined
 
 
 def _infer_vix_fetch_start(
@@ -895,7 +968,7 @@ def _load_align_vix_ohlcv(
                 target_index=target_index,
                 explicit_end=cfg.vix_fetch_end,
             )
-            print(
+            _agent_matrix_log(
                 f"[agent_matrix] Fetching intraday VIX ({cfg.vix_ticker}) "
                 f"to {preferred_path} because: {reason}"
             )
@@ -917,7 +990,7 @@ def _load_align_vix_ohlcv(
     def _refresh_daily_fallback(reason: str) -> Exception | None:
         try:
             start = _infer_vix_daily_start(target_index=target_index)
-            print(
+            _agent_matrix_log(
                 f"[agent_matrix] Refreshing daily VIX ({cfg.vix_daily_symbol}) "
                 f"from {start} because: {reason}"
             )
@@ -945,7 +1018,10 @@ def _load_align_vix_ohlcv(
 
     try:
         if preferred_path is not None:
-            vix_df = load_ticker_parquet(cfg.vix_ticker, parquet_path=str(preferred_path))
+            vix_df = _load_ticker_parquet_with_live_context(
+                cfg.vix_ticker,
+                parquet_path=preferred_path,
+            )
         else:
             vix_df = load_ticker_parquet(cfg.vix_ticker)
     except Exception as exc:  # noqa: BLE001
@@ -971,7 +1047,7 @@ def _load_align_vix_ohlcv(
         )
         coverage = _coverage_ratio(aligned_intraday)
         if cfg.vix_warn_on_missing:
-            print(f"[agent_matrix] Intraday VIX aligned coverage={coverage:.1%}")
+            _agent_matrix_log(f"[agent_matrix] Intraday VIX aligned coverage={coverage:.1%}")
 
         if (
             coverage < required_coverage
@@ -984,8 +1060,9 @@ def _load_align_vix_ohlcv(
             )
             if refetch_error is None:
                 try:
-                    vix_df_refreshed = load_ticker_parquet(
-                        cfg.vix_ticker, parquet_path=str(preferred_path)
+                    vix_df_refreshed = _load_ticker_parquet_with_live_context(
+                        cfg.vix_ticker,
+                        parquet_path=preferred_path,
                     )
                     vix_df_refreshed = _prepare_intraday_frame(vix_df_refreshed)
                     aligned_intraday = _align_frame(
@@ -1012,7 +1089,7 @@ def _load_align_vix_ohlcv(
         raise FileNotFoundError("Intraday VIX source unavailable.")
 
     if intraday_error is not None and cfg.vix_warn_on_missing:
-        print(
+        _agent_matrix_log(
             "[agent_matrix] Intraday VIX unavailable; falling back to daily source. "
             f"Reason: {intraday_error}"
         )
@@ -1050,7 +1127,7 @@ def _load_align_vix_ohlcv(
             daily_coverage = _coverage_ratio(aligned_daily)
             close_valid_daily = aligned_daily["close"].notna().sum() if "close" in aligned_daily.columns else 0
         elif cfg.vix_warn_on_missing:
-            print(f"[agent_matrix] Daily VIX refresh failed: {refresh_error}")
+            _agent_matrix_log(f"[agent_matrix] Daily VIX refresh failed: {refresh_error}")
     if close_valid_daily == 0:
         if intraday_error is not None:
             raise RuntimeError(
@@ -1058,11 +1135,11 @@ def _load_align_vix_ohlcv(
             ) from intraday_error
         raise RuntimeError("Daily VIX fallback produced no aligned rows.")
     if cfg.vix_warn_on_missing:
-        print(f"[agent_matrix] Daily VIX aligned coverage={daily_coverage:.1%}")
-    print(
-        f"[agent_matrix] Using daily VIX fallback ({cfg.vix_daily_symbol}) "
-        f"with max_lag={cfg.vix_daily_max_lag}."
-    )
+        _agent_matrix_log(f"[agent_matrix] Daily VIX aligned coverage={daily_coverage:.1%}")
+        _agent_matrix_log(
+            f"[agent_matrix] Using daily VIX fallback ({cfg.vix_daily_symbol}) "
+            f"with max_lag={cfg.vix_daily_max_lag}."
+        )
     return aligned_daily
 
 
@@ -1252,7 +1329,7 @@ def build_agent_feature_matrix(
             df = _add_vix_feature_suite(df, vix_ohlcv=vix_ohlcv)
         except Exception as exc:
             if cfg.vix_warn_on_missing:
-                print(f"[agent_matrix] VIX feature suite unavailable: {exc}")
+                _agent_matrix_log(f"[agent_matrix] VIX feature suite unavailable: {exc}")
             df = _ensure_vix_feature_cols(df)
 
     df = _add_meta_interaction_features(df)
