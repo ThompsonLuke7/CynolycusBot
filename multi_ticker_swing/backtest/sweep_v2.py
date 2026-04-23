@@ -34,6 +34,7 @@ from multi_ticker_swing.config.pipeline_config import (
     BACKTEST_RESULTS_DIR,
     RAW_30M_DIR,
     RAW_5M_DIR,
+    TRADING_BLACKLIST,
     UNIVERSE_CSV,
 )
 
@@ -64,6 +65,10 @@ EXIT_STRATEGIES: list[dict] = [
     {"name": "trail_arm2.5_gb25_opp60", "arm_pct": 0.025, "giveback_pct": 0.25, "sl_atr": 1.0, "opp_exit": 0.60, "max_days": None},
     # Wider stop
     {"name": "trail_arm2.5_gb25_sl1.5", "arm_pct": 0.025, "giveback_pct": 0.25, "sl_atr": 1.5, "opp_exit": None, "max_days": None},
+    {"name": "trail_arm2.5_gb25_sl2.0", "arm_pct": 0.025, "giveback_pct": 0.25, "sl_atr": 2.0, "opp_exit": None, "max_days": None},
+    {"name": "trail_arm2.5_gb25_sl2.5", "arm_pct": 0.025, "giveback_pct": 0.25, "sl_atr": 2.5, "opp_exit": None, "max_days": None},
+    {"name": "trail_arm2.5_gb25_sl3.0", "arm_pct": 0.025, "giveback_pct": 0.25, "sl_atr": 3.0, "opp_exit": None, "max_days": None},
+    {"name": "trail_arm2.5_gb25_sl4.0", "arm_pct": 0.025, "giveback_pct": 0.25, "sl_atr": 4.0, "opp_exit": None, "max_days": None},
     {"name": "trail_arm5_gb25_sl1.5",   "arm_pct": 0.050, "giveback_pct": 0.25, "sl_atr": 1.5, "opp_exit": None, "max_days": None},
     # Time-capped (for weeklies)
     {"name": "trail_arm2.5_gb25_5d", "arm_pct": 0.025, "giveback_pct": 0.25, "sl_atr": 1.0, "opp_exit": None, "max_days": 5},
@@ -132,11 +137,34 @@ def select_top_tickers(proba: pd.DataFrame, top_n: int) -> list[str]:
 # Pre-built ticker data
 # ---------------------------------------------------------------------------
 
+def compute_daily_ema_slope(raw_30m: pd.DataFrame, period: int = 20) -> np.ndarray:
+    """
+    Compute daily EMA(period) slope aligned to 30m bar indices.
+    Uses PREVIOUS day's close to avoid lookahead — safe to use at signal time.
+    Returns array of length n_30m: positive = daily uptrend, negative = downtrend, 0 = unknown.
+    """
+    raw = raw_30m.copy()
+    raw["date_et"] = pd.to_datetime(raw["timestamp"]).dt.tz_convert("America/New_York").dt.date
+    daily = raw.groupby("date_et")["close"].last().reset_index()
+    daily["ema"] = daily["close"].ewm(span=period, adjust=False).mean()
+    # Slope using previous day's ema so no lookahead
+    daily["slope"] = daily["ema"].diff()
+    # Shift by 1: slope known at start of next day (after prior close)
+    daily["slope_prev"] = daily["slope"].shift(1)
+    date_to_slope = dict(zip(daily["date_et"], daily["slope_prev"]))
+
+    slopes = np.zeros(len(raw), dtype=np.float64)
+    for idx, date in enumerate(raw["date_et"]):
+        s = date_to_slope.get(date, np.nan)
+        slopes[idx] = 0.0 if np.isnan(s) else s
+    return slopes
+
+
 class TickerData:
     __slots__ = ("ticker", "ts_30m", "open_30m", "high_30m", "low_30m", "close_30m",
-                 "atr_30m", "n_30m", "p_long_dir", "p_short_dir",
-                 "ts_5m", "open_5m", "high_5m", "low_5m", "close_5m", "n_5m",
-                 "has_5m")
+                 "atr_30m", "daily_ema_slope", "n_30m", "p_long_dir", "p_short_dir",
+                 "ts_5m", "open_5m", "high_5m", "low_5m", "close_5m", "vol_5m",
+                 "vol_5m_mean20", "n_5m", "has_5m")
 
     def __init__(self, ticker, raw_30m, raw_5m, proba_ticker):
         self.ticker = ticker
@@ -147,6 +175,7 @@ class TickerData:
         self.low_30m = raw_30m["low"].values.astype(np.float64)
         self.close_30m = raw_30m["close"].values.astype(np.float64)
         self.atr_30m = compute_atr(raw_30m)
+        self.daily_ema_slope = compute_daily_ema_slope(raw_30m)
         self.n_30m = n
 
         # Map probabilities to 30m bar indices
@@ -167,6 +196,10 @@ class TickerData:
             self.high_5m = raw_5m["high"].values.astype(np.float64)
             self.low_5m = raw_5m["low"].values.astype(np.float64)
             self.close_5m = raw_5m["close"].values.astype(np.float64)
+            raw_vol = raw_5m["volume"].values.astype(np.float64)
+            self.vol_5m = raw_vol
+            # Rolling 20-bar mean volume — used for volume confirmation filter
+            self.vol_5m_mean20 = pd.Series(raw_vol).rolling(20, min_periods=5).mean().values
             self.n_5m = len(raw_5m)
             self.has_5m = True
         else:
@@ -175,6 +208,8 @@ class TickerData:
             self.high_5m = np.array([], dtype=np.float64)
             self.low_5m = np.array([], dtype=np.float64)
             self.close_5m = np.array([], dtype=np.float64)
+            self.vol_5m = np.array([], dtype=np.float64)
+            self.vol_5m_mean20 = np.array([], dtype=np.float64)
             self.n_5m = 0
             self.has_5m = False
 
@@ -188,12 +223,20 @@ def find_5m_confirmation(
     signal_bar_idx: int,
     direction: int,
     max_5m_bars: int,
+    min_vol_mult: float = 0.0,
 ) -> tuple[float | None, int]:
     """
     Look for breakout confirmation on 5m bars after the 30m signal bar.
 
     For longs: 5m bar high >= signal bar high AND close > open AND close > signal bar high
     For shorts: 5m bar low <= signal bar low AND close < open AND close < signal bar low
+
+    Confirmation must occur within max_5m_bars × 5 minutes of wall-clock time from the
+    signal bar close — overnight gaps are excluded (no confirming into the next day's open).
+
+    min_vol_mult: confirming 5m bar volume must be >= min_vol_mult × 20-bar rolling mean.
+    Default 0.0 = disabled. Values around 1.2–1.5 filter thin false breakouts but reduce
+    trade count and Sharpe — empirically not beneficial with current model.
 
     Returns (entry_price, 5m_bar_idx) or (None, -1) if no confirmation found.
     """
@@ -207,13 +250,27 @@ def find_5m_confirmation(
     # Find first 5m bar strictly after signal bar timestamp
     start_5m = np.searchsorted(td.ts_5m, signal_ts, side="right")
 
+    # Hard wall-clock deadline: max_5m_bars × 5 minutes of actual time
+    # This prevents confirming into overnight gaps (e.g. signal at close, entry at next open)
+    deadline_ts = signal_ts + np.timedelta64(max_5m_bars * 5, "m")
+
     end_5m = min(start_5m + max_5m_bars, td.n_5m)
 
     for j in range(start_5m, end_5m):
+        if td.ts_5m[j] > deadline_ts:
+            break
+
         h = td.high_5m[j]
         l = td.low_5m[j]
         o = td.open_5m[j]
         c = td.close_5m[j]
+
+        # Volume confirmation: reject thin breakouts below min_vol_mult × rolling mean
+        if min_vol_mult > 0.0:
+            mean_vol = td.vol_5m_mean20[j]
+            if not np.isnan(mean_vol) and mean_vol > 0:
+                if td.vol_5m[j] < min_vol_mult * mean_vol:
+                    continue
 
         if direction == 1:
             if h >= ref_high and c > o and c > ref_high:
@@ -234,6 +291,7 @@ def simulate_ticker(
     entry_threshold: float,
     confirm_max_5m: int,
     exit_cfg: dict,
+    trend_filter: bool = False,
 ) -> list[tuple]:
     """Returns list of tuples: (ticker, dir, entry_ts_idx, exit_ts_idx, entry_price, exit_price, pnl_pct, exit_reason, holding_bars_30m)"""
     results = []
@@ -267,6 +325,15 @@ def simulate_ticker(
             direction = -1
         if direction == 0:
             continue
+
+        # Daily trend filter: only take longs in uptrend, shorts in downtrend
+        # Uses previous day's EMA slope — no lookahead
+        if trend_filter:
+            slope = td.daily_ema_slope[i]
+            if direction == 1 and slope <= 0:
+                continue
+            if direction == -1 and slope >= 0:
+                continue
 
         atr_val = td.atr_30m[i]
         if np.isnan(atr_val) or atr_val <= 0:
@@ -442,6 +509,8 @@ def compute_grouped_metrics(trades_df: pd.DataFrame) -> dict:
 def run_sweep(
     top_n: int = 100,
     split: str = "test",
+    trend_filter: bool = False,
+    apply_blacklist: bool = True,
 ) -> pd.DataFrame:
     SWEEP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -456,6 +525,12 @@ def run_sweep(
 
     logger.info("Selecting top %d tickers by dollar volume...", top_n)
     tickers = select_top_tickers(proba, top_n)
+
+    if apply_blacklist:
+        blacklisted = [t for t in tickers if t in TRADING_BLACKLIST]
+        tickers = [t for t in tickers if t not in TRADING_BLACKLIST]
+        if blacklisted:
+            logger.info("Blacklist removed %d tickers: %s", len(blacklisted), blacklisted)
     logger.info("Selected %d tickers", len(tickers))
 
     logger.info("Pre-building ticker data (30m + 5m)...")
@@ -479,7 +554,7 @@ def run_sweep(
         logger.info("  Missing 5m: %s", ", ".join(no_5m[:10]) + ("..." if len(no_5m) > 10 else ""))
 
     total_combos = len(ENTRY_THRESHOLDS) * len(CONFIRM_MAX_BARS_5M) * len(EXIT_STRATEGIES)
-    logger.info("Running %d combos × %d tickers", total_combos, len(ticker_data))
+    logger.info("Running %d combos × %d tickers  [trend_filter=%s]", total_combos, len(ticker_data), trend_filter)
 
     results = []
     combo_idx = 0
@@ -493,7 +568,7 @@ def run_sweep(
 
                 all_rows = []
                 for td in ticker_data.values():
-                    trades = simulate_ticker(td, entry_thresh, confirm_bars, exit_cfg)
+                    trades = simulate_ticker(td, entry_thresh, confirm_bars, exit_cfg, trend_filter=trend_filter)
                     all_rows.extend(trades)
 
                 if all_rows:
@@ -546,7 +621,7 @@ def run_sweep(
 
         all_rows = []
         for td in ticker_data.values():
-            trades = simulate_ticker(td, best["entry_threshold"], best_confirm, best_exit_cfg)
+            trades = simulate_ticker(td, best["entry_threshold"], best_confirm, best_exit_cfg, trend_filter=trend_filter)
             all_rows.extend(trades)
 
         if all_rows:
@@ -597,5 +672,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--top-n", type=int, default=100)
     p.add_argument("--split", default="test", choices=["train", "val", "test"])
+    p.add_argument("--trend-filter", action="store_true", help="Only trade direction aligned with daily EMA(20) slope")
+    p.add_argument("--no-blacklist", action="store_true", help="Disable TRADING_BLACKLIST filtering (for diagnostics)")
     args = p.parse_args()
-    run_sweep(top_n=args.top_n, split=args.split)
+    run_sweep(top_n=args.top_n, split=args.split, trend_filter=args.trend_filter, apply_blacklist=not args.no_blacklist)

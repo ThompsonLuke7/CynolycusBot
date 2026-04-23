@@ -87,12 +87,19 @@ class OptionOrderPolicyConfig:
     meta_stale_no_progress_atr: float = 0.35
     meta_stale_after_favorable_minutes: int = 30
     meta_stale_retrace_atr: float = 0.25
+    meta_setup_failure_exit_enabled: bool = True
+    meta_setup_failure_buffer_atr: float = 0.10
+    meta_no_progress_exit_enabled: bool = True
+    meta_no_progress_exit_minutes: int = 10
+    meta_no_progress_exit_atr: float = 0.20
     meta_execute_on_interval_close: bool = False
     meta_intrabar_execution_enabled: bool = True
     meta_intrabar_breakout_entry_only: bool = False
     meta_intrabar_entry_policy: str = "legacy_breakout_touch"
     meta_intrabar_setup_max_bars: int = 4
     meta_intrabar_setup_bar_minutes: int = 10
+    meta_intrabar_max_confirmation_age_minutes: int = 30
+    meta_intrabar_ref_chase_atr: float = 0.50
     meta_intrabar_long_setup_threshold: float | None = None
     meta_intrabar_short_setup_threshold: float | None = None
     meta_intrabar_opposite_dominance_delta: float = 0.0
@@ -199,6 +206,8 @@ class OptionOrderPolicy:
         self._meta_intrabar_entry_ref: dict[str, float] = {"long": float("nan"), "short": float("nan")}
         self._meta_intrabar_entry_setup_ts: dict[str, datetime | None] = {"long": None, "short": None}
         self._meta_intrabar_entry_expires_at: dict[str, datetime | None] = {"long": None, "short": None}
+        self._meta_intrabar_setup_snapshot: dict[str, dict[str, Any] | None] = {"long": None, "short": None}
+        self._meta_entry_structure: dict[str, dict[str, Any] | None] = {"long": None, "short": None}
         self._meta_side_reason: dict[str, str | None] = {"long": None, "short": None}
         self._pending_broker_reconcile: dict[str, Any] | None = None
         self._last_broker_reconcile_monotonic: float = 0.0
@@ -409,6 +418,78 @@ class OptionOrderPolicy:
             and retrace_move >= float(self.cfg.meta_stale_retrace_atr) * entry_atr
         )
         return bool(no_progress_hit or stale_retrace_hit)
+
+    def _setup_failure_exit_hit(
+        self,
+        *,
+        side: str,
+        close: float,
+        high: float,
+        low: float,
+    ) -> bool:
+        if not bool(self.cfg.meta_setup_failure_exit_enabled):
+            return False
+        side_key = str(side).strip().lower()
+        structure = self._meta_entry_structure.get(side_key)
+        if not isinstance(structure, dict):
+            return False
+        signal_atr = _as_float(structure.get("signal_atr"))
+        trail_state = self._trail_state(side_key)
+        ref_atr = signal_atr if math.isfinite(signal_atr) and signal_atr > 0.0 else _as_float(trail_state.entry_atr)
+        if not (math.isfinite(ref_atr) and ref_atr > 0.0):
+            return False
+        buffer_atr = max(0.0, float(self.cfg.meta_setup_failure_buffer_atr))
+        buffer = buffer_atr * ref_atr
+        if side_key == "long":
+            invalid_level = _as_float(structure.get("signal_low"))
+            if not math.isfinite(invalid_level):
+                return False
+            invalid_level = float(invalid_level) - buffer
+            probe = low if math.isfinite(low) else close
+            return bool(math.isfinite(probe) and probe <= invalid_level)
+
+        invalid_level = _as_float(structure.get("signal_high"))
+        if not math.isfinite(invalid_level):
+            return False
+        invalid_level = float(invalid_level) + buffer
+        probe = high if math.isfinite(high) else close
+        return bool(math.isfinite(probe) and probe >= invalid_level)
+
+    def _no_progress_exit_hit(
+        self,
+        *,
+        side: str,
+        close: float,
+        local_ts: datetime | None,
+    ) -> bool:
+        if not bool(self.cfg.meta_no_progress_exit_enabled):
+            return False
+        state = self._trail_state(side)
+        if (
+            local_ts is None
+            or (not state.active)
+            or state.entry_ts is None
+            or (not math.isfinite(state.entry_price))
+            or (not math.isfinite(state.entry_atr))
+            or state.entry_atr <= 0.0
+            or (not math.isfinite(state.favorable_anchor))
+            or (not math.isfinite(close))
+        ):
+            return False
+        elapsed_min = max(0.0, (local_ts - state.entry_ts).total_seconds() / 60.0)
+        if elapsed_min < max(0, int(self.cfg.meta_no_progress_exit_minutes)):
+            return False
+        threshold_atr = max(0.0, float(self.cfg.meta_no_progress_exit_atr))
+        if side == "long":
+            favorable_move = float(state.favorable_anchor) - float(state.entry_price)
+            current_move = float(close) - float(state.entry_price)
+        else:
+            favorable_move = float(state.entry_price) - float(state.favorable_anchor)
+            current_move = float(state.entry_price) - float(close)
+        return bool(
+            favorable_move < threshold_atr * float(state.entry_atr)
+            and current_move <= 0.0
+        )
 
     def _hard_stop_hit(
         self,
@@ -903,6 +984,7 @@ class OptionOrderPolicy:
                 self._meta_side_entry_signal_ts[side] = None
                 self._meta_side_soft_exit_count[side] = 0
                 self._reset_trail_state(side)
+                self._clear_entry_structure(side=side)
                 self._option_exit_best_price[side] = float("nan")
                 self._option_exit_best_seen_at[side] = None
                 continue
@@ -919,6 +1001,7 @@ class OptionOrderPolicy:
                 self._meta_side_entry_signal_ts[side] = None
                 self._meta_side_soft_exit_count[side] = 0
                 self._reset_trail_state(side)
+                self._clear_entry_structure(side=side)
                 self._option_exit_best_price[side] = float(avg_entry) if math.isfinite(avg_entry) else float("nan")
                 self._option_exit_best_seen_at[side] = local_ts
                 if local_ts is not None and self._symbol_expires_today(next_symbol, local_ts=local_ts):
@@ -1216,8 +1299,99 @@ class OptionOrderPolicy:
         self._meta_intrabar_entry_ref[side] = float("nan")
         self._meta_intrabar_entry_setup_ts[side] = None
         self._meta_intrabar_entry_expires_at[side] = None
+        self._meta_intrabar_setup_snapshot[side] = None
         if reason:
             self._meta_side_reason[side] = reason
+
+    def _capture_intrabar_setup_snapshot(
+        self,
+        *,
+        side: str,
+        closed_bar: dict[str, Any],
+        ref: float,
+        setup_ts: datetime | None,
+        expires_at: datetime | None,
+        prob: float,
+        threshold: float,
+        entry_kind: str,
+        source_side: str,
+    ) -> None:
+        self._meta_intrabar_setup_snapshot[side] = {
+            "setup_ts": setup_ts.isoformat() if isinstance(setup_ts, datetime) else None,
+            "expires_at": expires_at.isoformat() if isinstance(expires_at, datetime) else None,
+            "signal_open": _as_float(closed_bar.get("open")),
+            "signal_high": _as_float(closed_bar.get("high", closed_bar.get("signal_high"))),
+            "signal_low": _as_float(closed_bar.get("low", closed_bar.get("signal_low"))),
+            "signal_close": _as_float(closed_bar.get("close", closed_bar.get("signal_close"))),
+            "signal_atr": _as_float(closed_bar.get("signal_atr")),
+            "ref": float(ref) if math.isfinite(ref) else float("nan"),
+            "prob": float(prob) if math.isfinite(prob) else float("nan"),
+            "threshold": float(threshold) if math.isfinite(threshold) else float("nan"),
+            "entry_kind": str(entry_kind),
+            "source_side": str(source_side),
+        }
+
+    def _seed_entry_structure(
+        self,
+        *,
+        side: str,
+        local_ts: datetime | None,
+        entry_price: float,
+    ) -> None:
+        snap = self._meta_intrabar_setup_snapshot.get(side)
+        if not isinstance(snap, dict):
+            self._meta_entry_structure[side] = None
+            return
+        setup_ts = snap.get("setup_ts")
+        expires_at = snap.get("expires_at")
+        parsed_setup_ts = pd.to_datetime(setup_ts, utc=True, errors="coerce") if setup_ts else None
+        parsed_expires_at = pd.to_datetime(expires_at, utc=True, errors="coerce") if expires_at else None
+        self._meta_entry_structure[side] = {
+            "setup_ts": (
+                parsed_setup_ts.to_pydatetime().astimezone(self._tz)
+                if parsed_setup_ts is not None and not pd.isna(parsed_setup_ts)
+                else None
+            ),
+            "expires_at": (
+                parsed_expires_at.to_pydatetime().astimezone(self._tz)
+                if parsed_expires_at is not None and not pd.isna(parsed_expires_at)
+                else None
+            ),
+            "entry_ts": local_ts,
+            "entry_price": float(entry_price) if math.isfinite(entry_price) else float("nan"),
+            "signal_high": _as_float(snap.get("signal_high")),
+            "signal_low": _as_float(snap.get("signal_low")),
+            "signal_close": _as_float(snap.get("signal_close")),
+            "signal_atr": _as_float(snap.get("signal_atr")),
+            "ref": _as_float(snap.get("ref")),
+            "prob": _as_float(snap.get("prob")),
+            "threshold": _as_float(snap.get("threshold")),
+            "entry_kind": str(snap.get("entry_kind") or ""),
+            "source_side": str(snap.get("source_side") or ""),
+        }
+
+    def _clear_entry_structure(self, *, side: str) -> None:
+        self._meta_entry_structure[side] = None
+
+    @staticmethod
+    def _blend_avg_entry_price(
+        *,
+        current_avg: float,
+        current_qty: int,
+        fill_price: float,
+        fill_qty: int,
+    ) -> float:
+        if not (math.isfinite(fill_price) and int(fill_qty) > 0):
+            return float("nan")
+        if not (math.isfinite(current_avg) and int(current_qty) > 0):
+            return float(fill_price)
+        total_qty = int(current_qty) + int(fill_qty)
+        if total_qty <= 0:
+            return float(fill_price)
+        return (
+            float(current_avg) * int(current_qty)
+            + float(fill_price) * int(fill_qty)
+        ) / float(total_qty)
 
     def _intrabar_entry_triggered(
         self,
@@ -1436,6 +1610,22 @@ class OptionOrderPolicy:
                 self._meta_intrabar_entry_setup_ts[side_key] = setup_ts
                 self._meta_intrabar_entry_expires_at[side_key] = expires_at
                 entry_kind = "continuation" if continuation_valid.get(side_key, False) and not (long_valid if side_key == "long" else short_valid) else "swing"
+                prob = _as_float(closed_bar.get(f"p_enter_{side_key}"))
+                threshold = self._effective_intrabar_setup_threshold(closed_bar=closed_bar, side=side_key)
+                source_side = side_key
+                if entry_kind == "continuation":
+                    source_side = "short_failed" if side_key == "long" else "long_failed"
+                self._capture_intrabar_setup_snapshot(
+                    side=side_key,
+                    closed_bar=closed_bar,
+                    ref=self._meta_intrabar_entry_ref[side_key],
+                    setup_ts=setup_ts,
+                    expires_at=expires_at,
+                    prob=prob,
+                    threshold=threshold,
+                    entry_kind=entry_kind,
+                    source_side=source_side,
+                )
                 self._meta_side_reason[side_key] = (
                     f"intrabar_{entry_kind}_setup_armed:{self._intrabar_entry_policy_name()}"
                 )
@@ -1458,10 +1648,9 @@ class OptionOrderPolicy:
             self._meta_rearm_session_day = session_day
         for side_key in ("long", "short"):
             enter_prob = _as_float(closed_bar.get(f"p_enter_{side_key}"))
-            enter_thr = self._meta_threshold_value(
-                closed_bar,
-                f"thr_enter_{side_key}",
-                f"enter_{side_key}_threshold",
+            enter_thr = self._effective_intrabar_setup_threshold(
+                closed_bar=closed_bar,
+                side=side_key,
             )
             is_above = bool(
                 math.isfinite(enter_prob)
@@ -1485,22 +1674,51 @@ class OptionOrderPolicy:
         side: str,
         close: float,
         atr: float,
+        local_ts: datetime | None,
     ) -> bool:
-        chase_atr = float(self.cfg.meta_no_chase_atr)
-        if chase_atr <= 0.0 or not math.isfinite(close):
+        side_key = str(side).strip().lower()
+        if side_key not in {"long", "short"} or not math.isfinite(close):
             return False
-        snapshot = self._latest_meta_side_snapshot or {}
-        signal_close = _as_float(snapshot.get("signal_close"))
-        signal_atr = _as_float(snapshot.get("signal_atr"))
+
+        setup_ts = self._meta_intrabar_entry_setup_ts.get(side_key)
+        max_age_min = max(0, int(self.cfg.meta_intrabar_max_confirmation_age_minutes))
+        if (
+            max_age_min > 0
+            and local_ts is not None
+            and isinstance(setup_ts, datetime)
+            and local_ts >= setup_ts + timedelta(minutes=max_age_min)
+        ):
+            self._clear_intrabar_entry_intent(side=side_key, reason="entry_confirmation_too_late")
+            return True
+
+        setup_snapshot = self._meta_intrabar_setup_snapshot.get(side_key) or {}
+        signal_close = _as_float(setup_snapshot.get("signal_close"))
+        signal_atr = _as_float(setup_snapshot.get("signal_atr"))
         ref_atr = signal_atr if math.isfinite(signal_atr) and signal_atr > 0.0 else atr
+        if math.isfinite(ref_atr) and ref_atr > 0.0:
+            ref = _as_float(self._meta_intrabar_entry_ref.get(side_key))
+            ref_chase_atr = max(0.0, float(self.cfg.meta_intrabar_ref_chase_atr))
+            if ref_chase_atr > 0.0 and math.isfinite(ref):
+                max_ref_chase = ref_chase_atr * ref_atr
+                if side_key == "long" and close > ref + max_ref_chase:
+                    self._meta_side_reason[side_key] = "entry_no_chase_ref_extension"
+                    return True
+                if side_key == "short" and close < ref - max_ref_chase:
+                    self._meta_side_reason[side_key] = "entry_no_chase_ref_extension"
+                    return True
+
+        chase_atr = float(self.cfg.meta_no_chase_atr)
+        if chase_atr <= 0.0:
+            return False
         if not (math.isfinite(signal_close) and math.isfinite(ref_atr) and ref_atr > 0.0):
             return False
         max_chase = chase_atr * ref_atr
-        side_key = str(side).strip().lower()
-        if side_key == "long":
-            return close > signal_close + max_chase
-        if side_key == "short":
-            return close < signal_close - max_chase
+        if side_key == "long" and close > signal_close + max_chase:
+            self._meta_side_reason[side_key] = "entry_no_chase_signal_extension"
+            return True
+        if side_key == "short" and close < signal_close - max_chase:
+            self._meta_side_reason[side_key] = "entry_no_chase_signal_extension"
+            return True
         return False
 
     def _side_reentry_cooldown_active(self, *, side: str, local_ts: datetime | None) -> bool:
@@ -2317,6 +2535,8 @@ class OptionOrderPolicy:
             "long_soft_exit_count": int(self._meta_side_soft_exit_count.get("long", 0)),
             "short_soft_exit_count": int(self._meta_side_soft_exit_count.get("short", 0)),
             "meta_intrabar_entry_policy": self._intrabar_entry_policy_name(),
+            "meta_intrabar_max_confirmation_age_minutes": int(self.cfg.meta_intrabar_max_confirmation_age_minutes),
+            "meta_intrabar_ref_chase_atr": float(self.cfg.meta_intrabar_ref_chase_atr),
             "meta_intrabar_long_setup_threshold": (
                 float(self.cfg.meta_intrabar_long_setup_threshold)
                 if self.cfg.meta_intrabar_long_setup_threshold is not None
@@ -2362,6 +2582,21 @@ class OptionOrderPolicy:
             ),
             "long_decision_reason": self._meta_side_reason.get("long"),
             "short_decision_reason": self._meta_side_reason.get("short"),
+            "meta_setup_failure_exit_enabled": bool(self.cfg.meta_setup_failure_exit_enabled),
+            "meta_setup_failure_buffer_atr": float(self.cfg.meta_setup_failure_buffer_atr),
+            "meta_no_progress_exit_enabled": bool(self.cfg.meta_no_progress_exit_enabled),
+            "meta_no_progress_exit_minutes": int(self.cfg.meta_no_progress_exit_minutes),
+            "meta_no_progress_exit_atr": float(self.cfg.meta_no_progress_exit_atr),
+            "long_entry_invalidation_level": (
+                _as_float((self._meta_entry_structure.get("long") or {}).get("signal_low"))
+                if math.isfinite(_as_float((self._meta_entry_structure.get("long") or {}).get("signal_low")))
+                else None
+            ),
+            "short_entry_invalidation_level": (
+                _as_float((self._meta_entry_structure.get("short") or {}).get("signal_high"))
+                if math.isfinite(_as_float((self._meta_entry_structure.get("short") or {}).get("signal_high")))
+                else None
+            ),
             "pending_broker_reconcile": bool(self._pending_broker_reconcile),
             "pending_broker_reconcile_order_id": (
                 self._pending_broker_reconcile.get("order_id")
@@ -2385,6 +2620,22 @@ class OptionOrderPolicy:
             "meta_intrabar_entry_expires_at": {
                 key: (_ts.isoformat() if isinstance(_ts, datetime) else None)
                 for key, _ts in self._meta_intrabar_entry_expires_at.items()
+            },
+            "meta_intrabar_setup_snapshot": dict(self._meta_intrabar_setup_snapshot),
+            "meta_entry_structure": {
+                key: (
+                    {
+                        sub_key: (
+                            sub_value.isoformat()
+                            if isinstance(sub_value, datetime)
+                            else sub_value
+                        )
+                        for sub_key, sub_value in value.items()
+                    }
+                    if isinstance(value, dict)
+                    else None
+                )
+                for key, value in self._meta_entry_structure.items()
             },
             "meta_side_reason": dict(self._meta_side_reason),
             "meta_side_entry_armed": dict(self._meta_side_entry_armed),
@@ -2444,6 +2695,33 @@ class OptionOrderPolicy:
                 for side in ("long", "short"):
                     ref_val = _as_float(entry_ref.get(side))
                     self._meta_intrabar_entry_ref[side] = ref_val if math.isfinite(ref_val) else float("nan")
+
+            setup_snapshot = state.get("meta_intrabar_setup_snapshot")
+            if isinstance(setup_snapshot, dict):
+                for side in ("long", "short"):
+                    value = setup_snapshot.get(side)
+                    self._meta_intrabar_setup_snapshot[side] = dict(value) if isinstance(value, dict) else None
+
+            entry_structure = state.get("meta_entry_structure")
+            if isinstance(entry_structure, dict):
+                for side in ("long", "short"):
+                    value = entry_structure.get(side)
+                    if not isinstance(value, dict):
+                        self._meta_entry_structure[side] = None
+                        continue
+                    parsed_value: dict[str, Any] = {}
+                    for sub_key, sub_value in value.items():
+                        if sub_key.endswith("_ts") or sub_key == "expires_at":
+                            if sub_value in (None, ""):
+                                parsed_value[sub_key] = None
+                            else:
+                                parsed = pd.to_datetime(sub_value, utc=True, errors="coerce")
+                                parsed_value[sub_key] = (
+                                    None if pd.isna(parsed) else parsed.to_pydatetime().astimezone(self._tz)
+                                )
+                        else:
+                            parsed_value[sub_key] = sub_value
+                    self._meta_entry_structure[side] = parsed_value
 
             enter_above = state.get("meta_side_enter_above_threshold")
             if isinstance(enter_above, dict):
@@ -2680,7 +2958,10 @@ class OptionOrderPolicy:
         current_qty = self._long_contracts if side_key == "long" else self._short_contracts
         enter_prob = _as_float(closed_bar.get(f"p_enter_{side_key}"))
         exit_prob = _as_float(closed_bar.get(f"p_exit_{side_key}"))
-        enter_thr = self._meta_threshold_value(closed_bar, f"thr_enter_{side_key}", f"enter_{side_key}_threshold")
+        enter_thr = self._effective_intrabar_setup_threshold(
+            closed_bar=closed_bar,
+            side=side_key,
+        )
         exit_thr = self._meta_threshold_value(closed_bar, f"thr_exit_{side_key}", f"exit_{side_key}_threshold")
         desired_qty = max(0, int(self.cfg.qty))
         if bool(self.cfg.meta_replay_compatible_mode):
@@ -2806,6 +3087,24 @@ class OptionOrderPolicy:
             if self._ohlc_exit_bar_is_after_entry(side=side_key, local_ts=local_ts):
                 hard_stop_signal = self._hard_stop_hit(side=side_key, close=close, high=high, low=low)
                 if hard_stop_signal:
+                    self._meta_side_reason[side_key] = "hard_stop_exit"
+                    return 0
+                setup_failure_signal = self._setup_failure_exit_hit(
+                    side=side_key,
+                    close=close,
+                    high=high,
+                    low=low,
+                )
+                if setup_failure_signal:
+                    self._meta_side_reason[side_key] = "setup_failure_exit"
+                    return 0
+                no_progress_signal = self._no_progress_exit_hit(
+                    side=side_key,
+                    close=close,
+                    local_ts=local_ts,
+                )
+                if no_progress_signal:
+                    self._meta_side_reason[side_key] = "no_progress_exit"
                     return 0
             if self._option_value_exit_hit(
                 side=side_key,
@@ -2856,7 +3155,7 @@ class OptionOrderPolicy:
                 return 0
             if self._side_reentry_cooldown_active(side=side_key, local_ts=local_ts):
                 return 0
-            if self._entry_no_chase_blocked(side=side_key, close=close, atr=atr):
+            if self._entry_no_chase_blocked(side=side_key, close=close, atr=atr, local_ts=local_ts):
                 return 0
             if enforce_trend_gate and not self._trend_gate_passed(
                 side=side_key,
@@ -3013,6 +3312,7 @@ class OptionOrderPolicy:
                         self._option_exit_best_seen_at["long"] = None
                         self._meta_side_entry_signal_ts["long"] = None
                         self._reset_trail_state("long")
+                        self._clear_entry_structure(side="long")
                         self._meta_side_soft_exit_count["long"] = 0
                         self._meta_side_entry_armed["long"] = False
                         cooldown_bars = max(0, int(self.cfg.meta_same_side_reentry_cooldown_bars))
@@ -3028,6 +3328,7 @@ class OptionOrderPolicy:
                         self._option_exit_best_seen_at["short"] = None
                         self._meta_side_entry_signal_ts["short"] = None
                         self._reset_trail_state("short")
+                        self._clear_entry_structure(side="short")
                         self._meta_side_soft_exit_count["short"] = 0
                         self._meta_side_entry_armed["short"] = False
                         cooldown_bars = max(0, int(self.cfg.meta_same_side_reentry_cooldown_bars))
@@ -3111,35 +3412,61 @@ class OptionOrderPolicy:
             )
             side_events.append(f"open_{side}")
             if side == "long":
+                prior_avg_entry = self._long_avg_entry_price
                 self._long_contracts = desired_final
                 self._long_symbol = symbol
                 if current_qty <= 0 and desired_final > 0:
                     self._meta_side_entry_signal_ts["long"] = self._latest_meta_snapshot_local_ts() or local_ts
                     self._seed_trail_state(side="long", close=close, atr=atr, high=high, low=low)
+                    self._seed_entry_structure(side="long", local_ts=local_ts, entry_price=close)
                 filled_avg = self._extract_filled_avg_price(open_resp.get("verification", {}).get("order") if isinstance(open_resp, dict) else None)
                 if not math.isfinite(filled_avg):
                     filled_avg = self._extract_filled_avg_price(open_resp.get("response") if isinstance(open_resp, dict) else None)
                 if not math.isfinite(filled_avg) and math.isfinite(contract_price):
                     filled_avg = float(contract_price)
                 if math.isfinite(filled_avg):
-                    self._long_avg_entry_price = float(filled_avg)
-                    self._option_exit_best_price["long"] = float(filled_avg)
-                    self._option_exit_best_seen_at["long"] = local_ts
+                    blended_avg = self._blend_avg_entry_price(
+                        current_avg=prior_avg_entry,
+                        current_qty=current_qty,
+                        fill_price=float(filled_avg),
+                        fill_qty=open_qty,
+                    )
+                    self._long_avg_entry_price = blended_avg if math.isfinite(blended_avg) else float(filled_avg)
+                    if current_qty <= 0:
+                        self._option_exit_best_price["long"] = self._long_avg_entry_price
+                        self._option_exit_best_seen_at["long"] = local_ts
+                    elif not math.isfinite(_as_float(self._option_exit_best_price.get("long"))):
+                        self._option_exit_best_price["long"] = self._long_avg_entry_price
+                        self._option_exit_best_seen_at["long"] = local_ts
+                self._clear_intrabar_entry_intent(side="long", reason="entry_filled")
             else:
+                prior_avg_entry = self._short_avg_entry_price
                 self._short_contracts = desired_final
                 self._short_symbol = symbol
                 if current_qty <= 0 and desired_final > 0:
                     self._meta_side_entry_signal_ts["short"] = self._latest_meta_snapshot_local_ts() or local_ts
                     self._seed_trail_state(side="short", close=close, atr=atr, high=high, low=low)
+                    self._seed_entry_structure(side="short", local_ts=local_ts, entry_price=close)
                 filled_avg = self._extract_filled_avg_price(open_resp.get("verification", {}).get("order") if isinstance(open_resp, dict) else None)
                 if not math.isfinite(filled_avg):
                     filled_avg = self._extract_filled_avg_price(open_resp.get("response") if isinstance(open_resp, dict) else None)
                 if not math.isfinite(filled_avg) and math.isfinite(contract_price):
                     filled_avg = float(contract_price)
                 if math.isfinite(filled_avg):
-                    self._short_avg_entry_price = float(filled_avg)
-                    self._option_exit_best_price["short"] = float(filled_avg)
-                    self._option_exit_best_seen_at["short"] = local_ts
+                    blended_avg = self._blend_avg_entry_price(
+                        current_avg=prior_avg_entry,
+                        current_qty=current_qty,
+                        fill_price=float(filled_avg),
+                        fill_qty=open_qty,
+                    )
+                    self._short_avg_entry_price = blended_avg if math.isfinite(blended_avg) else float(filled_avg)
+                    if current_qty <= 0:
+                        self._option_exit_best_price["short"] = self._short_avg_entry_price
+                        self._option_exit_best_seen_at["short"] = local_ts
+                    elif not math.isfinite(_as_float(self._option_exit_best_price.get("short"))):
+                        self._option_exit_best_price["short"] = self._short_avg_entry_price
+                        self._option_exit_best_seen_at["short"] = local_ts
+                self._clear_intrabar_entry_intent(side="short", reason="entry_filled")
 
         self._refresh_legacy_state()
         prev_counts = {"long": current_long, "short": current_short}
@@ -3155,6 +3482,7 @@ class OptionOrderPolicy:
                 self._meta_side_bars_held[side] = -1
                 self._meta_side_entry_signal_ts[side] = None
                 self._meta_side_soft_exit_count[side] = 0
+                self._clear_entry_structure(side=side)
         if not orders:
             return {
                 "event": "hold",

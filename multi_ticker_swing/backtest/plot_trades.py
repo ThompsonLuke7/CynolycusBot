@@ -22,13 +22,14 @@ from Data.plots.plots import _plot_candles, _compute_time_ticks, _apply_time_tic
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
 logger = logging.getLogger(__name__)
 
-SWEEP_DIR = BACKTEST_RESULTS_DIR / "sweep"
+SWEEP_DIR = BACKTEST_RESULTS_DIR / "sweep_v2"
 PLOTS_DIR = SWEEP_DIR / "plots"
 PROBA_PATH = Path(__file__).resolve().parents[1] / "models" / "p_swing_probs.parquet"
 
-BEST_TICKERS = ["SMCI", "MSTR", "VRT", "MU"]
-WORST_TICKERS = ["NFLX", "SNDK", "UNH", "GDX"]
-TAIL_BARS = 500
+BEST_TICKERS = ["TSLA", "AFRM", "UEC", "SLV"]
+WORST_TICKERS = ["GOOGL", "ADBE", "XOM", "LULU"]
+TAIL_BARS = 315          # ~24 trading days ≈ 1 month
+ENTRY_THRESHOLD = 0.70   # must match best combo
 
 
 def load_raw(ticker: str) -> pd.DataFrame:
@@ -63,12 +64,12 @@ def plot_ticker_trades(
     pos = np.arange(n)
     ts_to_pos = {pd.Timestamp(ts, tz="UTC"): i for ts, i in zip(raw["timestamp"].values, pos)}
 
-    fig, axes = plt.subplots(2, 1, figsize=(20, 10), height_ratios=[3, 1],
+    fig, axes = plt.subplots(2, 1, figsize=(22, 10), height_ratios=[3, 1],
                               sharex=True, gridspec_kw={"hspace": 0.05})
     ax_candle = axes[0]
     ax_proba = axes[1]
 
-    # Candles
+    # ── Candles ───────────────────────────────────────────────────────────────
     _plot_candles(
         ax_candle, pos,
         raw["open"].values, raw["high"].values,
@@ -76,7 +77,7 @@ def plot_ticker_trades(
         width=0.6,
     )
 
-    # Trade overlays
+    # ── Trade overlays ────────────────────────────────────────────────────────
     for _, t in trades.iterrows():
         entry_ts = pd.Timestamp(t["entry_time"])
         exit_ts = pd.Timestamp(t["exit_time"])
@@ -92,15 +93,17 @@ def plot_ticker_trades(
         marker_entry = "^" if is_long else "v"
 
         ax_candle.plot(entry_pos, t["entry_price"], marker=marker_entry,
-                       color=color, markersize=10, zorder=5, markeredgecolor="black", markeredgewidth=0.5)
+                       color=color, markersize=11, zorder=5,
+                       markeredgecolor="white", markeredgewidth=0.8)
 
-        reason_markers = {"tp": "D", "sl": "X", "time": "s", "trail": "P", "prob_exit": "o"}
+        reason_markers = {"tp": "D", "sl": "X", "time": "s", "trail": "P", "opp_signal": "o"}
         ax_candle.plot(exit_pos, t["exit_price"],
                        marker=reason_markers.get(t["exit_reason"], "o"),
-                       color=color, markersize=8, zorder=5, markeredgecolor="black", markeredgewidth=0.5)
+                       color=color, markersize=9, zorder=5,
+                       markeredgecolor="white", markeredgewidth=0.6)
 
         ax_candle.plot([entry_pos, exit_pos], [t["entry_price"], t["exit_price"]],
-                       color=color, linewidth=1.0, alpha=0.5, linestyle="--", zorder=3)
+                       color=color, linewidth=1.2, alpha=0.6, linestyle="--", zorder=3)
 
     n_trades = len(trades)
     wins = (trades["pnl_pct"] > 0).sum() if n_trades > 0 else 0
@@ -108,59 +111,58 @@ def plot_ticker_trades(
     wr = wins / n_trades * 100 if n_trades > 0 else 0
 
     ax_candle.set_title(
-        f"{ticker}  |  Best Combo: entry≥0.75 + TP 4×ATR / SL 1×ATR  |  "
+        f"{ticker}  |  e0.70, 5m confirm 30min, trail arm 2.5%, giveback 25%, SL 1.5×ATR  |  "
         f"Trades={n_trades}  WR={wr:.0f}%  totalPnL={total_pnl:+.1f}%",
-        fontsize=13, fontweight="bold",
+        fontsize=12, fontweight="bold",
     )
     ax_candle.set_ylabel("Price", fontsize=11)
 
-    # Probability panel
+    # ── Probability panel — same style as SPY day trader ────────────────────
     if not proba_t.empty:
         proba_positions = []
-        p_long_vals = []
-        p_short_vals = []
+        p_long_raw = []
+        p_short_raw = []
         for _, pr in proba_t.iterrows():
             p = ts_to_pos.get(pr["timestamp"])
             if p is not None:
                 proba_positions.append(p)
-                p_dir = max(pr["p_long"] + pr["p_short"], 1e-8)
-                p_long_vals.append(pr["p_long"] / p_dir)
-                p_short_vals.append(pr["p_short"] / p_dir)
+                p_long_raw.append(pr["p_long"])
+                p_short_raw.append(pr["p_short"])
 
         proba_positions = np.array(proba_positions)
-        p_long_vals = np.array(p_long_vals)
-        p_short_vals = np.array(p_short_vals)
+        p_long_raw = np.array(p_long_raw)
+        p_short_raw = np.array(p_short_raw)
 
-        ax_proba.fill_between(proba_positions, 0.5, p_long_vals,
-                               where=p_long_vals > 0.5, color="#4CAF50", alpha=0.4, label="P(long|dir)")
-        ax_proba.fill_between(proba_positions, 0.5, p_short_vals,
-                               where=p_short_vals > 0.5, color="#F44336", alpha=0.4, label="P(short|dir)")
-        ax_proba.plot(proba_positions, p_long_vals, color="#2E7D32", linewidth=0.8, alpha=0.7)
-        ax_proba.plot(proba_positions, 1 - p_long_vals, color="#C62828", linewidth=0.8, alpha=0.7)
+        ax_proba.plot(proba_positions, p_long_raw,
+                      color="#1565C0", linewidth=1.5, label="P(long)")
+        ax_proba.plot(proba_positions, p_short_raw,
+                      color="#FB8C00", linewidth=1.5, label="P(short)")
 
-    ax_proba.axhline(0.75, color="gray", linewidth=0.8, linestyle=":", alpha=0.5, label="Threshold 0.75")
-    ax_proba.axhline(0.5, color="gray", linewidth=0.5, linestyle="-", alpha=0.3)
-    ax_proba.set_ylabel("P(dir|conditional)", fontsize=11)
-    ax_proba.set_ylim(0, 1)
-    ax_proba.legend(loc="upper left", fontsize=9)
+    # Threshold lines (raw prob space — entry uses p_long_dir conditional,
+    # so these are approximate visual guides only)
+    ax_proba.axhline(0.5, color="gray", linewidth=0.6, linestyle="-", alpha=0.25)
 
-    # Time axis
+    ax_proba.set_ylabel("Model probability", fontsize=11)
+    ax_proba.set_ylim(0, 1.02)
+    ax_proba.legend(loc="upper right", fontsize=9)
+
+    # ── Time axis ─────────────────────────────────────────────────────────────
     date_idx = pd.DatetimeIndex(raw["timestamp"])
-    tick_pos, tick_labels = _compute_time_ticks(date_idx, pos, max_ticks=20)
+    tick_pos, tick_labels = _compute_time_ticks(date_idx, pos, max_ticks=18)
     _apply_time_ticks(ax_proba, tick_pos, tick_labels)
 
-    # Legend for trade markers
+    # ── Trade legend ──────────────────────────────────────────────────────────
     legend_elements = [
         mpatches.Patch(color="#2E7D32", label="Win"),
         mpatches.Patch(color="#C62828", label="Loss"),
         plt.Line2D([0], [0], marker="^", color="gray", markersize=8, linestyle="None", label="Long entry"),
         plt.Line2D([0], [0], marker="v", color="gray", markersize=8, linestyle="None", label="Short entry"),
-        plt.Line2D([0], [0], marker="D", color="gray", markersize=7, linestyle="None", label="TP exit"),
+        plt.Line2D([0], [0], marker="P", color="gray", markersize=8, linestyle="None", label="Trail exit"),
         plt.Line2D([0], [0], marker="X", color="gray", markersize=8, linestyle="None", label="SL exit"),
+        plt.Line2D([0], [0], marker="s", color="gray", markersize=7, linestyle="None", label="Time exit"),
     ]
-    ax_candle.legend(handles=legend_elements, loc="upper left", fontsize=9, ncol=3)
+    ax_candle.legend(handles=legend_elements, loc="upper left", fontsize=9, ncol=4)
 
-    fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     logger.info("Saved %s", out_path)
@@ -169,12 +171,11 @@ def plot_ticker_trades(
 def main():
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    trades_df = pd.read_parquet(SWEEP_DIR / "best_combo_trades.parquet")
+    trades_df = pd.read_parquet(SWEEP_DIR / "best_v2_trades.parquet")
     proba = pd.read_parquet(PROBA_PATH)
     proba = proba[proba["split"] == "test"].copy()
     proba["timestamp"] = pd.to_datetime(proba["timestamp"], utc=True)
 
-    # Need to map entry_idx/exit_idx back to timestamps per ticker
     all_tickers = BEST_TICKERS + WORST_TICKERS
     for ticker in all_tickers:
         logger.info("Plotting %s...", ticker)
@@ -189,12 +190,11 @@ def main():
             logger.warning("No trades for %s", ticker)
             continue
 
-        # Map integer indices back to timestamps and prices
-        ticker_trades["entry_time"] = ticker_trades["entry_idx"].map(
-            lambda idx: raw.iloc[idx]["timestamp"] if idx < len(raw) else pd.NaT
+        ticker_trades["entry_time"] = ticker_trades["signal_idx"].apply(
+            lambda idx: raw.iloc[min(idx+1, len(raw)-1)]["timestamp"]
         )
-        ticker_trades["exit_time"] = ticker_trades["exit_idx"].map(
-            lambda idx: raw.iloc[idx]["timestamp"] if idx < len(raw) else pd.NaT
+        ticker_trades["exit_time"] = ticker_trades["exit_idx"].apply(
+            lambda idx: raw.iloc[min(idx, len(raw)-1)]["timestamp"]
         )
         ticker_trades = ticker_trades.dropna(subset=["entry_time", "exit_time"])
 

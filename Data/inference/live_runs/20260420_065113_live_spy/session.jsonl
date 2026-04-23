@@ -1,1 +1,2 @@
 {"stream":"session","recorded_at":"2026-04-20T06:51:13.297957+00:00","payload":{"event":"session_started","started_at":"2026-04-20T06:51:13.295368+00:00","runner_mode":"live","symbols":["SPY"],"audit_dir":"Data/inference/live_runs/20260420_065113_live_spy"}}
+{"stream":"session","recorded_at":"2026-04-21T07:30:54.156094+00:00","payload":{"event":"session_stopped","error":null,"stopped_at":"2026-04-21T07:30:54.156087+00:00"}}

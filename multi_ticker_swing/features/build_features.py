@@ -391,18 +391,39 @@ def _add_cat8_context(
 ) -> pd.DataFrame:
     """
     Cat 8 – Relative strength / market context.
-    ctx = {"SPY": df_spy, "QQQ": df_qqq, "IWM": df_iwm}
-    Each context DataFrame has a "close" column and pre-computed ret_N columns.
+
+    Computes returns for all context tickers (SPY, QQQ, IWM, TLT, USO, GLD, …).
+    For USO and GLD also computes relative-strength and 64-bar rolling correlation,
+    giving the model causal information about what is driving commodity-correlated names.
     """
     c   = df["close"]
     idx = df.index
 
-    def _ctx_ret(name: str, n: int) -> pd.Series:
+    own_logret = np.log(c / c.shift(1))
+
+    def _ctx_close(name: str) -> pd.Series:
         if name not in ctx:
             return pd.Series(np.nan, index=idx)
-        c_ctx = ctx[name]["close"].reindex(idx, method="ffill")
-        return c_ctx.pct_change(n)
+        return ctx[name]["close"].reindex(idx, method="ffill")
 
+    def _ctx_ret(name: str, n: int) -> pd.Series:
+        return _ctx_close(name).pct_change(n)
+
+    def _ctx_logret(name: str) -> pd.Series:
+        cc = _ctx_close(name)
+        return np.log(cc / cc.shift(1))
+
+    def _rolling_beta(y: pd.Series, x: pd.Series, w: int) -> pd.Series:
+        cov  = y.rolling(w).cov(x)
+        xvar = x.rolling(w).var().replace(0, np.nan)
+        return (cov / xvar).clip(-5, 5)
+
+    def _rolling_corr(y: pd.Series, x: pd.Series, w: int) -> pd.Series:
+        return y.rolling(w).corr(x)
+
+    # ------------------------------------------------------------------
+    # Equity index context — SPY, QQQ, IWM returns
+    # ------------------------------------------------------------------
     for sym in ("SPY", "QQQ", "IWM"):
         key = sym.lower()
         for n in (1, 4, 16):
@@ -411,26 +432,13 @@ def _add_cat8_context(
     # Relative strength vs SPY
     for n in (4, 16):
         spy_ret = _ctx_ret("SPY", n).replace(0, np.nan)
-        df[f"rel_str_spy_{n}"] = df[f"ret_{n}"] / spy_ret
+        df[f"rel_str_spy_{n}"] = (df[f"ret_{n}"] / spy_ret).clip(-10, 10)
 
     qqq_ret4 = _ctx_ret("QQQ", 4).replace(0, np.nan)
-    df["rel_str_qqq_4"] = df["ret_4"] / qqq_ret4
+    df["rel_str_qqq_4"] = (df["ret_4"] / qqq_ret4).clip(-10, 10)
 
-    # Rolling beta vs SPY (64-bar)
-    spy_close = (
-        ctx["SPY"]["close"].reindex(idx, method="ffill") if "SPY" in ctx else pd.Series(np.nan, index=idx)
-    )
-    spy_logret = np.log(spy_close / spy_close.shift(1))
-    own_logret = np.log(c / c.shift(1))
-
-    def _rolling_beta(y: pd.Series, x: pd.Series, w: int) -> pd.Series:
-        cov  = y.rolling(w).cov(x)
-        xvar = x.rolling(w).var().replace(0, np.nan)
-        return cov / xvar
-
-    def _rolling_corr(y: pd.Series, x: pd.Series, w: int) -> pd.Series:
-        return y.rolling(w).corr(x)
-
+    # Rolling beta and correlation vs SPY
+    spy_logret = _ctx_logret("SPY")
     if ticker == "SPY":
         df["beta_like_spy_64"] = 1.0
         df["corr_spy_64"]      = 1.0
@@ -438,9 +446,48 @@ def _add_cat8_context(
         df["beta_like_spy_64"] = _rolling_beta(own_logret, spy_logret, 64)
         df["corr_spy_64"]      = _rolling_corr(own_logret, spy_logret, 64)
 
-    # Market regime proxy: SPY 16-bar return sign, scaled ±1 → continuous
+    # Market regime proxy: SPY 16-bar return sign
     spy16 = _ctx_ret("SPY", 16)
     df["market_regime_proxy"] = spy16.apply(lambda x: 1.0 if x > 0.01 else (-1.0 if x < -0.01 else 0.0))
+
+    # ------------------------------------------------------------------
+    # Rate context — TLT returns (rates-rising = TLT falling)
+    # Gives model causal rate information for rate-sensitive sectors
+    # ------------------------------------------------------------------
+    for n in (1, 4, 16):
+        df[f"tlt_ret_{n}"] = _ctx_ret("TLT", n)
+
+    # ------------------------------------------------------------------
+    # Crude oil context — USO returns + relative strength + correlation
+    # Causal driver for energy names: model learns "USO falling → don't go long XOM"
+    # ------------------------------------------------------------------
+    uso_logret = _ctx_logret("USO")
+    for n in (1, 4, 16):
+        df[f"uso_ret_{n}"] = _ctx_ret("USO", n)
+
+    uso_ret4 = _ctx_ret("USO", 4).replace(0, np.nan)
+    df["rel_str_uso_4"] = (df.get("ret_4", pd.Series(np.nan, index=idx)) / uso_ret4).clip(-10, 10)
+
+    if ticker == "USO":
+        df["corr_uso_64"] = 1.0
+    else:
+        df["corr_uso_64"] = _rolling_corr(own_logret, uso_logret, 64)
+
+    # ------------------------------------------------------------------
+    # Gold context — GLD returns + relative strength + correlation
+    # Causal driver for metals/miners: model learns "GLD falling → don't go long GDX"
+    # ------------------------------------------------------------------
+    gld_logret = _ctx_logret("GLD")
+    for n in (1, 4, 16):
+        df[f"gld_ret_{n}"] = _ctx_ret("GLD", n)
+
+    gld_ret4 = _ctx_ret("GLD", 4).replace(0, np.nan)
+    df["rel_str_gld_4"] = (df.get("ret_4", pd.Series(np.nan, index=idx)) / gld_ret4).clip(-10, 10)
+
+    if ticker == "GLD":
+        df["corr_gld_64"] = 1.0
+    else:
+        df["corr_gld_64"] = _rolling_corr(own_logret, gld_logret, 64)
 
     return df
 

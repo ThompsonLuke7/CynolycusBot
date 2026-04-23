@@ -2,17 +2,17 @@
   "symbols": [
     "SPY"
   ],
-  "updated_at": "2026-04-20T20:00:08.807962+00:00",
+  "updated_at": "2026-04-22T20:00:07.126948+00:00",
   "policies": {
     "SPY": {
       "latest_meta_side_snapshot": {
-        "timestamp": "2026-04-20T19:50:00+00:00",
-        "signal_close": 708.79,
-        "signal_high": 708.79,
-        "signal_low": 707.755,
-        "signal_atr": 0.5891280967463567,
-        "p_enter_long": 0.3700995445251465,
-        "p_enter_short": 0.024210292845964432,
+        "timestamp": "2026-04-22T19:50:00+00:00",
+        "signal_close": 711.2,
+        "signal_high": 711.44,
+        "signal_low": 710.46,
+        "signal_atr": 0.6309382159262322,
+        "p_enter_long": 0.004287444055080414,
+        "p_enter_short": 0.6643320322036743,
         "p_exit_long": null,
         "p_exit_short": null,
         "ema_fast": null,
@@ -33,18 +33,53 @@
       },
       "meta_intrabar_entry_intent_active": {
         "long": false,
-        "short": false
+        "short": true
       },
       "meta_intrabar_entry_ref": {
         "long": null,
-        "short": null
+        "short": 710.46
       },
       "meta_intrabar_entry_setup_ts": {
         "long": null,
-        "short": null
+        "short": "2026-04-22T15:50:00-04:00"
       },
       "meta_intrabar_entry_expires_at": {
         "long": null,
+        "short": "2026-04-22T16:40:00-04:00"
+      },
+      "meta_intrabar_setup_snapshot": {
+        "long": null,
+        "short": {
+          "setup_ts": "2026-04-22T15:50:00-04:00",
+          "expires_at": "2026-04-22T16:40:00-04:00",
+          "signal_open": null,
+          "signal_high": 711.44,
+          "signal_low": 710.46,
+          "signal_close": 711.2,
+          "signal_atr": 0.6309382159262322,
+          "ref": 710.46,
+          "prob": 0.6643320322036743,
+          "threshold": 0.65,
+          "entry_kind": "swing",
+          "source_side": "short"
+        }
+      },
+      "meta_entry_structure": {
+        "long": {
+          "setup_ts": "2026-04-22T15:00:00-04:00",
+          "expires_at": "2026-04-22T15:50:00-04:00",
+          "entry_ts": "2026-04-22T15:13:00-04:00",
+          "entry_price": 709.965,
+          "signal_high": 709.92,
+          "signal_low": 709.22,
+          "signal_close": 709.91,
+          "signal_atr": 0.6647007481891861,
+          "ref": 709.92,
+          "prob": 0.3944963812828064,
+          "threshold": 0.35,
+          "entry_kind": "swing",
+          "source_side": "long"
+        },
         "short": null
       },
       "meta_side_reason": {
@@ -52,44 +87,44 @@
         "short": "entry_waiting_for_1m_confirmation"
       },
       "meta_side_entry_armed": {
-        "long": false,
+        "long": true,
         "short": true
       },
       "meta_side_enter_above_threshold": {
-        "long": true,
-        "short": false
+        "long": false,
+        "short": true
       },
       "meta_side_enter_peak_prob": {
-        "long": 0.5656018257141113,
-        "short": null
+        "long": null,
+        "short": 0.6643320322036743
       },
       "meta_side_bars_held": {
-        "long": 6,
+        "long": 51,
         "short": -1
       },
       "meta_side_entry_signal_ts": {
-        "long": "2026-04-20T15:40:00-04:00",
+        "long": "2026-04-22T15:00:00-04:00",
         "short": null
       },
       "meta_side_cooldown_until": {
-        "long": "2026-04-20T11:26:00-04:00",
+        "long": "2026-04-22T14:51:00-04:00",
         "short": "2026-04-20T13:20:00-04:00"
       },
-      "prev_1m_close": 708.45,
-      "last_1m_close": 708.79,
+      "prev_1m_close": 711.27,
+      "last_1m_close": 711.2,
       "recent_1m_closes": [
-        708.08,
-        708.205,
-        708.265,
-        708.45,
-        708.79
+        711.015,
+        711.14,
+        711.2,
+        711.27,
+        711.2
       ],
       "option_exit_best_price": {
-        "long": 1.93,
+        "long": 2.19,
         "short": null
       },
       "option_exit_best_seen_at": {
-        "long": "2026-04-20T15:59:00-04:00",
+        "long": "2026-04-22T15:59:00-04:00",
         "short": null
       },
       "entry_lockout_until": null,

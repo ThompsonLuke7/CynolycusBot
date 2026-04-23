@@ -43,7 +43,29 @@ TRAIN_END   = "2026-04-15"
 # ---------------------------------------------------------------------------
 # Context / market tickers (always fetched; used for relative-strength features)
 # ---------------------------------------------------------------------------
-CONTEXT_TICKERS: list[str] = ["SPY", "QQQ", "IWM"]
+CONTEXT_TICKERS: list[str] = ["SPY", "QQQ", "IWM", "TLT", "USO", "GLD"]
+
+# Tickers kept in universe for training features but excluded from live trading / backtests
+TRADING_BLACKLIST: list[str] = [
+    # Rates-driven — equity momentum features have no causal relationship to price drivers
+    "TLT",   # 20yr Treasury — use as regime feature only
+    "HYG",   # high yield bonds — same issue
+    "LQD",   # investment grade bonds — same issue
+    "SHY",   # short-duration Treasury — same issue, near-zero ATR
+    # Rate proxies — price driven by Fed expectations, not price momentum
+    "XLU",   # utilities — interest-rate proxy
+    "SCHW",  # Charles Schwab — NII-driven like a bond; 66% SL rate, WR=34%
+    "BAC",   # Bank of America — extreme NII sensitivity same as SCHW; 66% SL rate, WR=34%
+    # Inverse/leveraged products with structural decay — timing mismatch
+    "SCO",   # 2x inverse crude oil — contango decay + lead/lag vs USO; 52% SL rate
+    # Broad sector ETFs — diversification kills fractal momentum; model systematically wrong
+    "XLP",   # Consumer Staples ETF — WR=23%, SL%=77%
+    "XLI",   # Industrials ETF — WR=25%, SL%=71%
+    "XLB",   # Materials ETF — WR=27%, SL%=73%
+    "PG",    # Procter & Gamble — quintessential anti-momentum stock; WR=28%, SL%=69%
+    # Hyper-efficient benchmark — fractal momentum approach doesn't apply
+    "SPY",   # S&P 500 ETF — use as context feature only; WR=30%, SL%=70%
+]
 
 # ---------------------------------------------------------------------------
 # Feature list  (exact column names produced by build_features.py)
@@ -130,6 +152,7 @@ FEATURES_GAP = [
 
 # Cat 8 – Relative strength / market context
 FEATURES_RS = [
+    # Equity index context
     "spy_ret_1",  "spy_ret_4",  "spy_ret_16",
     "qqq_ret_1",  "qqq_ret_4",  "qqq_ret_16",
     "iwm_ret_1",  "iwm_ret_4",  "iwm_ret_16",
@@ -138,6 +161,16 @@ FEATURES_RS = [
     "beta_like_spy_64",
     "corr_spy_64",
     "market_regime_proxy",
+    # Rate context — TLT moves tell the model when rate pressure is driving sectors
+    "tlt_ret_1",  "tlt_ret_4",  "tlt_ret_16",
+    # Crude oil context — causal driver for energy names (XOM, XLE, HAL, SLB, etc.)
+    "uso_ret_1",  "uso_ret_4",  "uso_ret_16",
+    "rel_str_uso_4",   # ticker's 4-bar return relative to USO (is it outperforming crude?)
+    "corr_uso_64",     # 64-bar rolling correlation to USO (is this an oil-beta name?)
+    # Gold context — causal driver for metals/miners (GLD, GDX, SLV, COPX, PAAS, etc.)
+    "gld_ret_1",  "gld_ret_4",  "gld_ret_16",
+    "rel_str_gld_4",   # ticker's 4-bar return relative to GLD
+    "corr_gld_64",     # 64-bar rolling correlation to GLD
 ]
 
 # Cat 9 – Location / mean-reversion context
@@ -276,10 +309,13 @@ NEUTRAL_WEIGHT_FACTOR: float = 0.40
 # ---------------------------------------------------------------------------
 BACKTEST_CONFIG: dict = {
     "tp_atr_mult":          2.5,
-    "sl_atr_mult":          1.0,
-    "entry_bars_max":       3,       # max 10m bars after signal before giving up
-    "prob_threshold_long":  0.50,    # model P(class=long) to enter
-    "prob_threshold_short": 0.50,
+    "sl_atr_mult":          4.0,     # 4.0×ATR stop — wider stop improves WR and trail exit rate
+    "entry_bars_max":       3,       # max 5m bars after signal before giving up
+    "prob_threshold_long":  0.70,    # directional-conditional P(long|dir) threshold
+    "prob_threshold_short": 0.70,
+    "arm_pct":              0.025,   # underlying move to arm trailing exit (2.5%)
+    "giveback_pct":         0.25,    # fraction of peak profit given back before exit (25%)
+    "confirm_max_5m":       6,       # 30-minute confirmation window (6 × 5m bars)
     "swing_gate_required":  True,    # only trade when swing state gate is active
     "max_concurrent":       5,       # portfolio-level position limit
     "position_size_pct":    0.02,    # 2 % of equity per trade

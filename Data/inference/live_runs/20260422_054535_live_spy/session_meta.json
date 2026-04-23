@@ -1,5 +1,5 @@
 {
-  "started_at": "2026-04-20T06:51:13.295368+00:00",
+  "started_at": "2026-04-22T05:45:35.417437+00:00",
   "runner_mode": "live",
   "symbols": [
     "SPY"
@@ -43,6 +43,8 @@
     "meta_exit_threshold": null,
     "meta_intrabar_entry_policy": "phase4_swing_setup_bodyclose_bodyclose_v1",
     "meta_intrabar_setup_max_bars": 4,
+    "meta_intrabar_max_confirmation_age_minutes": 30,
+    "meta_intrabar_ref_chase_atr": 0.5,
     "meta_intrabar_long_setup_threshold": 0.35,
     "meta_intrabar_short_setup_threshold": 0.65,
     "meta_countertrend_veto_enabled": false,
@@ -62,6 +64,11 @@
     "regime_neutral_long_quantile": 0.95,
     "regime_neutral_short_quantile": 0.95,
     "meta_hard_stop_atr": 0.0,
+    "meta_setup_failure_exit_enabled": true,
+    "meta_setup_failure_buffer_atr": 0.1,
+    "meta_no_progress_exit_enabled": true,
+    "meta_no_progress_exit_minutes": 10,
+    "meta_no_progress_exit_atr": 0.2,
     "meta_trail_activate_atr": 2.0,
     "meta_trail_atr": 1.0,
     "meta_trail_atr_after_tp": 0.8,
@@ -114,7 +121,5 @@
     "audit_enabled": true,
     "audit_root": "Data/inference/live_runs"
   },
-  "session_dir": "Data/inference/live_runs/20260420_065113_live_spy",
-  "stopped_at": "2026-04-21T07:30:54.162116+00:00",
-  "dropped_records": 0
+  "session_dir": "Data/inference/live_runs/20260422_054535_live_spy"
 }

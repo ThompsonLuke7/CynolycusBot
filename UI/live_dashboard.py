@@ -224,6 +224,8 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "meta_exit_threshold": cfg.meta_exit_threshold,
         "meta_intrabar_entry_policy": str(cfg.meta_intrabar_entry_policy),
         "meta_intrabar_setup_max_bars": int(cfg.meta_intrabar_setup_max_bars),
+        "meta_intrabar_max_confirmation_age_minutes": int(cfg.meta_intrabar_max_confirmation_age_minutes),
+        "meta_intrabar_ref_chase_atr": float(cfg.meta_intrabar_ref_chase_atr),
         "meta_intrabar_long_setup_threshold": cfg.meta_intrabar_long_setup_threshold,
         "meta_intrabar_short_setup_threshold": cfg.meta_intrabar_short_setup_threshold,
         "meta_countertrend_veto_enabled": bool(cfg.meta_countertrend_veto_enabled),
@@ -243,6 +245,11 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "regime_neutral_long_quantile": float(cfg.regime_neutral_long_quantile),
         "regime_neutral_short_quantile": float(cfg.regime_neutral_short_quantile),
         "meta_hard_stop_atr": float(cfg.meta_hard_stop_atr),
+        "meta_setup_failure_exit_enabled": bool(cfg.meta_setup_failure_exit_enabled),
+        "meta_setup_failure_buffer_atr": float(cfg.meta_setup_failure_buffer_atr),
+        "meta_no_progress_exit_enabled": bool(cfg.meta_no_progress_exit_enabled),
+        "meta_no_progress_exit_minutes": int(cfg.meta_no_progress_exit_minutes),
+        "meta_no_progress_exit_atr": float(cfg.meta_no_progress_exit_atr),
         "meta_trail_activate_atr": float(cfg.meta_trail_activate_atr),
         "meta_trail_atr": float(cfg.meta_trail_atr),
         "meta_trail_atr_after_tp": float(cfg.meta_trail_atr_after_tp),
@@ -834,6 +841,8 @@ class SessionConfig:
     meta_exit_threshold: float | None = None
     meta_intrabar_entry_policy: str = PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1
     meta_intrabar_setup_max_bars: int = 4
+    meta_intrabar_max_confirmation_age_minutes: int = 30
+    meta_intrabar_ref_chase_atr: float = 0.50
     meta_intrabar_long_setup_threshold: float | None = 0.35
     meta_intrabar_short_setup_threshold: float | None = 0.65
     meta_countertrend_veto_enabled: bool = False
@@ -853,6 +862,11 @@ class SessionConfig:
     regime_neutral_long_quantile: float = 0.95
     regime_neutral_short_quantile: float = 0.95
     meta_hard_stop_atr: float = 0.0
+    meta_setup_failure_exit_enabled: bool = True
+    meta_setup_failure_buffer_atr: float = 0.10
+    meta_no_progress_exit_enabled: bool = True
+    meta_no_progress_exit_minutes: int = 10
+    meta_no_progress_exit_atr: float = 0.20
     meta_trail_activate_atr: float = 2.0
     meta_trail_atr: float = 1.0
     meta_trail_atr_after_tp: float = 0.8
@@ -963,6 +977,12 @@ class SessionConfig:
                 payload.get("meta_intrabar_entry_policy", PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1)
             ),
             meta_intrabar_setup_max_bars=max(1, _coerce_int(payload.get("meta_intrabar_setup_max_bars"), 4)),
+            meta_intrabar_max_confirmation_age_minutes=max(
+                0, _coerce_int(payload.get("meta_intrabar_max_confirmation_age_minutes"), 30)
+            ),
+            meta_intrabar_ref_chase_atr=max(
+                0.0, _coerce_float(payload.get("meta_intrabar_ref_chase_atr"), 0.50)
+            ),
             meta_intrabar_long_setup_threshold=_coerce_optional_float(
                 payload.get("meta_intrabar_long_setup_threshold", 0.35)
             ),
@@ -992,6 +1012,17 @@ class SessionConfig:
             regime_neutral_long_quantile=_coerce_float(payload.get("regime_neutral_long_quantile"), 0.95),
             regime_neutral_short_quantile=_coerce_float(payload.get("regime_neutral_short_quantile"), 0.95),
             meta_hard_stop_atr=max(0.0, _coerce_float(payload.get("meta_hard_stop_atr"), 0.0)),
+            meta_setup_failure_exit_enabled=_coerce_bool(payload.get("meta_setup_failure_exit_enabled"), True),
+            meta_setup_failure_buffer_atr=max(
+                0.0, _coerce_float(payload.get("meta_setup_failure_buffer_atr"), 0.10)
+            ),
+            meta_no_progress_exit_enabled=_coerce_bool(payload.get("meta_no_progress_exit_enabled"), True),
+            meta_no_progress_exit_minutes=max(
+                0, _coerce_int(payload.get("meta_no_progress_exit_minutes"), 10)
+            ),
+            meta_no_progress_exit_atr=max(
+                0.0, _coerce_float(payload.get("meta_no_progress_exit_atr"), 0.20)
+            ),
             meta_trail_activate_atr=_coerce_float(payload.get("meta_trail_activate_atr"), 2.0),
             meta_trail_atr=_coerce_float(payload.get("meta_trail_atr"), 1.0),
             meta_trail_atr_after_tp=_coerce_float(payload.get("meta_trail_atr_after_tp"), 0.8),
@@ -2145,6 +2176,8 @@ class LiveSession:
                     trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
                     use_tp_to_tighten_trail=bool(cfg.meta_use_tp_to_tighten_trail),
                     entry_threshold_override=cfg.meta_entry_threshold,
+                    entry_long_threshold_override=cfg.meta_intrabar_long_setup_threshold,
+                    entry_short_threshold_override=cfg.meta_intrabar_short_setup_threshold,
                     exit_threshold_override=cfg.meta_exit_threshold,
                     precomputed_base_frame=precomputed_meta_frame,
                     precomputed_append_lookback_days=int(cfg.meta_base_frame_append_lookback_days),
@@ -2251,6 +2284,8 @@ class LiveSession:
                     meta_intrabar_entry_policy=str(cfg.meta_intrabar_entry_policy),
                     meta_intrabar_setup_max_bars=int(cfg.meta_intrabar_setup_max_bars),
                     meta_intrabar_setup_bar_minutes=int(cfg.interval),
+                    meta_intrabar_max_confirmation_age_minutes=int(cfg.meta_intrabar_max_confirmation_age_minutes),
+                    meta_intrabar_ref_chase_atr=float(cfg.meta_intrabar_ref_chase_atr),
                     meta_intrabar_long_setup_threshold=cfg.meta_intrabar_long_setup_threshold,
                     meta_intrabar_short_setup_threshold=cfg.meta_intrabar_short_setup_threshold,
                     meta_countertrend_veto_enabled=bool(cfg.meta_countertrend_veto_enabled),
@@ -2262,6 +2297,11 @@ class LiveSession:
                     meta_continuation_source_long_threshold=float(cfg.meta_continuation_source_long_threshold),
                     meta_continuation_pullback_atr=float(cfg.meta_continuation_pullback_atr),
                     meta_hard_stop_atr=float(cfg.meta_hard_stop_atr),
+                    meta_setup_failure_exit_enabled=bool(cfg.meta_setup_failure_exit_enabled),
+                    meta_setup_failure_buffer_atr=float(cfg.meta_setup_failure_buffer_atr),
+                    meta_no_progress_exit_enabled=bool(cfg.meta_no_progress_exit_enabled),
+                    meta_no_progress_exit_minutes=int(cfg.meta_no_progress_exit_minutes),
+                    meta_no_progress_exit_atr=float(cfg.meta_no_progress_exit_atr),
                     meta_trail_activate_atr=float(cfg.meta_trail_activate_atr),
                     meta_trail_atr=float(cfg.meta_trail_atr),
                     meta_trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
@@ -2974,6 +3014,8 @@ class LiveSession:
                         trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),
                         use_tp_to_tighten_trail=bool(cfg.meta_use_tp_to_tighten_trail),
                         entry_threshold_override=cfg.meta_entry_threshold,
+                        entry_long_threshold_override=cfg.meta_intrabar_long_setup_threshold,
+                        entry_short_threshold_override=cfg.meta_intrabar_short_setup_threshold,
                         exit_threshold_override=cfg.meta_exit_threshold,
                         precomputed_base_frame=precomputed_meta_frame,
                         precomputed_append_lookback_days=int(cfg.meta_base_frame_append_lookback_days),
@@ -3076,6 +3118,8 @@ class LiveSession:
                         meta_intrabar_entry_policy=str(cfg.meta_intrabar_entry_policy),
                         meta_intrabar_setup_max_bars=int(cfg.meta_intrabar_setup_max_bars),
                         meta_intrabar_setup_bar_minutes=int(cfg.interval),
+                        meta_intrabar_max_confirmation_age_minutes=int(cfg.meta_intrabar_max_confirmation_age_minutes),
+                        meta_intrabar_ref_chase_atr=float(cfg.meta_intrabar_ref_chase_atr),
                         meta_intrabar_long_setup_threshold=cfg.meta_intrabar_long_setup_threshold,
                         meta_intrabar_short_setup_threshold=cfg.meta_intrabar_short_setup_threshold,
                         meta_countertrend_veto_enabled=bool(cfg.meta_countertrend_veto_enabled),
@@ -3087,6 +3131,11 @@ class LiveSession:
                         meta_continuation_source_long_threshold=float(cfg.meta_continuation_source_long_threshold),
                         meta_continuation_pullback_atr=float(cfg.meta_continuation_pullback_atr),
                         meta_hard_stop_atr=float(cfg.meta_hard_stop_atr),
+                        meta_setup_failure_exit_enabled=bool(cfg.meta_setup_failure_exit_enabled),
+                        meta_setup_failure_buffer_atr=float(cfg.meta_setup_failure_buffer_atr),
+                        meta_no_progress_exit_enabled=bool(cfg.meta_no_progress_exit_enabled),
+                        meta_no_progress_exit_minutes=int(cfg.meta_no_progress_exit_minutes),
+                        meta_no_progress_exit_atr=float(cfg.meta_no_progress_exit_atr),
                         meta_trail_activate_atr=float(cfg.meta_trail_activate_atr),
                         meta_trail_atr=float(cfg.meta_trail_atr),
                         meta_trail_atr_after_tp=float(cfg.meta_trail_atr_after_tp),

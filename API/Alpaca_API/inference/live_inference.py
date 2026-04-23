@@ -1081,6 +1081,8 @@ class LiveMetaXGBAgent:
         trail_atr_after_tp: float = 0.8,
         use_tp_to_tighten_trail: bool = True,
         entry_threshold_override: float | None = None,
+        entry_long_threshold_override: float | None = None,
+        entry_short_threshold_override: float | None = None,
         exit_threshold_override: float | None = None,
         ga_probs_frame: pd.DataFrame | None = None,
         ga_probs_mode: str = "xgb",
@@ -1112,6 +1114,16 @@ class LiveMetaXGBAgent:
         self._entry_threshold_override = (
             float(entry_threshold_override)
             if entry_threshold_override is not None and np.isfinite(entry_threshold_override)
+            else None
+        )
+        self._entry_long_threshold_override = (
+            float(entry_long_threshold_override)
+            if entry_long_threshold_override is not None and np.isfinite(entry_long_threshold_override)
+            else None
+        )
+        self._entry_short_threshold_override = (
+            float(entry_short_threshold_override)
+            if entry_short_threshold_override is not None and np.isfinite(entry_short_threshold_override)
             else None
         )
         self._exit_threshold_override = (
@@ -1150,6 +1162,10 @@ class LiveMetaXGBAgent:
         if self._entry_threshold_override is not None:
             self._entry_thresholds["enter_long"] = float(self._entry_threshold_override)
             self._entry_thresholds["enter_short"] = float(self._entry_threshold_override)
+        if self._entry_long_threshold_override is not None:
+            self._entry_thresholds["enter_long"] = float(self._entry_long_threshold_override)
+        if self._entry_short_threshold_override is not None:
+            self._entry_thresholds["enter_short"] = float(self._entry_short_threshold_override)
         if self._exit_threshold_override is not None:
             self._exit_thresholds["exit_long"] = float(self._exit_threshold_override)
             self._exit_thresholds["exit_short"] = float(self._exit_threshold_override)
@@ -1720,6 +1736,8 @@ class LiveIndependentMetaXGBAgent:
         trail_atr_after_tp: float = 0.8,
         use_tp_to_tighten_trail: bool = True,
         entry_threshold_override: float | None = None,
+        entry_long_threshold_override: float | None = None,
+        entry_short_threshold_override: float | None = None,
         exit_threshold_override: float | None = None,
         ga_probs_frame: pd.DataFrame | None = None,
         ga_probs_mode: str = "xgb",
@@ -1763,6 +1781,8 @@ class LiveIndependentMetaXGBAgent:
             trail_atr_after_tp=trail_atr_after_tp,
             use_tp_to_tighten_trail=use_tp_to_tighten_trail,
             entry_threshold_override=entry_threshold_override,
+            entry_long_threshold_override=entry_long_threshold_override,
+            entry_short_threshold_override=entry_short_threshold_override,
             exit_threshold_override=exit_threshold_override,
             ga_probs_frame=ga_probs_frame,
             ga_probs_mode=ga_probs_mode,
