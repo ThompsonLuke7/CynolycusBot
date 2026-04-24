@@ -17,6 +17,43 @@ from Features.feature_sets.feature_constants import SWING_LABEL_COLUMNS
 from Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
 
 
+def _shift_binary_event_labels_back(
+    event_series: pd.Series | np.ndarray,
+    timestamps: pd.DatetimeIndex,
+    shift_bars: int = 0,
+) -> np.ndarray:
+    """
+    Move binary event labels earlier by ``shift_bars`` within the same session.
+
+    If shifting backward would cross a session boundary, keep the label on its
+    original bar so we never leak it across overnight gaps.
+    """
+    src = (
+        event_series.fillna(0).astype(int).to_numpy(dtype=np.int64)
+        if isinstance(event_series, pd.Series)
+        else np.asarray(event_series, dtype=np.int64)
+    )
+    if shift_bars <= 0 or src.size == 0:
+        return (src > 0).astype(np.int64)
+
+    if not isinstance(timestamps, pd.DatetimeIndex):
+        timestamps = pd.DatetimeIndex(timestamps)
+
+    dates = timestamps.tz_convert(None).normalize() if timestamps.tz is not None else timestamps.normalize()
+    out = np.zeros(len(src), dtype=np.int64)
+    for i, value in enumerate(src):
+        if int(value) != 1:
+            continue
+        target = i - int(shift_bars)
+        while target < 0 or dates[target] != dates[i]:
+            target += 1
+            if target >= i:
+                target = i
+                break
+        out[target] = 1
+    return out
+
+
 def _apply_leg_reset_bridge(
     raw_leg_state: np.ndarray,
     *,
@@ -198,6 +235,7 @@ def add_atr_pivot_swing_labels(
     tp_mult: float = 1.0,
     sl_mult: float = 0.8,
     max_holding: int = 20,
+    shift_pivot_labels_back_bars: int = 0,
     base_label_col: str = "atr_swing_label",
 ) -> pd.DataFrame:
     """
@@ -305,9 +343,26 @@ def add_atr_pivot_swing_labels(
     df["atr_holding_bars"] = holding_bars
     df["atr_realized_return"] = realized_ret
 
-    # Binary labels
-    df["long_swing_label"] = (df[base_label_col] == 1.0).astype("Int64")
-    df["short_swing_label"] = (df[base_label_col] == -1.0).astype("Int64")
+    # Binary labels; optionally shift them earlier within-session so the model
+    # learns to anticipate the confirmed pivot bar by a fixed number of bars.
+    long_labels = (df[base_label_col] == 1.0).astype("Int64")
+    short_labels = (df[base_label_col] == -1.0).astype("Int64")
+    if int(shift_pivot_labels_back_bars) > 0:
+        long_shifted = _shift_binary_event_labels_back(
+            long_labels,
+            df.index,
+            shift_bars=int(shift_pivot_labels_back_bars),
+        )
+        short_shifted = _shift_binary_event_labels_back(
+            short_labels,
+            df.index,
+            shift_bars=int(shift_pivot_labels_back_bars),
+        )
+        df["long_swing_label"] = pd.Series(long_shifted, index=df.index).astype("Int64")
+        df["short_swing_label"] = pd.Series(short_shifted, index=df.index).astype("Int64")
+    else:
+        df["long_swing_label"] = long_labels
+        df["short_swing_label"] = short_labels
 
     return df
 

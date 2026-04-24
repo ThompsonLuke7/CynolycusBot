@@ -16,6 +16,13 @@ class SwingLeg:
     end_pivot_kind: str
 
 
+def _session_dates(timestamps: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    idx = pd.DatetimeIndex(timestamps)
+    if idx.tz is not None:
+        idx = idx.tz_convert(None)
+    return idx.normalize()
+
+
 def compute_wilder_atr(
     high: np.ndarray,
     low: np.ndarray,
@@ -91,6 +98,68 @@ def apply_swing_pivot_zone_weights(
     return y_zone, weights, source
 
 
+def apply_swing_pivot_zone_weights_session_aware(
+    y: np.ndarray,
+    timestamps: pd.DatetimeIndex,
+    *,
+    positive_window_bars: int,
+    ambiguous_window_bars: int,
+    neighbor_weight: float,
+    ambiguous_weight: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Session-aware soft zone expansion.
+
+    Backward expansion never crosses the prior session boundary, so a core on
+    the first bar of the day does not mark the last bar of the previous day as
+    a neighbor/ambiguous training row. Forward expansion remains allowed.
+    """
+    dates = _session_dates(timestamps)
+    n = len(y)
+    y_base = (np.asarray(y) == 1).astype(np.int64)
+    y_zone = y_base.copy()
+    weights = np.ones(n, dtype=np.float32)
+    source = np.zeros(n, dtype=np.int8)
+
+    if n == 0:
+        return y_zone, weights, source
+
+    pos_w = max(0, int(positive_window_bars))
+    amb_w = max(pos_w, max(0, int(ambiguous_window_bars)))
+    core_idx = np.flatnonzero(y_base == 1)
+    if core_idx.size == 0:
+        return y_zone, weights, source
+
+    if amb_w > 0:
+        for idx in core_idx:
+            pivot_date = dates[idx]
+            for j in range(max(0, idx - amb_w), idx):
+                if dates[j] == pivot_date:
+                    weights[j] = float(ambiguous_weight)
+                    source[j] = 3
+            for j in range(idx + 1, min(n, idx + amb_w + 1)):
+                weights[j] = float(ambiguous_weight)
+                source[j] = 3
+
+    if pos_w > 0:
+        for idx in core_idx:
+            pivot_date = dates[idx]
+            for j in range(max(0, idx - pos_w), idx):
+                if dates[j] == pivot_date:
+                    y_zone[j] = 1
+                    weights[j] = float(neighbor_weight)
+                    source[j] = 2
+            for j in range(idx + 1, min(n, idx + pos_w + 1)):
+                y_zone[j] = 1
+                weights[j] = float(neighbor_weight)
+                source[j] = 2
+
+    y_zone[core_idx] = 1
+    weights[core_idx] = 1.0
+    source[core_idx] = 1
+    return y_zone, weights, source
+
+
 def keep_first_same_side_event(
     long_y: np.ndarray,
     short_y: np.ndarray,
@@ -132,6 +201,65 @@ def keep_first_same_side_event(
                 suppressed_short[idx] = True
             else:
                 active_side = "short"
+
+    return long_out, short_out, suppressed_long, suppressed_short
+
+
+def keep_first_same_side_event_session_reset(
+    long_y: np.ndarray,
+    short_y: np.ndarray,
+    timestamps: pd.DatetimeIndex,
+    lows: np.ndarray,
+    highs: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    First-in-run filter that resets each session and preserves genuinely new
+    extremes within a same-side sequence.
+    """
+    dates = _session_dates(timestamps)
+    long_in = (np.asarray(long_y) == 1).astype(np.int64)
+    short_in = (np.asarray(short_y) == 1).astype(np.int64)
+
+    long_out = long_in.copy()
+    short_out = short_in.copy()
+    suppressed_long = np.zeros(len(long_in), dtype=bool)
+    suppressed_short = np.zeros(len(short_in), dtype=bool)
+
+    active_side: str | None = None
+    last_long_low = np.inf
+    last_short_high = -np.inf
+    prev_date = None
+
+    for idx, (is_long, is_short) in enumerate(zip(long_in == 1, short_in == 1)):
+        cur_date = dates[idx]
+        if prev_date is not None and cur_date != prev_date:
+            active_side = None
+        prev_date = cur_date
+
+        if is_long and is_short:
+            long_out[idx] = 0
+            short_out[idx] = 0
+            suppressed_long[idx] = True
+            suppressed_short[idx] = True
+            active_side = None
+            continue
+
+        if is_long:
+            cur_low = float(lows[idx])
+            if active_side == "long" and cur_low >= last_long_low:
+                long_out[idx] = 0
+                suppressed_long[idx] = True
+            else:
+                active_side = "long"
+                last_long_low = cur_low
+        elif is_short:
+            cur_high = float(highs[idx])
+            if active_side == "short" and cur_high <= last_short_high:
+                short_out[idx] = 0
+                suppressed_short[idx] = True
+            else:
+                active_side = "short"
+                last_short_high = cur_high
 
     return long_out, short_out, suppressed_long, suppressed_short
 

@@ -31,9 +31,9 @@ from Data.plots.plots import (  # noqa: E402
 )
 from Data.retrieve_data import normalize_ticker  # noqa: E402
 from Models.ga_xgboost.swing_label_weights import (  # noqa: E402
-    apply_swing_pivot_zone_weights,
+    apply_swing_pivot_zone_weights_session_aware,
     build_phase3_swing_event_labels,
-    keep_first_same_side_event,
+    keep_first_same_side_event_session_reset,
 )
 
 
@@ -90,17 +90,25 @@ def plot_soft_swing_labels(
     suppressed_run_short_full = np.zeros(len(df), dtype=bool)
     if first_in_run_filter:
         long_core_full, short_core_full, suppressed_run_long_full, suppressed_run_short_full = (
-            keep_first_same_side_event(long_core_full, short_core_full)
+            keep_first_same_side_event_session_reset(
+                long_core_full,
+                short_core_full,
+                df.index,
+                lows=pd.to_numeric(df["low"], errors="coerce").to_numpy(dtype=float),
+                highs=pd.to_numeric(df["high"], errors="coerce").to_numpy(dtype=float),
+            )
         )
-    long_zone_full, long_w_full, _ = apply_swing_pivot_zone_weights(
+    long_zone_full, long_w_full, _ = apply_swing_pivot_zone_weights_session_aware(
         long_core_full,
+        df.index,
         positive_window_bars=positive_window_bars,
         ambiguous_window_bars=ambiguous_window_bars,
         neighbor_weight=neighbor_weight,
         ambiguous_weight=ambiguous_weight,
     )
-    short_zone_full, short_w_full, _ = apply_swing_pivot_zone_weights(
+    short_zone_full, short_w_full, _ = apply_swing_pivot_zone_weights_session_aware(
         short_core_full,
+        df.index,
         positive_window_bars=positive_window_bars,
         ambiguous_window_bars=ambiguous_window_bars,
         neighbor_weight=neighbor_weight,

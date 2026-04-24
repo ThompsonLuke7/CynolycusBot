@@ -48,9 +48,11 @@ from Features.feature_matrix_regime import AgentFeatureConfig, build_agent_featu
 from Models.ga_xgboost.ga_xgboost import GAXGBoostFeatureSelector
 from Models.ga_xgboost.swing_label_weights import (
     apply_swing_pivot_zone_weights as _shared_apply_swing_pivot_zone_weights,
+    apply_swing_pivot_zone_weights_session_aware,
     build_phase3_swing_event_labels,
     compute_wilder_atr,
     keep_first_same_side_event,
+    keep_first_same_side_event_session_reset,
 )
 from Policy.training_logging import log_training_run
 
@@ -698,9 +700,20 @@ def load_dataset(
         if use_first_in_run_filter and not use_phase3_events:
             y_long_orig = y_long.copy()
             y_short_orig = y_short.copy()
-            y_long, y_short, suppressed_run_long, suppressed_run_short = (
-                keep_first_same_side_event(y_long, y_short)
-            )
+            if plot_df is not None and isinstance(plot_df.index, pd.DatetimeIndex):
+                y_long, y_short, suppressed_run_long, suppressed_run_short = (
+                    keep_first_same_side_event_session_reset(
+                        y_long,
+                        y_short,
+                        plot_df.index,
+                        lows=pd.to_numeric(plot_df["low"], errors="coerce").to_numpy(dtype=float),
+                        highs=pd.to_numeric(plot_df["high"], errors="coerce").to_numpy(dtype=float),
+                    )
+                )
+            else:
+                y_long, y_short, suppressed_run_long, suppressed_run_short = (
+                    keep_first_same_side_event(y_long, y_short)
+                )
             print(
                 "[GA-XGB] Swing first-in-run filter enabled: "
                 f"long_core_before={int((y_long_orig == 1).sum())}, "
@@ -713,20 +726,38 @@ def load_dataset(
         if use_swing_zone_weights and not use_phase3_events:
             y_long_orig = y_long.copy()
             y_short_orig = y_short.copy()
-            y_long, sample_weight_long = _apply_swing_pivot_zone_weights(
-                y_long,
-                positive_window_bars=int(swing_zone_positive_window_bars),
-                ambiguous_window_bars=int(swing_zone_ambiguous_window_bars),
-                neighbor_weight=float(swing_zone_neighbor_weight),
-                ambiguous_weight=float(swing_zone_ambiguous_weight),
-            )
-            y_short, sample_weight_short = _apply_swing_pivot_zone_weights(
-                y_short,
-                positive_window_bars=int(swing_zone_positive_window_bars),
-                ambiguous_window_bars=int(swing_zone_ambiguous_window_bars),
-                neighbor_weight=float(swing_zone_neighbor_weight),
-                ambiguous_weight=float(swing_zone_ambiguous_weight),
-            )
+            if plot_df is not None and isinstance(plot_df.index, pd.DatetimeIndex):
+                y_long, sample_weight_long, _ = apply_swing_pivot_zone_weights_session_aware(
+                    y_long,
+                    plot_df.index,
+                    positive_window_bars=int(swing_zone_positive_window_bars),
+                    ambiguous_window_bars=int(swing_zone_ambiguous_window_bars),
+                    neighbor_weight=float(swing_zone_neighbor_weight),
+                    ambiguous_weight=float(swing_zone_ambiguous_weight),
+                )
+                y_short, sample_weight_short, _ = apply_swing_pivot_zone_weights_session_aware(
+                    y_short,
+                    plot_df.index,
+                    positive_window_bars=int(swing_zone_positive_window_bars),
+                    ambiguous_window_bars=int(swing_zone_ambiguous_window_bars),
+                    neighbor_weight=float(swing_zone_neighbor_weight),
+                    ambiguous_weight=float(swing_zone_ambiguous_weight),
+                )
+            else:
+                y_long, sample_weight_long = _apply_swing_pivot_zone_weights(
+                    y_long,
+                    positive_window_bars=int(swing_zone_positive_window_bars),
+                    ambiguous_window_bars=int(swing_zone_ambiguous_window_bars),
+                    neighbor_weight=float(swing_zone_neighbor_weight),
+                    ambiguous_weight=float(swing_zone_ambiguous_weight),
+                )
+                y_short, sample_weight_short = _apply_swing_pivot_zone_weights(
+                    y_short,
+                    positive_window_bars=int(swing_zone_positive_window_bars),
+                    ambiguous_window_bars=int(swing_zone_ambiguous_window_bars),
+                    neighbor_weight=float(swing_zone_neighbor_weight),
+                    ambiguous_weight=float(swing_zone_ambiguous_weight),
+                )
             print(
                 "[GA-XGB] Swing pivot-zone weights enabled: "
                 f"positive_window=+/-{int(swing_zone_positive_window_bars)} bars, "

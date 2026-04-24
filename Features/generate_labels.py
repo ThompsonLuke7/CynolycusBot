@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -75,11 +76,66 @@ def _print_pivot_stats(df: pd.DataFrame) -> None:
     print("[labels] pivots: " + ", ".join(stats))
 
 
+def _clone_dataset_support_files(
+    *,
+    clean_ticker: str,
+    source_dataset_name: str,
+    output_dataset_name: str,
+) -> None:
+    if source_dataset_name == output_dataset_name:
+        return
+    base_dir = get_ticker_processed_base_dir(clean_ticker)
+    src_dir = base_dir / "datasets" / source_dataset_name
+    dst_dir = base_dir / "datasets" / output_dataset_name
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    support_files = [
+        "plot_frame.parquet",
+        "plot_frame.csv",
+        f"X_{source_dataset_name}_tree.parquet",
+        f"X_{source_dataset_name}_tree.csv",
+        f"X_{source_dataset_name}_lstm.parquet",
+        f"X_{source_dataset_name}_lstm.csv",
+        f"features_X_{source_dataset_name}_tree.txt",
+        f"features_X_{source_dataset_name}_lstm.txt",
+        "phase3_swing_event_metadata.parquet",
+        "phase3_swing_event_metadata.csv",
+        "phase3_macro_swing_event_metadata.parquet",
+        "phase3_macro_swing_event_metadata.csv",
+    ]
+    for name in support_files:
+        src = src_dir / name
+        if not src.exists():
+            continue
+        dst_name = name.replace(source_dataset_name, output_dataset_name)
+        shutil.copy2(src, dst_dir / dst_name)
+
+    splits_src = base_dir / "splits" / source_dataset_name
+    splits_dst = base_dir / "splits" / output_dataset_name
+    if splits_src.exists() and not splits_dst.exists():
+        shutil.copytree(splits_src, splits_dst)
+        src_tree_split = splits_dst / f"X_{source_dataset_name}_tree"
+        dst_tree_split = splits_dst / f"X_{output_dataset_name}_tree"
+        if src_tree_split.exists() and not dst_tree_split.exists():
+            src_tree_split.rename(dst_tree_split)
+        src_lstm_split = splits_dst / f"X_{source_dataset_name}_lstm"
+        dst_lstm_split = splits_dst / f"X_{output_dataset_name}_lstm"
+        if src_lstm_split.exists() and not dst_lstm_split.exists():
+            src_lstm_split.rename(dst_lstm_split)
+
+    stats_src = base_dir / "stats" / f"norm_stats_{source_dataset_name}_X_{source_dataset_name}_tree_train.json"
+    stats_dst = base_dir / "stats" / f"norm_stats_{output_dataset_name}_X_{output_dataset_name}_tree_train.json"
+    if stats_src.exists() and not stats_dst.exists():
+        shutil.copy2(stats_src, stats_dst)
+
+
 def generate_labels(
     *,
     ticker: str,
     dataset_name: str,
     plot_frame_path: Path | None = None,
+    output_dataset_name: str | None = None,
+    swing_label_shift_bars: int = 0,
 ) -> Path:
     plot_path = plot_frame_path or _resolve_plot_frame_path(
         ticker=ticker, dataset_name=dataset_name
@@ -87,7 +143,12 @@ def generate_labels(
     df = _load_plot_frame(plot_path)
 
     df = add_fractal_pivots(df)
-    df = add_all_labels(df)
+    df = add_all_labels(
+        df,
+        atr_pivot_kwargs={
+            "shift_pivot_labels_back_bars": int(swing_label_shift_bars),
+        },
+    )
 
     _print_triple_barrier_stats(df)
     _print_pivot_stats(df)
@@ -99,7 +160,17 @@ def generate_labels(
     labels_df = df[label_cols].copy()
 
     clean = normalize_ticker(ticker)
-    dataset_dir = get_ticker_processed_base_dir(clean) / "datasets" / dataset_name
+    resolved_output_dataset = (
+        str(output_dataset_name).strip() if output_dataset_name else dataset_name
+    )
+    _clone_dataset_support_files(
+        clean_ticker=clean,
+        source_dataset_name=dataset_name,
+        output_dataset_name=resolved_output_dataset,
+    )
+    dataset_dir = get_ticker_processed_base_dir(clean) / "datasets" / (
+        resolved_output_dataset
+    )
     dataset_dir.mkdir(parents=True, exist_ok=True)
 
     y_parquet = dataset_dir / "y.parquet"
@@ -118,6 +189,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ticker", type=str, default="$SPY")
     parser.add_argument("--dataset", type=str, default="15min")
     parser.add_argument(
+        "--output-dataset",
+        type=str,
+        default=None,
+        help="Optional alternate dataset dir to write labels into instead of overwriting --dataset.",
+    )
+    parser.add_argument(
+        "--swing-label-shift-bars",
+        type=int,
+        default=0,
+        help="Shift long/short swing labels earlier by this many bars within the same session.",
+    )
+    parser.add_argument(
         "--plot-frame",
         type=str,
         default=None,
@@ -133,6 +216,8 @@ def main() -> None:
         ticker=args.ticker,
         dataset_name=args.dataset,
         plot_frame_path=plot_path,
+        output_dataset_name=args.output_dataset,
+        swing_label_shift_bars=int(args.swing_label_shift_bars),
     )
     print(f"Wrote {out_path} and y.csv")
 
