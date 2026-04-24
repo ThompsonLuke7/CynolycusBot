@@ -1,5 +1,5 @@
 {
-  "started_at": "2026-04-22T05:45:35.417437+00:00",
+  "started_at": "2026-04-23T07:03:52.114468+00:00",
   "runner_mode": "live",
   "symbols": [
     "SPY"
@@ -121,7 +121,5 @@
     "audit_enabled": true,
     "audit_root": "Data/inference/live_runs"
   },
-  "session_dir": "Data/inference/live_runs/20260422_054535_live_spy",
-  "stopped_at": "2026-04-23T07:03:27.563432+00:00",
-  "dropped_records": 0
+  "session_dir": "Data/inference/live_runs/20260423_070352_live_spy"
 }

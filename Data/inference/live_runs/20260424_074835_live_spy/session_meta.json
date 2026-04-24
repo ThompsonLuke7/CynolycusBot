@@ -1,5 +1,5 @@
 {
-  "started_at": "2026-04-22T05:45:35.417437+00:00",
+  "started_at": "2026-04-24T07:48:35.194741+00:00",
   "runner_mode": "live",
   "symbols": [
     "SPY"
@@ -93,6 +93,7 @@
     "option_exit_time_decay_minutes": 80,
     "option_exit_time_decay_progress_pct": 1.0,
     "option_exit_opposite_prob": 0.6,
+    "option_exit_opposite_profit_pct": 0.6,
     "option_exit_quote_mode": "bid",
     "replay_option_proxy_mode": "black_scholes",
     "replay_option_proxy_expiry_hhmm": "15:40",
@@ -121,7 +122,7 @@
     "audit_enabled": true,
     "audit_root": "Data/inference/live_runs"
   },
-  "session_dir": "Data/inference/live_runs/20260422_054535_live_spy",
-  "stopped_at": "2026-04-23T07:03:27.563432+00:00",
+  "session_dir": "Data/inference/live_runs/20260424_074835_live_spy",
+  "stopped_at": "2026-04-24T07:48:43.809290+00:00",
   "dropped_records": 0
 }

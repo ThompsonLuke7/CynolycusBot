@@ -524,6 +524,7 @@ def _build_option_order_policy(
     option_exit_time_decay_minutes: int = 80,
     option_exit_time_decay_progress_pct: float = 1.0,
     option_exit_opposite_prob: float = 0.60,
+    option_exit_opposite_profit_pct: float = 0.60,
     option_exit_quote_mode: str = "bid",
 ) -> OptionOrderPolicy:
     cfg = OptionOrderPolicyConfig(
@@ -591,6 +592,7 @@ def _build_option_order_policy(
         option_exit_time_decay_minutes=int(option_exit_time_decay_minutes),
         option_exit_time_decay_progress_pct=float(option_exit_time_decay_progress_pct),
         option_exit_opposite_prob=float(option_exit_opposite_prob),
+        option_exit_opposite_profit_pct=float(option_exit_opposite_profit_pct),
         option_exit_quote_mode=str(option_exit_quote_mode),
     )
     return OptionOrderPolicy(cfg)

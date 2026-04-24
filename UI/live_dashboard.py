@@ -269,6 +269,7 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "option_exit_time_decay_minutes": int(cfg.option_exit_time_decay_minutes),
         "option_exit_time_decay_progress_pct": float(cfg.option_exit_time_decay_progress_pct),
         "option_exit_opposite_prob": float(cfg.option_exit_opposite_prob),
+        "option_exit_opposite_profit_pct": float(cfg.option_exit_opposite_profit_pct),
         "option_exit_quote_mode": str(cfg.option_exit_quote_mode),
         "replay_option_proxy_mode": str(cfg.replay_option_proxy_mode),
         "replay_option_proxy_expiry_hhmm": str(cfg.replay_option_proxy_expiry_hhmm),
@@ -891,6 +892,7 @@ class SessionConfig:
     option_exit_time_decay_minutes: int = 80
     option_exit_time_decay_progress_pct: float = 1.0
     option_exit_opposite_prob: float = 0.60
+    option_exit_opposite_profit_pct: float = 0.60
     option_exit_quote_mode: str = "bid"
     replay_option_proxy_mode: str = "black_scholes"
     replay_option_proxy_expiry_hhmm: str = "15:40"
@@ -1077,6 +1079,10 @@ class SessionConfig:
             option_exit_opposite_prob=max(
                 0.0,
                 _coerce_float(payload.get("option_exit_opposite_prob"), 0.60),
+            ),
+            option_exit_opposite_profit_pct=max(
+                0.0,
+                _coerce_float(payload.get("option_exit_opposite_profit_pct"), 0.60),
             ),
             option_exit_quote_mode=str(payload.get("option_exit_quote_mode", "bid")).strip().lower(),
             replay_option_proxy_mode=str(payload.get("replay_option_proxy_mode", "black_scholes")).strip().lower(),
@@ -2323,6 +2329,7 @@ class LiveSession:
                     option_exit_time_decay_minutes=int(cfg.option_exit_time_decay_minutes),
                     option_exit_time_decay_progress_pct=float(cfg.option_exit_time_decay_progress_pct),
                     option_exit_opposite_prob=float(cfg.option_exit_opposite_prob),
+                    option_exit_opposite_profit_pct=float(cfg.option_exit_opposite_profit_pct),
                     option_exit_quote_mode=str(cfg.option_exit_quote_mode),
                 )
                 if str(cfg.replay_option_proxy_mode).lower() == "black_scholes":
@@ -3157,6 +3164,7 @@ class LiveSession:
                         option_exit_time_decay_minutes=int(cfg.option_exit_time_decay_minutes),
                         option_exit_time_decay_progress_pct=float(cfg.option_exit_time_decay_progress_pct),
                         option_exit_opposite_prob=float(cfg.option_exit_opposite_prob),
+                        option_exit_opposite_profit_pct=float(cfg.option_exit_opposite_profit_pct),
                         option_exit_quote_mode=str(cfg.option_exit_quote_mode),
                     )
                     order_policies[symbol] = policy

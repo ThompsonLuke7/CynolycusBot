@@ -131,6 +131,7 @@ class OptionOrderPolicyConfig:
     option_exit_time_decay_minutes: int = 80
     option_exit_time_decay_progress_pct: float = 1.0
     option_exit_opposite_prob: float = 0.60
+    option_exit_opposite_profit_pct: float = 0.60
     option_exit_quote_mode: str = "bid"
     expiring_position_exit_hhmm: str | None = "15:40"
 
@@ -629,10 +630,16 @@ class OptionOrderPolicy:
                 return True
 
             opp_thr = max(0.0, float(self.cfg.option_exit_opposite_prob))
+            opp_profit_pct = max(0.0, float(self.cfg.option_exit_opposite_profit_pct))
             bar = closed_bar or {}
             opp_key = "p_enter_short" if side_key == "long" else "p_enter_long"
             opp_prob = _as_float(bar.get(opp_key))
-            if opp_thr > 0.0 and math.isfinite(opp_prob) and opp_prob >= opp_thr and best_profit_pct >= 1.0:
+            if (
+                opp_thr > 0.0
+                and math.isfinite(opp_prob)
+                and opp_prob >= opp_thr
+                and best_profit_pct >= opp_profit_pct
+            ):
                 self._meta_side_reason[side_key] = "option_opposite_signal"
                 return True
             return False
@@ -2516,6 +2523,7 @@ class OptionOrderPolicy:
             "option_exit_time_decay_minutes": int(self.cfg.option_exit_time_decay_minutes),
             "option_exit_time_decay_progress_pct": float(self.cfg.option_exit_time_decay_progress_pct),
             "option_exit_opposite_prob": float(self.cfg.option_exit_opposite_prob),
+            "option_exit_opposite_profit_pct": float(self.cfg.option_exit_opposite_profit_pct),
             "atr": float(atr) if math.isfinite(atr) else None,
             "bars_interval": int(len(self._bars_interval)),
             "bars_15m": int(len(self._bars_interval)),
@@ -2972,6 +2980,25 @@ class OptionOrderPolicy:
                     if hard_stop_signal:
                         self._meta_side_soft_exit_count[side_key] = 0
                         self._meta_side_reason[side_key] = "hard_stop"
+                        return 0
+                    setup_failure_signal = self._setup_failure_exit_hit(
+                        side=side_key,
+                        close=close,
+                        high=high,
+                        low=low,
+                    )
+                    if setup_failure_signal:
+                        self._meta_side_soft_exit_count[side_key] = 0
+                        self._meta_side_reason[side_key] = "setup_failure_exit"
+                        return 0
+                    no_progress_signal = self._no_progress_exit_hit(
+                        side=side_key,
+                        close=close,
+                        local_ts=local_ts,
+                    )
+                    if no_progress_signal:
+                        self._meta_side_soft_exit_count[side_key] = 0
+                        self._meta_side_reason[side_key] = "no_progress_exit"
                         return 0
                 option_exit_signal = self._option_value_exit_hit(
                     side=side_key,

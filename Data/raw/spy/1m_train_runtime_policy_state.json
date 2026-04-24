@@ -2,17 +2,17 @@
   "symbols": [
     "SPY"
   ],
-  "updated_at": "2026-04-22T20:00:07.126948+00:00",
+  "updated_at": "2026-04-23T17:31:06.943135+00:00",
   "policies": {
     "SPY": {
       "latest_meta_side_snapshot": {
-        "timestamp": "2026-04-22T19:50:00+00:00",
-        "signal_close": 711.2,
-        "signal_high": 711.44,
-        "signal_low": 710.46,
-        "signal_atr": 0.6309382159262322,
-        "p_enter_long": 0.004287444055080414,
-        "p_enter_short": 0.6643320322036743,
+        "timestamp": "2026-04-23T17:10:00+00:00",
+        "signal_close": 706.52,
+        "signal_high": 708.18,
+        "signal_low": 706.27,
+        "signal_atr": 0.9311776937134146,
+        "p_enter_long": 0.5821072459220886,
+        "p_enter_short": 0.014720502309501171,
         "p_exit_long": null,
         "p_exit_short": null,
         "ema_fast": null,
@@ -32,100 +32,100 @@
         "short": 0
       },
       "meta_intrabar_entry_intent_active": {
-        "long": false,
-        "short": true
+        "long": true,
+        "short": false
       },
       "meta_intrabar_entry_ref": {
-        "long": null,
-        "short": 710.46
+        "long": 708.18,
+        "short": null
       },
       "meta_intrabar_entry_setup_ts": {
-        "long": null,
-        "short": "2026-04-22T15:50:00-04:00"
+        "long": "2026-04-23T13:10:00-04:00",
+        "short": null
       },
       "meta_intrabar_entry_expires_at": {
-        "long": null,
-        "short": "2026-04-22T16:40:00-04:00"
+        "long": "2026-04-23T14:00:00-04:00",
+        "short": null
       },
       "meta_intrabar_setup_snapshot": {
-        "long": null,
-        "short": {
-          "setup_ts": "2026-04-22T15:50:00-04:00",
-          "expires_at": "2026-04-22T16:40:00-04:00",
-          "signal_open": null,
-          "signal_high": 711.44,
-          "signal_low": 710.46,
-          "signal_close": 711.2,
-          "signal_atr": 0.6309382159262322,
-          "ref": 710.46,
-          "prob": 0.6643320322036743,
-          "threshold": 0.65,
-          "entry_kind": "swing",
-          "source_side": "short"
-        }
-      },
-      "meta_entry_structure": {
         "long": {
-          "setup_ts": "2026-04-22T15:00:00-04:00",
-          "expires_at": "2026-04-22T15:50:00-04:00",
-          "entry_ts": "2026-04-22T15:13:00-04:00",
-          "entry_price": 709.965,
-          "signal_high": 709.92,
-          "signal_low": 709.22,
-          "signal_close": 709.91,
-          "signal_atr": 0.6647007481891861,
-          "ref": 709.92,
-          "prob": 0.3944963812828064,
+          "setup_ts": "2026-04-23T13:10:00-04:00",
+          "expires_at": "2026-04-23T14:00:00-04:00",
+          "signal_open": null,
+          "signal_high": 708.18,
+          "signal_low": 706.27,
+          "signal_close": 706.52,
+          "signal_atr": 0.9311776937134146,
+          "ref": 708.18,
+          "prob": 0.5821072459220886,
           "threshold": 0.35,
           "entry_kind": "swing",
           "source_side": "long"
         },
         "short": null
       },
+      "meta_entry_structure": {
+        "long": null,
+        "short": {
+          "setup_ts": "2026-04-23T11:30:00-04:00",
+          "expires_at": "2026-04-23T12:20:00-04:00",
+          "entry_ts": "2026-04-23T11:43:00-04:00",
+          "entry_price": 711.67,
+          "signal_high": 712.35,
+          "signal_low": 711.8,
+          "signal_close": 711.805,
+          "signal_atr": 0.7118775772234113,
+          "ref": 711.8,
+          "prob": 0.6618459224700928,
+          "threshold": 0.65,
+          "entry_kind": "swing",
+          "source_side": "short"
+        }
+      },
       "meta_side_reason": {
-        "long": "hold_option_value_bracket",
-        "short": "entry_waiting_for_1m_confirmation"
+        "long": "below_entry_threshold",
+        "short": "hold_option_value_bracket"
       },
       "meta_side_entry_armed": {
         "long": true,
         "short": true
       },
       "meta_side_enter_above_threshold": {
-        "long": false,
-        "short": true
+        "long": true,
+        "short": false
       },
       "meta_side_enter_peak_prob": {
-        "long": null,
-        "short": 0.6643320322036743
+        "long": 0.5821072459220886,
+        "short": null
       },
       "meta_side_bars_held": {
-        "long": 51,
-        "short": -1
+        "long": -1,
+        "short": 117
       },
       "meta_side_entry_signal_ts": {
-        "long": "2026-04-22T15:00:00-04:00",
-        "short": null
+        "long": null,
+        "short": "2026-04-23T11:30:00-04:00"
       },
       "meta_side_cooldown_until": {
-        "long": "2026-04-22T14:51:00-04:00",
+        "long": "2026-04-23T12:55:00-04:00",
         "short": "2026-04-20T13:20:00-04:00"
       },
-      "prev_1m_close": 711.27,
-      "last_1m_close": 711.2,
+      "prev_1m_close": 706.1,
+      "last_1m_close": 706.36,
       "recent_1m_closes": [
-        711.015,
-        711.14,
-        711.2,
-        711.27,
-        711.2
+        707.15,
+        706.79,
+        706.23,
+        706.1,
+        706.36
       ],
       "option_exit_best_price": {
-        "long": 2.19,
-        "short": null
+        "long": null,
+        "short": 5.11
       },
       "option_exit_best_seen_at": {
-        "long": "2026-04-22T15:59:00-04:00",
-        "short": null
+        "long": null,
+        "short": "2026-04-23T13:28:00-04:00"
       },
       "entry_lockout_until": null,
       "entry_lockout_reason": null

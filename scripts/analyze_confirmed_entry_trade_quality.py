@@ -345,6 +345,7 @@ def main() -> None:
             option_exit_time_decay_minutes=80,
             option_exit_time_decay_progress_pct=1.0,
             option_exit_opposite_prob=0.60,
+            option_exit_opposite_profit_pct=0.60,
             option_exit_quote_mode="bid",
         )
     )
