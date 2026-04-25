@@ -1,0 +1,29 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="CDL_INSIDE<100" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="CDL_THRUSTING<0" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="pct_from_recent_high__4h<-0.0273376293" ]
+    3 -> 5 [label="yes" color="#FF0000"]
+    3 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="leaf=-0.0104198279" ]
+
+    6 [ label="leaf=0.0247877836" ]
+
+    4 [ label="dist_to_recent_high_12<5.03999996" ]
+    4 -> 7 [label="yes" color="#FF0000"]
+    4 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.000446721155" ]
+
+    8 [ label="leaf=-0.0106915915" ]
+
+    2 [ label="leaf=-0.0299381856" ]
+}

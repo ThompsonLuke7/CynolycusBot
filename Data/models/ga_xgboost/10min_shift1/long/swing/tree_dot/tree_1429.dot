@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="lower_wick_ratio<0.10358566" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="PPOh_12_26_9<-0.056216713" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="CCI_14_0.015__4h<175.600586" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.00633662008" ]
+
+    8 [ label="leaf=-0.0362015851" ]
+
+    4 [ label="PVOL__30m<51962104" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.0120157124" ]
+
+    10 [ label="leaf=0.0050947424" ]
+
+    2 [ label="THERMO_20_2_0.5<0.0250000004" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="vix_z_20<0.944052219" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=-0.0512982868" ]
+
+    12 [ label="leaf=0.0125412149" ]
+
+    6 [ label="SMCti_14_50_20_5<2.67000008" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=0.00375128957" ]
+
+    14 [ label="leaf=-0.0311741345" ]
+}

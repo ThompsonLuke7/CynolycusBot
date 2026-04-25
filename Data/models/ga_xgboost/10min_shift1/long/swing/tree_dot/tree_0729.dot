@@ -1,0 +1,35 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="DPO_20<1.80575001" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="SMCtp_14_50_20_5<-58.1818199" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="vix_ret_1__1d<-0.0321489014" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.00820448622" ]
+
+    8 [ label="leaf=-0.0249228925" ]
+
+    4 [ label="BBP_5_2.0_2.0<0.169215441" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.00264416984" ]
+
+    10 [ label="leaf=0.00210401323" ]
+
+    2 [ label="vix_z_20<-2.20582795" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="leaf=0.0125327744" ]
+
+    6 [ label="leaf=-0.0376656987" ]
+}

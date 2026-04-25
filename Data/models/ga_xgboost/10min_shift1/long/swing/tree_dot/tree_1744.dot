@@ -1,0 +1,35 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="STDEV_30__30m<0.33086738" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="ADOSC_3_10<-11387.502" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="leaf=-0.0111205122" ]
+
+    4 [ label="leaf=-0.0481054857" ]
+
+    2 [ label="range_normalized_wick__1d<0.180105507" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="dist_to_recent_high_12<0.405000001" ]
+    5 -> 7 [label="yes" color="#FF0000"]
+    5 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.0105574252" ]
+
+    8 [ label="leaf=0.00640618708" ]
+
+    6 [ label="BBP_5_2.0_2.0<0.169215441" ]
+    6 -> 9 [label="yes" color="#FF0000"]
+    6 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.00318946107" ]
+
+    10 [ label="leaf=0.000914639037" ]
+}

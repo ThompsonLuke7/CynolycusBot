@@ -1,0 +1,41 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="vol_z_20<4.07467079" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="lower_wick_ratio<0.715596318" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="SKEW_30__1d<0.744335353" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.000332403521" ]
+
+    8 [ label="leaf=-0.0243754312" ]
+
+    4 [ label="ret_8__1d<0.00116409932" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.00541716535" ]
+
+    10 [ label="leaf=0.0121039813" ]
+
+    2 [ label="SMCti_14_50_20_5__1d<-7.9749999" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="leaf=-0.010256378" ]
+
+    6 [ label="pct_from_recent_low<0.00338224438" ]
+    6 -> 11 [label="yes" color="#FF0000"]
+    6 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=0.0287740771" ]
+
+    12 [ label="leaf=-0.000138583462" ]
+}

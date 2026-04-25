@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="SLOPE_1__1h<-1.72500002" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="vol_z_20<1.54089093" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="vix_z_20<2.20431948" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.00604837527" ]
+
+    8 [ label="leaf=-0.0365192965" ]
+
+    4 [ label="close_Z_30_1__4h<-1.55339861" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.0302476343" ]
+
+    10 [ label="leaf=0.0206527784" ]
+
+    2 [ label="TMOs_14_5_3<-5.82665825" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="vwap_slope_pct__1h<0.000945159059" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=0.00427259458" ]
+
+    12 [ label="leaf=0.0303907041" ]
+
+    6 [ label="dist_to_vwap_upper_1<-2.19546723" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=-0.0116967764" ]
+
+    14 [ label="leaf=0.000790734251" ]
+}

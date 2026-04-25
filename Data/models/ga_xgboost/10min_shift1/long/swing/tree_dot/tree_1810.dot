@@ -1,0 +1,47 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="rsilg_gamma__1d<0.339976281" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="dist_to_vwap_upper_1<0.391163439" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="ADOSC_3_10<-4629.16113" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=0.00922499318" ]
+
+    8 [ label="leaf=-0.00157420582" ]
+
+    4 [ label="vix_ret_1__4h<0.00131926127" ]
+    4 -> 9 [label="yes" color="#FF0000"]
+    4 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=0.0311537106" ]
+
+    10 [ label="leaf=-0.0310036466" ]
+
+    2 [ label="vol_z_20<-1.13717866" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="CRSI_3_2_100__4h<20.2355194" ]
+    5 -> 11 [label="yes" color="#FF0000"]
+    5 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="leaf=-0.0357474051" ]
+
+    12 [ label="leaf=0.0149420416" ]
+
+    6 [ label="EXHC_UPa<3" ]
+    6 -> 13 [label="yes" color="#FF0000"]
+    6 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=-0.000498608104" ]
+
+    14 [ label="leaf=-0.00669878442" ]
+}

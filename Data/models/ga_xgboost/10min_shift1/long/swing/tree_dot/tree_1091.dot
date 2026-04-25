@@ -1,0 +1,35 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="SKEW_30__1d<1.00269234" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="CDL_INSIDE<100" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="REFLEX_20_20_0.04<-2.08835292" ]
+    3 -> 7 [label="yes" color="#FF0000"]
+    3 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="leaf=-0.0123894103" ]
+
+    8 [ label="leaf=0.000978182419" ]
+
+    4 [ label="leaf=-0.0283899568" ]
+
+    2 [ label="DPO_20<-0.456999987" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="ADOSC_3_10<14409.3389" ]
+    5 -> 9 [label="yes" color="#FF0000"]
+    5 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="leaf=-0.0229151491" ]
+
+    10 [ label="leaf=-0.000253982522" ]
+
+    6 [ label="leaf=-0.0510155857" ]
+}
