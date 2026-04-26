@@ -40,7 +40,7 @@ from multi_ticker_swing.config.pipeline_config import (
     RAW_10M_DIR,
     TRAINING_MATRIX,
 )
-from multi_ticker_swing.data.load_data import load_raw_10m, load_training_matrix
+from multi_ticker_swing.data.load_data import load_raw_5m, load_training_matrix
 
 
 # ---------------------------------------------------------------------------
@@ -77,18 +77,18 @@ class Trade:
 # 10m data loader (per ticker, test window only)
 # ---------------------------------------------------------------------------
 
-def _load_10m_slice(
+def _load_5m_slice(
     ticker: str,
     test_start: pd.Timestamp,
     test_end: pd.Timestamp,
 ) -> pd.DataFrame | None:
     try:
-        df = load_raw_10m(ticker)
+        df = load_raw_5m(ticker)
         df.columns = [c.lower() for c in df.columns]
         mask = (df.index >= test_start) & (df.index <= test_end)
         return df.loc[mask].copy()
     except FileNotFoundError:
-        logger.warning("[%s] 10m data missing — will use 30m for execution", ticker)
+        logger.warning("[%s] 5m data missing — will use 30m for execution", ticker)
         return None
 
 
@@ -151,7 +151,7 @@ def generate_signals(
 def _simulate_ticker(
     ticker: str,
     signals: pd.DataFrame,           # rows for this ticker, has ts_col, signal, prob_long, prob_short
-    df_10m: Optional[pd.DataFrame],  # 10m bars for execution; None → use 30m
+    df_5m: Optional[pd.DataFrame],   # 5m bars for execution; None → use 30m
     df_30m_signals: pd.DataFrame,    # 30m feature rows for this ticker (for ATR)
     cfg: dict,
     equity_curve: list[float],
@@ -164,15 +164,15 @@ def _simulate_ticker(
     if signals.empty:
         return trades
 
-    # Execution bars: prefer 10m, fall back to 30m signal bars
-    exec_df = df_10m if df_10m is not None and not df_10m.empty else signals
+    # Execution bars: prefer 5m, fall back to 30m signal bars
+    exec_df = df_5m if df_5m is not None and not df_5m.empty else signals
 
     tp_mult = cfg["tp_atr_mult"]
     sl_mult = cfg["sl_atr_mult"]
     entry_bars_max  = cfg["entry_bars_max"]
     pos_size_pct    = cfg["position_size_pct"]
     commission_pct  = cfg["commission_pct"]
-    max_holding_10m = 48 * 3   # 48 30m bars × 3 = 144 10m bars ≈ 3 days
+    max_holding_5m = 144 * 3   # 144 5m bars × 3 = 432 5m bars ≈ 3 days (36 hours)
 
     active: Optional[Position] = None
 
@@ -257,7 +257,7 @@ def _simulate_ticker(
         exit_price  = None
         exit_reason = "time"
 
-        for j in range(entry_idx + 1, min(entry_idx + max_holding_10m + 1, len(exec_times))):
+        for j in range(entry_idx + 1, min(entry_idx + max_holding_5m + 1, len(exec_times))):
             bar = exec_df.iloc[j]
             bar_h = float(bar.get("high",  close_at_signal))
             bar_l = float(bar.get("low",   close_at_signal))
@@ -279,7 +279,7 @@ def _simulate_ticker(
                     break
         else:
             # Time expiry: exit at last bar's close
-            last_idx = min(entry_idx + max_holding_10m, len(exec_times) - 1)
+            last_idx = min(entry_idx + max_holding_5m, len(exec_times) - 1)
             exit_ts    = exec_times[last_idx]
             exit_price = float(exec_df.iloc[last_idx].get("close", entry_price))
             exit_reason = "time"
@@ -319,7 +319,6 @@ def simulate(
     matrix_path: Path = TRAINING_MATRIX,
     model_path: Path = MODEL_PATH,
     results_dir: Path = BACKTEST_RESULTS_DIR,
-    raw_10m_dir: Path = RAW_10M_DIR,
     feature_columns: list[str] = FEATURE_COLUMNS,
     cfg: dict = BACKTEST_CONFIG,
     test_start_str: str = "2024-01-01",
@@ -372,12 +371,12 @@ def simulate(
         if ticker_sigs.empty:
             continue
 
-        df_10m = _load_10m_slice(ticker, test_start, test_end)
+        df_5m = _load_5m_slice(ticker, test_start, test_end)
 
         ticker_trades = _simulate_ticker(
             ticker=ticker,
             signals=ticker_sigs,
-            df_10m=df_10m,
+            df_5m=df_5m,
             df_30m_signals=ticker_sigs,
             cfg=cfg,
             equity_curve=equity_vals,
@@ -457,9 +456,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--test-start", default="2024-01-01")
     p.add_argument("--test-end",   default="2026-04-15")
     p.add_argument("--force",      action="store_true")
+    p.add_argument("--model",      default=None, help="Path to model .json (default: models/swing_xgb_model.json)")
+    p.add_argument("--results-dir", default=None, help="Directory to save results (default: backtest/results)")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    simulate(test_start_str=args.test_start, test_end_str=args.test_end, force=args.force)
+    kwargs = dict(test_start_str=args.test_start, test_end_str=args.test_end, force=args.force)
+    if args.model:
+        kwargs["model_path"] = Path(args.model)
+    if args.results_dir:
+        kwargs["results_dir"] = Path(args.results_dir)
+    simulate(**kwargs)

@@ -209,8 +209,11 @@ __marimo__/
 *.png
 *.csv
 *.zip
+*.dot
+*.tgz
 colab_minimal.zip
 colab_intraday_spy_minimal.zip
 colab_minimal.zip
 multi_ticker_swing/data/processed/*.parquet
+multi_ticker_swing/data/processed/30min/*.parquet
 multi_ticker_swing/data/raw/**/*.parquet

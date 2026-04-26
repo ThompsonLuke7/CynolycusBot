@@ -11,6 +11,7 @@ import pandas as pd
 
 from multi_ticker_swing.config.pipeline_config import (
     RAW_30M_DIR,
+    RAW_5M_DIR,
     RAW_10M_DIR,
     FEATURES_COMBINED,
     LABELS_COMBINED,
@@ -25,6 +26,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def load_raw_30m(ticker: str, base_dir: Path = RAW_30M_DIR) -> pd.DataFrame:
+    path = base_dir / f"{ticker}.parquet"
+    return _load(path, ticker)
+
+
+def load_raw_5m(ticker: str, base_dir: Path = RAW_5M_DIR) -> pd.DataFrame:
     path = base_dir / f"{ticker}.parquet"
     return _load(path, ticker)
 
