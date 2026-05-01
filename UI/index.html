@@ -263,9 +263,9 @@
             <input id="metaModelRoot" type="hidden" value="Data/models/meta_xgboost/10min" />
             <input id="metaBaseFramePath" type="hidden" value="Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet" />
             <div class="field"><label>Live Prefill Start</label><input id="prefillStart" value="2026-01-30" /></div>
-            <div class="field"><label>Prefill Path</label><input id="prefillPath" value="Data/raw/spy/1m_train.parquet" /></div>
+            <div class="field"><label>Prefill Path</label><input id="prefillPath" value="Data/raw/spy/spy_intraday_1min.parquet" /></div>
             <div class="field"><label>Env File</label><input id="envFile" value=".env" /></div>
-            <div class="field"><label>Replay Data Path</label><input id="replayDataPath" value="Data/raw/spy/1m_train.parquet" /></div>
+            <div class="field"><label>Replay Data Path</label><input id="replayDataPath" value="Data/raw/spy/spy_intraday_1min.parquet" /></div>
             <div class="field"><label>Replay Start</label><input id="replayStart" value="2026-03-14T00:00:00Z" placeholder="optional ISO datetime" /></div>
             <div class="field"><label>Replay End</label><input id="replayEnd" value="2026-03-23T23:59:59Z" placeholder="optional ISO datetime" /></div>
             <div class="field"><label>Replay Sleep (sec)</label><input id="replaySleep" type="number" step="0.01" min="0" value="0.0" /></div>
@@ -655,6 +655,9 @@
         ["Order trigger long threshold", pol.meta_intrabar_long_setup_threshold ?? "-"],
         ["Order trigger short threshold", pol.meta_intrabar_short_setup_threshold ?? "-"],
         ["Trigger valid bars", pol.meta_intrabar_setup_max_bars ?? "-"],
+        ["Exit long opposite prob", pol.option_exit_opposite_prob_long ?? pol.option_exit_opposite_prob ?? "-"],
+        ["Exit short opposite prob", pol.option_exit_opposite_prob_short ?? pol.option_exit_opposite_prob ?? "-"],
+        ["Exit quote mode", pol.option_exit_quote_mode ?? "-"],
         ...(usingSwingSetupEntry ? [] : [
           ["p_exit_long", ag.p_exit_long ?? "-"],
           ["p_exit_short", ag.p_exit_short ?? "-"]
@@ -1292,7 +1295,7 @@
       const chartPolicyState = state.policy_state?.[sym] || {};
       const longSetupThreshold = Number(chartPolicyState.meta_intrabar_long_setup_threshold ?? 0.35);
       const shortSetupThreshold = Number(chartPolicyState.meta_intrabar_short_setup_threshold ?? 0.65);
-      const setupMaxBars = Math.max(1, Number(chartPolicyState.meta_intrabar_setup_max_bars ?? 4));
+      const setupMaxBars = Math.max(1, Number(chartPolicyState.meta_intrabar_setup_max_bars ?? 3));
       const orderEvents = (state.trade_events || [])
         .filter((e) => e && e.symbol === sym && e.timestamp && e.result)
         .slice(-500)
@@ -2019,15 +2022,22 @@
         symbols: document.getElementById("symbols").value,
         feed: document.getElementById("feed").value,
         interval: Number(document.getElementById("interval").value),
+        buffer_size: 50000,
+        prefill_tail: 50000,
+        broker_snapshot_interval_sec: 30,
+        policy_state_persist_interval_sec: 30,
+        max_live_entry_lag_sec: 180,
+        use_wall_clock_entry_cutoff: true,
         model_path: null,
         meta_model_root: document.getElementById("metaModelRoot").value,
         meta_entry_prob_source: "swing_support_single",
         swing_setup_single_model_dir: "Data/models/ga_xgboost/10min/single/swing_support_single",
         meta_intrabar_entry_policy: "phase4_swing_setup_bodyclose_bodyclose_v1",
+        meta_intrabar_setup_max_bars: 3,
         meta_intrabar_long_setup_threshold: 0.35,
         meta_intrabar_short_setup_threshold: 0.65,
         meta_hard_stop_atr: Number(document.getElementById("metaHardStopAtr").value || 0),
-        meta_base_frame_path: document.getElementById("metaBaseFramePath").value,
+        setup_feature_frame_path: document.getElementById("metaBaseFramePath").value,
         prefill_path: document.getElementById("prefillPath").value,
         prefill_start: document.getElementById("prefillStart").value,
         no_prefill_fetch: document.getElementById("noPrefillFetch").checked,
@@ -2050,10 +2060,14 @@
         option_exit_profit_lock_floor_pct: 0.25,
         option_exit_trailing_arm_pct: 2.0,
         option_exit_trailing_giveback_pct: 0.25,
+        option_exit_no_progress_minutes: 0,
+        option_exit_no_progress_mfe_pct: 0.0,
         option_exit_time_decay_minutes: 80,
         option_exit_time_decay_progress_pct: 1.0,
-        option_exit_opposite_prob: 0.60,
-        option_exit_opposite_profit_pct: 0.60,
+        option_exit_opposite_prob: 0.40,
+        option_exit_opposite_prob_long: 0.40,
+        option_exit_opposite_prob_short: 0.75,
+        option_exit_opposite_profit_pct: 0.0,
         option_exit_quote_mode: "bid",
         replay_option_proxy_mode: document.getElementById("replayOptionProxyMode").value,
         no_agent: false,

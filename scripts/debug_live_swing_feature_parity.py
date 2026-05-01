@@ -22,7 +22,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare live-built swing setup features/probs against saved swing probability artifacts."
     )
-    parser.add_argument("--data-path", default="Data/raw/spy/1m_train.parquet")
+    parser.add_argument("--data-path", default="Data/raw/spy/spy_intraday_1min.parquet")
     parser.add_argument("--model-dir", default="Data/models/ga_xgboost/10min/single/swing_support_single")
     parser.add_argument("--start", default="2026-04-01")
     parser.add_argument("--end", default="2026-04-02")

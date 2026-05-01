@@ -674,5 +674,11 @@ if __name__ == "__main__":
     p.add_argument("--split", default="test", choices=["train", "val", "test"])
     p.add_argument("--trend-filter", action="store_true", help="Only trade direction aligned with daily EMA(20) slope")
     p.add_argument("--no-blacklist", action="store_true", help="Disable TRADING_BLACKLIST filtering (for diagnostics)")
+    p.add_argument("--proba", default=None, help="Path to p_swing_probs parquet (overrides PROBA_PATH)")
+    p.add_argument("--out-dir", default=None, help="Override SWEEP_DIR output directory")
     args = p.parse_args()
+    if args.proba:
+        PROBA_PATH = Path(args.proba)
+    if args.out_dir:
+        SWEEP_DIR = Path(args.out_dir)
     run_sweep(top_n=args.top_n, split=args.split, trend_filter=args.trend_filter, apply_blacklist=not args.no_blacklist)

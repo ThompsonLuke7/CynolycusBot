@@ -213,8 +213,16 @@ def _run_one(
     one_min: pd.DataFrame,
     long_thr: float,
     short_thr: float,
+    exit_opp_long_thr: float,
+    exit_opp_short_thr: float,
     setup_max_bars: int,
     cutoff_hhmm: str,
+    new_entry_cutoff_hhmm: str,
+    entry_quote_mode: str,
+    exit_quote_mode: str,
+    quote_spread_bps: float,
+    no_progress_minutes: int,
+    no_progress_mfe_pct: float,
 ) -> list[dict[str, Any]]:
     proxy = ReplayOptionPriceProxy(
         tz_name="America/New_York",
@@ -223,6 +231,7 @@ def _run_one(
         iv_ceiling=0.90,
         iv_multiplier=1.50,
         min_dte_minutes=1.0,
+        quote_spread_bps=quote_spread_bps,
     )
     decision_records = decisions.to_dict("records")
     decision_idx = 0
@@ -264,7 +273,7 @@ def _run_one(
 
         close = _as_float(row.get("close"))
         if pos is not None:
-            premium = proxy.price(pos.symbol, mode="mid")
+            premium = proxy.price(pos.symbol, mode=exit_quote_mode)
             if math.isfinite(premium):
                 if premium > pos.best_premium:
                     pos.best_premium = float(premium)
@@ -272,13 +281,22 @@ def _run_one(
                 ret = premium / pos.entry_premium - 1.0
                 best_ret = pos.best_premium / pos.entry_premium - 1.0
                 minutes_since_best = (ts - pos.best_seen_at).total_seconds() / 60.0
+                minutes_since_entry = (ts - pos.entry_ts).total_seconds() / 60.0
                 opp_prob = latest_probs["short"] if pos.side == "long" else latest_probs["long"]
+                opp_thr = exit_opp_long_thr if pos.side == "long" else exit_opp_short_thr
                 reason = None
                 if best_ret >= 2.0 and ((pos.best_premium - premium) / pos.entry_premium) >= 0.25:
                     reason = "adaptive_trail"
+                elif (
+                    no_progress_minutes > 0
+                    and no_progress_mfe_pct > 0.0
+                    and minutes_since_entry >= float(no_progress_minutes)
+                    and best_ret < float(no_progress_mfe_pct)
+                ):
+                    reason = "no_progress"
                 elif minutes_since_best >= 80 and best_ret < 1.0 and ret <= 0.0:
                     reason = "time_decay"
-                elif best_ret >= 1.0 and math.isfinite(opp_prob) and opp_prob >= 0.60:
+                elif best_ret >= 1.0 and math.isfinite(opp_prob) and opp_prob >= opp_thr:
                     reason = "opposite_signal"
                 elif ts.hour == 15 and ts.minute >= 40 and pos.symbol.split("_")[2] == ts.strftime("%y%m%d"):
                     reason = "same_day_eod"
@@ -287,6 +305,11 @@ def _run_one(
                     pos = None
 
         if pos is None:
+            if str(new_entry_cutoff_hhmm or "").strip():
+                cutoff_h, cutoff_m = [int(x) for x in str(new_entry_cutoff_hhmm).split(":")]
+                cutoff_ts = ts.replace(hour=cutoff_h, minute=cutoff_m, second=0, microsecond=0)
+                if ts >= cutoff_ts:
+                    continue
             live_setups = [
                 setup
                 for setup in (pending.get("long"), pending.get("short"))
@@ -300,7 +323,7 @@ def _run_one(
                 right = "C" if setup.side == "long" else "P"
                 strike = round(close + latest_atr) if setup.side == "long" else round(close - latest_atr)
                 symbol = _sim_symbol("SPY", ts, right, strike, cutoff_hhmm)
-                premium = proxy.price(symbol, mode="mid")
+                premium = proxy.price(symbol, mode=entry_quote_mode)
                 if math.isfinite(premium) and premium > 0:
                     pos = Position(
                         side=setup.side,
@@ -317,7 +340,7 @@ def _run_one(
 
     if pos is not None and len(one_min):
         last = one_min.iloc[-1]
-        premium = proxy.price(pos.symbol, mode="mid")
+        premium = proxy.price(pos.symbol, mode=exit_quote_mode)
         if math.isfinite(premium):
             events.append(_close_event(pos, last["timestamp"], _as_float(last["close"]), premium, "window_end"))
     return events
@@ -365,7 +388,16 @@ def main() -> None:
     parser.add_argument("--long-grid", default="0.30,0.35,0.40,0.42,0.45,0.50,0.55,0.60,0.65")
     parser.add_argument("--short-grid", default="0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.65")
     parser.add_argument("--setup-max-bars", type=int, default=4)
+    parser.add_argument("--setup-max-bars-grid", default="")
+    parser.add_argument("--exit-opp-long-grid", default="0.40")
+    parser.add_argument("--exit-opp-short-grid", default="0.40")
+    parser.add_argument("--entry-quote-mode-grid", default="mid")
+    parser.add_argument("--exit-quote-mode-grid", default="mid")
+    parser.add_argument("--quote-spread-bps", type=float, default=0.0)
     parser.add_argument("--cutoff-hhmm", default="13:00")
+    parser.add_argument("--new-entry-cutoff-hhmm", default="16:00")
+    parser.add_argument("--no-progress-minutes-grid", default="0")
+    parser.add_argument("--no-progress-mfe-grid", default="0.0")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
     parser.add_argument("--events-out", default=str(DEFAULT_EVENTS_OUT))
     args = parser.parse_args()
@@ -381,27 +413,60 @@ def main() -> None:
 
     summaries: list[dict[str, Any]] = []
     all_events: list[dict[str, Any]] = []
+    setup_grid = (
+        [int(x.strip()) for x in str(args.setup_max_bars_grid).split(",") if x.strip()]
+        if str(args.setup_max_bars_grid or "").strip()
+        else [int(args.setup_max_bars)]
+    )
+    entry_quote_modes = [x.strip().lower() for x in str(args.entry_quote_mode_grid).split(",") if x.strip()]
+    exit_quote_modes = [x.strip().lower() for x in str(args.exit_quote_mode_grid).split(",") if x.strip()]
+    no_progress_minutes_grid = [int(x.strip()) for x in str(args.no_progress_minutes_grid).split(",") if x.strip()]
+    no_progress_mfe_grid = _parse_grid(args.no_progress_mfe_grid)
     for long_thr in _parse_grid(args.long_grid):
         for short_thr in _parse_grid(args.short_grid):
-            events = _run_one(
-                decisions=decisions,
-                one_min=one_min,
-                long_thr=long_thr,
-                short_thr=short_thr,
-                setup_max_bars=int(args.setup_max_bars),
-                cutoff_hhmm=str(args.cutoff_hhmm),
-            )
-            summary = {
-                "long_threshold": long_thr,
-                "short_threshold": short_thr,
-                "decision_rows": int(len(decisions)),
-                "first_decision": decisions["timestamp"].min(),
-                "last_decision": decisions["timestamp"].max(),
-                **_metrics(events),
-            }
-            summaries.append(summary)
-            for event in events:
-                all_events.append({"long_threshold": long_thr, "short_threshold": short_thr, **event})
+            for setup_max_bars in setup_grid:
+                for exit_opp_long_thr in _parse_grid(args.exit_opp_long_grid):
+                    for exit_opp_short_thr in _parse_grid(args.exit_opp_short_grid):
+                        for entry_quote_mode in entry_quote_modes:
+                            for exit_quote_mode in exit_quote_modes:
+                                for no_progress_minutes in no_progress_minutes_grid:
+                                    for no_progress_mfe_pct in no_progress_mfe_grid:
+                                        events = _run_one(
+                                            decisions=decisions,
+                                            one_min=one_min,
+                                            long_thr=long_thr,
+                                            short_thr=short_thr,
+                                            exit_opp_long_thr=exit_opp_long_thr,
+                                            exit_opp_short_thr=exit_opp_short_thr,
+                                            setup_max_bars=int(setup_max_bars),
+                                            cutoff_hhmm=str(args.cutoff_hhmm),
+                                            new_entry_cutoff_hhmm=str(args.new_entry_cutoff_hhmm),
+                                            entry_quote_mode=entry_quote_mode,
+                                            exit_quote_mode=exit_quote_mode,
+                                            quote_spread_bps=float(args.quote_spread_bps),
+                                            no_progress_minutes=int(no_progress_minutes),
+                                            no_progress_mfe_pct=float(no_progress_mfe_pct),
+                                        )
+                                        summary = {
+                                            "long_threshold": long_thr,
+                                            "short_threshold": short_thr,
+                                            "setup_max_bars": int(setup_max_bars),
+                                            "exit_opp_long_threshold": exit_opp_long_thr,
+                                            "exit_opp_short_threshold": exit_opp_short_thr,
+                                            "entry_quote_mode": entry_quote_mode,
+                                            "exit_quote_mode": exit_quote_mode,
+                                            "quote_spread_bps": float(args.quote_spread_bps),
+                                            "new_entry_cutoff_hhmm": str(args.new_entry_cutoff_hhmm),
+                                            "no_progress_minutes": int(no_progress_minutes),
+                                            "no_progress_mfe_pct": float(no_progress_mfe_pct),
+                                            "decision_rows": int(len(decisions)),
+                                            "first_decision": decisions["timestamp"].min(),
+                                            "last_decision": decisions["timestamp"].max(),
+                                            **_metrics(events),
+                                        }
+                                        summaries.append(summary)
+                                        for event in events:
+                                            all_events.append({**summary, **event})
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

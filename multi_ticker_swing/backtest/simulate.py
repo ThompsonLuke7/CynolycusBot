@@ -40,7 +40,7 @@ from multi_ticker_swing.config.pipeline_config import (
     RAW_10M_DIR,
     TRAINING_MATRIX,
 )
-from multi_ticker_swing.data.load_data import load_raw_5m, load_training_matrix
+from multi_ticker_swing.data.load_data import load_raw_5m, load_raw_30m, load_training_matrix
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +88,21 @@ def _load_5m_slice(
         mask = (df.index >= test_start) & (df.index <= test_end)
         return df.loc[mask].copy()
     except FileNotFoundError:
-        logger.warning("[%s] 5m data missing — will use 30m for execution", ticker)
+        return None
+
+
+def _load_30m_slice(
+    ticker: str,
+    test_start: pd.Timestamp,
+    test_end: pd.Timestamp,
+) -> pd.DataFrame | None:
+    try:
+        df = load_raw_30m(ticker)
+        df.columns = [c.lower() for c in df.columns]
+        mask = (df.index >= test_start) & (df.index <= test_end)
+        return df.loc[mask].copy()
+    except FileNotFoundError:
+        logger.warning("[%s] 30m data missing — no execution data", ticker)
         return None
 
 
@@ -151,8 +165,8 @@ def generate_signals(
 def _simulate_ticker(
     ticker: str,
     signals: pd.DataFrame,           # rows for this ticker, has ts_col, signal, prob_long, prob_short
-    df_5m: Optional[pd.DataFrame],   # 5m bars for execution; None → use 30m
-    df_30m_signals: pd.DataFrame,    # 30m feature rows for this ticker (for ATR)
+    df_5m: Optional[pd.DataFrame],   # 5m bars for execution; None → fall back to df_30m
+    df_30m: Optional[pd.DataFrame],  # raw 30m OHLCV bars; used for ATR/price and as exec fallback
     cfg: dict,
     equity_curve: list[float],
     equity_times: list[pd.Timestamp],
@@ -164,15 +178,29 @@ def _simulate_ticker(
     if signals.empty:
         return trades
 
-    # Execution bars: prefer 5m, fall back to 30m signal bars
-    exec_df = df_5m if df_5m is not None and not df_5m.empty else signals
+    # Execution bars: prefer 5m, fall back to raw 30m bars
+    if df_5m is not None and not df_5m.empty:
+        exec_df = df_5m
+        max_holding_bars = 144 * 3   # 432 × 5m ≈ 3 days
+    elif df_30m is not None and not df_30m.empty:
+        exec_df = df_30m
+        max_holding_bars = 24 * 3    # 72 × 30m ≈ 3 days
+    else:
+        return trades  # no execution data at all
 
     tp_mult = cfg["tp_atr_mult"]
     sl_mult = cfg["sl_atr_mult"]
     entry_bars_max  = cfg["entry_bars_max"]
     pos_size_pct    = cfg["position_size_pct"]
     commission_pct  = cfg["commission_pct"]
-    max_holding_5m = 144 * 3   # 144 5m bars × 3 = 432 5m bars ≈ 3 days (36 hours)
+
+    # Build a timestamp → close lookup from raw 30m bars for ATR/price at signal time
+    raw30_close: dict[pd.Timestamp, float] = {}
+    raw30_atr14: dict[pd.Timestamp, float] = {}
+    if df_30m is not None and not df_30m.empty:
+        raw30_close = df_30m["close"].to_dict()
+        if "atr_14" in df_30m.columns:
+            raw30_atr14 = df_30m["atr_14"].to_dict()
 
     active: Optional[Position] = None
 
@@ -183,18 +211,25 @@ def _simulate_ticker(
 
     for _, sig_row in signal_rows.iterrows():
         sig_ts  = pd.Timestamp(sig_row[ts_col])
+        if sig_ts.tzinfo is None:
+            sig_ts = sig_ts.tz_localize("UTC")
         signal  = int(sig_row["signal"])
 
         # Skip if no signal or already in a position
         if signal == 0 or active is not None:
             continue
 
-        # ATR at signal time (from 30m row)
-        atr_val = float(sig_row.get("atr_14", sig_row.get("atr", np.nan)))
+        # ATR in absolute price terms at signal time
+        # Prefer raw 30m atr_14; fall back to atr_pct_14 × close
+        close_at_signal = raw30_close.get(sig_ts, np.nan)
+        atr_val = raw30_atr14.get(sig_ts, np.nan)
+        if np.isnan(atr_val) and not np.isnan(close_at_signal):
+            atr_pct = float(sig_row.get("atr_pct_14", np.nan))
+            if not np.isnan(atr_pct) and atr_pct > 0:
+                atr_val = atr_pct * close_at_signal
+
         if np.isnan(atr_val) or atr_val <= 0:
             continue
-
-        close_at_signal = float(sig_row.get("close", np.nan))
         if np.isnan(close_at_signal):
             continue
 
@@ -257,7 +292,7 @@ def _simulate_ticker(
         exit_price  = None
         exit_reason = "time"
 
-        for j in range(entry_idx + 1, min(entry_idx + max_holding_5m + 1, len(exec_times))):
+        for j in range(entry_idx + 1, min(entry_idx + max_holding_bars + 1, len(exec_times))):
             bar = exec_df.iloc[j]
             bar_h = float(bar.get("high",  close_at_signal))
             bar_l = float(bar.get("low",   close_at_signal))
@@ -279,7 +314,7 @@ def _simulate_ticker(
                     break
         else:
             # Time expiry: exit at last bar's close
-            last_idx = min(entry_idx + max_holding_5m, len(exec_times) - 1)
+            last_idx = min(entry_idx + max_holding_bars, len(exec_times) - 1)
             exit_ts    = exec_times[last_idx]
             exit_price = float(exec_df.iloc[last_idx].get("close", entry_price))
             exit_reason = "time"
@@ -371,13 +406,14 @@ def simulate(
         if ticker_sigs.empty:
             continue
 
-        df_5m = _load_5m_slice(ticker, test_start, test_end)
+        df_5m  = _load_5m_slice(ticker, test_start, test_end)
+        df_30m = _load_30m_slice(ticker, test_start, test_end)
 
         ticker_trades = _simulate_ticker(
             ticker=ticker,
             signals=ticker_sigs,
             df_5m=df_5m,
-            df_30m_signals=ticker_sigs,
+            df_30m=df_30m,
             cfg=cfg,
             equity_curve=equity_vals,
             equity_times=equity_times,
@@ -457,6 +493,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--test-end",   default="2026-04-15")
     p.add_argument("--force",      action="store_true")
     p.add_argument("--model",      default=None, help="Path to model .json (default: models/swing_xgb_model.json)")
+    p.add_argument("--features",   default=None, help="Path to newline-delimited feature list .txt (default: FEATURE_COLUMNS from config)")
     p.add_argument("--results-dir", default=None, help="Directory to save results (default: backtest/results)")
     return p.parse_args()
 
@@ -468,4 +505,8 @@ if __name__ == "__main__":
         kwargs["model_path"] = Path(args.model)
     if args.results_dir:
         kwargs["results_dir"] = Path(args.results_dir)
+    if args.features:
+        feat_path = Path(args.features)
+        kwargs["feature_columns"] = [l.strip() for l in feat_path.read_text().splitlines() if l.strip()]
+        logger.info("Loaded %d features from %s", len(kwargs["feature_columns"]), feat_path)
     simulate(**kwargs)

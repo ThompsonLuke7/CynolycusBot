@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
 import queue as queue_mod
@@ -10,6 +12,12 @@ from alpaca.data.live import StockDataStream
 from alpaca.data.models import Bar
 
 from ..core.config import AlpacaConfig
+
+# Alpaca SDK logger that emits connection errors
+_ALPACA_WS_LOGGER = "alpaca.data.live.websocket"
+
+# Error substrings that are permanent (retrying will never succeed)
+_FATAL_PHRASES = ("connection limit exceeded",)
 
 BarCallback = Callable[[dict], None]
 
@@ -41,6 +49,53 @@ def bar_to_dict(bar: Bar) -> dict:
     if vwap is not None:
         payload["vwap"] = float(vwap)
     return payload
+
+
+class _FatalErrorWatcher(logging.Handler):
+    """
+    Attaches to the Alpaca WebSocket logger and calls stop() + queues an error
+    sentinel the first time a permanent (non-retriable) error is detected.
+
+    This prevents the SDK's built-in retry loop from hammering the server with
+    429s when the connection limit is exceeded or credentials are invalid.
+    """
+
+    def __init__(
+        self,
+        stream: StockDataStream,
+        queue: Optional[queue_mod.Queue],
+        error_holder: list,
+    ) -> None:
+        super().__init__(level=logging.ERROR)
+        self._stream = stream
+        self._queue = queue
+        self._error_holder = error_holder
+        self._triggered = False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self._triggered:
+            return
+        msg = record.getMessage().lower()
+        for phrase in _FATAL_PHRASES:
+            if phrase in msg:
+                self._triggered = True
+                self._error_holder.append(record.getMessage())
+                logging.getLogger(_ALPACA_WS_LOGGER).info(
+                    "Fatal WebSocket error detected (%s) — stopping retry loop.", phrase
+                )
+                try:
+                    self._stream.stop()
+                except Exception:
+                    pass
+                if self._queue is not None:
+                    try:
+                        self._queue.put_nowait({
+                            "_sentinel": True,
+                            "_error": record.getMessage(),
+                        })
+                    except Exception:
+                        pass
+                break
 
 
 class AlpacaBarStreamer:
@@ -83,7 +138,24 @@ class AlpacaBarStreamer:
 
     def start(self) -> None:
         self._stream.subscribe_bars(self._handle_bar, *self._symbols)
-        self._stream.run()
+
+        # Install the fatal-error watcher before run() so it intercepts the very
+        # first "connection limit exceeded" log and tells the SDK to stop retrying.
+        error_holder: list[str] = []
+        watcher = _FatalErrorWatcher(self._stream, self._queue, error_holder)
+        ws_logger = logging.getLogger(_ALPACA_WS_LOGGER)
+        ws_logger.addHandler(watcher)
+        try:
+            self._stream.run()
+        finally:
+            ws_logger.removeHandler(watcher)
+
+        # If the watcher caught a fatal error, re-raise so the caller knows.
+        if error_holder:
+            raise ConnectionError(
+                f"Alpaca WebSocket fatal error: {error_holder[0]}\n"
+                "Check that no other stream is already connected on this account."
+            )
 
     def start_in_thread(self, daemon: bool = True) -> None:
         if self._thread and self._thread.is_alive():

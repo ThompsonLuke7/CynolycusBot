@@ -131,7 +131,15 @@ def _align_htf_features(
     if shift_bars:
         aligned = aligned.shift(shift_bars)
     aligned = aligned.reindex(base_index, method="ffill")
-    return aligned.dropna(axis=1, how="all")
+    always_keep = {f"{col}__{suffix}" for col in VIX_SUITE_COLUMNS}
+    drop_cols = [
+        col
+        for col in aligned.columns
+        if col not in always_keep and aligned[col].isna().all()
+    ]
+    if drop_cols:
+        aligned = aligned.drop(columns=drop_cols)
+    return aligned
 
 
 def _add_lstm_features_for_tree(
@@ -245,8 +253,12 @@ def _add_vix_suite_to_frame(
     if vix_tf.empty:
         return _ensure_vix_suite_cols(out)
 
-    vix_suite = _compute_vix_suite(base_df=out, vix_ohlcv=vix_tf)
+    vix_suite = _compute_vix_suite(base_df=vix_tf, vix_ohlcv=vix_tf)
     vix_suite = vix_suite.reindex(out.index, method="ffill")
+    if "ret_1" in out.columns and "vix_close" in vix_suite.columns:
+        vix_suite["ret_1_x_vix"] = pd.to_numeric(out["ret_1"], errors="coerce") * vix_suite["vix_close"]
+    if "atr_pct" in out.columns and "vix_close" in vix_suite.columns:
+        vix_suite["atr_pct_x_vix"] = pd.to_numeric(out["atr_pct"], errors="coerce") * vix_suite["vix_close"]
     for col in VIX_SUITE_COLUMNS:
         out[col] = vix_suite.get(col)
     return out

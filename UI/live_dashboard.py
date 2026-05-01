@@ -32,7 +32,7 @@ from Policy.regime_probability_filter import (
 from Policy.replay_option_proxy import ReplayOptionPriceProxy
 
 UI_BUILD = "2026-04-18-regime-percentile-thresholds"
-DEFAULT_SPY_1M_PATH = "Data/raw/spy/1m_train.parquet"
+DEFAULT_SPY_1M_PATH = "Data/raw/spy/spy_intraday_1min.parquet"
 DEFAULT_REGIME_PROBABILITY_FRAME = (
     "Data/models/ga_xgboost/10min/analysis/"
     "phase4_1m_oof_focused_trigger_sweep_l42_s15_full_1m_train/phase4_signal_frame.parquet"
@@ -266,11 +266,19 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "option_exit_profit_lock_floor_pct": float(cfg.option_exit_profit_lock_floor_pct),
         "option_exit_trailing_arm_pct": float(cfg.option_exit_trailing_arm_pct),
         "option_exit_trailing_giveback_pct": float(cfg.option_exit_trailing_giveback_pct),
+        "option_exit_no_progress_minutes": int(cfg.option_exit_no_progress_minutes),
+        "option_exit_no_progress_mfe_pct": float(cfg.option_exit_no_progress_mfe_pct),
         "option_exit_time_decay_minutes": int(cfg.option_exit_time_decay_minutes),
         "option_exit_time_decay_progress_pct": float(cfg.option_exit_time_decay_progress_pct),
         "option_exit_opposite_prob": float(cfg.option_exit_opposite_prob),
+        "option_exit_opposite_prob_long": cfg.option_exit_opposite_prob_long,
+        "option_exit_opposite_prob_short": cfg.option_exit_opposite_prob_short,
         "option_exit_opposite_profit_pct": float(cfg.option_exit_opposite_profit_pct),
         "option_exit_quote_mode": str(cfg.option_exit_quote_mode),
+        "max_live_entry_lag_sec": float(cfg.max_live_entry_lag_sec),
+        "use_wall_clock_entry_cutoff": bool(cfg.use_wall_clock_entry_cutoff),
+        "broker_snapshot_interval_sec": float(cfg.broker_snapshot_interval_sec),
+        "policy_state_persist_interval_sec": float(cfg.policy_state_persist_interval_sec),
         "replay_option_proxy_mode": str(cfg.replay_option_proxy_mode),
         "replay_option_proxy_expiry_hhmm": str(cfg.replay_option_proxy_expiry_hhmm),
         "replay_option_proxy_iv_floor": float(cfg.replay_option_proxy_iv_floor),
@@ -539,7 +547,7 @@ def _load_test_split_warmup_1m(*, symbol: str, dataset_name: str, x_filename: st
         raw_dir = get_ticker_raw_dir(clean)
         slug = clean.lower()
         candidates = [
-            raw_dir / "1m_train.parquet",
+            raw_dir / "spy_intraday_1min.parquet",
             raw_dir / "train.parquet",
             raw_dir / f"{slug}_intraday_1min.parquet",
         ]
@@ -811,8 +819,10 @@ class SessionConfig:
     inference_mode: str = "meta"
     feed: str = "IEX"
     interval: int = 10
-    buffer_size: int = 0
+    buffer_size: int = 50000
     queue_size: int = 5000
+    broker_snapshot_interval_sec: float = 30.0
+    policy_state_persist_interval_sec: float = 30.0
     resample_label: str = "left"
     resample_closed: str = "left"
     tz: str = "America/New_York"
@@ -841,7 +851,7 @@ class SessionConfig:
     meta_entry_threshold: float | None = None
     meta_exit_threshold: float | None = None
     meta_intrabar_entry_policy: str = PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1
-    meta_intrabar_setup_max_bars: int = 4
+    meta_intrabar_setup_max_bars: int = 3
     meta_intrabar_max_confirmation_age_minutes: int = 30
     meta_intrabar_ref_chase_atr: float = 0.50
     meta_intrabar_long_setup_threshold: float | None = 0.35
@@ -876,12 +886,13 @@ class SessionConfig:
     prefill_path: str | None = DEFAULT_SPY_1M_PATH
     prefill_start: str = "2026-01-30"
     no_prefill_fetch: bool = False
-    prefill_tail: int | None = None
+    prefill_tail: int | None = 50000
     enable_option_orders: bool = True
     no_startup_sync: bool = False
     option_order_qty: int = 1
     option_atr_mult: float = 1.0
     option_dte_cutoff: str = "13:00"
+    option_new_entry_cutoff: str = "15:00"
     option_exit_policy: str = "option_adaptive_trail_v1"
     option_exit_take_profit_pct: float = 0.0
     option_exit_stop_loss_pct: float = 1.0
@@ -889,11 +900,17 @@ class SessionConfig:
     option_exit_profit_lock_floor_pct: float = 0.25
     option_exit_trailing_arm_pct: float = 2.0
     option_exit_trailing_giveback_pct: float = 0.25
+    option_exit_no_progress_minutes: int = 0
+    option_exit_no_progress_mfe_pct: float = 0.0
     option_exit_time_decay_minutes: int = 80
     option_exit_time_decay_progress_pct: float = 1.0
-    option_exit_opposite_prob: float = 0.60
-    option_exit_opposite_profit_pct: float = 0.60
+    option_exit_opposite_prob: float = 0.40
+    option_exit_opposite_prob_long: float | None = 0.40
+    option_exit_opposite_prob_short: float | None = 0.75
+    option_exit_opposite_profit_pct: float = 0.0
     option_exit_quote_mode: str = "bid"
+    max_live_entry_lag_sec: float = 180.0
+    use_wall_clock_entry_cutoff: bool = True
     replay_option_proxy_mode: str = "black_scholes"
     replay_option_proxy_expiry_hhmm: str = "15:40"
     replay_option_proxy_iv_floor: float = 0.12
@@ -933,8 +950,16 @@ class SessionConfig:
             inference_mode=str(payload.get("inference_mode", "meta")).strip().lower(),
             feed=str(payload.get("feed", "IEX")).upper(),
             interval=max(1, _coerce_int(payload.get("interval"), 10)),
-            buffer_size=max(0, _coerce_int(payload.get("buffer_size"), 0)),
+            buffer_size=max(500, _coerce_int(payload.get("buffer_size"), 50000)),
             queue_size=max(100, _coerce_int(payload.get("queue_size"), 5000)),
+            broker_snapshot_interval_sec=max(
+                5.0,
+                _coerce_float(payload.get("broker_snapshot_interval_sec"), 30.0),
+            ),
+            policy_state_persist_interval_sec=max(
+                5.0,
+                _coerce_float(payload.get("policy_state_persist_interval_sec"), 30.0),
+            ),
             resample_label=str(payload.get("resample_label", "left")).strip().lower(),
             resample_closed=str(payload.get("resample_closed", "left")).strip().lower(),
             tz=str(payload.get("tz", "America/New_York")),
@@ -950,13 +975,22 @@ class SessionConfig:
             ),
             meta_base_frame_path=str(
                 payload.get(
-                    "meta_base_frame_path",
-                    "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet",
+                    "setup_feature_frame_path",
+                    payload.get(
+                        "meta_base_frame_path",
+                        "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet",
+                    ),
                 )
             ),
             meta_base_frame_append_lookback_days=max(
                 1,
-                _coerce_int(payload.get("meta_base_frame_append_lookback_days"), 900),
+                _coerce_int(
+                    payload.get(
+                        "setup_feature_frame_append_lookback_days",
+                        payload.get("meta_base_frame_append_lookback_days"),
+                    ),
+                    900,
+                ),
             ),
             no_agent=_coerce_bool(payload.get("no_agent"), False),
             stochastic=_coerce_bool(payload.get("stochastic"), False),
@@ -978,7 +1012,7 @@ class SessionConfig:
             meta_intrabar_entry_policy=str(
                 payload.get("meta_intrabar_entry_policy", PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1)
             ),
-            meta_intrabar_setup_max_bars=max(1, _coerce_int(payload.get("meta_intrabar_setup_max_bars"), 4)),
+            meta_intrabar_setup_max_bars=max(1, _coerce_int(payload.get("meta_intrabar_setup_max_bars"), 3)),
             meta_intrabar_max_confirmation_age_minutes=max(
                 0, _coerce_int(payload.get("meta_intrabar_max_confirmation_age_minutes"), 30)
             ),
@@ -1033,16 +1067,13 @@ class SessionConfig:
             prefill_path=payload.get("prefill_path", DEFAULT_SPY_1M_PATH),
             prefill_start=str(payload.get("prefill_start", "2026-01-30")),
             no_prefill_fetch=_coerce_bool(payload.get("no_prefill_fetch"), False),
-            prefill_tail=(
-                None
-                if payload.get("prefill_tail") in (None, "")
-                else max(50, _coerce_int(payload.get("prefill_tail"), 0))
-            ),
+            prefill_tail=max(500, _coerce_int(payload.get("prefill_tail"), 50000)),
             enable_option_orders=_coerce_bool(payload.get("enable_option_orders"), True),
             no_startup_sync=_coerce_bool(payload.get("no_startup_sync"), False),
             option_order_qty=max(1, _coerce_int(payload.get("option_order_qty"), 1)),
             option_atr_mult=max(0.0, _coerce_float(payload.get("option_atr_mult"), 1.0)),
             option_dte_cutoff=str(payload.get("option_dte_cutoff", "13:00")),
+            option_new_entry_cutoff=str(payload.get("option_new_entry_cutoff", "15:00")),
             option_exit_policy=str(payload.get("option_exit_policy", "option_adaptive_trail_v1")).strip().lower(),
             option_exit_take_profit_pct=max(
                 0.0,
@@ -1068,6 +1099,14 @@ class SessionConfig:
                 0.0,
                 _coerce_float(payload.get("option_exit_trailing_giveback_pct"), 0.25),
             ),
+            option_exit_no_progress_minutes=max(
+                0,
+                _coerce_int(payload.get("option_exit_no_progress_minutes"), 0),
+            ),
+            option_exit_no_progress_mfe_pct=max(
+                0.0,
+                _coerce_float(payload.get("option_exit_no_progress_mfe_pct"), 0.0),
+            ),
             option_exit_time_decay_minutes=max(
                 0,
                 _coerce_int(payload.get("option_exit_time_decay_minutes"), 80),
@@ -1078,13 +1117,24 @@ class SessionConfig:
             ),
             option_exit_opposite_prob=max(
                 0.0,
-                _coerce_float(payload.get("option_exit_opposite_prob"), 0.60),
+                _coerce_float(payload.get("option_exit_opposite_prob"), 0.40),
+            ),
+            option_exit_opposite_prob_long=_coerce_optional_float(
+                payload.get("option_exit_opposite_prob_long", 0.40)
+            ),
+            option_exit_opposite_prob_short=_coerce_optional_float(
+                payload.get("option_exit_opposite_prob_short", 0.75)
             ),
             option_exit_opposite_profit_pct=max(
                 0.0,
-                _coerce_float(payload.get("option_exit_opposite_profit_pct"), 0.60),
+                _coerce_float(payload.get("option_exit_opposite_profit_pct"), 0.0),
             ),
             option_exit_quote_mode=str(payload.get("option_exit_quote_mode", "bid")).strip().lower(),
+            max_live_entry_lag_sec=max(
+                0.0,
+                _coerce_float(payload.get("max_live_entry_lag_sec"), 180.0),
+            ),
+            use_wall_clock_entry_cutoff=_coerce_bool(payload.get("use_wall_clock_entry_cutoff"), True),
             replay_option_proxy_mode=str(payload.get("replay_option_proxy_mode", "black_scholes")).strip().lower(),
             replay_option_proxy_expiry_hhmm=str(payload.get("replay_option_proxy_expiry_hhmm", "15:40")),
             replay_option_proxy_iv_floor=max(
@@ -1816,7 +1866,7 @@ class LiveSession:
                 "log",
                 {
                     "symbol": "SYSTEM",
-                    "message": "[live] skipped warmup action replay because cached meta base frame is loaded.",
+                    "message": "[live] skipped warmup action replay because cached setup feature frame is loaded.",
                 },
             )
 
@@ -2093,7 +2143,7 @@ class LiveSession:
                             {
                                 "symbol": "SYSTEM",
                                 "message": (
-                                    f"[replay] loaded cached meta base frame: rows={len(precomputed_meta_frame):,} "
+                                    f"[replay] loaded cached setup feature frame: rows={len(precomputed_meta_frame):,} "
                                     f"range={_ts_iso(precomputed_meta_frame.index.min())}..{_ts_iso(precomputed_meta_frame.index.max())} "
                                     f"path={meta_base_path}"
                                 ),
@@ -2104,7 +2154,7 @@ class LiveSession:
                         "log",
                         {
                             "symbol": "SYSTEM",
-                            "message": f"[replay] cached meta base frame unavailable: {exc}",
+                            "message": f"[replay] cached setup feature frame unavailable: {exc}",
                         },
                     )
 
@@ -2277,6 +2327,7 @@ class LiveSession:
                     tz_name=cfg.tz,
                     atr_multiplier=float(cfg.option_atr_mult),
                     dte_cutoff_hhmm=cfg.option_dte_cutoff,
+                    option_new_entry_cutoff_hhmm=cfg.option_new_entry_cutoff,
                     qty=int(cfg.option_order_qty),
                     close_on_flat=not cfg.option_no_close_on_flat,
                     close_on_flip=not cfg.option_no_close_on_flip,
@@ -2326,11 +2377,17 @@ class LiveSession:
                     option_exit_profit_lock_floor_pct=float(cfg.option_exit_profit_lock_floor_pct),
                     option_exit_trailing_arm_pct=float(cfg.option_exit_trailing_arm_pct),
                     option_exit_trailing_giveback_pct=float(cfg.option_exit_trailing_giveback_pct),
+                    option_exit_no_progress_minutes=int(cfg.option_exit_no_progress_minutes),
+                    option_exit_no_progress_mfe_pct=float(cfg.option_exit_no_progress_mfe_pct),
                     option_exit_time_decay_minutes=int(cfg.option_exit_time_decay_minutes),
                     option_exit_time_decay_progress_pct=float(cfg.option_exit_time_decay_progress_pct),
                     option_exit_opposite_prob=float(cfg.option_exit_opposite_prob),
+                    option_exit_opposite_prob_long=cfg.option_exit_opposite_prob_long,
+                    option_exit_opposite_prob_short=cfg.option_exit_opposite_prob_short,
                     option_exit_opposite_profit_pct=float(cfg.option_exit_opposite_profit_pct),
                     option_exit_quote_mode=str(cfg.option_exit_quote_mode),
+                    max_live_entry_lag_sec=0.0,
+                    use_wall_clock_entry_cutoff=False,
                 )
                 if str(cfg.replay_option_proxy_mode).lower() == "black_scholes":
                     proxy = ReplayOptionPriceProxy(
@@ -2970,7 +3027,7 @@ class LiveSession:
                                     {
                                         "symbol": "SYSTEM",
                                         "message": (
-                                            f"[live] Loaded cached context base frame: rows={len(precomputed_meta_frame):,} "
+                                            f"[live] Loaded cached setup feature frame: rows={len(precomputed_meta_frame):,} "
                                             f"range={_ts_iso(precomputed_meta_frame.index.min())}..{_ts_iso(precomputed_meta_frame.index.max())} "
                                             f"path={meta_base_path}"
                                         ),
@@ -2981,7 +3038,7 @@ class LiveSession:
                                 "log",
                                 {
                                     "symbol": "SYSTEM",
-                                    "message": f"[live] Cached context base frame unavailable: {exc}",
+                                    "message": f"[live] Cached setup feature frame unavailable: {exc}",
                                 },
                             )
                     regime_probability_calibrator = _build_regime_probability_calibrator(cfg)
@@ -3112,6 +3169,7 @@ class LiveSession:
                         tz_name=cfg.tz,
                         atr_multiplier=float(cfg.option_atr_mult),
                         dte_cutoff_hhmm=cfg.option_dte_cutoff,
+                        option_new_entry_cutoff_hhmm=cfg.option_new_entry_cutoff,
                         qty=int(cfg.option_order_qty),
                         close_on_flat=not cfg.option_no_close_on_flat,
                         close_on_flip=not cfg.option_no_close_on_flip,
@@ -3161,11 +3219,17 @@ class LiveSession:
                         option_exit_profit_lock_floor_pct=float(cfg.option_exit_profit_lock_floor_pct),
                         option_exit_trailing_arm_pct=float(cfg.option_exit_trailing_arm_pct),
                         option_exit_trailing_giveback_pct=float(cfg.option_exit_trailing_giveback_pct),
+                        option_exit_no_progress_minutes=int(cfg.option_exit_no_progress_minutes),
+                        option_exit_no_progress_mfe_pct=float(cfg.option_exit_no_progress_mfe_pct),
                         option_exit_time_decay_minutes=int(cfg.option_exit_time_decay_minutes),
                         option_exit_time_decay_progress_pct=float(cfg.option_exit_time_decay_progress_pct),
                         option_exit_opposite_prob=float(cfg.option_exit_opposite_prob),
+                        option_exit_opposite_prob_long=cfg.option_exit_opposite_prob_long,
+                        option_exit_opposite_prob_short=cfg.option_exit_opposite_prob_short,
                         option_exit_opposite_profit_pct=float(cfg.option_exit_opposite_profit_pct),
                         option_exit_quote_mode=str(cfg.option_exit_quote_mode),
+                        max_live_entry_lag_sec=float(cfg.max_live_entry_lag_sec),
+                        use_wall_clock_entry_cutoff=bool(cfg.use_wall_clock_entry_cutoff),
                     )
                     order_policies[symbol] = policy
                     self._store.set_policy_state(symbol, policy.snapshot_state())
@@ -3190,6 +3254,34 @@ class LiveSession:
                     }
                     _persist_runtime_policy_cache(runtime_policy_cache_path, payload)
 
+                last_policy_cache_persist = 0.0
+                last_broker_snapshot_by_symbol: dict[str, float] = {}
+
+                def _persist_policy_runtime_cache_throttled(*, force: bool = False) -> None:
+                    nonlocal last_policy_cache_persist
+                    now = time.monotonic()
+                    if not force and now - last_policy_cache_persist < float(cfg.policy_state_persist_interval_sec):
+                        return
+                    _persist_policy_runtime_cache()
+                    last_policy_cache_persist = now
+
+                def _snapshot_broker_state(
+                    symbol: str,
+                    policy: OptionOrderPolicy,
+                    *,
+                    force: bool = False,
+                ) -> dict[str, Any] | None:
+                    now = time.monotonic()
+                    last = last_broker_snapshot_by_symbol.get(symbol, 0.0)
+                    if not force and now - last < float(cfg.broker_snapshot_interval_sec):
+                        return None
+                    broker_state = policy.snapshot_broker_state(orders_limit=20)
+                    last_broker_snapshot_by_symbol[symbol] = now
+                    self._store.set_broker_state(symbol, broker_state)
+                    self._emit("broker_state", {"symbol": symbol, "state": broker_state})
+                    self._audit("broker_state", {"symbol": symbol, "state": broker_state})
+                    return broker_state
+
                 if not cfg.no_startup_sync:
                     for symbol in symbols:
                         policy = order_policies[symbol]
@@ -3197,13 +3289,10 @@ class LiveSession:
                         if cfg.use_execution_latch:
                             execution_latches[symbol].set_position(policy.snapshot_state().get("position", 0))
                         self._store.set_policy_state(symbol, policy.snapshot_state())
-                        _persist_policy_runtime_cache()
+                        _persist_policy_runtime_cache_throttled(force=True)
                         self._emit("startup_sync", {"symbol": symbol, "result": sync_result})
                         self._audit("startup_sync", {"symbol": symbol, "result": sync_result})
-                        broker_snap = policy.snapshot_broker_state(orders_limit=20)
-                        self._store.set_broker_state(symbol, broker_snap)
-                        self._emit("broker_state", {"symbol": symbol, "state": broker_snap})
-                        self._audit("broker_state", {"symbol": symbol, "state": broker_snap})
+                        _snapshot_broker_state(symbol, policy, force=True)
 
             def _on_1m(symbol: str, bar: dict, buffer: Any) -> None:
                 size = len(buffer) if buffer is not None else None
@@ -3222,20 +3311,19 @@ class LiveSession:
                 result = policy.on_1m_bar(bar=bar, logger=self._policy_logger(symbol))
                 policy_state = policy.snapshot_state()
                 self._store.set_policy_state(symbol, policy_state)
-                _persist_policy_runtime_cache()
-                broker_snap = policy.snapshot_broker_state(orders_limit=20)
-                self._store.set_broker_state(symbol, broker_snap)
-                self._emit("broker_state", {"symbol": symbol, "state": broker_snap})
-                self._audit("broker_state", {"symbol": symbol, "state": broker_snap})
+                event_key = str(result.get("event", "")).strip().lower()
+                force_io = event_key not in {"hold", "no_change", "intent_update"}
+                _persist_policy_runtime_cache_throttled(force=force_io)
+                broker_snap = _snapshot_broker_state(symbol, policy, force=force_io)
                 event_payload = {
                     "symbol": symbol,
                     "timestamp": _ts_iso(bar.get("timestamp")),
                     "result": result,
                     "policy_state": policy_state,
-                    "broker_state": broker_snap,
                 }
+                if broker_snap is not None:
+                    event_payload["broker_state"] = broker_snap
                 self._emit("order_policy", event_payload)
-                event_key = str(result.get("event", "")).strip().lower()
                 if event_key not in {"hold", "no_change", "intent_update"}:
                     self._audit("order_policy", event_payload)
                 if event_key not in {"hold", "no_change", "intent_update"}:
@@ -3255,7 +3343,7 @@ class LiveSession:
                     policy = order_policies[symbol]
                     policy.on_15m_bar(closed_bar=bar15)
                     self._store.set_policy_state(symbol, policy.snapshot_state())
-                    _persist_policy_runtime_cache()
+                    _persist_policy_runtime_cache_throttled()
 
                 action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
                 if action is None:
@@ -3421,10 +3509,10 @@ class LiveSession:
                 )
                 policy_state = policy.snapshot_state()
                 self._store.set_policy_state(symbol, policy_state)
-                _persist_policy_runtime_cache()
-                broker_snap = policy.snapshot_broker_state(orders_limit=20)
-                self._store.set_broker_state(symbol, broker_snap)
-                self._audit("broker_state", {"symbol": symbol, "state": broker_snap})
+                event_key = str(result.get("event", "")).strip().lower()
+                force_io = event_key not in {"hold", "no_change"}
+                _persist_policy_runtime_cache_throttled(force=force_io)
+                broker_snap = _snapshot_broker_state(symbol, policy, force=force_io)
                 policy_pos = int(policy_state.get("position", 0) or 0)
                 self._store.set_last_action(
                     symbol,
@@ -3439,12 +3527,11 @@ class LiveSession:
                     "timestamp": _ts_iso(bar15.get("timestamp")),
                     "result": result,
                     "policy_state": policy_state,
-                    "broker_state": broker_snap,
                 }
+                if broker_snap is not None:
+                    event_payload["broker_state"] = broker_snap
                 self._emit("order_policy", event_payload)
-                self._emit("broker_state", {"symbol": symbol, "state": broker_snap})
                 self._audit("order_policy", event_payload)
-                event_key = str(result.get("event", "")).strip().lower()
                 if event_key not in {"hold", "no_change"}:
                     self._store.add_trade_event(event_payload)
                     self._audit("trade_events", event_payload)
@@ -3645,14 +3732,40 @@ class LiveSession:
                 try:
                     vix_runtime_cache_df = lr._load_runtime_vix_frame(vix_source_path)
                 except Exception as exc:
-                    self._emit(
-                        "log",
-                        {
-                            "symbol": "SYSTEM",
-                            "message": f"[live] VIX runtime cache load failed from {vix_source_path}: {exc}",
-                        },
-                    )
                     vix_runtime_cache_df = None
+                    if not cfg.no_prefill_fetch:
+                        try:
+                            self._emit(
+                                "log",
+                                {
+                                    "symbol": "SYSTEM",
+                                    "message": (
+                                        f"[live] VIX cache unavailable at {vix_source_path}; "
+                                        "fetching VIXY 10m history from Alpaca."
+                                    ),
+                                },
+                            )
+                            vix_runtime_cache_df = lr._fetch_vix_history_from_alpaca(
+                                feed=feed,
+                                ticker=live_vix_symbol,
+                                timeframe=f"{int(cfg.interval)}Min",
+                            )
+                        except Exception as fetch_exc:
+                            self._emit(
+                                "log",
+                                {
+                                    "symbol": "SYSTEM",
+                                    "message": f"[live] VIX history fetch failed: {fetch_exc}",
+                                },
+                            )
+                    if vix_runtime_cache_df is None or vix_runtime_cache_df.empty:
+                        self._emit(
+                            "log",
+                            {
+                                "symbol": "SYSTEM",
+                                "message": f"[live] VIX runtime cache load failed from {vix_source_path}: {exc}",
+                            },
+                        )
                 if vix_runtime_cache_df is not None and not vix_runtime_cache_df.empty and not cfg.no_prefill_fetch:
                     try:
                         vix_runtime_cache_df = lr._extend_vix_with_alpaca_gap(
@@ -3949,7 +4062,7 @@ class LiveSession:
                                 "message": f"[live] restored runtime policy state cache for: {', '.join(restored_symbols)}",
                             },
                         )
-                _persist_policy_runtime_cache()
+                _persist_policy_runtime_cache_throttled(force=True)
                 if cfg.startup_catchup_order:
                     lr._run_startup_catchup_decision(
                         processor=processor,
@@ -3963,7 +4076,7 @@ class LiveSession:
                     )
                     for symbol in symbols:
                         self._store.set_policy_state(symbol, order_policies[symbol].snapshot_state())
-                    _persist_policy_runtime_cache()
+                    _persist_policy_runtime_cache_throttled(force=True)
 
             stream_symbols = list(symbols)
             if live_vix_enabled and live_vix_symbol not in stream_symbols:
@@ -3993,10 +4106,26 @@ class LiveSession:
 
             last_broker_poll = 0.0
             while not stop_event.is_set():
-                # Keep broker-side positions/orders fresh in UI between trade events.
+                try:
+                    bar = bar_queue.get(timeout=0.5)
+                except queue_mod.Empty:
+                    bar = None
+                if bar is not None:
+                    bar_symbol = str(bar.get("symbol", "")).upper()
+                    context_processor = context_processors.get(bar_symbol)
+                    if context_processor is not None:
+                        context_processor.handle_bar(bar)
+                        continue
+                    if live_vix_enabled and vix_processor is not None and bar_symbol == live_vix_symbol:
+                        vix_processor.handle_bar(bar)
+                        continue
+                    processor.handle_bar(bar)
+                    continue
+
+                # Keep broker-side positions/orders fresh when the market-data queue is idle.
                 if order_policies is not None:
                     now = time.monotonic()
-                    if now - last_broker_poll >= 30.0:
+                    if now - last_broker_poll >= float(cfg.broker_snapshot_interval_sec):
                         last_broker_poll = now
                         for symbol, policy in order_policies.items():
                             reconcile_event: dict[str, Any] | None = None
@@ -4009,31 +4138,16 @@ class LiveSession:
                                         policy.snapshot_state().get("position", 0)
                                     )
                                 self._store.set_policy_state(symbol, policy.snapshot_state())
-                                _persist_policy_runtime_cache()
-                                self._emit(
-                                    "order_policy",
-                                    {
-                                        "symbol": symbol,
-                                        "timestamp": _ts_iso(datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))),
-                                        "result": {
-                                            "event": "broker_reconcile",
-                                            "pending_reconcile_result": reconcile_result,
-                                        },
-                                        "policy_state": policy.snapshot_state(),
+                                _persist_policy_runtime_cache_throttled(force=True)
+                                reconcile_event = {
+                                    "symbol": symbol,
+                                    "timestamp": _ts_iso(datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))),
+                                    "result": {
+                                        "event": "broker_reconcile",
+                                        "pending_reconcile_result": reconcile_result,
                                     },
-                                )
-                                self._audit(
-                                    "order_policy",
-                                    {
-                                        "symbol": symbol,
-                                        "timestamp": _ts_iso(datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))),
-                                        "result": {
-                                            "event": "broker_reconcile",
-                                            "pending_reconcile_result": reconcile_result,
-                                        },
-                                        "policy_state": policy.snapshot_state(),
-                                    },
-                                )
+                                    "policy_state": policy.snapshot_state(),
+                                }
                             else:
                                 reconcile_result = policy.reconcile_with_broker(
                                     logger=self._policy_logger(symbol),
@@ -4045,7 +4159,7 @@ class LiveSession:
                                             policy.snapshot_state().get("position", 0)
                                         )
                                     self._store.set_policy_state(symbol, policy.snapshot_state())
-                                    _persist_policy_runtime_cache()
+                                    _persist_policy_runtime_cache_throttled(force=True)
                                     reconcile_event = {
                                         "symbol": symbol,
                                         "timestamp": _ts_iso(datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))),
@@ -4058,23 +4172,7 @@ class LiveSession:
                             if reconcile_event is not None:
                                 self._emit("order_policy", reconcile_event)
                                 self._audit("order_policy", reconcile_event)
-                            broker_snap = policy.snapshot_broker_state(orders_limit=20)
-                            self._store.set_broker_state(symbol, broker_snap)
-                            self._emit("broker_state", {"symbol": symbol, "state": broker_snap})
-                            self._audit("broker_state", {"symbol": symbol, "state": broker_snap})
-                try:
-                    bar = bar_queue.get(timeout=0.5)
-                except queue_mod.Empty:
-                    continue
-                bar_symbol = str(bar.get("symbol", "")).upper()
-                context_processor = context_processors.get(bar_symbol)
-                if context_processor is not None:
-                    context_processor.handle_bar(bar)
-                    continue
-                if live_vix_enabled and vix_processor is not None and bar_symbol == live_vix_symbol:
-                    vix_processor.handle_bar(bar)
-                    continue
-                processor.handle_bar(bar)
+                            _snapshot_broker_state(symbol, policy, force=True)
 
         except Exception as exc:
             error_message = f"{exc}"

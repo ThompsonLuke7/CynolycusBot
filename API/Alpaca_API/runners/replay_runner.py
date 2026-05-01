@@ -1047,7 +1047,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data-path",
-        default="Data/raw/spy/1m_train.parquet",
+        default="Data/raw/spy/spy_intraday_1min.parquet",
         help="CSV/Parquet with 1m bars.",
     )
     parser.add_argument("--symbols", default="SPY", help="Comma-separated symbols.")
@@ -1290,8 +1290,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--option-exit-opposite-prob",
         type=float,
-        default=0.60,
-        help="Adaptive opposite-signal exit threshold after the trade has seen at least +100%% MFE.",
+        default=0.40,
+        help="Adaptive opposite-signal exit threshold.",
     )
     parser.add_argument(
         "--option-exit-quote-mode",

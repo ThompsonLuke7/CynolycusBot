@@ -475,14 +475,14 @@ def _build_option_order_policy(
     ema_alpha: float = 0.85,
     rebalance_deadband: float = 0.10,
     max_step_contracts: int = 2,
-    price_mode: str = "ask",
+    price_mode: str = "mid",
     max_contracts_fallback: int = 1,
     max_contracts_cap: int = 0,
     meta_execute_on_interval_close: bool = False,
     meta_intrabar_execution_enabled: bool = True,
     meta_intrabar_breakout_entry_only: bool = False,
     meta_intrabar_entry_policy: str = "legacy_breakout_touch",
-    meta_intrabar_setup_max_bars: int = 4,
+    meta_intrabar_setup_max_bars: int = 3,
     meta_intrabar_setup_bar_minutes: int = 10,
     meta_intrabar_max_confirmation_age_minutes: int = 30,
     meta_intrabar_ref_chase_atr: float = 0.50,
@@ -521,11 +521,18 @@ def _build_option_order_policy(
     option_exit_profit_lock_floor_pct: float = 0.25,
     option_exit_trailing_arm_pct: float = 2.0,
     option_exit_trailing_giveback_pct: float = 0.25,
+    option_exit_no_progress_minutes: int = 0,
+    option_exit_no_progress_mfe_pct: float = 0.0,
     option_exit_time_decay_minutes: int = 80,
     option_exit_time_decay_progress_pct: float = 1.0,
-    option_exit_opposite_prob: float = 0.60,
-    option_exit_opposite_profit_pct: float = 0.60,
+    option_exit_opposite_prob: float = 0.40,
+    option_exit_opposite_prob_long: float | None = None,
+    option_exit_opposite_prob_short: float | None = None,
+    option_exit_opposite_profit_pct: float = 0.0,
     option_exit_quote_mode: str = "bid",
+    option_new_entry_cutoff_hhmm: str | None = "16:00",
+    max_live_entry_lag_sec: float = 0.0,
+    use_wall_clock_entry_cutoff: bool = False,
 ) -> OptionOrderPolicy:
     cfg = OptionOrderPolicyConfig(
         underlying=symbol,
@@ -589,11 +596,22 @@ def _build_option_order_policy(
         option_exit_profit_lock_floor_pct=float(option_exit_profit_lock_floor_pct),
         option_exit_trailing_arm_pct=float(option_exit_trailing_arm_pct),
         option_exit_trailing_giveback_pct=float(option_exit_trailing_giveback_pct),
+        option_exit_no_progress_minutes=int(option_exit_no_progress_minutes),
+        option_exit_no_progress_mfe_pct=float(option_exit_no_progress_mfe_pct),
         option_exit_time_decay_minutes=int(option_exit_time_decay_minutes),
         option_exit_time_decay_progress_pct=float(option_exit_time_decay_progress_pct),
         option_exit_opposite_prob=float(option_exit_opposite_prob),
+        option_exit_opposite_prob_long=(
+            None if option_exit_opposite_prob_long is None else float(option_exit_opposite_prob_long)
+        ),
+        option_exit_opposite_prob_short=(
+            None if option_exit_opposite_prob_short is None else float(option_exit_opposite_prob_short)
+        ),
         option_exit_opposite_profit_pct=float(option_exit_opposite_profit_pct),
         option_exit_quote_mode=str(option_exit_quote_mode),
+        option_new_entry_cutoff_hhmm=option_new_entry_cutoff_hhmm,
+        max_live_entry_lag_sec=float(max_live_entry_lag_sec),
+        use_wall_clock_entry_cutoff=bool(use_wall_clock_entry_cutoff),
     )
     return OptionOrderPolicy(cfg)
 
@@ -1007,6 +1025,26 @@ def _persist_runtime_context_cache(
         df.to_parquet(cache_path, index=False)
 
 
+def _fetch_vix_history_from_alpaca(
+    *,
+    feed: DataFeed,
+    ticker: str = "VIXY",
+    timeframe: str = "10Min",
+    start: str = "2020-12-01T14:30:00Z",
+) -> pd.DataFrame:
+    fetched_df = fetch_intraday(
+        ticker=ticker,
+        start=start,
+        timeframe=timeframe,
+        limit=100000,
+        feed=feed,
+        save_path=None,
+    )
+    if fetched_df is None or fetched_df.empty:
+        return pd.DataFrame()
+    return _normalize_runtime_vix_frame(fetched_df, symbol=ticker)
+
+
 def _extend_vix_with_alpaca_gap(
     *,
     df: pd.DataFrame,
@@ -1093,20 +1131,20 @@ def _resolve_symbolized_path(template: str | Path, *, symbol: str) -> Path:
 
 def _load_precomputed_meta_frame(path: Path, *, tz: str = "America/New_York") -> pd.DataFrame:
     if not path.exists():
-        raise FileNotFoundError(f"Missing meta base frame file: {path}")
+        raise FileNotFoundError(f"Missing setup feature frame file: {path}")
     if path.suffix.lower() == ".parquet":
         df = pd.read_parquet(path)
     elif path.suffix.lower() == ".csv":
         df = pd.read_csv(path)
     else:
-        raise ValueError("Meta base frame must be .csv or .parquet")
+        raise ValueError("Setup feature frame must be .csv or .parquet")
 
     if "timestamp" in df.columns:
         ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         df = df.loc[ts.notna()].copy()
         df.index = ts[ts.notna()]
     elif not isinstance(df.index, pd.DatetimeIndex):
-        raise ValueError("Meta base frame must include a timestamp column or DatetimeIndex.")
+        raise ValueError("Setup feature frame must include a timestamp column or DatetimeIndex.")
 
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
@@ -1708,7 +1746,7 @@ def _load_test_split_warmup_1m(
         raw_dir = get_ticker_raw_dir(clean)
         slug = clean.lower()
         candidates = [
-            raw_dir / "1m_train.parquet",
+            raw_dir / "spy_intraday_1min.parquet",
             raw_dir / "train.parquet",
             raw_dir / f"{slug}_intraday_1min.parquet",
         ]
@@ -1815,7 +1853,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
     parser.add_argument(
         "--prefill-path",
-        default="Data/raw/spy/1m_train.parquet",
+        default="Data/raw/spy/spy_intraday_1min.parquet",
         help="Optional CSV/Parquet path to prefill the 1m buffer for warm start. If --no-prefill-fetch is not set, Alpaca will only fetch and append the missing gap after the latest local bar.",
     )
     parser.add_argument(
@@ -1930,6 +1968,11 @@ def _parse_args() -> argparse.Namespace:
         help="Local HH:MM cutoff; before cutoff use 0DTE, otherwise 1DTE.",
     )
     parser.add_argument(
+        "--option-new-entry-cutoff",
+        default="16:00",
+        help="Local HH:MM cutoff for fresh option opens; exits remain allowed at/after this time.",
+    )
+    parser.add_argument(
         "--option-exit-policy",
         default="option_adaptive_trail_v1",
         choices=["meta", "option_value_bracket_v1", "software_oco_v1", "option_adaptive_trail_v1"],
@@ -1986,8 +2029,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--option-exit-opposite-prob",
         type=float,
-        default=0.60,
-        help="Adaptive opposite-signal exit threshold after the trade has seen at least +100% MFE.",
+        default=0.40,
+        help="Adaptive opposite-signal exit threshold.",
     )
     parser.add_argument(
         "--option-exit-quote-mode",
@@ -2096,12 +2139,12 @@ def main() -> None:
                 )
                 if not precomputed_meta_frame.empty:
                     print(
-                        f"[live] Loaded cached context base frame: rows={len(precomputed_meta_frame):,} "
+                        f"[live] Loaded cached setup feature frame: rows={len(precomputed_meta_frame):,} "
                         f"range={precomputed_meta_frame.index.min()}..{precomputed_meta_frame.index.max()} "
                         f"path={meta_base_path}"
                     )
             except Exception as exc:
-                print(f"[live] Cached context base frame unavailable: {exc}")
+                print(f"[live] Cached setup feature frame unavailable: {exc}")
         swing_setup_probs_frame = None
         if str(args.meta_entry_prob_source or "").strip().lower() == "swing_support_single":
             swing_setup_probs_frame = _load_swing_setup_probs_frame(
@@ -2237,6 +2280,7 @@ def main() -> None:
                 option_exit_time_decay_progress_pct=float(args.option_exit_time_decay_progress_pct),
                 option_exit_opposite_prob=float(args.option_exit_opposite_prob),
                 option_exit_quote_mode=str(args.option_exit_quote_mode),
+                option_new_entry_cutoff_hhmm=str(args.option_new_entry_cutoff),
             )
         mode = "SIMULATED" if args.simulate_orders else "LIVE"
         print(f"[live] Option order policy enabled ({mode}) for symbols: {', '.join(symbols)}")
@@ -2337,8 +2381,22 @@ def main() -> None:
             try:
                 base_df = _load_runtime_vix_frame(source_path) if aux_symbol == "VIXY" else _load_runtime_context_frame(source_path, symbol=aux_symbol)
             except Exception as exc:
-                print(f"[live] Runtime cache load failed for {aux_symbol} from {source_path}: {exc}")
                 base_df = None
+                if aux_symbol == "VIXY" and not args.no_prefill_fetch:
+                    try:
+                        print(
+                            f"[live] VIX cache unavailable at {source_path}; "
+                            "fetching VIXY 10m history from Alpaca."
+                        )
+                        base_df = _fetch_vix_history_from_alpaca(
+                            feed=feed,
+                            ticker=aux_symbol,
+                            timeframe=f"{int(args.interval)}Min",
+                        )
+                    except Exception as fetch_exc:
+                        print(f"[live] VIX history fetch failed: {fetch_exc}")
+                if base_df is None or base_df.empty:
+                    print(f"[live] Runtime cache load failed for {aux_symbol} from {source_path}: {exc}")
             if base_df is not None and not base_df.empty and not args.no_prefill_fetch:
                 try:
                     if aux_symbol == "VIXY":

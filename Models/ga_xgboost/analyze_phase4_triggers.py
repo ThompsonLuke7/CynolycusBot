@@ -501,6 +501,37 @@ def _session_reset_mask(index: pd.Index) -> np.ndarray:
     return reset
 
 
+def _setup_side_filter_masks(feature_df: pd.DataFrame, policy: str | None) -> tuple[np.ndarray, np.ndarray]:
+    policy_key = "none" if policy is None else str(policy).strip().lower()
+    n = len(feature_df)
+    all_true = np.ones(n, dtype=bool)
+    if policy_key in {"", "none", "any"}:
+        return all_true.copy(), all_true.copy()
+
+    mom_up = feature_df.get("mom_up", pd.Series(False, index=feature_df.index)).fillna(False).to_numpy(dtype=bool)
+    mom_dn = feature_df.get("mom_dn", pd.Series(False, index=feature_df.index)).fillna(False).to_numpy(dtype=bool)
+    fast_above = feature_df.get("fast_above_slow", pd.Series(False, index=feature_df.index)).fillna(False).to_numpy(dtype=bool)
+    fast_below = feature_df.get("fast_below_slow", pd.Series(False, index=feature_df.index)).fillna(False).to_numpy(dtype=bool)
+    above_vwap = feature_df.get("above_vwap", pd.Series(False, index=feature_df.index)).fillna(False).to_numpy(dtype=bool)
+    below_vwap = feature_df.get("below_vwap", pd.Series(False, index=feature_df.index)).fillna(False).to_numpy(dtype=bool)
+
+    if policy_key == "momentum":
+        return mom_up, mom_dn
+    if policy_key == "ema":
+        return fast_above, fast_below
+    if policy_key == "not_ema_opposed":
+        return ~fast_below, ~fast_above
+    if policy_key == "momentum_and_ema":
+        return mom_up & fast_above, mom_dn & fast_below
+    if policy_key == "momentum_not_ema_opposed":
+        return mom_up & ~fast_below, mom_dn & ~fast_above
+    if policy_key == "vwap":
+        return above_vwap, below_vwap
+    if policy_key == "momentum_and_vwap":
+        return mom_up & above_vwap, mom_dn & below_vwap
+    raise ValueError(f"Unknown setup side filter: {policy}")
+
+
 def _bar_interval_for_close_timestamp(index: pd.Index, i: int) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
     if not isinstance(index, pd.DatetimeIndex) or i < 0 or i + 1 >= len(index):
         return None, None
@@ -929,6 +960,8 @@ def _merge_side_metrics(
     long_invalidated: int = 0,
     short_invalidated: int = 0,
     post_setup_max_bars: int = 0,
+    setup_side_filter: str = "none",
+    max_entry_lag_minutes: float | None = None,
 ) -> dict[str, float | str | bool]:
     total_trades = long_metrics["trades"] + short_metrics["trades"]
     total_ev = np.nan
@@ -952,6 +985,8 @@ def _merge_side_metrics(
         "long_setup_hold_bars": float(long_setup_hold_bars),
         "short_setup_hold_bars": float(short_setup_hold_bars),
         "post_setup_max_bars": float(post_setup_max_bars),
+        "setup_side_filter": str(setup_side_filter),
+        "max_entry_lag_minutes": float(max_entry_lag_minutes) if max_entry_lag_minutes is not None else float("nan"),
         "setup_invalidation": setup_invalidation,
         "setup_invalidation_atr": float(setup_invalidation_atr),
         "long_setup_invalidated": float(long_invalidated),
@@ -990,6 +1025,7 @@ def _post_setup_side_candidates(
     policy: str,
     trigger_col: str | None,
     max_bars: int,
+    max_entry_lag_minutes: float | None = None,
     execution_1m: pd.DataFrame | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
     open_ = pd.to_numeric(feature_df["open"], errors="coerce").to_numpy(dtype=float)
@@ -1152,6 +1188,16 @@ def _post_setup_side_candidates(
             continue
         if entry_time is None and isinstance(feature_df.index, pd.DatetimeIndex):
             entry_time = feature_df.index[entry_idx]
+        if (
+            max_entry_lag_minutes is not None
+            and isinstance(feature_df.index, pd.DatetimeIndex)
+            and entry_time is not None
+            and pd.notna(entry_time)
+        ):
+            trigger_time = feature_df.index[entry_idx]
+            lag_minutes = (pd.Timestamp(entry_time) - pd.Timestamp(trigger_time)).total_seconds() / 60.0
+            if lag_minutes > float(max_entry_lag_minutes):
+                continue
         entries[entry_idx] = True
         if not np.isfinite(entry_prices[entry_idx]):
             entry_prices[entry_idx] = entry_price
@@ -1181,6 +1227,8 @@ def _evaluate_post_setup_policy(
     horizon_bars: int,
     tp_atr: float,
     sl_atr: float,
+    setup_side_filter: str | None = None,
+    max_entry_lag_minutes: float | None = None,
     execution_1m: pd.DataFrame | None = None,
 ) -> tuple[
     dict[str, float | str | bool],
@@ -1198,6 +1246,9 @@ def _evaluate_post_setup_policy(
     finite = np.isfinite(p_long) & np.isfinite(p_short)
     long_raw_setup = eval_mask & finite & (p_long >= float(long_setup_threshold))
     short_raw_setup = eval_mask & finite & (p_short >= float(short_setup_threshold))
+    long_filter, short_filter = _setup_side_filter_masks(feature_df, setup_side_filter)
+    long_raw_setup &= long_filter
+    short_raw_setup &= short_filter
     policy = (
         _post_setup_policy_to_internal(policy_name)
     )
@@ -1210,6 +1261,7 @@ def _evaluate_post_setup_policy(
         policy=policy,
         trigger_col=long_trigger_col,
         max_bars=max_bars,
+        max_entry_lag_minutes=max_entry_lag_minutes,
         execution_1m=execution_1m,
     )
     short_candidate, short_prices, short_times, short_setup_count, short_trigger_count = _post_setup_side_candidates(
@@ -1220,6 +1272,7 @@ def _evaluate_post_setup_policy(
         policy=policy,
         trigger_col=short_trigger_col,
         max_bars=max_bars,
+        max_entry_lag_minutes=max_entry_lag_minutes,
         execution_1m=execution_1m,
     )
     active_long = _expand_recent_setup(long_raw_setup, max_bars) & eval_mask
@@ -1283,6 +1336,8 @@ def _evaluate_post_setup_policy(
             long_metrics=long_metrics,
             short_metrics=short_metrics,
             post_setup_max_bars=max_bars,
+            setup_side_filter=str(setup_side_filter or "none"),
+            max_entry_lag_minutes=max_entry_lag_minutes,
         ),
         long_entries,
         short_entries,
@@ -1331,6 +1386,8 @@ def _evaluate_asymmetric_policy(
     horizon_bars: int,
     tp_atr: float,
     sl_atr: float,
+    setup_side_filter: str | None = None,
+    max_entry_lag_minutes: float | None = None,
     execution_1m: pd.DataFrame | None = None,
 ) -> tuple[
     dict[str, float | str | bool],
@@ -1348,6 +1405,9 @@ def _evaluate_asymmetric_policy(
     finite = np.isfinite(p_long) & np.isfinite(p_short)
     long_raw_setup = eval_mask & finite & (p_long >= float(long_setup_threshold))
     short_raw_setup = eval_mask & finite & (p_short >= float(short_setup_threshold))
+    long_filter, short_filter = _setup_side_filter_masks(feature_df, setup_side_filter)
+    long_raw_setup &= long_filter
+    short_raw_setup &= short_filter
 
     long_candidate, long_prices, long_times, long_setup_count, long_trigger_count = _post_setup_side_candidates(
         feature_df,
@@ -1357,6 +1417,7 @@ def _evaluate_asymmetric_policy(
         policy=long_policy,
         trigger_col=long_trigger_col,
         max_bars=max_bars,
+        max_entry_lag_minutes=max_entry_lag_minutes,
         execution_1m=execution_1m,
     )
     short_candidate, short_prices, short_times, short_setup_count, short_trigger_count = _post_setup_side_candidates(
@@ -1367,6 +1428,7 @@ def _evaluate_asymmetric_policy(
         policy=short_policy,
         trigger_col=short_trigger_col,
         max_bars=max_bars,
+        max_entry_lag_minutes=max_entry_lag_minutes,
         execution_1m=execution_1m,
     )
 
@@ -1431,6 +1493,8 @@ def _evaluate_asymmetric_policy(
             long_metrics=long_metrics,
             short_metrics=short_metrics,
             post_setup_max_bars=max_bars,
+            setup_side_filter=str(setup_side_filter or "none"),
+            max_entry_lag_minutes=max_entry_lag_minutes,
         ),
         long_entries,
         short_entries,
@@ -1932,6 +1996,27 @@ def main() -> None:
     )
     parser.add_argument("--setup-invalidation-atr", type=float, default=0.5)
     parser.add_argument("--cooldown-bars", type=int, default=5)
+    parser.add_argument(
+        "--setup-side-filter",
+        choices=(
+            "none",
+            "momentum",
+            "ema",
+            "not_ema_opposed",
+            "momentum_and_ema",
+            "momentum_not_ema_opposed",
+            "vwap",
+            "momentum_and_vwap",
+        ),
+        default="none",
+        help="Optional side-alignment filter applied before post-setup/asymmetric entries.",
+    )
+    parser.add_argument(
+        "--max-entry-lag-minutes",
+        type=float,
+        default=None,
+        help="Optional maximum minutes from setup bar timestamp to actual intrabar entry.",
+    )
     parser.add_argument("--horizon-bars", type=int, default=12)
     parser.add_argument("--tp-atr", type=float, default=1.0)
     parser.add_argument("--sl-atr", type=float, default=0.8)
@@ -2192,6 +2277,8 @@ def main() -> None:
                             horizon_bars=int(args.horizon_bars),
                             tp_atr=float(args.tp_atr),
                             sl_atr=float(args.sl_atr),
+                            setup_side_filter=str(args.setup_side_filter),
+                            max_entry_lag_minutes=args.max_entry_lag_minutes,
                             execution_1m=execution_1m,
                         )
                         row["mode"] = f"{mode_name}_max{max_bars}"
@@ -2250,6 +2337,8 @@ def main() -> None:
                                 horizon_bars=int(args.horizon_bars),
                                 tp_atr=float(args.tp_atr),
                                 sl_atr=float(args.sl_atr),
+                                setup_side_filter=str(args.setup_side_filter),
+                                max_entry_lag_minutes=args.max_entry_lag_minutes,
                                 execution_1m=execution_1m,
                             )
                             row["mode"] = f"{mode_name}_longmax{max_bars}_shortmax{max_bars}"
@@ -2328,6 +2417,8 @@ def main() -> None:
         "long_setup_hold_bars",
         "short_setup_hold_bars",
         "post_setup_max_bars",
+        "setup_side_filter",
+        "max_entry_lag_minutes",
         "setup_invalidation",
         "total_ev_atr",
         "long_ev_atr",
@@ -2368,6 +2459,9 @@ def main() -> None:
     eval_mask[eval_idx] = True
     long_setup_test = eval_mask & finite & (p_long_test >= float(args.long_setup_threshold))
     short_setup_test = eval_mask & finite & (p_short_test >= float(args.short_setup_threshold))
+    plot_long_filter, plot_short_filter = _setup_side_filter_masks(feature_df, str(args.setup_side_filter))
+    long_setup_test &= plot_long_filter
+    short_setup_test &= plot_short_filter
     for _, row in test_scores.head(max(0, int(args.plot_top_n))).iterrows():
         key = ("test", str(row["variant"]), str(row["mode"]))
         if key not in entry_maps:

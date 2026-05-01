@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Multi-Ticker Swing Live</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel2: #1f2630;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+    --border: #30363d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 16px;
+    display: flex; align-items: center; gap: 16px;
+    flex-wrap: wrap;
+  }
+  h1 { font-size: 15px; margin: 0; color: var(--text); }
+  .pill {
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .pill.idle    { background: #30363d; color: var(--muted); }
+  .pill.warming { background: #3a2d10; color: var(--yellow); }
+  .pill.running { background: #0f3a1f; color: var(--green); }
+  .pill.stopping{ background: #3a2d10; color: var(--yellow); }
+  .pill.stopped { background: #2d1010; color: var(--red); }
+  .pill.error   { background: #2d1010; color: var(--red); }
+  .pill.dryrun  { background: #1f3a4a; color: var(--blue); }
+
+  .controls {
+    margin-left: auto;
+    display: flex; gap: 8px; align-items: center;
+  }
+  button, input[type="number"] {
+    background: var(--panel2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: 5px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  button:hover { background: #2c3340; cursor: pointer; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; }
+  button.primary:hover { background: #2879f0; }
+  button.danger { background: #6e1f1f; border-color: #6e1f1f; }
+  button.danger:hover { background: #8a2929; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  label.tog {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  label.tog input { accent-color: var(--blue); }
+
+  main {
+    padding: 12px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .full { grid-column: 1 / -1; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .card-head {
+    padding: 8px 12px;
+    background: var(--panel2);
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--muted);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .card-body { padding: 0; max-height: 360px; overflow: auto; }
+  .card-body.tall { max-height: 460px; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 12px;
+    padding: 12px;
+  }
+  .stat {
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 8px 10px;
+  }
+  .stat .label {
+    font-size: 10px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .stat .value {
+    font-size: 18px; font-weight: 600; color: var(--text);
+    margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  th {
+    text-align: left;
+    padding: 6px 10px;
+    color: var(--muted);
+    font-weight: 500;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.4px;
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0;
+    background: var(--panel);
+    z-index: 1;
+  }
+  td {
+    padding: 6px 10px;
+    border-bottom: 1px solid #1c232c;
+  }
+  tr:hover td { background: #1a2230; }
+  .pos     { color: var(--green); }
+  .neg     { color: var(--red); }
+  .muted   { color: var(--muted); }
+  .mono    { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .dirL    { color: var(--green); font-weight: 600; }
+  .dirS    { color: var(--red);   font-weight: 600; }
+  .empty   { color: var(--muted); font-style: italic; padding: 12px; }
+
+  .log {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.5;
+    padding: 6px 10px;
+  }
+  .log .line { padding: 2px 0; border-bottom: 1px solid #1c232c; display: flex; gap: 8px; }
+  .log .line:last-child { border-bottom: 0; }
+  .log .ts { color: var(--muted); flex: 0 0 70px; }
+  .log .kind {
+    flex: 0 0 100px;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.4px;
+  }
+  .kind-signal              { color: var(--blue);   }
+  .kind-confirmation        { color: var(--green);  }
+  .kind-confirmation_expired{ color: var(--muted);  }
+  .kind-position_opened     { color: var(--green);  }
+  .kind-position_closed     { color: var(--yellow); }
+  .kind-order_submitted     { color: var(--blue);   }
+  .kind-order_dry_run       { color: var(--yellow); }
+  .kind-order_failed        { color: var(--red);    }
+  .kind-entry_skipped       { color: var(--muted);  }
+  .kind-error               { color: var(--red);    }
+  .kind-stream_started      { color: var(--green);  }
+  .kind-session_started     { color: var(--green);  }
+  .kind-session_ended       { color: var(--muted);  }
+  .kind-stopped             { color: var(--muted);  }
+
+  .progress-wrap {
+    height: 6px; background: #1c232c; border-radius: 3px; overflow: hidden;
+    margin: 6px 12px;
+  }
+  .progress-bar { height: 100%; background: var(--blue); width: 0%; transition: width 0.2s; }
+  .progress-label {
+    padding: 0 12px 6px; font-size: 11px; color: var(--muted);
+    display: flex; justify-content: space-between;
+  }
+
+  .footer {
+    padding: 6px 12px; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 11px;
+    display: flex; justify-content: space-between;
+  }
+
+  @media (max-width: 1200px) {
+    main { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: repeat(3, 1fr); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Multi-Ticker Swing Live</h1>
+  <span id="state-pill" class="pill idle">idle</span>
+  <span id="dryrun-pill" class="pill dryrun">dry-run · paper</span>
+  <div class="controls">
+    <label class="tog">
+      max entries / 30m
+      <input type="number" id="max-entries" value="5" min="1" max="50" step="1"
+             style="width: 60px; padding: 4px 6px;" />
+    </label>
+    <label class="tog" title="Dry-run is locked ON for now (paper account only).">
+      <input type="checkbox" id="dry-run" checked disabled /> dry-run
+    </label>
+    <button id="btn-start" class="primary">▶ Run</button>
+    <button id="btn-stop"  class="danger" disabled>■ Stop</button>
+  </div>
+</header>
+
+<main>
+  <section class="card full">
+    <div class="card-head">
+      <span>Status</span>
+      <span id="warmup-message" class="muted" style="text-transform: none; font-weight: 400; font-size: 11px;"></span>
+    </div>
+    <div class="stats">
+      <div class="stat">
+        <div class="label">Open positions</div>
+        <div class="value" id="stat-open">0</div>
+        <div class="sub">uncapped</div>
+      </div>
+      <div class="stat">
+        <div class="label">Confirming</div>
+        <div class="value" id="stat-confirming">0</div>
+        <div class="sub">awaiting 5m breakout</div>
+      </div>
+      <div class="stat">
+        <div class="label">Universe</div>
+        <div class="value" id="stat-universe">0</div>
+        <div class="sub" id="stat-stream">0 stream symbols</div>
+      </div>
+      <div class="stat">
+        <div class="label">1m bars</div>
+        <div class="value" id="stat-bars">0</div>
+        <div class="sub" id="stat-lastbar">no bars yet</div>
+      </div>
+      <div class="stat">
+        <div class="label">Started</div>
+        <div class="value" id="stat-started">—</div>
+        <div class="sub" id="stat-uptime">idle</div>
+      </div>
+      <div class="stat">
+        <div class="label">Warmup</div>
+        <div class="value" id="stat-warmup">0 / 0</div>
+        <div class="sub">prefill 30m parquet</div>
+      </div>
+    </div>
+    <div class="progress-wrap"><div id="warmup-bar" class="progress-bar"></div></div>
+    <div class="progress-label">
+      <span id="warmup-current"></span>
+      <span id="warmup-pct">0%</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <span>Open positions</span>
+      <span id="pos-count" class="muted" style="text-transform: none; font-weight: 400;"></span>
+    </div>
+    <div class="card-body tall">
+      <table>
+        <thead>
+          <tr>
+            <th>Ticker</th><th>Dir</th><th>Entry</th><th>Last</th><th>Best</th>
+            <th>P&amp;L%</th><th>SL</th><th>Trail</th><th>Bars</th>
+            <th>Option</th><th>Qty</th><th>Tier</th>
+          </tr>
+        </thead>
+        <tbody id="positions-body"></tbody>
+      </table>
+      <div id="positions-empty" class="empty">No open positions.</div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <span>Pending confirmations</span>
+      <span id="conf-count" class="muted" style="text-transform: none; font-weight: 400;"></span>
+    </div>
+    <div class="card-body tall">
+      <table>
+        <thead>
+          <tr>
+            <th>Ticker</th><th>Dir</th><th>p_dir</th><th>EV</th>
+            <th>Bars</th><th>Ref High</th><th>Ref Low</th><th>ATR</th>
+          </tr>
+        </thead>
+        <tbody id="confirming-body"></tbody>
+      </table>
+      <div id="confirming-empty" class="empty">No tickers in confirmation window.</div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><span>Alpaca orders</span><span class="muted" style="text-transform: none; font-weight: 400;" id="orders-count"></span></div>
+    <div class="card-body tall">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th><th>Kind</th><th>Side</th><th>Ticker</th>
+            <th>Option</th><th>Qty</th><th>Detail</th>
+          </tr>
+        </thead>
+        <tbody id="orders-body"></tbody>
+      </table>
+      <div id="orders-empty" class="empty">No orders yet.</div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><span>Closed trades</span><span class="muted" style="text-transform: none; font-weight: 400;" id="trades-count"></span></div>
+    <div class="card-body tall">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th><th>Ticker</th><th>Dir</th><th>Entry</th>
+            <th>Exit</th><th>P&amp;L%</th><th>Reason</th><th>Bars</th>
+          </tr>
+        </thead>
+        <tbody id="trades-body"></tbody>
+      </table>
+      <div id="trades-empty" class="empty">No closed trades yet.</div>
+    </div>
+  </section>
+
+  <section class="card full">
+    <div class="card-head"><span>Recent 30m scans (top-N by EV)</span><span class="muted" style="text-transform: none; font-weight: 400;">latest first</span></div>
+    <div class="card-body">
+      <div id="scans-log" class="log"></div>
+      <div id="scans-empty" class="empty">No scans recorded yet.</div>
+    </div>
+  </section>
+
+  <section class="card full">
+    <div class="card-head"><span>Event log</span><span class="muted" style="text-transform: none; font-weight: 400;" id="events-count"></span></div>
+    <div class="card-body tall">
+      <div id="events-log" class="log"></div>
+      <div id="events-empty" class="empty">Waiting for events…</div>
+    </div>
+  </section>
+
+  <section class="card full">
+    <div class="card-head"><span>Warmup log</span><span class="muted" style="text-transform: none; font-weight: 400;" id="warmup-count"></span></div>
+    <div class="card-body">
+      <div id="warmup-log" class="log"></div>
+      <div id="warmup-empty" class="empty">No warmup activity yet.</div>
+    </div>
+  </section>
+</main>
+
+<div class="footer">
+  <span id="conn-state">connecting…</span>
+  <span>Multi-Ticker Swing · port 8766</span>
+</div>
+
+<script>
+(() => {
+  // --------------------------------------------------------------
+  // DOM helpers
+  // --------------------------------------------------------------
+  const $ = (id) => document.getElementById(id);
+  const fmtNum = (v, digits = 2) =>
+    (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(digits);
+  const fmtPct = (v) =>
+    (v === null || v === undefined || Number.isNaN(v)) ? "—" :
+      (Number(v) * 100).toFixed(2) + "%";
+  const fmtTime = (iso) => {
+    if (!iso) return "—";
+    try {
+      const d = new Date(iso);
+      return d.toLocaleTimeString("en-US", { hour12: false });
+    } catch { return iso; }
+  };
+  const fmtTimeShort = (iso) => {
+    if (!iso) return "";
+    try {
+      const d = new Date(iso);
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      const ss = String(d.getSeconds()).padStart(2, "0");
+      return `${hh}:${mm}:${ss}`;
+    } catch { return iso; }
+  };
+
+  // --------------------------------------------------------------
+  // Renderers
+  // --------------------------------------------------------------
+  function renderStatus(status, alive) {
+    const pill = $("state-pill");
+    pill.className = "pill " + (status.state || "idle");
+    pill.textContent = status.state || "idle";
+
+    $("stat-open").textContent      = status.open_positions_count ?? 0;
+    $("stat-confirming").textContent = status.confirming_count ?? 0;
+    $("stat-universe").textContent  = status.universe_size ?? 0;
+    $("stat-stream").textContent    = (status.stream_symbols ?? 0) + " stream symbols";
+    $("stat-bars").textContent      = (status.bar_count ?? 0).toLocaleString();
+    $("stat-lastbar").textContent   = status.last_bar_ts
+      ? "last bar " + fmtTime(status.last_bar_ts) : "no bars yet";
+    $("stat-started").textContent   = status.started_at ? fmtTime(status.started_at) : "—";
+    $("stat-uptime").textContent    = status.started_at && alive
+      ? uptime(status.started_at) : (status.state || "idle");
+
+    const wIdx = status.warmup_index ?? 0;
+    const wTot = status.warmup_total ?? 0;
+    $("stat-warmup").textContent = `${wIdx} / ${wTot}`;
+    const pct = wTot > 0 ? Math.min(100, (wIdx / wTot) * 100) : 0;
+    $("warmup-bar").style.width = pct + "%";
+    $("warmup-pct").textContent = pct.toFixed(0) + "%";
+    $("warmup-message").textContent = status.warmup_message || "";
+
+    $("btn-start").disabled = alive;
+    $("btn-stop").disabled  = !alive;
+  }
+
+  function uptime(iso) {
+    const start = new Date(iso).getTime();
+    const sec = Math.floor((Date.now() - start) / 1000);
+    if (sec < 60) return sec + "s";
+    if (sec < 3600) return Math.floor(sec/60) + "m " + (sec%60) + "s";
+    return Math.floor(sec/3600) + "h " + Math.floor((sec%3600)/60) + "m";
+  }
+
+  function dirCell(d) {
+    if (d === 1)  return '<span class="dirL">LONG</span>';
+    if (d === -1) return '<span class="dirS">SHORT</span>';
+    return '<span class="muted">—</span>';
+  }
+
+  function renderPositions(positions) {
+    const body = $("positions-body");
+    const empty = $("positions-empty");
+    $("pos-count").textContent = positions.length ? positions.length + " open" : "";
+    if (!positions.length) {
+      body.innerHTML = "";
+      empty.style.display = "";
+      return;
+    }
+    empty.style.display = "none";
+    body.innerHTML = positions.map(p => {
+      const cls = p.pnl_pct >= 0 ? "pos" : "neg";
+      return `<tr>
+        <td><b>${p.ticker}</b></td>
+        <td>${dirCell(p.direction)}</td>
+        <td>${fmtNum(p.entry_price)}</td>
+        <td>${fmtNum(p.last_price)}</td>
+        <td>${fmtNum(p.best_price)}</td>
+        <td class="${cls}">${fmtPct(p.pnl_pct)}</td>
+        <td>${p.sl_price !== null && p.sl_price !== undefined ? fmtNum(p.sl_price) : '<span class="muted">—</span>'}</td>
+        <td>${p.trail_armed ? '<span class="pos">armed</span>' : '<span class="muted">—</span>'}</td>
+        <td>${p.bars_held}</td>
+        <td class="mono" style="font-size:10.5px">${p.option_symbol}</td>
+        <td>${p.qty}</td>
+        <td>${p.tier ?? '—'}</td>
+      </tr>`;
+    }).join("");
+  }
+
+  function renderConfirming(confirming) {
+    const body = $("confirming-body");
+    const empty = $("confirming-empty");
+    $("conf-count").textContent = confirming.length ? confirming.length + " pending" : "";
+    if (!confirming.length) {
+      body.innerHTML = "";
+      empty.style.display = "";
+      return;
+    }
+    empty.style.display = "none";
+    body.innerHTML = confirming.map(c => `
+      <tr>
+        <td><b>${c.ticker}</b></td>
+        <td>${dirCell(c.direction)}</td>
+        <td>${fmtNum(c.p_dir, 3)}</td>
+        <td>${fmtNum(c.ev_score, 4)}</td>
+        <td>${c.bars_watched} / ${c.bars_max}</td>
+        <td>${fmtNum(c.ref_high)}</td>
+        <td>${fmtNum(c.ref_low)}</td>
+        <td>${fmtNum(c.atr, 3)}</td>
+      </tr>
+    `).join("");
+  }
+
+  function describeOrder(o) {
+    const p = o.payload || o;
+    if (o.kind === "order_failed") return `<span class="neg">${p.error || "failed"}</span>`;
+    if (o.kind === "order_dry_run") {
+      const px = p.entry_price ?? p.exit_price;
+      return `<span class="muted">would ${p.side} @ ~${fmtNum(px)}</span>`;
+    }
+    if (o.kind === "entry_skipped")
+      return `<span class="muted">skipped: ${p.reason || "—"}</span>`;
+    if (p.response) {
+      const r = p.response;
+      const id = r.id ? r.id.toString().slice(0, 8) : "—";
+      const status = r.status || "submitted";
+      return `<span class="mono" style="font-size:10.5px">id=${id} ${status}</span>`;
+    }
+    return '<span class="muted">submitted</span>';
+  }
+
+  const orderBuf = [];
+  function addOrder(o) {
+    orderBuf.unshift(o);
+    if (orderBuf.length > 200) orderBuf.length = 200;
+    const body = $("orders-body");
+    $("orders-empty").style.display = orderBuf.length ? "none" : "";
+    $("orders-count").textContent = orderBuf.length ? orderBuf.length + " entries" : "";
+    body.innerHTML = orderBuf.map(o => {
+      const p = o.payload || o;
+      const kindCls = "kind-" + (o.kind || "order");
+      return `<tr>
+        <td>${fmtTimeShort(o.ts)}</td>
+        <td><span class="${kindCls}" style="text-transform:uppercase;font-size:10px;font-weight:600;">${o.kind}</span></td>
+        <td>${(p.side || "").toUpperCase()}</td>
+        <td><b>${p.ticker || ""}</b></td>
+        <td class="mono" style="font-size:10.5px">${p.option_symbol || ""}</td>
+        <td>${p.qty ?? ""}</td>
+        <td>${describeOrder(o)}</td>
+      </tr>`;
+    }).join("");
+  }
+
+  const tradeBuf = [];
+  function addTrade(t) {
+    tradeBuf.unshift(t);
+    if (tradeBuf.length > 200) tradeBuf.length = 200;
+    const body = $("trades-body");
+    $("trades-empty").style.display = tradeBuf.length ? "none" : "";
+    $("trades-count").textContent = tradeBuf.length ? tradeBuf.length + " trades" : "";
+    body.innerHTML = tradeBuf.map(t => {
+      const cls = t.exit_pnl_pct >= 0 ? "pos" : "neg";
+      return `<tr>
+        <td>${fmtTimeShort(t.ts)}</td>
+        <td><b>${t.ticker}</b></td>
+        <td>${dirCell(t.direction)}</td>
+        <td>${fmtNum(t.entry_price)}</td>
+        <td>${fmtNum(t.exit_price)}</td>
+        <td class="${cls}">${fmtPct(t.exit_pnl_pct)}</td>
+        <td>${t.exit_reason}</td>
+        <td>${t.bars_held}</td>
+      </tr>`;
+    }).join("");
+  }
+
+  const eventsBuf = [];
+  function addEvent(e) {
+    eventsBuf.unshift(e);
+    if (eventsBuf.length > 400) eventsBuf.length = 400;
+    const log = $("events-log");
+    $("events-empty").style.display = eventsBuf.length ? "none" : "";
+    $("events-count").textContent = eventsBuf.length ? eventsBuf.length + " events" : "";
+    log.innerHTML = eventsBuf.map(e => {
+      const p = e.payload || {};
+      const kind = e.type || "evt";
+      const tk = p.ticker || "";
+      let detail = "";
+      switch (kind) {
+        case "signal":
+          detail = `${tk} ${p.direction === 1 ? "L" : "S"} p=${fmtNum(p.p_dir, 3)} ev=${fmtNum(p.ev_score, 4)}`; break;
+        case "confirmation":
+          detail = `${tk} confirmed bar=${p.bars_watched} close=${fmtNum(p.close)}`; break;
+        case "confirmation_expired":
+          detail = `${tk} expired after ${p.bars_watched} bars`; break;
+        case "position_opened":
+          detail = `${tk} ${p.direction === 1 ? "L" : "S"} entry=${fmtNum(p.entry_price)} sl=${fmtNum(p.sl_price)}`; break;
+        case "position_closed":
+          detail = `${tk} ${p.exit_reason} pnl=${fmtPct(p.exit_pnl_pct)} bars=${p.bars_held}`; break;
+        case "order_submitted":
+          detail = `${tk} ${p.side} ${p.option_symbol} qty=${p.qty}`; break;
+        case "order_dry_run":
+          detail = `${tk} ${p.side} ${p.option_symbol} qty=${p.qty} (dry)`; break;
+        case "order_failed":
+          detail = `${tk} ${p.side} FAILED: ${p.error}`; break;
+        case "entry_skipped":
+          detail = `${tk} skipped: ${p.reason}`; break;
+        case "stream_started":
+          detail = `WebSocket stream started (${p.symbols} symbols)`; break;
+        case "session_started":
+          detail = `session started · max=${p.max_entries} · ${p.dry_run ? "DRY" : "LIVE"}`; break;
+        case "session_ended":
+          detail = `session ended`; break;
+        case "stopped":
+          detail = `runner stopped${p.reason ? " (" + p.reason + ")" : ""}`; break;
+        case "stream_error":
+          detail = `<b style="color:var(--red)">${p.error}</b><br><span class="muted" style="font-size:11px">${p.hint || ""}</span>`; break;
+        case "error":
+          detail = p.error || JSON.stringify(p); break;
+        default:
+          detail = JSON.stringify(p).slice(0, 200);
+      }
+      return `<div class="line">
+        <span class="ts">${fmtTimeShort(e.ts)}</span>
+        <span class="kind kind-${kind}">${kind}</span>
+        <span>${detail}</span>
+      </div>`;
+    }).join("");
+  }
+
+  const scansBuf = [];
+  function addScan(s) {
+    scansBuf.unshift(s);
+    if (scansBuf.length > 50) scansBuf.length = 50;
+    const log = $("scans-log");
+    $("scans-empty").style.display = scansBuf.length ? "none" : "";
+    log.innerHTML = scansBuf.map(s => {
+      const sigs = s.signals || [];
+      if (!sigs.length) return "";
+      const inner = sigs.map(sg =>
+        `<span class="${sg.direction === 1 ? "dirL" : "dirS"}">${sg.ticker}(${sg.direction === 1 ? "L" : "S"})</span> p=${fmtNum(sg.p_dir, 3)} ev=${fmtNum(sg.ev_score, 4)}`
+      ).join(" · ");
+      return `<div class="line">
+        <span class="ts">${fmtTimeShort(s.ts)}</span>
+        <span class="kind kind-signal">scan</span>
+        <span>${s.ticker || ""}: ${inner}</span>
+      </div>`;
+    }).filter(Boolean).join("");
+  }
+
+  const warmupBuf = [];
+  function describeWarmup(w) {
+    const phase = w.phase || w.kind;
+    const ticker = w.ticker || "";
+    if (phase === "start" || w.kind === "start") {
+      return `<i>${w.message || `warmup starting (${w.total ?? w.tickers ?? ""} symbols)`}</i>`;
+    }
+    if (phase === "done" || w.kind === "done") {
+      const c = w.cached ?? 0, l = w.loaded ?? 0, g = w.gap_filled ?? 0, f = w.failed ?? 0;
+      return `<b>warmup complete</b> · <span class="muted">cached=</span><span class="pos">${c}</span> · loaded=${l} · <span class="kind-signal">gap-filled=${g}</span> · <span class="${f ? 'neg' : 'muted'}">failed=${f}</span>`;
+    }
+    if (phase === "cached") {
+      return `<span class="muted">cached</span> <b>${ticker}</b> · ${w.bars} bars (skipped)`;
+    }
+    if (phase === "loaded") {
+      const cls = w.ok === false ? "neg" : "pos";
+      return `<span class="${cls}">loaded</span> <b>${ticker}</b> · ${w.bars} bars`;
+    }
+    if (phase === "gap_fetching") {
+      return `<span class="kind-signal">fetching</span> <b>${ticker}</b> · ${w.from?.slice(0,16) ?? ""} → ${w.to?.slice(0,16) ?? "now"}`;
+    }
+    if (phase === "gap_filled") {
+      return `<span class="pos">gap-filled</span> <b>${ticker}</b> · +${w.added} bars (total ${w.bars})`;
+    }
+    if (phase === "gap_fetch_failed") {
+      return `<span class="neg">fetch failed</span> <b>${ticker}</b>: ${w.error}`;
+    }
+    if (phase === "done_ticker") {
+      // Avoid log noise — these mostly duplicate cached/loaded/gap_filled
+      return null;
+    }
+    // Fallback for unknown phases
+    const okCls = w.ok === false ? "neg" : "pos";
+    return `<span class="${okCls}">${ticker}</span> · ${w.bars ?? ""} bars`;
+  }
+
+  function addWarmup(line) {
+    const detail = describeWarmup(line);
+    if (detail === null) {
+      // Still let it advance the progress UI, just don't put it in the log
+      maybeUpdateWarmupHeader(line);
+      return;
+    }
+    warmupBuf.unshift({ ...line, _detail: detail });
+    if (warmupBuf.length > 600) warmupBuf.length = 600;
+    const log = $("warmup-log");
+    $("warmup-empty").style.display = warmupBuf.length ? "none" : "";
+    $("warmup-count").textContent = warmupBuf.length ? warmupBuf.length + " entries" : "";
+    log.innerHTML = warmupBuf.slice(0, 200).map(w => {
+      const idx = (w.index !== undefined && w.total !== undefined) ? `[${w.index}/${w.total}]` : "";
+      return `<div class="line">
+        <span class="ts">${fmtTimeShort(w.ts)}</span>
+        <span class="kind">${idx}</span>
+        <span>${w._detail}</span>
+      </div>`;
+    }).join("");
+
+    maybeUpdateWarmupHeader(line);
+  }
+
+  function maybeUpdateWarmupHeader(line) {
+    const phase = line.phase || line.kind;
+    if (line.index !== undefined && line.total !== undefined) {
+      $("warmup-current").textContent =
+        `${(line.ticker || "")} ${phase ? "· " + phase : ""} (${line.index}/${line.total})`;
+    } else if (phase === "done" || line.kind === "done") {
+      $("warmup-current").textContent = "warmup complete";
+    } else if (phase === "start" || line.kind === "start") {
+      $("warmup-current").textContent = line.message || "warmup starting";
+    } else if (phase === "gap_fetching") {
+      $("warmup-current").textContent = `gap-fetching ${line.ticker}…`;
+    }
+  }
+
+  // --------------------------------------------------------------
+  // Live update
+  // --------------------------------------------------------------
+  function applySnapshot(snap) {
+    if (!snap) return;
+    if (snap.status) renderStatus(snap.status, !!snap.session_alive);
+    if (snap.positions) renderPositions(snap.positions);
+    if (snap.confirming) renderConfirming(snap.confirming);
+    if (snap.scans_recent) {
+      scansBuf.length = 0;
+      [...snap.scans_recent].reverse().forEach(addScan);
+    }
+    if (snap.events) {
+      eventsBuf.length = 0;
+      [...snap.events].reverse().forEach(addEvent);
+    }
+    if (snap.orders) {
+      orderBuf.length = 0;
+      [...snap.orders].reverse().forEach(addOrder);
+    }
+    if (snap.trades) {
+      tradeBuf.length = 0;
+      [...snap.trades].reverse().forEach(addTrade);
+    }
+    if (snap.warmup) {
+      warmupBuf.length = 0;
+      [...snap.warmup].reverse().forEach(addWarmup);
+    }
+  }
+
+  let currentState = { status: { state: "idle" }, session_alive: false };
+
+  async function fetchState() {
+    const res = await fetch("/api/state");
+    const data = await res.json();
+    currentState = data;
+    applySnapshot(data);
+  }
+
+  function handleEvent(evt) {
+    // evt: {type, ts, payload}
+    const t = evt.type;
+    if (t === "hello") {
+      // Snapshot embedded in payload
+      applySnapshot(evt.payload);
+      return;
+    }
+    if (t === "meta_tick") {
+      const p = evt.payload || {};
+      const s = currentState.status || {};
+      Object.assign(s, p.meta || p);
+      currentState.status = s;
+      renderStatus(s, currentState.session_alive);
+      if (Array.isArray(p.positions))  renderPositions(p.positions);
+      if (Array.isArray(p.confirming)) renderConfirming(p.confirming);
+      return;
+    }
+    if (t === "session_started") {
+      currentState.session_alive = true;
+      addEvent(evt);
+      fetchState();
+      return;
+    }
+    if (t === "session_ended" || t === "stopped") {
+      currentState.session_alive = false;
+      addEvent(evt);
+      fetchState();
+      return;
+    }
+    if (t === "warmup_start" || t === "warmup_progress" || t === "warmup_done") {
+      const p = evt.payload || {};
+      const kindForStartDone = t === "warmup_progress" ? undefined : t.replace("warmup_", "");
+      addWarmup({ ts: evt.ts, kind: kindForStartDone, ...p });
+      // Also reflect into status meta
+      const s = currentState.status || {};
+      if (t === "warmup_progress") {
+        if (p.index !== undefined) s.warmup_index = p.index;
+        if (p.total !== undefined) s.warmup_total = p.total;
+      } else if (t === "warmup_start") {
+        s.state = "warming";
+        s.warmup_message = p.message || "";
+      } else if (t === "warmup_done") {
+        const c = p.cached ?? 0, l = p.loaded ?? 0, g = p.gap_filled ?? 0, f = p.failed ?? 0;
+        s.warmup_message = `Warmup complete · cached=${c} · loaded=${l} · gap-filled=${g} · failed=${f}`;
+      }
+      currentState.status = s;
+      renderStatus(s, currentState.session_alive);
+      return;
+    }
+    if (t === "scan") {
+      addScan({ ts: evt.ts, ...(evt.payload || {}) });
+      return;
+    }
+    if (t === "order_submitted" || t === "order_failed" ||
+        t === "order_dry_run"   || t === "entry_skipped") {
+      addOrder({ ts: evt.ts, kind: t, payload: evt.payload || {} });
+      addEvent(evt);
+      return;
+    }
+    if (t === "position_closed") {
+      addTrade({ ts: evt.ts, ...(evt.payload || {}) });
+      addEvent(evt);
+      return;
+    }
+    if (t === "stream_started" || t === "signal" || t === "confirmation" ||
+        t === "confirmation_expired" || t === "position_opened" || t === "error") {
+      addEvent(evt);
+    }
+  }
+
+  // SSE
+  let es = null;
+  function connectSSE() {
+    if (es) try { es.close(); } catch {}
+    es = new EventSource("/api/events");
+    $("conn-state").textContent = "connecting…";
+    es.onopen = () => { $("conn-state").textContent = "connected"; };
+    es.onerror = () => { $("conn-state").textContent = "reconnecting…"; };
+    es.onmessage = (msg) => {
+      try {
+        const evt = JSON.parse(msg.data);
+        handleEvent(evt);
+      } catch (err) {
+        console.warn("bad SSE message", err);
+      }
+    };
+  }
+
+  // Buttons
+  $("btn-start").addEventListener("click", async () => {
+    const max_entries = parseInt($("max-entries").value || "5", 10);
+    $("btn-start").disabled = true;
+    try {
+      const res = await fetch("/api/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ max_entries, dry_run: true }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert("Failed to start: " + (data.error || "unknown"));
+        $("btn-start").disabled = false;
+        return;
+      }
+      applySnapshot(data.state);
+    } catch (err) {
+      alert("Start failed: " + err);
+      $("btn-start").disabled = false;
+    }
+  });
+
+  $("btn-stop").addEventListener("click", async () => {
+    if (!confirm("Stop the live runner?")) return;
+    $("btn-stop").disabled = true;
+    try {
+      const res = await fetch("/api/stop", { method: "POST" });
+      const data = await res.json();
+      applySnapshot(data.state || {});
+    } catch (err) {
+      alert("Stop failed: " + err);
+      $("btn-stop").disabled = false;
+    }
+  });
+
+  // Periodic uptime refresh — keeps the "started 12m ago" line live
+  setInterval(() => {
+    if (currentState.session_alive && currentState.status?.started_at) {
+      $("stat-uptime").textContent = uptime(currentState.status.started_at);
+    }
+  }, 1000);
+
+  // Boot
+  fetchState().catch(() => {});
+  connectSSE();
+})();
+</script>
+</body>
+</html>

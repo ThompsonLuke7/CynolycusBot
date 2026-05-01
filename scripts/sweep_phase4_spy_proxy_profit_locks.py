@@ -247,26 +247,41 @@ def _build_entries(
         short_policy_name = variant
     else:
         long_policy_name, short_policy_name = asym_names
+    max_entry_lag_minutes = row.get("max_entry_lag_minutes", None)
+    if pd.isna(max_entry_lag_minutes):
+        max_entry_lag_minutes = None
+    elif max_entry_lag_minutes is not None:
+        max_entry_lag_minutes = float(max_entry_lag_minutes)
+
+    def _internal_policy(name: str) -> str:
+        mapped = _post_setup_policy_to_internal(name)
+        if mapped == "trigger_close" and str(name).startswith("break_prev_stop"):
+            return str(name)
+        if mapped == "trigger_close" and str(name) in {"next_open", "next_open_direction", "micro_reversal_1m"}:
+            return str(name)
+        return mapped
 
     long_candidate, long_prices, long_times, _, _ = _post_setup_side_candidates(
         feature_df,
         long_raw_setup,
         eval_mask,
         side="long",
-        policy=_post_setup_policy_to_internal(long_policy_name),
+        policy=_internal_policy(long_policy_name),
         trigger_col=_trigger_col(long_policy_name, "long"),
         max_bars=post_setup_max_bars,
         execution_1m=execution_1m,
+        max_entry_lag_minutes=max_entry_lag_minutes,
     )
     short_candidate, short_prices, short_times, _, _ = _post_setup_side_candidates(
         feature_df,
         short_raw_setup,
         eval_mask,
         side="short",
-        policy=_post_setup_policy_to_internal(short_policy_name),
+        policy=_internal_policy(short_policy_name),
         trigger_col=_trigger_col(short_policy_name, "short"),
         max_bars=post_setup_max_bars,
         execution_1m=execution_1m,
+        max_entry_lag_minutes=max_entry_lag_minutes,
     )
     active_long = _expand_recent_setup(long_raw_setup, post_setup_max_bars) & eval_mask
     active_short = _expand_recent_setup(short_raw_setup, post_setup_max_bars) & eval_mask

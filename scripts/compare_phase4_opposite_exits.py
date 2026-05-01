@@ -40,7 +40,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--short-setup-threshold", type=float, default=None)
     parser.add_argument("--cooldown-bars", type=int, default=None)
     parser.add_argument("--post-setup-max-bars", type=int, default=None)
-    parser.add_argument("--execution-1m-path", default="Data/raw/spy/1m_train.parquet")
+    parser.add_argument("--execution-1m-path", default="Data/raw/spy/spy_intraday_1min.parquet")
     parser.add_argument("--proxy-mode", choices=["black_scholes", "atr"], default="black_scholes")
     parser.add_argument("--exit-hhmm", default="15:40")
     parser.add_argument("--horizon-bars", type=int, default=39)
@@ -52,6 +52,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--bs-strike-round", type=float, default=1.0)
     parser.add_argument("--premium-atr-mult", type=float, default=2.5)
     parser.add_argument("--opposite-proba-thresholds", default="0.30,0.40,0.50,0.60,0.70,0.80")
+    parser.add_argument(
+        "--giveback-pcts",
+        default="0.20,0.30,0.40,0.50",
+        help=(
+            "Comma-separated option-profit giveback amounts for opposite-proba-after-giveback exits. "
+            "Example: 0.30 exits after giving back 30 percentage points from the trade's best option return."
+        ),
+    )
+    parser.add_argument(
+        "--soft-counts",
+        default="2,3",
+        help="Comma-separated consecutive 10m opposite-probability bar counts for soft opposite exits.",
+    )
     parser.add_argument("--position-modes", default="hedged")
     parser.add_argument(
         "--out",
@@ -79,6 +92,18 @@ def _position_modes(raw: str) -> list[str]:
         if value not in out:
             out.append(value)
     return out or ["hedged"]
+
+
+def _parse_int_list(raw: str) -> list[int]:
+    out: list[int] = []
+    for item in str(raw or "").split(","):
+        value = item.strip()
+        if not value:
+            continue
+        parsed = int(value)
+        if parsed not in out:
+            out.append(parsed)
+    return out
 
 
 def _current_best_spec() -> dict[str, object]:
@@ -310,6 +335,132 @@ def _simulate_opposite_proba(
     return rows
 
 
+def _simulate_opposite_proba_giveback(
+    trades: list[dict[str, object]],
+    *,
+    p_long: np.ndarray,
+    p_short: np.ndarray,
+    threshold: float,
+    giveback_pct: float,
+    position_mode: str,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    open_until: pd.Timestamp | None = None
+    blocked = 0
+    ordered = sorted(trades, key=lambda trade: pd.Timestamp(trade["entry_time"]))
+    for trade in ordered:
+        entry_time = pd.Timestamp(trade["entry_time"])
+        if position_mode == "single" and open_until is not None and entry_time < open_until:
+            blocked += 1
+            continue
+        side = str(trade["side"])
+        path_idx = trade.get("path_idx")
+        close_path = trade.get("close_path")
+        favorable_path = trade.get("favorable_path")
+        if not (
+            isinstance(path_idx, np.ndarray)
+            and isinstance(close_path, np.ndarray)
+            and isinstance(favorable_path, np.ndarray)
+            and path_idx.size > 0
+        ):
+            continue
+        opp = p_short if side == "long" else p_long
+        exit_pos = path_idx.size - 1
+        reason = "timeout"
+        for pos, idx in enumerate(path_idx):
+            idx_i = int(idx)
+            if idx_i <= int(trade["entry_idx"]):
+                continue
+            value = float(opp[idx_i]) if idx_i < opp.size else np.nan
+            best_so_far = float(np.nanmax(favorable_path[: pos + 1]))
+            current_profit = float(close_path[pos])
+            gave_back = bool(current_profit <= best_so_far - float(giveback_pct))
+            if np.isfinite(value) and value >= float(threshold) and gave_back:
+                exit_pos = int(pos)
+                reason = f"opposite_proba_{threshold:.2f}_giveback_{giveback_pct:.2f}"
+                break
+        event = _event_from_trade(
+            trade,
+            regime=f"opposite_proba_{threshold:.2f}_giveback_{giveback_pct:.2f}",
+            exit_style="opposite_proba_giveback",
+            exit_pos=exit_pos,
+            exit_reason=reason,
+        )
+        if event is None:
+            continue
+        event["position_mode"] = position_mode
+        rows.append(event)
+        if position_mode == "single":
+            open_until = pd.Timestamp(event["exit_time"])
+    for row in rows:
+        row["candidate_trades"] = len(ordered)
+        row["skipped_overlap_candidates"] = blocked
+    return rows
+
+
+def _simulate_opposite_proba_soft_count(
+    trades: list[dict[str, object]],
+    *,
+    p_long: np.ndarray,
+    p_short: np.ndarray,
+    threshold: float,
+    soft_count: int,
+    position_mode: str,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    open_until: pd.Timestamp | None = None
+    blocked = 0
+    ordered = sorted(trades, key=lambda trade: pd.Timestamp(trade["entry_time"]))
+    required = max(1, int(soft_count))
+    for trade in ordered:
+        entry_time = pd.Timestamp(trade["entry_time"])
+        if position_mode == "single" and open_until is not None and entry_time < open_until:
+            blocked += 1
+            continue
+        side = str(trade["side"])
+        path_idx = trade.get("path_idx")
+        if not isinstance(path_idx, np.ndarray) or path_idx.size == 0:
+            continue
+        opp = p_short if side == "long" else p_long
+        exit_pos = path_idx.size - 1
+        reason = "timeout"
+        seen_10m: set[int] = set()
+        consecutive = 0
+        for pos, idx in enumerate(path_idx):
+            idx_i = int(idx)
+            if idx_i in seen_10m:
+                continue
+            seen_10m.add(idx_i)
+            if idx_i <= int(trade["entry_idx"]):
+                continue
+            value = float(opp[idx_i]) if idx_i < opp.size else np.nan
+            if np.isfinite(value) and value >= float(threshold):
+                consecutive += 1
+            else:
+                consecutive = 0
+            if consecutive >= required:
+                exit_pos = int(pos)
+                reason = f"opposite_proba_{threshold:.2f}_soft{required}"
+                break
+        event = _event_from_trade(
+            trade,
+            regime=f"opposite_proba_{threshold:.2f}_soft{required}",
+            exit_style="opposite_proba_soft_count",
+            exit_pos=exit_pos,
+            exit_reason=reason,
+        )
+        if event is None:
+            continue
+        event["position_mode"] = position_mode
+        rows.append(event)
+        if position_mode == "single":
+            open_until = pd.Timestamp(event["exit_time"])
+    for row in rows:
+        row["candidate_trades"] = len(ordered)
+        row["skipped_overlap_candidates"] = blocked
+    return rows
+
+
 def main() -> None:
     args = _parse_args()
     feature_df = pd.read_parquet(REPO_ROOT / args.signal_frame).sort_index()
@@ -406,6 +557,28 @@ def main() -> None:
                     position_mode=mode,
                 )
             )
+            for giveback_pct in _parse_float_list(args.giveback_pcts):
+                event_rows.extend(
+                    _simulate_opposite_proba_giveback(
+                        trades,
+                        p_long=p_long,
+                        p_short=p_short,
+                        threshold=float(threshold),
+                        giveback_pct=float(giveback_pct),
+                        position_mode=mode,
+                    )
+                )
+            for soft_count in _parse_int_list(args.soft_counts):
+                event_rows.extend(
+                    _simulate_opposite_proba_soft_count(
+                        trades,
+                        p_long=p_long,
+                        p_short=p_short,
+                        threshold=float(threshold),
+                        soft_count=int(soft_count),
+                        position_mode=mode,
+                    )
+                )
 
     events = pd.DataFrame(event_rows)
     summary = _summarize(events)

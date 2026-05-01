@@ -866,7 +866,11 @@ class LiveGAXGBPredictor:
         model: xgb.Booster,
     ) -> float:
         if mask.size != x_row.shape[0]:
-            raise ValueError("Mask length does not match feature vector length.")
+            _warn_once(
+                "[live] GA-XGB feature mask width does not match the live feature vector; "
+                "using neutral probability for that legacy model."
+            )
+            return float(self._NEUTRAL_PROBABILITY)
         x_sel = x_row[mask].reshape(1, -1)
         dmat = xgb.DMatrix(x_sel)
         return float(model.predict(dmat)[0])
@@ -878,7 +882,11 @@ class LiveGAXGBPredictor:
         model: xgb.Booster,
     ) -> np.ndarray:
         if mask.size != x_mat.shape[1]:
-            raise ValueError("Mask length does not match feature matrix width.")
+            _warn_once(
+                "[live] GA-XGB feature mask width does not match the live feature matrix; "
+                "using neutral probabilities for that legacy model."
+            )
+            return np.full(x_mat.shape[0], self._NEUTRAL_PROBABILITY, dtype=np.float32)
         x_sel = x_mat[:, mask]
         dmat = xgb.DMatrix(x_sel)
         return model.predict(dmat).astype(np.float32, copy=False)

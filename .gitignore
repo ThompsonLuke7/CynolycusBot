@@ -217,3 +217,11 @@ colab_minimal.zip
 multi_ticker_swing/data/processed/*.parquet
 multi_ticker_swing/data/processed/30min/*.parquet
 multi_ticker_swing/data/raw/**/*.parquet
+Data/raw/spy/_tmp_1min_chunks/
+
+Data/
+*.parquets
+*.json
+*.zip
+*.dot
+logs/

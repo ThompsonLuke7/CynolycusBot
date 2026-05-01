@@ -27,7 +27,7 @@ DEFAULT_ANALYSIS_DIR = Path(
     "phase4_1m_oof_focused_trigger_sweep_l42_s15_full_1m_train"
 )
 DEFAULT_SIGNAL_FRAME = DEFAULT_ANALYSIS_DIR / "phase4_signal_frame.parquet"
-DEFAULT_ONE_MIN = Path("Data/raw/spy/1m_train.parquet")
+DEFAULT_ONE_MIN = Path("Data/raw/spy/spy_intraday_1min.parquet")
 DEFAULT_OUT = DEFAULT_ANALYSIS_DIR / "phase4_regime_aware_threshold_compare_summary.csv"
 DEFAULT_EVENTS_OUT = DEFAULT_ANALYSIS_DIR / "phase4_regime_aware_threshold_compare_events.csv"
 

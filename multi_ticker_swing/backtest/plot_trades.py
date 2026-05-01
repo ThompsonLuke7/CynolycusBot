@@ -2,10 +2,15 @@
 Plot candlestick charts with trade entry/exit overlays for the best sweep combo.
 
 Usage:
-  python -m multi_ticker_swing.backtest.plot_trades
+  python multi_ticker_swing/backtest/plot_trades.py \
+      --sweep-dir backtest/results/sweep_1500 \
+      --proba     models/p_swing_probs.parquet \
+      --best      IWM LABU AG NNE \
+      --worst     SLB BE CVX FSLR
 """
 from __future__ import annotations
 
+import argparse
 import logging
 from pathlib import Path
 
@@ -22,14 +27,8 @@ from Data.plots.plots import _plot_candles, _compute_time_ticks, _apply_time_tic
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
 logger = logging.getLogger(__name__)
 
-SWEEP_DIR = BACKTEST_RESULTS_DIR / "sweep_v2"
-PLOTS_DIR = SWEEP_DIR / "plots"
-PROBA_PATH = Path(__file__).resolve().parents[1] / "models" / "p_swing_probs.parquet"
-
-BEST_TICKERS = ["TSLA", "AFRM", "UEC", "SLV"]
-WORST_TICKERS = ["GOOGL", "ADBE", "XOM", "LULU"]
+MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 TAIL_BARS = 315          # ~24 trading days ≈ 1 month
-ENTRY_THRESHOLD = 0.70   # must match best combo
 
 
 def load_raw(ticker: str) -> pd.DataFrame:
@@ -111,7 +110,7 @@ def plot_ticker_trades(
     wr = wins / n_trades * 100 if n_trades > 0 else 0
 
     ax_candle.set_title(
-        f"{ticker}  |  e0.70, 5m confirm 30min, trail arm 2.5%, giveback 25%, SL 1.5×ATR  |  "
+        f"{ticker}  |  trail arm 2.5%, giveback 25%, SL 4×ATR, 5m confirm 6 bars  |  "
         f"Trades={n_trades}  WR={wr:.0f}%  totalPnL={total_pnl:+.1f}%",
         fontsize=12, fontweight="bold",
     )
@@ -119,30 +118,35 @@ def plot_ticker_trades(
 
     # ── Probability panel — same style as SPY day trader ────────────────────
     if not proba_t.empty:
-        proba_positions = []
-        p_long_raw = []
-        p_short_raw = []
+        # Compute directional-conditional probabilities — these are what actually
+        # drive entries. p_long_dir = P(long) / (P(long) + P(short)).
+        # Plotting raw P(long)/P(short) is misleading because neutral mass dilutes them.
+        p_dir = (proba_t["p_long"] + proba_t["p_short"]).clip(lower=1e-8)
+        proba_t = proba_t.copy()
+        proba_t["p_long_dir"]  = proba_t["p_long"]  / p_dir
+        proba_t["p_short_dir"] = proba_t["p_short"] / p_dir
+
+        proba_positions, p_long_dir, p_short_dir = [], [], []
         for _, pr in proba_t.iterrows():
             p = ts_to_pos.get(pr["timestamp"])
             if p is not None:
                 proba_positions.append(p)
-                p_long_raw.append(pr["p_long"])
-                p_short_raw.append(pr["p_short"])
+                p_long_dir.append(pr["p_long_dir"])
+                p_short_dir.append(pr["p_short_dir"])
 
         proba_positions = np.array(proba_positions)
-        p_long_raw = np.array(p_long_raw)
-        p_short_raw = np.array(p_short_raw)
+        p_long_dir  = np.array(p_long_dir)
+        p_short_dir = np.array(p_short_dir)
 
-        ax_proba.plot(proba_positions, p_long_raw,
-                      color="#1565C0", linewidth=1.5, label="P(long)")
-        ax_proba.plot(proba_positions, p_short_raw,
-                      color="#FB8C00", linewidth=1.5, label="P(short)")
+        ax_proba.plot(proba_positions, p_long_dir,
+                      color="#1565C0", linewidth=1.5, label="P(long|dir)")
+        ax_proba.plot(proba_positions, p_short_dir,
+                      color="#FB8C00", linewidth=1.5, label="P(short|dir)")
 
-    # Threshold lines (raw prob space — entry uses p_long_dir conditional,
-    # so these are approximate visual guides only)
-    ax_proba.axhline(0.5, color="gray", linewidth=0.6, linestyle="-", alpha=0.25)
+    # Entry threshold line — entries fire when directional prob crosses this
+    ax_proba.axhline(0.5, color="gray", linewidth=0.8, linestyle="--", alpha=0.4, label="50%")
 
-    ax_proba.set_ylabel("Model probability", fontsize=11)
+    ax_proba.set_ylabel("Directional probability", fontsize=11)
     ax_proba.set_ylim(0, 1.02)
     ax_proba.legend(loc="upper right", fontsize=9)
 
@@ -169,16 +173,31 @@ def plot_ticker_trades(
 
 
 def main():
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    p = argparse.ArgumentParser()
+    p.add_argument("--sweep-dir", required=True, help="Path to sweep result directory")
+    p.add_argument("--proba",     required=True, help="Path to p_swing_probs.parquet")
+    p.add_argument("--best",  nargs="+", default=[], help="Best tickers to plot")
+    p.add_argument("--worst", nargs="+", default=[], help="Worst tickers to plot")
+    p.add_argument("--tail-bars", type=int, default=TAIL_BARS)
+    args = p.parse_args()
 
-    trades_df = pd.read_parquet(SWEEP_DIR / "best_v2_trades.parquet")
-    proba = pd.read_parquet(PROBA_PATH)
+    sweep_dir = Path(args.sweep_dir)
+    plots_dir = sweep_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    _default_trades = "best_v2_trades.parquet"
+    for _candidate in ("best_v4_trades.parquet", "best_v3_trades.parquet", "best_v2_trades.parquet"):
+        if (sweep_dir / _candidate).exists():
+            _default_trades = _candidate
+            break
+    trades_df = pd.read_parquet(sweep_dir / _default_trades)
+    proba = pd.read_parquet(args.proba)
     proba = proba[proba["split"] == "test"].copy()
     proba["timestamp"] = pd.to_datetime(proba["timestamp"], utc=True)
 
-    all_tickers = BEST_TICKERS + WORST_TICKERS
-    for ticker in all_tickers:
-        logger.info("Plotting %s...", ticker)
+    all_tickers = [(t, "best") for t in args.best] + [(t, "worst") for t in args.worst]
+    for ticker, label in all_tickers:
+        logger.info("Plotting %s (%s)...", ticker, label)
         try:
             raw = load_raw(ticker)
         except FileNotFoundError:
@@ -190,21 +209,22 @@ def main():
             logger.warning("No trades for %s", ticker)
             continue
 
+        ticker_trades = ticker_trades.copy()
         ticker_trades["entry_time"] = ticker_trades["signal_idx"].apply(
-            lambda idx: raw.iloc[min(idx+1, len(raw)-1)]["timestamp"]
+            lambda idx: raw.iloc[min(idx + 1, len(raw) - 1)]["timestamp"]
         )
         ticker_trades["exit_time"] = ticker_trades["exit_idx"].apply(
-            lambda idx: raw.iloc[min(idx, len(raw)-1)]["timestamp"]
+            lambda idx: raw.iloc[min(idx, len(raw) - 1)]["timestamp"]
         )
         ticker_trades = ticker_trades.dropna(subset=["entry_time", "exit_time"])
 
         proba_t = proba[proba["ticker"] == ticker]
 
-        label = "best" if ticker in BEST_TICKERS else "worst"
-        out_path = PLOTS_DIR / f"trades_{label}_{ticker}.png"
-        plot_ticker_trades(ticker, raw, ticker_trades, proba_t, out_path)
+        out_path = plots_dir / f"trades_{label}_{ticker}.png"
+        plot_ticker_trades(ticker, raw, ticker_trades, proba_t, out_path,
+                           tail_bars=args.tail_bars)
 
-    logger.info("All plots saved → %s", PLOTS_DIR)
+    logger.info("All plots saved → %s", plots_dir)
 
 
 if __name__ == "__main__":
