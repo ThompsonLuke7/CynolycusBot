@@ -20,9 +20,10 @@ import logging
 import queue
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as _time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,8 +52,14 @@ BARS_PER_5M  = 5    # aggregate 5 × 1m bars into one 5m bar
 BARS_PER_30M = 6    # aggregate 6 × 5m bars into one 30m bar
 CONFIRM_MAX_5M = 6  # confirmation window (matches backtest)
 DEFAULT_QTY  = 1
-DTE_MIN_DAYS = 1    # skip expiry on same calendar day (buy at least next day)
-DTE_TARGET   = 7    # target DTE for fresh entries (1-week options)
+
+_ET = ZoneInfo("America/New_York")
+
+# Market hours gate (ET): confirmations and scans only within this window.
+# Exits always run regardless of time.
+_CONFIRM_START = _time(10, 0)   # no entries in first 30 min (matches backtest)
+_CONFIRM_END   = _time(15, 55)  # last 5m bar of regular session (3:55-3:59 ET)
+_SCAN_END_TS   = _time(15, 55)  # skip 30m bar whose last 5m opens at 3:55 (post-close confirm impossible)
 
 # Tickers that may be in the stream but are excluded from entry signals
 _CONTEXT_SET = set(CONTEXT_TICKERS)
@@ -110,13 +117,32 @@ class _ConfirmState:
 # Options contract selection
 # ---------------------------------------------------------------------------
 
-def _next_expiry(ref_date: date, dte_target: int = DTE_TARGET) -> date:
-    """Return expiration date that is at least DTE_MIN_DAYS out and closest to dte_target."""
-    candidate = ref_date + timedelta(days=max(DTE_MIN_DAYS, dte_target))
-    # Roll forward to next Friday if not already a business day
-    while candidate.weekday() >= 5:
-        candidate += timedelta(days=1)
-    return candidate
+_MIN_DTE_DAYS = 7    # skip monthly if fewer than 7 calendar days away
+_DELTA_LO    = 0.20  # minimum |delta| for OTM contract selection
+_DELTA_HI    = 0.40  # maximum |delta| — stays slightly OTM
+_DELTA_TGT   = 0.30  # preferred |delta| within the range
+
+def _next_monthly_expiry(ref_date: date) -> date:
+    """Return the next monthly options expiry (third Friday of the month).
+
+    Skips to the following month if the nearest monthly expiry is within
+    _MIN_DTE_DAYS (e.g. on May 11 with May 15 expiry only 4 days away,
+    returns June 19 instead).
+    """
+    def _third_friday(year: int, month: int) -> date:
+        first = date(year, month, 1)
+        days_to_fri = (4 - first.weekday()) % 7   # weekday 4 = Friday
+        return first + timedelta(days=days_to_fri) + timedelta(weeks=2)
+
+    year, month = ref_date.year, ref_date.month
+    for _ in range(13):
+        exp = _third_friday(year, month)
+        if (exp - ref_date).days >= _MIN_DTE_DAYS:
+            return exp
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    raise ValueError(f"Could not determine monthly expiry after {ref_date}")
 
 
 def _select_contract(
@@ -127,36 +153,73 @@ def _select_contract(
     ref_date: date,
 ) -> str | None:
     """
-    Select ATM option contract for the given direction.
+    Select a slightly-OTM option contract targeting delta 0.2–0.4 (|delta| ~0.30).
+
+    Strategy:
+      1. Fetch option chain snapshots (includes Greeks) for the next monthly expiry.
+      2. Filter to contracts where |delta| is in [_DELTA_LO, _DELTA_HI].
+      3. Pick the contract closest to _DELTA_TGT.
+      4. If Greeks are unavailable (pre-market, API gap), fall back to nearest ATM strike.
+
     Returns OCC-format symbol string, or None if selection fails.
     """
     cp = "call" if direction == 1 else "put"
-    expiry = _next_expiry(ref_date)
+    expiry = _next_monthly_expiry(ref_date)
+    expiry_str = expiry.strftime("%Y-%m-%d")
 
-    # Search ±5% around ATM
-    strike_lo = round(current_price * 0.95, 0)
-    strike_hi = round(current_price * 1.05, 0)
-
+    # --- Primary path: delta-based selection via snapshots ---
     try:
+        snapshots = client.get_option_snapshots(
+            ticker,
+            expiration_date=expiry_str,
+            type=cp,
+        )
+        if snapshots:
+            candidates = []
+            for occ_sym, snap in snapshots.items():
+                greeks = snap.get("greeks") or {}
+                raw_delta = greeks.get("delta")
+                if raw_delta is None:
+                    continue
+                abs_delta = abs(float(raw_delta))
+                candidates.append((occ_sym, abs_delta))
+
+            if candidates:
+                # Prefer contracts in [_DELTA_LO, _DELTA_HI], else take closest overall
+                in_range = [(s, d) for s, d in candidates if _DELTA_LO <= d <= _DELTA_HI]
+                pool = in_range if in_range else candidates
+                best_sym, best_d = min(pool, key=lambda x: abs(x[1] - _DELTA_TGT))
+                logger.info(
+                    "[%s] selected %s %s (|delta|=%.3f, exp=%s)",
+                    ticker, cp, best_sym, best_d, expiry_str,
+                )
+                return best_sym
+    except Exception as exc:
+        logger.warning("[%s] snapshot delta selection failed (%s); falling back to ATM.", ticker, exc)
+
+    # --- Fallback: nearest ATM strike via contracts list ---
+    try:
+        strike_lo = round(current_price * 0.90, 0)
+        strike_hi = round(current_price * 1.10, 0)
         resp = client.get_option_contracts(
             underlying_symbol=ticker,
-            expiration_date=expiry.strftime("%Y-%m-%d"),
+            expiration_date=expiry_str,
             type=cp,
             strike_price_gte=int(strike_lo),
             strike_price_lte=int(strike_hi),
         )
-        contracts = resp.get("option_contracts") or resp if isinstance(resp, list) else []
+        contracts = resp.get("option_contracts") or (resp if isinstance(resp, list) else [])
     except Exception as exc:
         logger.error("[%s] get_option_contracts failed: %s", ticker, exc)
         return None
 
     if not contracts:
         logger.warning("[%s] no %s contracts found near ATM (%.2f) exp %s",
-                       ticker, cp, current_price, expiry)
+                       ticker, cp, current_price, expiry_str)
         return None
 
-    # Pick the strike closest to current price
     best = min(contracts, key=lambda c: abs(float(c.get("strike_price", 0)) - current_price))
+    logger.info("[%s] ATM fallback: selected %s %s (exp=%s)", ticker, cp, best.get("symbol"), expiry_str)
     return str(best.get("symbol", ""))
 
 
@@ -172,6 +235,7 @@ class SwingLiveRunner:
         max_entries_per_bar: int = 5,
         event_sink: EventSink | None = None,
         feature_builder: LiveSwingFeatureBuilder | None = None,
+        bar_queue: queue.Queue | None = None,
     ) -> None:
         self._dry_run = dry_run
         self._env_file = env_file
@@ -198,10 +262,17 @@ class SwingLiveRunner:
         self._acc_5m:  dict[str, _BarAccumulator] = defaultdict(lambda: _BarAccumulator(BARS_PER_5M))
         self._acc_30m: dict[str, _BarAccumulator] = defaultdict(lambda: _BarAccumulator(BARS_PER_30M))
 
+        # Rolling 5m bar history per ticker (60 bars ≈ 5h of market data).
+        # Used to seed position charts with pre-entry context.
+        self._buf_5m: dict[str, deque] = defaultdict(lambda: deque(maxlen=60))
+
         # Confirmation watchers: ticker → _ConfirmState
         self._confirming: dict[str, _ConfirmState] = {}
 
-        self._bar_queue: queue.Queue = queue.Queue(maxsize=10_000)
+        # If an external queue is provided (e.g. from SharedBarStream) use it directly
+        # and skip creating / managing an AlpacaBarStreamer in start().
+        self._bar_queue: queue.Queue = bar_queue if bar_queue is not None else queue.Queue(maxsize=10_000)
+        self._external_queue: bool = bar_queue is not None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._streamer: AlpacaBarStreamer | None = None
@@ -337,29 +408,38 @@ class SwingLiveRunner:
             self._emit("stopped", {"reason": "stop requested during warmup"})
             return
 
-        streamer = AlpacaBarStreamer(
-            symbols=self._stream_symbols,
-            env_file=self._env_file,
-            queue=self._bar_queue,
-        )
-        streamer.start_in_thread(daemon=True)
-        self._streamer = streamer
-        logger.info("WebSocket stream started for %d symbols.", len(self._stream_symbols))
-        self._emit("stream_started", {"symbols": len(self._stream_symbols)})
-
-        try:
-            self._process_loop()
-        finally:
+        if self._external_queue:
+            # Bar queue is owned by the caller (e.g. SharedBarStream in combined_server).
+            # We don't create or stop the Alpaca streamer here.
+            logger.info("Using shared bar stream for %d symbols.", len(self._stream_symbols))
+            self._emit("stream_started", {"symbols": len(self._stream_symbols), "shared": True})
             try:
-                streamer.stop()
-            except Exception as exc:
-                logger.warning("streamer.stop() failed: %s", exc)
+                self._process_loop()
+            finally:
+                self._emit("stopped", {"reason": "loop_exit"})
+        else:
+            streamer = AlpacaBarStreamer(
+                symbols=self._stream_symbols,
+                env_file=self._env_file,
+                queue=self._bar_queue,
+            )
+            streamer.start_in_thread(daemon=True)
+            self._streamer = streamer
+            logger.info("WebSocket stream started for %d symbols.", len(self._stream_symbols))
+            self._emit("stream_started", {"symbols": len(self._stream_symbols), "shared": False})
             try:
-                streamer.join(timeout=5.0)
-            except Exception:
-                pass
-            self._streamer = None
-            self._emit("stopped", {"reason": "loop_exit"})
+                self._process_loop()
+            finally:
+                try:
+                    streamer.stop()
+                except Exception as exc:
+                    logger.warning("streamer.stop() failed: %s", exc)
+                try:
+                    streamer.join(timeout=5.0)
+                except Exception:
+                    pass
+                self._streamer = None
+                self._emit("stopped", {"reason": "loop_exit"})
 
     def stop(self) -> None:
         """Signal the runner to stop. Safe to call from any thread."""
@@ -417,18 +497,26 @@ class SwingLiveRunner:
             self._on_5m_bar(ticker, bar5)
 
     def _on_5m_bar(self, ticker: str, bar5: dict) -> None:
+        # Maintain rolling 5m history for chart seeding and position_bar_5m events
+        self._buf_5m[ticker].append(bar5)
+
         # Update position manager — exit checks run on underlying 5m bars
         self._pos_mgr.on_5m_bar(ticker, bar5)
 
-        # Check first-30-min entry filter before confirmation
+        # Push live bar to dashboard if a position is open for this ticker
+        pos = self._pos_mgr.get_position(ticker)
+        if pos is not None:
+            self._emit("position_bar_5m", {
+                "ticker": ticker,
+                "bar": _bar_to_event(bar5),
+                "position": pos.to_chart_dict(),
+            })
+
+        # Market hours gate for confirmations and new entries.
+        # Exits (handled above by pos_mgr.on_5m_bar) always run regardless of time.
         ts = bar5["timestamp"]
-        if hasattr(ts, "astimezone"):
-            ts_et = ts.astimezone(__import__("zoneinfo").ZoneInfo("America/New_York"))
-            if ts_et.hour == 9 and ts_et.minute < 60:  # 9:30–9:55 ET
-                pass  # note: don't confirm during first 30 min
-            else:
-                self._check_confirmation(ticker, bar5)
-        else:
+        bar_et_t = ts.astimezone(_ET).time() if hasattr(ts, "astimezone") else None
+        if bar_et_t is None or _CONFIRM_START <= bar_et_t <= _CONFIRM_END:
             self._check_confirmation(ticker, bar5)
 
         # Aggregate 5m → 30m
@@ -442,6 +530,13 @@ class SwingLiveRunner:
         # Update context tickers silently; only scan universe tickers
         if ticker in _CONTEXT_SET and ticker not in self._universe:
             return
+
+        # Market hours gate: the 30m bar whose last 5m bar opens at 3:55 closes right
+        # at the market end — no 5m bars remain to confirm, so skip scanning.
+        ts30 = bar30.get("timestamp")
+        if hasattr(ts30, "astimezone"):
+            if ts30.astimezone(_ET).time() >= _SCAN_END_TS:
+                return
 
         # Run scanner once per 30m close for this ticker only
         # (Full cross-ticker scan triggered by a dedicated timer; per-ticker scan here
@@ -587,17 +682,48 @@ class SwingLiveRunner:
                 "entry_price": entry_price,
             })
 
+        entry_time = datetime.now(timezone.utc)
         pos = SwingPosition(
             ticker=ticker,
             direction=sig.direction,
             entry_price=entry_price,
-            entry_time=datetime.now(timezone.utc),
+            entry_time=entry_time,
             atr_at_entry=sig.atr,
             option_symbol=option_symbol,
             qty=qty,
             config=sig.config,
         )
         self._pos_mgr.open_position(pos)
+
+        # Attach pre-entry 5m bar history so the chart can show context before the entry
+        pre_bars = [_bar_to_event(b) for b in self._buf_5m.get(ticker, [])]
+        self._emit("position_chart_seed", {
+            "ticker": ticker,
+            "direction": int(sig.direction),
+            "entry_price": float(entry_price),
+            "entry_time": int(entry_time.timestamp()),
+            "sl_price": float(pos.sl_price) if pos.sl_price is not None else None,
+            "pre_entry_bars": pre_bars,
+        })
+
+
+def _bar_to_event(bar: dict) -> dict:
+    """Reduce a bar dict to a JSON-safe form suitable for Lightweight Charts."""
+    ts = bar.get("timestamp")
+    if isinstance(ts, datetime):
+        epoch_sec = int(ts.timestamp())
+    else:
+        try:
+            epoch_sec = int(datetime.fromisoformat(str(ts)).timestamp())
+        except Exception:
+            epoch_sec = 0
+    return {
+        "time": epoch_sec,
+        "open":  float(bar.get("open",  float("nan"))),
+        "high":  float(bar.get("high",  float("nan"))),
+        "low":   float(bar.get("low",   float("nan"))),
+        "close": float(bar.get("close", float("nan"))),
+    }
 
 
 def _safe_response(resp: Any) -> Any:

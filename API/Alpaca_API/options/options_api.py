@@ -115,6 +115,25 @@ class AlpacaOptionsClient:
         url = f"{self._trading_base}/v2/options/contracts"
         return self._request("GET", url, params=params)
 
+    def get_option_snapshots(self, underlying_symbol: str, **params: Any) -> dict:
+        """
+        GET /v1beta1/options/snapshots/{underlying_symbol}
+
+        Returns a dict keyed by OCC symbol, each value containing:
+          greeks: {delta, gamma, theta, vega, rho}
+          impliedVolatility, latestQuote, latestTrade
+
+        Example params:
+          expiration_date="2026-06-20", type="call",
+          strike_price_gte=500, strike_price_lte=560
+        """
+        sym = underlying_symbol.strip().upper()
+        url = f"{self._data_base}/v1beta1/options/snapshots/{sym}"
+        result = self._request("GET", url, params=params)
+        if isinstance(result, dict):
+            return result.get("snapshots", result)
+        return {}
+
     def get_positions(self, **params: Any) -> Any:
         """
         GET /v2/positions

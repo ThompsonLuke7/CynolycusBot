@@ -103,6 +103,12 @@ class OptionOrderPolicyConfig:
     meta_intrabar_long_setup_threshold: float | None = None
     meta_intrabar_short_setup_threshold: float | None = None
     meta_intrabar_opposite_dominance_delta: float = 0.0
+    scalp_mode_enabled: bool = False
+    scalp_long_setup_threshold: float = 0.30
+    scalp_short_setup_threshold: float = 0.55
+    scalp_setup_max_bars: int = 1
+    scalp_min_signal_range_atr: float = 0.35
+    scalp_require_reversal_close: bool = True
     meta_countertrend_veto_enabled: bool = False
     meta_countertrend_min_prob: float = 0.65
     meta_neutral_long_min_prob: float = 0.50
@@ -126,18 +132,18 @@ class OptionOrderPolicyConfig:
     option_exit_stop_loss_pct: float = 1.0
     option_exit_profit_lock_arm_pct: float = 2.0
     option_exit_profit_lock_floor_pct: float = 0.25
-    option_exit_trailing_arm_pct: float = 2.0
-    option_exit_trailing_giveback_pct: float = 0.25
+    option_exit_trailing_arm_pct: float = 1.0
+    option_exit_trailing_giveback_pct: float = 0.20
     option_exit_no_progress_minutes: int = 0
     option_exit_no_progress_mfe_pct: float = 0.0
-    option_exit_time_decay_minutes: int = 80
-    option_exit_time_decay_progress_pct: float = 1.0
+    option_exit_time_decay_minutes: int = 60
+    option_exit_time_decay_progress_pct: float = 0.5
     option_exit_opposite_prob: float = 0.40
-    option_exit_opposite_prob_long: float | None = None
-    option_exit_opposite_prob_short: float | None = None
+    option_exit_opposite_prob_long: float | None = 0.40
+    option_exit_opposite_prob_short: float | None = 0.75
     option_exit_opposite_profit_pct: float = 0.0
     option_exit_quote_mode: str = "bid"
-    option_new_entry_cutoff_hhmm: str | None = "16:00"
+    option_new_entry_cutoff_hhmm: str | None = "15:00"
     max_live_entry_lag_sec: float = 0.0
     use_wall_clock_entry_cutoff: bool = False
     expiring_position_exit_hhmm: str | None = "15:40"
@@ -618,6 +624,11 @@ class OptionOrderPolicy:
         if policy == "option_adaptive_trail_v1":
             best_profit_pct = (best_price - entry_price) / entry_price
             current_profit_pct = (float(current_price) - entry_price) / entry_price
+            stop_loss_pct = max(0.0, float(self.cfg.option_exit_stop_loss_pct))
+            if 0.0 < stop_loss_pct < 1.0 and current_profit_pct <= -stop_loss_pct:
+                self._meta_side_reason[side_key] = "option_stop_loss"
+                return True
+
             trail_arm = max(0.0, float(self.cfg.option_exit_trailing_arm_pct))
             trail_giveback = max(0.0, float(self.cfg.option_exit_trailing_giveback_pct))
             peak_profit = max(0.0, best_price - entry_price)
@@ -1346,10 +1357,18 @@ class OptionOrderPolicy:
             "break_prev_stop_1m_body_and_close",
         }
 
-    def _intrabar_intent_expires_at(self, *, setup_ts: datetime | None) -> datetime | None:
+    def _intrabar_intent_expires_at(
+        self,
+        *,
+        setup_ts: datetime | None,
+        max_bars_override: int | None = None,
+    ) -> datetime | None:
         if setup_ts is None:
             return None
-        max_bars = max(1, int(self.cfg.meta_intrabar_setup_max_bars))
+        max_bars = max(
+            1,
+            int(self.cfg.meta_intrabar_setup_max_bars if max_bars_override is None else max_bars_override),
+        )
         bar_minutes = max(1, int(self.cfg.meta_intrabar_setup_bar_minutes))
         # Project 10m bars are timestamped by bar start. A setup from bar i is
         # actionable on the next max_bars bars, so expiration is i+(max_bars+1).
@@ -1638,6 +1657,55 @@ class OptionOrderPolicy:
             return bool(trend_ok and shallow and math.isfinite(low))
         return False
 
+    def _scalp_entry_valid(self, *, closed_bar: dict[str, Any], side: str) -> bool:
+        if not bool(self.cfg.scalp_mode_enabled):
+            return False
+        side_key = str(side).strip().lower()
+        if side_key not in {"long", "short"}:
+            return False
+
+        prob = _as_float(closed_bar.get(f"p_enter_{side_key}"))
+        threshold = (
+            max(0.0, float(self.cfg.scalp_long_setup_threshold))
+            if side_key == "long"
+            else max(0.0, float(self.cfg.scalp_short_setup_threshold))
+        )
+        if not (math.isfinite(prob) and prob >= threshold):
+            return False
+
+        swing_threshold = self._effective_intrabar_setup_threshold(closed_bar=closed_bar, side=side_key)
+        if math.isfinite(swing_threshold) and prob >= swing_threshold:
+            return False
+
+        high = _as_float(closed_bar.get("high", closed_bar.get("signal_high")))
+        low = _as_float(closed_bar.get("low", closed_bar.get("signal_low")))
+        open_ = _as_float(closed_bar.get("open", closed_bar.get("signal_open")))
+        close = _as_float(closed_bar.get("close", closed_bar.get("signal_close")))
+        atr = _as_float(closed_bar.get("signal_atr"))
+        if not math.isfinite(atr) or atr <= 0.0:
+            atr = self._compute_atr()
+        min_range_atr = max(0.0, float(self.cfg.scalp_min_signal_range_atr))
+        if min_range_atr > 0.0:
+            if not (math.isfinite(high) and math.isfinite(low) and math.isfinite(atr) and atr > 0.0):
+                return False
+            if (high - low) < min_range_atr * atr:
+                return False
+
+        if bool(self.cfg.scalp_require_reversal_close):
+            if not (math.isfinite(high) and math.isfinite(low) and math.isfinite(close)):
+                return False
+            mid = (high + low) / 2.0
+            if side_key == "long" and close < mid:
+                return False
+            if side_key == "short" and close > mid:
+                return False
+            if math.isfinite(open_):
+                if side_key == "long" and close <= open_:
+                    return False
+                if side_key == "short" and close >= open_:
+                    return False
+        return True
+
     def _refresh_intrabar_entry_intents(
         self,
         *,
@@ -1652,13 +1720,23 @@ class OptionOrderPolicy:
         if not math.isfinite(signal_low):
             signal_low = _as_float(closed_bar.get("signal_low"))
         setup_ts = self._to_local_ts(closed_bar.get("timestamp"))
-        expires_at = self._intrabar_intent_expires_at(setup_ts=setup_ts)
         continuation_valid = {
             "long": self._continuation_entry_valid(closed_bar=closed_bar, side="long"),
             "short": self._continuation_entry_valid(closed_bar=closed_bar, side="short"),
         }
+        scalp_valid = {
+            "long": self._scalp_entry_valid(closed_bar=closed_bar, side="long"),
+            "short": self._scalp_entry_valid(closed_bar=closed_bar, side="short"),
+        }
         for side_key, valid in (("long", long_valid), ("short", short_valid)):
-            valid = bool(valid or continuation_valid.get(side_key, False))
+            swing_valid = bool(valid)
+            continuation_side_valid = bool(continuation_valid.get(side_key, False))
+            scalp_side_valid = bool(
+                scalp_valid.get(side_key, False)
+                and not swing_valid
+                and not continuation_side_valid
+            )
+            valid = bool(swing_valid or continuation_side_valid or scalp_side_valid)
             current_qty = self._long_contracts if side_key == "long" else self._short_contracts
             if current_qty > 0:
                 self._clear_intrabar_entry_intent(side=side_key, reason="already_in_position")
@@ -1673,10 +1751,30 @@ class OptionOrderPolicy:
                     float(signal_high) if side_key == "long" else float(signal_low)
                 )
                 self._meta_intrabar_entry_setup_ts[side_key] = setup_ts
+                expires_at = self._intrabar_intent_expires_at(
+                    setup_ts=setup_ts,
+                    max_bars_override=(
+                        int(self.cfg.scalp_setup_max_bars)
+                        if scalp_side_valid
+                        else None
+                    ),
+                )
                 self._meta_intrabar_entry_expires_at[side_key] = expires_at
-                entry_kind = "continuation" if continuation_valid.get(side_key, False) and not (long_valid if side_key == "long" else short_valid) else "swing"
+                if scalp_side_valid:
+                    entry_kind = "scalp"
+                elif continuation_side_valid and not swing_valid:
+                    entry_kind = "continuation"
+                else:
+                    entry_kind = "swing"
                 prob = _as_float(closed_bar.get(f"p_enter_{side_key}"))
-                threshold = self._effective_intrabar_setup_threshold(closed_bar=closed_bar, side=side_key)
+                if entry_kind == "scalp":
+                    threshold = (
+                        max(0.0, float(self.cfg.scalp_long_setup_threshold))
+                        if side_key == "long"
+                        else max(0.0, float(self.cfg.scalp_short_setup_threshold))
+                    )
+                else:
+                    threshold = self._effective_intrabar_setup_threshold(closed_bar=closed_bar, side=side_key)
                 source_side = side_key
                 if entry_kind == "continuation":
                     source_side = "short_failed" if side_key == "long" else "long_failed"
@@ -1814,6 +1912,47 @@ class OptionOrderPolicy:
             math.isfinite(long_thr)
             and math.isfinite(short_thr)
         )
+
+    def _missed_trade_diagnostics(self) -> dict[str, Any]:
+        snapshot = self._latest_meta_side_snapshot or {}
+        out: dict[str, Any] = {}
+        for side_key, opposite_key in (("long", "short"), ("short", "long")):
+            prob = _as_float(snapshot.get(f"p_enter_{side_key}"))
+            opp_prob = _as_float(snapshot.get(f"p_enter_{opposite_key}"))
+            threshold = _as_float(snapshot.get(f"thr_enter_{side_key}"))
+            close = _as_float(snapshot.get("signal_close"))
+            high = _as_float(snapshot.get("signal_high"))
+            low = _as_float(snapshot.get("signal_low"))
+            ref = _as_float(self._meta_intrabar_entry_ref.get(side_key))
+            gap = threshold - prob if math.isfinite(prob) and math.isfinite(threshold) else float("nan")
+            near_miss = bool(math.isfinite(gap) and 0.0 < gap <= 0.10)
+            below_ref = bool(math.isfinite(close) and math.isfinite(ref) and close < ref)
+            above_ref = bool(math.isfinite(close) and math.isfinite(ref) and close > ref)
+            if side_key == "long":
+                ref_state = "above_ref" if above_ref else ("below_ref" if below_ref else "no_ref")
+                last_range_ok = bool(math.isfinite(high) and math.isfinite(ref) and high >= ref)
+            else:
+                ref_state = "below_ref" if below_ref else ("above_ref" if above_ref else "no_ref")
+                last_range_ok = bool(math.isfinite(low) and math.isfinite(ref) and low <= ref)
+            out[side_key] = {
+                "prob": float(prob) if math.isfinite(prob) else None,
+                "threshold": float(threshold) if math.isfinite(threshold) else None,
+                "gap_to_threshold": float(gap) if math.isfinite(gap) else None,
+                "near_threshold": near_miss,
+                "opposite_prob": float(opp_prob) if math.isfinite(opp_prob) else None,
+                "opposite_suppressed_015": bool(math.isfinite(opp_prob) and opp_prob <= 0.15),
+                "intent_active": bool(self._meta_intrabar_entry_intent_active.get(side_key, False)),
+                "entry_ref": float(ref) if math.isfinite(ref) else None,
+                "last_bar_touched_ref": last_range_ok,
+                "close_vs_ref": ref_state,
+                "reason": self._meta_side_reason.get(side_key),
+                "expires_at": (
+                    self._meta_intrabar_entry_expires_at[side_key].isoformat()
+                    if isinstance(self._meta_intrabar_entry_expires_at.get(side_key), datetime)
+                    else None
+                ),
+            }
+        return out
 
     def _smooth_action(self, action: float) -> float:
         alpha = min(max(float(self.cfg.ema_alpha), 0.0), 0.9999)
@@ -2642,6 +2781,12 @@ class OptionOrderPolicy:
                 else None
             ),
             "meta_intrabar_setup_max_bars": int(self.cfg.meta_intrabar_setup_max_bars),
+            "scalp_mode_enabled": bool(self.cfg.scalp_mode_enabled),
+            "scalp_long_setup_threshold": float(self.cfg.scalp_long_setup_threshold),
+            "scalp_short_setup_threshold": float(self.cfg.scalp_short_setup_threshold),
+            "scalp_setup_max_bars": int(self.cfg.scalp_setup_max_bars),
+            "scalp_min_signal_range_atr": float(self.cfg.scalp_min_signal_range_atr),
+            "scalp_require_reversal_close": bool(self.cfg.scalp_require_reversal_close),
             "long_intrabar_setup_peak_prob": (
                 float(self._meta_side_enter_peak_prob.get("long", float("nan")))
                 if math.isfinite(_as_float(self._meta_side_enter_peak_prob.get("long")))
@@ -2699,6 +2844,7 @@ class OptionOrderPolicy:
             ),
             "entry_lockout_until": self._entry_lockout_until.isoformat() if self._entry_lockout_until else None,
             "entry_lockout_reason": self._entry_lockout_reason,
+            "missed_trade_diagnostics": self._missed_trade_diagnostics(),
         }
 
     def export_runtime_state(self) -> dict[str, Any]:

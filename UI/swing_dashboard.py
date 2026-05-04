@@ -183,6 +183,8 @@ class SwingDashboardStore:
         self._orders: deque[dict] = deque(maxlen=MAX_ORDERS_LOG)
         self._trades: deque[dict] = deque(maxlen=MAX_TRADES_LOG)
         self._warmup: deque[dict] = deque(maxlen=MAX_WARMUP_LOG)
+        # chart seeds keyed by ticker; cleared when position closes
+        self._chart_seeds: dict[str, dict] = {}
 
     def reset_for_session(self, *, max_entries: int, dry_run: bool, env_file: str) -> None:
         with self._lock:
@@ -200,6 +202,7 @@ class SwingDashboardStore:
             self._orders.clear()
             self._trades.clear()
             self._warmup.clear()
+            self._chart_seeds.clear()
 
     # -- mutation helpers (called from runner thread via event sink) ----
 
@@ -246,6 +249,16 @@ class SwingDashboardStore:
         with self._lock:
             self._scans_recent.append(scan)
 
+    def append_chart_seed(self, seed: dict) -> None:
+        with self._lock:
+            ticker = seed.get("ticker")
+            if ticker:
+                self._chart_seeds[ticker] = seed
+
+    def remove_chart_seed(self, ticker: str) -> None:
+        with self._lock:
+            self._chart_seeds.pop(ticker, None)
+
     def append_warmup(self, line: dict) -> None:
         with self._lock:
             self._warmup.append(line)
@@ -267,7 +280,8 @@ class SwingDashboardStore:
                 "events": list(self._events),
                 "orders": list(self._orders),
                 "trades": list(self._trades),
-                "warmup": list(self._warmup)[-30:],  # last 30 lines is enough to seed
+                "warmup": list(self._warmup)[-30:],
+                "chart_seeds": list(self._chart_seeds.values()),
                 "ts": _utc_iso(),
             }
 
@@ -277,10 +291,17 @@ class SwingDashboardStore:
 # ---------------------------------------------------------------------------
 
 class SwingSession:
-    def __init__(self, store: SwingDashboardStore, broker: EventBroker, audit_root: Path) -> None:
+    def __init__(
+        self,
+        store: SwingDashboardStore,
+        broker: EventBroker,
+        audit_root: Path,
+        bar_queue: queue_mod.Queue | None = None,
+    ) -> None:
         self._store = store
         self._broker = broker
         self._audit_root = audit_root
+        self._bar_queue = bar_queue  # None → runner creates its own streamer
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._runner: Any = None  # SwingLiveRunner; lazy-imported
@@ -348,10 +369,16 @@ class SwingSession:
         elif kind in ("order_submitted", "order_failed", "order_dry_run", "entry_skipped"):
             self._store.append_order({"ts": ts, "kind": kind, **payload})
             self._store.append_event(evt)
+        elif kind == "position_chart_seed":
+            # Store chart seeds separately so reconnecting clients can restore charts
+            self._store.append_chart_seed(payload)
+            self._publish(evt)
+            return  # already published — skip the second publish below
         elif kind == "position_opened":
             self._store.append_event(evt)
             self._refresh_runner_state()
         elif kind == "position_closed":
+            self._store.remove_chart_seed(payload.get("ticker", ""))
             self._store.append_trade({"ts": ts, **payload})
             self._store.append_event(evt)
             self._refresh_runner_state()
@@ -434,6 +461,7 @@ class SwingSession:
                 dry_run=dry_run,
                 max_entries_per_bar=max_entries,
                 event_sink=self._on_event,
+                bar_queue=self._bar_queue,
             )
         except Exception as exc:
             err = f"runner_init_failed: {exc}"
@@ -524,10 +552,10 @@ class SwingSession:
 # ---------------------------------------------------------------------------
 
 class SwingDashboardApp:
-    def __init__(self, audit_root: Path) -> None:
+    def __init__(self, audit_root: Path, bar_queue: queue_mod.Queue | None = None) -> None:
         self.store = SwingDashboardStore()
         self.broker = EventBroker()
-        self.session = SwingSession(self.store, self.broker, audit_root)
+        self.session = SwingSession(self.store, self.broker, audit_root, bar_queue=bar_queue)
 
     def snapshot(self) -> dict:
         snap = self.store.snapshot()
@@ -538,8 +566,7 @@ class SwingDashboardApp:
         max_entries = int(payload.get("max_entries", 5) or 5)
         if max_entries < 1:
             max_entries = 1
-        # Dry-run is always ON for now (paper account safety).
-        dry_run = True
+        dry_run = bool(payload.get("dry_run", False))
         env_file = str(payload.get("env_file") or ".env")
         return self.session.start(
             max_entries=max_entries, dry_run=dry_run, env_file=env_file,

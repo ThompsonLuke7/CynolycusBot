@@ -228,6 +228,12 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "meta_intrabar_ref_chase_atr": float(cfg.meta_intrabar_ref_chase_atr),
         "meta_intrabar_long_setup_threshold": cfg.meta_intrabar_long_setup_threshold,
         "meta_intrabar_short_setup_threshold": cfg.meta_intrabar_short_setup_threshold,
+        "scalp_mode_enabled": bool(cfg.scalp_mode_enabled),
+        "scalp_long_setup_threshold": float(cfg.scalp_long_setup_threshold),
+        "scalp_short_setup_threshold": float(cfg.scalp_short_setup_threshold),
+        "scalp_setup_max_bars": int(cfg.scalp_setup_max_bars),
+        "scalp_min_signal_range_atr": float(cfg.scalp_min_signal_range_atr),
+        "scalp_require_reversal_close": bool(cfg.scalp_require_reversal_close),
         "meta_countertrend_veto_enabled": bool(cfg.meta_countertrend_veto_enabled),
         "meta_countertrend_min_prob": float(cfg.meta_countertrend_min_prob),
         "meta_neutral_long_min_prob": float(cfg.meta_neutral_long_min_prob),
@@ -856,6 +862,12 @@ class SessionConfig:
     meta_intrabar_ref_chase_atr: float = 0.50
     meta_intrabar_long_setup_threshold: float | None = 0.35
     meta_intrabar_short_setup_threshold: float | None = 0.65
+    scalp_mode_enabled: bool = False
+    scalp_long_setup_threshold: float = 0.30
+    scalp_short_setup_threshold: float = 0.55
+    scalp_setup_max_bars: int = 1
+    scalp_min_signal_range_atr: float = 0.35
+    scalp_require_reversal_close: bool = True
     meta_countertrend_veto_enabled: bool = False
     meta_countertrend_min_prob: float = 0.65
     meta_neutral_long_min_prob: float = 0.50
@@ -898,12 +910,12 @@ class SessionConfig:
     option_exit_stop_loss_pct: float = 1.0
     option_exit_profit_lock_arm_pct: float = 2.0
     option_exit_profit_lock_floor_pct: float = 0.25
-    option_exit_trailing_arm_pct: float = 2.0
-    option_exit_trailing_giveback_pct: float = 0.25
-    option_exit_no_progress_minutes: int = 0
-    option_exit_no_progress_mfe_pct: float = 0.0
-    option_exit_time_decay_minutes: int = 80
-    option_exit_time_decay_progress_pct: float = 1.0
+    option_exit_trailing_arm_pct: float = 1.0
+    option_exit_trailing_giveback_pct: float = 0.20
+    option_exit_no_progress_minutes: int = 10
+    option_exit_no_progress_mfe_pct: float = 0.05
+    option_exit_time_decay_minutes: int = 60
+    option_exit_time_decay_progress_pct: float = 0.5
     option_exit_opposite_prob: float = 0.40
     option_exit_opposite_prob_long: float | None = 0.40
     option_exit_opposite_prob_short: float | None = 0.75
@@ -1025,6 +1037,18 @@ class SessionConfig:
             meta_intrabar_short_setup_threshold=_coerce_optional_float(
                 payload.get("meta_intrabar_short_setup_threshold", 0.65)
             ),
+            scalp_mode_enabled=_coerce_bool(payload.get("scalp_mode_enabled"), False),
+            scalp_long_setup_threshold=max(
+                0.0, _coerce_float(payload.get("scalp_long_setup_threshold"), 0.30)
+            ),
+            scalp_short_setup_threshold=max(
+                0.0, _coerce_float(payload.get("scalp_short_setup_threshold"), 0.55)
+            ),
+            scalp_setup_max_bars=max(1, _coerce_int(payload.get("scalp_setup_max_bars"), 1)),
+            scalp_min_signal_range_atr=max(
+                0.0, _coerce_float(payload.get("scalp_min_signal_range_atr"), 0.35)
+            ),
+            scalp_require_reversal_close=_coerce_bool(payload.get("scalp_require_reversal_close"), True),
             meta_countertrend_veto_enabled=_coerce_bool(payload.get("meta_countertrend_veto_enabled"), False),
             meta_countertrend_min_prob=_coerce_float(payload.get("meta_countertrend_min_prob"), 0.65),
             meta_neutral_long_min_prob=_coerce_float(payload.get("meta_neutral_long_min_prob"), 0.50),
@@ -1093,27 +1117,27 @@ class SessionConfig:
             ),
             option_exit_trailing_arm_pct=max(
                 0.0,
-                _coerce_float(payload.get("option_exit_trailing_arm_pct"), 2.0),
+                _coerce_float(payload.get("option_exit_trailing_arm_pct"), 1.0),
             ),
             option_exit_trailing_giveback_pct=max(
                 0.0,
-                _coerce_float(payload.get("option_exit_trailing_giveback_pct"), 0.25),
+                _coerce_float(payload.get("option_exit_trailing_giveback_pct"), 0.20),
             ),
             option_exit_no_progress_minutes=max(
                 0,
-                _coerce_int(payload.get("option_exit_no_progress_minutes"), 0),
+                _coerce_int(payload.get("option_exit_no_progress_minutes"), 10),
             ),
             option_exit_no_progress_mfe_pct=max(
                 0.0,
-                _coerce_float(payload.get("option_exit_no_progress_mfe_pct"), 0.0),
+                _coerce_float(payload.get("option_exit_no_progress_mfe_pct"), 0.05),
             ),
             option_exit_time_decay_minutes=max(
                 0,
-                _coerce_int(payload.get("option_exit_time_decay_minutes"), 80),
+                _coerce_int(payload.get("option_exit_time_decay_minutes"), 60),
             ),
             option_exit_time_decay_progress_pct=max(
                 0.0,
-                _coerce_float(payload.get("option_exit_time_decay_progress_pct"), 1.0),
+                _coerce_float(payload.get("option_exit_time_decay_progress_pct"), 0.5),
             ),
             option_exit_opposite_prob=max(
                 0.0,
@@ -1549,9 +1573,17 @@ class DashboardStore:
 
 
 class LiveSession:
-    def __init__(self, store: DashboardStore, broker: EventBroker) -> None:
+    def __init__(
+        self,
+        store: DashboardStore,
+        broker: EventBroker,
+        external_bar_queue: queue_mod.Queue | None = None,
+    ) -> None:
         self._store = store
         self._broker = broker
+        # When set, _run() uses this queue instead of creating an AlpacaBarStreamer.
+        # The caller (combined_server) owns the stream lifecycle.
+        self._external_bar_queue = external_bar_queue
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
@@ -2345,6 +2377,12 @@ class LiveSession:
                     meta_intrabar_ref_chase_atr=float(cfg.meta_intrabar_ref_chase_atr),
                     meta_intrabar_long_setup_threshold=cfg.meta_intrabar_long_setup_threshold,
                     meta_intrabar_short_setup_threshold=cfg.meta_intrabar_short_setup_threshold,
+                    scalp_mode_enabled=bool(cfg.scalp_mode_enabled),
+                    scalp_long_setup_threshold=float(cfg.scalp_long_setup_threshold),
+                    scalp_short_setup_threshold=float(cfg.scalp_short_setup_threshold),
+                    scalp_setup_max_bars=int(cfg.scalp_setup_max_bars),
+                    scalp_min_signal_range_atr=float(cfg.scalp_min_signal_range_atr),
+                    scalp_require_reversal_close=bool(cfg.scalp_require_reversal_close),
                     meta_countertrend_veto_enabled=bool(cfg.meta_countertrend_veto_enabled),
                     meta_countertrend_min_prob=float(cfg.meta_countertrend_min_prob),
                     meta_neutral_long_min_prob=float(cfg.meta_neutral_long_min_prob),
@@ -2875,7 +2913,14 @@ class LiveSession:
                 for symbol in symbols
             }
             feed = lr._parse_feed(cfg.feed)
-            bar_queue: queue_mod.Queue = queue_mod.Queue(maxsize=cfg.queue_size)
+            # Use the shared queue if one was injected at init (combined_server mode),
+            # otherwise create a fresh queue for this session.
+            _using_external_queue = self._external_bar_queue is not None
+            bar_queue: queue_mod.Queue = (
+                self._external_bar_queue
+                if _using_external_queue
+                else queue_mod.Queue(maxsize=cfg.queue_size)
+            )
             precomputed_meta_frame = None
             inference_mode = "none" if cfg.no_agent else str(cfg.inference_mode or "meta").strip().lower()
             live_vix_symbol = "VIXY"
@@ -3187,6 +3232,12 @@ class LiveSession:
                         meta_intrabar_ref_chase_atr=float(cfg.meta_intrabar_ref_chase_atr),
                         meta_intrabar_long_setup_threshold=cfg.meta_intrabar_long_setup_threshold,
                         meta_intrabar_short_setup_threshold=cfg.meta_intrabar_short_setup_threshold,
+                        scalp_mode_enabled=bool(cfg.scalp_mode_enabled),
+                        scalp_long_setup_threshold=float(cfg.scalp_long_setup_threshold),
+                        scalp_short_setup_threshold=float(cfg.scalp_short_setup_threshold),
+                        scalp_setup_max_bars=int(cfg.scalp_setup_max_bars),
+                        scalp_min_signal_range_atr=float(cfg.scalp_min_signal_range_atr),
+                        scalp_require_reversal_close=bool(cfg.scalp_require_reversal_close),
                         meta_countertrend_veto_enabled=bool(cfg.meta_countertrend_veto_enabled),
                         meta_countertrend_min_prob=float(cfg.meta_countertrend_min_prob),
                         meta_neutral_long_min_prob=float(cfg.meta_neutral_long_min_prob),
@@ -4085,17 +4136,21 @@ class LiveSession:
                 if context_symbol not in stream_symbols:
                     stream_symbols.append(context_symbol)
 
-            streamer = AlpacaBarStreamer(
-                symbols=stream_symbols,
-                feed=feed,
-                env_file=cfg.env_file,
-                queue=bar_queue,
-            )
-            with self._lock:
-                self._streamer = streamer
-
-            streamer.start_in_thread()
-            self._emit_status(running=True, message="live stream started (waiting for real-time bars)")
+            if _using_external_queue:
+                # Bar queue is owned by SharedBarStream (combined_server mode).
+                # Don't create a local streamer; bars are already flowing in.
+                self._emit_status(running=True, message="live stream started (shared WebSocket)")
+            else:
+                streamer = AlpacaBarStreamer(
+                    symbols=stream_symbols,
+                    feed=feed,
+                    env_file=cfg.env_file,
+                    queue=bar_queue,
+                )
+                with self._lock:
+                    self._streamer = streamer
+                streamer.start_in_thread()
+                self._emit_status(running=True, message="live stream started (waiting for real-time bars)")
             self._emit(
                 "log",
                 {
@@ -4230,10 +4285,10 @@ class LiveSession:
 
 
 class DashboardApp:
-    def __init__(self) -> None:
+    def __init__(self, bar_queue: queue_mod.Queue | None = None) -> None:
         self.store = DashboardStore(max_bars=900, max_events=400)
         self.broker = EventBroker()
-        self.session = LiveSession(self.store, self.broker)
+        self.session = LiveSession(self.store, self.broker, external_bar_queue=bar_queue)
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         cfg = SessionConfig.from_payload(payload)

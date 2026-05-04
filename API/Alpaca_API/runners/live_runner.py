@@ -488,6 +488,12 @@ def _build_option_order_policy(
     meta_intrabar_ref_chase_atr: float = 0.50,
     meta_intrabar_long_setup_threshold: float | None = None,
     meta_intrabar_short_setup_threshold: float | None = None,
+    scalp_mode_enabled: bool = False,
+    scalp_long_setup_threshold: float = 0.30,
+    scalp_short_setup_threshold: float = 0.55,
+    scalp_setup_max_bars: int = 1,
+    scalp_min_signal_range_atr: float = 0.35,
+    scalp_require_reversal_close: bool = True,
     meta_countertrend_veto_enabled: bool = False,
     meta_countertrend_min_prob: float = 0.65,
     meta_neutral_long_min_prob: float = 0.50,
@@ -519,18 +525,18 @@ def _build_option_order_policy(
     option_exit_stop_loss_pct: float = 1.0,
     option_exit_profit_lock_arm_pct: float = 2.0,
     option_exit_profit_lock_floor_pct: float = 0.25,
-    option_exit_trailing_arm_pct: float = 2.0,
-    option_exit_trailing_giveback_pct: float = 0.25,
+    option_exit_trailing_arm_pct: float = 1.0,
+    option_exit_trailing_giveback_pct: float = 0.20,
     option_exit_no_progress_minutes: int = 0,
     option_exit_no_progress_mfe_pct: float = 0.0,
-    option_exit_time_decay_minutes: int = 80,
-    option_exit_time_decay_progress_pct: float = 1.0,
+    option_exit_time_decay_minutes: int = 60,
+    option_exit_time_decay_progress_pct: float = 0.5,
     option_exit_opposite_prob: float = 0.40,
-    option_exit_opposite_prob_long: float | None = None,
-    option_exit_opposite_prob_short: float | None = None,
+    option_exit_opposite_prob_long: float | None = 0.40,
+    option_exit_opposite_prob_short: float | None = 0.75,
     option_exit_opposite_profit_pct: float = 0.0,
     option_exit_quote_mode: str = "bid",
-    option_new_entry_cutoff_hhmm: str | None = "16:00",
+    option_new_entry_cutoff_hhmm: str | None = "15:00",
     max_live_entry_lag_sec: float = 0.0,
     use_wall_clock_entry_cutoff: bool = False,
 ) -> OptionOrderPolicy:
@@ -568,6 +574,12 @@ def _build_option_order_policy(
         meta_intrabar_ref_chase_atr=float(meta_intrabar_ref_chase_atr),
         meta_intrabar_long_setup_threshold=meta_intrabar_long_setup_threshold,
         meta_intrabar_short_setup_threshold=meta_intrabar_short_setup_threshold,
+        scalp_mode_enabled=bool(scalp_mode_enabled),
+        scalp_long_setup_threshold=float(scalp_long_setup_threshold),
+        scalp_short_setup_threshold=float(scalp_short_setup_threshold),
+        scalp_setup_max_bars=int(scalp_setup_max_bars),
+        scalp_min_signal_range_atr=float(scalp_min_signal_range_atr),
+        scalp_require_reversal_close=bool(scalp_require_reversal_close),
         meta_countertrend_veto_enabled=bool(meta_countertrend_veto_enabled),
         meta_countertrend_min_prob=float(meta_countertrend_min_prob),
         meta_neutral_long_min_prob=float(meta_neutral_long_min_prob),
@@ -1883,7 +1895,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--meta-intrabar-setup-max-bars",
         type=int,
-        default=4,
+        default=3,
         help="Number of subsequent interval bars a setup may remain pending for 1m confirmation.",
     )
     parser.add_argument(
@@ -1897,6 +1909,42 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=0.65,
         help="Optional short setup threshold override used by the intrabar policy.",
+    )
+    parser.add_argument(
+        "--scalp-mode-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the lower-threshold tactical scalp overlay after normal swing setups fail.",
+    )
+    parser.add_argument(
+        "--scalp-long-setup-threshold",
+        type=float,
+        default=0.30,
+        help="Long probability threshold for scalp setups.",
+    )
+    parser.add_argument(
+        "--scalp-short-setup-threshold",
+        type=float,
+        default=0.55,
+        help="Short probability threshold for scalp setups.",
+    )
+    parser.add_argument(
+        "--scalp-setup-max-bars",
+        type=int,
+        default=1,
+        help="Number of subsequent interval bars a scalp setup may remain pending for 1m confirmation.",
+    )
+    parser.add_argument(
+        "--scalp-min-signal-range-atr",
+        type=float,
+        default=0.35,
+        help="Minimum 10m signal-bar range, in ATR, required for a scalp setup.",
+    )
+    parser.add_argument(
+        "--scalp-require-reversal-close",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require the 10m scalp signal bar to close in the trade direction and on the favorable half of its range.",
     )
     parser.add_argument(
         "--prefill-tail",
@@ -1969,7 +2017,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--option-new-entry-cutoff",
-        default="16:00",
+        default="15:00",
         help="Local HH:MM cutoff for fresh option opens; exits remain allowed at/after this time.",
     )
     parser.add_argument(
@@ -1988,49 +2036,73 @@ def _parse_args() -> argparse.Namespace:
         "--option-exit-stop-loss-pct",
         type=float,
         default=1.0,
-        help="Software option-value stop-loss trigger as fractional loss from entry (1.0 effectively disables for long options).",
+        help="Software option-value stop-loss trigger as fractional loss from entry (0.55 = -55%; 1.0 disables for long options).",
     )
     parser.add_argument(
         "--option-exit-profit-lock-arm-pct",
         type=float,
         default=2.0,
-        help="Legacy profit-lock arm threshold, and adaptive trail arm default (+2.0 = +200%).",
+        help="Legacy profit-lock arm threshold for bracket-style exits (+2.0 = +200%).",
     )
     parser.add_argument(
         "--option-exit-profit-lock-floor-pct",
         type=float,
         default=0.25,
-        help="Legacy profit-lock floor threshold, and adaptive trail giveback default (0.25 = 25 premium points).",
+        help="Legacy profit-lock floor threshold for bracket-style exits.",
     )
     parser.add_argument(
         "--option-exit-trailing-arm-pct",
         type=float,
-        default=2.0,
-        help="Adaptive trail arms after this fractional gain over entry (2.0 = +200%).",
+        default=1.0,
+        help="Adaptive trail arms after this fractional gain over entry (1.0 = +100%).",
     )
     parser.add_argument(
         "--option-exit-trailing-giveback-pct",
         type=float,
-        default=0.25,
+        default=0.20,
         help="Adaptive trail exits after this giveback from best option value, as a fraction of entry premium.",
+    )
+    parser.add_argument(
+        "--option-exit-no-progress-minutes",
+        type=int,
+        default=0,
+        help="Adaptive no-progress exit after this many minutes if option MFE stays below the configured threshold.",
+    )
+    parser.add_argument(
+        "--option-exit-no-progress-mfe-pct",
+        type=float,
+        default=0.0,
+        help="Adaptive no-progress MFE threshold as fractional gain over entry (0.05 = +5%).",
     )
     parser.add_argument(
         "--option-exit-time-decay-minutes",
         type=int,
-        default=80,
+        default=60,
         help="Adaptive time-decay exit after this many minutes without a new option-value peak.",
     )
     parser.add_argument(
         "--option-exit-time-decay-progress-pct",
         type=float,
-        default=1.0,
-        help="Adaptive time-decay only applies before this MFE threshold (1.0 = before +100%).",
+        default=0.5,
+        help="Adaptive time-decay only applies before this MFE threshold (0.5 = before +50%).",
     )
     parser.add_argument(
         "--option-exit-opposite-prob",
         type=float,
         default=0.40,
-        help="Adaptive opposite-signal exit threshold.",
+        help="Fallback adaptive opposite-signal exit threshold when a side-specific value is not set.",
+    )
+    parser.add_argument(
+        "--option-exit-opposite-prob-long",
+        type=float,
+        default=0.40,
+        help="Adaptive opposite-signal exit threshold while holding calls.",
+    )
+    parser.add_argument(
+        "--option-exit-opposite-prob-short",
+        type=float,
+        default=0.75,
+        help="Adaptive opposite-signal exit threshold while holding puts.",
     )
     parser.add_argument(
         "--option-exit-quote-mode",
@@ -2257,6 +2329,12 @@ def main() -> None:
                 meta_intrabar_setup_bar_minutes=int(args.interval),
                 meta_intrabar_long_setup_threshold=args.meta_intrabar_long_setup_threshold,
                 meta_intrabar_short_setup_threshold=args.meta_intrabar_short_setup_threshold,
+                scalp_mode_enabled=bool(args.scalp_mode_enabled),
+                scalp_long_setup_threshold=float(args.scalp_long_setup_threshold),
+                scalp_short_setup_threshold=float(args.scalp_short_setup_threshold),
+                scalp_setup_max_bars=int(args.scalp_setup_max_bars),
+                scalp_min_signal_range_atr=float(args.scalp_min_signal_range_atr),
+                scalp_require_reversal_close=bool(args.scalp_require_reversal_close),
                 meta_hard_stop_atr=float(args.meta_hard_stop_atr),
                 meta_trail_activate_atr=float(args.meta_trail_activate_atr),
                 meta_trail_atr=float(args.meta_trail_atr),
@@ -2276,9 +2354,13 @@ def main() -> None:
                 option_exit_profit_lock_floor_pct=float(args.option_exit_profit_lock_floor_pct),
                 option_exit_trailing_arm_pct=float(args.option_exit_trailing_arm_pct),
                 option_exit_trailing_giveback_pct=float(args.option_exit_trailing_giveback_pct),
+                option_exit_no_progress_minutes=int(args.option_exit_no_progress_minutes),
+                option_exit_no_progress_mfe_pct=float(args.option_exit_no_progress_mfe_pct),
                 option_exit_time_decay_minutes=int(args.option_exit_time_decay_minutes),
                 option_exit_time_decay_progress_pct=float(args.option_exit_time_decay_progress_pct),
                 option_exit_opposite_prob=float(args.option_exit_opposite_prob),
+                option_exit_opposite_prob_long=float(args.option_exit_opposite_prob_long),
+                option_exit_opposite_prob_short=float(args.option_exit_opposite_prob_short),
                 option_exit_quote_mode=str(args.option_exit_quote_mode),
                 option_new_entry_cutoff_hhmm=str(args.option_new_entry_cutoff),
             )

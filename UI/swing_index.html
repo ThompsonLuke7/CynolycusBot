@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <title>Multi-Ticker Swing Live</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
     --bg: #0d1117;
@@ -205,9 +206,43 @@
     display: flex; justify-content: space-between;
   }
 
+  #charts-section {
+    padding: 12px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+    gap: 12px;
+  }
+  #charts-section:empty { display: none; }
+  .pos-chart-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .pos-chart-card.closed { border-color: #555; opacity: 0.7; }
+  .pos-chart-head {
+    padding: 6px 12px;
+    background: var(--panel2);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+    font-size: 12px;
+  }
+  .pos-chart-ticker { font-weight: 700; font-size: 14px; }
+  .pos-chart-badge {
+    padding: 1px 7px; border-radius: 8px; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.4px;
+  }
+  .badge-long  { background: #0f3a1f; color: var(--green); }
+  .badge-short { background: #2d1010; color: var(--red);   }
+  .badge-closed{ background: #2a2a30; color: var(--muted); }
+  .pos-chart-pnl { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 12px; }
+  .pos-chart-meta { color: var(--muted); font-size: 11px; }
+  .pos-chart-body { height: 240px; }
+
   @media (max-width: 1200px) {
     main { grid-template-columns: 1fr; }
     .stats { grid-template-columns: repeat(3, 1fr); }
+    #charts-section { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -222,14 +257,15 @@
       <input type="number" id="max-entries" value="5" min="1" max="50" step="1"
              style="width: 60px; padding: 4px 6px;" />
     </label>
-    <label class="tog" title="Dry-run is locked ON for now (paper account only).">
-      <input type="checkbox" id="dry-run" checked disabled /> dry-run
+    <label class="tog" title="Uncheck to submit real option orders via Alpaca paper account.">
+      <input type="checkbox" id="dry-run" checked /> dry-run
     </label>
     <button id="btn-start" class="primary">▶ Run</button>
     <button id="btn-stop"  class="danger" disabled>■ Stop</button>
   </div>
 </header>
 
+<div id="charts-section"></div>
 <main>
   <section class="card full">
     <div class="card-head">
@@ -404,6 +440,193 @@
       return `${hh}:${mm}:${ss}`;
     } catch { return iso; }
   };
+
+  // --------------------------------------------------------------
+  // Position charts (TradingView Lightweight Charts)
+  // --------------------------------------------------------------
+  const posCharts = {};  // ticker → { chart, series, el, seed, closeTimer }
+
+  const LW_THEME = {
+    layout: { background: { color: "#161b22" }, textColor: "#8b949e" },
+    grid: { vertLines: { color: "#1c232c" }, horzLines: { color: "#1c232c" } },
+    timeScale: { borderColor: "#30363d", timeVisible: true, secondsVisible: false },
+    rightPriceScale: { borderColor: "#30363d" },
+  };
+
+  function _dirLabel(d) { return d === 1 ? "LONG" : "SHORT"; }
+  function _dirBadge(d) { return d === 1 ? "badge-long" : "badge-short"; }
+
+  function createPositionChart(seed) {
+    const { ticker, direction, entry_price, entry_time, sl_price, pre_entry_bars } = seed;
+    if (posCharts[ticker]) destroyPositionChart(ticker, false);
+
+    const card = document.createElement("div");
+    card.className = "pos-chart-card";
+    card.id = `chart-card-${ticker}`;
+    card.innerHTML = `
+      <div class="pos-chart-head">
+        <span class="pos-chart-ticker">${ticker}</span>
+        <span class="pos-chart-badge ${_dirBadge(direction)}" id="chart-badge-${ticker}">${_dirLabel(direction)}</span>
+        <span class="pos-chart-meta" id="chart-meta-${ticker}">entry @ ${fmtNum(entry_price)}</span>
+        <span class="pos-chart-pnl" id="chart-pnl-${ticker}">P&amp;L —</span>
+      </div>
+      <div class="pos-chart-body" id="chart-body-${ticker}"></div>`;
+    $("charts-section").appendChild(card);
+
+    const el = card.querySelector(`#chart-body-${ticker}`);
+    const chart = LightweightCharts.createChart(el, {
+      ...LW_THEME,
+      width: el.offsetWidth || 480,
+      height: 240,
+      handleScroll: true,
+      handleScale: true,
+    });
+
+    const upColor   = "#3fb950";
+    const downColor = "#f85149";
+    const series = chart.addCandlestickSeries({
+      upColor, downColor,
+      borderUpColor: upColor, borderDownColor: downColor,
+      wickUpColor: upColor, wickDownColor: downColor,
+    });
+
+    // Pre-entry bars (muted so they stand out from post-entry)
+    const preColor = "#4a5568";
+    const preSeries = chart.addCandlestickSeries({
+      upColor: preColor, downColor: preColor,
+      borderUpColor: preColor, borderDownColor: preColor,
+      wickUpColor: preColor, wickDownColor: preColor,
+    });
+
+    // Seed pre-entry bars
+    if (pre_entry_bars && pre_entry_bars.length) {
+      preSeries.setData(pre_entry_bars.filter(b => b.time < entry_time));
+    }
+
+    // Entry price line
+    series.createPriceLine({
+      price: entry_price,
+      color: direction === 1 ? "#3fb950" : "#f85149",
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: "entry",
+    });
+
+    // SL price line
+    if (sl_price != null) {
+      series.createPriceLine({
+        price: sl_price,
+        color: "#ff4444",
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: "SL",
+      });
+    }
+
+    // Entry time vertical marker via a tiny data point on the post-entry series
+    // (Lightweight Charts v4 doesn't have a native vertical line API, so we use
+    //  a visible marker on the series at the entry bar)
+    series.setMarkers([{
+      time: entry_time,
+      position: direction === 1 ? "belowBar" : "aboveBar",
+      color: direction === 1 ? "#3fb950" : "#f85149",
+      shape: direction === 1 ? "arrowUp" : "arrowDown",
+      text: "entry",
+    }]);
+
+    // Resize observer so chart fills its card when window resizes
+    const ro = new ResizeObserver(() => {
+      chart.resize(el.offsetWidth, 240);
+    });
+    ro.observe(el);
+
+    posCharts[ticker] = { chart, series, preSeries, el, card, seed, ro, trailLine: null };
+  }
+
+  function updatePositionChart(ticker, bar, pos) {
+    const pc = posCharts[ticker];
+    if (!pc) return;
+
+    // Push live bar onto the post-entry series
+    if (bar && bar.time >= (pc.seed.entry_time || 0)) {
+      pc.series.update(bar);
+    }
+
+    // Update trail floor price line
+    if (pos) {
+      const pnlPct = (pos.pnl_pct * 100).toFixed(2);
+      const cls    = pos.pnl_pct >= 0 ? "pos" : "neg";
+      const pnlEl  = document.getElementById(`chart-pnl-${ticker}`);
+      if (pnlEl) pnlEl.innerHTML = `<span class="${cls}">${pnlPct}%</span>`;
+
+      const metaEl = document.getElementById(`chart-meta-${ticker}`);
+      if (metaEl) {
+        const armed = pos.trail_armed ? " · trail armed" : "";
+        metaEl.textContent = `entry @ ${fmtNum(pos.entry_price)}${armed}`;
+      }
+
+      // Update trail floor price line
+      if (pos.trail_armed && pos.trail_floor != null) {
+        if (pc.trailLine) {
+          try { pc.series.removePriceLine(pc.trailLine); } catch {}
+        }
+        pc.trailLine = pc.series.createPriceLine({
+          price: pos.trail_floor,
+          color: "#d29922",
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: "trail",
+        });
+      }
+    }
+  }
+
+  function closePositionChart(ticker, exitPrice, reason) {
+    const pc = posCharts[ticker];
+    if (!pc) return;
+
+    // Add close marker
+    const markers = pc.series.markers() || [];
+    const seed = pc.seed;
+    const closeTime = Math.floor(Date.now() / 1000);
+    pc.series.setMarkers([...markers, {
+      time: closeTime,
+      position: seed.direction === 1 ? "aboveBar" : "belowBar",
+      color: "#d29922",
+      shape: "square",
+      text: `closed (${reason})`,
+    }]);
+
+    // Mark card as closed
+    pc.card.classList.add("closed");
+    const badge = document.getElementById(`chart-badge-${ticker}`);
+    if (badge) { badge.className = "pos-chart-badge badge-closed"; badge.textContent = "CLOSED"; }
+    const pnlEl = document.getElementById(`chart-pnl-${ticker}`);
+
+    // Auto-remove after 20 minutes
+    pc.closeTimer = setTimeout(() => destroyPositionChart(ticker, true), 20 * 60 * 1000);
+  }
+
+  function destroyPositionChart(ticker, removeEl) {
+    const pc = posCharts[ticker];
+    if (!pc) return;
+    if (pc.closeTimer) clearTimeout(pc.closeTimer);
+    if (pc.ro) pc.ro.disconnect();
+    try { pc.chart.remove(); } catch {}
+    if (removeEl && pc.card && pc.card.parentNode) pc.card.parentNode.removeChild(pc.card);
+    delete posCharts[ticker];
+  }
+
+  function seedChartsFromSnapshot(snap) {
+    // Called on initial page load to restore any open-position charts
+    if (!snap.chart_seeds) return;
+    snap.chart_seeds.forEach(seed => {
+      if (!posCharts[seed.ticker]) createPositionChart(seed);
+    });
+  }
 
   // --------------------------------------------------------------
   // Renderers
@@ -721,6 +944,7 @@
     if (snap.status) renderStatus(snap.status, !!snap.session_alive);
     if (snap.positions) renderPositions(snap.positions);
     if (snap.confirming) renderConfirming(snap.confirming);
+    seedChartsFromSnapshot(snap);
     if (snap.scans_recent) {
       scansBuf.length = 0;
       [...snap.scans_recent].reverse().forEach(addScan);
@@ -772,6 +996,14 @@
     }
     if (t === "session_started") {
       currentState.session_alive = true;
+      const pill = $("dryrun-pill");
+      if (evt.payload && evt.payload.dry_run) {
+        pill.textContent = "dry-run · paper";
+        pill.style.color = "";
+      } else {
+        pill.textContent = "live · paper account";
+        pill.style.color = "var(--green)";
+      }
       addEvent(evt);
       fetchState();
       return;
@@ -812,13 +1044,25 @@
       addEvent(evt);
       return;
     }
+    if (t === "position_chart_seed") {
+      createPositionChart(evt.payload || {});
+      return;
+    }
+    if (t === "position_bar_5m") {
+      const p = evt.payload || {};
+      updatePositionChart(p.ticker, p.bar, p.position);
+      return;
+    }
     if (t === "position_closed") {
-      addTrade({ ts: evt.ts, ...(evt.payload || {}) });
+      const p = evt.payload || {};
+      closePositionChart(p.ticker, p.exit_price, p.exit_reason);
+      addTrade({ ts: evt.ts, ...(p) });
       addEvent(evt);
       return;
     }
     if (t === "stream_started" || t === "signal" || t === "confirmation" ||
-        t === "confirmation_expired" || t === "position_opened" || t === "error") {
+        t === "confirmation_expired" || t === "position_opened" || t === "error" ||
+        t === "stream_error") {
       addEvent(evt);
     }
   }
@@ -844,12 +1088,13 @@
   // Buttons
   $("btn-start").addEventListener("click", async () => {
     const max_entries = parseInt($("max-entries").value || "5", 10);
+    const dry_run = $("dry-run").checked;
     $("btn-start").disabled = true;
     try {
       const res = await fetch("/api/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ max_entries, dry_run: true }),
+        body: JSON.stringify({ max_entries, dry_run }),
       });
       const data = await res.json();
       if (!data.ok) {

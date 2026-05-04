@@ -32,8 +32,14 @@ class TickerConfig:
         return p_dir * self.avg_win_pct + (1.0 - p_dir) * self.avg_loss_pct
 
 
-def load_universe(path: Path | str = _DEFAULT_PATH) -> dict[str, TickerConfig]:
-    """Returns {ticker: TickerConfig} for all tradeable tickers."""
+MAX_TIER = 2  # only trade Tier 1 and Tier 2; Tier 3 (negative Sharpe) excluded
+
+
+def load_universe(
+    path: Path | str = _DEFAULT_PATH,
+    max_tier: int = MAX_TIER,
+) -> dict[str, TickerConfig]:
+    """Returns {ticker: TickerConfig} for tickers up to max_tier (inclusive)."""
     data = json.loads(Path(path).read_text())
     return {
         ticker: TickerConfig(
@@ -49,4 +55,5 @@ def load_universe(path: Path | str = _DEFAULT_PATH) -> dict[str, TickerConfig]:
             sharpe=float(v["sharpe"]),
         )
         for ticker, v in data.items()
+        if int(v["tier"]) <= max_tier
     }

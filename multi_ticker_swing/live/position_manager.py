@@ -101,6 +101,14 @@ class SwingPosition:
 
         return None
 
+    def _trail_floor(self) -> float | None:
+        """Price at which the trailing stop would trigger (None if not yet armed)."""
+        if not self.trail_armed:
+            return None
+        peak_profit = self.direction * (self.best_price - self.entry_price)
+        floor_profit = peak_profit * (1.0 - GIVEBACK_PCT)
+        return self.entry_price + self.direction * floor_profit
+
     def to_dict(self) -> dict:
         pnl_pct = self.direction * (self.last_price - self.entry_price) / self.entry_price if self.entry_price else 0.0
         return {
@@ -113,11 +121,25 @@ class SwingPosition:
             "pnl_pct": float(pnl_pct),
             "sl_price": float(self.sl_price) if self.sl_price is not None else None,
             "trail_armed": bool(self.trail_armed),
+            "trail_floor": float(tf) if (tf := self._trail_floor()) is not None else None,
             "bars_held": int(self.bar_count_5m),
             "atr_at_entry": float(self.atr_at_entry) if not _isnan(self.atr_at_entry) else None,
             "option_symbol": str(self.option_symbol),
             "qty": int(self.qty),
             "tier": int(self.config.tier) if self.config else None,
+        }
+
+    def to_chart_dict(self) -> dict:
+        """Compact snapshot for position_bar_5m events (just the overlay fields)."""
+        return {
+            "ticker": self.ticker,
+            "direction": int(self.direction),
+            "entry_price": float(self.entry_price),
+            "entry_time": self.entry_time.astimezone(timezone.utc).isoformat() if self.entry_time else None,
+            "sl_price": float(self.sl_price) if self.sl_price is not None else None,
+            "trail_armed": bool(self.trail_armed),
+            "trail_floor": float(tf) if (tf := self._trail_floor()) is not None else None,
+            "pnl_pct": float(self.direction * (self.last_price - self.entry_price) / self.entry_price) if self.entry_price else 0.0,
         }
 
 
@@ -168,6 +190,9 @@ class SwingPositionManager:
     @property
     def open_tickers(self) -> set[str]:
         return set(self._positions.keys())
+
+    def get_position(self, ticker: str) -> "SwingPosition | None":
+        return self._positions.get(ticker)
 
     def snapshot(self) -> list[dict]:
         return [p.to_dict() for p in self._positions.values()]

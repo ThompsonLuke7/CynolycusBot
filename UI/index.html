@@ -632,6 +632,20 @@
       const usingSwingSetupEntry = [ag.p_enter_long_source, ag.p_enter_short_source].includes("swing_support_single")
         || Number.isFinite(Number(ag.p_swing_setup_long))
         || Number.isFinite(Number(ag.p_swing_setup_short));
+      const diag = pol.missed_trade_diagnostics || {};
+      const diagText = (side) => {
+        const d = diag?.[side] || {};
+        const prob = Number.isFinite(Number(d.prob)) ? Number(d.prob).toFixed(3) : "-";
+        const gap = Number.isFinite(Number(d.gap_to_threshold)) ? Number(d.gap_to_threshold).toFixed(3) : "-";
+        const opp = Number.isFinite(Number(d.opposite_prob)) ? Number(d.opposite_prob).toFixed(3) : "-";
+        const flags = [
+          d.near_threshold ? "near" : "",
+          d.intent_active ? "armed" : "",
+          d.last_bar_touched_ref ? "touched" : "",
+          d.opposite_suppressed_015 ? "opp-low" : ""
+        ].filter(Boolean).join(",");
+        return `p=${prob} gap=${gap} opp=${opp}${flags ? ` ${flags}` : ""}`;
+      };
       const rows = [
           ["Symbol", sym],
           ["Last Action", lastActionText],
@@ -640,6 +654,8 @@
           ["Net Position", netPositionText],
           ["Long Setup / Trigger", pol.long_decision_reason ?? "-"],
           ["Short Setup / Trigger", pol.short_decision_reason ?? "-"],
+          ["Missed Long Diagnostic", diagText("long")],
+          ["Missed Short Diagnostic", diagText("short")],
           ["Long Soft Exit Count", pol.long_soft_exit_count ?? "-"],
           ["Short Soft Exit Count", pol.short_soft_exit_count ?? "-"],
           ["Long 1m Trigger Armed", pol.long_intrabar_intent_active ?? "-"],
@@ -655,6 +671,10 @@
         ["Order trigger long threshold", pol.meta_intrabar_long_setup_threshold ?? "-"],
         ["Order trigger short threshold", pol.meta_intrabar_short_setup_threshold ?? "-"],
         ["Trigger valid bars", pol.meta_intrabar_setup_max_bars ?? "-"],
+        ["Scalp mode", pol.scalp_mode_enabled ? "on" : "off"],
+        ["Scalp long threshold", pol.scalp_long_setup_threshold ?? "-"],
+        ["Scalp short threshold", pol.scalp_short_setup_threshold ?? "-"],
+        ["Scalp valid bars", pol.scalp_setup_max_bars ?? "-"],
         ["Exit long opposite prob", pol.option_exit_opposite_prob_long ?? pol.option_exit_opposite_prob ?? "-"],
         ["Exit short opposite prob", pol.option_exit_opposite_prob_short ?? pol.option_exit_opposite_prob ?? "-"],
         ["Exit quote mode", pol.option_exit_quote_mode ?? "-"],
@@ -2036,6 +2056,12 @@
         meta_intrabar_setup_max_bars: 3,
         meta_intrabar_long_setup_threshold: 0.35,
         meta_intrabar_short_setup_threshold: 0.65,
+        scalp_mode_enabled: false,
+        scalp_long_setup_threshold: 0.30,
+        scalp_short_setup_threshold: 0.55,
+        scalp_setup_max_bars: 1,
+        scalp_min_signal_range_atr: 0.35,
+        scalp_require_reversal_close: true,
         meta_hard_stop_atr: Number(document.getElementById("metaHardStopAtr").value || 0),
         setup_feature_frame_path: document.getElementById("metaBaseFramePath").value,
         prefill_path: document.getElementById("prefillPath").value,
@@ -2058,12 +2084,12 @@
         option_exit_stop_loss_pct: 1.0,
         option_exit_profit_lock_arm_pct: 2.0,
         option_exit_profit_lock_floor_pct: 0.25,
-        option_exit_trailing_arm_pct: 2.0,
-        option_exit_trailing_giveback_pct: 0.25,
-        option_exit_no_progress_minutes: 0,
-        option_exit_no_progress_mfe_pct: 0.0,
-        option_exit_time_decay_minutes: 80,
-        option_exit_time_decay_progress_pct: 1.0,
+        option_exit_trailing_arm_pct: 1.0,
+        option_exit_trailing_giveback_pct: 0.20,
+        option_exit_no_progress_minutes: 10,
+        option_exit_no_progress_mfe_pct: 0.05,
+        option_exit_time_decay_minutes: 60,
+        option_exit_time_decay_progress_pct: 0.5,
         option_exit_opposite_prob: 0.40,
         option_exit_opposite_prob_long: 0.40,
         option_exit_opposite_prob_short: 0.75,

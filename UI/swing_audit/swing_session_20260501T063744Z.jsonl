@@ -652,3 +652,5 @@
 {"type": "warmup_progress", "ts": "2026-05-01T06:37:58.736978+00:00", "payload": {"phase": "done", "ticker": null, "bars": null, "added": null, "ok": null, "error": null, "from": null, "to": null}}
 {"type": "warmup_done", "ts": "2026-05-01T06:37:58.737685+00:00", "payload": {"tickers": 162, "cached": 0, "loaded": 162, "gap_filled": 0, "failed": 0}}
 {"type": "stream_started", "ts": "2026-05-01T06:37:58.738831+00:00", "payload": {"symbols": 162}}
+{"type": "stopped", "ts": "2026-05-01T06:59:40.661797+00:00", "payload": {"reason": "loop_exit"}}
+{"type": "session_ended", "ts": "2026-05-01T06:59:40.663597+00:00", "payload": {}}
