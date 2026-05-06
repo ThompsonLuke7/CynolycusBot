@@ -71,6 +71,8 @@ class SharedBarStream:
 
         symbols_list = sorted(set(symbols))
 
+        feed = DataFeed.IEX
+
         def _on_bar(bar: dict) -> None:
             with self._lock:
                 queues = list(self._queues)
@@ -82,7 +84,7 @@ class SharedBarStream:
 
         streamer = AlpacaBarStreamer(
             symbols=symbols_list,
-            feed=DataFeed.IEX,
+            feed=feed,
             env_file=env_file,
             on_bar=_on_bar,
         )

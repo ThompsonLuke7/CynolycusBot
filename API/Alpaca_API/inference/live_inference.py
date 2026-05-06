@@ -192,7 +192,8 @@ def _default_live_external_parquet_path(
             return str(static_path)
     except Exception:
         pass
-    return str(static_path)
+    # Prefer runtime over static when range-check fails (e.g. malformed timestamp column)
+    return str(runtime_path) if runtime_path.exists() else str(static_path)
 
 
 def _resolve_device(device: str) -> torch.device:
@@ -476,6 +477,11 @@ def build_agent_feature_frame_from_15m(
         vix_refetch_if_low_coverage=False,
         vix_warn_on_missing=True,
         external_warn_on_missing=True,
+        # Use 24h max_lag so yesterday's close can fill forward to today's open bars.
+        # The runtime parquets are updated live, so the gap closes as bars arrive;
+        # overnight the previous session's close is an acceptable regime proxy.
+        external_max_lag="24h",
+        external_ffill_limit=None,
         qqq_parquet_path=_default_live_external_parquet_path("QQQ", df.index),
         iwm_parquet_path=_default_live_external_parquet_path("IWM", df.index),
         tlt_parquet_path=_default_live_external_parquet_path("TLT", df.index),

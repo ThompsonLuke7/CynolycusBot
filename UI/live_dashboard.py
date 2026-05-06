@@ -887,7 +887,7 @@ class SessionConfig:
     meta_hard_stop_atr: float = 0.0
     meta_setup_failure_exit_enabled: bool = True
     meta_setup_failure_buffer_atr: float = 0.10
-    meta_no_progress_exit_enabled: bool = True
+    meta_no_progress_exit_enabled: bool = False
     meta_no_progress_exit_minutes: int = 10
     meta_no_progress_exit_atr: float = 0.20
     meta_trail_activate_atr: float = 2.0
@@ -1076,7 +1076,7 @@ class SessionConfig:
             meta_setup_failure_buffer_atr=max(
                 0.0, _coerce_float(payload.get("meta_setup_failure_buffer_atr"), 0.10)
             ),
-            meta_no_progress_exit_enabled=_coerce_bool(payload.get("meta_no_progress_exit_enabled"), True),
+            meta_no_progress_exit_enabled=_coerce_bool(payload.get("meta_no_progress_exit_enabled"), False),
             meta_no_progress_exit_minutes=max(
                 0, _coerce_int(payload.get("meta_no_progress_exit_minutes"), 10)
             ),

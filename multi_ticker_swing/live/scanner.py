@@ -161,3 +161,25 @@ class SwingScanner:
                 ),
             )
         return top
+
+    def get_directional_p(self, ticker: str) -> tuple[float, float]:
+        """
+        Return (p_long_dir, p_short_dir) for any ticker with fresh features.
+        Used by the SPY regime filter in the runner. Returns (nan, nan) if
+        features are unavailable or model inference fails.
+        """
+        nan = float("nan")
+        feat = self._fb._compute_latest(ticker)
+        if feat is None:
+            return nan, nan
+        avail = [c for c in FEATURE_COLUMNS if c in feat.index]
+        X = feat[avail].values.astype(np.float32).reshape(1, -1)
+        try:
+            proba = self._clf.predict_proba(X)[0]  # [P(short), P(neutral), P(long)]
+        except Exception:
+            return nan, nan
+        p_long, p_short = float(proba[2]), float(proba[0])
+        p_sum = p_long + p_short
+        if p_sum < 1e-8:
+            return nan, nan
+        return p_long / p_sum, p_short / p_sum

@@ -21,8 +21,9 @@ from multi_ticker_swing.live.universe import TickerConfig
 
 logger = logging.getLogger(__name__)
 
-ARM_PCT      = 0.025   # arm trailing stop after 2.5% underlying move (matches backtest)
-GIVEBACK_PCT = 0.25    # exit when 25% of peak gain given back
+# Legacy defaults — individual positions now use config.arm_pct / config.giveback_pct
+_ARM_PCT_DEFAULT      = 0.025
+_GIVEBACK_PCT_DEFAULT = 0.25
 
 EventSink = Callable[[str, dict], None]
 
@@ -79,14 +80,16 @@ class SwingPosition:
         else:
             self.best_price = min(self.best_price, bar_l)
 
-        # 3. Trailing stop
+        # 3. Trailing stop (arm/giveback thresholds are per-tier via TickerConfig)
+        arm_pct      = self.config.arm_pct      if self.config else _ARM_PCT_DEFAULT
+        giveback_pct = self.config.giveback_pct if self.config else _GIVEBACK_PCT_DEFAULT
         move_pct = self.direction * (self.best_price - self.entry_price) / self.entry_price
-        if move_pct >= ARM_PCT:
+        if move_pct >= arm_pct:
             self.trail_armed = True
         if self.trail_armed:
             peak_profit  = self.direction * (self.best_price - self.entry_price)
             cur_profit   = self.direction * (bar_c        - self.entry_price)
-            floor_profit = peak_profit * (1.0 - GIVEBACK_PCT)
+            floor_profit = peak_profit * (1.0 - giveback_pct)
             if cur_profit <= floor_profit:
                 return "trail"
 
@@ -105,8 +108,9 @@ class SwingPosition:
         """Price at which the trailing stop would trigger (None if not yet armed)."""
         if not self.trail_armed:
             return None
+        giveback_pct = self.config.giveback_pct if self.config else _GIVEBACK_PCT_DEFAULT
         peak_profit = self.direction * (self.best_price - self.entry_price)
-        floor_profit = peak_profit * (1.0 - GIVEBACK_PCT)
+        floor_profit = peak_profit * (1.0 - giveback_pct)
         return self.entry_price + self.direction * floor_profit
 
     def to_dict(self) -> dict:

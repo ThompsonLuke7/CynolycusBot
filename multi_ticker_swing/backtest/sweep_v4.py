@@ -95,21 +95,24 @@ def load_proba(split: str = "test") -> pd.DataFrame:
     return df
 
 
-def load_raw_30m(ticker: str) -> pd.DataFrame:
-    df = pd.read_parquet(RAW_30M_DIR / f"{ticker}.parquet")
+def _normalise_raw(df: pd.DataFrame) -> pd.DataFrame:
+    """Promote timestamp index to column if needed, lowercase all column names."""
     df.columns = [c.lower() for c in df.columns]
+    if "timestamp" not in df.columns and df.index.name == "timestamp":
+        df = df.reset_index()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df.sort_values("timestamp").reset_index(drop=True)
+
+
+def load_raw_30m(ticker: str) -> pd.DataFrame:
+    return _normalise_raw(pd.read_parquet(RAW_30M_DIR / f"{ticker}.parquet"))
 
 
 def load_raw_5m(ticker: str) -> pd.DataFrame | None:
     path = RAW_5M_DIR / f"{ticker}.parquet"
     if not path.exists():
         return None
-    df = pd.read_parquet(path)
-    df.columns = [c.lower() for c in df.columns]
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    return df.sort_values("timestamp").reset_index(drop=True)
+    return _normalise_raw(pd.read_parquet(path))
 
 
 def compute_atr(df: pd.DataFrame, period: int = 14) -> np.ndarray:

@@ -26,6 +26,10 @@ class TickerConfig:
     avg_loss_pct: float      # historical avg loss trade return (negative, for EV score)
     profit_factor: float
     sharpe: float
+    # Tier-specific exit params (sweep_v5 results)
+    arm_pct: float = 0.025       # trail arms after this fractional move (Tier1=0.015, Tier2=0.025)
+    giveback_pct: float = 0.25   # trail exits when this fraction of peak gain given back (Tier1=0.20)
+    spy_min: float = 0.0         # minimum SPY directional prob to take a signal (Tier1=0.60, Tier2=off)
 
     def ev_score(self, p_dir: float) -> float:
         """Expected trade PnL at this signal strength."""
@@ -41,10 +45,18 @@ def load_universe(
 ) -> dict[str, TickerConfig]:
     """Returns {ticker: TickerConfig} for tickers up to max_tier (inclusive)."""
     data = json.loads(Path(path).read_text())
-    return {
-        ticker: TickerConfig(
+    result = {}
+    for ticker, v in data.items():
+        tier = int(v["tier"])
+        if tier > max_tier:
+            continue
+        # Tier-specific trail params from sweep_v5: Tier 1 gets tighter trail + SPY filter
+        arm_pct      = 0.015 if tier == 1 else 0.025
+        giveback_pct = 0.20  if tier == 1 else 0.25
+        spy_min      = 0.60  if tier == 1 else 0.0
+        result[ticker] = TickerConfig(
             ticker=ticker,
-            tier=int(v["tier"]),
+            tier=tier,
             entry_threshold=float(v["entry_threshold"]),
             sl_atr=float(v["sl_atr"]),
             np_n_bars=int(v["np_n_bars"]) if v.get("np_n_bars") is not None else None,
@@ -53,7 +65,8 @@ def load_universe(
             avg_loss_pct=float(v["avg_loss_pct"]),
             profit_factor=float(v["profit_factor"]),
             sharpe=float(v["sharpe"]),
+            arm_pct=arm_pct,
+            giveback_pct=giveback_pct,
+            spy_min=spy_min,
         )
-        for ticker, v in data.items()
-        if int(v["tier"]) <= max_tier
-    }
+    return result

@@ -13,10 +13,15 @@ from __future__ import annotations
 
 import logging
 import math
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+# Feature building builds columns incrementally; fragmentation warnings are expected
+# and harmless. Suppress them to keep the live log readable.
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 # Existing custom indicators (reused directly)
 from Features.feature_sets.custom_indicators import (

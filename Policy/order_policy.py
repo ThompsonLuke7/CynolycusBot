@@ -89,7 +89,7 @@ class OptionOrderPolicyConfig:
     meta_stale_retrace_atr: float = 0.25
     meta_setup_failure_exit_enabled: bool = True
     meta_setup_failure_buffer_atr: float = 0.10
-    meta_no_progress_exit_enabled: bool = True
+    meta_no_progress_exit_enabled: bool = False
     meta_no_progress_exit_minutes: int = 10
     meta_no_progress_exit_atr: float = 0.20
     meta_execute_on_interval_close: bool = False

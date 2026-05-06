@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import queue
 import threading
 import time
@@ -60,6 +61,13 @@ _ET = ZoneInfo("America/New_York")
 _CONFIRM_START = _time(10, 0)   # no entries in first 30 min (matches backtest)
 _CONFIRM_END   = _time(15, 55)  # last 5m bar of regular session (3:55-3:59 ET)
 _SCAN_END_TS   = _time(15, 55)  # skip 30m bar whose last 5m opens at 3:55 (post-close confirm impossible)
+
+# Regular trading hours gate for bar aggregation (drop pre/post-market bars entirely)
+_RTH_START = _time(9, 30)
+_RTH_END   = _time(16, 0)
+
+# Stream health: warn if no bar received for this many seconds during RTH
+_STREAM_STALE_SECS = 300
 
 # Tickers that may be in the stream but are excluded from entry signals
 _CONTEXT_SET = set(CONTEXT_TICKERS)
@@ -418,8 +426,10 @@ class SwingLiveRunner:
             finally:
                 self._emit("stopped", {"reason": "loop_exit"})
         else:
+            from alpaca.data.enums import DataFeed
             streamer = AlpacaBarStreamer(
                 symbols=self._stream_symbols,
+                feed=DataFeed.IEX,
                 env_file=self._env_file,
                 queue=self._bar_queue,
             )
@@ -458,10 +468,28 @@ class SwingLiveRunner:
     # ------------------------------------------------------------------
 
     def _process_loop(self) -> None:
+        _last_bar_wall: float = time.monotonic()
+        _stale_warned: bool = False
+
         while not self._stop_event.is_set():
             try:
                 bar = self._bar_queue.get(timeout=2.0)
             except queue.Empty:
+                # Health-check: warn if no bar received for >5 min during RTH
+                now_et = datetime.now(_ET)
+                if _RTH_START <= now_et.time() < _RTH_END:
+                    elapsed = time.monotonic() - _last_bar_wall
+                    if elapsed >= _STREAM_STALE_SECS and not _stale_warned:
+                        _stale_warned = True
+                        logger.warning(
+                            "No bars received for %.0fs during RTH — stream may be stale. "
+                            "Check Alpaca data subscription or restart the server.",
+                            elapsed,
+                        )
+                        self._emit("stream_stale", {
+                            "elapsed_secs": round(elapsed),
+                            "hint": "No bars received during market hours. Stream may have dropped. Restart to reconnect.",
+                        })
                 continue
             if bar.get("_sentinel"):
                 err = bar.get("_error")
@@ -482,6 +510,8 @@ class SwingLiveRunner:
             if not ticker:
                 continue
             self._bar_count_total += 1
+            _last_bar_wall = time.monotonic()
+            _stale_warned = False
             ts = bar.get("timestamp")
             if isinstance(ts, datetime):
                 self._last_bar_ts = ts
@@ -492,6 +522,14 @@ class SwingLiveRunner:
     # ------------------------------------------------------------------
 
     def _on_1m_bar(self, ticker: str, bar: dict) -> None:
+        # Drop pre-market and post-market bars — only aggregate RTH bars so the
+        # 30m accumulator aligns cleanly with the 9:30/10:00/.../15:30 schedule.
+        ts = bar.get("timestamp")
+        if hasattr(ts, "astimezone"):
+            bar_et_t = ts.astimezone(_ET).time()
+            if not (_RTH_START <= bar_et_t < _RTH_END):
+                return
+
         bar5 = self._acc_5m[ticker].push(bar)
         if bar5 is not None:
             self._on_5m_bar(ticker, bar5)
@@ -557,7 +595,22 @@ class SwingLiveRunner:
                     for s in signals
                 ],
             })
+            # SPY regime filter: veto Tier-1 signals where SPY directional prob < spy_min
+            spy_p_long, spy_p_short = None, None
+            filtered_signals = []
             for sig in signals:
+                spy_min = sig.config.spy_min if sig.config else 0.0
+                if spy_min > 0:
+                    if spy_p_long is None:
+                        spy_p_long, spy_p_short = self._scanner.get_directional_p("SPY")
+                    spy_p = spy_p_long if sig.direction == 1 else spy_p_short
+                    if math.isnan(spy_p) or spy_p < spy_min:
+                        logger.info("[%s] VETOED by SPY filter (spy_p=%.3f < min=%.2f)",
+                                    sig.ticker, spy_p if not math.isnan(spy_p) else -1, spy_min)
+                        continue
+                filtered_signals.append(sig)
+
+            for sig in filtered_signals:
                 self._confirming[sig.ticker] = _ConfirmState(signal=sig)
                 logger.info("[%s] SIGNAL  dir=%+d  p=%.3f  ev=%.4f",
                             sig.ticker, sig.direction, sig.p_dir, sig.ev_score)

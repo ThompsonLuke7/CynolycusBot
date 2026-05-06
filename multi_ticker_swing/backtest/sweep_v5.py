@@ -19,10 +19,10 @@ New dimensions tested on top of each baseline:
      giveback_pct ∈ {0.20,  0.25,  0.35 }   (was fixed at 0.25 )
 
 Grid: 4 spy_filter × 3 arm × 3 giveback = 36 combos per tier × 2 tiers = 72 total.
-Run on OOF split to avoid burning the test set during parameter search.
+Run on val split to avoid burning the test set during parameter search.
 
 Run:
-  python multi_ticker_swing/backtest/sweep_v5.py [--split oof] [--out-dir ...]
+  python multi_ticker_swing/backtest/sweep_v5.py [--split val] [--out-dir ...]
 """
 from __future__ import annotations
 
@@ -335,7 +335,7 @@ def run_tier_sweep_v5(
 # Main
 # ---------------------------------------------------------------------------
 
-def run_sweep(split: str = "oof") -> None:
+def run_sweep(split: str = "val") -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     if not V3_PER_TICKER.exists():
@@ -389,11 +389,11 @@ def run_sweep(split: str = "oof") -> None:
 
 
 def main() -> None:
+    global OUT_DIR
     p = argparse.ArgumentParser(description="Sweep v5: SPY regime filter + trail params")
-    p.add_argument("--split",   default="oof", choices=["oof", "test"])
+    p.add_argument("--split",   default="val", choices=["val", "test"])
     p.add_argument("--out-dir", default=str(OUT_DIR))
     args = p.parse_args()
-    global OUT_DIR
     OUT_DIR = Path(args.out_dir)
     run_sweep(split=args.split)
 

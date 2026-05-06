@@ -608,6 +608,8 @@
       const pol = state.policy_state?.[sym] || {};
       const brk = state.broker_state?.[sym] || {};
       const ag = state.agent_state || {};
+      const signalBars = state.bars_15m?.[sym] || [];
+      const latestSignalBar = signalBars.length ? signalBars[signalBars.length - 1] : {};
       const recentActs = (state.action_events || []).filter((x) => x && x.symbol === sym).slice(-120);
       const actionClass = (x) => {
         const cls = Number(x?.action_class);
@@ -633,6 +635,13 @@
         || Number.isFinite(Number(ag.p_swing_setup_long))
         || Number.isFinite(Number(ag.p_swing_setup_short));
       const diag = pol.missed_trade_diagnostics || {};
+      const finiteValue = (...values) => {
+        for (const value of values) {
+          const n = Number(value);
+          if (Number.isFinite(n)) return value;
+        }
+        return null;
+      };
       const diagText = (side) => {
         const d = diag?.[side] || {};
         const prob = Number.isFinite(Number(d.prob)) ? Number(d.prob).toFixed(3) : "-";
@@ -666,8 +675,8 @@
         ["Short Contracts", pol.short_contracts ?? "-"],
         ["ATR", pol.atr ?? "-"],
         ["Entry Price", ag.entry_price ?? "-"],
-        ["p_enter_long", ag.p_enter_long ?? "-"],
-        ["p_enter_short", ag.p_enter_short ?? "-"],
+        ["p_enter_long", finiteValue(diag?.long?.prob, latestSignalBar.p_enter_long, ag.p_enter_long) ?? "-"],
+        ["p_enter_short", finiteValue(diag?.short?.prob, latestSignalBar.p_enter_short, ag.p_enter_short) ?? "-"],
         ["Order trigger long threshold", pol.meta_intrabar_long_setup_threshold ?? "-"],
         ["Order trigger short threshold", pol.meta_intrabar_short_setup_threshold ?? "-"],
         ["Trigger valid bars", pol.meta_intrabar_setup_max_bars ?? "-"],
