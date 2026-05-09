@@ -1,0 +1,15 @@
+# Runtime data caches
+data/raw/
+data/processed/
+data/market_windows/
+data/embeddings/
+
+# Inference and backtest output
+inference/output/
+backtests/results/
+
+# Trained model artifacts and reports
+models/forward_guidance_*.json
+models/forward_guidance_*.txt
+models/feature_importance.csv
+models/eval_metrics.json

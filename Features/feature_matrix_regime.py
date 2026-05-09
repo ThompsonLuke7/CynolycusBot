@@ -86,6 +86,7 @@ META_INTERACTION_FEATURE_COLUMNS = [
 ]
 
 _AGENT_MATRIX_LOGGED_MESSAGES: set[str] = set()
+_SPY_INTRADAY_LOG_PREFIX = "[spy_intraday_trader]"
 
 
 def _agent_matrix_log(message: str, *, once: bool = True) -> None:
@@ -485,12 +486,14 @@ def _load_align_optional_ohlcv(
             source = load_ticker_parquet(ticker)
     except Exception as exc:  # noqa: BLE001
         if warn_on_missing:
-            _agent_matrix_log(f"[agent_matrix] Skipping {label} features: {exc}")
+            _agent_matrix_log(f"{_SPY_INTRADAY_LOG_PREFIX} Skipping {label} features: {exc}")
         return None
 
     if not isinstance(source.index, pd.DatetimeIndex):
         if warn_on_missing:
-            _agent_matrix_log(f"[agent_matrix] Skipping {label} features: source is missing a DatetimeIndex.")
+            _agent_matrix_log(
+                f"{_SPY_INTRADAY_LOG_PREFIX} Skipping {label} features: source is missing a DatetimeIndex."
+            )
         return None
 
     out = source.sort_index().copy()
@@ -529,14 +532,14 @@ def _load_align_optional_ohlcv(
             target_min = target_index.min() if len(target_index) else None
             target_max = target_index.max() if len(target_index) else None
             _agent_matrix_log(
-                "[agent_matrix] Skipping "
+                f"{_SPY_INTRADAY_LOG_PREFIX} Skipping "
                 f"{label} features: no aligned rows after reindex "
                 f"(source={source_min}..{source_max}, target={target_min}..{target_max}, "
                 f"max_lag={max_lag}, ffill_limit={ffill_limit})."
             )
         return None
     if warn_on_missing:
-        _agent_matrix_log(f"[agent_matrix] {label} aligned coverage={coverage:.1%}")
+        _agent_matrix_log(f"{_SPY_INTRADAY_LOG_PREFIX} {label} aligned coverage={coverage:.1%}")
     return aligned
 
 
@@ -969,7 +972,7 @@ def _load_align_vix_ohlcv(
                 explicit_end=cfg.vix_fetch_end,
             )
             _agent_matrix_log(
-                f"[agent_matrix] Fetching intraday VIX ({cfg.vix_ticker}) "
+                f"{_SPY_INTRADAY_LOG_PREFIX} Fetching intraday VIX ({cfg.vix_ticker}) "
                 f"to {preferred_path} because: {reason}"
             )
             fetched = fetch_intraday(
@@ -991,7 +994,7 @@ def _load_align_vix_ohlcv(
         try:
             start = _infer_vix_daily_start(target_index=target_index)
             _agent_matrix_log(
-                f"[agent_matrix] Refreshing daily VIX ({cfg.vix_daily_symbol}) "
+                f"{_SPY_INTRADAY_LOG_PREFIX} Refreshing daily VIX ({cfg.vix_daily_symbol}) "
                 f"from {start} because: {reason}"
             )
             daily_df = retrieve_data(cfg.vix_daily_symbol, start=start, interval="1d")
@@ -1047,7 +1050,7 @@ def _load_align_vix_ohlcv(
         )
         coverage = _coverage_ratio(aligned_intraday)
         if cfg.vix_warn_on_missing:
-            _agent_matrix_log(f"[agent_matrix] Intraday VIX aligned coverage={coverage:.1%}")
+            _agent_matrix_log(f"{_SPY_INTRADAY_LOG_PREFIX} Intraday VIX aligned coverage={coverage:.1%}")
 
         if (
             coverage < required_coverage
@@ -1090,7 +1093,7 @@ def _load_align_vix_ohlcv(
 
     if intraday_error is not None and cfg.vix_warn_on_missing:
         _agent_matrix_log(
-            "[agent_matrix] Intraday VIX unavailable; falling back to daily source. "
+            f"{_SPY_INTRADAY_LOG_PREFIX} Intraday VIX unavailable; falling back to daily source. "
             f"Reason: {intraday_error}"
         )
 
@@ -1127,7 +1130,7 @@ def _load_align_vix_ohlcv(
             daily_coverage = _coverage_ratio(aligned_daily)
             close_valid_daily = aligned_daily["close"].notna().sum() if "close" in aligned_daily.columns else 0
         elif cfg.vix_warn_on_missing:
-            _agent_matrix_log(f"[agent_matrix] Daily VIX refresh failed: {refresh_error}")
+            _agent_matrix_log(f"{_SPY_INTRADAY_LOG_PREFIX} Daily VIX refresh failed: {refresh_error}")
     if close_valid_daily == 0:
         if intraday_error is not None:
             raise RuntimeError(
@@ -1135,9 +1138,9 @@ def _load_align_vix_ohlcv(
             ) from intraday_error
         raise RuntimeError("Daily VIX fallback produced no aligned rows.")
     if cfg.vix_warn_on_missing:
-        _agent_matrix_log(f"[agent_matrix] Daily VIX aligned coverage={daily_coverage:.1%}")
+        _agent_matrix_log(f"{_SPY_INTRADAY_LOG_PREFIX} Daily VIX aligned coverage={daily_coverage:.1%}")
         _agent_matrix_log(
-            f"[agent_matrix] Using daily VIX fallback ({cfg.vix_daily_symbol}) "
+            f"{_SPY_INTRADAY_LOG_PREFIX} Using daily VIX fallback ({cfg.vix_daily_symbol}) "
             f"with max_lag={cfg.vix_daily_max_lag}."
         )
     return aligned_daily
@@ -1329,7 +1332,7 @@ def build_agent_feature_matrix(
             df = _add_vix_feature_suite(df, vix_ohlcv=vix_ohlcv)
         except Exception as exc:
             if cfg.vix_warn_on_missing:
-                _agent_matrix_log(f"[agent_matrix] VIX feature suite unavailable: {exc}")
+                _agent_matrix_log(f"{_SPY_INTRADAY_LOG_PREFIX} VIX feature suite unavailable: {exc}")
             df = _ensure_vix_feature_cols(df)
 
     df = _add_meta_interaction_features(df)

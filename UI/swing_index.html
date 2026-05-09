@@ -186,6 +186,12 @@
   .kind-entry_skipped       { color: var(--muted);  }
   .kind-error               { color: var(--red);    }
   .kind-stream_started      { color: var(--green);  }
+  .kind-stream_heartbeat    { color: var(--blue);   }
+  .kind-stream_backlog      { color: var(--yellow); }
+  .kind-stream_stale        { color: var(--yellow); }
+  .kind-bar_queue_drained   { color: var(--yellow); }
+  .kind-startup_scan        { color: var(--blue);   }
+  .kind-startup_scan_skipped { color: var(--muted); }
   .kind-session_started     { color: var(--green);  }
   .kind-session_ended       { color: var(--muted);  }
   .kind-stopped             { color: var(--muted);  }
@@ -640,9 +646,35 @@
     $("stat-confirming").textContent = status.confirming_count ?? 0;
     $("stat-universe").textContent  = status.universe_size ?? 0;
     $("stat-stream").textContent    = (status.stream_symbols ?? 0) + " stream symbols";
-    $("stat-bars").textContent      = (status.bar_count ?? 0).toLocaleString();
-    $("stat-lastbar").textContent   = status.last_bar_ts
-      ? "last bar " + fmtTime(status.last_bar_ts) : "no bars yet";
+    const barCount = Number(status.bar_count ?? 0);
+    const rawCount = Number(status.raw_bar_count ?? barCount);
+    $("stat-bars").textContent      = barCount.toLocaleString();
+    const lastBarParts = status.last_bar_ts
+      ? ["last bar " + fmtTime(status.last_bar_ts)]
+      : ["no bars yet"];
+    if (status.last_bar_ticker) {
+      lastBarParts.push(String(status.last_bar_ticker));
+    }
+    if (rawCount !== barCount) {
+      lastBarParts.push("raw " + rawCount.toLocaleString());
+    }
+    if (Number(status.five_min_bar_count) > 0 || Number(status.thirty_min_bar_count) > 0 || Number(status.scan_count) > 0) {
+      lastBarParts.push(
+        "5m " + Number(status.five_min_bar_count || 0).toLocaleString()
+        + " · 30m " + Number(status.thirty_min_bar_count || 0).toLocaleString()
+        + " · scans " + Number(status.scan_count || 0).toLocaleString()
+      );
+    }
+    if (Number(status.last_bar_lag_secs) > 120) {
+      lastBarParts.push("lag " + compactDuration(Number(status.last_bar_lag_secs)));
+    }
+    if (Number(status.queue_size) > 0) {
+      lastBarParts.push("q " + Number(status.queue_size).toLocaleString());
+    }
+    if (Number(status.dropped_stale_bars) > 0) {
+      lastBarParts.push("dropped " + Number(status.dropped_stale_bars).toLocaleString());
+    }
+    $("stat-lastbar").textContent = lastBarParts.join(" · ");
     $("stat-started").textContent   = status.started_at ? fmtTime(status.started_at) : "—";
     $("stat-uptime").textContent    = status.started_at && alive
       ? uptime(status.started_at) : (status.state || "idle");
@@ -665,6 +697,13 @@
     if (sec < 60) return sec + "s";
     if (sec < 3600) return Math.floor(sec/60) + "m " + (sec%60) + "s";
     return Math.floor(sec/3600) + "h " + Math.floor((sec%3600)/60) + "m";
+  }
+
+  function compactDuration(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    if (sec < 60) return sec + "s";
+    if (sec < 3600) return Math.floor(sec / 60) + "m";
+    return Math.floor(sec / 3600) + "h " + Math.floor((sec % 3600) / 60) + "m";
   }
 
   function dirCell(d) {
@@ -821,6 +860,18 @@
           detail = `${tk} skipped: ${p.reason}`; break;
         case "stream_started":
           detail = `WebSocket stream started (${p.symbols} symbols)`; break;
+        case "bar_queue_drained":
+          detail = `drained ${Number(p.drained || 0).toLocaleString()} queued bars before start`; break;
+        case "stream_backlog":
+          detail = `<b style="color:var(--yellow)">stale bar backlog</b> ${tk || p.ticker || ""} lag=${compactDuration(p.lag_secs || 0)} q=${p.queue_size ?? "?"} dropped=${p.dropped_stale_bars ?? 0}`; break;
+        case "stream_heartbeat":
+          detail = `bars raw=${Number(p.raw_bar_count || 0).toLocaleString()} accepted=${Number(p.bar_count || 0).toLocaleString()} 5m=${Number(p.five_min_bar_count || 0).toLocaleString()} 30m=${Number(p.thirty_min_bar_count || 0).toLocaleString()} scans=${Number(p.scan_count || 0).toLocaleString()} last=${p.last_bar_ticker || "-"} q=${p.queue_size ?? 0}`; break;
+        case "stream_stale":
+          detail = `<b style="color:var(--yellow)">no bars received</b> ${compactDuration(p.elapsed_secs || 0)} · ${p.hint || ""}`; break;
+        case "startup_scan":
+          detail = `warmup scan · candidates=${Number(p.candidate_count || 0).toLocaleString()} · latest=${p.latest_bar_ts ? fmtTime(p.latest_bar_ts) : "-"} · signals=${(p.signals || []).length}`; break;
+        case "startup_scan_skipped":
+          detail = `warmup scan skipped · ${p.reason || "unknown"}`; break;
         case "session_started":
           detail = `session started · max=${p.max_entries} · ${p.dry_run ? "DRY" : "LIVE"}`; break;
         case "session_ended":
@@ -850,7 +901,13 @@
     $("scans-empty").style.display = scansBuf.length ? "none" : "";
     log.innerHTML = scansBuf.map(s => {
       const sigs = s.signals || [];
-      if (!sigs.length) return "";
+      if (!sigs.length) {
+        return `<div class="line">
+          <span class="ts">${fmtTimeShort(s.ts)}</span>
+          <span class="kind kind-signal">scan</span>
+          <span>${s.ticker || ""}: <span class="muted">no qualifying setup</span></span>
+        </div>`;
+      }
       const inner = sigs.map(sg =>
         `<span class="${sg.direction === 1 ? "dirL" : "dirS"}">${sg.ticker}(${sg.direction === 1 ? "L" : "S"})</span> p=${fmtNum(sg.p_dir, 3)} ev=${fmtNum(sg.ev_score, 4)}`
       ).join(" · ");
@@ -1008,6 +1065,24 @@
       fetchState();
       return;
     }
+    if (t === "stream_started") {
+      currentState.session_alive = true;
+      const s = currentState.status || {};
+      s.state = "running";
+      currentState.status = s;
+      renderStatus(s, currentState.session_alive);
+      addEvent(evt);
+      fetchState();
+      return;
+    }
+    if (t === "stream_heartbeat") {
+      const s = currentState.status || {};
+      Object.assign(s, evt.payload || {});
+      currentState.status = s;
+      renderStatus(s, currentState.session_alive);
+      addEvent(evt);
+      return;
+    }
     if (t === "session_ended" || t === "stopped") {
       currentState.session_alive = false;
       addEvent(evt);
@@ -1038,6 +1113,12 @@
       addScan({ ts: evt.ts, ...(evt.payload || {}) });
       return;
     }
+    if (t === "startup_scan") {
+      addScan({ ts: evt.ts, ticker: "WARMUP", ...(evt.payload || {}) });
+      addEvent(evt);
+      fetchState();
+      return;
+    }
     if (t === "order_submitted" || t === "order_failed" ||
         t === "order_dry_run"   || t === "entry_skipped") {
       addOrder({ ts: evt.ts, kind: t, payload: evt.payload || {} });
@@ -1060,7 +1141,7 @@
       addEvent(evt);
       return;
     }
-    if (t === "stream_started" || t === "signal" || t === "confirmation" ||
+    if (t === "signal" || t === "confirmation" ||
         t === "confirmation_expired" || t === "position_opened" || t === "error" ||
         t === "stream_error") {
       addEvent(evt);

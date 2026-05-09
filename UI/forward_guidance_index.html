@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forward Guidance Live</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #10151b;
+      --panel: #18212b;
+      --panel-2: #202b36;
+      --line: #334457;
+      --text: #d9e4ee;
+      --muted: #91a3b8;
+      --accent: #43a5ff;
+      --good: #29d17d;
+      --bad: #ff6470;
+      --warn: #f0b84f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      background: #131a22;
+    }
+    h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+    }
+    main { padding: 12px; }
+    .status {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(140px, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .metric, .panel {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 6px;
+    }
+    .metric { padding: 10px 12px; min-height: 68px; }
+    .label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .value {
+      margin-top: 5px;
+      font-size: 20px;
+      font-weight: 700;
+    }
+    .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .panel { overflow: hidden; }
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 9px 12px;
+      background: var(--panel-2);
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+    th, td {
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(51, 68, 87, 0.55);
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    th {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      background: #151c24;
+    }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .ticker { font-weight: 800; color: #ffffff; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 44px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(67, 165, 255, 0.14);
+      color: #b8dcff;
+      font-variant-numeric: tabular-nums;
+    }
+    .good { color: var(--good); }
+    .bad { color: var(--bad); }
+    .muted { color: var(--muted); }
+    .empty {
+      padding: 28px 16px;
+      color: var(--muted);
+      font-style: italic;
+    }
+    button {
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 6px;
+      min-height: 32px;
+      padding: 0 10px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    @media (max-width: 900px) {
+      .status { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+      th:nth-child(8), td:nth-child(8) { display: none; }
+    }
+    @media (max-width: 640px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .status { grid-template-columns: 1fr; }
+      th:nth-child(4), td:nth-child(4), th:nth-child(7), td:nth-child(7) { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Forward Guidance Live</h1>
+      <div class="sub" id="source">loading</div>
+    </div>
+    <button id="refresh" type="button" title="Refresh ranked opportunities">Refresh</button>
+  </header>
+  <main>
+    <section class="status">
+      <div class="metric">
+        <div class="label">Status</div>
+        <div class="value" id="status">-</div>
+        <div class="sub" id="updated">-</div>
+      </div>
+      <div class="metric">
+        <div class="label">Opportunities</div>
+        <div class="value" id="count">0</div>
+        <div class="sub">ranked by 60d probability</div>
+      </div>
+      <div class="metric">
+        <div class="label">Top Probability</div>
+        <div class="value" id="topProb">-</div>
+        <div class="sub">future sector outperformance</div>
+      </div>
+      <div class="metric">
+        <div class="label">Disagreement</div>
+        <div class="value" id="topDisagree">-</div>
+        <div class="sub">guidance strength x bad reaction</div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head">
+        <span>Ranked Opportunities</span>
+        <span id="rowCount">0 rows</span>
+      </div>
+      <div id="tableWrap"></div>
+    </section>
+  </main>
+  <script>
+    const fmtPct = (v) => Number.isFinite(Number(v)) ? `${(Number(v) * 100).toFixed(1)}%` : "-";
+    const fmtNum = (v) => Number.isFinite(Number(v)) ? Number(v).toFixed(3) : "-";
+    const cls = (v) => Number(v) < 0 ? "bad" : "good";
+
+    async function loadState() {
+      const res = await fetch("/api/state", { cache: "no-store" });
+      const state = await res.json();
+      render(state);
+    }
+
+    function render(state) {
+      const rows = state.opportunities || [];
+      document.getElementById("status").textContent = state.status || "-";
+      document.getElementById("updated").textContent = state.updated_at || "-";
+      document.getElementById("source").textContent = state.source || "";
+      document.getElementById("count").textContent = state.count || rows.length || 0;
+      document.getElementById("rowCount").textContent = `${rows.length} rows`;
+      const top = rows[0] || {};
+      document.getElementById("topProb").textContent = fmtPct(top.future_60d_outperformance_probability);
+      document.getElementById("topDisagree").textContent = fmtNum(top.guidance_reaction_disagreement_score);
+      const wrap = document.getElementById("tableWrap");
+      if (!rows.length) {
+        wrap.innerHTML = `<div class="empty">No ranked opportunities yet.</div>`;
+        return;
+      }
+      const body = rows.map((r) => `
+        <tr>
+          <td class="ticker">${r.ticker || ""}</td>
+          <td>${r.earnings_date || ""}</td>
+          <td>${r.report_time || ""}</td>
+          <td class="num"><span class="pill">${fmtPct(r.future_60d_outperformance_probability)}</span></td>
+          <td class="num">${fmtPct(r.expected_return)}</td>
+          <td class="num">${fmtPct(r.confidence)}</td>
+          <td class="num ${cls(r.post_er_move_pct)}">${fmtPct(r.post_er_move_pct)}</td>
+          <td class="num">${fmtNum(r.guidance_strength_score)}</td>
+          <td>${r.top_reason_features || ""}</td>
+        </tr>
+      `).join("");
+      wrap.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 8%">Ticker</th>
+              <th style="width: 10%">Date</th>
+              <th style="width: 8%">Time</th>
+              <th class="num" style="width: 11%">Prob</th>
+              <th class="num" style="width: 11%">Exp Ret</th>
+              <th class="num" style="width: 10%">Conf</th>
+              <th class="num" style="width: 10%">ER Move</th>
+              <th class="num" style="width: 10%">Guidance</th>
+              <th>Reasons</th>
+            </tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>`;
+    }
+
+    document.getElementById("refresh").addEventListener("click", loadState);
+    loadState();
+    setInterval(loadState, 30000);
+  </script>
+</body>
+</html>

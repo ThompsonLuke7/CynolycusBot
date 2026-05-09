@@ -2108,7 +2108,7 @@ class LiveSession:
                         {
                             "symbol": "SYSTEM",
                             "message": (
-                                "[replay] loaded agent_matrix probs "
+                                "[replay] loaded SPY intraday probs "
                                 f"(rows={len(ga_probs_frame):,}, "
                                 f"range={_ts_iso(rng_min)}..{_ts_iso(rng_max)}, "
                                 f"sources={len(src)})"
@@ -2139,7 +2139,7 @@ class LiveSession:
                                     "log",
                                     {
                                         "symbol": "SYSTEM",
-                                        "message": "[replay] agent_matrix probs out of range; falling back to XGB.",
+                                        "message": "[replay] saved SPY intraday probs out of range; falling back to XGB.",
                                     },
                                 )
                     if ga_probs_frame is not None:
@@ -3028,7 +3028,7 @@ class LiveSession:
                         "log",
                         {
                             "symbol": "SYSTEM",
-                            "message": "[live] eval parity mode requested, but no agent_matrix probs were found; falling back to XGB probs.",
+                            "message": "[live] eval parity mode requested, but no saved SPY intraday probs were found; falling back to XGB probs.",
                         },
                     )
                 if ga_probs_frame is not None:
@@ -3041,7 +3041,7 @@ class LiveSession:
                             {
                                 "symbol": "SYSTEM",
                                 "message": (
-                                    "[live] loaded agent_matrix probs "
+                                    "[live] loaded SPY intraday probs "
                                     f"(rows={len(ga_probs_frame):,}, "
                                     f"range={_ts_iso(rng_min)}..{_ts_iso(rng_max)}, "
                                     f"sources={len(src)}, mode={ga_probs_mode})"

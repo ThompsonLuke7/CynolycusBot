@@ -165,7 +165,17 @@ class _Status:
     universe_size: int = 0
     stream_symbols: int = 0
     bar_count: int = 0
+    raw_bar_count: int = 0
+    rth_bar_count: int = 0
+    non_rth_bar_count: int = 0
+    five_min_bar_count: int = 0
+    thirty_min_bar_count: int = 0
+    scan_count: int = 0
+    last_bar_ticker: str | None = None
     last_bar_ts: str | None = None
+    last_bar_lag_secs: int | None = None
+    queue_size: int | None = None
+    dropped_stale_bars: int = 0
     confirming_count: int = 0
     open_positions_count: int = 0
 
@@ -219,7 +229,17 @@ class SwingDashboardStore:
             self._status.universe_size = int(meta.get("universe_size", 0))
             self._status.stream_symbols = int(meta.get("stream_symbols", 0))
             self._status.bar_count = int(meta.get("bar_count", 0))
+            self._status.raw_bar_count = int(meta.get("raw_bar_count", 0))
+            self._status.rth_bar_count = int(meta.get("rth_bar_count", 0))
+            self._status.non_rth_bar_count = int(meta.get("non_rth_bar_count", 0))
+            self._status.five_min_bar_count = int(meta.get("five_min_bar_count", 0))
+            self._status.thirty_min_bar_count = int(meta.get("thirty_min_bar_count", 0))
+            self._status.scan_count = int(meta.get("scan_count", 0))
+            self._status.last_bar_ticker = meta.get("last_bar_ticker")
             self._status.last_bar_ts = meta.get("last_bar_ts")
+            self._status.last_bar_lag_secs = meta.get("last_bar_lag_secs")
+            self._status.queue_size = meta.get("queue_size")
+            self._status.dropped_stale_bars = int(meta.get("dropped_stale_bars", 0))
             self._status.confirming_count = int(meta.get("confirming_count", 0))
             self._status.open_positions_count = int(meta.get("open_positions_count", 0))
 
@@ -325,6 +345,21 @@ class SwingSession:
             self._audit.write(event)
         self._broker.publish(event)
 
+    @staticmethod
+    def _drain_queue(q: queue_mod.Queue | None) -> int:
+        if q is None:
+            return 0
+        drained = 0
+        while True:
+            try:
+                q.get_nowait()
+                drained += 1
+            except queue_mod.Empty:
+                break
+            except Exception:
+                break
+        return drained
+
     def _on_event(self, kind: str, payload: dict) -> None:
         ts = _utc_iso()
         evt = {"type": kind, "ts": ts, "payload": payload}
@@ -351,6 +386,9 @@ class SwingSession:
         elif kind == "stream_started":
             self._store.set_state("running")
             self._store.append_event(evt)
+        elif kind == "stream_heartbeat":
+            self._store.set_meta(payload)
+            self._store.append_event(evt)
         elif kind == "signal":
             self._store.append_event(evt)
             self._refresh_runner_state()
@@ -362,10 +400,18 @@ class SwingSession:
             self._refresh_runner_state()
         elif kind == "scan":
             sigs = payload.get("signals") or []
+            self._store.append_scan({"ts": ts, **payload})
+            # Keep zero-signal scans out of the generic event log, but retain
+            # them in scans_recent so the UI has a 30m heartbeat.
             if sigs:
-                self._store.append_scan({"ts": ts, **payload})
-                # Skip noisy zero-signal scans from the event log; keep them in scans_recent only
+                self._store.append_event(evt)
             self._refresh_runner_state()
+        elif kind == "startup_scan":
+            self._store.append_scan({"ts": ts, "ticker": "WARMUP", **payload})
+            self._store.append_event(evt)
+            self._refresh_runner_state()
+        elif kind == "startup_scan_skipped":
+            self._store.append_event(evt)
         elif kind in ("order_submitted", "order_failed", "order_dry_run", "entry_skipped"):
             self._store.append_order({"ts": ts, "kind": kind, **payload})
             self._store.append_event(evt)
@@ -455,6 +501,19 @@ class SwingSession:
         logger.info("Audit log: %s", audit_path)
         self._audit = audit
 
+        drained = self._drain_queue(self._bar_queue)
+        if drained:
+            evt = {
+                "type": "bar_queue_drained",
+                "ts": _utc_iso(),
+                "payload": {
+                    "drained": drained,
+                    "reason": "discarded stale shared-stream backlog before swing session start",
+                },
+            }
+            self._store.append_event(evt)
+            self._publish(evt)
+
         try:
             runner = SwingLiveRunner(
                 env_file=env_file,
@@ -477,7 +536,17 @@ class SwingSession:
             "universe_size": runner.universe_size,
             "stream_symbols": len(runner.stream_symbols),
             "bar_count": 0,
+            "raw_bar_count": 0,
+            "rth_bar_count": 0,
+            "non_rth_bar_count": 0,
+            "five_min_bar_count": 0,
+            "thirty_min_bar_count": 0,
+            "scan_count": 0,
+            "last_bar_ticker": None,
             "last_bar_ts": None,
+            "last_bar_lag_secs": None,
+            "queue_size": None,
+            "dropped_stale_bars": 0,
             "confirming_count": 0,
             "open_positions_count": 0,
         })

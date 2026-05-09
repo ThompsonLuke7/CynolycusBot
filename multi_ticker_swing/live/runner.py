@@ -66,8 +66,15 @@ _SCAN_END_TS   = _time(15, 55)  # skip 30m bar whose last 5m opens at 3:55 (post
 _RTH_START = _time(9, 30)
 _RTH_END   = _time(16, 0)
 
-# Stream health: warn if no bar received for this many seconds during RTH
+# Stream health: warn if no bar received for this many seconds during RTH.
 _STREAM_STALE_SECS = 300
+
+# If we are still dequeuing bars whose timestamps are this far behind wall-clock
+# RTH, the shared queue is stale/backlogged.  Drop them rather than trading on
+# hours-old data.
+_STALE_BAR_LAG_SECS = 10 * 60
+_BACKLOG_EVENT_THROTTLE_SECS = 60.0
+_HEARTBEAT_SECS = 60.0
 
 # Tickers that may be in the stream but are excluded from entry signals
 _CONTEXT_SET = set(CONTEXT_TICKERS)
@@ -84,19 +91,52 @@ def _utc_iso(ts: datetime | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 class _BarAccumulator:
-    """Accumulates N 1m bars into one aggregate OHLCV bar."""
+    """Clock-aligned OHLCV accumulator for 1m->5m and 5m->30m bars."""
 
-    def __init__(self, n: int) -> None:
-        self._n = n
+    def __init__(self, bucket_minutes: int, *, min_bars: int = 1) -> None:
+        self._bucket_minutes = int(bucket_minutes)
+        self._min_bars = max(1, int(min_bars))
         self._buf: list[dict] = []
+        self._bucket_start: datetime | None = None
+
+    def reset(self) -> None:
+        self._buf.clear()
+        self._bucket_start = None
 
     def push(self, bar: dict) -> dict | None:
+        ts = bar.get("timestamp")
+        if not isinstance(ts, datetime):
+            return None
+
+        bucket_start = self._bucket_start_for(ts)
+        if self._bucket_start is None:
+            self._bucket_start = bucket_start
+        elif bucket_start != self._bucket_start:
+            completed = self._finalize()
+            self._bucket_start = bucket_start
+            self._buf.append(bar)
+            return completed
+
         self._buf.append(bar)
-        if len(self._buf) >= self._n:
-            agg = self._aggregate(self._buf[-self._n:])
-            self._buf.clear()
-            return agg
+        if self._is_bucket_end(ts):
+            return self._finalize()
         return None
+
+    def _bucket_start_for(self, ts: datetime) -> datetime:
+        local = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=_ET)
+        minute = (local.minute // self._bucket_minutes) * self._bucket_minutes
+        return local.replace(minute=minute, second=0, microsecond=0)
+
+    def _is_bucket_end(self, ts: datetime) -> bool:
+        local = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=_ET)
+        return local.minute % self._bucket_minutes == self._bucket_minutes - 1
+
+    def _finalize(self) -> dict | None:
+        bars = list(self._buf)
+        self.reset()
+        if len(bars) < self._min_bars:
+            return None
+        return self._aggregate(bars)
 
     @staticmethod
     def _aggregate(bars: list[dict]) -> dict:
@@ -266,9 +306,11 @@ class SwingLiveRunner:
             self._client, dry_run=dry_run, event_sink=self._emit,
         )
 
-        # Per-ticker bar aggregators
-        self._acc_5m:  dict[str, _BarAccumulator] = defaultdict(lambda: _BarAccumulator(BARS_PER_5M))
-        self._acc_30m: dict[str, _BarAccumulator] = defaultdict(lambda: _BarAccumulator(BARS_PER_30M))
+        # Per-ticker bar aggregators.  These align to wall-clock buckets instead
+        # of simple counts, so a restart or skipped stale bars cannot shift the
+        # 5m/30m schedule.
+        self._acc_5m:  dict[str, _BarAccumulator] = defaultdict(lambda: _BarAccumulator(5))
+        self._acc_30m: dict[str, _BarAccumulator] = defaultdict(lambda: _BarAccumulator(30, min_bars=BARS_PER_30M))
 
         # Rolling 5m bar history per ticker (60 bars ≈ 5h of market data).
         # Used to seed position charts with pre-entry context.
@@ -285,7 +327,20 @@ class SwingLiveRunner:
         self._stop_event = threading.Event()
         self._streamer: AlpacaBarStreamer | None = None
         self._bar_count_total = 0
+        self._raw_bar_count_total = 0
+        self._rth_bar_count_total = 0
+        self._non_rth_bar_count_total = 0
+        self._five_min_bar_count_total = 0
+        self._thirty_min_bar_count_total = 0
+        self._scan_count_total = 0
+        self._last_bar_ticker: str | None = None
+        self._last_heartbeat_wall = 0.0
+        self._heartbeat_window_counts: dict[str, int] = defaultdict(int)
         self._last_bar_ts: datetime | None = None
+        self._last_bar_lag_secs: int | None = None
+        self._last_queue_size: int | None = None
+        self._dropped_stale_bars = 0
+        self._last_backlog_event_wall = 0.0
 
     # ------------------------------------------------------------------
     # Event emission
@@ -337,7 +392,17 @@ class SwingLiveRunner:
             "stream_symbols": len(self._stream_symbols),
             "universe_size": len(self._universe),
             "bar_count": int(self._bar_count_total),
+            "raw_bar_count": int(self._raw_bar_count_total),
+            "rth_bar_count": int(self._rth_bar_count_total),
+            "non_rth_bar_count": int(self._non_rth_bar_count_total),
+            "five_min_bar_count": int(self._five_min_bar_count_total),
+            "thirty_min_bar_count": int(self._thirty_min_bar_count_total),
+            "scan_count": int(self._scan_count_total),
+            "last_bar_ticker": self._last_bar_ticker,
             "last_bar_ts": _utc_iso(self._last_bar_ts) if self._last_bar_ts else None,
+            "last_bar_lag_secs": self._last_bar_lag_secs,
+            "queue_size": self._last_queue_size,
+            "dropped_stale_bars": int(self._dropped_stale_bars),
             "confirming_count": len(self._confirming),
             "open_positions_count": len(self._pos_mgr.open_tickers),
         }
@@ -415,6 +480,8 @@ class SwingLiveRunner:
         if self._stop_event.is_set():
             self._emit("stopped", {"reason": "stop requested during warmup"})
             return
+
+        self._run_startup_scan_from_warmup()
 
         if self._external_queue:
             # Bar queue is owned by the caller (e.g. SharedBarStream in combined_server).
@@ -509,32 +576,232 @@ class SwingLiveRunner:
             ticker = bar.get("symbol", bar.get("ticker", "")).upper()
             if not ticker:
                 continue
+            self._raw_bar_count_total += 1
+            self._last_bar_ticker = ticker
+            self._heartbeat_window_counts[ticker] += 1
+            self._last_queue_size = self._queue_size()
+            lag_secs = self._bar_lag_secs(bar)
+            if lag_secs is not None:
+                self._last_bar_lag_secs = int(round(lag_secs))
+            if self._bar_is_too_stale(lag_secs):
+                self._dropped_stale_bars += 1
+                self._reset_ticker_accumulators(ticker)
+                self._emit_backlog_event(ticker=ticker, bar=bar, lag_secs=lag_secs)
+                self._maybe_emit_heartbeat(reason="stale_drop")
+                continue
             self._bar_count_total += 1
             _last_bar_wall = time.monotonic()
             _stale_warned = False
             ts = bar.get("timestamp")
             if isinstance(ts, datetime):
                 self._last_bar_ts = ts
-            self._on_1m_bar(ticker, bar)
+            if self._on_1m_bar(ticker, bar):
+                self._rth_bar_count_total += 1
+            else:
+                self._non_rth_bar_count_total += 1
+            self._maybe_emit_heartbeat(reason="bar")
+
+    def _queue_size(self) -> int | None:
+        try:
+            return int(self._bar_queue.qsize())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _bar_lag_secs(bar: dict) -> float | None:
+        ts = bar.get("timestamp")
+        if not isinstance(ts, datetime):
+            return None
+        ts_utc = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - ts_utc).total_seconds())
+
+    @staticmethod
+    def _bar_is_too_stale(lag_secs: float | None) -> bool:
+        if lag_secs is None or lag_secs < _STALE_BAR_LAG_SECS:
+            return False
+        now_et = datetime.now(_ET)
+        return _RTH_START <= now_et.time() < _RTH_END
+
+    def _reset_ticker_accumulators(self, ticker: str) -> None:
+        acc5 = self._acc_5m.get(ticker)
+        if acc5 is not None:
+            acc5.reset()
+        acc30 = self._acc_30m.get(ticker)
+        if acc30 is not None:
+            acc30.reset()
+
+    def _emit_backlog_event(self, *, ticker: str, bar: dict, lag_secs: float | None) -> None:
+        now = time.monotonic()
+        if now - self._last_backlog_event_wall < _BACKLOG_EVENT_THROTTLE_SECS:
+            return
+        self._last_backlog_event_wall = now
+        lag = int(round(lag_secs or 0.0))
+        qsize = self._queue_size()
+        ts = bar.get("timestamp")
+        ts_iso = _utc_iso(ts) if isinstance(ts, datetime) else None
+        logger.warning(
+            "Dropping stale swing bar: ticker=%s ts=%s lag=%ss queue=%s dropped=%d",
+            ticker, ts_iso, lag, qsize, self._dropped_stale_bars,
+        )
+        self._emit("stream_backlog", {
+            "ticker": ticker,
+            "bar_ts": ts_iso,
+            "lag_secs": lag,
+            "queue_size": qsize,
+            "dropped_stale_bars": int(self._dropped_stale_bars),
+            "hint": "Swing queue is behind real time; stale bars are being skipped until fresh data catches up.",
+        })
+
+    def _maybe_emit_heartbeat(self, *, reason: str) -> None:
+        now = time.monotonic()
+        if self._last_heartbeat_wall and (now - self._last_heartbeat_wall) < _HEARTBEAT_SECS:
+            return
+        self._last_heartbeat_wall = now
+        window_counts = dict(self._heartbeat_window_counts)
+        self._heartbeat_window_counts.clear()
+        top_symbols = sorted(window_counts.items(), key=lambda item: item[1], reverse=True)[:8]
+        payload = self.snapshot_meta()
+        payload.update({
+            "reason": reason,
+            "window_unique_symbols": len(window_counts),
+            "window_bar_count": int(sum(window_counts.values())),
+            "window_top_symbols": [
+                {"ticker": ticker, "bars": int(count)}
+                for ticker, count in top_symbols
+            ],
+        })
+        logger.info(
+            "Swing stream heartbeat: raw=%d accepted=%d rth=%d 5m=%d 30m=%d scans=%d "
+            "last=%s ts=%s lag=%s queue=%s unique=%d",
+            self._raw_bar_count_total,
+            self._bar_count_total,
+            self._rth_bar_count_total,
+            self._five_min_bar_count_total,
+            self._thirty_min_bar_count_total,
+            self._scan_count_total,
+            self._last_bar_ticker,
+            payload.get("last_bar_ts"),
+            self._last_bar_lag_secs,
+            self._last_queue_size,
+            len(window_counts),
+        )
+        self._emit("stream_heartbeat", payload)
+
+    # ------------------------------------------------------------------
+    # Startup scan from warmed 30m cache
+    # ------------------------------------------------------------------
+
+    def _run_startup_scan_from_warmup(self) -> None:
+        now_et = datetime.now(_ET)
+        if not (_CONFIRM_START <= now_et.time() <= _SCAN_END_TS):
+            self._emit("startup_scan_skipped", {
+                "reason": "outside_scan_window",
+                "now_et": now_et.isoformat(),
+            })
+            return
+
+        latest_ts: datetime | None = None
+        eligible: list[str] = []
+        stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=75)
+        for ticker in self._all_tickers:
+            bar = self._fb.get_last_bar(ticker)
+            if not bar:
+                continue
+            ts = bar.get("timestamp")
+            if not isinstance(ts, datetime):
+                continue
+            ts_utc = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+            if ts_utc < stale_cutoff:
+                continue
+            if latest_ts is None or ts_utc > latest_ts:
+                latest_ts = ts_utc
+            eligible.append(ticker)
+
+        if not eligible:
+            self._emit("startup_scan_skipped", {
+                "reason": "no_fresh_warmup_bars",
+                "freshness_cutoff": stale_cutoff.isoformat(),
+            })
+            return
+
+        with self._lock:
+            busy = set(self._confirming.keys()) | self._pos_mgr.open_tickers
+
+        signals = self._scanner.scan(eligible, skip_tickers=busy)
+        self._scan_count_total += 1
+        self._emit("startup_scan", {
+            "candidate_count": len(eligible),
+            "latest_bar_ts": _utc_iso(latest_ts),
+            "signals": [
+                {
+                    "ticker": s.ticker,
+                    "direction": int(s.direction),
+                    "p_dir": float(s.p_dir),
+                    "ev_score": float(s.ev_score),
+                }
+                for s in signals
+            ],
+        })
+        self._accept_signals(signals)
+
+    def _accept_signals(self, signals: list[Signal]) -> None:
+        spy_p_long, spy_p_short = None, None
+        filtered_signals = []
+        for sig in signals:
+            spy_min = sig.config.spy_min if sig.config else 0.0
+            if spy_min > 0:
+                if spy_p_long is None:
+                    spy_p_long, spy_p_short = self._scanner.get_directional_p("SPY")
+                spy_p = spy_p_long if sig.direction == 1 else spy_p_short
+                if math.isnan(spy_p) or spy_p < spy_min:
+                    logger.info("[%s] VETOED by SPY filter (spy_p=%.3f < min=%.2f)",
+                                sig.ticker, spy_p if not math.isnan(spy_p) else -1, spy_min)
+                    continue
+            filtered_signals.append(sig)
+
+        accepted_signals: list[Signal] = []
+        with self._lock:
+            busy_now = set(self._confirming.keys()) | self._pos_mgr.open_tickers
+            for sig in filtered_signals:
+                if sig.ticker in busy_now:
+                    continue
+                self._confirming[sig.ticker] = _ConfirmState(signal=sig)
+                busy_now.add(sig.ticker)
+                accepted_signals.append(sig)
+
+        for sig in accepted_signals:
+            logger.info("[%s] SIGNAL  dir=%+d  p=%.3f  ev=%.4f",
+                        sig.ticker, sig.direction, sig.p_dir, sig.ev_score)
+            self._emit("signal", {
+                "ticker": sig.ticker,
+                "direction": int(sig.direction),
+                "p_dir": float(sig.p_dir),
+                "ev_score": float(sig.ev_score),
+                "ref_high": float(sig.ref_high),
+                "ref_low": float(sig.ref_low),
+                "atr": float(sig.atr),
+            })
 
     # ------------------------------------------------------------------
     # 1m → 5m → 30m aggregation
     # ------------------------------------------------------------------
 
-    def _on_1m_bar(self, ticker: str, bar: dict) -> None:
+    def _on_1m_bar(self, ticker: str, bar: dict) -> bool:
         # Drop pre-market and post-market bars — only aggregate RTH bars so the
         # 30m accumulator aligns cleanly with the 9:30/10:00/.../15:30 schedule.
         ts = bar.get("timestamp")
         if hasattr(ts, "astimezone"):
             bar_et_t = ts.astimezone(_ET).time()
             if not (_RTH_START <= bar_et_t < _RTH_END):
-                return
+                return False
 
         bar5 = self._acc_5m[ticker].push(bar)
         if bar5 is not None:
             self._on_5m_bar(ticker, bar5)
+        return True
 
     def _on_5m_bar(self, ticker: str, bar5: dict) -> None:
+        self._five_min_bar_count_total += 1
         # Maintain rolling 5m history for chart seeding and position_bar_5m events
         self._buf_5m[ticker].append(bar5)
 
@@ -560,6 +827,7 @@ class SwingLiveRunner:
         # Aggregate 5m → 30m
         bar30 = self._acc_30m[ticker].push(bar5)
         if bar30 is not None:
+            self._thirty_min_bar_count_total += 1
             # Update feature builder with the new 30m bar
             self._fb.append_bar(ticker, bar30)
             self._on_30m_close(ticker, bar30)
@@ -576,53 +844,32 @@ class SwingLiveRunner:
             if ts30.astimezone(_ET).time() >= _SCAN_END_TS:
                 return
 
-        # Run scanner once per 30m close for this ticker only
-        # (Full cross-ticker scan triggered by a dedicated timer; per-ticker scan here
-        # handles incremental signals as bars close at slightly different times)
+        # Run scanner once per 30m close for this ticker only.
+        #
+        # Important: never call the dashboard event sink while holding
+        # self._lock. The sink refreshes runner snapshots, which also acquire
+        # this lock. Emitting from inside the lock deadlocks the live loop on
+        # the first scan event.
         with self._lock:
             busy = set(self._confirming.keys()) | self._pos_mgr.open_tickers
-            signals = self._scanner.scan([ticker], skip_tickers=busy)
-            self._emit("scan", {
-                "ticker": ticker,
-                "ts": _utc_iso(bar30.get("timestamp")) if isinstance(bar30.get("timestamp"), datetime) else None,
-                "signals": [
-                    {
-                        "ticker": s.ticker,
-                        "direction": int(s.direction),
-                        "p_dir": float(s.p_dir),
-                        "ev_score": float(s.ev_score),
-                    }
-                    for s in signals
-                ],
-            })
-            # SPY regime filter: veto Tier-1 signals where SPY directional prob < spy_min
-            spy_p_long, spy_p_short = None, None
-            filtered_signals = []
-            for sig in signals:
-                spy_min = sig.config.spy_min if sig.config else 0.0
-                if spy_min > 0:
-                    if spy_p_long is None:
-                        spy_p_long, spy_p_short = self._scanner.get_directional_p("SPY")
-                    spy_p = spy_p_long if sig.direction == 1 else spy_p_short
-                    if math.isnan(spy_p) or spy_p < spy_min:
-                        logger.info("[%s] VETOED by SPY filter (spy_p=%.3f < min=%.2f)",
-                                    sig.ticker, spy_p if not math.isnan(spy_p) else -1, spy_min)
-                        continue
-                filtered_signals.append(sig)
 
-            for sig in filtered_signals:
-                self._confirming[sig.ticker] = _ConfirmState(signal=sig)
-                logger.info("[%s] SIGNAL  dir=%+d  p=%.3f  ev=%.4f",
-                            sig.ticker, sig.direction, sig.p_dir, sig.ev_score)
-                self._emit("signal", {
-                    "ticker": sig.ticker,
-                    "direction": int(sig.direction),
-                    "p_dir": float(sig.p_dir),
-                    "ev_score": float(sig.ev_score),
-                    "ref_high": float(sig.ref_high),
-                    "ref_low": float(sig.ref_low),
-                    "atr": float(sig.atr),
-                })
+        signals = self._scanner.scan([ticker], skip_tickers=busy)
+        self._scan_count_total += 1
+        self._emit("scan", {
+            "ticker": ticker,
+            "ts": _utc_iso(bar30.get("timestamp")) if isinstance(bar30.get("timestamp"), datetime) else None,
+            "signals": [
+                {
+                    "ticker": s.ticker,
+                    "direction": int(s.direction),
+                    "p_dir": float(s.p_dir),
+                    "ev_score": float(s.ev_score),
+                }
+                for s in signals
+            ],
+        })
+
+        self._accept_signals(signals)
 
     # ------------------------------------------------------------------
     # 5m confirmation: breakout on 5m bar after signal

@@ -124,6 +124,7 @@ class AlpacaBarStreamer:
         self._on_bar = on_bar
         self._stream = StockDataStream(cfg.key_id, cfg.secret_key, feed=feed)
         self._thread: Optional[threading.Thread] = None
+        self._thread_error: BaseException | None = None
 
     async def _handle_bar(self, bar: Bar) -> None:
         payload = bar_to_dict(bar)
@@ -160,7 +161,16 @@ class AlpacaBarStreamer:
     def start_in_thread(self, daemon: bool = True) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._thread = threading.Thread(target=self.start, daemon=daemon)
+
+        def _target() -> None:
+            try:
+                self.start()
+            except BaseException as exc:
+                self._thread_error = exc
+                logging.getLogger(__name__).exception("AlpacaBarStreamer thread exited with error: %s", exc)
+
+        self._thread_error = None
+        self._thread = threading.Thread(target=_target, daemon=daemon, name="alpaca-bar-stream")
         self._thread.start()
 
     def stop(self) -> None:
@@ -169,3 +179,10 @@ class AlpacaBarStreamer:
     def join(self, timeout: float | None = None) -> None:
         if self._thread:
             self._thread.join(timeout=timeout)
+
+    def is_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+    @property
+    def thread_error(self) -> BaseException | None:
+        return self._thread_error
