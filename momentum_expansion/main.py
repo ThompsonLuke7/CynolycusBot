@@ -39,6 +39,7 @@ from momentum_expansion.data.bars import (
     fetch_universe_bars,
 )
 from momentum_expansion.data.universe import (
+    filter_context_only_tickers,
     get_candidate_pool,
     list_snapshots,
     load_snapshot_for,
@@ -89,24 +90,25 @@ def main() -> int:
         if list_snapshots():
             snap = load_snapshot_for(pd.Timestamp.utcnow())
         tickers = snap["ticker"].astype(str).tolist() if not snap.empty else get_candidate_pool()
+    candidate_tickers = filter_context_only_tickers(tickers)
 
     if args.refresh_universe:
         write_weekly_snapshot(as_of=pd.Timestamp.utcnow().normalize())
 
     if args.fetch_daily_only:
-        fetch_daily_for_universe_scoring(tickers=tickers, force=args.force)
+        fetch_daily_for_universe_scoring(tickers=candidate_tickers, force=args.force)
 
     if args.fetch_context:
         fetch_context_bars(force=args.force)
 
     if args.fetch:
-        fetch_universe_bars(tickers=tickers, force=args.force)
+        fetch_universe_bars(tickers=candidate_tickers, force=args.force)
 
     if args.build_features:
-        build_all_features_4h(tickers=tickers, force=args.force)
+        build_all_features_4h(tickers=candidate_tickers, force=args.force)
 
     if args.build_labels:
-        build_all_labels_4h(tickers=tickers, force=args.force)
+        build_all_labels_4h(tickers=candidate_tickers, force=args.force)
 
     if args.build_matrix:
         build_training_matrix(force=args.force)

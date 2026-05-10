@@ -34,6 +34,7 @@ from momentum_expansion.config.momentum_config import (
     SECTOR_ETFS,
 )
 from momentum_expansion.data.load_bars import load_1d, load_4h
+from momentum_expansion.data.universe import load_candidate_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,47 @@ SECTOR_MAP: dict[str, str] = {
 
 def _sector_etf_for(ticker: str) -> str:
     return SECTOR_MAP.get(ticker.upper(), "XLK")
+
+
+def _build_metadata_encodings(meta: pd.DataFrame) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    """Return stable categorical encodings for sector, cap bucket, and asset type."""
+    if meta is None or meta.empty:
+        return {"Unknown": 0}, {"Unknown": 0}, {"Stock": 0}
+    sectors = sorted(meta.get("sector", pd.Series(["Unknown"])).fillna("Unknown").astype(str).unique())
+    caps = sorted(meta.get("market_cap_bucket", pd.Series(["Unknown"])).fillna("Unknown").astype(str).unique())
+    types = sorted(meta.get("type", pd.Series(["Stock"])).fillna("Stock").astype(str).unique())
+    if "Unknown" not in sectors:
+        sectors.append("Unknown")
+    if "Unknown" not in caps:
+        caps.append("Unknown")
+    if "Stock" not in types:
+        types.append("Stock")
+    return (
+        {name: i for i, name in enumerate(sectors)},
+        {name: i for i, name in enumerate(caps)},
+        {name: i for i, name in enumerate(types)},
+    )
+
+
+def _metadata_for_ticker(
+    *,
+    ticker: str,
+    meta_lookup: dict[str, dict] | None,
+    sector_enc: dict[str, int],
+    cap_enc: dict[str, int],
+    type_enc: dict[str, int],
+) -> dict[str, float]:
+    row = (meta_lookup or {}).get(ticker.upper(), {})
+    sector = str(row.get("sector", "Unknown"))
+    cap = str(row.get("market_cap_bucket", "Unknown"))
+    asset_type = str(row.get("type", "Stock"))
+    is_etf = 1.0 if asset_type.upper() == "ETF" else 0.0
+    return {
+        "sector_id": float(sector_enc.get(sector, sector_enc.get("Unknown", 0))),
+        "market_cap_bucket": float(cap_enc.get(cap, cap_enc.get("Unknown", 0))),
+        "asset_type": float(type_enc.get(asset_type, type_enc.get("Stock", 0))),
+        "is_etf": is_etf,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +173,22 @@ def _macd_hist(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
         return pd.Series(np.nan, index=close.index)
 
 
+def _bars_since_true(mask: pd.Series, *, cap: int = 252) -> pd.Series:
+    """Number of bars since a boolean condition last occurred, capped."""
+    out: list[float] = []
+    last_seen: int | None = None
+    values = mask.fillna(False).astype(bool).to_numpy()
+    for i, flag in enumerate(values):
+        if flag:
+            last_seen = i
+            out.append(0.0)
+        elif last_seen is None:
+            out.append(np.nan)
+        else:
+            out.append(float(min(i - last_seen, cap)))
+    return pd.Series(out, index=mask.index)
+
+
 # ---------------------------------------------------------------------------
 # Per-ticker builder
 # ---------------------------------------------------------------------------
@@ -141,6 +199,7 @@ def build_ticker_features_4h(
     df_4h: pd.DataFrame,
     df_1d: pd.DataFrame | None,
     ctx_4h: dict[str, pd.DataFrame],
+    ticker_meta: dict[str, float] | None = None,
 ) -> pd.DataFrame | None:
     """
     Build 4H features for one ticker.
@@ -212,6 +271,14 @@ def build_ticker_features_4h(
     df["dollar_volume"] = (v * c)
     df["dollar_vol_pctile_252"] = (v * c).rolling(252, min_periods=50).rank(pct=True)
     df["dollar_vol_surge_20"] = ((v * c) / (v * c).rolling(20).mean().replace(0, np.nan)).clip(0, 20)
+    vol_std20 = v.rolling(20).std().replace(0, np.nan)
+    dollar_vol = v * c
+    dollar_vol_mean60 = dollar_vol.rolling(60).mean()
+    dollar_vol_std60 = dollar_vol.rolling(60).std().replace(0, np.nan)
+    df["volume_z_20"] = ((v - vol_mean20) / vol_std20).clip(-5, 10)
+    df["dollar_vol_z_60"] = ((dollar_vol - dollar_vol_mean60) / dollar_vol_std60).clip(-5, 10)
+    df["volume_spike_20"] = (df["rvol_20"] >= 2.0).astype(float)
+    df["bars_since_volume_spike"] = _bars_since_true(df["volume_spike_20"] > 0, cap=252)
 
     # --- STRUCTURE ---
     # 52-week high distance — at 2 4H bars/day * ~252 trading days = ~504 bars
@@ -229,13 +296,30 @@ def build_ticker_features_4h(
 
     # Compression: vol_5 / vol_20 — lower = tighter
     df["compression_5_20"] = (rv5 / rv20.replace(0, np.nan)).clip(0, 5)
+    df["is_compressed_5_20"] = (df["compression_5_20"] <= 0.65).astype(float)
+    df["compression_count_20"] = df["is_compressed_5_20"].rolling(20).sum()
 
     # Breakout flag — close > 20-bar high (causal: shifted by 1 to avoid same-bar)
     df["breakout_20"] = (c > rh20.shift(1)).astype(float)
+    df["breakout_attempts_60"] = df["breakout_20"].rolling(60).sum()
+    df["bars_since_breakout_20"] = _bars_since_true(df["breakout_20"] > 0, cap=252)
 
     # Base depth: 60-bar drawdown from rolling 60-bar high
     rh60 = h.rolling(60).max()
     df["drawdown_from_60h"] = ((rh60 - c) / rh60.replace(0, np.nan)).clip(0, 1)
+    base_range_60 = (rh60 - lo.rolling(60).min()).replace(0, np.nan)
+    df["base_range_60_atr"] = (base_range_60 / atr14.replace(0, np.nan)).clip(0, 100)
+    df["base_position_60"] = ((c - lo.rolling(60).min()) / base_range_60).clip(0, 1)
+    df["close_tightness_10"] = (
+        (c.diff().abs().rolling(10).mean() / atr14.replace(0, np.nan))
+        .clip(0, 10)
+    )
+    df["range_contraction_20_60"] = (
+        (h - lo).rolling(20).mean() / (h - lo).rolling(60).mean().replace(0, np.nan)
+    ).clip(0, 5)
+    df["near_52w_high"] = (df["dist_to_52w_high_atr"] <= 2.0).astype(float)
+    df["bars_since_52w_high"] = _bars_since_true(c >= roll_high_252d.shift(1), cap=504)
+    df["open_to_prev_close_ret"] = (df["open"] / c.shift(1).replace(0, np.nan) - 1.0).clip(-1, 1)
 
     # --- RELATIVE STRENGTH ---
     def _ctx_close(name: str) -> pd.Series:
@@ -299,9 +383,32 @@ def build_ticker_features_4h(
         d_rsi = _rsi(dc, 14).shift(1)
         d_ema20 = _ema(dc, 20)
         d_ema50 = _ema(dc, 50)
+        d_ema100 = _ema(dc, 100)
+        d_ema200 = _ema(dc, 200)
         d_trend = np.sign(d_ema20 - d_ema50).shift(1)
+        d_stack = (
+            (d_ema20 > d_ema50).astype(int)
+            + 2 * (d_ema50 > d_ema100).astype(int)
+            + 4 * (d_ema100 > d_ema200).astype(int)
+        ).shift(1)
         d_high_252 = d["high"].rolling(252).max()
         d_dist_52w = ((d_high_252 - dc) / d_atr.replace(0, np.nan)).shift(1).clip(0, 50)
+        d_dist_200 = ((dc - d_ema200) / d_atr.replace(0, np.nan)).shift(1).clip(-50, 50)
+        d_new_high_252 = (dc >= d_high_252.shift(1)).astype(float)
+        d_gap = (d["open"] / dc.shift(1).replace(0, np.nan) - 1.0).clip(-1, 1)
+        d_gap_z_60 = (
+            (d_gap - d_gap.rolling(60).mean()) / d_gap.rolling(60).std().replace(0, np.nan)
+        ).clip(-10, 10)
+
+        weekly_close = dc.resample("W-FRI").last()
+        weekly_ema10 = _ema(weekly_close, 10)
+        weekly_ema30 = _ema(weekly_close, 30)
+        weekly = pd.DataFrame({
+            "weekly_ret_1": weekly_close.pct_change(1).shift(1),
+            "weekly_ret_4": weekly_close.pct_change(4).shift(1),
+            "weekly_trend_state": np.sign(weekly_ema10 - weekly_ema30).shift(1),
+        })
+        weekly_daily = weekly.reindex(d.index, method="ffill")
 
         # Map daily series to 4H bars by date
         ny = df.index.tz_convert("America/New_York")
@@ -322,6 +429,14 @@ def build_ticker_features_4h(
         df["daily_rsi_14"] = _map_to_4h(d_rsi)
         df["daily_trend_state"] = _map_to_4h(d_trend)
         df["daily_dist_52w_atr"] = _map_to_4h(d_dist_52w)
+        df["daily_ema_stack"] = _map_to_4h(d_stack)
+        df["daily_dist_200dma_atr"] = _map_to_4h(d_dist_200)
+        df["daily_new_high_252"] = _map_to_4h(d_new_high_252.shift(1))
+        df["daily_gap_pct"] = _map_to_4h(d_gap)
+        df["daily_gap_z_60"] = _map_to_4h(d_gap_z_60)
+        df["weekly_ret_1"] = _map_to_4h(weekly_daily["weekly_ret_1"])
+        df["weekly_ret_4"] = _map_to_4h(weekly_daily["weekly_ret_4"])
+        df["weekly_trend_state"] = _map_to_4h(weekly_daily["weekly_trend_state"])
     else:
         df["daily_ret_1"] = np.nan
         df["daily_ret_5"] = np.nan
@@ -329,12 +444,47 @@ def build_ticker_features_4h(
         df["daily_rsi_14"] = np.nan
         df["daily_trend_state"] = np.nan
         df["daily_dist_52w_atr"] = np.nan
+        df["daily_ema_stack"] = np.nan
+        df["daily_dist_200dma_atr"] = np.nan
+        df["daily_new_high_252"] = np.nan
+        df["daily_gap_pct"] = np.nan
+        df["daily_gap_z_60"] = np.nan
+        df["weekly_ret_1"] = np.nan
+        df["weekly_ret_4"] = np.nan
+        df["weekly_trend_state"] = np.nan
 
     # --- BAR TIME (within session) ---
     ny = df.index.tz_convert("America/New_York")
     minutes = ny.hour * 60 + ny.minute
     df["is_morning_4h"] = (minutes < 13 * 60 + 30).astype(float)
     df["dow"] = pd.Series(ny.dayofweek.astype(float), index=df.index)
+    month = pd.Series(ny.month.astype(float), index=df.index)
+    quarter = pd.Series(ny.quarter.astype(float), index=df.index)
+    week = pd.Series(ny.isocalendar().week.astype(float), index=df.index)
+    day = pd.Series(ny.day.astype(float), index=df.index)
+    df["month"] = month
+    df["quarter"] = quarter
+    df["week_of_year"] = week
+    df["day_of_month"] = day
+    df["dow_sin"] = np.sin(2 * np.pi * df["dow"] / 5.0)
+    df["dow_cos"] = np.cos(2 * np.pi * df["dow"] / 5.0)
+    df["month_sin"] = np.sin(2 * np.pi * month / 12.0)
+    df["month_cos"] = np.cos(2 * np.pi * month / 12.0)
+    df["week_sin"] = np.sin(2 * np.pi * week / 52.0)
+    df["week_cos"] = np.cos(2 * np.pi * week / 52.0)
+    df["is_month_start"] = pd.Series(ny.is_month_start.astype(float), index=df.index)
+    df["is_month_end"] = pd.Series(ny.is_month_end.astype(float), index=df.index)
+
+    # --- STATIC IDENTITY / TRADABILITY CONTEXT ---
+    # These are intentionally simple categorical/numeric fields, mirroring the
+    # multi-ticker swing model's ability to separate ETFs, mega caps, small caps,
+    # and unknown scanner names.
+    ticker_meta = ticker_meta or {}
+    df["sector_id"] = float(ticker_meta.get("sector_id", 0.0))
+    df["market_cap_bucket"] = float(ticker_meta.get("market_cap_bucket", 0.0))
+    df["asset_type"] = float(ticker_meta.get("asset_type", 0.0))
+    df["is_etf"] = float(ticker_meta.get("is_etf", 0.0))
+    df["low_price_flag"] = (c < 5.0).astype(float)
 
     return df
 
@@ -357,10 +507,16 @@ FEATURE_COLUMNS_4H: list[str] = [
     "realized_vol_5", "realized_vol_20", "vol_regime_5_60", "vol_of_vol_20",
     # Volume
     "rvol_20", "dollar_vol_pctile_252", "dollar_vol_surge_20",
+    "volume_z_20", "dollar_vol_z_60", "volume_spike_20", "bars_since_volume_spike",
     # Structure
     "dist_to_52w_high_atr", "dist_to_52w_low_atr",
     "range_pos_20", "dist_20bar_high_atr",
     "compression_5_20", "breakout_20", "drawdown_from_60h",
+    "is_compressed_5_20", "compression_count_20",
+    "breakout_attempts_60", "bars_since_breakout_20",
+    "base_range_60_atr", "base_position_60", "close_tightness_10",
+    "range_contraction_20_60", "near_52w_high", "bars_since_52w_high",
+    "open_to_prev_close_ret",
     # Relative strength
     "rs_spy_1", "rs_spy_5", "rs_spy_20",
     "rs_qqq_1", "rs_qqq_5", "rs_qqq_20",
@@ -372,14 +528,53 @@ FEATURE_COLUMNS_4H: list[str] = [
     # Daily HTF
     "daily_ret_1", "daily_ret_5", "daily_atr_pct", "daily_rsi_14",
     "daily_trend_state", "daily_dist_52w_atr",
+    "daily_ema_stack", "daily_dist_200dma_atr", "daily_new_high_252",
+    "daily_gap_pct", "daily_gap_z_60",
+    "weekly_ret_1", "weekly_ret_4", "weekly_trend_state",
     # Time
-    "is_morning_4h", "dow",
+    "is_morning_4h", "dow", "month", "quarter", "week_of_year", "day_of_month",
+    "dow_sin", "dow_cos", "month_sin", "month_cos", "week_sin", "week_cos",
+    "is_month_start", "is_month_end",
+    # Identity / tradability context
+    "sector_id", "market_cap_bucket", "asset_type", "is_etf", "low_price_flag",
+    # Cross-sectional ranks added after all tickers are combined
+    "xsec_ret_5_rank", "xsec_ret_20_rank", "xsec_rs_spy_20_rank",
+    "xsec_rvol_20_rank", "xsec_dollar_vol_surge_20_rank",
+    "xsec_atr_expand_rank", "xsec_atr_pct_rank", "xsec_near_high_rank",
 ]
 
 
 # ---------------------------------------------------------------------------
 # Pipeline orchestrator
 # ---------------------------------------------------------------------------
+
+def _add_cross_sectional_features(combined: pd.DataFrame) -> pd.DataFrame:
+    """Add same-timestamp ranks across the active ticker universe."""
+    if combined.empty or not isinstance(combined.index, pd.MultiIndex):
+        return combined
+    ts_level = combined.index.names[0]
+    rank_specs = {
+        "ret_5": "xsec_ret_5_rank",
+        "ret_20": "xsec_ret_20_rank",
+        "rs_spy_20": "xsec_rs_spy_20_rank",
+        "rvol_20": "xsec_rvol_20_rank",
+        "dollar_vol_surge_20": "xsec_dollar_vol_surge_20_rank",
+        "atr_expand_14_60": "xsec_atr_expand_rank",
+        "atr_pct_14": "xsec_atr_pct_rank",
+    }
+    for source, target in rank_specs.items():
+        if source in combined.columns:
+            combined[target] = combined.groupby(level=ts_level)[source].rank(pct=True)
+        else:
+            combined[target] = np.nan
+    if "dist_to_52w_high_atr" in combined.columns:
+        # Lower distance means closer to a high, so rank the negative distance.
+        combined["xsec_near_high_rank"] = (
+            (-combined["dist_to_52w_high_atr"]).groupby(level=ts_level).rank(pct=True)
+        )
+    else:
+        combined["xsec_near_high_rank"] = np.nan
+    return combined
 
 def _load_context_4h() -> dict[str, pd.DataFrame]:
     ctx: dict[str, pd.DataFrame] = {}
@@ -414,12 +609,27 @@ def build_all_features_4h(
         return pd.read_parquet(out_path)
 
     ctx_4h = _load_context_4h()
+    meta = load_candidate_metadata()
+    sector_enc, cap_enc, type_enc = _build_metadata_encodings(meta)
+    meta_lookup = meta.set_index("ticker").to_dict(orient="index") if not meta.empty else {}
     frames: list[pd.DataFrame] = []
     tickers = list(tickers)
     for i, t in enumerate(tickers, 1):
         per_path = PROCESSED_FEAT_DIR / f"{t}_features.parquet"
         if per_path.exists() and not force:
             df_feat = pd.read_parquet(per_path)
+            ticker_meta = _metadata_for_ticker(
+                ticker=t,
+                meta_lookup=meta_lookup,
+                sector_enc=sector_enc,
+                cap_enc=cap_enc,
+                type_enc=type_enc,
+            )
+            for col, value in ticker_meta.items():
+                if col not in df_feat.columns:
+                    df_feat[col] = value
+            if "low_price_flag" not in df_feat.columns and "close" in df_feat.columns:
+                df_feat["low_price_flag"] = (df_feat["close"] < 5.0).astype(float)
             df_feat["ticker"] = t
             frames.append(df_feat)
             continue
@@ -435,7 +645,17 @@ def build_all_features_4h(
             df_1d = None
 
         feats = build_ticker_features_4h(
-            ticker=t, df_4h=df_4h, df_1d=df_1d, ctx_4h=ctx_4h
+            ticker=t,
+            df_4h=df_4h,
+            df_1d=df_1d,
+            ctx_4h=ctx_4h,
+            ticker_meta=_metadata_for_ticker(
+                ticker=t,
+                meta_lookup=meta_lookup,
+                sector_enc=sector_enc,
+                cap_enc=cap_enc,
+                type_enc=type_enc,
+            ),
         )
         if feats is None:
             logger.info("[%s] insufficient bars or missing OHLCV — skip", t)
@@ -454,6 +674,7 @@ def build_all_features_4h(
     combined = combined.reset_index().rename(columns={"index": "timestamp"})
     ts_col = "timestamp" if "timestamp" in combined.columns else combined.columns[0]
     combined = combined.set_index([ts_col, "ticker"])
+    combined = _add_cross_sectional_features(combined)
     combined.to_parquet(out_path)
     logger.info("Saved combined 4H features (%d rows) -> %s", len(combined), out_path)
     return combined

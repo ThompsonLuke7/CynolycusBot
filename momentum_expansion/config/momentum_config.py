@@ -19,6 +19,7 @@ RAW_1H_DIR           = RAW_DIR / "1h"
 RAW_4H_DIR           = RAW_DIR / "4h"
 RAW_1D_DIR           = RAW_DIR / "1d"
 RAW_CONTEXT_DIR      = RAW_DIR / "context"
+DEFAULT_SCAN_UNIVERSE = RAW_DIR / "MomentumExpansionUniverse.xlsx"
 
 UNIVERSE_DIR         = MODULE_ROOT / "data" / "universe_snapshots"
 PROCESSED_DIR        = MODULE_ROOT / "data" / "processed"
@@ -40,7 +41,7 @@ PLOTS_DIR            = MODULE_ROOT / "plots" / "output"
 # ---------------------------------------------------------------------------
 # Date range — Alpaca historical depth on most names is reliable from ~2016
 # ---------------------------------------------------------------------------
-TRAIN_START = "2017-01-01"
+TRAIN_START = "2018-01-01"
 TRAIN_END   = "2026-04-30"
 
 # ---------------------------------------------------------------------------
@@ -61,11 +62,16 @@ SECTOR_ETFS:      list[str] = [
     "XLC",  # Communications
 ]
 
+# Instruments used as cross-market context/regime inputs only. They should be
+# fetched for features, but not labeled as expansion-training examples or used
+# as live trade candidates by default.
+CONTEXT_ONLY_TICKERS: list[str] = sorted(set(CONTEXT_TICKERS) | set(SECTOR_ETFS))
+
 # ---------------------------------------------------------------------------
 # Universe selector defaults
 # ---------------------------------------------------------------------------
 UNIVERSE_CONFIG: dict = {
-    "candidate_pool_csv":   None,            # if None, pulls from get_candidate_pool()
+    "candidate_pool_csv":   DEFAULT_SCAN_UNIVERSE,  # TOS export; unioned with swing universe
     "min_avg_dollar_vol":   5_000_000.0,     # 30-day avg dollar volume floor (lowered to catch emerging breakouts faster)
     "min_price":            1.0,             # allow low-priced names; option chain gate handles real illiquidity
     "max_price":            1000.0,

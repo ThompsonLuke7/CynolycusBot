@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from momentum_expansion.config.momentum_config import (
+    CONTEXT_ONLY_TICKERS,
     FEATURES_COMBINED,
     LABEL_CONFIG,
     LABELS_COMBINED,
@@ -36,6 +37,7 @@ from momentum_expansion.data.load_bars import load_4h
 from momentum_expansion.features.feature_matrix_4h import FEATURE_COLUMNS_4H
 
 logger = logging.getLogger(__name__)
+_CONTEXT_ONLY_SET = {t.upper() for t in CONTEXT_ONLY_TICKERS}
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +197,11 @@ def build_all_labels_4h(
     df_bench = load_4h(benchmark)
 
     frames: list[pd.DataFrame] = []
-    tickers = list(tickers)
+    original_tickers = [str(t).upper() for t in tickers]
+    tickers = [t for t in dict.fromkeys(original_tickers) if t not in _CONTEXT_ONLY_SET]
+    skipped = sorted(set(original_tickers) - set(tickers))
+    if skipped:
+        logger.info("Skipping context-only tickers for labels: %s", ", ".join(skipped))
     for i, t in enumerate(tickers, 1):
         try:
             df_4h = load_4h(t)

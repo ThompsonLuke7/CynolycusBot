@@ -166,7 +166,8 @@ def fetch_intraday(
         .drop_duplicates(subset=["symbol", "timestamp"], keep="last")
         .reset_index(drop=True)
     )
-    if "timestamp" in df.columns:
+    tf_slug = _timeframe_slug(timeframe)
+    if "timestamp" in df.columns and not tf_slug.endswith("d"):
         ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         ny = ts.dt.tz_convert("America/New_York")
         minutes = ny.dt.hour * 60 + ny.dt.minute
@@ -177,7 +178,6 @@ def fetch_intraday(
         slug = clean_ticker.lower()
         raw_dir = get_ticker_raw_dir(clean_ticker)
         raw_dir.mkdir(parents=True, exist_ok=True)
-        tf_slug = _timeframe_slug(timeframe)
         save_path = str(raw_dir / f"{slug}_intraday_{tf_slug}.parquet")
 
     if save_path:

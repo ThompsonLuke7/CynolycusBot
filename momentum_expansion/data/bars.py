@@ -196,7 +196,10 @@ def build_4h_for(ticker: str, *, force: bool = False) -> pd.DataFrame | None:
     """Resample cached 1H bars to 4H and persist."""
     out_path = _path_for(ticker, "4h")
     if out_path.exists() and not force:
-        return pd.read_parquet(out_path)
+        try:
+            return pd.read_parquet(out_path)
+        except Exception as exc:
+            logger.warning("[%s] existing 4h cache unreadable, rebuilding: %s", ticker, exc)
 
     src = _path_for(ticker, "1h")
     if not src.exists():

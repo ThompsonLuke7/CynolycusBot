@@ -17,46 +17,33 @@ universe; flagged in the plan / report.
 from __future__ import annotations
 
 import logging
+import re
+from zipfile import ZipFile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from xml.etree import ElementTree as ET
 
 import numpy as np
 import pandas as pd
 
 from momentum_expansion.config.momentum_config import (
+    CONTEXT_ONLY_TICKERS,
+    REPO_ROOT,
     RAW_1D_DIR,
     UNIVERSE_CONFIG,
     UNIVERSE_DIR,
 )
 
 logger = logging.getLogger(__name__)
+_CONTEXT_ONLY_SET = {t.upper() for t in CONTEXT_ONLY_TICKERS}
 
 
 # ---------------------------------------------------------------------------
 # Candidate pool
 # ---------------------------------------------------------------------------
 
-def get_candidate_pool() -> list[str]:
-    """
-    Default candidate pool: union of curated multi_ticker_swing universe
-    plus megacaps that aren't in there. Stocks only (ETFs handled via context).
-    """
-    swing_csv = (
-        Path(__file__).resolve().parents[2]
-        / "multi_ticker_swing" / "config" / "swing_trader_universe_v3.csv"
-    )
-    pool: set[str] = set()
-    if swing_csv.exists():
-        df = pd.read_csv(swing_csv)
-        type_col = "type" if "type" in df.columns else "asset_type"
-        # exclude ETFs from the candidate pool (we use those as context)
-        stocks = df[df[type_col].astype(str).str.upper() != "ETF"]["ticker"].tolist()
-        pool.update(stocks)
-
-    # Hand-curated megacaps + high-beta liquid names that may not be in the
-    # swing CSV. Safe to add even if duplicates — set semantics dedupes.
-    pool.update([
+_HAND_CURATED_TICKERS = [
         "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "GOOG", "TSLA",
         "AVGO", "AMD", "NFLX", "ADBE", "CRM", "ORCL", "INTC", "MU",
         "JPM", "BAC", "WFC", "GS", "MS", "C", "V", "MA", "AXP",
@@ -73,8 +60,242 @@ def get_candidate_pool() -> list[str]:
         "BABA", "JD", "PDD", "BIDU",
         "TSM", "ASML", "ARM",
         "SMCI", "MSTR", "MARA", "RIOT",
-    ])
-    return sorted(pool)
+]
+
+
+def _clean_ticker(value: object) -> str:
+    return str(value).strip().upper().replace("$", "")
+
+
+def _swing_universe_path() -> Path:
+    return REPO_ROOT / "multi_ticker_swing" / "config" / "swing_trader_universe_v3.csv"
+
+
+def _parse_market_cap_bucket(market_cap: object) -> str:
+    """
+    Convert Thinkorswim-style market-cap strings (for example "1,597 M")
+    into broad buckets compatible with the swing model's behavioral identity.
+    """
+    s = str(market_cap).strip().replace(",", "")
+    match = re.match(r"([-+0-9.]+)\s*([KMBT]?)", s, flags=re.IGNORECASE)
+    if not match:
+        return "Unknown"
+    value = float(match.group(1))
+    unit = match.group(2).upper()
+    cap_m = value * {"": 1.0, "K": 1e-3, "M": 1.0, "B": 1e3, "T": 1e6}[unit]
+    if cap_m >= 200_000:
+        return "Mega"
+    if cap_m >= 10_000:
+        return "Large"
+    if cap_m >= 2_000:
+        return "Mid"
+    if cap_m >= 300:
+        return "Small"
+    return "Micro"
+
+
+def _read_tos_xlsx(path: Path) -> pd.DataFrame:
+    """
+    Lightweight XLSX reader for the Thinkorswim scan export.
+
+    The project environment does not require openpyxl. TOS exports the first
+    worksheet as ordinary shared-string XLSX XML, so a small reader is enough
+    for ticker metadata.
+    """
+    ns = {
+        "a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    }
+    with ZipFile(path) as zf:
+        names = zf.namelist()
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in names:
+            root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+            for si in root.findall("a:si", ns):
+                text = "".join(
+                    t.text or ""
+                    for t in si.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
+                )
+                shared.append(text)
+
+        workbook = ET.fromstring(zf.read("xl/workbook.xml"))
+        sheet = workbook.find("a:sheets", ns)[0]
+        rel_id = sheet.attrib["{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"]
+        rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+        target = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}[rel_id]
+        sheet_path = "xl/" + target if not target.startswith("xl/") else target
+        sheet_root = ET.fromstring(zf.read(sheet_path))
+
+        def col_num(cell_ref: str) -> int:
+            letters = "".join(ch for ch in cell_ref if ch.isalpha())
+            n = 0
+            for ch in letters:
+                n = n * 26 + ord(ch.upper()) - 64
+            return n - 1
+
+        rows: list[list[str]] = []
+        for row in sheet_root.findall(".//a:sheetData/a:row", ns):
+            values: list[str] = []
+            for cell in row.findall("a:c", ns):
+                idx = col_num(cell.attrib["r"])
+                while len(values) <= idx:
+                    values.append("")
+                value_node = cell.find("a:v", ns)
+                value = "" if value_node is None else value_node.text or ""
+                if cell.attrib.get("t") == "s" and value:
+                    value = shared[int(value)]
+                values[idx] = value
+            rows.append(values)
+
+    records: list[dict] = []
+    for row in rows:
+        if not row:
+            continue
+        ticker = _clean_ticker(row[0])
+        if not ticker or ticker in {"SYMBOL", "TICKER"}:
+            continue
+        records.append({
+            "ticker": ticker,
+            "sector": "Unknown",
+            "market_cap_bucket": _parse_market_cap_bucket(row[11] if len(row) > 11 else ""),
+            "type": "Stock",
+            "notes": str(row[1]).strip() if len(row) > 1 else "Thinkorswim scan export",
+        })
+    return pd.DataFrame.from_records(records)
+
+
+def _read_external_candidate_pool(path: Path | str | None) -> pd.DataFrame:
+    if path is None or str(path).strip() in {"", "None"}:
+        return pd.DataFrame()
+    p = Path(path)
+    if not p.is_absolute():
+        p = REPO_ROOT / p
+    if not p.exists() or p.name.startswith("~$"):
+        return pd.DataFrame()
+    suffix = p.suffix.lower()
+    if suffix == ".csv":
+        df = pd.read_csv(p)
+    elif suffix in {".xlsx", ".xlsm"}:
+        df = _read_tos_xlsx(p)
+    else:
+        logger.warning("Unsupported candidate pool format: %s", p)
+        return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+    if "ticker" not in df.columns:
+        df = df.rename(columns={df.columns[0]: "ticker"})
+    df["ticker"] = df["ticker"].map(_clean_ticker)
+    df = df[df["ticker"] != ""].copy()
+    if "sector" not in df.columns:
+        df["sector"] = "Unknown"
+    if "market_cap_bucket" not in df.columns:
+        cap_col = "cap_bucket" if "cap_bucket" in df.columns else None
+        df["market_cap_bucket"] = df[cap_col] if cap_col else "Unknown"
+    if "type" not in df.columns:
+        type_col = "asset_type" if "asset_type" in df.columns else None
+        df["type"] = df[type_col] if type_col else "Stock"
+    if "notes" not in df.columns:
+        df["notes"] = f"External candidate pool: {p.name}"
+    return df[["ticker", "sector", "market_cap_bucket", "type", "notes"]]
+
+
+def load_candidate_metadata(cfg: dict | None = None) -> pd.DataFrame:
+    """
+    Return ticker metadata for the momentum-expansion training universe.
+
+    Sources are unioned, in priority order:
+      1. Thinkorswim/exported candidate pool from config.
+      2. Full multi_ticker_swing universe, including ETFs.
+      3. Hand-curated liquid/high-beta additions.
+    """
+    cfg = {**UNIVERSE_CONFIG, **(cfg or {})}
+    frames: list[pd.DataFrame] = []
+
+    external = _read_external_candidate_pool(cfg.get("candidate_pool_csv"))
+    if not external.empty:
+        external["_source_priority"] = 0
+        frames.append(external)
+
+    swing_csv = _swing_universe_path()
+    if swing_csv.exists():
+        swing = pd.read_csv(swing_csv)
+        if "cap_bucket" in swing.columns and "market_cap_bucket" not in swing.columns:
+            swing = swing.rename(columns={"cap_bucket": "market_cap_bucket"})
+        if "asset_type" in swing.columns and "type" not in swing.columns:
+            swing = swing.rename(columns={"asset_type": "type"})
+        for col, default in (
+            ("sector", "Unknown"),
+            ("market_cap_bucket", "Unknown"),
+            ("type", "Stock"),
+            ("notes", "multi_ticker_swing universe"),
+        ):
+            if col not in swing.columns:
+                swing[col] = default
+        swing["ticker"] = swing["ticker"].map(_clean_ticker)
+        swing["_source_priority"] = 1
+        frames.append(swing[["ticker", "sector", "market_cap_bucket", "type", "notes", "_source_priority"]])
+
+    hand = pd.DataFrame({
+        "ticker": _HAND_CURATED_TICKERS,
+        "sector": "Unknown",
+        "market_cap_bucket": "Unknown",
+        "type": "Stock",
+        "notes": "hand-curated momentum expansion addition",
+    })
+    hand["_source_priority"] = 2
+    frames.append(hand)
+
+    meta = pd.concat(frames, axis=0, ignore_index=True) if frames else pd.DataFrame()
+    if meta.empty:
+        return meta
+    meta["ticker"] = meta["ticker"].map(_clean_ticker)
+    meta = meta[meta["ticker"] != ""].copy()
+    meta = meta.sort_values(["ticker", "_source_priority"])
+
+    def first_known(values: pd.Series, default: str = "Unknown") -> str:
+        for value in values:
+            text = str(value).strip()
+            if text and text.lower() != "nan" and text != "Unknown":
+                return text
+        return default
+
+    records: list[dict] = []
+    for ticker, group in meta.groupby("ticker", sort=True):
+        asset_type = "ETF" if group["type"].astype(str).str.upper().eq("ETF").any() else first_known(group["type"], "Stock")
+        records.append({
+            "ticker": ticker,
+            # TOS exports do not include sector, so borrow swing sector when present.
+            "sector": first_known(group["sector"]),
+            # TOS usually has current market cap; swing fills names not in the scan.
+            "market_cap_bucket": first_known(group["market_cap_bucket"]),
+            "type": asset_type,
+            "notes": first_known(group["notes"], ""),
+        })
+    meta = pd.DataFrame.from_records(records)
+    meta["is_context_only"] = meta["ticker"].isin(_CONTEXT_ONLY_SET)
+    return meta.reset_index(drop=True)
+
+
+def get_candidate_pool(*, include_context_only: bool = False) -> list[str]:
+    """
+    Default candidate pool: union of the Thinkorswim scan, full swing universe
+    including ETFs, and a small hand-curated liquid/high-beta supplement.
+
+    Context-only regime ETFs are kept in metadata but excluded from the default
+    training/trading pool. Fetch them with fetch_context_bars() instead.
+    """
+    meta = load_candidate_metadata()
+    if meta.empty:
+        return sorted(_HAND_CURATED_TICKERS)
+    if not include_context_only and "is_context_only" in meta.columns:
+        meta = meta[~meta["is_context_only"]].copy()
+    return sorted(meta["ticker"].astype(str).tolist())
+
+
+def filter_context_only_tickers(tickers: Iterable[str]) -> list[str]:
+    """Remove regime/context-only instruments from a candidate ticker list."""
+    return [t for t in dict.fromkeys(_clean_ticker(t) for t in tickers) if t and t not in _CONTEXT_ONLY_SET]
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +470,8 @@ def write_weekly_snapshot(
     cfg = {**UNIVERSE_CONFIG, **(cfg or {})}
     if candidates is None:
         candidates = get_candidate_pool()
+    else:
+        candidates = filter_context_only_tickers(candidates)
     scored = score_universe(as_of=as_of, candidates=candidates, cfg=cfg)
     if scored.empty:
         logger.warning("No candidates scored for as_of=%s — wrote empty snapshot", as_of)
@@ -309,6 +532,8 @@ def build_snapshots_over_range(
     """
     if candidates is None:
         candidates = get_candidate_pool()
+    else:
+        candidates = filter_context_only_tickers(candidates)
     start_ts = pd.Timestamp(start)
     end_ts   = pd.Timestamp(end)
 
