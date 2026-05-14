@@ -10,7 +10,7 @@ For each 4H bar at time T we look forward W bars and compute:
 
 A composite expansion-quality score combines these via configurable weights.
 A binary target (expansion_target) flags the top quantile of composite
-within a rolling cross-sectional + temporal window.
+within each ticker's rolling temporal window.
 
 ALL future-window slices end at index T+W, never inclusive of T (no leakage
 of T's bar into the label of T).
@@ -26,6 +26,8 @@ import pandas as pd
 
 from momentum_expansion.config.momentum_config import (
     CONTEXT_ONLY_TICKERS,
+    CORRELATED_FEATURE_REPORT,
+    CORRELATION_PRUNE_THRESHOLD,
     FEATURES_COMBINED,
     LABEL_CONFIG,
     LABELS_COMBINED,
@@ -143,8 +145,18 @@ def assemble_composite_and_target(
     win = int(cfg["binary_window_bars"])
 
     df = df_labels.copy()
+    required_raw_labels = [
+        "fwd_max_return",
+        "fwd_max_alpha",
+        "fwd_atr_adj_return",
+        "fwd_max_drawdown",
+        "fwd_close_return",
+        "trend_persistence",
+    ]
+    complete_forward_window = df[required_raw_labels].notna().all(axis=1)
 
-    # Per-ticker rolling rank (cross-sectional via groupby, temporal via rolling)
+    # Per-ticker rolling rank. This labels each symbol's own best expansion
+    # regimes instead of letting high-volatility symbols dominate the target.
     out = df.copy()
     for col in ["fwd_max_alpha", "fwd_atr_adj_return", "trend_persistence", "fwd_max_drawdown"]:
         if col not in df.columns:
@@ -172,6 +184,7 @@ def assemble_composite_and_target(
     )
     out["expansion_target"] = (score_rank >= threshold_q).astype(float)
     out.loc[score_rank.isna(), "expansion_target"] = np.nan
+    out.loc[~complete_forward_window, "expansion_target"] = np.nan
     return out
 
 
@@ -236,11 +249,62 @@ def build_all_labels_4h(
 # Build the combined training matrix (features + labels, NaN-pruned)
 # ---------------------------------------------------------------------------
 
+def _drop_correlated_features(
+    df: pd.DataFrame,
+    *,
+    feature_cols: list[str],
+    threshold: float,
+    report_path: Path,
+) -> tuple[pd.DataFrame, list[str], pd.DataFrame]:
+    """
+    Drop redundant feature columns whose absolute pairwise correlation exceeds
+    threshold. Later columns are dropped, preserving FEATURE_COLUMNS_4H order.
+    """
+    cols = [c for c in feature_cols if c in df.columns]
+    if len(cols) < 2:
+        report = pd.DataFrame(columns=["dropped_feature", "kept_feature", "abs_corr"])
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report.to_csv(report_path, index=False)
+        return df, [], report
+
+    corr = df[cols].astype("float32").corr().abs()
+    to_drop: set[str] = set()
+    rows: list[dict[str, object]] = []
+
+    for i, keep_col in enumerate(cols):
+        if keep_col in to_drop:
+            continue
+        for drop_col in cols[i + 1:]:
+            if drop_col in to_drop:
+                continue
+            value = corr.at[keep_col, drop_col]
+            if pd.notna(value) and value > threshold:
+                to_drop.add(drop_col)
+                rows.append({
+                    "dropped_feature": drop_col,
+                    "kept_feature": keep_col,
+                    "abs_corr": float(value),
+                })
+
+    dropped = [c for c in cols if c in to_drop]
+    report = pd.DataFrame(rows, columns=["dropped_feature", "kept_feature", "abs_corr"])
+    if not report.empty:
+        report = report.sort_values(["abs_corr", "dropped_feature"], ascending=[False, True])
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report.to_csv(report_path, index=False)
+    if dropped:
+        df = df.drop(columns=dropped)
+    return df, dropped, report
+
+
 def build_training_matrix(
     *,
     features_path: Path = FEATURES_COMBINED,
     labels_path: Path = LABELS_COMBINED,
     out_path: Path = TRAINING_MATRIX,
+    corr_report_path: Path = CORRELATED_FEATURE_REPORT,
+    corr_threshold: float = CORRELATION_PRUNE_THRESHOLD,
     force: bool = False,
 ) -> pd.DataFrame | None:
     if out_path.exists() and not force:
@@ -263,8 +327,41 @@ def build_training_matrix(
     ]
     df = df[keep_cols].copy()
     df = df.dropna(subset=["expansion_target"])
-    df = df.dropna(subset=[c for c in FEATURE_COLUMNS_4H if c in df.columns], how="any")
+    label_cols = [
+        "fwd_max_return", "fwd_max_alpha", "fwd_atr_adj_return",
+        "fwd_max_drawdown", "fwd_close_return", "trend_persistence",
+        "expansion_score",
+    ]
+    df = df.dropna(subset=[c for c in label_cols if c in df.columns], how="any")
+    feature_cols = [c for c in FEATURE_COLUMNS_4H if c in df.columns]
+    df = df.dropna(subset=feature_cols, how="any")
+    df, dropped, corr_report = _drop_correlated_features(
+        df,
+        feature_cols=feature_cols,
+        threshold=float(corr_threshold),
+        report_path=corr_report_path,
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out_path)
+    if dropped:
+        logger.info(
+            "Dropped %d correlated features at abs(corr) > %.5f. Report -> %s",
+            len(dropped),
+            float(corr_threshold),
+            corr_report_path,
+        )
+        for row in corr_report.head(25).itertuples(index=False):
+            logger.info(
+                "  drop %s, keep %s, abs_corr=%.6f",
+                row.dropped_feature,
+                row.kept_feature,
+                row.abs_corr,
+            )
+    else:
+        logger.info(
+            "No correlated features exceeded abs(corr) > %.5f. Empty report -> %s",
+            float(corr_threshold),
+            corr_report_path,
+        )
     logger.info("Training matrix: %d rows × %d cols -> %s", len(df), df.shape[1], out_path)
     return df

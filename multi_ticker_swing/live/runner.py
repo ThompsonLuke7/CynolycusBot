@@ -165,7 +165,8 @@ class _ConfirmState:
 # Options contract selection
 # ---------------------------------------------------------------------------
 
-_MIN_DTE_DAYS = 7    # skip monthly if fewer than 7 calendar days away
+_MIN_DTE_DAYS = 0    # allow the nearest listed expiry, including 0DTE/1DTE weeklies
+_EXPIRY_LOOKAHEAD_DAYS = 90
 _DELTA_LO    = 0.20  # minimum |delta| for OTM contract selection
 _DELTA_HI    = 0.40  # maximum |delta| — stays slightly OTM
 _DELTA_TGT   = 0.30  # preferred |delta| within the range
@@ -193,6 +194,100 @@ def _next_monthly_expiry(ref_date: date) -> date:
     raise ValueError(f"Could not determine monthly expiry after {ref_date}")
 
 
+def _contract_strike(contract: dict) -> float:
+    try:
+        return float(contract.get("strike_price", 0.0))
+    except Exception:
+        return 0.0
+
+
+def _contract_expiry(contract: dict) -> date | None:
+    raw = contract.get("expiration_date")
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw))
+    except ValueError:
+        return None
+
+
+def _is_standard_100_contract(contract: dict, ticker: str) -> bool:
+    """True for standard, full-size option contracts.
+
+    Alpaca exposes both multiplier and size on option contract records. Minis,
+    adjusted contracts, and other non-standard deliverables should not be traded
+    by this live runner, so require the normal 100-share contract fields when
+    present and keep root_symbol pinned to the underlying ticker.
+    """
+    root_symbol = str(contract.get("root_symbol") or ticker).upper()
+    if root_symbol != ticker.upper():
+        return False
+    multiplier = contract.get("multiplier")
+    if multiplier is not None and str(multiplier) != "100":
+        return False
+    size = contract.get("size")
+    if size is not None and str(size) != "100":
+        return False
+    return True
+
+
+def _available_contracts(
+    client: AlpacaOptionsClient,
+    ticker: str,
+    cp: str,
+    current_price: float,
+    ref_date: date,
+) -> tuple[str | None, list[dict]]:
+    """Return standard 100-share contracts for the nearest listed expiry.
+
+    Alpaca lists holiday-adjusted expiries by their actual trading date. Looking up
+    a hard-coded third Friday can miss the chain when the monthly expiry moves to
+    Thursday, so live selection starts from the contracts endpoint and lets the
+    broker tell us which expiries exist. With weeklies, the nearest weekly wins;
+    without weeklies, this naturally falls back to the closest monthly chain.
+    """
+    start = ref_date + timedelta(days=_MIN_DTE_DAYS)
+    end = ref_date + timedelta(days=_EXPIRY_LOOKAHEAD_DAYS)
+    strike_lo = int(round(current_price * 0.90, 0))
+    strike_hi = int(round(current_price * 1.10, 0))
+
+    contracts: list[dict] = []
+    page_token: str | None = None
+    for _ in range(10):
+        resp = client.get_option_contracts(
+            underlying_symbol=ticker,
+            expiration_date_gte=start.strftime("%Y-%m-%d"),
+            expiration_date_lte=end.strftime("%Y-%m-%d"),
+            type=cp,
+            strike_price_gte=strike_lo,
+            strike_price_lte=strike_hi,
+            status="active",
+            page_token=page_token,
+        )
+        page = resp.get("option_contracts") if isinstance(resp, dict) else resp
+        if page:
+            contracts.extend(c for c in page if isinstance(c, dict))
+        page_token = resp.get("next_page_token") if isinstance(resp, dict) else None
+        if not page_token:
+            break
+
+    tradable = [
+        c for c in contracts
+        if (
+            c.get("tradable", True)
+            and _is_standard_100_contract(c, ticker)
+            and (exp := _contract_expiry(c)) is not None
+            and exp >= start
+        )
+    ]
+    if not tradable:
+        return None, []
+
+    nearest_expiry = min(_contract_expiry(c) for c in tradable if _contract_expiry(c) is not None)
+    expiry_str = nearest_expiry.strftime("%Y-%m-%d")
+    return expiry_str, [c for c in tradable if c.get("expiration_date") == expiry_str]
+
+
 def _select_contract(
     client: AlpacaOptionsClient,
     ticker: str,
@@ -204,16 +299,29 @@ def _select_contract(
     Select a slightly-OTM option contract targeting delta 0.2–0.4 (|delta| ~0.30).
 
     Strategy:
-      1. Fetch option chain snapshots (includes Greeks) for the next monthly expiry.
-      2. Filter to contracts where |delta| is in [_DELTA_LO, _DELTA_HI].
-      3. Pick the contract closest to _DELTA_TGT.
-      4. If Greeks are unavailable (pre-market, API gap), fall back to nearest ATM strike.
+      1. Discover the nearest listed expiry with at least _MIN_DTE_DAYS remaining.
+      2. Fetch option chain snapshots for that actual expiry (includes Greeks).
+      3. Filter to contracts where |delta| is in [_DELTA_LO, _DELTA_HI].
+      4. Pick the contract closest to _DELTA_TGT.
+      5. If Greeks are unavailable (pre-market, API gap), fall back to nearest ATM strike.
 
     Returns OCC-format symbol string, or None if selection fails.
     """
     cp = "call" if direction == 1 else "put"
-    expiry = _next_monthly_expiry(ref_date)
-    expiry_str = expiry.strftime("%Y-%m-%d")
+    try:
+        expiry_str, contracts = _available_contracts(client, ticker, cp, current_price, ref_date)
+    except Exception as exc:
+        logger.error("[%s] get_option_contracts failed: %s", ticker, exc)
+        return None
+
+    if not expiry_str or not contracts:
+        logger.warning(
+            "[%s] no standard 100-share %s contracts found near ATM (%.2f)",
+            ticker, cp, current_price,
+        )
+        return None
+
+    available_symbols = {str(c.get("symbol", "")) for c in contracts}
 
     # --- Primary path: delta-based selection via snapshots ---
     try:
@@ -225,6 +333,8 @@ def _select_contract(
         if snapshots:
             candidates = []
             for occ_sym, snap in snapshots.items():
+                if available_symbols and occ_sym not in available_symbols:
+                    continue
                 greeks = snap.get("greeks") or {}
                 raw_delta = greeks.get("delta")
                 if raw_delta is None:
@@ -246,27 +356,7 @@ def _select_contract(
         logger.warning("[%s] snapshot delta selection failed (%s); falling back to ATM.", ticker, exc)
 
     # --- Fallback: nearest ATM strike via contracts list ---
-    try:
-        strike_lo = round(current_price * 0.90, 0)
-        strike_hi = round(current_price * 1.10, 0)
-        resp = client.get_option_contracts(
-            underlying_symbol=ticker,
-            expiration_date=expiry_str,
-            type=cp,
-            strike_price_gte=int(strike_lo),
-            strike_price_lte=int(strike_hi),
-        )
-        contracts = resp.get("option_contracts") or (resp if isinstance(resp, list) else [])
-    except Exception as exc:
-        logger.error("[%s] get_option_contracts failed: %s", ticker, exc)
-        return None
-
-    if not contracts:
-        logger.warning("[%s] no %s contracts found near ATM (%.2f) exp %s",
-                       ticker, cp, current_price, expiry_str)
-        return None
-
-    best = min(contracts, key=lambda c: abs(float(c.get("strike_price", 0)) - current_price))
+    best = min(contracts, key=lambda c: abs(_contract_strike(c) - current_price))
     logger.info("[%s] ATM fallback: selected %s %s (exp=%s)", ticker, cp, best.get("symbol"), expiry_str)
     return str(best.get("symbol", ""))
 
@@ -481,6 +571,7 @@ class SwingLiveRunner:
             self._emit("stopped", {"reason": "stop requested during warmup"})
             return
 
+        self._sync_positions_from_broker()
         self._run_startup_scan_from_warmup()
 
         if self._external_queue:
@@ -529,6 +620,46 @@ class SwingLiveRunner:
 
     def is_stop_requested(self) -> bool:
         return self._stop_event.is_set()
+
+    def _sync_positions_from_broker(self) -> None:
+        if self._dry_run:
+            self._emit("broker_sync", {"synced": True, "restored": 0, "ignored": 0, "simulated": True})
+            return
+        try:
+            result = self._pos_mgr.sync_from_broker(
+                universe=self._universe,
+                price_lookup=self._latest_underlying_close,
+                atr_lookup=self._fb.get_atr,
+            )
+            logger.info(
+                "Broker sync complete: restored=%s ignored=%s",
+                result.get("restored"),
+                result.get("ignored"),
+            )
+            for pos in result.get("positions") or []:
+                if not isinstance(pos, dict):
+                    continue
+                self._emit("position_chart_seed", {
+                    "ticker": pos.get("ticker"),
+                    "direction": int(pos.get("direction", 0) or 0),
+                    "entry_price": float(pos.get("entry_price", float("nan"))),
+                    "entry_time": int(datetime.now(timezone.utc).timestamp()),
+                    "sl_price": pos.get("sl_price"),
+                    "pre_entry_bars": [],
+                    "restored": True,
+                })
+        except Exception as exc:
+            logger.warning("Broker sync failed: %s", exc)
+            self._emit("broker_sync", {"synced": False, "error": str(exc)})
+
+    def _latest_underlying_close(self, ticker: str) -> float | None:
+        bar = self._fb.get_last_bar(ticker)
+        if not bar:
+            return None
+        try:
+            return float(bar.get("close"))
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Main processing loop

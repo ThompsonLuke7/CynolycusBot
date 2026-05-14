@@ -139,9 +139,9 @@ class OptionOrderPolicyConfig:
     option_exit_time_decay_minutes: int = 60
     option_exit_time_decay_progress_pct: float = 0.5
     option_exit_opposite_prob: float = 0.40
-    option_exit_opposite_prob_long: float | None = 0.40
+    option_exit_opposite_prob_long: float | None = 0.70
     option_exit_opposite_prob_short: float | None = 0.75
-    option_exit_opposite_profit_pct: float = 0.0
+    option_exit_opposite_profit_pct: float = 0.25
     option_exit_quote_mode: str = "bid"
     option_new_entry_cutoff_hhmm: str | None = "15:00"
     max_live_entry_lag_sec: float = 0.0

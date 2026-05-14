@@ -673,7 +673,7 @@ def build_all_features_4h(
     combined = pd.concat(frames, axis=0)
     combined = combined.reset_index().rename(columns={"index": "timestamp"})
     ts_col = "timestamp" if "timestamp" in combined.columns else combined.columns[0]
-    combined = combined.set_index([ts_col, "ticker"])
+    combined = combined.set_index([ts_col, "ticker"]).sort_index()
     combined = _add_cross_sectional_features(combined)
     combined.to_parquet(out_path)
     logger.info("Saved combined 4H features (%d rows) -> %s", len(combined), out_path)

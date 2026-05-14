@@ -542,9 +542,31 @@ class LiveSwingFeatureBuilder:
     def get_atr(self, ticker: str) -> float:
         """Return the ATR value at the last available bar (for SL computation)."""
         df = self._to_df(ticker)
-        if df is None or "atr_14" not in df.columns:
+        if df is None:
             return float("nan")
-        val = df["atr_14"].iloc[-1]
+        if "atr_14" in df.columns:
+            val = df["atr_14"].iloc[-1]
+            return float(val) if pd.notna(val) else float("nan")
+
+        required = {"high", "low", "close"}
+        if not required.issubset(df.columns):
+            return float("nan")
+
+        try:
+            import pandas_ta as ta
+            atr_series = ta.atr(df["high"], df["low"], df["close"], length=14)
+            if atr_series is None or atr_series.empty:
+                return float("nan")
+            val = atr_series.iloc[-1]
+        except Exception:
+            high_low = df["high"] - df["low"]
+            high_prev_close = (df["high"] - df["close"].shift(1)).abs()
+            low_prev_close = (df["low"] - df["close"].shift(1)).abs()
+            true_range = pd.concat(
+                [high_low, high_prev_close, low_prev_close],
+                axis=1,
+            ).max(axis=1)
+            val = true_range.rolling(14).mean().iloc[-1]
         return float(val) if pd.notna(val) else float("nan")
 
     def get_last_bar(self, ticker: str) -> dict | None:

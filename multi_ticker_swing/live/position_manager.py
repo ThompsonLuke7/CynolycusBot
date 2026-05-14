@@ -12,6 +12,8 @@ All closes are submitted via AlpacaOptionsClient.submit_option_order().
 from __future__ import annotations
 
 import logging
+import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -201,6 +203,77 @@ class SwingPositionManager:
     def snapshot(self) -> list[dict]:
         return [p.to_dict() for p in self._positions.values()]
 
+    def sync_from_broker(
+        self,
+        *,
+        universe: dict[str, TickerConfig],
+        price_lookup: Callable[[str], float | None],
+        atr_lookup: Callable[[str], float | None],
+    ) -> dict[str, Any]:
+        """Seed open swing option positions from Alpaca broker positions.
+
+        Broker positions do not tell us the original underlying entry price or MFE
+        trail state, so restored positions are anchored at the current warmed-up
+        underlying close and managed from that point forward.
+        """
+        if self._dry_run:
+            return {"synced": True, "restored": 0, "ignored": 0, "simulated": True}
+
+        resp = self._client.get_positions()
+        broker_positions = _extract_positions(resp)
+        restored: list[dict[str, Any]] = []
+        ignored: list[dict[str, Any]] = []
+
+        for raw in broker_positions:
+            symbol = str(raw.get("symbol", "")).strip().upper()
+            parsed = _parse_swing_option_symbol(symbol, universe)
+            if parsed is None:
+                continue
+            ticker, direction = parsed
+
+            side_raw = str(raw.get("side", "")).strip().lower()
+            qty_val = _as_float(raw.get("qty"))
+            side_mult = -1 if side_raw == "short" or (math.isfinite(qty_val) and qty_val < 0) else 1
+            qty = int(round(abs(qty_val))) if math.isfinite(qty_val) else 0
+            if side_mult <= 0 or qty <= 0:
+                ignored.append({"symbol": symbol, "reason": "not_long_option_position"})
+                continue
+            if ticker in self._positions:
+                ignored.append({"symbol": symbol, "ticker": ticker, "reason": "already_tracked"})
+                continue
+
+            entry_price = price_lookup(ticker)
+            atr = atr_lookup(ticker)
+            if entry_price is None or not math.isfinite(float(entry_price)):
+                ignored.append({"symbol": symbol, "ticker": ticker, "reason": "missing_underlying_price"})
+                continue
+            if atr is None or not math.isfinite(float(atr)) or float(atr) <= 0:
+                ignored.append({"symbol": symbol, "ticker": ticker, "reason": "missing_atr"})
+                continue
+
+            pos = SwingPosition(
+                ticker=ticker,
+                direction=direction,
+                entry_price=float(entry_price),
+                entry_time=datetime.now(timezone.utc),
+                atr_at_entry=float(atr),
+                option_symbol=symbol,
+                qty=qty,
+                config=universe[ticker],
+            )
+            self.open_position(pos)
+            restored.append(pos.to_dict())
+
+        result = {
+            "synced": True,
+            "restored": len(restored),
+            "ignored": len(ignored),
+            "positions": restored,
+            "ignored_positions": ignored,
+        }
+        self._emit("broker_sync", {**result, "positions": restored, "ignored_positions": ignored})
+        return result
+
     def open_position(self, pos: SwingPosition) -> None:
         """Register a newly entered position."""
         self._positions[pos.ticker] = pos
@@ -279,3 +352,35 @@ class SwingPositionManager:
             "order_error": order_error,
         })
         del self._positions[pos.ticker]
+
+
+def _as_float(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float("nan")
+
+
+def _extract_positions(resp: Any) -> list[dict[str, Any]]:
+    if isinstance(resp, list):
+        return [x for x in resp if isinstance(x, dict)]
+    if isinstance(resp, dict):
+        for key in ("positions", "data"):
+            value = resp.get(key)
+            if isinstance(value, list):
+                return [x for x in value if isinstance(x, dict)]
+    return []
+
+
+def _parse_swing_option_symbol(
+    symbol: str,
+    universe: dict[str, TickerConfig],
+) -> tuple[str, int] | None:
+    m = re.match(r"^([A-Z]+)(\d{6})([CP])(\d{8})$", symbol.strip().upper())
+    if not m:
+        return None
+    root = m.group(1)
+    cp = m.group(3)
+    if root not in universe:
+        return None
+    return root, (1 if cp == "C" else -1)

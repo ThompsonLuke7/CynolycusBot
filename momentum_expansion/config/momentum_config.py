@@ -27,6 +27,7 @@ PROCESSED_FEAT_DIR   = PROCESSED_DIR / "features_4h"
 FEATURES_COMBINED    = PROCESSED_DIR / "features_4h.parquet"
 LABELS_COMBINED      = PROCESSED_DIR / "expansion_labels_4h.parquet"
 TRAINING_MATRIX      = PROCESSED_DIR / "training_matrix_4h.parquet"
+CORRELATED_FEATURE_REPORT = PROCESSED_DIR / "correlated_features_dropped.csv"
 
 TRAINING_EXPORT_DIR  = MODULE_ROOT / "data" / "training_export"
 
@@ -108,6 +109,7 @@ BAR_CONFIG: dict = {
 # Feature matrix
 # ---------------------------------------------------------------------------
 MIN_4H_BARS = 250  # ~6 months of 4H bars before features are usable
+CORRELATION_PRUNE_THRESHOLD = 0.995
 
 # ---------------------------------------------------------------------------
 # Forward expansion label

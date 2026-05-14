@@ -433,17 +433,21 @@
     if (!iso) return "—";
     try {
       const d = new Date(iso);
-      return d.toLocaleTimeString("en-US", { hour12: false });
+      return d.toLocaleTimeString("en-US", {
+        hour12: false,
+        timeZone: "America/New_York",
+        timeZoneName: "short",
+      });
     } catch { return iso; }
   };
   const fmtTimeShort = (iso) => {
     if (!iso) return "";
     try {
       const d = new Date(iso);
-      const hh = String(d.getHours()).padStart(2, "0");
-      const mm = String(d.getMinutes()).padStart(2, "0");
-      const ss = String(d.getSeconds()).padStart(2, "0");
-      return `${hh}:${mm}:${ss}`;
+      return d.toLocaleTimeString("en-US", {
+        hour12: false,
+        timeZone: "America/New_York",
+      });
     } catch { return iso; }
   };
 
@@ -455,12 +459,42 @@
   const LW_THEME = {
     layout: { background: { color: "#161b22" }, textColor: "#8b949e" },
     grid: { vertLines: { color: "#1c232c" }, horzLines: { color: "#1c232c" } },
-    timeScale: { borderColor: "#30363d", timeVisible: true, secondsVisible: false },
+    timeScale: {
+      borderColor: "#30363d",
+      timeVisible: true,
+      secondsVisible: false,
+      tickMarkFormatter: (time) => fmtChartTime(time),
+    },
+    localization: {
+      timeFormatter: (time) => fmtChartTime(time),
+    },
     rightPriceScale: { borderColor: "#30363d" },
   };
 
   function _dirLabel(d) { return d === 1 ? "LONG" : "SHORT"; }
   function _dirBadge(d) { return d === 1 ? "badge-long" : "badge-short"; }
+  function fmtChartTime(time) {
+    const seconds = typeof time === "number" ? time : (time?.timestamp ?? null);
+    if (seconds == null) return "";
+    return new Date(seconds * 1000).toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: "America/New_York",
+    });
+  }
+  function fmtChartDateTime(seconds) {
+    if (!seconds) return "";
+    return new Date(seconds * 1000).toLocaleString("en-US", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: "America/New_York",
+      timeZoneName: "short",
+    });
+  }
 
   function createPositionChart(seed) {
     const { ticker, direction, entry_price, entry_time, sl_price, pre_entry_bars } = seed;
@@ -473,7 +507,7 @@
       <div class="pos-chart-head">
         <span class="pos-chart-ticker">${ticker}</span>
         <span class="pos-chart-badge ${_dirBadge(direction)}" id="chart-badge-${ticker}">${_dirLabel(direction)}</span>
-        <span class="pos-chart-meta" id="chart-meta-${ticker}">entry @ ${fmtNum(entry_price)}</span>
+        <span class="pos-chart-meta" id="chart-meta-${ticker}">entry ${fmtChartDateTime(entry_time)} @ ${fmtNum(entry_price)}</span>
         <span class="pos-chart-pnl" id="chart-pnl-${ticker}">P&amp;L —</span>
       </div>
       <div class="pos-chart-body" id="chart-body-${ticker}"></div>`;
@@ -549,6 +583,7 @@
     ro.observe(el);
 
     posCharts[ticker] = { chart, series, preSeries, el, card, seed, ro, trailLine: null };
+    chart.timeScale().fitContent();
   }
 
   function updatePositionChart(ticker, bar, pos) {
@@ -558,6 +593,7 @@
     // Push live bar onto the post-entry series
     if (bar && bar.time >= (pc.seed.entry_time || 0)) {
       pc.series.update(bar);
+      pc.chart.timeScale().fitContent();
     }
 
     // Update trail floor price line
@@ -570,7 +606,7 @@
       const metaEl = document.getElementById(`chart-meta-${ticker}`);
       if (metaEl) {
         const armed = pos.trail_armed ? " · trail armed" : "";
-        metaEl.textContent = `entry @ ${fmtNum(pos.entry_price)}${armed}`;
+        metaEl.textContent = `entry ${fmtChartDateTime(pc.seed.entry_time)} @ ${fmtNum(pos.entry_price)}${armed}`;
       }
 
       // Update trail floor price line
@@ -1115,6 +1151,11 @@
     }
     if (t === "startup_scan") {
       addScan({ ts: evt.ts, ticker: "WARMUP", ...(evt.payload || {}) });
+      addEvent(evt);
+      fetchState();
+      return;
+    }
+    if (t === "broker_sync") {
       addEvent(evt);
       fetchState();
       return;

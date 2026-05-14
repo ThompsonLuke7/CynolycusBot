@@ -412,6 +412,9 @@ class SwingSession:
             self._refresh_runner_state()
         elif kind == "startup_scan_skipped":
             self._store.append_event(evt)
+        elif kind == "broker_sync":
+            self._store.append_event(evt)
+            self._refresh_runner_state()
         elif kind in ("order_submitted", "order_failed", "order_dry_run", "entry_skipped"):
             self._store.append_order({"ts": ts, "kind": kind, **payload})
             self._store.append_event(evt)

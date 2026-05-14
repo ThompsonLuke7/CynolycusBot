@@ -917,9 +917,9 @@ class SessionConfig:
     option_exit_time_decay_minutes: int = 60
     option_exit_time_decay_progress_pct: float = 0.5
     option_exit_opposite_prob: float = 0.40
-    option_exit_opposite_prob_long: float | None = 0.40
+    option_exit_opposite_prob_long: float | None = 0.70
     option_exit_opposite_prob_short: float | None = 0.75
-    option_exit_opposite_profit_pct: float = 0.0
+    option_exit_opposite_profit_pct: float = 0.25
     option_exit_quote_mode: str = "bid"
     max_live_entry_lag_sec: float = 180.0
     use_wall_clock_entry_cutoff: bool = True
@@ -1144,14 +1144,14 @@ class SessionConfig:
                 _coerce_float(payload.get("option_exit_opposite_prob"), 0.40),
             ),
             option_exit_opposite_prob_long=_coerce_optional_float(
-                payload.get("option_exit_opposite_prob_long", 0.40)
+                payload.get("option_exit_opposite_prob_long", 0.70)
             ),
             option_exit_opposite_prob_short=_coerce_optional_float(
                 payload.get("option_exit_opposite_prob_short", 0.75)
             ),
             option_exit_opposite_profit_pct=max(
                 0.0,
-                _coerce_float(payload.get("option_exit_opposite_profit_pct"), 0.0),
+                _coerce_float(payload.get("option_exit_opposite_profit_pct"), 0.25),
             ),
             option_exit_quote_mode=str(payload.get("option_exit_quote_mode", "bid")).strip().lower(),
             max_live_entry_lag_sec=max(
@@ -4224,6 +4224,28 @@ class LiveSession:
                                         },
                                         "policy_state": policy.snapshot_state(),
                                     }
+                            force_close_fn = getattr(policy, "_maybe_force_close_expiring_positions", None)
+                            if callable(force_close_fn) and not policy.has_pending_broker_reconcile():
+                                local_now = datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))
+                                forced_flat = force_close_fn(
+                                    local_ts=local_now,
+                                    logger=self._policy_logger(symbol),
+                                )
+                                if forced_flat is not None:
+                                    if cfg.use_execution_latch:
+                                        execution_latches[symbol].set_position(
+                                            policy.snapshot_state().get("position", 0)
+                                        )
+                                    self._store.set_policy_state(symbol, policy.snapshot_state())
+                                    _persist_policy_runtime_cache_throttled(force=True)
+                                    force_event = {
+                                        "symbol": symbol,
+                                        "timestamp": _ts_iso(local_now),
+                                        "result": forced_flat,
+                                        "policy_state": policy.snapshot_state(),
+                                    }
+                                    self._emit("order_policy", force_event)
+                                    self._audit("order_policy", force_event)
                             if reconcile_event is not None:
                                 self._emit("order_policy", reconcile_event)
                                 self._audit("order_policy", reconcile_event)
