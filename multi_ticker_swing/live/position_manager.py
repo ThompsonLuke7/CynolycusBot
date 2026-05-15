@@ -219,12 +219,149 @@ class SwingPositionManager:
         if self._dry_run:
             return {"synced": True, "restored": 0, "ignored": 0, "simulated": True}
 
-        resp = self._client.get_positions()
-        broker_positions = _extract_positions(resp)
+        broker_positions, ignored = self._broker_swing_positions(universe)
         restored: list[dict[str, Any]] = []
+
+        for broker_pos in broker_positions:
+            ticker = broker_pos["ticker"]
+            symbol = broker_pos["option_symbol"]
+            if ticker in self._positions:
+                ignored.append({"symbol": symbol, "ticker": ticker, "reason": "already_tracked"})
+                continue
+
+            pos = self._restore_broker_position(
+                broker_pos,
+                universe=universe,
+                price_lookup=price_lookup,
+                atr_lookup=atr_lookup,
+                ignored=ignored,
+            )
+            if pos is not None:
+                restored.append(pos.to_dict())
+
+        result = {
+            "synced": True,
+            "restored": len(restored),
+            "ignored": len(ignored),
+            "positions": restored,
+            "ignored_positions": ignored,
+        }
+        self._emit("broker_sync", {**result, "positions": restored, "ignored_positions": ignored})
+        return result
+
+    def reconcile_with_broker(
+        self,
+        *,
+        universe: dict[str, TickerConfig],
+        price_lookup: Callable[[str], float | None],
+        atr_lookup: Callable[[str], float | None],
+        reason: str = "periodic",
+    ) -> dict[str, Any]:
+        """Reconcile local swing tracking with current Alpaca option positions."""
+        if self._dry_run:
+            return {"ok": True, "simulated": True, "reason": reason}
+
+        broker_positions, ignored = self._broker_swing_positions(universe)
+        broker_by_ticker: dict[str, dict[str, Any]] = {}
+        duplicates: list[dict[str, Any]] = []
+        for broker_pos in broker_positions:
+            ticker = broker_pos["ticker"]
+            if ticker in broker_by_ticker:
+                duplicates.append(broker_pos)
+                continue
+            broker_by_ticker[ticker] = broker_pos
+
+        removed: list[dict[str, Any]] = []
+        replaced: list[dict[str, Any]] = []
+        qty_updates: list[dict[str, Any]] = []
+        restored: list[dict[str, Any]] = []
+
+        for ticker, pos in list(self._positions.items()):
+            broker_pos = broker_by_ticker.get(ticker)
+            if broker_pos is None:
+                payload = {
+                    **pos.to_dict(),
+                    "reason": "not_found_at_broker",
+                    "reconcile_reason": reason,
+                }
+                removed.append(payload)
+                self._positions.pop(ticker, None)
+                self._emit("broker_position_missing", payload)
+                continue
+
+            broker_symbol = str(broker_pos.get("option_symbol", "")).upper()
+            local_symbol = str(pos.option_symbol).upper()
+            if broker_symbol != local_symbol:
+                old_payload = {
+                    **pos.to_dict(),
+                    "broker_option_symbol": broker_symbol,
+                    "reason": "broker_symbol_changed",
+                    "reconcile_reason": reason,
+                }
+                replaced.append(old_payload)
+                self._positions.pop(ticker, None)
+                restored_pos = self._restore_broker_position(
+                    broker_pos,
+                    universe=universe,
+                    price_lookup=price_lookup,
+                    atr_lookup=atr_lookup,
+                    ignored=ignored,
+                )
+                if restored_pos is not None:
+                    restored.append(restored_pos.to_dict())
+                continue
+
+            broker_qty = int(broker_pos.get("qty", pos.qty) or pos.qty)
+            if broker_qty != pos.qty:
+                qty_updates.append({
+                    "ticker": ticker,
+                    "option_symbol": pos.option_symbol,
+                    "old_qty": int(pos.qty),
+                    "new_qty": broker_qty,
+                })
+                pos.qty = broker_qty
+
+        for ticker, broker_pos in broker_by_ticker.items():
+            if ticker in self._positions:
+                continue
+            pos = self._restore_broker_position(
+                broker_pos,
+                universe=universe,
+                price_lookup=price_lookup,
+                atr_lookup=atr_lookup,
+                ignored=ignored,
+            )
+            if pos is not None:
+                restored.append(pos.to_dict())
+
+        result = {
+            "ok": True,
+            "reason": reason,
+            "broker_positions": len(broker_positions),
+            "local_positions": len(self._positions),
+            "restored": len(restored),
+            "removed": len(removed),
+            "replaced": len(replaced),
+            "qty_updates": qty_updates,
+            "positions": restored,
+            "removed_positions": removed,
+            "replaced_positions": replaced,
+            "ignored_positions": ignored,
+            "duplicate_positions": duplicates,
+        }
+        self._emit("broker_reconcile", result)
+        return result
+
+    def _broker_swing_positions(
+        self,
+        universe: dict[str, TickerConfig],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        resp = self._client.get_positions()
+        raw_positions = _extract_positions(resp)
+        positions: list[dict[str, Any]] = []
         ignored: list[dict[str, Any]] = []
 
-        for raw in broker_positions:
+        for raw in raw_positions:
             symbol = str(raw.get("symbol", "")).strip().upper()
             parsed = _parse_swing_option_symbol(symbol, universe)
             if parsed is None:
@@ -236,43 +373,58 @@ class SwingPositionManager:
             side_mult = -1 if side_raw == "short" or (math.isfinite(qty_val) and qty_val < 0) else 1
             qty = int(round(abs(qty_val))) if math.isfinite(qty_val) else 0
             if side_mult <= 0 or qty <= 0:
-                ignored.append({"symbol": symbol, "reason": "not_long_option_position"})
-                continue
-            if ticker in self._positions:
-                ignored.append({"symbol": symbol, "ticker": ticker, "reason": "already_tracked"})
+                ignored.append({"symbol": symbol, "ticker": ticker, "reason": "not_long_option_position"})
                 continue
 
-            entry_price = price_lookup(ticker)
-            atr = atr_lookup(ticker)
-            if entry_price is None or not math.isfinite(float(entry_price)):
-                ignored.append({"symbol": symbol, "ticker": ticker, "reason": "missing_underlying_price"})
-                continue
-            if atr is None or not math.isfinite(float(atr)) or float(atr) <= 0:
-                ignored.append({"symbol": symbol, "ticker": ticker, "reason": "missing_atr"})
-                continue
+            positions.append({
+                "ticker": ticker,
+                "direction": direction,
+                "option_symbol": symbol,
+                "qty": qty,
+                "side": side_raw or "long",
+                "avg_entry_price": _finite_or_none(raw.get("avg_entry_price")),
+                "market_value": _finite_or_none(raw.get("market_value")),
+                "unrealized_pl": _finite_or_none(raw.get("unrealized_pl")),
+                "unrealized_plpc": _finite_or_none(raw.get("unrealized_plpc")),
+            })
+        return positions, ignored
 
-            pos = SwingPosition(
-                ticker=ticker,
-                direction=direction,
-                entry_price=float(entry_price),
-                entry_time=datetime.now(timezone.utc),
-                atr_at_entry=float(atr),
-                option_symbol=symbol,
-                qty=qty,
-                config=universe[ticker],
-            )
-            self.open_position(pos)
-            restored.append(pos.to_dict())
+    def _restore_broker_position(
+        self,
+        broker_pos: dict[str, Any],
+        *,
+        universe: dict[str, TickerConfig],
+        price_lookup: Callable[[str], float | None],
+        atr_lookup: Callable[[str], float | None],
+        ignored: list[dict[str, Any]],
+    ) -> SwingPosition | None:
+        ticker = str(broker_pos.get("ticker", "")).upper()
+        symbol = str(broker_pos.get("option_symbol", "")).upper()
+        if ticker not in universe:
+            ignored.append({"symbol": symbol, "ticker": ticker, "reason": "outside_universe"})
+            return None
 
-        result = {
-            "synced": True,
-            "restored": len(restored),
-            "ignored": len(ignored),
-            "positions": restored,
-            "ignored_positions": ignored,
-        }
-        self._emit("broker_sync", {**result, "positions": restored, "ignored_positions": ignored})
-        return result
+        entry_price = price_lookup(ticker)
+        atr = atr_lookup(ticker)
+        if entry_price is None or not math.isfinite(float(entry_price)):
+            ignored.append({"symbol": symbol, "ticker": ticker, "reason": "missing_underlying_price"})
+            return None
+        if atr is None or not math.isfinite(float(atr)) or float(atr) <= 0:
+            ignored.append({"symbol": symbol, "ticker": ticker, "reason": "missing_atr"})
+            return None
+
+        pos = SwingPosition(
+            ticker=ticker,
+            direction=int(broker_pos.get("direction", 1) or 1),
+            entry_price=float(entry_price),
+            entry_time=datetime.now(timezone.utc),
+            atr_at_entry=float(atr),
+            option_symbol=symbol,
+            qty=int(broker_pos.get("qty", 0) or 0),
+            config=universe[ticker],
+        )
+        self.open_position(pos)
+        return pos
 
     def open_position(self, pos: SwingPosition) -> None:
         """Register a newly entered position."""
@@ -335,6 +487,14 @@ class SwingPositionManager:
                     "qty": pos.qty,
                     "error": order_error,
                 })
+                self._emit("position_close_failed", {
+                    **pos.to_dict(),
+                    "exit_price": exit_price,
+                    "exit_pnl_pct": float(pnl_pct),
+                    "exit_reason": reason,
+                    "order_error": order_error,
+                })
+                return
         else:
             self._emit("order_dry_run", {
                 "ticker": pos.ticker,
@@ -359,6 +519,11 @@ def _as_float(value: Any) -> float:
         return float(value)
     except Exception:
         return float("nan")
+
+
+def _finite_or_none(value: Any) -> float | None:
+    out = _as_float(value)
+    return float(out) if math.isfinite(out) else None
 
 
 def _extract_positions(resp: Any) -> list[dict[str, Any]]:

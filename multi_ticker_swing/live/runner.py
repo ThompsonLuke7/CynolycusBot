@@ -75,6 +75,8 @@ _STREAM_STALE_SECS = 300
 _STALE_BAR_LAG_SECS = 10 * 60
 _BACKLOG_EVENT_THROTTLE_SECS = 60.0
 _HEARTBEAT_SECS = 60.0
+_BROKER_RECONCILE_SECS = 60.0
+_LOG_END = _time(16, 15)
 
 # Tickers that may be in the stream but are excluded from entry signals
 _CONTEXT_SET = set(CONTEXT_TICKERS)
@@ -431,6 +433,11 @@ class SwingLiveRunner:
         self._last_queue_size: int | None = None
         self._dropped_stale_bars = 0
         self._last_backlog_event_wall = 0.0
+        self._last_broker_reconcile_wall = 0.0
+        self._last_broker_reconcile_ts: str | None = None
+        self._last_broker_reconcile_ok: bool | None = None
+        self._last_broker_reconcile_error: str | None = None
+        self._entry_dates_by_ticker: dict[str, date] = {}
 
     # ------------------------------------------------------------------
     # Event emission
@@ -495,6 +502,9 @@ class SwingLiveRunner:
             "dropped_stale_bars": int(self._dropped_stale_bars),
             "confirming_count": len(self._confirming),
             "open_positions_count": len(self._pos_mgr.open_tickers),
+            "last_broker_reconcile_ts": self._last_broker_reconcile_ts,
+            "last_broker_reconcile_ok": self._last_broker_reconcile_ok,
+            "last_broker_reconcile_error": self._last_broker_reconcile_error,
         }
 
     # ------------------------------------------------------------------
@@ -639,8 +649,11 @@ class SwingLiveRunner:
             for pos in result.get("positions") or []:
                 if not isinstance(pos, dict):
                     continue
+                ticker = str(pos.get("ticker", "")).upper()
+                if ticker:
+                    self._entry_dates_by_ticker[ticker] = datetime.now(_ET).date()
                 self._emit("position_chart_seed", {
-                    "ticker": pos.get("ticker"),
+                    "ticker": ticker or pos.get("ticker"),
                     "direction": int(pos.get("direction", 0) or 0),
                     "entry_price": float(pos.get("entry_price", float("nan"))),
                     "entry_time": int(datetime.now(timezone.utc).timestamp()),
@@ -651,6 +664,49 @@ class SwingLiveRunner:
         except Exception as exc:
             logger.warning("Broker sync failed: %s", exc)
             self._emit("broker_sync", {"synced": False, "error": str(exc)})
+
+    def _maybe_reconcile_broker(self, *, reason: str, force: bool = False) -> None:
+        if self._dry_run:
+            return
+        now_et = datetime.now(_ET)
+        if not force and now_et.time() >= _LOG_END:
+            return
+        now = time.monotonic()
+        if not force and self._last_broker_reconcile_wall and (now - self._last_broker_reconcile_wall) < _BROKER_RECONCILE_SECS:
+            return
+        self._last_broker_reconcile_wall = now
+        self._last_broker_reconcile_ts = _utc_iso()
+        try:
+            result = self._pos_mgr.reconcile_with_broker(
+                universe=self._universe,
+                price_lookup=self._latest_underlying_close,
+                atr_lookup=self._fb.get_atr,
+                reason=reason,
+            )
+            self._last_broker_reconcile_ok = bool(result.get("ok", False))
+            self._last_broker_reconcile_error = None
+            restored = result.get("positions") or []
+            for pos in restored:
+                if not isinstance(pos, dict):
+                    continue
+                ticker = str(pos.get("ticker", "")).upper()
+                if ticker:
+                    self._entry_dates_by_ticker[ticker] = now_et.date()
+                self._emit("position_chart_seed", {
+                    "ticker": ticker or pos.get("ticker"),
+                    "direction": int(pos.get("direction", 0) or 0),
+                    "entry_price": float(pos.get("entry_price", float("nan"))),
+                    "entry_time": int(datetime.now(timezone.utc).timestamp()),
+                    "sl_price": pos.get("sl_price"),
+                    "pre_entry_bars": [],
+                    "restored": True,
+                    "reconciled": True,
+                })
+        except Exception as exc:
+            self._last_broker_reconcile_ok = False
+            self._last_broker_reconcile_error = str(exc)
+            logger.warning("Broker reconcile failed: %s", exc)
+            self._emit("broker_reconcile", {"ok": False, "reason": reason, "error": str(exc)})
 
     def _latest_underlying_close(self, ticker: str) -> float | None:
         bar = self._fb.get_last_bar(ticker)
@@ -675,6 +731,7 @@ class SwingLiveRunner:
             except queue.Empty:
                 # Health-check: warn if no bar received for >5 min during RTH
                 now_et = datetime.now(_ET)
+                self._maybe_reconcile_broker(reason="idle")
                 if _RTH_START <= now_et.time() < _RTH_END:
                     elapsed = time.monotonic() - _last_bar_wall
                     if elapsed >= _STREAM_STALE_SECS and not _stale_warned:
@@ -707,6 +764,8 @@ class SwingLiveRunner:
             ticker = bar.get("symbol", bar.get("ticker", "")).upper()
             if not ticker:
                 continue
+            if self._bar_after_log_cutoff(bar):
+                continue
             self._raw_bar_count_total += 1
             self._last_bar_ticker = ticker
             self._heartbeat_window_counts[ticker] += 1
@@ -730,6 +789,7 @@ class SwingLiveRunner:
                 self._rth_bar_count_total += 1
             else:
                 self._non_rth_bar_count_total += 1
+            self._maybe_reconcile_broker(reason="bar")
             self._maybe_emit_heartbeat(reason="bar")
 
     def _queue_size(self) -> int | None:
@@ -752,6 +812,16 @@ class SwingLiveRunner:
             return False
         now_et = datetime.now(_ET)
         return _RTH_START <= now_et.time() < _RTH_END
+
+    @staticmethod
+    def _bar_after_log_cutoff(bar: dict) -> bool:
+        if datetime.now(_ET).time() >= _LOG_END:
+            return True
+        ts = bar.get("timestamp")
+        if isinstance(ts, datetime):
+            bar_et = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=_ET)
+            return bar_et.time() >= _LOG_END
+        return False
 
     def _reset_ticker_accumulators(self, ticker: str) -> None:
         acc5 = self._acc_5m.get(ticker)
@@ -891,14 +961,26 @@ class SwingLiveRunner:
             filtered_signals.append(sig)
 
         accepted_signals: list[Signal] = []
+        skipped_cooldown: list[Signal] = []
+        today_et = datetime.now(_ET).date()
         with self._lock:
             busy_now = set(self._confirming.keys()) | self._pos_mgr.open_tickers
             for sig in filtered_signals:
                 if sig.ticker in busy_now:
                     continue
+                if self._entry_dates_by_ticker.get(sig.ticker) == today_et:
+                    skipped_cooldown.append(sig)
+                    continue
                 self._confirming[sig.ticker] = _ConfirmState(signal=sig)
                 busy_now.add(sig.ticker)
                 accepted_signals.append(sig)
+
+        for sig in skipped_cooldown:
+            self._emit("entry_skipped", {
+                "ticker": sig.ticker,
+                "direction": int(sig.direction),
+                "reason": "ticker_daily_cooldown",
+            })
 
         for sig in accepted_signals:
             logger.info("[%s] SIGNAL  dir=%+d  p=%.3f  ev=%.4f",
@@ -1125,6 +1207,7 @@ class SwingLiveRunner:
             config=sig.config,
         )
         self._pos_mgr.open_position(pos)
+        self._entry_dates_by_ticker[ticker] = datetime.now(_ET).date()
 
         # Attach pre-entry 5m bar history so the chart can show context before the entry
         pre_bars = [_bar_to_event(b) for b in self._buf_5m.get(ticker, [])]

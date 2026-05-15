@@ -180,9 +180,13 @@
   .kind-confirmation_expired{ color: var(--muted);  }
   .kind-position_opened     { color: var(--green);  }
   .kind-position_closed     { color: var(--yellow); }
+  .kind-position_close_failed { color: var(--red);  }
   .kind-order_submitted     { color: var(--blue);   }
   .kind-order_dry_run       { color: var(--yellow); }
   .kind-order_failed        { color: var(--red);    }
+  .kind-broker_sync         { color: var(--blue);   }
+  .kind-broker_reconcile    { color: var(--blue);   }
+  .kind-broker_position_missing { color: var(--yellow); }
   .kind-entry_skipped       { color: var(--muted);  }
   .kind-error               { color: var(--red);    }
   .kind-stream_started      { color: var(--green);  }
@@ -804,6 +808,7 @@
   function describeOrder(o) {
     const p = o.payload || o;
     if (o.kind === "order_failed") return `<span class="neg">${p.error || "failed"}</span>`;
+    if (o.kind === "position_close_failed") return `<span class="neg">close failed: ${p.order_error || "broker rejected"}</span>`;
     if (o.kind === "order_dry_run") {
       const px = p.entry_price ?? p.exit_price;
       return `<span class="muted">would ${p.side} @ ~${fmtNum(px)}</span>`;
@@ -886,6 +891,17 @@
           detail = `${tk} ${p.direction === 1 ? "L" : "S"} entry=${fmtNum(p.entry_price)} sl=${fmtNum(p.sl_price)}`; break;
         case "position_closed":
           detail = `${tk} ${p.exit_reason} pnl=${fmtPct(p.exit_pnl_pct)} bars=${p.bars_held}`; break;
+        case "position_close_failed":
+          detail = `${tk} close failed · ${p.exit_reason} pnl=${fmtPct(p.exit_pnl_pct)} · still tracked`; break;
+        case "broker_sync":
+          detail = `broker sync · restored=${p.restored ?? 0} ignored=${p.ignored ?? 0}`; break;
+        case "broker_reconcile":
+          detail = p.ok === false
+            ? `broker reconcile failed · ${p.error || "unknown"}`
+            : `broker reconcile · broker=${p.broker_positions ?? 0} local=${p.local_positions ?? 0} restored=${p.restored ?? 0} removed=${p.removed ?? 0} replaced=${p.replaced ?? 0}`;
+          break;
+        case "broker_position_missing":
+          detail = `${tk} removed from local tracking after broker no longer showed the position`; break;
         case "order_submitted":
           detail = `${tk} ${p.side} ${p.option_symbol} qty=${p.qty}`; break;
         case "order_dry_run":
@@ -1155,7 +1171,13 @@
       fetchState();
       return;
     }
-    if (t === "broker_sync") {
+    if (t === "broker_sync" || t === "broker_reconcile" || t === "broker_position_missing") {
+      addEvent(evt);
+      fetchState();
+      return;
+    }
+    if (t === "position_close_failed") {
+      addOrder({ ts: evt.ts, kind: t, payload: evt.payload || {} });
       addEvent(evt);
       fetchState();
       return;
