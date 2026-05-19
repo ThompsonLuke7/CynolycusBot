@@ -1,5 +1,29 @@
 {
     "python.analysis.autoImportCompletions": true,
     "python.analysis.typeCheckingMode": "off",
-    "python-envs.pythonProjects": []
+    "python-envs.pythonProjects": [],
+
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "**/.venv/**": true,
+        "**/venv/**": true,
+        "**/__pycache__/**": true,
+        "**/data/**": true,
+        "**/outputs/**": true,
+        "**/artifacts/**": true,
+        "**/models/**": true,
+        "**/*.parquet": true,
+        "**/*.csv": true,
+        "**/*.pkl": true
+    },
+
+    "search.exclude": {
+        "**/data": true,
+        "**/outputs": true,
+        "**/artifacts": true,
+        "**/models": true,
+        "**/*.parquet": true,
+        "**/*.csv": true,
+        "**/*.pkl": true
+    }
 }

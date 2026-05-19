@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -26,6 +27,11 @@ logger = logging.getLogger(__name__)
 # Legacy defaults — individual positions now use config.arm_pct / config.giveback_pct
 _ARM_PCT_DEFAULT      = 0.025
 _GIVEBACK_PCT_DEFAULT = 0.25
+_CLOSE_FAILURE_RETRY_SECS = 60
+_CLOSE_ORDER_ATTEMPTS = 5
+_ORDER_VERIFY_TIMEOUT_SECS = 2.5
+_ORDER_VERIFY_POLL_SECS = 0.5
+_OPTION_TICK = 0.01
 
 EventSink = Callable[[str, dict], None]
 
@@ -184,6 +190,7 @@ class SwingPositionManager:
         self._dry_run = dry_run
         self._sink = event_sink
         self._positions: dict[str, SwingPosition] = {}   # ticker → position
+        self._last_close_failure_wall: dict[str, float] = {}
 
     def _emit(self, kind: str, payload: dict) -> None:
         if self._sink is None:
@@ -453,6 +460,11 @@ class SwingPositionManager:
     def _close_position(self, pos: SwingPosition, reason: str, bar: dict) -> None:
         exit_price = float(bar["close"])
         pnl_pct = pos.direction * (exit_price - pos.entry_price) / pos.entry_price
+        if not self._dry_run:
+            last_failure = self._last_close_failure_wall.get(pos.ticker)
+            now = time.monotonic()
+            if last_failure is not None and (now - last_failure) < _CLOSE_FAILURE_RETRY_SECS:
+                return
         logger.info(
             "[%s] CLOSE  reason=%-12s  pnl=%+.2f%%  bars=%d  option=%s",
             pos.ticker, reason, pnl_pct * 100, pos.bar_count_5m, pos.option_symbol,
@@ -461,24 +473,33 @@ class SwingPositionManager:
         order_error: str | None = None
         if not self._dry_run:
             try:
-                order_resp = self._client.submit_option_order(
-                    symbol=pos.option_symbol,
-                    qty=pos.qty,
-                    side="sell",
-                    order_type="market",
-                    time_in_force="day",
-                )
-                logger.info("[%s] sell order submitted: %s", pos.ticker, order_resp)
+                close_result = self._submit_close_order(pos)
+                order_resp = close_result.get("response")
+                self._last_close_failure_wall.pop(pos.ticker, None)
                 self._emit("order_submitted", {
                     "ticker": pos.ticker,
                     "side": "sell",
                     "option_symbol": pos.option_symbol,
                     "qty": pos.qty,
                     "exit_price": exit_price,
+                    "limit_price": close_result.get("limit_price"),
                     "response": _safe_response(order_resp),
+                    "verification": close_result.get("verification"),
                 })
+                if not close_result.get("verified", False):
+                    self._last_close_failure_wall[pos.ticker] = time.monotonic()
+                    self._emit("position_close_pending", {
+                        **pos.to_dict(),
+                        "exit_price": exit_price,
+                        "exit_pnl_pct": float(pnl_pct),
+                        "exit_reason": reason,
+                        "order_response": _safe_response(order_resp),
+                        "verification": close_result.get("verification"),
+                    })
+                    return
             except Exception as exc:
                 order_error = str(exc)
+                self._last_close_failure_wall[pos.ticker] = time.monotonic()
                 logger.error("[%s] sell order FAILED: %s", pos.ticker, exc)
                 self._emit("order_failed", {
                     "ticker": pos.ticker,
@@ -511,7 +532,173 @@ class SwingPositionManager:
             "exit_reason": reason,
             "order_error": order_error,
         })
+        self._last_close_failure_wall.pop(pos.ticker, None)
         del self._positions[pos.ticker]
+
+    def _submit_close_order(self, pos: SwingPosition) -> dict[str, Any]:
+        symbol = str(pos.option_symbol).strip().upper()
+        qty = int(pos.qty)
+        base_limit = self._get_contract_price(symbol=symbol, mode="bid")
+        close_bid = base_limit
+        if not math.isfinite(base_limit) or base_limit <= 0.0:
+            base_limit = self._get_contract_price(symbol=symbol, mode="mid")
+        if not math.isfinite(base_limit) or base_limit <= 0.0:
+            base_limit = self._get_contract_price(symbol=symbol, mode="mark")
+        if not math.isfinite(base_limit) or base_limit <= 0.0:
+            base_limit = _OPTION_TICK
+
+        logger.info(
+            "[%s] close order pricing symbol=%s source=%s base_limit=%.2f",
+            pos.ticker,
+            symbol,
+            "bid" if math.isfinite(close_bid) and close_bid > 0.0 else "fallback",
+            base_limit,
+        )
+
+        last_result: dict[str, Any] | None = None
+        for attempt in range(1, _CLOSE_ORDER_ATTEMPTS + 1):
+            if math.isfinite(close_bid) and close_bid > 0.0:
+                limit_price = base_limit if attempt == 1 else close_bid - (attempt - 2) * _OPTION_TICK
+            else:
+                limit_price = base_limit - (attempt - 1) * _OPTION_TICK * 2.0
+            limit_price = max(_OPTION_TICK, round(float(limit_price), 2))
+
+            resp = self._client.submit_option_order(
+                symbol=symbol,
+                qty=qty,
+                side="sell",
+                order_type="limit",
+                time_in_force="day",
+                limit_price=limit_price,
+            )
+            status = _status_key(resp.get("status") if isinstance(resp, dict) else None)
+            order_id = str(resp.get("id", "")).strip() if isinstance(resp, dict) else ""
+            logger.info(
+                "[%s] close order submitted symbol=%s order_id=%s status=%s limit=%.2f attempt=%d/%d",
+                pos.ticker,
+                symbol,
+                order_id or "n/a",
+                status or "n/a",
+                limit_price,
+                attempt,
+                _CLOSE_ORDER_ATTEMPTS,
+            )
+
+            verify = self._verify_close_order(submitted_resp=resp if isinstance(resp, dict) else {}, symbol=symbol)
+            last_result = {
+                "response": resp,
+                "verification": verify,
+                "limit_price": limit_price,
+                "verified": bool(verify.get("verified")),
+            }
+            if verify.get("verified"):
+                logger.info(
+                    "[%s] close order verified symbol=%s status=%s via=%s",
+                    pos.ticker,
+                    symbol,
+                    verify.get("status"),
+                    verify.get("via"),
+                )
+                return last_result
+
+            can_retry = bool(verify.get("retryable")) and attempt < _CLOSE_ORDER_ATTEMPTS
+            logger.info(
+                "[%s] close order not verified symbol=%s status=%s via=%s retrying=%s",
+                pos.ticker,
+                symbol,
+                verify.get("status"),
+                verify.get("via"),
+                can_retry,
+            )
+            if can_retry:
+                self._cancel_order_if_needed(verify)
+                continue
+            self._cancel_order_if_needed(verify)
+            return last_result
+
+        if last_result is not None:
+            return last_result
+        raise RuntimeError(f"close_order_submit_failed symbol={symbol}")
+
+    def _get_contract_price(self, *, symbol: str, mode: str) -> float:
+        try:
+            resp = self._client.get_option_quotes(symbols=symbol, limit=1)
+            quotes = _extract_quotes(resp, symbol=symbol)
+            if not quotes:
+                return float("nan")
+            return _quote_price(quotes[-1], mode=mode)
+        except Exception as exc:
+            logger.warning("quote fetch failed symbol=%s mode=%s: %s", symbol, mode, exc)
+            return float("nan")
+
+    def _verify_close_order(self, *, submitted_resp: dict[str, Any], symbol: str) -> dict[str, Any]:
+        order_id = str(submitted_resp.get("id", "")).strip()
+        last = submitted_resp
+        status = _status_key(last.get("status"))
+        if _order_is_success(status):
+            return {"verified": True, "status": status, "order_id": order_id, "via": "submit_response", "order": last}
+        if _order_is_terminal_fail(status):
+            return {"verified": False, "status": status, "order_id": order_id, "via": "submit_response", "retryable": True, "cancel_required": False, "order": last}
+
+        deadline = time.monotonic() + _ORDER_VERIFY_TIMEOUT_SECS
+        while time.monotonic() < deadline and order_id:
+            time.sleep(_ORDER_VERIFY_POLL_SECS)
+            try:
+                current = self._client.get_order(order_id)
+                if isinstance(current, dict):
+                    last = current
+                    status = _status_key(current.get("status"))
+            except Exception as exc:
+                logger.warning("close order verify poll warning order_id=%s: %s", order_id, exc)
+                continue
+            if _order_is_success(status):
+                return {"verified": True, "status": status, "order_id": order_id, "via": "order_poll", "order": last}
+            if _order_is_terminal_fail(status):
+                return {"verified": False, "status": status, "order_id": order_id, "via": "order_poll", "retryable": True, "cancel_required": False, "order": last}
+
+        try:
+            if not self._has_open_long_position(symbol=symbol):
+                return {"verified": True, "status": status or "unknown", "order_id": order_id, "via": "positions_reconcile", "order": last}
+        except Exception:
+            pass
+
+        return {
+            "verified": False,
+            "status": status or "unknown",
+            "order_id": order_id,
+            "via": "timeout",
+            "retryable": bool(order_id),
+            "cancel_required": bool(order_id),
+            "order": last,
+        }
+
+    def _cancel_order_if_needed(self, verify_result: dict[str, Any]) -> None:
+        if not bool(verify_result.get("cancel_required")):
+            return
+        order_id = str(verify_result.get("order_id", "")).strip()
+        if not order_id:
+            return
+        try:
+            self._client.cancel_order(order_id)
+            logger.info("close order canceled before retry order_id=%s", order_id)
+        except Exception as exc:
+            logger.warning("close order cancel warning order_id=%s: %s", order_id, exc)
+
+    def _has_open_long_position(self, *, symbol: str) -> bool:
+        target = str(symbol).strip().upper()
+        resp = self._client.get_positions()
+        for raw in _extract_positions(resp):
+            if str(raw.get("symbol", "")).strip().upper() != target:
+                continue
+            side_raw = str(raw.get("side", "")).strip().lower()
+            qty_val = _as_float(raw.get("qty"))
+            if side_raw == "short":
+                continue
+            if side_raw == "long":
+                return True
+            if math.isfinite(qty_val) and qty_val > 0:
+                return True
+        return False
 
 
 def _as_float(value: Any) -> float:
@@ -526,6 +713,25 @@ def _finite_or_none(value: Any) -> float | None:
     return float(out) if math.isfinite(out) else None
 
 
+def _status_key(status: Any) -> str:
+    return str(status or "").strip().lower()
+
+
+def _order_is_success(status: Any) -> bool:
+    return _status_key(status) in {"filled", "partially_filled"}
+
+
+def _order_is_terminal_fail(status: Any) -> bool:
+    return _status_key(status) in {
+        "canceled",
+        "cancelled",
+        "expired",
+        "rejected",
+        "failed",
+        "suspended",
+    }
+
+
 def _extract_positions(resp: Any) -> list[dict[str, Any]]:
     if isinstance(resp, list):
         return [x for x in resp if isinstance(x, dict)]
@@ -535,6 +741,81 @@ def _extract_positions(resp: Any) -> list[dict[str, Any]]:
             if isinstance(value, list):
                 return [x for x in value if isinstance(x, dict)]
     return []
+
+
+def _extract_quotes(resp: Any, *, symbol: str) -> list[dict[str, Any]]:
+    sym = str(symbol).strip().upper()
+    if isinstance(resp, dict):
+        quotes_obj = resp.get("quotes")
+        if isinstance(quotes_obj, dict):
+            for key, value in quotes_obj.items():
+                if str(key).strip().upper() != sym:
+                    continue
+                if isinstance(value, list):
+                    return [q for q in value if isinstance(q, dict)]
+                if isinstance(value, dict):
+                    return [value]
+        if isinstance(quotes_obj, list):
+            return [
+                q for q in quotes_obj
+                if isinstance(q, dict) and str(q.get("symbol", "")).strip().upper() == sym
+            ]
+        value = resp.get("data")
+        if isinstance(value, list):
+            return [
+                q for q in value
+                if isinstance(q, dict) and str(q.get("symbol", "")).strip().upper() == sym
+            ]
+        if isinstance(value, dict):
+            maybe = value.get(sym) or value.get(sym.lower()) or value.get(sym.upper())
+            if isinstance(maybe, list):
+                return [q for q in maybe if isinstance(q, dict)]
+            if isinstance(maybe, dict):
+                return [maybe]
+    if isinstance(resp, list):
+        return [
+            q for q in resp
+            if isinstance(q, dict) and str(q.get("symbol", "")).strip().upper() == sym
+        ]
+    return []
+
+
+def _quote_price(quote: dict[str, Any], *, mode: str) -> float:
+    mode_key = str(mode or "bid").strip().lower()
+    ask = _as_float(quote.get("ask_price", quote.get("ap", quote.get("ask"))))
+    bid = _as_float(quote.get("bid_price", quote.get("bp", quote.get("bid"))))
+    last = _as_float(quote.get("last_price", quote.get("lp")))
+    mark = _as_float(quote.get("mark_price", quote.get("mark")))
+    if mode_key == "bid":
+        return bid
+    if mode_key == "last":
+        return last
+    if mode_key == "mark":
+        if math.isfinite(mark):
+            return mark
+        if math.isfinite(bid) and math.isfinite(ask):
+            return 0.5 * (bid + ask)
+        return float("nan")
+    if mode_key == "mid":
+        if math.isfinite(bid) and math.isfinite(ask):
+            return 0.5 * (bid + ask)
+        if math.isfinite(mark):
+            return mark
+        if math.isfinite(last):
+            return last
+        if math.isfinite(bid):
+            return bid
+        if math.isfinite(ask):
+            return ask
+    if math.isfinite(bid):
+        return bid
+    if math.isfinite(mark):
+        return mark
+    if math.isfinite(last):
+        return last
+    if math.isfinite(ask):
+        return ask
+    return float("nan")
 
 
 def _parse_swing_option_symbol(

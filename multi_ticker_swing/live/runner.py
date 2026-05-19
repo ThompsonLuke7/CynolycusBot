@@ -169,6 +169,7 @@ class _ConfirmState:
 
 _MIN_DTE_DAYS = 0    # allow the nearest listed expiry, including 0DTE/1DTE weeklies
 _EXPIRY_LOOKAHEAD_DAYS = 90
+_ZERO_DTE_CUTOFF = _time(13, 0)
 _DELTA_LO    = 0.20  # minimum |delta| for OTM contract selection
 _DELTA_HI    = 0.40  # maximum |delta| — stays slightly OTM
 _DELTA_TGT   = 0.30  # preferred |delta| within the range
@@ -288,6 +289,13 @@ def _available_contracts(
     nearest_expiry = min(_contract_expiry(c) for c in tradable if _contract_expiry(c) is not None)
     expiry_str = nearest_expiry.strftime("%Y-%m-%d")
     return expiry_str, [c for c in tradable if c.get("expiration_date") == expiry_str]
+
+
+def _entry_contract_ref_date(now_et: datetime) -> date:
+    ref_date = now_et.date()
+    if now_et.time() >= _ZERO_DTE_CUTOFF:
+        return ref_date + timedelta(days=1)
+    return ref_date
 
 
 def _select_contract(
@@ -437,7 +445,6 @@ class SwingLiveRunner:
         self._last_broker_reconcile_ts: str | None = None
         self._last_broker_reconcile_ok: bool | None = None
         self._last_broker_reconcile_error: str | None = None
-        self._entry_dates_by_ticker: dict[str, date] = {}
 
     # ------------------------------------------------------------------
     # Event emission
@@ -650,8 +657,6 @@ class SwingLiveRunner:
                 if not isinstance(pos, dict):
                     continue
                 ticker = str(pos.get("ticker", "")).upper()
-                if ticker:
-                    self._entry_dates_by_ticker[ticker] = datetime.now(_ET).date()
                 self._emit("position_chart_seed", {
                     "ticker": ticker or pos.get("ticker"),
                     "direction": int(pos.get("direction", 0) or 0),
@@ -669,7 +674,7 @@ class SwingLiveRunner:
         if self._dry_run:
             return
         now_et = datetime.now(_ET)
-        if not force and now_et.time() >= _LOG_END:
+        if not force and not self._within_log_window(now_et):
             return
         now = time.monotonic()
         if not force and self._last_broker_reconcile_wall and (now - self._last_broker_reconcile_wall) < _BROKER_RECONCILE_SECS:
@@ -690,8 +695,6 @@ class SwingLiveRunner:
                 if not isinstance(pos, dict):
                     continue
                 ticker = str(pos.get("ticker", "")).upper()
-                if ticker:
-                    self._entry_dates_by_ticker[ticker] = now_et.date()
                 self._emit("position_chart_seed", {
                     "ticker": ticker or pos.get("ticker"),
                     "direction": int(pos.get("direction", 0) or 0),
@@ -815,13 +818,17 @@ class SwingLiveRunner:
 
     @staticmethod
     def _bar_after_log_cutoff(bar: dict) -> bool:
-        if datetime.now(_ET).time() >= _LOG_END:
+        if not SwingLiveRunner._within_log_window(datetime.now(_ET)):
             return True
         ts = bar.get("timestamp")
         if isinstance(ts, datetime):
             bar_et = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=_ET)
             return bar_et.time() >= _LOG_END
         return False
+
+    @staticmethod
+    def _within_log_window(now_et: datetime) -> bool:
+        return _RTH_START <= now_et.time() < _LOG_END
 
     def _reset_ticker_accumulators(self, ticker: str) -> None:
         acc5 = self._acc_5m.get(ticker)
@@ -961,26 +968,14 @@ class SwingLiveRunner:
             filtered_signals.append(sig)
 
         accepted_signals: list[Signal] = []
-        skipped_cooldown: list[Signal] = []
-        today_et = datetime.now(_ET).date()
         with self._lock:
             busy_now = set(self._confirming.keys()) | self._pos_mgr.open_tickers
             for sig in filtered_signals:
                 if sig.ticker in busy_now:
                     continue
-                if self._entry_dates_by_ticker.get(sig.ticker) == today_et:
-                    skipped_cooldown.append(sig)
-                    continue
                 self._confirming[sig.ticker] = _ConfirmState(signal=sig)
                 busy_now.add(sig.ticker)
                 accepted_signals.append(sig)
-
-        for sig in skipped_cooldown:
-            self._emit("entry_skipped", {
-                "ticker": sig.ticker,
-                "direction": int(sig.direction),
-                "reason": "ticker_daily_cooldown",
-            })
 
         for sig in accepted_signals:
             logger.info("[%s] SIGNAL  dir=%+d  p=%.3f  ev=%.4f",
@@ -1137,10 +1132,18 @@ class SwingLiveRunner:
         ticker = sig.ticker
         # Entry at close of confirmation bar (matches backtest realism)
         entry_price = float(conf_bar["close"])
-        today = datetime.now(timezone.utc).date()
+        now_et = datetime.now(_ET)
+        contract_ref_date = _entry_contract_ref_date(now_et)
+        if contract_ref_date != now_et.date():
+            logger.info(
+                "[%s] after %s ET; skipping same-day expiry and selecting next listed expiry >= %s",
+                ticker,
+                _ZERO_DTE_CUTOFF.strftime("%H:%M"),
+                contract_ref_date.isoformat(),
+            )
 
         option_symbol = _select_contract(
-            self._client, ticker, sig.direction, entry_price, today
+            self._client, ticker, sig.direction, entry_price, contract_ref_date
         )
         if not option_symbol:
             logger.warning("[%s] no option contract found — skipping entry", ticker)
@@ -1207,7 +1210,6 @@ class SwingLiveRunner:
             config=sig.config,
         )
         self._pos_mgr.open_position(pos)
-        self._entry_dates_by_ticker[ticker] = datetime.now(_ET).date()
 
         # Attach pre-entry 5m bar history so the chart can show context before the entry
         pre_bars = [_bar_to_event(b) for b in self._buf_5m.get(ticker, [])]

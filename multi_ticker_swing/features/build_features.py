@@ -18,6 +18,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # Feature building builds columns incrementally; fragmentation warnings are expected
 # and harmless. Suppress them to keep the live log readable.
@@ -46,6 +48,31 @@ BARS_PER_DAY = 13
 
 # Swing setup score gate threshold
 _SETUP_THRESHOLD = 0.60
+
+
+def _downcast_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """Reduce parquet/RAM footprint without changing model-facing semantics."""
+    out = df.copy()
+    float_cols = out.select_dtypes(include=["float64"]).columns
+    if len(float_cols):
+        out[float_cols] = out[float_cols].astype(np.float32)
+    int_cols = out.select_dtypes(include=["int64", "int32"]).columns
+    for col in int_cols:
+        out[col] = pd.to_numeric(out[col], downcast="integer")
+    return out
+
+
+def _append_parquet_frame(
+    writer: pq.ParquetWriter | None,
+    df: pd.DataFrame,
+    path: Path,
+) -> pq.ParquetWriter:
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    if writer is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        writer = pq.ParquetWriter(path, table.schema, compression="snappy")
+    writer.write_table(table)
+    return writer
 
 
 # ===========================================================================
@@ -960,65 +987,63 @@ def build_all_features(
     # Load context tickers once
     ctx = _load_context_data(context_tickers, raw_30m_dir)
 
-    all_frames: list[pd.DataFrame] = []
+    combined_writer: pq.ParquetWriter | None = None
+    combined_rows = 0
     n = len(tickers)
 
-    for i, row in universe.iterrows():
-        ticker = row["ticker"]
-        logger.info("(%d/%d) Building features for %s", i + 1, n, ticker)
+    try:
+        for i, row in universe.iterrows():
+            ticker = row["ticker"]
+            logger.info("(%d/%d) Building features for %s", i + 1, n, ticker)
 
-        per_ticker_path = processed_30m_dir / f"{ticker}_features.parquet"
-        if per_ticker_path.exists() and not force:
-            logger.info("[%s] cached — loading", ticker)
-            df_feat = pd.read_parquet(per_ticker_path)
-            df_feat["ticker"] = ticker
-            all_frames.append(df_feat)
-            continue
+            per_ticker_path = processed_30m_dir / f"{ticker}_features.parquet"
+            if per_ticker_path.exists() and not force:
+                logger.info("[%s] cached — loading", ticker)
+                df_feat = pd.read_parquet(per_ticker_path)
+            else:
+                try:
+                    df_raw = load_raw_30m(ticker, raw_30m_dir)
+                except FileNotFoundError:
+                    logger.warning("[%s] raw 30m data missing — skipping", ticker)
+                    continue
 
-        try:
-            df_raw = load_raw_30m(ticker, raw_30m_dir)
-        except FileNotFoundError:
-            logger.warning("[%s] raw 30m data missing — skipping", ticker)
-            continue
+                # Handle both old and new CSV column names
+                cap_col = "market_cap_bucket" if "market_cap_bucket" in row.index else "cap_bucket"
+                type_col = "type" if "type" in row.index else "asset_type"
 
-        # Handle both old and new CSV column names
-        cap_col = "market_cap_bucket" if "market_cap_bucket" in row.index else "cap_bucket"
-        type_col = "type" if "type" in row.index else "asset_type"
+                # ETFs have NaN market_cap_bucket — route them to the dedicated ETF bucket
+                if str(row.get(type_col, "Stock")) == "ETF":
+                    cap_bucket = cap_enc.get("ETF", len(cap_enc) - 1)
+                else:
+                    cap_bucket = cap_enc.get(row[cap_col], 0)
 
-        # ETFs have NaN market_cap_bucket — route them to the dedicated ETF bucket
-        if str(row.get(type_col, "Stock")) == "ETF":
-            cap_bucket = cap_enc.get("ETF", len(cap_enc) - 1)
-        else:
-            cap_bucket = cap_enc.get(row[cap_col], 0)
+                meta = {
+                    "sector_id":         sector_enc.get(row["sector"], 0),
+                    "market_cap_bucket": cap_bucket,
+                    "asset_type":        asset_enc.get(row[type_col], 0),
+                }
 
-        meta = {
-            "sector_id":         sector_enc.get(row["sector"], 0),
-            "market_cap_bucket": cap_bucket,
-            "asset_type":        asset_enc.get(row[type_col], 0),
-        }
+                df_feat = build_ticker_features(ticker, df_raw, ctx, meta)
+                if df_feat is None:
+                    continue
 
-        df_feat = build_ticker_features(ticker, df_raw, ctx, meta)
-        if df_feat is None:
-            continue
+                df_feat = _downcast_numeric(df_feat)
+                df_feat.to_parquet(per_ticker_path)
+                logger.info("[%s] done (%d bars)", ticker, len(df_feat))
 
-        # Save per-ticker parquet
-        df_feat.to_parquet(per_ticker_path)
+            out = df_feat.reset_index().rename(columns={"index": "timestamp"})
+            if "timestamp" not in out.columns:
+                out = out.rename(columns={out.columns[0]: "timestamp"})
+            out["ticker"] = ticker
+            out = _downcast_numeric(out)
+            combined_writer = _append_parquet_frame(combined_writer, out, combined_path)
+            combined_rows += len(out)
+    finally:
+        if combined_writer is not None:
+            combined_writer.close()
 
-        df_feat["ticker"] = ticker
-        all_frames.append(df_feat)
-        logger.info("[%s] done (%d bars)", ticker, len(df_feat))
-
-    if not all_frames:
+    if combined_rows == 0:
         logger.error("No feature frames built — check raw data.")
         return
 
-    combined = pd.concat(all_frames, axis=0)
-    combined = combined.reset_index().rename(columns={"index": "timestamp"})
-
-    # Ensure timestamp column
-    ts_col = "timestamp" if "timestamp" in combined.columns else combined.columns[0]
-    combined = combined.set_index([ts_col, "ticker"] if "ticker" in combined.columns else [ts_col])
-
-    combined_path.parent.mkdir(parents=True, exist_ok=True)
-    combined.to_parquet(combined_path)
-    logger.info("Saved combined features → %s  (%d rows)", combined_path, len(combined))
+    logger.info("Saved combined features → %s  (%d rows)", combined_path, combined_rows)

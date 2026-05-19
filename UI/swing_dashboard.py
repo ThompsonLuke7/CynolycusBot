@@ -415,7 +415,7 @@ class SwingSession:
         elif kind in ("broker_sync", "broker_reconcile", "broker_position_missing"):
             self._store.append_event(evt)
             self._refresh_runner_state()
-        elif kind == "position_close_failed":
+        elif kind in ("position_close_failed", "position_close_pending"):
             self._store.append_order({"ts": ts, "kind": kind, **payload})
             self._store.append_event(evt)
             self._refresh_runner_state()

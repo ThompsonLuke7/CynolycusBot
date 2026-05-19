@@ -24,6 +24,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from Features.label_generations import add_pivot_swing_state_machine
 from Features.feature_sets.custom_indicators import add_fractal_pivots
@@ -60,6 +62,31 @@ from multi_ticker_swing.data.fetch_data import load_universe
 from multi_ticker_swing.data.load_data import load_ticker_features
 
 logger = logging.getLogger(__name__)
+
+
+def _downcast_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """Reduce parquet/RAM footprint without changing label semantics."""
+    out = df.copy()
+    float_cols = out.select_dtypes(include=["float64"]).columns
+    if len(float_cols):
+        out[float_cols] = out[float_cols].astype(np.float32)
+    int_cols = out.select_dtypes(include=["int64", "int32"]).columns
+    for col in int_cols:
+        out[col] = pd.to_numeric(out[col], downcast="integer")
+    return out
+
+
+def _append_parquet_frame(
+    writer: pq.ParquetWriter | None,
+    df: pd.DataFrame,
+    path: Path,
+) -> pq.ParquetWriter:
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    if writer is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        writer = pq.ParquetWriter(path, table.schema, compression="snappy")
+    writer.write_table(table)
+    return writer
 
 
 # ---------------------------------------------------------------------------
@@ -321,42 +348,48 @@ def build_all_labels(
     tickers  = universe["ticker"].tolist()
     processed_lbl_dir.mkdir(parents=True, exist_ok=True)
 
-    all_frames: list[pd.DataFrame] = []
+    combined_writer: pq.ParquetWriter | None = None
+    combined_rows = 0
     n = len(tickers)
 
-    for i, ticker in enumerate(tickers, 1):
-        logger.info("(%d/%d) Building labels for %s", i, n, ticker)
+    try:
+        for i, ticker in enumerate(tickers, 1):
+            logger.info("(%d/%d) Building labels for %s", i, n, ticker)
 
-        per_lbl_path = processed_lbl_dir / f"{ticker}_labels.parquet"
-        if per_lbl_path.exists() and not force:
-            logger.info("[%s] label cache hit", ticker)
-            df_lbl = pd.read_parquet(per_lbl_path)
-            df_lbl["ticker"] = ticker
-            all_frames.append(df_lbl)
-            continue
+            per_lbl_path = processed_lbl_dir / f"{ticker}_labels.parquet"
+            if per_lbl_path.exists() and not force:
+                logger.info("[%s] label cache hit", ticker)
+                df_lbl = pd.read_parquet(per_lbl_path)
+            else:
+                df_feat = load_ticker_features(ticker, processed_30m_dir)
+                if df_feat is None:
+                    logger.warning("[%s] feature file missing — skipping", ticker)
+                    continue
 
-        df_feat = load_ticker_features(ticker, processed_30m_dir)
-        if df_feat is None:
-            logger.warning("[%s] feature file missing — skipping", ticker)
-            continue
+                df_lbl = build_ticker_labels(ticker, df_feat)
+                if df_lbl is None:
+                    continue
 
-        df_lbl = build_ticker_labels(ticker, df_feat)
-        if df_lbl is None:
-            continue
+                df_lbl = _downcast_numeric(df_lbl)
+                df_lbl.to_parquet(per_lbl_path)
+                logger.info("[%s] done (%d labelled bars)", ticker, len(df_lbl))
 
-        df_lbl.to_parquet(per_lbl_path)
-        df_lbl["ticker"] = ticker
-        all_frames.append(df_lbl)
-        logger.info("[%s] done (%d labelled bars)", ticker, len(df_lbl))
+            out = df_lbl.reset_index().rename(columns={"index": "timestamp"})
+            if "timestamp" not in out.columns:
+                out = out.rename(columns={out.columns[0]: "timestamp"})
+            out["ticker"] = ticker
+            out = _downcast_numeric(out)
+            combined_writer = _append_parquet_frame(combined_writer, out, combined_path)
+            combined_rows += len(out)
+    finally:
+        if combined_writer is not None:
+            combined_writer.close()
 
-    if not all_frames:
+    if combined_rows == 0:
         logger.error("No label frames built.")
         return
 
-    combined = pd.concat(all_frames)
-    combined_path.parent.mkdir(parents=True, exist_ok=True)
-    combined.to_parquet(combined_path)
-    logger.info("Saved combined labels → %s  (%d rows)", combined_path, len(combined))
+    logger.info("Saved combined labels → %s  (%d rows)", combined_path, combined_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +401,9 @@ def build_training_matrix(
     features_path: Path = FEATURES_COMBINED,
     labels_path: Path = LABELS_COMBINED,
     output_path: Path = TRAINING_MATRIX,
+    processed_30m_dir: Path = PROCESSED_30M_DIR,
+    processed_lbl_dir: Path = PROCESSED_LBL_DIR,
+    universe_csv: Path | str = UNIVERSE_CSV,
     feature_columns: list[str] = FEATURE_COLUMNS,
     force: bool = False,
 ) -> pd.DataFrame | None:
@@ -375,11 +411,119 @@ def build_training_matrix(
         logger.info("Training matrix exists at %s — skipping.", output_path)
         return None
 
-    feat = pd.read_parquet(features_path).reset_index()
-    lbl  = pd.read_parquet(labels_path).reset_index()
+    universe = load_universe(universe_csv)
+    tickers = universe["ticker"].tolist()
+    writer: pq.ParquetWriter | None = None
+    total_before = 0
+    total_after = 0
+    available_union: set[str] = set()
+    missing_union: set[str] = set()
+
+    try:
+        for ticker in tickers:
+            feat_path = processed_30m_dir / f"{ticker}_features.parquet"
+            lbl_path = processed_lbl_dir / f"{ticker}_labels.parquet"
+            if not feat_path.exists() or not lbl_path.exists():
+                logger.warning("[%s] per-ticker feature/label parquet missing — skipping", ticker)
+                continue
+
+            merged, before, available = _build_ticker_training_frame(
+                ticker=ticker,
+                feat_path=feat_path,
+                lbl_path=lbl_path,
+                feature_columns=feature_columns,
+            )
+            if merged is None:
+                continue
+
+            available_union.update(available)
+            missing_union.update(set(feature_columns) - set(available))
+            total_before += before
+            total_after += len(merged)
+            writer = _append_parquet_frame(writer, merged, output_path)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if total_after == 0:
+        logger.warning("No per-ticker matrix rows were written; falling back to combined parquet merge.")
+        return _build_training_matrix_legacy(
+            features_path=features_path,
+            labels_path=labels_path,
+            output_path=output_path,
+            feature_columns=feature_columns,
+        )
+
+    missing = sorted(missing_union - available_union)
+    if missing:
+        logger.warning("Features missing from matrix: %s", missing)
+    logger.info("Dropped %d NaN rows (%d → %d)", total_before - total_after, total_before, total_after)
+    logger.info("Saved training matrix → %s  (%d rows, %d features)",
+                output_path, total_after, len(available_union))
+    return None
+
+
+def _build_ticker_training_frame(
+    *,
+    ticker: str,
+    feat_path: Path,
+    lbl_path: Path,
+    feature_columns: list[str],
+) -> tuple[pd.DataFrame | None, int, list[str]]:
+    feat = pd.read_parquet(feat_path).reset_index()
+    lbl = pd.read_parquet(lbl_path).reset_index()
+    feat["ticker"] = ticker
+    lbl["ticker"] = ticker
 
     feat_ts = _find_ts_col(feat)
-    lbl_ts  = _find_ts_col(lbl)
+    lbl_ts = _find_ts_col(lbl)
+
+    lbl_keep = [lbl_ts, "ticker",
+                "target", "sample_weight",
+                "soft_long_label", "soft_short_label",
+                "soft_long_weight", "soft_short_weight",
+                "soft_long_core", "soft_short_core",
+                "p_long_state_gate", "p_short_state_gate"]
+    lbl_keep = [c for c in lbl_keep if c in lbl.columns]
+
+    merged = pd.merge(
+        feat,
+        lbl[lbl_keep],
+        left_on=[feat_ts, "ticker"],
+        right_on=[lbl_ts, "ticker"],
+        how="inner",
+    )
+    available = [c for c in feature_columns if c in merged.columns]
+    if not available:
+        logger.warning("[%s] no requested feature columns available — skipping", ticker)
+        return None, 0, []
+
+    keep = [feat_ts, "ticker"] + available + [
+        "target", "sample_weight",
+        "soft_long_label", "soft_short_label",
+        "p_long_state_gate", "p_short_state_gate",
+    ]
+    keep = [c for c in keep if c in merged.columns]
+    merged = merged[keep]
+
+    before = len(merged)
+    merged = merged.dropna(subset=available)
+    merged = _downcast_numeric(merged)
+    return merged, before, available
+
+
+def _build_training_matrix_legacy(
+    *,
+    features_path: Path,
+    labels_path: Path,
+    output_path: Path,
+    feature_columns: list[str],
+) -> pd.DataFrame | None:
+    feat = pd.read_parquet(features_path).reset_index()
+    lbl = pd.read_parquet(labels_path).reset_index()
+
+    feat_ts = _find_ts_col(feat)
+    lbl_ts = _find_ts_col(lbl)
 
     lbl_keep = [lbl_ts, "ticker",
                 "target", "sample_weight",
@@ -398,7 +542,7 @@ def build_training_matrix(
     )
 
     available = [c for c in feature_columns if c in merged.columns]
-    missing   = set(feature_columns) - set(available)
+    missing = set(feature_columns) - set(available)
     if missing:
         logger.warning("Features missing from matrix: %s", sorted(missing))
 
@@ -407,12 +551,13 @@ def build_training_matrix(
         "soft_long_label", "soft_short_label",
         "p_long_state_gate", "p_short_state_gate",
     ]
-    keep   = [c for c in keep if c in merged.columns]
+    keep = [c for c in keep if c in merged.columns]
     merged = merged[keep]
 
     before = len(merged)
     merged = merged.dropna(subset=available)
-    after  = len(merged)
+    merged = _downcast_numeric(merged)
+    after = len(merged)
     logger.info("Dropped %d NaN rows (%d → %d)", before - after, before, after)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -69,14 +69,19 @@ def export_training_bundle(
         json.dump(label_manifest, f, default=str, indent=2)
 
     bundle_path = out_dir / "momentum_colab_bundle.tgz"
+    notebook_src = Path(__file__).parent / "colab" / "momentum_train_colab.py"
+    if notebook_src.exists():
+        notebook_path = out_dir / notebook_src.name
+        shutil.copy2(notebook_src, notebook_path)
+    else:
+        notebook_path = None
+
     with tarfile.open(bundle_path, "w:gz") as tar:
         tar.add(target_path, arcname=target_path.name)
         tar.add(feature_manifest_path, arcname=feature_manifest_path.name)
         tar.add(label_manifest_path, arcname=label_manifest_path.name)
-
-    notebook_src = Path(__file__).parent / "colab" / "momentum_train_colab.py"
-    if notebook_src.exists():
-        shutil.copy2(notebook_src, out_dir / notebook_src.name)
+        if notebook_path is not None:
+            tar.add(notebook_path, arcname=notebook_path.name)
 
     logger.info("Bundle written to %s", bundle_path)
     logger.info("  matrix:   %s (%d rows)", target_path.name, len(df))
