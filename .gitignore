@@ -220,6 +220,7 @@ multi_ticker_swing/data/raw/**/*.parquet
 momentum_expansion/data/raw/**/*.parquet
 momentum_expansion/data/processed/*.parquet
 momentum_expansion/data/processed/features_4h/*.parquet
+theme_expansion/outputs/**/*.parquet
 Data/raw/spy/_tmp_1min_chunks/
 
 Data/
