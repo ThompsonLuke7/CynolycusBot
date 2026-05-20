@@ -31,12 +31,14 @@ from momentum_expansion.config.momentum_config import (
     FEATURES_COMBINED,
     LABEL_CONFIG,
     LABELS_COMBINED,
+    MOMENTUM_CANDIDATE_FILTER_CONFIG,
     PROCESSED_FEAT_DIR,
     RAW_4H_DIR,
     TRAINING_MATRIX,
 )
 from momentum_expansion.data.load_bars import load_4h
 from momentum_expansion.features.feature_matrix_4h import FEATURE_COLUMNS_4H
+from momentum_expansion.inference.candidate_filter import momentum_candidate_mask
 
 logger = logging.getLogger(__name__)
 _CONTEXT_ONLY_SET = {t.upper() for t in CONTEXT_ONLY_TICKERS}
@@ -335,6 +337,16 @@ def build_training_matrix(
     df = df.dropna(subset=[c for c in label_cols if c in df.columns], how="any")
     feature_cols = [c for c in FEATURE_COLUMNS_4H if c in df.columns]
     df = df.dropna(subset=feature_cols, how="any")
+    if MOMENTUM_CANDIDATE_FILTER_CONFIG.get("enabled", True):
+        before = len(df)
+        df["momentum_candidate"] = momentum_candidate_mask(df).astype(float)
+        df = df[df["momentum_candidate"] > 0].copy()
+        logger.info(
+            "Applied momentum candidate filter: %d -> %d rows (%.2f%% kept)",
+            before,
+            len(df),
+            100.0 * len(df) / max(before, 1),
+        )
     df, dropped, corr_report = _drop_correlated_features(
         df,
         feature_cols=feature_cols,

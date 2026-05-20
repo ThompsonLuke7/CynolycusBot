@@ -27,6 +27,7 @@ from momentum_expansion.config.momentum_config import (
 )
 from momentum_expansion.data.universe import load_snapshot_for
 from momentum_expansion.features.feature_matrix_4h import FEATURE_COLUMNS_4H
+from momentum_expansion.inference.candidate_filter import filter_momentum_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,11 @@ def top_n_at(
     if not snapshot.empty:
         allowed = set(snapshot["ticker"].astype(str).tolist())
         rows = rows[rows.index.isin(allowed)]
+    if rows.empty:
+        return pd.DataFrame(columns=["ticker", "expansion_score", "rank"])
+
+    if cfg.get("use_momentum_candidate_filter", True):
+        rows = filter_momentum_candidates(rows)
     if rows.empty:
         return pd.DataFrame(columns=["ticker", "expansion_score", "rank"])
 
