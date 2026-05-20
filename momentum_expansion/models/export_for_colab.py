@@ -24,6 +24,7 @@ import pandas as pd
 from momentum_expansion.config.momentum_config import (
     LABEL_CONFIG,
     LABELS_COMBINED,
+    MOMENTUM_CANDIDATE_FILTER_CONFIG,
     TRAINING_EXPORT_DIR,
     TRAINING_MATRIX,
     WALK_FORWARD_CONFIG,
@@ -57,6 +58,7 @@ def export_training_bundle(
         "date_min":        str(df.index.get_level_values(0).min()),
         "date_max":        str(df.index.get_level_values(0).max()),
         "label_cfg":       LABEL_CONFIG,
+        "momentum_candidate_filter": MOMENTUM_CANDIDATE_FILTER_CONFIG,
         "walk_forward":    WALK_FORWARD_CONFIG,
     }
     feature_manifest_path = out_dir / "feature_manifest.json"
@@ -64,6 +66,7 @@ def export_training_bundle(
         json.dump(feature_manifest, f, default=str, indent=2)
 
     label_manifest = {k: LABEL_CONFIG[k] for k in LABEL_CONFIG}
+    label_manifest["momentum_candidate_filter"] = MOMENTUM_CANDIDATE_FILTER_CONFIG
     label_manifest_path = out_dir / "label_manifest.json"
     with open(label_manifest_path, "w") as f:
         json.dump(label_manifest, f, default=str, indent=2)

@@ -236,7 +236,7 @@ class AlpacaOptionsClient:
             raise last_exc
         raise RuntimeError("option_quote_request_failed")
 
-    def submit_option_order(
+    def submit_order(
         self,
         *,
         symbol: str,
@@ -248,7 +248,7 @@ class AlpacaOptionsClient:
         stop_price: float | None = None,
     ) -> Any:
         """
-        POST /v2/orders with an option symbol.
+        POST /v2/orders.
         """
         url = f"{self._trading_base}/v2/orders"
         payload = {
@@ -263,3 +263,27 @@ class AlpacaOptionsClient:
         if stop_price is not None:
             payload["stop_price"] = float(stop_price)
         return self._request("POST", url, json_body=payload)
+
+    def submit_option_order(
+        self,
+        *,
+        symbol: str,
+        qty: int,
+        side: str,
+        order_type: str = "market",
+        time_in_force: str = "day",
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+    ) -> Any:
+        """
+        POST /v2/orders with an option symbol.
+        """
+        return self.submit_order(
+            symbol=symbol,
+            qty=qty,
+            side=side,
+            order_type=order_type,
+            time_in_force=time_in_force,
+            limit_price=limit_price,
+            stop_price=stop_price,
+        )

@@ -12,12 +12,15 @@ All closes are submitted via AlpacaOptionsClient.submit_option_order().
 from __future__ import annotations
 
 import logging
+import json
 import math
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from API.Alpaca_API.options.options_api import AlpacaOptionsClient
 from multi_ticker_swing.live.universe import TickerConfig
@@ -32,8 +35,25 @@ _CLOSE_ORDER_ATTEMPTS = 5
 _ORDER_VERIFY_TIMEOUT_SECS = 2.5
 _ORDER_VERIFY_POLL_SECS = 0.5
 _OPTION_TICK = 0.01
+_ET = ZoneInfo("America/New_York")
+_DEFER_TRAIL_AFTER_HOUR = 15
+_DEFER_TRAIL_AFTER_MINUTE = 55
+_DEFER_RECOVERY_BARS = 3
+_DEFER_RECOVERY_PCT = 0.0025
+_DEFERRED_TRAIL_STATE_PATH = Path("Data/inference/multi_ticker_swing/deferred_trails.json")
+_EXPIRING_ITM_CLOSE_HOUR = 15
+_EXPIRING_ITM_CLOSE_MINUTE = 45
+_ASSIGNED_EQUITY_MIN_SHARES = 100
 
 EventSink = Callable[[str, dict], None]
+
+
+@dataclass(frozen=True)
+class ParsedOptionSymbol:
+    root: str
+    expiration: date
+    call_put: str
+    strike: float
 
 
 @dataclass
@@ -55,6 +75,12 @@ class SwingPosition:
     last_price: float = field(init=False)
     trail_armed: bool = False
     bar_count_5m: int = 0
+    deferred_trail_active: bool = False
+    deferred_trail_trigger_time: datetime | None = None
+    deferred_trail_trigger_price: float | None = None
+    deferred_trail_trigger_pnl_pct: float | None = None
+    deferred_trail_bars: int = 0
+    deferred_trail_last_price: float | None = None
 
     def __post_init__(self):
         self.best_price = self.entry_price
@@ -64,7 +90,7 @@ class SwingPosition:
                 self.entry_price - self.direction * self.config.sl_atr * self.atr_at_entry
             )
 
-    def update(self, bar: dict) -> str | None:
+    def update(self, bar: dict, *, allow_trail_exit: bool = True) -> str | None:
         """
         Process one 5m underlying bar. Returns exit_reason string if exit fires, else None.
         bar: {open, high, low, close, ...}
@@ -98,7 +124,7 @@ class SwingPosition:
             peak_profit  = self.direction * (self.best_price - self.entry_price)
             cur_profit   = self.direction * (bar_c        - self.entry_price)
             floor_profit = peak_profit * (1.0 - giveback_pct)
-            if cur_profit <= floor_profit:
+            if allow_trail_exit and cur_profit <= floor_profit:
                 return "trail"
 
         # 4. ATR MFE no-progress (checked once at bar N)
@@ -109,6 +135,71 @@ class SwingPosition:
                 mfe_atr = self.direction * (self.best_price - self.entry_price) / self.atr_at_entry
                 if mfe_atr < np_t:
                     return "no_progress"
+
+        return None
+
+    def mark_deferred_trail(self, bar: dict) -> None:
+        trigger_price = float(bar["close"])
+        ts = bar.get("timestamp")
+        self.deferred_trail_active = True
+        self.deferred_trail_trigger_time = ts if isinstance(ts, datetime) else datetime.now(timezone.utc)
+        self.deferred_trail_trigger_price = trigger_price
+        self.deferred_trail_trigger_pnl_pct = (
+            self.direction * (trigger_price - self.entry_price) / self.entry_price
+            if self.entry_price else 0.0
+        )
+        self.deferred_trail_bars = 0
+        self.deferred_trail_last_price = trigger_price
+
+    def clear_deferred_trail(self) -> None:
+        self.deferred_trail_active = False
+        self.deferred_trail_trigger_time = None
+        self.deferred_trail_trigger_price = None
+        self.deferred_trail_trigger_pnl_pct = None
+        self.deferred_trail_bars = 0
+        self.deferred_trail_last_price = None
+
+    def deferred_trail_decision(self, bar: dict) -> str | None:
+        """Return close reason when a deferred trail should finally exit.
+
+        A late-session trail gets one short next-session recovery window. If price
+        resumes in the trade direction, we clear the deferral and let the normal
+        trailing logic manage the renewed trend. If the next session opens weak
+        or fails to recover quickly, close the position.
+        """
+        if not self.deferred_trail_active or self.deferred_trail_trigger_price is None:
+            return None
+
+        trigger_ts = self.deferred_trail_trigger_time
+        bar_ts = bar.get("timestamp")
+        if not isinstance(trigger_ts, datetime) or not isinstance(bar_ts, datetime):
+            return None
+
+        trigger_day = trigger_ts.astimezone(_ET).date()
+        bar_day = bar_ts.astimezone(_ET).date()
+        if bar_day <= trigger_day:
+            return None
+
+        bar_c = float(bar["close"])
+        prior = self.deferred_trail_last_price or self.deferred_trail_trigger_price
+        self.deferred_trail_bars += 1
+        self.deferred_trail_last_price = bar_c
+
+        favorable_from_trigger = (
+            self.direction * (bar_c - self.deferred_trail_trigger_price)
+            / self.deferred_trail_trigger_price
+        )
+        favorable_from_prior = self.direction * (bar_c - prior)
+
+        if favorable_from_trigger >= _DEFER_RECOVERY_PCT and favorable_from_prior >= 0:
+            self.clear_deferred_trail()
+            return None
+
+        if favorable_from_trigger < 0:
+            return "deferred_trail_failed"
+
+        if self.deferred_trail_bars >= _DEFER_RECOVERY_BARS:
+            return "deferred_trail_timeout"
 
         return None
 
@@ -134,6 +225,20 @@ class SwingPosition:
             "sl_price": float(self.sl_price) if self.sl_price is not None else None,
             "trail_armed": bool(self.trail_armed),
             "trail_floor": float(tf) if (tf := self._trail_floor()) is not None else None,
+            "deferred_trail_active": bool(self.deferred_trail_active),
+            "deferred_trail_trigger_time": (
+                self.deferred_trail_trigger_time.astimezone(timezone.utc).isoformat()
+                if self.deferred_trail_trigger_time else None
+            ),
+            "deferred_trail_trigger_price": (
+                float(self.deferred_trail_trigger_price)
+                if self.deferred_trail_trigger_price is not None else None
+            ),
+            "deferred_trail_trigger_pnl_pct": (
+                float(self.deferred_trail_trigger_pnl_pct)
+                if self.deferred_trail_trigger_pnl_pct is not None else None
+            ),
+            "deferred_trail_bars": int(self.deferred_trail_bars),
             "bars_held": int(self.bar_count_5m),
             "atr_at_entry": float(self.atr_at_entry) if not _isnan(self.atr_at_entry) else None,
             "option_symbol": str(self.option_symbol),
@@ -151,6 +256,11 @@ class SwingPosition:
             "sl_price": float(self.sl_price) if self.sl_price is not None else None,
             "trail_armed": bool(self.trail_armed),
             "trail_floor": float(tf) if (tf := self._trail_floor()) is not None else None,
+            "deferred_trail_active": bool(self.deferred_trail_active),
+            "deferred_trail_trigger_price": (
+                float(self.deferred_trail_trigger_price)
+                if self.deferred_trail_trigger_price is not None else None
+            ),
             "pnl_pct": float(self.direction * (self.last_price - self.entry_price) / self.entry_price) if self.entry_price else 0.0,
         }
 
@@ -174,6 +284,68 @@ def _safe_response(resp: Any) -> Any:
     return out or str(resp)
 
 
+def _should_defer_trail_exit(bar: dict) -> bool:
+    ts = bar.get("timestamp")
+    if not isinstance(ts, datetime):
+        return False
+    local = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=_ET)
+    return (
+        local.hour > _DEFER_TRAIL_AFTER_HOUR
+        or (
+            local.hour == _DEFER_TRAIL_AFTER_HOUR
+            and local.minute >= _DEFER_TRAIL_AFTER_MINUTE
+        )
+    )
+
+
+def _past_expiring_itm_close_cutoff(ts: Any) -> bool:
+    if not isinstance(ts, datetime):
+        return False
+    local = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=_ET)
+    return (
+        local.hour > _EXPIRING_ITM_CLOSE_HOUR
+        or (
+            local.hour == _EXPIRING_ITM_CLOSE_HOUR
+            and local.minute >= _EXPIRING_ITM_CLOSE_MINUTE
+        )
+    )
+
+
+def _expiring_itm_exit_reason(pos: SwingPosition, bar: dict) -> str | None:
+    parsed = _parse_occ_option_symbol(pos.option_symbol)
+    if parsed is None:
+        return None
+    ts = bar.get("timestamp")
+    if not isinstance(ts, datetime):
+        return None
+    local = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=_ET)
+    if parsed.expiration != local.date():
+        return None
+    if not _past_expiring_itm_close_cutoff(ts):
+        return None
+
+    close = _as_float(bar.get("close"))
+    if not math.isfinite(close):
+        return None
+    if parsed.call_put == "C" and close > parsed.strike:
+        return "expiration_itm_cutoff"
+    if parsed.call_put == "P" and close < parsed.strike:
+        return "expiration_itm_cutoff"
+    return None
+
+
+def _safe_bar(bar: dict) -> dict[str, Any]:
+    ts = bar.get("timestamp")
+    return {
+        "timestamp": ts.astimezone(timezone.utc).isoformat() if isinstance(ts, datetime) else ts,
+        "open": _finite_or_none(bar.get("open")),
+        "high": _finite_or_none(bar.get("high")),
+        "low": _finite_or_none(bar.get("low")),
+        "close": _finite_or_none(bar.get("close")),
+        "volume": _finite_or_none(bar.get("volume")),
+    }
+
+
 class SwingPositionManager:
     """
     Manages all open positions across all tickers.
@@ -185,12 +357,15 @@ class SwingPositionManager:
         alpaca_client: AlpacaOptionsClient,
         dry_run: bool = False,
         event_sink: EventSink | None = None,
+        auto_flatten_assigned_equities: bool = True,
     ) -> None:
         self._client = alpaca_client
         self._dry_run = dry_run
         self._sink = event_sink
+        self._auto_flatten_assigned_equities = bool(auto_flatten_assigned_equities)
         self._positions: dict[str, SwingPosition] = {}   # ticker → position
         self._last_close_failure_wall: dict[str, float] = {}
+        self._deferred_trail_cache = self._load_deferred_trail_cache()
 
     def _emit(self, kind: str, payload: dict) -> None:
         if self._sink is None:
@@ -244,6 +419,7 @@ class SwingPositionManager:
                 ignored=ignored,
             )
             if pos is not None:
+                self._apply_deferred_trail_cache(pos)
                 restored.append(pos.to_dict())
 
         result = {
@@ -269,6 +445,7 @@ class SwingPositionManager:
             return {"ok": True, "simulated": True, "reason": reason}
 
         broker_positions, ignored = self._broker_swing_positions(universe)
+        assigned_equities = self._broker_assigned_equity_positions(universe)
         broker_by_ticker: dict[str, dict[str, Any]] = {}
         duplicates: list[dict[str, Any]] = []
         for broker_pos in broker_positions:
@@ -341,6 +518,10 @@ class SwingPositionManager:
             if pos is not None:
                 restored.append(pos.to_dict())
 
+        flattened_equities: list[dict[str, Any]] = []
+        if assigned_equities and self._auto_flatten_assigned_equities:
+            flattened_equities = self.flatten_assigned_equity_positions(assigned_equities)
+
         result = {
             "ok": True,
             "reason": reason,
@@ -355,7 +536,15 @@ class SwingPositionManager:
             "replaced_positions": replaced,
             "ignored_positions": ignored,
             "duplicate_positions": duplicates,
+            "assigned_equity_positions": assigned_equities,
+            "flattened_assigned_equities": flattened_equities,
         }
+        if assigned_equities:
+            self._emit("assigned_equity_detected", {
+                "reason": reason,
+                "positions": assigned_equities,
+                "count": len(assigned_equities),
+            })
         self._emit("broker_reconcile", result)
         return result
 
@@ -396,6 +585,107 @@ class SwingPositionManager:
             })
         return positions, ignored
 
+    def _broker_assigned_equity_positions(
+        self,
+        universe: dict[str, TickerConfig],
+    ) -> list[dict[str, Any]]:
+        """Detect possible exercised/assigned option lots now held as shares.
+
+        Alpaca exposes exercised/assigned options as plain equity positions. The
+        live option manager cannot prove intent here, so this method only flags
+        whole 100-share lots in the swing universe for operator/audit handling.
+        """
+        resp = self._client.get_positions()
+        raw_positions = _extract_positions(resp)
+        positions: list[dict[str, Any]] = []
+
+        for raw in raw_positions:
+            symbol = str(raw.get("symbol", "")).strip().upper()
+            if symbol not in universe:
+                continue
+            if _parse_occ_option_symbol(symbol) is not None:
+                continue
+            qty_val = _as_float(raw.get("qty"))
+            if not math.isfinite(qty_val):
+                continue
+            abs_qty = abs(qty_val)
+            if abs_qty < _ASSIGNED_EQUITY_MIN_SHARES:
+                continue
+            lots = abs_qty / _ASSIGNED_EQUITY_MIN_SHARES
+            if not math.isclose(lots, round(lots), rel_tol=0.0, abs_tol=1e-6):
+                continue
+
+            side_raw = str(raw.get("side", "")).strip().lower()
+            side = side_raw or ("long" if qty_val > 0 else "short")
+            close_side = "sell" if qty_val > 0 else "buy"
+            positions.append({
+                "symbol": symbol,
+                "qty": qty_val,
+                "side": side,
+                "lots_100": int(round(lots)),
+                "suggested_close_side": close_side,
+                "avg_entry_price": _finite_or_none(raw.get("avg_entry_price")),
+                "market_value": _finite_or_none(raw.get("market_value")),
+                "unrealized_pl": _finite_or_none(raw.get("unrealized_pl")),
+                "unrealized_plpc": _finite_or_none(raw.get("unrealized_plpc")),
+                "reason": "possible_option_exercise_assignment",
+            })
+
+        return positions
+
+    def flatten_assigned_equity_positions(
+        self,
+        positions: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Submit market orders to close detected assignment/exercise share lots."""
+        results: list[dict[str, Any]] = []
+        if self._dry_run:
+            for pos in positions:
+                result = {**pos, "simulated": True, "submitted": False}
+                results.append(result)
+                self._emit("assigned_equity_flatten_dry_run", result)
+            return results
+
+        for pos in positions:
+            symbol = str(pos.get("symbol", "")).strip().upper()
+            qty_val = _as_float(pos.get("qty"))
+            close_side = str(pos.get("suggested_close_side", "")).strip().lower()
+            qty = int(round(abs(qty_val))) if math.isfinite(qty_val) else 0
+            if not symbol or qty <= 0 or close_side not in {"buy", "sell"}:
+                result = {**pos, "submitted": False, "error": "invalid_equity_flatten_position"}
+                results.append(result)
+                self._emit("assigned_equity_flatten_failed", result)
+                continue
+
+            try:
+                resp = self._client.submit_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side=close_side,
+                    order_type="market",
+                    time_in_force="day",
+                )
+                result = {
+                    **pos,
+                    "submitted": True,
+                    "close_side": close_side,
+                    "close_qty": qty,
+                    "response": _safe_response(resp),
+                }
+                self._emit("assigned_equity_flatten_order_submitted", result)
+            except Exception as exc:
+                result = {
+                    **pos,
+                    "submitted": False,
+                    "close_side": close_side,
+                    "close_qty": qty,
+                    "error": str(exc),
+                }
+                self._emit("assigned_equity_flatten_failed", result)
+            results.append(result)
+
+        return results
+
     def _restore_broker_position(
         self,
         broker_pos: dict[str, Any],
@@ -430,6 +720,7 @@ class SwingPositionManager:
             qty=int(broker_pos.get("qty", 0) or 0),
             config=universe[ticker],
         )
+        self._apply_deferred_trail_cache(pos)
         self.open_position(pos)
         return pos
 
@@ -453,8 +744,57 @@ class SwingPositionManager:
         if pos is None:
             return
 
+        expiration_reason = _expiring_itm_exit_reason(pos, bar)
+        if expiration_reason:
+            self._emit("expiring_itm_exit_triggered", {
+                **pos.to_dict(),
+                "reason": expiration_reason,
+                "bar": _safe_bar(bar),
+                "cutoff_et": f"{_EXPIRING_ITM_CLOSE_HOUR:02d}:{_EXPIRING_ITM_CLOSE_MINUTE:02d}",
+            })
+            self._close_position(pos, expiration_reason, bar)
+            return
+
+        if pos.deferred_trail_active:
+            reason = pos.update(bar, allow_trail_exit=False)
+            if reason:
+                self._close_position(pos, reason, bar)
+                return
+
+            was_deferred = pos.deferred_trail_active
+            deferred_reason = pos.deferred_trail_decision(bar)
+            if deferred_reason:
+                self._close_position(pos, deferred_reason, bar)
+                return
+            if was_deferred and not pos.deferred_trail_active:
+                self._emit("position_trail_resumed", {
+                    **pos.to_dict(),
+                    "reason": "deferred_trail_recovered",
+                    "bar": _safe_bar(bar),
+                })
+                self._remove_deferred_trail_cache(pos)
+            return
+
         reason = pos.update(bar)
         if reason:
+            if reason == "trail" and _should_defer_trail_exit(bar):
+                pos.mark_deferred_trail(bar)
+                self._persist_deferred_trail_cache()
+                logger.info(
+                    "[%s] DEFER trail exit until next session  pnl=%+.2f%%  bars=%d  option=%s",
+                    pos.ticker,
+                    (pos.deferred_trail_trigger_pnl_pct or 0.0) * 100.0,
+                    pos.bar_count_5m,
+                    pos.option_symbol,
+                )
+                self._emit("position_trail_deferred", {
+                    **pos.to_dict(),
+                    "reason": "late_session_trail",
+                    "bar": _safe_bar(bar),
+                    "recovery_bars": _DEFER_RECOVERY_BARS,
+                    "recovery_pct": _DEFER_RECOVERY_PCT,
+                })
+                return
             self._close_position(pos, reason, bar)
 
     def _close_position(self, pos: SwingPosition, reason: str, bar: dict) -> None:
@@ -533,7 +873,71 @@ class SwingPositionManager:
             "order_error": order_error,
         })
         self._last_close_failure_wall.pop(pos.ticker, None)
+        self._remove_deferred_trail_cache(pos)
         del self._positions[pos.ticker]
+
+    def _load_deferred_trail_cache(self) -> dict[str, dict[str, Any]]:
+        try:
+            if not _DEFERRED_TRAIL_STATE_PATH.exists():
+                return {}
+            raw = json.loads(_DEFERRED_TRAIL_STATE_PATH.read_text())
+            if isinstance(raw, dict):
+                return {
+                    str(k).upper(): v
+                    for k, v in raw.items()
+                    if isinstance(v, dict)
+                }
+        except Exception as exc:
+            logger.warning("deferred trail state load failed: %s", exc)
+        return {}
+
+    def _persist_deferred_trail_cache(self) -> None:
+        cache: dict[str, dict[str, Any]] = {}
+        for pos in self._positions.values():
+            if not pos.deferred_trail_active:
+                continue
+            cache[pos.ticker.upper()] = {
+                "ticker": pos.ticker.upper(),
+                "option_symbol": str(pos.option_symbol).upper(),
+                "trigger_time": (
+                    pos.deferred_trail_trigger_time.astimezone(timezone.utc).isoformat()
+                    if pos.deferred_trail_trigger_time else None
+                ),
+                "trigger_price": pos.deferred_trail_trigger_price,
+                "trigger_pnl_pct": pos.deferred_trail_trigger_pnl_pct,
+                "bars": pos.deferred_trail_bars,
+                "last_price": pos.deferred_trail_last_price,
+            }
+        try:
+            _DEFERRED_TRAIL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _DEFERRED_TRAIL_STATE_PATH.write_text(json.dumps(cache, indent=2, sort_keys=True))
+            self._deferred_trail_cache = cache
+        except Exception as exc:
+            logger.warning("deferred trail state persist failed: %s", exc)
+
+    def _apply_deferred_trail_cache(self, pos: SwingPosition) -> None:
+        cached = self._deferred_trail_cache.get(pos.ticker.upper())
+        if not cached:
+            return
+        if str(cached.get("option_symbol", "")).upper() != str(pos.option_symbol).upper():
+            return
+        trigger_time = _parse_dt(cached.get("trigger_time"))
+        trigger_price = _as_float(cached.get("trigger_price"))
+        if trigger_time is None or not math.isfinite(trigger_price) or trigger_price <= 0:
+            return
+        pos.deferred_trail_active = True
+        pos.deferred_trail_trigger_time = trigger_time
+        pos.deferred_trail_trigger_price = float(trigger_price)
+        pos.deferred_trail_trigger_pnl_pct = _finite_or_none(cached.get("trigger_pnl_pct"))
+        pos.deferred_trail_bars = int(cached.get("bars") or 0)
+        last_price = _as_float(cached.get("last_price"))
+        pos.deferred_trail_last_price = float(last_price) if math.isfinite(last_price) else float(trigger_price)
+
+    def _remove_deferred_trail_cache(self, pos: SwingPosition) -> None:
+        if pos.ticker.upper() not in self._deferred_trail_cache:
+            return
+        self._deferred_trail_cache.pop(pos.ticker.upper(), None)
+        self._persist_deferred_trail_cache()
 
     def _submit_close_order(self, pos: SwingPosition) -> dict[str, Any]:
         symbol = str(pos.option_symbol).strip().upper()
@@ -713,6 +1117,21 @@ def _finite_or_none(value: Any) -> float | None:
     return float(out) if math.isfinite(out) else None
 
 
+def _parse_dt(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
 def _status_key(status: Any) -> str:
     return str(status or "").strip().lower()
 
@@ -818,15 +1237,30 @@ def _quote_price(quote: dict[str, Any], *, mode: str) -> float:
     return float("nan")
 
 
+def _parse_occ_option_symbol(symbol: str) -> ParsedOptionSymbol | None:
+    m = re.match(r"^([A-Z]+)(\d{6})([CP])(\d{8})$", str(symbol).strip().upper())
+    if not m:
+        return None
+    yy, mm, dd = int(m.group(2)[:2]), int(m.group(2)[2:4]), int(m.group(2)[4:6])
+    try:
+        expiration = date(2000 + yy, mm, dd)
+    except ValueError:
+        return None
+    return ParsedOptionSymbol(
+        root=m.group(1),
+        expiration=expiration,
+        call_put=m.group(3),
+        strike=int(m.group(4)) / 1000.0,
+    )
+
+
 def _parse_swing_option_symbol(
     symbol: str,
     universe: dict[str, TickerConfig],
 ) -> tuple[str, int] | None:
-    m = re.match(r"^([A-Z]+)(\d{6})([CP])(\d{8})$", symbol.strip().upper())
-    if not m:
+    parsed = _parse_occ_option_symbol(symbol)
+    if parsed is None:
         return None
-    root = m.group(1)
-    cp = m.group(3)
-    if root not in universe:
+    if parsed.root not in universe:
         return None
-    return root, (1 if cp == "C" else -1)
+    return parsed.root, (1 if parsed.call_put == "C" else -1)

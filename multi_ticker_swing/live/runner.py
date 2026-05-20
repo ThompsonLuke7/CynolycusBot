@@ -384,6 +384,7 @@ class SwingLiveRunner:
         event_sink: EventSink | None = None,
         feature_builder: LiveSwingFeatureBuilder | None = None,
         bar_queue: queue.Queue | None = None,
+        auto_flatten_assigned_equities: bool = True,
     ) -> None:
         self._dry_run = dry_run
         self._env_file = env_file
@@ -403,7 +404,10 @@ class SwingLiveRunner:
         )
         self._client = AlpacaOptionsClient(env_file=env_file)
         self._pos_mgr = SwingPositionManager(
-            self._client, dry_run=dry_run, event_sink=self._emit,
+            self._client,
+            dry_run=dry_run,
+            event_sink=self._emit,
+            auto_flatten_assigned_equities=auto_flatten_assigned_equities,
         )
 
         # Per-ticker bar aggregators.  These align to wall-clock buckets instead
@@ -1271,12 +1275,15 @@ def main() -> None:
                    help="Path to .env file with Alpaca credentials")
     p.add_argument("--max-entries",   type=int, default=5,
                    help="Max new entries per 30m bar (default 5)")
+    p.add_argument("--auto-flatten-assigned-equities", action=argparse.BooleanOptionalAction, default=True,
+                   help="Market-close possible exercised/assigned 100-share equity lots detected during broker reconcile")
     args = p.parse_args()
 
     runner = SwingLiveRunner(
         env_file=args.env,
         dry_run=args.dry_run,
         max_entries_per_bar=args.max_entries,
+        auto_flatten_assigned_equities=args.auto_flatten_assigned_equities,
     )
     runner.start()
 

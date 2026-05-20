@@ -42,7 +42,10 @@ BUNDLE = Path("momentum_colab_bundle.tgz")
 WORK   = Path("momentum_work")
 WORK.mkdir(exist_ok=True)
 with tarfile.open(BUNDLE, "r:gz") as tar:
-    tar.extractall(WORK)
+    try:
+        tar.extractall(WORK, filter="data")
+    except TypeError:
+        tar.extractall(WORK)
 
 manifest = json.loads((WORK / "feature_manifest.json").read_text())
 FEATURES = manifest["feature_columns"]
@@ -247,6 +250,35 @@ if oof_rows:
     oof.to_parquet(WORK / "oof_preds.parquet")
     print("aggregate OOF AUC:", roc_auc_score(oof["y"], oof["score"]))
     print("aggregate OOF AP :", average_precision_score(oof["y"], oof["score"]))
+    print("aggregate OOF base rate:", float(oof["y"].mean()))
+
+    bucket_rows = []
+    ranked = oof["score"].rank(method="first")
+    oof_diag = oof.copy()
+    oof_diag["decile"] = pd.qcut(ranked, 10, labels=False) + 1
+    for decile, g in oof_diag.groupby("decile"):
+        bucket_rows.append({
+            "bucket": f"decile_{int(decile)}",
+            "n": int(len(g)),
+            "score_min": float(g["score"].min()),
+            "score_mean": float(g["score"].mean()),
+            "score_max": float(g["score"].max()),
+            "target_rate": float(g["y"].mean()),
+        })
+    for pct in (0.01, 0.02, 0.05, 0.10, 0.20):
+        threshold = float(oof["score"].quantile(1.0 - pct))
+        g = oof[oof["score"] >= threshold]
+        bucket_rows.append({
+            "bucket": f"top_{int(pct * 100)}pct",
+            "n": int(len(g)),
+            "score_min": threshold,
+            "score_mean": float(g["score"].mean()),
+            "score_max": float(g["score"].max()),
+            "target_rate": float(g["y"].mean()),
+        })
+    bucket_metrics = pd.DataFrame(bucket_rows)
+    bucket_metrics.to_csv(WORK / "oof_score_buckets.csv", index=False)
+    print(bucket_metrics.to_string(index=False))
 
 # %%
 # Cell 5 — final fit on all data, save booster
@@ -276,6 +308,28 @@ booster_path = WORK / "expansion_xgb.json"
 final_model.get_booster().save_model(str(booster_path))
 print("saved booster ->", booster_path)
 
+importance_rows = []
+booster = final_model.get_booster()
+for importance_type in ("gain", "weight", "cover"):
+    scores = booster.get_score(importance_type=importance_type)
+    for feature, value in scores.items():
+        importance_rows.append({
+            "importance_type": importance_type,
+            "feature": feature,
+            "value": float(value),
+        })
+importance = pd.DataFrame(importance_rows)
+if not importance.empty:
+    importance.to_csv(WORK / "feature_importance.csv", index=False)
+    for importance_type in ("gain", "weight", "cover"):
+        top = (
+            importance[importance["importance_type"] == importance_type]
+            .sort_values("value", ascending=False)
+            .head(20)
+        )
+        print(f"top feature importance ({importance_type})")
+        print(top[["feature", "value"]].to_string(index=False))
+
 # %%
 # Cell 6 — write metrics + final manifest
 metrics = {
@@ -296,7 +350,14 @@ metrics = {
 import shutil
 out_bundle = Path("momentum_model_bundle.tgz")
 with tarfile.open(out_bundle, "w:gz") as tar:
-    for name in ("expansion_xgb.json", "feature_manifest.json", "eval_metrics.json", "xgb_param_search.csv"):
+    for name in (
+        "expansion_xgb.json",
+        "feature_manifest.json",
+        "eval_metrics.json",
+        "xgb_param_search.csv",
+        "oof_score_buckets.csv",
+        "feature_importance.csv",
+    ):
         p = WORK / name
         if p.exists():
             tar.add(p, arcname=name)

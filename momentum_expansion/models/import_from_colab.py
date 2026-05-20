@@ -20,7 +20,10 @@ logger = logging.getLogger(__name__)
 def import_bundle(bundle: Path) -> None:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     with tarfile.open(bundle, "r:gz") as tar:
-        tar.extractall(MODELS_DIR)
+        try:
+            tar.extractall(MODELS_DIR, filter="data")
+        except TypeError:
+            tar.extractall(MODELS_DIR)
     logger.info("Booster bundle extracted -> %s", MODELS_DIR)
 
 

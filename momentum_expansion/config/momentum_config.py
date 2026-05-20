@@ -112,6 +112,24 @@ MIN_4H_BARS = 250  # ~6 months of 4H bars before features are usable
 CORRELATION_PRUNE_THRESHOLD = 0.995
 
 # ---------------------------------------------------------------------------
+# Momentum candidate filter
+# ---------------------------------------------------------------------------
+# The expansion model is meant to rank actionable momentum-continuation setups,
+# not every possible ticker/bar in the historical cache. Training and live
+# ranking both use this same coarse gate so the model is fit on the same kind of
+# rows it will later score.
+MOMENTUM_CANDIDATE_FILTER_CONFIG: dict = {
+    "enabled": True,
+    "exclude_low_price": True,
+    "min_dollar_vol_pctile_252": 0.20,
+    "max_dist_to_52w_high_atr": 8.0,
+    "min_xsec_near_high_rank": 0.60,
+    "min_rs_spy_20": 0.0,
+    "min_xsec_ret_20_rank": 0.60,
+    "min_range_pos_20": 0.45,
+}
+
+# ---------------------------------------------------------------------------
 # Forward expansion label
 # ---------------------------------------------------------------------------
 LABEL_CONFIG: dict = {
@@ -149,6 +167,7 @@ RANKING_CONFIG: dict = {
     "top_pct":       0.10,    # use min(top_n, top_pct * universe_size)
     "min_score":     0.55,    # absolute floor — name is rejected even if in top-N
     "tie_break":     "expansion_score",
+    "use_momentum_candidate_filter": True,
 }
 
 # ---------------------------------------------------------------------------

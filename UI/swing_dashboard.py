@@ -419,6 +419,10 @@ class SwingSession:
             self._store.append_order({"ts": ts, "kind": kind, **payload})
             self._store.append_event(evt)
             self._refresh_runner_state()
+        elif kind in ("position_trail_deferred", "position_trail_resumed"):
+            self._store.append_order({"ts": ts, "kind": kind, **payload})
+            self._store.append_event(evt)
+            self._refresh_runner_state()
         elif kind in ("order_submitted", "order_failed", "order_dry_run", "entry_skipped"):
             self._store.append_order({"ts": ts, "kind": kind, **payload})
             self._store.append_event(evt)
