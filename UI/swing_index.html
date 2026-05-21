@@ -547,6 +547,9 @@
     if (pre_entry_bars && pre_entry_bars.length) {
       preSeries.setData(pre_entry_bars.filter(b => b.time < entry_time));
     }
+    if (seed.post_entry_bars && seed.post_entry_bars.length) {
+      series.setData(seed.post_entry_bars.filter(b => b.time >= entry_time));
+    }
 
     // Entry price line
     series.createPriceLine({
@@ -588,6 +591,9 @@
     ro.observe(el);
 
     posCharts[ticker] = { chart, series, preSeries, el, card, seed, ro, trailLine: null };
+    if (seed.closed) {
+      closePositionChart(ticker, seed.exit_price, seed.exit_reason, false);
+    }
     chart.timeScale().fitContent();
   }
 
@@ -631,7 +637,7 @@
     }
   }
 
-  function closePositionChart(ticker, exitPrice, reason) {
+  function closePositionChart(ticker, exitPrice, reason, autoRemove = false) {
     const pc = posCharts[ticker];
     if (!pc) return;
 
@@ -653,8 +659,9 @@
     if (badge) { badge.className = "pos-chart-badge badge-closed"; badge.textContent = "CLOSED"; }
     const pnlEl = document.getElementById(`chart-pnl-${ticker}`);
 
-    // Auto-remove after 20 minutes
-    pc.closeTimer = setTimeout(() => destroyPositionChart(ticker, true), 20 * 60 * 1000);
+    if (autoRemove) {
+      pc.closeTimer = setTimeout(() => destroyPositionChart(ticker, true), 20 * 60 * 1000);
+    }
   }
 
   function destroyPositionChart(ticker, removeEl) {

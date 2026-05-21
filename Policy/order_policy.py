@@ -103,6 +103,11 @@ class OptionOrderPolicyConfig:
     meta_intrabar_long_setup_threshold: float | None = None
     meta_intrabar_short_setup_threshold: float | None = None
     meta_intrabar_opposite_dominance_delta: float = 0.0
+    meta_opening_pullback_enabled: bool = True
+    meta_opening_pullback_setup_hhmm: str = "09:30"
+    meta_opening_pullback_until_hhmm: str = "10:00"
+    meta_opening_pullback_stretch_atr: float = 0.35
+    meta_opening_pullback_ema_length: int = 8
     scalp_mode_enabled: bool = False
     scalp_long_setup_threshold: float = 0.30
     scalp_short_setup_threshold: float = 0.55
@@ -147,6 +152,7 @@ class OptionOrderPolicyConfig:
     max_live_entry_lag_sec: float = 0.0
     use_wall_clock_entry_cutoff: bool = False
     expiring_position_exit_hhmm: str | None = "15:40"
+    auto_flatten_underlying_shares: bool = True
 
 
 @dataclass
@@ -211,7 +217,7 @@ class OptionOrderPolicy:
         self._meta_short_trail = _MetaTrailState()
         self._last_1m_close: float = float("nan")
         self._prev_1m_close: float = float("nan")
-        self._recent_1m_closes: deque[float] = deque(maxlen=5)
+        self._recent_1m_closes: deque[float] = deque(maxlen=30)
         self._latest_meta_side_snapshot: dict[str, float] | None = None
         self._meta_side_entry_armed: dict[str, bool] = {"long": True, "short": True}
         self._meta_side_enter_above_threshold: dict[str, bool] = {"long": False, "short": False}
@@ -226,6 +232,8 @@ class OptionOrderPolicy:
         self._meta_intrabar_entry_setup_ts: dict[str, datetime | None] = {"long": None, "short": None}
         self._meta_intrabar_entry_expires_at: dict[str, datetime | None] = {"long": None, "short": None}
         self._meta_intrabar_setup_snapshot: dict[str, dict[str, Any] | None] = {"long": None, "short": None}
+        self._opening_pullback_required: dict[str, bool] = {"long": False, "short": False}
+        self._opening_pullback_seen: dict[str, bool] = {"long": False, "short": False}
         self._meta_entry_structure: dict[str, dict[str, Any] | None] = {"long": None, "short": None}
         self._meta_side_reason: dict[str, str | None] = {"long": None, "short": None}
         self._pending_broker_reconcile: dict[str, Any] | None = None
@@ -977,9 +985,18 @@ class OptionOrderPolicy:
 
         long_candidates: list[tuple[float, str, float]] = []
         short_candidates: list[tuple[float, str, float]] = []
+        underlying_equity_qty = 0.0
+        underlying_equity_side: str | None = None
         ignored_short_count = 0
         for p in positions:
             symbol = str(p.get("symbol", "")).strip().upper()
+            if symbol == under:
+                qty_val = _as_float(p.get("qty"))
+                if math.isfinite(qty_val) and abs(qty_val) >= 100.0:
+                    side_raw = str(p.get("side", "")).strip().lower()
+                    underlying_equity_qty = qty_val
+                    underlying_equity_side = side_raw or ("long" if qty_val > 0 else "short")
+                continue
             if not symbol.startswith(under):
                 continue
             cp = self._option_cp(symbol)
@@ -1025,7 +1042,53 @@ class OptionOrderPolicy:
             "qty_short": short_qty if short_symbol else 0.0,
             "multiple_positions": (len(long_candidates) > 1 or len(short_candidates) > 1),
             "ignored_short_positions": ignored_short_count,
+            "underlying_equity_qty": underlying_equity_qty,
+            "underlying_equity_side": underlying_equity_side,
         }
+
+    def _maybe_flatten_underlying_equity(
+        self,
+        *,
+        broker_state: dict[str, Any],
+        logger: Callable[[str], None],
+    ) -> dict[str, Any] | None:
+        qty_val = _as_float(broker_state.get("underlying_equity_qty"))
+        if not math.isfinite(qty_val) or abs(qty_val) < 100.0:
+            return None
+        symbol = str(broker_state.get("underlying") or self.cfg.underlying).strip().upper()
+        side = "sell" if qty_val > 0 else "buy"
+        qty = int(round(abs(qty_val)))
+        try:
+            resp = self._client.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                order_type="market",
+                time_in_force="day",
+            )
+            logger(
+                "[order_policy] UNDERLYING EQUITY FLATTEN SUBMITTED "
+                f"symbol={symbol} side={side} qty={qty}"
+            )
+            return {
+                "submitted": True,
+                "symbol": symbol,
+                "side": side,
+                "qty": qty,
+                "response": resp,
+            }
+        except Exception as exc:
+            logger(
+                "[order_policy] UNDERLYING EQUITY FLATTEN FAILED "
+                f"symbol={symbol} side={side} qty={qty}: {exc}"
+            )
+            return {
+                "submitted": False,
+                "symbol": symbol,
+                "side": side,
+                "qty": qty,
+                "error": str(exc),
+            }
 
     def _apply_broker_position_state(
         self,
@@ -1118,13 +1181,24 @@ class OptionOrderPolicy:
         }
         broker_state = self._read_broker_position_state()
         self._last_broker_reconcile_monotonic = now_mono
+        equity_flatten = None
+        if bool(self.cfg.auto_flatten_underlying_shares):
+            equity_flatten = self._maybe_flatten_underlying_equity(
+                broker_state=broker_state,
+                logger=logger,
+            )
 
         changed = any(
             prev_state.get(key) != broker_state.get(key)
             for key in ("long_contracts", "short_contracts", "long_symbol", "short_symbol")
         )
         if not changed:
-            return {"checked": True, "changed": False, "broker_state": broker_state}
+            return {
+                "checked": True,
+                "changed": False,
+                "broker_state": broker_state,
+                "underlying_equity_flatten": equity_flatten,
+            }
 
         expiring_long_was_open = (
             prev_state["long_contracts"] > 0
@@ -1159,6 +1233,7 @@ class OptionOrderPolicy:
             "changed": True,
             "previous_state": prev_state,
             "broker_state": broker_state,
+            "underlying_equity_flatten": equity_flatten,
             "position": int(self._pos),
         }
 
@@ -1384,8 +1459,83 @@ class OptionOrderPolicy:
         self._meta_intrabar_entry_setup_ts[side] = None
         self._meta_intrabar_entry_expires_at[side] = None
         self._meta_intrabar_setup_snapshot[side] = None
+        self._opening_pullback_required[side] = False
+        self._opening_pullback_seen[side] = False
         if reason:
             self._meta_side_reason[side] = reason
+
+    def _recent_ema(self, *, length: int) -> float:
+        values = [float(x) for x in self._recent_1m_closes if math.isfinite(_as_float(x))]
+        span = max(1, int(length))
+        if len(values) < max(2, min(span, 4)):
+            return float("nan")
+        alpha = 2.0 / float(span + 1)
+        ema = values[0]
+        for value in values[1:]:
+            ema = alpha * value + (1.0 - alpha) * ema
+        return float(ema)
+
+    def _opening_pullback_applies(self, *, side: str, local_ts: datetime | None) -> bool:
+        if not bool(self.cfg.meta_opening_pullback_enabled):
+            return False
+        side_key = str(side).strip().lower()
+        if side_key != "long":
+            return False
+        if local_ts is None:
+            return False
+        setup_ts = self._meta_intrabar_entry_setup_ts.get(side_key)
+        if not isinstance(setup_ts, datetime):
+            return False
+        setup_time = _parse_hhmm(str(self.cfg.meta_opening_pullback_setup_hhmm or "09:30"))
+        until_time = _parse_hhmm(str(self.cfg.meta_opening_pullback_until_hhmm or "10:00"))
+        if setup_ts.time().replace(second=0, microsecond=0) != setup_time:
+            return False
+        if local_ts.time().replace(second=0, microsecond=0) >= until_time:
+            return False
+        snap = self._meta_intrabar_setup_snapshot.get(side_key) or {}
+        return str(snap.get("entry_kind") or "swing").strip().lower() == "swing"
+
+    def _opening_pullback_triggered(
+        self,
+        *,
+        side: str,
+        close: float,
+        open_: float,
+        low: float,
+        local_ts: datetime | None,
+    ) -> bool:
+        side_key = str(side).strip().lower()
+        if not self._opening_pullback_applies(side=side_key, local_ts=local_ts):
+            return True
+
+        snap = self._meta_intrabar_setup_snapshot.get(side_key) or {}
+        signal_close = _as_float(snap.get("signal_close"))
+        signal_atr = _as_float(snap.get("signal_atr"))
+        stretch_atr = max(0.0, float(self.cfg.meta_opening_pullback_stretch_atr))
+        if not (math.isfinite(signal_close) and math.isfinite(signal_atr) and signal_atr > 0.0):
+            return True
+        stretched = bool(math.isfinite(close) and close > signal_close + stretch_atr * signal_atr)
+        if not self._opening_pullback_required.get(side_key, False):
+            if not stretched:
+                return True
+            self._opening_pullback_required[side_key] = True
+            self._opening_pullback_seen[side_key] = False
+            self._meta_side_reason[side_key] = "opening_pullback_waiting_for_pullback"
+            return False
+
+        target = self._recent_ema(length=max(1, int(self.cfg.meta_opening_pullback_ema_length)))
+        if not math.isfinite(target):
+            target = signal_close
+        if math.isfinite(low) and low <= target:
+            self._opening_pullback_seen[side_key] = True
+        if not self._opening_pullback_seen.get(side_key, False):
+            self._meta_side_reason[side_key] = "opening_pullback_waiting_for_pullback"
+            return False
+        if math.isfinite(close) and math.isfinite(open_) and close > target and close > open_:
+            self._meta_side_reason[side_key] = "opening_pullback_reclaim"
+            return True
+        self._meta_side_reason[side_key] = "opening_pullback_waiting_for_reclaim"
+        return False
 
     def _capture_intrabar_setup_snapshot(
         self,
@@ -1506,13 +1656,33 @@ class OptionOrderPolicy:
 
         if self._phase4_intrabar_entry_enabled():
             if side == "long":
-                return bool(
+                if (
+                    self._opening_pullback_required.get(side, False)
+                    and self._opening_pullback_applies(side=side, local_ts=local_ts)
+                ):
+                    return self._opening_pullback_triggered(
+                        side=side,
+                        close=close,
+                        open_=open_,
+                        low=low,
+                        local_ts=local_ts,
+                    )
+                breakout_confirmed = bool(
                     math.isfinite(high)
                     and math.isfinite(open_)
                     and math.isfinite(close)
                     and high >= ref
                     and close > open_
                     and close > ref
+                )
+                if not breakout_confirmed:
+                    return False
+                return self._opening_pullback_triggered(
+                    side=side,
+                    close=close,
+                    open_=open_,
+                    low=low,
+                    local_ts=local_ts,
                 )
             return bool(
                 math.isfinite(low)
@@ -1747,6 +1917,8 @@ class OptionOrderPolicy:
                 and not self._side_reentry_cooldown_active(side=side_key, local_ts=local_ts)
             ):
                 self._meta_intrabar_entry_intent_active[side_key] = True
+                self._opening_pullback_required[side_key] = False
+                self._opening_pullback_seen[side_key] = False
                 self._meta_intrabar_entry_ref[side_key] = (
                     float(signal_high) if side_key == "long" else float(signal_low)
                 )
@@ -2819,6 +2991,8 @@ class OptionOrderPolicy:
                 if isinstance(self._meta_intrabar_entry_expires_at.get("short"), datetime)
                 else None
             ),
+            "opening_pullback_required": dict(self._opening_pullback_required),
+            "opening_pullback_seen": dict(self._opening_pullback_seen),
             "long_decision_reason": self._meta_side_reason.get("long"),
             "short_decision_reason": self._meta_side_reason.get("short"),
             "meta_setup_failure_exit_enabled": bool(self.cfg.meta_setup_failure_exit_enabled),
@@ -2862,6 +3036,8 @@ class OptionOrderPolicy:
                 for key, _ts in self._meta_intrabar_entry_expires_at.items()
             },
             "meta_intrabar_setup_snapshot": dict(self._meta_intrabar_setup_snapshot),
+            "opening_pullback_required": dict(self._opening_pullback_required),
+            "opening_pullback_seen": dict(self._opening_pullback_seen),
             "meta_entry_structure": {
                 key: (
                     {
@@ -2941,6 +3117,16 @@ class OptionOrderPolicy:
                 for side in ("long", "short"):
                     value = setup_snapshot.get(side)
                     self._meta_intrabar_setup_snapshot[side] = dict(value) if isinstance(value, dict) else None
+
+            pullback_required = state.get("opening_pullback_required")
+            if isinstance(pullback_required, dict):
+                for side in ("long", "short"):
+                    self._opening_pullback_required[side] = bool(pullback_required.get(side, False))
+
+            pullback_seen = state.get("opening_pullback_seen")
+            if isinstance(pullback_seen, dict):
+                for side in ("long", "short"):
+                    self._opening_pullback_seen[side] = bool(pullback_seen.get(side, False))
 
             entry_structure = state.get("meta_entry_structure")
             if isinstance(entry_structure, dict):

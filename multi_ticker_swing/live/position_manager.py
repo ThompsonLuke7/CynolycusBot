@@ -35,6 +35,13 @@ _CLOSE_ORDER_ATTEMPTS = 5
 _ORDER_VERIFY_TIMEOUT_SECS = 2.5
 _ORDER_VERIFY_POLL_SECS = 0.5
 _OPTION_TICK = 0.01
+_LIQUIDATION_CLOSE_REASONS = {
+    "sl",
+    "no_progress",
+    "deferred_trail_failed",
+    "deferred_trail_timeout",
+    "expiration_itm_cutoff",
+}
 _ET = ZoneInfo("America/New_York")
 _DEFER_TRAIL_AFTER_HOUR = 15
 _DEFER_TRAIL_AFTER_MINUTE = 55
@@ -44,6 +51,11 @@ _DEFERRED_TRAIL_STATE_PATH = Path("Data/inference/multi_ticker_swing/deferred_tr
 _EXPIRING_ITM_CLOSE_HOUR = 15
 _EXPIRING_ITM_CLOSE_MINUTE = 45
 _ASSIGNED_EQUITY_MIN_SHARES = 100
+_OPTION_VALUE_EXIT_ENABLED = True
+_OPTION_VALUE_QUOTE_MODE = "bid"
+_OPTION_PROFIT_TRAIL_ARM_PCT = 1.00
+_OPTION_PROFIT_TRAIL_GIVEBACK_PCT = 0.25
+_OPTION_TAKE_PROFIT_PCT = 3.00
 
 EventSink = Callable[[str, dict], None]
 
@@ -66,6 +78,7 @@ class SwingPosition:
     option_symbol: str
     qty: int
     config: TickerConfig
+    option_entry_price: float | None = None
 
     # Derived at entry
     sl_price: float | None = None
@@ -75,6 +88,9 @@ class SwingPosition:
     last_price: float = field(init=False)
     trail_armed: bool = False
     bar_count_5m: int = 0
+    option_last_price: float | None = None
+    option_best_price: float | None = None
+    option_trail_armed: bool = False
     deferred_trail_active: bool = False
     deferred_trail_trigger_time: datetime | None = None
     deferred_trail_trigger_price: float | None = None
@@ -85,6 +101,15 @@ class SwingPosition:
     def __post_init__(self):
         self.best_price = self.entry_price
         self.last_price = self.entry_price
+        option_entry = _as_float(self.option_entry_price)
+        if math.isfinite(option_entry) and option_entry > 0.0:
+            self.option_entry_price = float(option_entry)
+            self.option_last_price = float(option_entry)
+            self.option_best_price = float(option_entry)
+        else:
+            self.option_entry_price = None
+            self.option_last_price = None
+            self.option_best_price = None
         if self.config.sl_atr > 0 and not _isnan(self.atr_at_entry):
             self.sl_price = (
                 self.entry_price - self.direction * self.config.sl_atr * self.atr_at_entry
@@ -159,6 +184,39 @@ class SwingPosition:
         self.deferred_trail_bars = 0
         self.deferred_trail_last_price = None
 
+    def update_option_value(self, option_price: float | None) -> str | None:
+        price = _as_float(option_price)
+        if not math.isfinite(price) or price <= 0.0:
+            return None
+        self.option_last_price = float(price)
+        if self.option_entry_price is None or self.option_entry_price <= 0.0:
+            self.option_entry_price = float(price)
+            self.option_best_price = float(price)
+            return None
+
+        if self.option_best_price is None or price > float(self.option_best_price):
+            self.option_best_price = float(price)
+
+        entry = float(self.option_entry_price)
+        best = float(self.option_best_price or price)
+        current_profit = price - entry
+        peak_profit = best - entry
+        if entry <= 0.0 or peak_profit <= 0.0:
+            return None
+
+        current_pct = current_profit / entry
+        peak_pct = peak_profit / entry
+        if _OPTION_TAKE_PROFIT_PCT > 0.0 and current_pct >= _OPTION_TAKE_PROFIT_PCT:
+            return "option_take_profit"
+
+        if peak_pct >= _OPTION_PROFIT_TRAIL_ARM_PCT:
+            self.option_trail_armed = True
+        if self.option_trail_armed:
+            floor_profit = peak_profit * (1.0 - _OPTION_PROFIT_TRAIL_GIVEBACK_PCT)
+            if current_profit <= floor_profit:
+                return "option_profit_trail"
+        return None
+
     def deferred_trail_decision(self, bar: dict) -> str | None:
         """Return close reason when a deferred trail should finally exit.
 
@@ -226,6 +284,22 @@ class SwingPosition:
             "trail_armed": bool(self.trail_armed),
             "trail_floor": float(tf) if (tf := self._trail_floor()) is not None else None,
             "deferred_trail_active": bool(self.deferred_trail_active),
+            "option_entry_price": (
+                float(self.option_entry_price)
+                if self.option_entry_price is not None and math.isfinite(_as_float(self.option_entry_price))
+                else None
+            ),
+            "option_last_price": (
+                float(self.option_last_price)
+                if self.option_last_price is not None and math.isfinite(_as_float(self.option_last_price))
+                else None
+            ),
+            "option_best_price": (
+                float(self.option_best_price)
+                if self.option_best_price is not None and math.isfinite(_as_float(self.option_best_price))
+                else None
+            ),
+            "option_trail_armed": bool(self.option_trail_armed),
             "deferred_trail_trigger_time": (
                 self.deferred_trail_trigger_time.astimezone(timezone.utc).isoformat()
                 if self.deferred_trail_trigger_time else None
@@ -257,6 +331,22 @@ class SwingPosition:
             "trail_armed": bool(self.trail_armed),
             "trail_floor": float(tf) if (tf := self._trail_floor()) is not None else None,
             "deferred_trail_active": bool(self.deferred_trail_active),
+            "option_entry_price": (
+                float(self.option_entry_price)
+                if self.option_entry_price is not None and math.isfinite(_as_float(self.option_entry_price))
+                else None
+            ),
+            "option_last_price": (
+                float(self.option_last_price)
+                if self.option_last_price is not None and math.isfinite(_as_float(self.option_last_price))
+                else None
+            ),
+            "option_best_price": (
+                float(self.option_best_price)
+                if self.option_best_price is not None and math.isfinite(_as_float(self.option_best_price))
+                else None
+            ),
+            "option_trail_armed": bool(self.option_trail_armed),
             "deferred_trail_trigger_price": (
                 float(self.deferred_trail_trigger_price)
                 if self.deferred_trail_trigger_price is not None else None
@@ -275,10 +365,10 @@ def _safe_response(resp: Any) -> Any:
     if isinstance(resp, (str, int, float, bool)):
         return resp
     if isinstance(resp, dict):
-        keep = ("id", "client_order_id", "symbol", "qty", "side", "status", "submitted_at")
+        keep = ("id", "client_order_id", "symbol", "qty", "side", "status", "submitted_at", "filled_avg_price")
         return {k: resp.get(k) for k in keep if k in resp}
     out = {}
-    for k in ("id", "client_order_id", "symbol", "qty", "side", "status", "submitted_at"):
+    for k in ("id", "client_order_id", "symbol", "qty", "side", "status", "submitted_at", "filled_avg_price"):
         if hasattr(resp, k):
             out[k] = getattr(resp, k)
     return out or str(resp)
@@ -504,6 +594,15 @@ class SwingPositionManager:
                     "new_qty": broker_qty,
                 })
                 pos.qty = broker_qty
+            broker_avg = _as_float(broker_pos.get("avg_entry_price"))
+            if (
+                math.isfinite(broker_avg)
+                and broker_avg > 0.0
+                and (pos.option_entry_price is None or pos.option_entry_price <= 0.0)
+            ):
+                pos.option_entry_price = float(broker_avg)
+                pos.option_last_price = float(broker_avg)
+                pos.option_best_price = float(broker_avg)
 
         for ticker, broker_pos in broker_by_ticker.items():
             if ticker in self._positions:
@@ -719,6 +818,7 @@ class SwingPositionManager:
             option_symbol=symbol,
             qty=int(broker_pos.get("qty", 0) or 0),
             config=universe[ticker],
+            option_entry_price=_finite_or_none(broker_pos.get("avg_entry_price")),
         )
         self._apply_deferred_trail_cache(pos)
         self.open_position(pos)
@@ -753,6 +853,19 @@ class SwingPositionManager:
                 "cutoff_et": f"{_EXPIRING_ITM_CLOSE_HOUR:02d}:{_EXPIRING_ITM_CLOSE_MINUTE:02d}",
             })
             self._close_position(pos, expiration_reason, bar)
+            return
+
+        option_reason = self._option_value_exit_reason(pos)
+        if option_reason:
+            self._emit("option_value_exit_triggered", {
+                **pos.to_dict(),
+                "reason": option_reason,
+                "bar": _safe_bar(bar),
+                "arm_pct": _OPTION_PROFIT_TRAIL_ARM_PCT,
+                "giveback_pct": _OPTION_PROFIT_TRAIL_GIVEBACK_PCT,
+                "take_profit_pct": _OPTION_TAKE_PROFIT_PCT,
+            })
+            self._close_position(pos, option_reason, bar)
             return
 
         if pos.deferred_trail_active:
@@ -797,6 +910,17 @@ class SwingPositionManager:
                 return
             self._close_position(pos, reason, bar)
 
+    def _option_value_exit_reason(self, pos: SwingPosition) -> str | None:
+        if not _OPTION_VALUE_EXIT_ENABLED:
+            return None
+        symbol = str(pos.option_symbol).strip().upper()
+        if not symbol:
+            return None
+        price = self._get_contract_price(symbol=symbol, mode=_OPTION_VALUE_QUOTE_MODE)
+        if not math.isfinite(price) or price <= 0.0:
+            price = self._get_contract_price(symbol=symbol, mode="mid")
+        return pos.update_option_value(price)
+
     def _close_position(self, pos: SwingPosition, reason: str, bar: dict) -> None:
         exit_price = float(bar["close"])
         pnl_pct = pos.direction * (exit_price - pos.entry_price) / pos.entry_price
@@ -813,7 +937,7 @@ class SwingPositionManager:
         order_error: str | None = None
         if not self._dry_run:
             try:
-                close_result = self._submit_close_order(pos)
+                close_result = self._submit_close_order(pos, reason=reason)
                 order_resp = close_result.get("response")
                 self._last_close_failure_wall.pop(pos.ticker, None)
                 self._emit("order_submitted", {
@@ -939,7 +1063,7 @@ class SwingPositionManager:
         self._deferred_trail_cache.pop(pos.ticker.upper(), None)
         self._persist_deferred_trail_cache()
 
-    def _submit_close_order(self, pos: SwingPosition) -> dict[str, Any]:
+    def _submit_close_order(self, pos: SwingPosition, *, reason: str) -> dict[str, Any]:
         symbol = str(pos.option_symbol).strip().upper()
         qty = int(pos.qty)
         base_limit = self._get_contract_price(symbol=symbol, mode="bid")
@@ -952,21 +1076,22 @@ class SwingPositionManager:
             base_limit = _OPTION_TICK
 
         logger.info(
-            "[%s] close order pricing symbol=%s source=%s base_limit=%.2f",
+            "[%s] close order pricing symbol=%s source=%s base_limit=%.2f reason=%s",
             pos.ticker,
             symbol,
             "bid" if math.isfinite(close_bid) and close_bid > 0.0 else "fallback",
             base_limit,
+            reason,
         )
 
+        limit_prices = _close_limit_ladder(
+            base_limit=base_limit,
+            close_bid=close_bid,
+            reason=reason,
+            attempts=_CLOSE_ORDER_ATTEMPTS,
+        )
         last_result: dict[str, Any] | None = None
-        for attempt in range(1, _CLOSE_ORDER_ATTEMPTS + 1):
-            if math.isfinite(close_bid) and close_bid > 0.0:
-                limit_price = base_limit if attempt == 1 else close_bid - (attempt - 2) * _OPTION_TICK
-            else:
-                limit_price = base_limit - (attempt - 1) * _OPTION_TICK * 2.0
-            limit_price = max(_OPTION_TICK, round(float(limit_price), 2))
-
+        for attempt, limit_price in enumerate(limit_prices, start=1):
             resp = self._client.submit_option_order(
                 symbol=symbol,
                 qty=qty,
@@ -985,7 +1110,7 @@ class SwingPositionManager:
                 status or "n/a",
                 limit_price,
                 attempt,
-                _CLOSE_ORDER_ATTEMPTS,
+                len(limit_prices),
             )
 
             verify = self._verify_close_order(submitted_resp=resp if isinstance(resp, dict) else {}, symbol=symbol)
@@ -1235,6 +1360,63 @@ def _quote_price(quote: dict[str, Any], *, mode: str) -> float:
     if math.isfinite(ask):
         return ask
     return float("nan")
+
+
+def _round_option_limit(value: float) -> float:
+    return max(_OPTION_TICK, round(float(value), 2))
+
+
+def _close_limit_ladder(
+    *,
+    base_limit: float,
+    close_bid: float,
+    reason: str,
+    attempts: int,
+) -> list[float]:
+    attempts = max(1, int(attempts))
+    base = _round_option_limit(base_limit if math.isfinite(base_limit) and base_limit > 0 else _OPTION_TICK)
+    bid = close_bid if math.isfinite(close_bid) and close_bid > 0.0 else float("nan")
+
+    prices: list[float] = []
+    if str(reason or "").strip().lower() in _LIQUIDATION_CLOSE_REASONS:
+        anchor = bid if math.isfinite(bid) and bid > 0.0 else base
+        if anchor <= 0.25:
+            raw_prices = [
+                base,
+                anchor,
+                anchor * 0.75,
+                anchor * 0.50,
+                anchor * 0.25,
+                0.02,
+                _OPTION_TICK,
+            ]
+        else:
+            raw_prices = [
+                base,
+                anchor - 0.02,
+                anchor - 0.05,
+                anchor - 0.10,
+                anchor - 0.20,
+            ]
+        for price in raw_prices:
+            rounded = _round_option_limit(price)
+            if rounded not in prices:
+                prices.append(rounded)
+            if len(prices) >= attempts:
+                break
+        if anchor <= 0.25 and prices[-1] != _OPTION_TICK and len(prices) < attempts:
+            prices.append(_OPTION_TICK)
+        return prices
+
+    for attempt in range(1, attempts + 1):
+        if math.isfinite(bid) and bid > 0.0:
+            price = base if attempt == 1 else bid - (attempt - 1) * _OPTION_TICK
+        else:
+            price = base - (attempt - 1) * _OPTION_TICK * 2.0
+        rounded = _round_option_limit(price)
+        if rounded not in prices:
+            prices.append(rounded)
+    return prices or [_OPTION_TICK]
 
 
 def _parse_occ_option_symbol(symbol: str) -> ParsedOptionSymbol | None:

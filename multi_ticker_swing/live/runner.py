@@ -1203,6 +1203,7 @@ class SwingLiveRunner:
             })
 
         entry_time = datetime.now(timezone.utc)
+        option_entry_price = _response_float(order_resp, "filled_avg_price")
         pos = SwingPosition(
             ticker=ticker,
             direction=sig.direction,
@@ -1212,6 +1213,7 @@ class SwingLiveRunner:
             option_symbol=option_symbol,
             qty=qty,
             config=sig.config,
+            option_entry_price=option_entry_price,
         )
         self._pos_mgr.open_position(pos)
 
@@ -1253,14 +1255,26 @@ def _safe_response(resp: Any) -> Any:
     if isinstance(resp, (str, int, float, bool)):
         return resp
     if isinstance(resp, dict):
-        keep = ("id", "client_order_id", "symbol", "qty", "side", "status", "submitted_at")
+        keep = ("id", "client_order_id", "symbol", "qty", "side", "status", "submitted_at", "filled_avg_price")
         return {k: resp.get(k) for k in keep if k in resp}
     # Object with attributes
     out = {}
-    for k in ("id", "client_order_id", "symbol", "qty", "side", "status", "submitted_at"):
+    for k in ("id", "client_order_id", "symbol", "qty", "side", "status", "submitted_at", "filled_avg_price"):
         if hasattr(resp, k):
             out[k] = getattr(resp, k)
     return out or str(resp)
+
+
+def _response_float(resp: Any, key: str) -> float | None:
+    try:
+        if isinstance(resp, dict):
+            value = resp.get(key)
+        else:
+            value = getattr(resp, key)
+        out = float(value)
+    except Exception:
+        return None
+    return out if math.isfinite(out) and out > 0.0 else None
 
 
 # ---------------------------------------------------------------------------
