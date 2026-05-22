@@ -193,8 +193,10 @@ class SwingDashboardStore:
         self._orders: deque[dict] = deque(maxlen=MAX_ORDERS_LOG)
         self._trades: deque[dict] = deque(maxlen=MAX_TRADES_LOG)
         self._warmup: deque[dict] = deque(maxlen=MAX_WARMUP_LOG)
-        # chart seeds keyed by ticker; cleared when position closes
+        # chart seeds keyed by ticker; retained after close so late/reloaded
+        # clients can still render closed trade charts.
         self._chart_seeds: dict[str, dict] = {}
+        self._chart_bars: dict[str, deque[dict]] = {}
 
     def reset_for_session(self, *, max_entries: int, dry_run: bool, env_file: str) -> None:
         with self._lock:
@@ -213,6 +215,7 @@ class SwingDashboardStore:
             self._trades.clear()
             self._warmup.clear()
             self._chart_seeds.clear()
+            self._chart_bars.clear()
 
     # -- mutation helpers (called from runner thread via event sink) ----
 
@@ -273,11 +276,32 @@ class SwingDashboardStore:
         with self._lock:
             ticker = seed.get("ticker")
             if ticker:
-                self._chart_seeds[ticker] = seed
+                self._chart_seeds[ticker] = dict(seed)
+                self._chart_bars.setdefault(ticker, deque(maxlen=300))
 
-    def remove_chart_seed(self, ticker: str) -> None:
+    def append_chart_bar(self, ticker: str, bar: dict) -> None:
         with self._lock:
-            self._chart_seeds.pop(ticker, None)
+            if not ticker or not isinstance(bar, dict):
+                return
+            bars = self._chart_bars.setdefault(ticker, deque(maxlen=300))
+            if bars and bars[-1].get("time") == bar.get("time"):
+                bars[-1] = dict(bar)
+            else:
+                bars.append(dict(bar))
+
+    def mark_chart_closed(self, ticker: str, payload: dict) -> None:
+        with self._lock:
+            if not ticker:
+                return
+            seed = self._chart_seeds.get(ticker)
+            if seed is None:
+                seed = {"ticker": ticker}
+                self._chart_seeds[ticker] = seed
+            seed["closed"] = True
+            seed["exit_price"] = payload.get("exit_price")
+            seed["exit_reason"] = payload.get("exit_reason")
+            seed["exit_time"] = payload.get("exit_time") or payload.get("ts")
+            seed["exit_pnl_pct"] = payload.get("exit_pnl_pct")
 
     def append_warmup(self, line: dict) -> None:
         with self._lock:
@@ -301,7 +325,10 @@ class SwingDashboardStore:
                 "orders": list(self._orders),
                 "trades": list(self._trades),
                 "warmup": list(self._warmup)[-30:],
-                "chart_seeds": list(self._chart_seeds.values()),
+                "chart_seeds": [
+                    {**seed, "post_entry_bars": list(self._chart_bars.get(ticker, []))}
+                    for ticker, seed in self._chart_seeds.items()
+                ],
                 "ts": _utc_iso(),
             }
 
@@ -431,11 +458,13 @@ class SwingSession:
             self._store.append_chart_seed(payload)
             self._publish(evt)
             return  # already published — skip the second publish below
+        elif kind == "position_bar_5m":
+            self._store.append_chart_bar(payload.get("ticker", ""), payload.get("bar", {}))
         elif kind == "position_opened":
             self._store.append_event(evt)
             self._refresh_runner_state()
         elif kind == "position_closed":
-            self._store.remove_chart_seed(payload.get("ticker", ""))
+            self._store.mark_chart_closed(payload.get("ticker", ""), {**payload, "ts": ts})
             self._store.append_trade({"ts": ts, **payload})
             self._store.append_event(evt)
             self._refresh_runner_state()
