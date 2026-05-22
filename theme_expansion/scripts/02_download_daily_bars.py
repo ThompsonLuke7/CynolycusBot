@@ -71,9 +71,15 @@ def download_one(ticker: str, start: str, end: str | None, force: bool) -> pd.Da
 
 def market_cap_for(ticker: str) -> float | None:
     try:
-        value = yf.Ticker(ticker).fast_info.get("market_cap")
+        yticker = yf.Ticker(ticker)
+        value = yticker.fast_info.get("market_cap")
     except Exception:
         return None
+    if value is None:
+        try:
+            value = yticker.info.get("marketCap")
+        except Exception:
+            return None
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -89,18 +95,25 @@ def build_universe_filter(combined: pd.DataFrame) -> pd.DataFrame:
         lambda s: s.rolling(20, min_periods=10).mean()
     )
     latest = df.groupby("ticker").tail(1).copy()
+    asset_types = (
+        load_theme_memberships()[["ticker", "asset_type"]]
+        .drop_duplicates(subset=["ticker"])
+        .set_index("ticker")["asset_type"]
+    )
+    latest["asset_type"] = latest["ticker"].map(asset_types).fillna("stock")
     latest["market_cap"] = latest["ticker"].map(market_cap_for)
     latest["is_exception"] = latest["ticker"].isin(FILTER_EXCEPTIONS)
     latest["passes_price"] = latest["px"] > MIN_PRICE
     latest["passes_adv20"] = latest["avg_dollar_volume_20d"] > MIN_AVG_DOLLAR_VOLUME_20D
     latest["market_cap_missing"] = latest["market_cap"].isna()
-    latest["passes_market_cap"] = latest["market_cap_missing"] | (latest["market_cap"] > MIN_MARKET_CAP)
+    latest["passes_market_cap"] = latest["asset_type"].eq("etf") | (latest["market_cap"].fillna(0.0) > MIN_MARKET_CAP)
     latest["is_eligible"] = latest["is_exception"] | (
         latest["passes_price"] & latest["passes_adv20"] & latest["passes_market_cap"]
     )
     out = latest[
         [
             "ticker",
+            "asset_type",
             "date",
             "px",
             "avg_dollar_volume_20d",
