@@ -77,6 +77,8 @@ _BACKLOG_EVENT_THROTTLE_SECS = 60.0
 _HEARTBEAT_SECS = 60.0
 _BROKER_RECONCILE_SECS = 60.0
 _LOG_END = _time(16, 15)
+_ENTRY_ORDER_VERIFY_TIMEOUT_SECS = 5.0
+_ENTRY_ORDER_VERIFY_POLL_SECS = 0.5
 
 # Tickers that may be in the stream but are excluded from entry signals
 _CONTEXT_SET = set(CONTEXT_TICKERS)
@@ -1162,6 +1164,7 @@ class SwingLiveRunner:
         qty = DEFAULT_QTY
         order_resp: Any = None
         order_error: str | None = None
+        verification: dict[str, Any] | None = None
         if not self._dry_run:
             try:
                 order_resp = self._client.submit_option_order(
@@ -1183,6 +1186,11 @@ class SwingLiveRunner:
                     "error": order_error,
                 })
                 return
+            verification = _verify_entry_order(
+                self._client,
+                submitted_resp=order_resp if isinstance(order_resp, dict) else {},
+                symbol=option_symbol,
+            )
             self._emit("order_submitted", {
                 "ticker": ticker,
                 "side": "buy",
@@ -1190,7 +1198,25 @@ class SwingLiveRunner:
                 "qty": qty,
                 "entry_price": entry_price,
                 "response": _safe_response(order_resp),
+                "verification": verification,
             })
+            if not verification.get("verified", False):
+                logger.warning(
+                    "[%s] buy order not verified; skipping local position open symbol=%s status=%s via=%s",
+                    ticker,
+                    option_symbol,
+                    verification.get("status"),
+                    verification.get("via"),
+                )
+                self._emit("entry_skipped", {
+                    "ticker": ticker,
+                    "direction": int(sig.direction),
+                    "reason": "buy_order_not_verified",
+                    "entry_price": entry_price,
+                    "option_symbol": option_symbol,
+                    "verification": verification,
+                })
+                return
         else:
             logger.info("[DRY RUN] [%s] would BUY %d × %s at entry ~%.2f",
                         ticker, qty, option_symbol, entry_price)
@@ -1203,7 +1229,12 @@ class SwingLiveRunner:
             })
 
         entry_time = datetime.now(timezone.utc)
-        option_entry_price = _response_float(order_resp, "filled_avg_price")
+        verified_order = verification.get("order") if verification else None
+        option_entry_price = (
+            _response_float(verified_order, "filled_avg_price")
+            if verified_order is not None
+            else _response_float(order_resp, "filled_avg_price")
+        )
         pos = SwingPosition(
             ticker=ticker,
             direction=sig.direction,
@@ -1263,6 +1294,96 @@ def _safe_response(resp: Any) -> Any:
         if hasattr(resp, k):
             out[k] = getattr(resp, k)
     return out or str(resp)
+
+
+def _status_key(status: Any) -> str:
+    return str(status or "").strip().lower()
+
+
+def _order_is_success(status: Any) -> bool:
+    return _status_key(status) in {"filled", "partially_filled"}
+
+
+def _order_is_terminal_fail(status: Any) -> bool:
+    return _status_key(status) in {
+        "canceled",
+        "cancelled",
+        "expired",
+        "rejected",
+        "failed",
+        "suspended",
+    }
+
+
+def _extract_positions(resp: Any) -> list[dict[str, Any]]:
+    if isinstance(resp, list):
+        return [x for x in resp if isinstance(x, dict)]
+    if isinstance(resp, dict):
+        for key in ("positions", "data"):
+            value = resp.get(key)
+            if isinstance(value, list):
+                return [x for x in value if isinstance(x, dict)]
+    return []
+
+
+def _has_open_long_option_position(client: AlpacaOptionsClient, *, symbol: str) -> bool:
+    target = str(symbol).strip().upper()
+    try:
+        resp = client.get_positions()
+    except Exception:
+        return False
+    for raw in _extract_positions(resp):
+        if str(raw.get("symbol", "")).strip().upper() != target:
+            continue
+        if str(raw.get("side", "")).strip().lower() == "short":
+            continue
+        qty = _response_float(raw, "qty")
+        if qty is None or qty > 0:
+            return True
+    return False
+
+
+def _verify_entry_order(
+    client: AlpacaOptionsClient,
+    *,
+    submitted_resp: dict[str, Any],
+    symbol: str,
+) -> dict[str, Any]:
+    order_id = str(submitted_resp.get("id", "")).strip()
+    last: dict[str, Any] = submitted_resp
+    status = _status_key(last.get("status"))
+    if _order_is_success(status):
+        return {"verified": True, "status": status, "order_id": order_id, "via": "submit_response", "order": last}
+    if _order_is_terminal_fail(status):
+        return {"verified": False, "status": status, "order_id": order_id, "via": "submit_response", "retryable": False, "order": last}
+
+    deadline = time.monotonic() + _ENTRY_ORDER_VERIFY_TIMEOUT_SECS
+    while time.monotonic() < deadline and order_id:
+        time.sleep(_ENTRY_ORDER_VERIFY_POLL_SECS)
+        try:
+            current = client.get_order(order_id)
+            if isinstance(current, dict):
+                last = current
+                status = _status_key(current.get("status"))
+        except Exception as exc:
+            logger.warning("entry order verify poll warning order_id=%s: %s", order_id, exc)
+            continue
+        if _order_is_success(status):
+            return {"verified": True, "status": status, "order_id": order_id, "via": "order_poll", "order": last}
+        if _order_is_terminal_fail(status):
+            return {"verified": False, "status": status, "order_id": order_id, "via": "order_poll", "retryable": False, "order": last}
+
+    if _has_open_long_option_position(client, symbol=symbol):
+        return {"verified": True, "status": status or "unknown", "order_id": order_id, "via": "positions_reconcile", "order": last}
+
+    return {
+        "verified": False,
+        "status": status or "unknown",
+        "order_id": order_id,
+        "via": "timeout",
+        "retryable": bool(order_id),
+        "order": last,
+    }
 
 
 def _response_float(resp: Any, key: str) -> float | None:

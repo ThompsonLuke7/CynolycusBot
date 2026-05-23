@@ -35,6 +35,7 @@ _CLOSE_ORDER_ATTEMPTS = 5
 _ORDER_VERIFY_TIMEOUT_SECS = 2.5
 _ORDER_VERIFY_POLL_SECS = 0.5
 _OPTION_TICK = 0.01
+_PENDING_CLOSE_REFRESH_SECS = 30.0
 _LIQUIDATION_CLOSE_REASONS = {
     "sl",
     "no_progress",
@@ -48,6 +49,7 @@ _DEFER_TRAIL_AFTER_MINUTE = 55
 _DEFER_RECOVERY_BARS = 3
 _DEFER_RECOVERY_PCT = 0.0025
 _DEFERRED_TRAIL_STATE_PATH = Path("Data/inference/multi_ticker_swing/deferred_trails.json")
+_WORTHLESS_CLOSE_STATE_PATH = Path("Data/inference/multi_ticker_swing/worthless_close_abandoned.json")
 _EXPIRING_ITM_CLOSE_HOUR = 15
 _EXPIRING_ITM_CLOSE_MINUTE = 45
 _ASSIGNED_EQUITY_MIN_SHARES = 100
@@ -455,7 +457,9 @@ class SwingPositionManager:
         self._auto_flatten_assigned_equities = bool(auto_flatten_assigned_equities)
         self._positions: dict[str, SwingPosition] = {}   # ticker → position
         self._last_close_failure_wall: dict[str, float] = {}
+        self._pending_close_orders: dict[str, dict[str, Any]] = {}
         self._deferred_trail_cache = self._load_deferred_trail_cache()
+        self._worthless_close_abandoned = self._load_worthless_close_abandoned()
 
     def _emit(self, kind: str, payload: dict) -> None:
         if self._sink is None:
@@ -662,6 +666,9 @@ class SwingPositionManager:
             if parsed is None:
                 continue
             ticker, direction = parsed
+            if symbol in self._worthless_close_abandoned:
+                ignored.append({"symbol": symbol, "ticker": ticker, "reason": "worthless_close_abandoned"})
+                continue
 
             side_raw = str(raw.get("side", "")).strip().lower()
             qty_val = _as_float(raw.get("qty"))
@@ -924,6 +931,40 @@ class SwingPositionManager:
     def _close_position(self, pos: SwingPosition, reason: str, bar: dict) -> None:
         exit_price = float(bar["close"])
         pnl_pct = pos.direction * (exit_price - pos.entry_price) / pos.entry_price
+        if str(pos.option_symbol).strip().upper() in self._worthless_close_abandoned:
+            self._abandon_worthless_close(
+                pos,
+                reason=reason,
+                exit_price=exit_price,
+                pnl_pct=pnl_pct,
+                close_result=None,
+            )
+            return
+        pending = self._pending_close_orders.get(pos.ticker)
+        if pending is not None and not self._dry_run:
+            state = self._reconcile_pending_close_order(pos, pending=pending)
+            if state.get("closed"):
+                self._emit_position_closed(
+                    pos,
+                    reason=str(pending.get("reason") or reason),
+                    exit_price=exit_price,
+                    pnl_pct=pnl_pct,
+                    order_error=None,
+                )
+                return
+            if state.get("still_pending"):
+                self._emit("position_close_pending", {
+                    **pos.to_dict(),
+                    "exit_price": exit_price,
+                    "exit_pnl_pct": float(pnl_pct),
+                    "exit_reason": reason,
+                    "order_response": _safe_response(state.get("order")),
+                    "verification": state.get("verification"),
+                    "pending_since": pending.get("created_wall"),
+                })
+                return
+            self._pending_close_orders.pop(pos.ticker, None)
+
         if not self._dry_run:
             last_failure = self._last_close_failure_wall.get(pos.ticker)
             now = time.monotonic()
@@ -950,8 +991,27 @@ class SwingPositionManager:
                     "response": _safe_response(order_resp),
                     "verification": close_result.get("verification"),
                 })
+                if close_result.get("abandoned_worthless"):
+                    self._abandon_worthless_close(
+                        pos,
+                        reason=reason,
+                        exit_price=exit_price,
+                        pnl_pct=pnl_pct,
+                        close_result=close_result,
+                    )
+                    return
                 if not close_result.get("verified", False):
                     self._last_close_failure_wall[pos.ticker] = time.monotonic()
+                    order_id = str((close_result.get("verification") or {}).get("order_id") or "").strip()
+                    if order_id:
+                        self._pending_close_orders[pos.ticker] = {
+                            "order_id": order_id,
+                            "symbol": pos.option_symbol,
+                            "reason": reason,
+                            "created_wall": time.monotonic(),
+                            "last_checked_wall": time.monotonic(),
+                            "order": (close_result.get("verification") or {}).get("order"),
+                        }
                     self._emit("position_close_pending", {
                         **pos.to_dict(),
                         "exit_price": exit_price,
@@ -989,6 +1049,23 @@ class SwingPositionManager:
                 "exit_price": exit_price,
             })
 
+        self._emit_position_closed(
+            pos,
+            reason=reason,
+            exit_price=exit_price,
+            pnl_pct=pnl_pct,
+            order_error=order_error,
+        )
+
+    def _emit_position_closed(
+        self,
+        pos: SwingPosition,
+        *,
+        reason: str,
+        exit_price: float,
+        pnl_pct: float,
+        order_error: str | None,
+    ) -> None:
         self._emit("position_closed", {
             **pos.to_dict(),
             "exit_price": exit_price,
@@ -997,8 +1074,37 @@ class SwingPositionManager:
             "order_error": order_error,
         })
         self._last_close_failure_wall.pop(pos.ticker, None)
+        self._pending_close_orders.pop(pos.ticker, None)
         self._remove_deferred_trail_cache(pos)
         del self._positions[pos.ticker]
+
+    def _abandon_worthless_close(
+        self,
+        pos: SwingPosition,
+        *,
+        reason: str,
+        exit_price: float,
+        pnl_pct: float,
+        close_result: dict[str, Any] | None,
+    ) -> None:
+        symbol = str(pos.option_symbol).strip().upper()
+        self._worthless_close_abandoned.add(symbol)
+        self._persist_worthless_close_abandoned()
+        self._last_close_failure_wall.pop(pos.ticker, None)
+        self._pending_close_orders.pop(pos.ticker, None)
+        self._remove_deferred_trail_cache(pos)
+        self._emit("position_close_abandoned", {
+            **pos.to_dict(),
+            "exit_price": exit_price,
+            "exit_pnl_pct": float(pnl_pct),
+            "exit_reason": reason,
+            "option_symbol": symbol,
+            "limit_price": _OPTION_TICK,
+            "reason": "worthless_after_one_cent_close_attempt",
+            "order_response": _safe_response((close_result or {}).get("response")),
+            "verification": (close_result or {}).get("verification"),
+        })
+        self._positions.pop(pos.ticker, None)
 
     def _load_deferred_trail_cache(self) -> dict[str, dict[str, Any]]:
         try:
@@ -1038,6 +1144,29 @@ class SwingPositionManager:
             self._deferred_trail_cache = cache
         except Exception as exc:
             logger.warning("deferred trail state persist failed: %s", exc)
+
+    def _load_worthless_close_abandoned(self) -> set[str]:
+        try:
+            if not _WORTHLESS_CLOSE_STATE_PATH.exists():
+                return set()
+            raw = json.loads(_WORTHLESS_CLOSE_STATE_PATH.read_text())
+            if isinstance(raw, list):
+                return {str(item).strip().upper() for item in raw if str(item).strip()}
+            if isinstance(raw, dict):
+                symbols = raw.get("symbols")
+                if isinstance(symbols, list):
+                    return {str(item).strip().upper() for item in symbols if str(item).strip()}
+        except Exception as exc:
+            logger.warning("worthless close state load failed: %s", exc)
+        return set()
+
+    def _persist_worthless_close_abandoned(self) -> None:
+        try:
+            _WORTHLESS_CLOSE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"symbols": sorted(self._worthless_close_abandoned)}
+            _WORTHLESS_CLOSE_STATE_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        except Exception as exc:
+            logger.warning("worthless close state persist failed: %s", exc)
 
     def _apply_deferred_trail_cache(self, pos: SwingPosition) -> None:
         cached = self._deferred_trail_cache.get(pos.ticker.upper())
@@ -1092,14 +1221,38 @@ class SwingPositionManager:
         )
         last_result: dict[str, Any] | None = None
         for attempt, limit_price in enumerate(limit_prices, start=1):
-            resp = self._client.submit_option_order(
-                symbol=symbol,
-                qty=qty,
-                side="sell",
-                order_type="limit",
-                time_in_force="day",
-                limit_price=limit_price,
-            )
+            try:
+                resp = self._client.submit_option_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side="sell",
+                    order_type="limit",
+                    time_in_force="day",
+                    limit_price=limit_price,
+                )
+            except Exception as exc:
+                if _is_option_tick(limit_price):
+                    logger.info(
+                        "[%s] close order abandoned after one-cent submit failure symbol=%s error=%s",
+                        pos.ticker,
+                        symbol,
+                        exc,
+                    )
+                    return {
+                        "response": {"error": str(exc), "symbol": symbol, "side": "sell", "qty": qty},
+                        "verification": {
+                            "verified": False,
+                            "status": "submit_failed",
+                            "order_id": "",
+                            "via": "one_cent_submit_exception",
+                            "retryable": False,
+                            "error": str(exc),
+                        },
+                        "limit_price": limit_price,
+                        "verified": False,
+                        "abandoned_worthless": True,
+                    }
+                raise
             status = _status_key(resp.get("status") if isinstance(resp, dict) else None)
             order_id = str(resp.get("id", "")).strip() if isinstance(resp, dict) else ""
             logger.info(
@@ -1129,6 +1282,16 @@ class SwingPositionManager:
                     verify.get("via"),
                 )
                 return last_result
+            if _is_option_tick(limit_price):
+                last_result["abandoned_worthless"] = True
+                logger.info(
+                    "[%s] close order abandoned after one-cent attempt symbol=%s status=%s via=%s",
+                    pos.ticker,
+                    symbol,
+                    verify.get("status"),
+                    verify.get("via"),
+                )
+                return last_result
 
             can_retry = bool(verify.get("retryable")) and attempt < _CLOSE_ORDER_ATTEMPTS
             logger.info(
@@ -1142,7 +1305,8 @@ class SwingPositionManager:
             if can_retry:
                 self._cancel_order_if_needed(verify)
                 continue
-            self._cancel_order_if_needed(verify)
+            # Keep the last live close order working. The manager tracks it in
+            # _pending_close_orders and reconciles it before any later retry.
             return last_result
 
         if last_result is not None:
@@ -1198,6 +1362,97 @@ class SwingPositionManager:
             "via": "timeout",
             "retryable": bool(order_id),
             "cancel_required": bool(order_id),
+            "order": last,
+        }
+
+    def _reconcile_pending_close_order(
+        self,
+        pos: SwingPosition,
+        *,
+        pending: dict[str, Any],
+    ) -> dict[str, Any]:
+        order_id = str(pending.get("order_id", "")).strip()
+        symbol = str(pending.get("symbol") or pos.option_symbol).strip().upper()
+        last = pending.get("order") if isinstance(pending.get("order"), dict) else {}
+        status = _status_key(last.get("status"))
+        now = time.monotonic()
+        if (now - float(pending.get("last_checked_wall") or 0.0)) < _PENDING_CLOSE_REFRESH_SECS:
+            return {
+                "still_pending": True,
+                "verification": {
+                    "verified": False,
+                    "status": status or "pending",
+                    "order_id": order_id,
+                    "via": "pending_close_cache",
+                    "retryable": False,
+                    "order": last,
+                },
+                "order": last,
+            }
+        pending["last_checked_wall"] = now
+
+        if order_id:
+            try:
+                current = self._client.get_order(order_id)
+                if isinstance(current, dict):
+                    last = current
+                    pending["order"] = current
+                    status = _status_key(current.get("status"))
+            except Exception as exc:
+                logger.warning("pending close order poll warning order_id=%s: %s", order_id, exc)
+
+        if _order_is_success(status):
+            return {
+                "closed": True,
+                "verification": {
+                    "verified": True,
+                    "status": status,
+                    "order_id": order_id,
+                    "via": "pending_order_poll",
+                    "order": last,
+                },
+                "order": last,
+            }
+        if _order_is_terminal_fail(status):
+            return {
+                "terminal": True,
+                "verification": {
+                    "verified": False,
+                    "status": status,
+                    "order_id": order_id,
+                    "via": "pending_order_poll",
+                    "retryable": True,
+                    "order": last,
+                },
+                "order": last,
+            }
+
+        try:
+            if not self._has_open_long_position(symbol=symbol):
+                return {
+                    "closed": True,
+                    "verification": {
+                        "verified": True,
+                        "status": status or "unknown",
+                        "order_id": order_id,
+                        "via": "positions_reconcile",
+                        "order": last,
+                    },
+                    "order": last,
+                }
+        except Exception:
+            pass
+
+        return {
+            "still_pending": True,
+            "verification": {
+                "verified": False,
+                "status": status or "unknown",
+                "order_id": order_id,
+                "via": "pending_order_poll",
+                "retryable": False,
+                "order": last,
+            },
             "order": last,
         }
 
@@ -1364,6 +1619,13 @@ def _quote_price(quote: dict[str, Any], *, mode: str) -> float:
 
 def _round_option_limit(value: float) -> float:
     return max(_OPTION_TICK, round(float(value), 2))
+
+
+def _is_option_tick(value: float) -> bool:
+    try:
+        return math.isclose(float(value), _OPTION_TICK, rel_tol=0.0, abs_tol=1e-9)
+    except Exception:
+        return False
 
 
 def _close_limit_ladder(

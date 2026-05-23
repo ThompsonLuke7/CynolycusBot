@@ -893,7 +893,34 @@ class OptionOrderPolicy:
             return False
         return True
 
-    def _new_entries_allowed(self, *, local_ts: datetime | None) -> bool:
+    def _armed_intrabar_entry_can_continue(
+        self,
+        *,
+        side: str,
+        local_ts: datetime | None,
+    ) -> bool:
+        side_key = str(side).strip().lower()
+        if side_key not in {"long", "short"}:
+            return False
+        if local_ts is None or self._new_entry_cutoff is None:
+            return False
+        if not bool(self._meta_intrabar_entry_intent_active.get(side_key, False)):
+            return False
+
+        setup_ts = self._meta_intrabar_entry_setup_ts.get(side_key)
+        if not isinstance(setup_ts, datetime):
+            return False
+        if setup_ts.date() != local_ts.date():
+            return False
+        if setup_ts.time().replace(second=0, microsecond=0) > self._new_entry_cutoff:
+            return False
+
+        expires_at = self._meta_intrabar_entry_expires_at.get(side_key)
+        if isinstance(expires_at, datetime) and local_ts >= expires_at:
+            return False
+        return True
+
+    def _new_entries_allowed(self, *, local_ts: datetime | None, side: str | None = None) -> bool:
         if local_ts is None:
             return True
         max_lag_sec = max(0.0, float(self.cfg.max_live_entry_lag_sec))
@@ -903,6 +930,8 @@ class OptionOrderPolicy:
                 return False
         cutoff = self._new_entry_cutoff
         if cutoff is None:
+            return True
+        if side is not None and self._armed_intrabar_entry_can_continue(side=side, local_ts=local_ts):
             return True
         if bool(self.cfg.use_wall_clock_entry_cutoff) and datetime.now(self._tz).time() >= cutoff:
             return False
@@ -3496,7 +3525,7 @@ class OptionOrderPolicy:
             if not bool(allow_new_entries):
                 self._meta_side_reason[side_key] = "entry_waiting_for_1m_confirmation"
                 return 0
-            if not self._new_entries_allowed(local_ts=local_ts):
+            if not self._new_entries_allowed(local_ts=local_ts, side=side_key):
                 cutoff = self._new_entry_cutoff.strftime("%H:%M") if self._new_entry_cutoff else "n/a"
                 self._meta_side_reason[side_key] = f"new_entry_cutoff_{cutoff}"
                 return 0
@@ -3594,7 +3623,7 @@ class OptionOrderPolicy:
                 return desired_qty
             return 0
         if math.isfinite(enter_prob) and math.isfinite(enter_thr) and enter_prob >= enter_thr:
-            if not self._new_entries_allowed(local_ts=local_ts):
+            if not self._new_entries_allowed(local_ts=local_ts, side=side_key):
                 cutoff = self._new_entry_cutoff.strftime("%H:%M") if self._new_entry_cutoff else "n/a"
                 self._meta_side_reason[side_key] = f"new_entry_cutoff_{cutoff}"
                 return 0
@@ -4174,8 +4203,10 @@ class OptionOrderPolicy:
             self._latest_meta_side_snapshot = None
             current_signed = int(self._signed_contracts)
             current_pos = 1 if current_signed > 0 else (-1 if current_signed < 0 else 0)
-            if current_signed == 0 and desired_pos != 0 and not self._new_entries_allowed(local_ts=local_ts):
-                desired_pos = 0
+            if current_signed == 0 and desired_pos != 0:
+                desired_side = "long" if desired_pos > 0 else "short"
+                if not self._new_entries_allowed(local_ts=local_ts, side=desired_side):
+                    desired_pos = 0
             if current_signed == 0 and desired_pos != 0 and self._entry_lockout_active(local_ts=local_ts):
                 desired_pos = 0
 
