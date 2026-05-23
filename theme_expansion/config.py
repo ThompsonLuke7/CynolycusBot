@@ -13,10 +13,24 @@ PLOTS_DIR = OUTPUT_DIR / "plots"
 
 DEFAULT_THEME_MAP_PATH = DATA_DIR / "default_theme_map.csv"
 THEME_DEFINITION_PATH = DATA_DIR / "theme_definition.csv"
+THEME_MAP_V3_1_PATH = DATA_DIR / "theme_map_v3_1.csv"
+THEME_DEFINITION_V3_1_PATH = DATA_DIR / "theme_definition_v3_1.csv"
 THEME_MAP_V2_PATH = DATA_DIR / "theme_map_v2.csv"
 THEME_DEFINITION_V2_PATH = DATA_DIR / "theme_definition_v2.csv"
-THEME_MAP_PATH = THEME_MAP_V2_PATH if THEME_MAP_V2_PATH.exists() else DEFAULT_THEME_MAP_PATH
-ACTIVE_THEME_DEFINITION_PATH = THEME_DEFINITION_V2_PATH if THEME_DEFINITION_V2_PATH.exists() else THEME_DEFINITION_PATH
+THEME_MAP_PATH = (
+    THEME_MAP_V3_1_PATH
+    if THEME_MAP_V3_1_PATH.exists()
+    else THEME_MAP_V2_PATH
+    if THEME_MAP_V2_PATH.exists()
+    else DEFAULT_THEME_MAP_PATH
+)
+ACTIVE_THEME_DEFINITION_PATH = (
+    THEME_DEFINITION_V3_1_PATH
+    if THEME_DEFINITION_V3_1_PATH.exists()
+    else THEME_DEFINITION_V2_PATH
+    if THEME_DEFINITION_V2_PATH.exists()
+    else THEME_DEFINITION_PATH
+)
 LEGACY_THEME_MAP_PATH = DATA_DIR / "ticker_theme_map.csv"
 DAILY_BARS_PATH = OUTPUT_DIR / "daily_bars.parquet"
 UNIVERSE_FILTER_PATH = OUTPUT_DIR / "universe_filter.csv"
@@ -26,7 +40,8 @@ THEME_LEADERS_PATH = OUTPUT_DIR / "theme_leaders.parquet"
 LIVE_RANKING_PATH = OUTPUT_DIR / "live_theme_ranking.csv"
 
 START_DATE = "2018-01-01"
-END_DATE = None
+# yfinance treats end as exclusive, so this includes bars through 2026-05-21.
+END_DATE = "2026-05-22"
 BENCHMARK_TICKERS = ("SPY", "QQQ")
 
 TOP_N_THEMES = 3
@@ -34,8 +49,8 @@ LEADERS_PER_THEME = 3
 HOLD_DAYS = 5
 REBALANCE_EVERY_DAYS = 1
 TRANSACTION_COST_BPS = 5.0
-MIN_PRICE = 5.0
-MIN_MARKET_CAP = 2_000_000_000
+MIN_PRICE = 3.0
+MIN_MARKET_CAP = 300_000_000
 MIN_AVG_DOLLAR_VOLUME_20D = 20_000_000
 FILTER_EXCEPTIONS = {"RKLB", "LUNR", "OKLO", "SMR", "HOOD", "PLTR"}
 
@@ -185,11 +200,11 @@ def load_theme_memberships(path: Path | None = None) -> pd.DataFrame:
         max_counts = pd.to_numeric(long_map["max_constituents"], errors="coerce").fillna(25)
         long_map["theme_constituent_count"] = counts
         auto_watchlist = counts < min_counts
-        overfull = counts > max_counts
+        long_map["is_below_min_constituents"] = auto_watchlist
+        long_map["is_above_max_constituents"] = counts > max_counts
         long_map["is_watchlist_only"] = long_map["is_watchlist_only"].map(_parse_bool).fillna(False) | auto_watchlist
         long_map["is_tradable"] = (
             long_map["is_tradable"].map(lambda value: _parse_bool(value, True)).fillna(True)
             & ~long_map["is_watchlist_only"]
-            & ~overfull
         )
     return long_map.drop_duplicates(subset=["ticker", "theme"]).sort_values(["theme", "ticker"]).reset_index(drop=True)
