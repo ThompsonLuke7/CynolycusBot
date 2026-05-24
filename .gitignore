@@ -218,6 +218,9 @@ multi_ticker_swing/data/processed/*.parquet
 multi_ticker_swing/data/processed/30min/*.parquet
 multi_ticker_swing/data/raw/**/*.parquet
 momentum_expansion/data/raw/**/*.parquet
+local_artifacts/
+momentum_expansion/data/processed/**/*.parquet
+momentum_expansion/data/training_export/*.parquet
 momentum_expansion/data/processed/*.parquet
 momentum_expansion/data/processed/features_4h/*.parquet
 theme_expansion/outputs/**/*.parquet

@@ -40,6 +40,7 @@ except Exception:
     AlpacaOptionsClient = None  # type: ignore
 
 from momentum_expansion.config.momentum_config import (
+    CAMPAIGN_CONFIG,
     CAPITAL_CONFIG,
     OPTION_POLICY_CONFIG,
 )
@@ -58,6 +59,13 @@ class MomentumOptionConfig:
     target_dte_max_days: int = OPTION_POLICY_CONFIG["target_dte_max_days"]
     target_delta_long: float = OPTION_POLICY_CONFIG["target_delta_long"]
     delta_tolerance: float = OPTION_POLICY_CONFIG["delta_tolerance"]
+    adaptive_delta_enabled: bool = OPTION_POLICY_CONFIG["adaptive_delta_enabled"]
+    adaptive_delta_high_score: float = OPTION_POLICY_CONFIG["adaptive_delta_high_score"]
+    adaptive_delta_mid_score: float = OPTION_POLICY_CONFIG["adaptive_delta_mid_score"]
+    adaptive_delta_high: float = OPTION_POLICY_CONFIG["adaptive_delta_high"]
+    adaptive_delta_mid: float = OPTION_POLICY_CONFIG["adaptive_delta_mid"]
+    adaptive_delta_low: float = OPTION_POLICY_CONFIG["adaptive_delta_low"]
+    adaptive_delta_late_campaign_entry: int = OPTION_POLICY_CONFIG["adaptive_delta_late_campaign_entry"]
 
     min_open_interest: int = OPTION_POLICY_CONFIG["min_open_interest"]
     min_chain_volume: int = OPTION_POLICY_CONFIG["min_chain_volume"]
@@ -72,8 +80,17 @@ class MomentumOptionConfig:
     atr_trail_arm: float = OPTION_POLICY_CONFIG["atr_trail_arm"]
     atr_trail_distance: float = OPTION_POLICY_CONFIG["atr_trail_distance"]
     score_decay_exit: float = OPTION_POLICY_CONFIG["score_decay_exit"]
-    trend_break_atr: float = OPTION_POLICY_CONFIG["trend_break_atr"]
+    trend_break_atr: float | None = OPTION_POLICY_CONFIG["trend_break_atr"]
     max_holding_4h_bars: int = OPTION_POLICY_CONFIG["max_holding_4h_bars"]
+
+    campaign_enabled: bool = CAMPAIGN_CONFIG["enabled"]
+    campaign_reset_gap_days: int = CAMPAIGN_CONFIG["reset_gap_days"]
+    campaign_max_entries: int = CAMPAIGN_CONFIG["max_entries"]
+    campaign_entry_1_min_score: float = CAMPAIGN_CONFIG["entry_1_min_score"]
+    campaign_entry_2_min_score: float = CAMPAIGN_CONFIG["entry_2_min_score"]
+    campaign_entry_3_min_score: float = CAMPAIGN_CONFIG["entry_3_min_score"]
+    campaign_entry_4_min_score: float = CAMPAIGN_CONFIG["entry_4_min_score"]
+    campaign_entry_3_min_cumulative_return: float = CAMPAIGN_CONFIG["entry_3_min_cumulative_return"]
 
     submit_orders: bool = False
     paper: bool = True
@@ -119,6 +136,14 @@ class MomentumOptionPosition:
     trail_high:        float = 0.0  # highest favorable underlying since entry
     bars_held:         int = 0
     extra:             dict = field(default_factory=dict)
+
+
+@dataclass
+class MomentumCampaignState:
+    entries: int = 0
+    profitable_legs: int = 0
+    cumulative_return: float = 0.0
+    last_exit_time: pd.Timestamp | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -177,12 +202,14 @@ def _select_contract(
     candidates: list[ContractCandidate],
     cfg: MomentumOptionConfig,
     direction: int,
+    target_delta_abs: float | None = None,
 ) -> ContractCandidate | None:
     """Pick the contract with delta closest to the target_delta_long, with
     OI / volume / spread gates."""
     if not candidates:
         return None
-    target_delta = cfg.target_delta_long if direction > 0 else -cfg.target_delta_long
+    target_delta_abs = float(target_delta_abs or cfg.target_delta_long)
+    target_delta = target_delta_abs if direction > 0 else -target_delta_abs
     pool = []
     for c in candidates:
         if direction > 0 and c.side != "call":
@@ -238,6 +265,83 @@ class MomentumOptionPolicy:
                 client = None
         self.client = client
         self.positions: dict[str, MomentumOptionPosition] = {}
+        self.campaigns: dict[str, MomentumCampaignState] = {}
+
+    # ---- campaign controls ----
+    def _campaign_state_for(self, ticker: str, as_of: pd.Timestamp) -> MomentumCampaignState:
+        state = self.campaigns.get(ticker)
+        if state is None:
+            state = MomentumCampaignState()
+            self.campaigns[ticker] = state
+            return state
+        if state.last_exit_time is not None:
+            gap_days = (as_of - state.last_exit_time).total_seconds() / 86400.0
+            if gap_days >= float(self.cfg.campaign_reset_gap_days):
+                state = MomentumCampaignState()
+                self.campaigns[ticker] = state
+        return state
+
+    def _campaign_entry_allowed(
+        self,
+        *,
+        ticker: str,
+        expansion_score: float,
+        as_of: pd.Timestamp,
+    ) -> tuple[bool, str, MomentumCampaignState]:
+        state = self._campaign_state_for(ticker, as_of)
+        if not self.cfg.campaign_enabled:
+            return True, "campaign_disabled", state
+
+        next_entry = int(state.entries) + 1
+        if next_entry > int(self.cfg.campaign_max_entries):
+            return False, f"campaign_max_entries_{self.cfg.campaign_max_entries}", state
+
+        min_score = float(self.cfg.campaign_entry_1_min_score)
+        if next_entry == 2:
+            min_score = float(self.cfg.campaign_entry_2_min_score)
+        elif next_entry == 3:
+            if float(state.cumulative_return) < float(self.cfg.campaign_entry_3_min_cumulative_return):
+                return False, "campaign_entry3_needs_profit", state
+            min_score = float(self.cfg.campaign_entry_3_min_score)
+        elif next_entry >= 4:
+            min_score = float(self.cfg.campaign_entry_4_min_score)
+
+        if float(expansion_score) < min_score:
+            return False, f"campaign_score_below_{min_score:.2f}", state
+        return True, f"campaign_entry_{next_entry}", state
+
+    def _target_delta_for_entry(
+        self,
+        *,
+        expansion_score: float,
+        campaign_entry: int,
+    ) -> float:
+        if not self.cfg.adaptive_delta_enabled:
+            return float(self.cfg.target_delta_long)
+        if int(campaign_entry) >= int(self.cfg.adaptive_delta_late_campaign_entry):
+            return float(self.cfg.adaptive_delta_low)
+        if float(expansion_score) >= float(self.cfg.adaptive_delta_high_score):
+            return float(self.cfg.adaptive_delta_high)
+        if float(expansion_score) >= float(self.cfg.adaptive_delta_mid_score):
+            return float(self.cfg.adaptive_delta_mid)
+        return float(self.cfg.adaptive_delta_low)
+
+    def record_campaign_exit(
+        self,
+        *,
+        ticker: str,
+        exit_underlying: float,
+        as_of: pd.Timestamp,
+    ) -> None:
+        pos = self.positions.get(ticker)
+        if pos is None or pos.entry_underlying <= 0:
+            return
+        state = self._campaign_state_for(ticker, as_of)
+        ret = pos.direction * (float(exit_underlying) / float(pos.entry_underlying) - 1.0)
+        state.cumulative_return += float(ret)
+        if ret > 0:
+            state.profitable_legs += 1
+        state.last_exit_time = as_of
 
     # ---- chain queries ----
     def _list_contract_candidates(
@@ -291,13 +395,29 @@ class MomentumOptionPolicy:
             return None
         if atr <= 0 or underlying_price <= 0:
             return None
+        campaign_ok, campaign_reason, campaign_state = self._campaign_entry_allowed(
+            ticker=ticker,
+            expansion_score=expansion_score,
+            as_of=as_of,
+        )
+        if not campaign_ok:
+            logger.info("[%s] campaign gate rejected entry: %s", ticker, campaign_reason)
+            return None
+        campaign_entry = int(campaign_state.entries) + 1
+        target_delta_abs = self._target_delta_for_entry(
+            expansion_score=expansion_score,
+            campaign_entry=campaign_entry,
+        )
 
         # Chain selection
         candidates = self._list_contract_candidates(
             underlying=ticker, as_of=as_of.date(), direction=direction
         )
         contract = _select_contract(
-            candidates=candidates, cfg=self.cfg, direction=direction
+            candidates=candidates,
+            cfg=self.cfg,
+            direction=direction,
+            target_delta_abs=target_delta_abs,
         )
         if contract is None:
             logger.info("[%s] no qualifying contract — skip", ticker)
@@ -340,8 +460,15 @@ class MomentumOptionPolicy:
             entry_score=expansion_score,
             entry_time=as_of,
             initial_stop=initial_stop,
+            extra={
+                "campaign_entry": campaign_entry,
+                "campaign_reason": campaign_reason,
+                "campaign_cumulative_return_before": float(campaign_state.cumulative_return),
+                "target_delta_abs": float(target_delta_abs),
+            },
         )
         self.positions[ticker] = position
+        campaign_state.entries += 1
 
         if self.cfg.submit_orders and self.client is not None:
             try:
@@ -356,8 +483,8 @@ class MomentumOptionPolicy:
             except Exception as exc:
                 logger.warning("[%s] order submit failed: %s", ticker, exc)
         else:
-            logger.info("[%s] (paper) BUY %d × %s @ %.2f (delta=%.2f, IVR=%.2f)",
-                        ticker, qty, contract.occ_symbol, contract.mid, contract.delta, ivr)
+            logger.info("[%s] (paper) BUY %d × %s @ %.2f (delta=%.2f target=%.2f, IVR=%.2f)",
+                        ticker, qty, contract.occ_symbol, contract.mid, contract.delta, target_delta_abs, ivr)
         return position
 
     # ---- per-bar management ----
@@ -404,10 +531,11 @@ class MomentumOptionPolicy:
             return True, "initial_stop"
 
         # Trend break vs ema_slow
-        if pos.direction > 0 and underlying_price < ema_slow - self.cfg.trend_break_atr * atr:
-            return True, "trend_break"
-        if pos.direction < 0 and underlying_price > ema_slow + self.cfg.trend_break_atr * atr:
-            return True, "trend_break"
+        if self.cfg.trend_break_atr is not None:
+            if pos.direction > 0 and underlying_price < ema_slow - self.cfg.trend_break_atr * atr:
+                return True, "trend_break"
+            if pos.direction < 0 and underlying_price > ema_slow + self.cfg.trend_break_atr * atr:
+                return True, "trend_break"
 
         # Score decay
         if expansion_score < self.cfg.score_decay_exit:

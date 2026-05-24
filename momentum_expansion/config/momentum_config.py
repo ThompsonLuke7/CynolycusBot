@@ -165,7 +165,11 @@ WALK_FORWARD_CONFIG: dict = {
 RANKING_CONFIG: dict = {
     "top_n":         20,
     "top_pct":       0.10,    # use min(top_n, top_pct * universe_size)
-    "min_score":     0.55,    # absolute floor — name is rejected even if in top-N
+    # Live default from the May 24, 2026 entry-timing replay:
+    # enter the first chronological 1H confirmation after the 4H score clears
+    # this floor. This avoids waiting for the hindsight-best bar inside a
+    # momentum campaign while keeping lower-quality early campaigns out.
+    "min_score":     0.85,    # absolute floor — name is rejected even if in top-N
     "tie_break":     "expansion_score",
     "use_momentum_candidate_filter": True,
 }
@@ -174,6 +178,10 @@ RANKING_CONFIG: dict = {
 # 1H entry rules
 # ---------------------------------------------------------------------------
 ENTRY_RULES_CONFIG: dict = {
+    # Default confirmation from the May 2026 trigger sweep:
+    # use SPY-style 1H body breakout as the main trigger and pullback reclaim
+    # as the higher-quality secondary continuation trigger.
+    "enabled_rules":           ("break_body_prev_high", "pullback_continuation"),
     "ema_fast":               10,
     "ema_slow":               20,
     "pullback_min_atr":       0.4,    # min pullback depth to be a "pullback continuation"
@@ -196,12 +204,39 @@ CAPITAL_CONFIG: dict = {
     "min_per_trade_dollars": 250.0,
 }
 
+CAMPAIGN_CONFIG: dict = {
+    # Defaults from the May 2026 adaptive-campaign and entry-timing replays:
+    # first entry uses the same 0.85 live floor as the ranking layer; take up
+    # to two entries in an expansion campaign normally; allow extra
+    # continuation legs only after the campaign has already paid us and the
+    # survival score is exceptional again.
+    "enabled": True,
+    "reset_gap_days": 15,
+    "max_entries": 4,
+    "entry_1_min_score": 0.85,
+    "entry_2_min_score": 0.50,
+    "entry_3_min_score": 0.80,
+    "entry_4_min_score": 0.85,
+    "entry_3_min_cumulative_return": 0.20,
+}
+
 OPTION_POLICY_CONFIG: dict = {
     # Strike & DTE selection
     "target_dte_min_days": 30,
     "target_dte_max_days": 60,
-    "target_delta_long":   0.55,        # slightly ITM call/put for swing momentum
+    "target_delta_long":   0.45,        # default fallback; adaptive delta below controls live selection
     "delta_tolerance":     0.10,
+    # Adaptive option moneyness from the May 2026 theoretical delta grid:
+    # use more convexity only when the expansion score is exceptional and the
+    # campaign is still early; use more intrinsic/delta when confidence is
+    # lower or the campaign is already mature.
+    "adaptive_delta_enabled": True,
+    "adaptive_delta_high_score": 0.85,
+    "adaptive_delta_mid_score": 0.65,
+    "adaptive_delta_high": 0.35,
+    "adaptive_delta_mid": 0.45,
+    "adaptive_delta_low": 0.55,
+    "adaptive_delta_late_campaign_entry": 3,
     # Liquidity gate (chain rejection — name is dropped if it fails)
     "min_open_interest":   500,
     "min_chain_volume":    100,
@@ -214,9 +249,9 @@ OPTION_POLICY_CONFIG: dict = {
     # Exits
     "atr_stop_mult":       1.5,         # initial underlying stop in ATR units
     "atr_trail_arm":       1.0,         # trail arms after this much favorable underlying move
-    "atr_trail_distance":  1.2,         # trailing distance once armed
-    "score_decay_exit":    0.40,        # exit if 4H score drops below this
-    "trend_break_atr":     1.0,         # exit if underlying breaks below ema_slow by this much
+    "atr_trail_distance":  2.4,         # best replay: give expansion pullbacks more room once armed
+    "score_decay_exit":    0.30,        # best replay: wait for deeper survival-score decay before exiting
+    "trend_break_atr":     None,        # best replay: disabled; EMA trend breaks cut runners too early
     "max_holding_4h_bars": 30,          # ~6 trading weeks; let winners run, kill stale
 }
 

@@ -14,7 +14,7 @@
 # avoided per project rules.
 #
 # Inputs (upload `momentum_colab_bundle.tgz`):
-#   - training_matrix_4h.parquet   (features + expansion_target)
+#   - training_matrix_4h.parquet   (features + expansion_survival_score)
 #   - feature_manifest.json
 #   - label_manifest.json
 #
@@ -49,10 +49,17 @@ with tarfile.open(BUNDLE, "r:gz") as tar:
 
 manifest = json.loads((WORK / "feature_manifest.json").read_text())
 FEATURES = manifest["feature_columns"]
+TARGET = manifest.get("target_column", "expansion_survival_score")
+TARGET_KIND = manifest.get("target_kind", "regression")
+if TARGET_KIND != "regression":
+    raise ValueError(f"momentum_expansion trainer now expects regression target, got {TARGET_KIND}")
 print("features:", len(FEATURES))
+print("target:", TARGET, TARGET_KIND)
 print("rows:", manifest["n_rows"], "tickers:", manifest["n_tickers"])
 
 df = pd.read_parquet(WORK / "training_matrix_4h.parquet")
+if TARGET not in df.columns:
+    raise ValueError(f"Missing target column {TARGET}; rebuild/export the training matrix")
 print(df.shape, df.head().T)
 
 # %%
@@ -91,12 +98,12 @@ for f in folds:
 # %%
 # Cell 4 — tune XGBoost, fit per fold, gather clean OOF predictions
 import xgboost as xgb
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import ParameterSampler
 
 BASE_XGB_PARAMS = dict(
-    objective="binary:logistic",
-    eval_metric="aucpr",
+    objective="reg:squarederror",
+    eval_metric="rmse",
     random_state=42,
     n_jobs=-1,
     tree_method="hist",
@@ -131,17 +138,10 @@ def _time_train_val_split(index, fraction=VAL_FRACTION):
     return train_mask, val_mask
 
 
-def _scale_pos_weight(y):
-    pos = int(np.sum(np.asarray(y) == 1))
-    neg = int(np.sum(np.asarray(y) == 0))
-    return float(neg / max(pos, 1))
-
-
 def _fit_xgb(Xtr, ytr, Xval, yval, params):
-    model = xgb.XGBClassifier(
+    model = xgb.XGBRegressor(
         **BASE_XGB_PARAMS,
         **params,
-        scale_pos_weight=_scale_pos_weight(ytr),
     )
     model.fit(Xtr, ytr, eval_set=[(Xval, yval)], verbose=False)
     return model
@@ -150,8 +150,8 @@ def _fit_xgb(Xtr, ytr, Xval, yval, params):
 def _predict(model, X):
     best_iteration = getattr(model, "best_iteration", None)
     if best_iteration is None:
-        return model.predict_proba(X)[:, 1]
-    return model.predict_proba(X, iteration_range=(0, int(best_iteration) + 1))[:, 1]
+        return model.predict(X)
+    return model.predict(X, iteration_range=(0, int(best_iteration) + 1))
 
 
 INT_PARAM_KEYS = {"n_estimators", "max_depth", "min_child_weight", "max_delta_step"}
@@ -172,7 +172,7 @@ def _coerce_xgb_params(params):
 BEST_PARAMS_JSON = os.environ.get("MOMENTUM_XGB_BEST_PARAMS_JSON", "").strip()
 if BEST_PARAMS_JSON:
     BEST_PARAMS = _coerce_xgb_params(json.loads(BEST_PARAMS_JSON))
-    tuning = pd.DataFrame([{"trial": "env", "mean_val_ap": np.nan, "n_folds": 0, **BEST_PARAMS}])
+    tuning = pd.DataFrame([{"trial": "env", "mean_val_spearman": np.nan, "n_folds": 0, **BEST_PARAMS}])
     tuning.to_csv(WORK / "xgb_param_search.csv", index=False)
     print("using env best params:", BEST_PARAMS)
 else:
@@ -188,21 +188,21 @@ else:
 
             inner_train_mask, inner_val_mask = _time_train_val_split(train_full.index)
             Xtr = train_full.loc[inner_train_mask, FEATURES]
-            ytr = train_full.loc[inner_train_mask, "expansion_target"].astype(int)
+            ytr = train_full.loc[inner_train_mask, TARGET].astype(float)
             Xval = train_full.loc[inner_val_mask, FEATURES]
-            yval = train_full.loc[inner_val_mask, "expansion_target"].astype(int)
-            if len(Xtr) < int(WF["min_train_rows"]) // 2 or len(Xval) < 1000 or yval.nunique() < 2:
+            yval = train_full.loc[inner_val_mask, TARGET].astype(float)
+            if len(Xtr) < int(WF["min_train_rows"]) // 2 or len(Xval) < 1000:
                 continue
 
             model = _fit_xgb(Xtr, ytr, Xval, yval, params)
             pval = _predict(model, Xval)
-            fold_scores.append(average_precision_score(yval, pval))
+            fold_scores.append(pd.Series(pval, index=yval.index).corr(yval, method="spearman"))
 
         mean_ap = float(np.mean(fold_scores)) if fold_scores else float("nan")
-        tuning_rows.append({"trial": pi, "mean_val_ap": mean_ap, "n_folds": len(fold_scores), **params})
+        tuning_rows.append({"trial": pi, "mean_val_spearman": mean_ap, "n_folds": len(fold_scores), **params})
         print("tune", tuning_rows[-1])
 
-    tuning = pd.DataFrame(tuning_rows).sort_values("mean_val_ap", ascending=False)
+    tuning = pd.DataFrame(tuning_rows).sort_values("mean_val_spearman", ascending=False)
     tuning.to_csv(WORK / "xgb_param_search.csv", index=False)
     BEST_PARAMS = _coerce_xgb_params({k: tuning.iloc[0][k] for k in PARAM_SPACE})
 print("best params:", BEST_PARAMS)
@@ -214,31 +214,33 @@ for fi, f in enumerate(folds):
     m_test       = (ts >= f["test_start"])  & (ts <= f["test_end"])
 
     train_full = df.loc[m_train_full]
-    Xte, yte = df.loc[m_test,  FEATURES], df.loc[m_test,  "expansion_target"].astype(int)
+    Xte, yte = df.loc[m_test,  FEATURES], df.loc[m_test,  TARGET].astype(float)
     if len(train_full) < int(WF["min_train_rows"]) or len(Xte) < 1000:
         continue
 
     inner_train_mask, inner_val_mask = _time_train_val_split(train_full.index)
     Xtr = train_full.loc[inner_train_mask, FEATURES]
-    ytr = train_full.loc[inner_train_mask, "expansion_target"].astype(int)
+    ytr = train_full.loc[inner_train_mask, TARGET].astype(float)
     Xval = train_full.loc[inner_val_mask, FEATURES]
-    yval = train_full.loc[inner_val_mask, "expansion_target"].astype(int)
+    yval = train_full.loc[inner_val_mask, TARGET].astype(float)
     if len(Xtr) < int(WF["min_train_rows"]) // 2 or len(Xval) < 1000:
         continue
 
     model = _fit_xgb(Xtr, ytr, Xval, yval, BEST_PARAMS)
     p = _predict(model, Xte)
 
-    auc = roc_auc_score(yte, p) if yte.nunique() > 1 else float("nan")
-    ap  = average_precision_score(yte, p) if yte.nunique() > 1 else float("nan")
+    rmse = mean_squared_error(yte, p, squared=False)
+    mae = mean_absolute_error(yte, p)
+    spearman = pd.Series(p, index=yte.index).corr(yte, method="spearman")
     fold_metrics.append({
         "fold": fi,
         "n_train": len(Xtr),
         "n_val": len(Xval),
         "n_test": len(Xte),
         "best_iteration": int(model.best_iteration) if getattr(model, "best_iteration", None) is not None else None,
-        "auc": auc,
-        "ap": ap,
+        "rmse": rmse,
+        "mae": mae,
+        "spearman": spearman,
     })
     print(fold_metrics[-1])
 
@@ -248,9 +250,9 @@ for fi, f in enumerate(folds):
 if oof_rows:
     oof = pd.concat(oof_rows)
     oof.to_parquet(WORK / "oof_preds.parquet")
-    print("aggregate OOF AUC:", roc_auc_score(oof["y"], oof["score"]))
-    print("aggregate OOF AP :", average_precision_score(oof["y"], oof["score"]))
-    print("aggregate OOF base rate:", float(oof["y"].mean()))
+    print("aggregate OOF RMSE:", mean_squared_error(oof["y"], oof["score"], squared=False))
+    print("aggregate OOF MAE :", mean_absolute_error(oof["y"], oof["score"]))
+    print("aggregate OOF Spearman:", oof["score"].corr(oof["y"], method="spearman"))
 
     bucket_rows = []
     ranked = oof["score"].rank(method="first")
@@ -263,7 +265,7 @@ if oof_rows:
             "score_min": float(g["score"].min()),
             "score_mean": float(g["score"].mean()),
             "score_max": float(g["score"].max()),
-            "target_rate": float(g["y"].mean()),
+            "target_mean": float(g["y"].mean()),
         })
     for pct in (0.01, 0.02, 0.05, 0.10, 0.20):
         threshold = float(oof["score"].quantile(1.0 - pct))
@@ -274,7 +276,7 @@ if oof_rows:
             "score_min": threshold,
             "score_mean": float(g["score"].mean()),
             "score_max": float(g["score"].max()),
-            "target_rate": float(g["y"].mean()),
+            "target_mean": float(g["y"].mean()),
         })
     bucket_metrics = pd.DataFrame(bucket_rows)
     bucket_metrics.to_csv(WORK / "oof_score_buckets.csv", index=False)
@@ -285,9 +287,9 @@ if oof_rows:
 final_train_mask, final_val_mask = _time_train_val_split(df.index)
 round_selector = _fit_xgb(
     df.loc[final_train_mask, FEATURES],
-    df.loc[final_train_mask, "expansion_target"].astype(int),
+    df.loc[final_train_mask, TARGET].astype(float),
     df.loc[final_val_mask, FEATURES],
-    df.loc[final_val_mask, "expansion_target"].astype(int),
+    df.loc[final_val_mask, TARGET].astype(float),
     BEST_PARAMS,
 )
 best_n_estimators = (
@@ -298,12 +300,11 @@ best_n_estimators = (
 print("final best_n_estimators:", best_n_estimators)
 
 final_params = {**BEST_PARAMS, "n_estimators": best_n_estimators}
-final_model = xgb.XGBClassifier(
+final_model = xgb.XGBRegressor(
     **{k: v for k, v in BASE_XGB_PARAMS.items() if k != "early_stopping_rounds"},
     **final_params,
-    scale_pos_weight=_scale_pos_weight(df["expansion_target"].astype(int)),
 )
-final_model.fit(df[FEATURES], df["expansion_target"].astype(int), verbose=False)
+final_model.fit(df[FEATURES], df[TARGET].astype(float), verbose=False)
 booster_path = WORK / "expansion_xgb.json"
 final_model.get_booster().save_model(str(booster_path))
 print("saved booster ->", booster_path)
@@ -340,6 +341,8 @@ metrics = {
     "best_n_estimators": best_n_estimators,
     "n_param_trials": N_PARAM_TRIALS,
     "validation_fraction": VAL_FRACTION,
+    "target_column": TARGET,
+    "target_kind": TARGET_KIND,
     "feature_columns": FEATURES,
 }
 (WORK / "eval_metrics.json").write_text(json.dumps(metrics, indent=2, default=str))

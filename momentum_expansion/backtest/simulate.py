@@ -297,10 +297,12 @@ class MomentumBacktester:
             return "initial_stop"
         if pos.direction < 0 and underlying >= pos.initial_stop:
             return "initial_stop"
-        if pos.direction > 0 and underlying < ema_slow - self.option_cfg["trend_break_atr"] * atr:
-            return "trend_break"
-        if pos.direction < 0 and underlying > ema_slow + self.option_cfg["trend_break_atr"] * atr:
-            return "trend_break"
+        trend_break_atr = self.option_cfg.get("trend_break_atr")
+        if trend_break_atr is not None:
+            if pos.direction > 0 and underlying < ema_slow - trend_break_atr * atr:
+                return "trend_break"
+            if pos.direction < 0 and underlying > ema_slow + trend_break_atr * atr:
+                return "trend_break"
         if score < self.option_cfg["score_decay_exit"]:
             return "score_decay"
         if pos.bars_held >= self.option_cfg["max_holding_4h_bars"]:

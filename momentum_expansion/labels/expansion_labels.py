@@ -130,6 +130,33 @@ def _rolling_quantile_rank(s: pd.Series, window: int) -> pd.Series:
     return s.rolling(window, min_periods=max(50, window // 4)).rank(pct=True)
 
 
+def _cross_sectional_expansion_survival_score(df: pd.DataFrame) -> pd.Series:
+    """
+    Continuous market-leader target for training.
+
+    This intentionally ranks forward expansion quality across all candidate
+    stocks at the same timestamp instead of comparing each ticker only to its
+    own history. Higher values mean the row became one of the cleaner/bigger
+    forward expansion leaders among that bar's candidate universe.
+    """
+    ts_level = df.index.names[0] if isinstance(df.index, pd.MultiIndex) else 0
+
+    def _rank(col: str, *, ascending: bool = True) -> pd.Series:
+        return df.groupby(level=ts_level)[col].rank(pct=True, ascending=ascending)
+
+    weights = LABEL_CONFIG["composite_weights"]
+    alpha_r = _rank("fwd_max_alpha")
+    atr_adj_r = _rank("fwd_atr_adj_return")
+    persistence_r = _rank("trend_persistence")
+    drawdown_good_r = _rank("fwd_max_drawdown", ascending=False)
+    return (
+        weights["fwd_max_alpha"] * alpha_r
+        + weights["fwd_atr_adj_return"] * atr_adj_r
+        + weights["trend_persistence"] * persistence_r
+        + weights["fwd_max_drawdown"] * drawdown_good_r
+    )
+
+
 def assemble_composite_and_target(
     df_labels: pd.DataFrame,
     *,
@@ -347,6 +374,8 @@ def build_training_matrix(
             len(df),
             100.0 * len(df) / max(before, 1),
         )
+    df["expansion_survival_score"] = _cross_sectional_expansion_survival_score(df)
+    df = df.dropna(subset=["expansion_survival_score"])
     df, dropped, corr_report = _drop_correlated_features(
         df,
         feature_cols=feature_cols,

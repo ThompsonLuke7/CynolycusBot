@@ -7,6 +7,7 @@ given ticker. They fire only when:
   - the bar is RTH (config-toggleable)
 
 Rules:
+  break_body_prev_high  — 1H bar trades through prior 1H high and closes green.
   pullback_continuation  — pullback of [pullback_min_atr, pullback_max_atr]
                            within an established uptrend, then close back
                            above ema_fast.
@@ -96,6 +97,26 @@ def _pullback_continuation(df: pd.DataFrame, cfg: dict) -> TriggerResult | None:
     )
 
 
+def _break_body_prev_high(df: pd.DataFrame, cfg: dict) -> TriggerResult | None:
+    if len(df) < 25:
+        return None
+    row = df.iloc[-1]
+    prev_high = float(df["high"].iloc[-2])
+    if not np.isfinite(prev_high):
+        return None
+    if row["high"] < prev_high:
+        return None
+    if row["close"] <= row["open"]:
+        return None
+    return TriggerResult(
+        rule="break_body_prev_high",
+        bar_ts=df.index[-1],
+        close=float(row["close"]),
+        suggested_stop_atr=1.1,
+        note=f"broke prev 1H high={prev_high:.2f} with green body",
+    )
+
+
 def _flag_breakout(df: pd.DataFrame, cfg: dict) -> TriggerResult | None:
     if len(df) < 30:
         return None
@@ -180,6 +201,7 @@ def _ema_reclaim(df: pd.DataFrame, cfg: dict) -> TriggerResult | None:
 # ---------------------------------------------------------------------------
 
 ALL_RULES = (
+    _break_body_prev_high,
     _pullback_continuation,
     _flag_breakout,
     _volume_confirmation,
@@ -204,7 +226,12 @@ def evaluate_entry(
     if cfg.get("rth_only", True) and not _is_rth(bar_ts):
         return []
     results: list[TriggerResult] = []
+    enabled = cfg.get("enabled_rules")
+    enabled_set = {str(x) for x in enabled} if enabled else None
     for rule in ALL_RULES:
+        rule_name = rule.__name__.lstrip("_")
+        if enabled_set is not None and rule_name not in enabled_set:
+            continue
         res = rule(df, cfg)
         if res is not None:
             results.append(res)

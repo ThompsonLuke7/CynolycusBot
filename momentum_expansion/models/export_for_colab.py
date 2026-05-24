@@ -53,6 +53,8 @@ def export_training_bundle(
     feature_manifest = {
         "feature_columns": [c for c in FEATURE_COLUMNS_4H if c in df.columns],
         "label_columns":   [c for c in df.columns if c.startswith("fwd_") or c.startswith("expansion_") or c == "trend_persistence"],
+        "target_column":   "expansion_survival_score",
+        "target_kind":     "regression",
         "n_rows":          int(len(df)),
         "n_tickers":       int(df.index.get_level_values("ticker").nunique()) if "ticker" in df.index.names else None,
         "date_min":        str(df.index.get_level_values(0).min()),
@@ -67,6 +69,8 @@ def export_training_bundle(
 
     label_manifest = {k: LABEL_CONFIG[k] for k in LABEL_CONFIG}
     label_manifest["momentum_candidate_filter"] = MOMENTUM_CANDIDATE_FILTER_CONFIG
+    label_manifest["target_column"] = "expansion_survival_score"
+    label_manifest["target_kind"] = "regression"
     label_manifest_path = out_dir / "label_manifest.json"
     with open(label_manifest_path, "w") as f:
         json.dump(label_manifest, f, default=str, indent=2)
