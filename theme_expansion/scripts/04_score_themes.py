@@ -80,6 +80,10 @@ def main() -> None:
     df = df.sort_values(["theme", "date"])
     df["theme_breadth_10d"] = df.groupby("theme")["theme_breadth"].transform(lambda s: s.rolling(10, min_periods=5).mean())
     df["theme_breadth_20d"] = df.groupby("theme")["theme_breadth"].transform(lambda s: s.rolling(20, min_periods=10).mean())
+    if "theme_breadth_20ema" not in df.columns:
+        df["theme_breadth_20ema"] = df.groupby("theme")["theme_breadth"].transform(
+            lambda s: s.ewm(span=20, min_periods=5, adjust=False).mean()
+        )
     df["theme_rvol_10d"] = df.groupby("theme")["theme_rvol"].transform(lambda s: s.rolling(10, min_periods=5).mean())
     if "is_tradable" not in df.columns:
         df["is_tradable"] = True
@@ -153,6 +157,18 @@ def main() -> None:
         + 0.2 * df["theme_breadth"].fillna(0.0)
         + 0.1 * entropy_rank
     )
+    for col in (
+        "theme_avg_rvol",
+        "theme_new_high_count",
+        "theme_leader_ticker",
+        "theme_leader_score",
+        "theme_leader_return_1d",
+        "theme_leader_return_5d",
+        "theme_avg_lag_vs_leader",
+        "theme_max_lag_vs_leader",
+    ):
+        if col not in df.columns:
+            df[col] = np.nan
 
     keep = [
         "date",
@@ -184,15 +200,24 @@ def main() -> None:
         "theme_breadth",
         "theme_breadth_10d",
         "theme_breadth_20d",
+        "theme_breadth_20ema",
         "theme_rvol",
         "theme_rvol_10d",
+        "theme_avg_rvol",
         "theme_advancers_pct",
         "theme_above_20d_pct",
         "theme_above_50d_pct",
         "theme_new_high_pct",
+        "theme_new_high_count",
         "theme_dollar_volume",
         "theme_concentration_top3",
         "leader_concentration",
+        "theme_leader_ticker",
+        "theme_leader_score",
+        "theme_leader_return_1d",
+        "theme_leader_return_5d",
+        "theme_avg_lag_vs_leader",
+        "theme_max_lag_vs_leader",
         "entropy_score",
         "theme_effective_breadth",
         "theme_num_constituents",

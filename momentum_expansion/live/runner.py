@@ -213,6 +213,11 @@ class MomentumLiveRunner:
                 expansion_score=score,
             )
             if should_exit:
+                self.policy.record_campaign_exit(
+                    ticker=ticker,
+                    exit_underlying=last_close,
+                    as_of=bar_ts,
+                )
                 self.policy.close(ticker, reason=reason)
                 payload = {
                     "kind":     "exit",

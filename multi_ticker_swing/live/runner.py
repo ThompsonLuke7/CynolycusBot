@@ -77,8 +77,10 @@ _BACKLOG_EVENT_THROTTLE_SECS = 60.0
 _HEARTBEAT_SECS = 60.0
 _BROKER_RECONCILE_SECS = 60.0
 _LOG_END = _time(16, 15)
+_ENTRY_ORDER_ATTEMPTS = 3
 _ENTRY_ORDER_VERIFY_TIMEOUT_SECS = 5.0
 _ENTRY_ORDER_VERIFY_POLL_SECS = 0.5
+_OPTION_TICK = 0.01
 
 # Tickers that may be in the stream but are excluded from entry signals
 _CONTEXT_SET = set(CONTEXT_TICKERS)
@@ -1165,42 +1167,96 @@ class SwingLiveRunner:
         order_resp: Any = None
         order_error: str | None = None
         verification: dict[str, Any] | None = None
+        limit_prices = _entry_buy_limit_ladder(
+            self._client,
+            symbol=option_symbol,
+            attempts=_ENTRY_ORDER_ATTEMPTS,
+        )
+        if not limit_prices:
+            logger.warning("[%s] no quote for buy limit price; skipping entry symbol=%s", ticker, option_symbol)
+            self._emit("entry_skipped", {
+                "ticker": ticker,
+                "direction": int(sig.direction),
+                "reason": "no_quote_for_buy_limit",
+                "entry_price": entry_price,
+                "option_symbol": option_symbol,
+            })
+            return
         if not self._dry_run:
-            try:
-                order_resp = self._client.submit_option_order(
+            for attempt, limit_price in enumerate(limit_prices, start=1):
+                try:
+                    order_resp = self._client.submit_option_order(
+                        symbol=option_symbol,
+                        qty=qty,
+                        side="buy",
+                        order_type="limit",
+                        time_in_force="day",
+                        limit_price=limit_price,
+                    )
+                    logger.info(
+                        "[%s] buy limit order submitted limit=%.2f attempt=%d/%d: %s",
+                        ticker,
+                        limit_price,
+                        attempt,
+                        len(limit_prices),
+                        order_resp,
+                    )
+                except Exception as exc:
+                    order_error = str(exc)
+                    logger.error("[%s] buy order FAILED: %s", ticker, exc)
+                    self._emit("order_failed", {
+                        "ticker": ticker,
+                        "side": "buy",
+                        "option_symbol": option_symbol,
+                        "qty": qty,
+                        "order_type": "limit",
+                        "limit_price": limit_price,
+                        "attempt": attempt,
+                        "attempts": len(limit_prices),
+                        "error": order_error,
+                    })
+                    return
+                verification = _verify_entry_order(
+                    self._client,
+                    submitted_resp=order_resp if isinstance(order_resp, dict) else {},
                     symbol=option_symbol,
-                    qty=qty,
-                    side="buy",
-                    order_type="market",
-                    time_in_force="day",
                 )
-                logger.info("[%s] buy order submitted: %s", ticker, order_resp)
-            except Exception as exc:
-                order_error = str(exc)
-                logger.error("[%s] buy order FAILED: %s", ticker, exc)
-                self._emit("order_failed", {
+                self._emit("order_submitted", {
                     "ticker": ticker,
                     "side": "buy",
                     "option_symbol": option_symbol,
                     "qty": qty,
-                    "error": order_error,
+                    "order_type": "limit",
+                    "limit_price": limit_price,
+                    "attempt": attempt,
+                    "attempts": len(limit_prices),
+                    "entry_price": entry_price,
+                    "response": _safe_response(order_resp),
+                    "verification": verification,
                 })
+                if verification.get("verified", False):
+                    break
+                order_id = str(verification.get("order_id") or "").strip()
+                can_retry = bool(verification.get("retryable")) and attempt < len(limit_prices)
+                if can_retry and order_id:
+                    _cancel_entry_order(self._client, order_id=order_id)
+                    logger.info(
+                        "[%s] buy limit not filled; retrying at next limit symbol=%s status=%s limit=%.2f",
+                        ticker,
+                        option_symbol,
+                        verification.get("status"),
+                        limit_price,
+                    )
+                    continue
+                if can_retry:
+                    continue
+                break
+            if verification is None:
                 return
-            verification = _verify_entry_order(
-                self._client,
-                submitted_resp=order_resp if isinstance(order_resp, dict) else {},
-                symbol=option_symbol,
-            )
-            self._emit("order_submitted", {
-                "ticker": ticker,
-                "side": "buy",
-                "option_symbol": option_symbol,
-                "qty": qty,
-                "entry_price": entry_price,
-                "response": _safe_response(order_resp),
-                "verification": verification,
-            })
             if not verification.get("verified", False):
+                order_id = str(verification.get("order_id") or "").strip()
+                if order_id and bool(verification.get("retryable")):
+                    _cancel_entry_order(self._client, order_id=order_id)
                 logger.warning(
                     "[%s] buy order not verified; skipping local position open symbol=%s status=%s via=%s",
                     ticker,
@@ -1218,13 +1274,17 @@ class SwingLiveRunner:
                 })
                 return
         else:
-            logger.info("[DRY RUN] [%s] would BUY %d × %s at entry ~%.2f",
-                        ticker, qty, option_symbol, entry_price)
+            logger.info(
+                "[DRY RUN] [%s] would BUY %d × %s limit ladder=%s at entry ~%.2f",
+                ticker, qty, option_symbol, limit_prices, entry_price,
+            )
             self._emit("order_dry_run", {
                 "ticker": ticker,
                 "side": "buy",
                 "option_symbol": option_symbol,
                 "qty": qty,
+                "order_type": "limit",
+                "limit_prices": limit_prices,
                 "entry_price": entry_price,
             })
 
@@ -1286,14 +1346,172 @@ def _safe_response(resp: Any) -> Any:
     if isinstance(resp, (str, int, float, bool)):
         return resp
     if isinstance(resp, dict):
-        keep = ("id", "client_order_id", "symbol", "qty", "side", "status", "submitted_at", "filled_avg_price")
+        keep = (
+            "id",
+            "client_order_id",
+            "symbol",
+            "qty",
+            "side",
+            "type",
+            "order_type",
+            "limit_price",
+            "status",
+            "submitted_at",
+            "filled_avg_price",
+        )
         return {k: resp.get(k) for k in keep if k in resp}
     # Object with attributes
     out = {}
-    for k in ("id", "client_order_id", "symbol", "qty", "side", "status", "submitted_at", "filled_avg_price"):
+    for k in (
+        "id",
+        "client_order_id",
+        "symbol",
+        "qty",
+        "side",
+        "type",
+        "order_type",
+        "limit_price",
+        "status",
+        "submitted_at",
+        "filled_avg_price",
+    ):
         if hasattr(resp, k):
             out[k] = getattr(resp, k)
     return out or str(resp)
+
+
+def _entry_buy_limit_ladder(
+    client: AlpacaOptionsClient,
+    *,
+    symbol: str,
+    attempts: int,
+) -> list[float]:
+    try:
+        resp = client.get_option_quotes(symbols=symbol, limit=1)
+        quotes = _extract_option_quotes(resp, symbol=symbol)
+    except Exception as exc:
+        logger.warning("entry quote fetch failed symbol=%s: %s", symbol, exc)
+        return []
+    if not quotes:
+        return []
+    quote = quotes[-1]
+    bid = _option_quote_price(quote, mode="bid")
+    ask = _option_quote_price(quote, mode="ask")
+    mid = _option_quote_price(quote, mode="mid")
+    if not math.isfinite(ask) or ask <= 0.0:
+        return []
+    if not math.isfinite(mid) or mid <= 0.0:
+        mid = ask
+    mid = min(mid, ask)
+
+    count = max(1, int(attempts))
+    if count == 1 or math.isclose(mid, ask, rel_tol=0.0, abs_tol=1e-9):
+        return [_round_option_limit(mid)]
+
+    prices: list[float] = []
+    distance = ask - mid
+    for idx in range(count):
+        raw = mid + distance * (idx / (count - 1))
+        rounded = _round_option_limit(raw)
+        if rounded not in prices:
+            prices.append(rounded)
+    ask_limit = _round_option_limit(ask)
+    if prices[-1] != ask_limit:
+        prices.append(ask_limit)
+    logger.info(
+        "entry buy limit ladder symbol=%s bid=%s mid=%.2f ask=%.2f limits=%s",
+        symbol,
+        f"{bid:.2f}" if math.isfinite(bid) else "nan",
+        mid,
+        ask,
+        prices,
+    )
+    return prices
+
+
+def _extract_option_quotes(resp: Any, *, symbol: str) -> list[dict[str, Any]]:
+    sym = str(symbol).strip().upper()
+    if isinstance(resp, dict):
+        quotes_obj = resp.get("quotes")
+        if isinstance(quotes_obj, dict):
+            for key, value in quotes_obj.items():
+                if str(key).strip().upper() != sym:
+                    continue
+                if isinstance(value, list):
+                    return [q for q in value if isinstance(q, dict)]
+                if isinstance(value, dict):
+                    return [value]
+        if isinstance(quotes_obj, list):
+            return [
+                q for q in quotes_obj
+                if isinstance(q, dict) and str(q.get("symbol", "")).strip().upper() == sym
+            ]
+        value = resp.get("data")
+        if isinstance(value, list):
+            return [
+                q for q in value
+                if isinstance(q, dict) and str(q.get("symbol", "")).strip().upper() == sym
+            ]
+        if isinstance(value, dict):
+            maybe = value.get(sym) or value.get(sym.lower()) or value.get(sym.upper())
+            if isinstance(maybe, list):
+                return [q for q in maybe if isinstance(q, dict)]
+            if isinstance(maybe, dict):
+                return [maybe]
+    if isinstance(resp, list):
+        return [
+            q for q in resp
+            if isinstance(q, dict) and str(q.get("symbol", "")).strip().upper() == sym
+        ]
+    return []
+
+
+def _option_quote_price(quote: dict[str, Any], *, mode: str) -> float:
+    mode_key = str(mode or "ask").strip().lower()
+    ask = _as_float(quote.get("ask_price", quote.get("ap", quote.get("ask"))))
+    bid = _as_float(quote.get("bid_price", quote.get("bp", quote.get("bid"))))
+    last = _as_float(quote.get("last_price", quote.get("lp")))
+    mark = _as_float(quote.get("mark_price", quote.get("mark")))
+    if mode_key == "bid":
+        return bid
+    if mode_key == "last":
+        return last
+    if mode_key == "mark":
+        if math.isfinite(mark):
+            return mark
+        if math.isfinite(bid) and math.isfinite(ask):
+            return 0.5 * (bid + ask)
+        return float("nan")
+    if mode_key == "mid":
+        if math.isfinite(bid) and math.isfinite(ask):
+            return 0.5 * (bid + ask)
+        if math.isfinite(mark):
+            return mark
+        if math.isfinite(last):
+            return last
+        if math.isfinite(ask):
+            return ask
+        return bid
+    if math.isfinite(ask):
+        return ask
+    if math.isfinite(mark):
+        return mark
+    if math.isfinite(last):
+        return last
+    if math.isfinite(bid):
+        return bid
+    return float("nan")
+
+
+def _round_option_limit(value: float) -> float:
+    return max(_OPTION_TICK, round(float(value), 2))
+
+
+def _as_float(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float("nan")
 
 
 def _status_key(status: Any) -> str:
@@ -1384,6 +1602,13 @@ def _verify_entry_order(
         "retryable": bool(order_id),
         "order": last,
     }
+
+
+def _cancel_entry_order(client: AlpacaOptionsClient, *, order_id: str) -> None:
+    try:
+        client.cancel_order(order_id)
+    except Exception as exc:
+        logger.warning("entry order cancel warning order_id=%s: %s", order_id, exc)
 
 
 def _response_float(resp: Any, key: str) -> float | None:

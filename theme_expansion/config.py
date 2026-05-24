@@ -37,6 +37,7 @@ UNIVERSE_FILTER_PATH = OUTPUT_DIR / "universe_filter.csv"
 THEME_DAILY_PATH = OUTPUT_DIR / "theme_daily.parquet"
 THEME_SCORES_PATH = OUTPUT_DIR / "theme_scores.parquet"
 THEME_LEADERS_PATH = OUTPUT_DIR / "theme_leaders.parquet"
+THEME_MEMBER_GRAPH_PATH = OUTPUT_DIR / "theme_member_graph.parquet"
 LIVE_RANKING_PATH = OUTPUT_DIR / "live_theme_ranking.csv"
 
 START_DATE = "2018-01-01"
@@ -173,10 +174,13 @@ def load_theme_memberships(path: Path | None = None) -> pd.DataFrame:
         raise ValueError(f"{src} must include at least one theme column")
 
     id_cols = [c for c in ["ticker", "asset_type", "sector", "industry", "subindustry"] if c in df.columns]
-    long_map = df.melt(id_vars=id_cols, value_vars=theme_cols, value_name="theme")
+    if theme_cols == ["theme"]:
+        long_map = df[id_cols + ["theme"]].copy()
+    else:
+        long_map = df.melt(id_vars=id_cols, value_vars=theme_cols, value_name="theme")
+        long_map = long_map.drop(columns=["variable"], errors="ignore")
     long_map["theme"] = long_map["theme"].fillna("").astype(str).str.strip().str.lower()
     long_map = long_map[long_map["theme"].ne("")]
-    long_map = long_map.drop(columns=["variable"], errors="ignore")
 
     defs = load_theme_definitions()
     if not defs.empty:
@@ -207,4 +211,16 @@ def load_theme_memberships(path: Path | None = None) -> pd.DataFrame:
             long_map["is_tradable"].map(lambda value: _parse_bool(value, True)).fillna(True)
             & ~long_map["is_watchlist_only"]
         )
+    if "is_tradable" not in long_map.columns:
+        long_map["is_tradable"] = True
+    if "is_watchlist_only" not in long_map.columns:
+        long_map["is_watchlist_only"] = False
+    if "theme_constituent_count" not in long_map.columns:
+        long_map["theme_constituent_count"] = long_map.groupby("theme")["ticker"].transform("nunique")
+    long_map["is_tradable"] = long_map["is_tradable"].map(lambda value: _parse_bool(value, True)).fillna(True)
+    long_map["is_watchlist_only"] = long_map["is_watchlist_only"].map(_parse_bool).fillna(False)
+    long_map["theme_constituent_count"] = (
+        pd.to_numeric(long_map["theme_constituent_count"], errors="coerce")
+        .fillna(long_map.groupby("theme")["ticker"].transform("nunique"))
+    )
     return long_map.drop_duplicates(subset=["ticker", "theme"]).sort_values(["theme", "ticker"]).reset_index(drop=True)
