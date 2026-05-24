@@ -182,6 +182,10 @@ ENTRY_RULES_CONFIG: dict = {
     # use SPY-style 1H body breakout as the main trigger and pullback reclaim
     # as the higher-quality secondary continuation trigger.
     "enabled_rules":           ("break_body_prev_high", "pullback_continuation"),
+    # Default confirmation from the May 2026 trigger sweep:
+    # use SPY-style 1H body breakout as the main trigger and pullback reclaim
+    # as the higher-quality secondary continuation trigger.
+    "enabled_rules":           ("break_body_prev_high", "pullback_continuation"),
     "ema_fast":               10,
     "ema_slow":               20,
     "pullback_min_atr":       0.4,    # min pullback depth to be a "pullback continuation"
@@ -225,7 +229,19 @@ OPTION_POLICY_CONFIG: dict = {
     "target_dte_min_days": 30,
     "target_dte_max_days": 60,
     "target_delta_long":   0.45,        # default fallback; adaptive delta below controls live selection
+    "target_delta_long":   0.45,        # default fallback; adaptive delta below controls live selection
     "delta_tolerance":     0.10,
+    # Adaptive option moneyness from the May 2026 theoretical delta grid:
+    # use more convexity only when the expansion score is exceptional and the
+    # campaign is still early; use more intrinsic/delta when confidence is
+    # lower or the campaign is already mature.
+    "adaptive_delta_enabled": True,
+    "adaptive_delta_high_score": 0.85,
+    "adaptive_delta_mid_score": 0.65,
+    "adaptive_delta_high": 0.35,
+    "adaptive_delta_mid": 0.45,
+    "adaptive_delta_low": 0.55,
+    "adaptive_delta_late_campaign_entry": 3,
     # Adaptive option moneyness from the May 2026 theoretical delta grid:
     # use more convexity only when the expansion score is exceptional and the
     # campaign is still early; use more intrinsic/delta when confidence is
@@ -249,6 +265,9 @@ OPTION_POLICY_CONFIG: dict = {
     # Exits
     "atr_stop_mult":       1.5,         # initial underlying stop in ATR units
     "atr_trail_arm":       1.0,         # trail arms after this much favorable underlying move
+    "atr_trail_distance":  2.4,         # best replay: give expansion pullbacks more room once armed
+    "score_decay_exit":    0.30,        # best replay: wait for deeper survival-score decay before exiting
+    "trend_break_atr":     None,        # best replay: disabled; EMA trend breaks cut runners too early
     "atr_trail_distance":  2.4,         # best replay: give expansion pullbacks more room once armed
     "score_decay_exit":    0.30,        # best replay: wait for deeper survival-score decay before exiting
     "trend_break_atr":     None,        # best replay: disabled; EMA trend breaks cut runners too early
