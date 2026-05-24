@@ -11,8 +11,8 @@ from typing import Any
 
 import pandas as pd
 
-from forward_guidance.config import DASHBOARD_STATE_PATH, RANKED_OUTPUT_CSV, RANKED_OUTPUT_PARQUET
-from forward_guidance.utils.io import json_safe, read_json
+from events.forward_guidance.config import DASHBOARD_STATE_PATH, RANKED_OUTPUT_CSV, RANKED_OUTPUT_PARQUET
+from events.forward_guidance.utils.io import json_safe, read_json
 
 
 DEFAULT_HOST = "127.0.0.1"

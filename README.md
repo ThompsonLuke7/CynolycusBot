@@ -27,7 +27,10 @@ This is an active research repo, not a packaged library. Many folders contain sa
 | `UI/` | Live/replay dashboards for SPY, swing work, and forward-guidance views. |
 | `scripts/` | Research scripts for phase-4 policy sweeps, diagnostics, plotting, probability normalization, and live-order analysis. |
 | `multi_ticker_swing/` | Multi-ticker swing pipeline with 30-minute features, labels, matrices, and model artifacts. |
-| `forward_guidance/` | Earnings forward-guidance event pipeline, features, models, inference, and backtests. |
+| `events/` | Scheduled macro/earnings event context features; `events/forward_guidance/` contains the post-earnings guidance module. |
+| `events/forward_guidance/` | Earnings forward-guidance event pipeline, features, models, inference, and backtests. |
+| `news/` | Unscheduled catalyst news ingestion, deduplication, BGE embeddings, FinBERT tone, clustering, labels, and features. |
+| `meta_context/` | Specialist-signal and final meta-model scaffolding. |
 | `momentum_expansion/` | Momentum expansion universe, features, labels, matrices, alerts, and backtest work. |
 | `ResearchPaperSummarySoFar.md` | Current research summary and best-saved-result narrative. |
 
@@ -45,7 +48,7 @@ python -m venv .venv
 
 Alpaca-backed workflows need credentials in `.env` or the environment. Be careful with live/paper mode settings before using anything that can submit orders.
 
-Some optional research paths need extra packages that are not in the base requirements. For example, the forward-guidance NLP features may use `transformers`, `sentence-transformers`, or `lightgbm`.
+Some optional research paths need extra packages that are not in the base requirements. For example, forward-guidance and news NLP features may use `transformers`, `sentence-transformers`, `hdbscan`, or `lightgbm`.
 
 ## Safe Orientation Commands
 
@@ -64,7 +67,15 @@ These commands inspect local CLIs and should not train models or submit orders:
 ```
 
 ```bash
-./.venv/bin/python -m forward_guidance.main -h
+./.venv/bin/python -m events.forward_guidance.main -h
+```
+
+```bash
+./.venv/bin/python -m events.main --stage features -h
+```
+
+```bash
+./.venv/bin/python -m news.main --stage features -h
 ```
 
 ```bash
@@ -126,18 +137,18 @@ The forward-guidance project studies post-earnings opportunities where the marke
 Common stages:
 
 ```bash
-./.venv/bin/python -m forward_guidance.main --stage discover-events --start 2025-01-01 --end 2026-02-01 --discovery-source sec --limit 10
+./.venv/bin/python -m events.forward_guidance.main --stage discover-events --start 2025-01-01 --end 2026-02-01 --discovery-source sec --limit 10
 ```
 
 ```bash
-./.venv/bin/python -m forward_guidance.main --stage features --events-csv events.csv
+./.venv/bin/python -m events.forward_guidance.main --stage features --events-csv events.csv
 ```
 
 ```bash
 ./.venv/bin/python -m UI.forward_guidance_dashboard
 ```
 
-See `forward_guidance/README.md` for event CSV format and optional NLP features.
+See `events/forward_guidance/README.md` for event CSV format and optional NLP features.
 
 ## Momentum Expansion
 
