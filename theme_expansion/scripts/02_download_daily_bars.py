@@ -18,6 +18,7 @@ from config import (
     MIN_PRICE,
     RAW_DAILY_DIR,
     START_DATE,
+    THEME_FILTER_OVERRIDES,
     UNIVERSE_FILTER_PATH,
     clean_ticker,
     ensure_dirs,
@@ -95,18 +96,38 @@ def build_universe_filter(combined: pd.DataFrame) -> pd.DataFrame:
         lambda s: s.rolling(20, min_periods=10).mean()
     )
     latest = df.groupby("ticker").tail(1).copy()
+    memberships = load_theme_memberships()
     asset_types = (
-        load_theme_memberships()[["ticker", "asset_type"]]
+        memberships[["ticker", "asset_type"]]
         .drop_duplicates(subset=["ticker"])
         .set_index("ticker")["asset_type"]
     )
+    ticker_themes = memberships.groupby("ticker")["theme"].agg(list)
+
+    def thresholds_for(ticker: str) -> pd.Series:
+        thresholds = {
+            "min_price": MIN_PRICE,
+            "min_avg_dollar_volume_20d": MIN_AVG_DOLLAR_VOLUME_20D,
+            "min_market_cap": MIN_MARKET_CAP,
+        }
+        for theme in ticker_themes.get(ticker, []):
+            override = THEME_FILTER_OVERRIDES.get(theme, {})
+            for key, value in override.items():
+                if key in thresholds:
+                    thresholds[key] = min(thresholds[key], value)
+        return pd.Series(thresholds)
+
     latest["asset_type"] = latest["ticker"].map(asset_types).fillna("stock")
+    thresholds = latest["ticker"].apply(thresholds_for)
+    latest = pd.concat([latest, thresholds], axis=1)
     latest["market_cap"] = latest["ticker"].map(market_cap_for)
     latest["is_exception"] = latest["ticker"].isin(FILTER_EXCEPTIONS)
-    latest["passes_price"] = latest["px"] > MIN_PRICE
-    latest["passes_adv20"] = latest["avg_dollar_volume_20d"] > MIN_AVG_DOLLAR_VOLUME_20D
+    latest["passes_price"] = latest["px"] > latest["min_price"]
+    latest["passes_adv20"] = latest["avg_dollar_volume_20d"] > latest["min_avg_dollar_volume_20d"]
     latest["market_cap_missing"] = latest["market_cap"].isna()
-    latest["passes_market_cap"] = latest["asset_type"].eq("etf") | (latest["market_cap"].fillna(0.0) > MIN_MARKET_CAP)
+    latest["passes_market_cap"] = latest["asset_type"].eq("etf") | (
+        latest["market_cap"].fillna(0.0) > latest["min_market_cap"]
+    )
     latest["is_eligible"] = latest["is_exception"] | (
         latest["passes_price"] & latest["passes_adv20"] & latest["passes_market_cap"]
     )
@@ -118,6 +139,9 @@ def build_universe_filter(combined: pd.DataFrame) -> pd.DataFrame:
             "px",
             "avg_dollar_volume_20d",
             "market_cap",
+            "min_price",
+            "min_avg_dollar_volume_20d",
+            "min_market_cap",
             "market_cap_missing",
             "is_exception",
             "passes_price",

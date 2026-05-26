@@ -39,7 +39,7 @@ def main() -> None:
     leaders["date"] = pd.to_datetime(leaders["date"])
     as_of = pd.Timestamp(args.date) if args.date else scores["date"].max()
 
-    day = scores[scores["date"].eq(as_of)].sort_values("theme_rank").copy()
+    day = scores[scores["date"].eq(as_of)].sort_values("theme_regime_rank").copy()
     if day.empty:
         raise SystemExit(f"no theme scores for {as_of.date()}")
 
@@ -47,16 +47,22 @@ def main() -> None:
         [
             "date",
             "theme",
+            "theme_regime_rank",
             "theme_rank",
             "theme_score",
+            "theme_regime_score",
             "theme_rank_change_5d",
             "theme_return_5d",
+            "theme_vs_spy_20d",
             "theme_vs_spy_5d",
             "theme_rvol",
             "theme_breadth",
         ]
     ].rename(
         columns={
+            "theme_regime_rank": "baseline_rank",
+            "theme_rank": "heat_rank",
+            "theme_regime_score": "baseline_score",
             "theme_rank_change_5d": "rank_change_5d",
             "theme_breadth": "breadth",
         }

@@ -54,6 +54,15 @@ MIN_PRICE = 3.0
 MIN_MARKET_CAP = 300_000_000
 MIN_AVG_DOLLAR_VOLUME_20D = 20_000_000
 FILTER_EXCEPTIONS = {"RKLB", "LUNR", "OKLO", "SMR", "HOOD", "PLTR"}
+THEME_FILTER_OVERRIDES = {
+    # Emerging themes can be investable before their constituents satisfy the
+    # broad liquidity/price profile of mature large-cap themes.
+    "additive_manufacturing": {
+        "min_price": 1.50,
+        "min_avg_dollar_volume_20d": 4_000_000,
+        "min_market_cap": 300_000_000,
+    },
+}
 
 THEME_SCORE_WEIGHTS = {
     "rank_5d": 30.0,

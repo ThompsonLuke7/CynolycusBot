@@ -1,0 +1,7 @@
+field,rule,basis
+close,>= 5,last completed daily close
+ADV20,>= 2000000,mean daily volume over last 20 completed sessions
+ADDV20,>= 20000000,mean(close*volume) over last 20 completed sessions
+history_days,>= 252 preferred; >=126 allowed for watchlist only,daily bars available
+exclusions,"exclude leveraged ETFs, thin ADR duplicates, SPAC remnants, bad corporate actions",metadata/manual denylist
+coverage_guardrail,"largest theme <12%, largest sector <20%, top 10 themes <55%",post-map coverage summary

@@ -207,10 +207,16 @@ def rolling_report(bt: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def leave_one_theme_out(scores: pd.DataFrame, leaders: pd.DataFrame, returns: pd.DataFrame) -> pd.DataFrame:
+def leave_one_theme_out(
+    scores: pd.DataFrame,
+    leaders: pd.DataFrame,
+    returns: pd.DataFrame,
+    *,
+    themes: list[str] | None = None,
+) -> pd.DataFrame:
     rows = []
-    themes = sorted(scores["theme"].unique())
-    for theme in themes:
+    selected_themes = themes or sorted(scores["theme"].unique())
+    for theme in selected_themes:
         bt, periods, _ = simulate(scores, leaders, returns, exclude_theme=theme)
         stats = perf_stats(bt["strategy_return"], bt["turnover"])
         rows.append(
@@ -240,8 +246,10 @@ def theme_contribution(contrib: pd.DataFrame, periods: pd.DataFrame) -> pd.DataF
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate frozen regime v3 robustness.")
+    parser.add_argument("--skip-leave-one", action="store_true", help="Skip expensive leave-one-theme-out attribution.")
+    parser.add_argument("--leave-one-start", type=int, default=None, help="Start index for chunked leave-one-theme-out.")
+    parser.add_argument("--leave-one-end", type=int, default=None, help="End index for chunked leave-one-theme-out.")
     args = parser.parse_args()
-    _ = args
 
     ensure_dirs()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -257,8 +265,19 @@ def main() -> None:
     periods.to_csv(OUT_DIR / "regime_v3_periods.csv", index=False)
     period_report(bt, periods).to_csv(OUT_DIR / "period_performance.csv", index=False)
     rolling_report(bt).to_csv(OUT_DIR / "rolling_12m_metrics.csv", index=False)
-    leave_one_theme_out(scores, leaders, returns).to_csv(OUT_DIR / "leave_one_theme_out.csv", index=False)
     theme_contribution(contrib, periods).to_csv(OUT_DIR / "theme_contribution_report.csv", index=False)
+    if not args.skip_leave_one:
+        themes = sorted(scores["theme"].unique())
+        start = args.leave_one_start
+        end = args.leave_one_end
+        if start is not None or end is not None:
+            start = 0 if start is None else start
+            end = len(themes) if end is None else end
+            selected = themes[start:end]
+            out_path = OUT_DIR / f"leave_one_theme_out_{start:03d}_{end:03d}.csv"
+            leave_one_theme_out(scores, leaders, returns, themes=selected).to_csv(out_path, index=False)
+        else:
+            leave_one_theme_out(scores, leaders, returns).to_csv(OUT_DIR / "leave_one_theme_out.csv", index=False)
 
     summary = {
         "overall": perf_stats(bt["strategy_return"], bt["turnover"]),
