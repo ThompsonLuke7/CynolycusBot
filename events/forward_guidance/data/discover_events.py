@@ -29,6 +29,33 @@ logger = logging.getLogger(__name__)
 
 
 SEC_EARNINGS_FORMS = ("8-K", "10-Q", "10-K")
+EARNINGS_DOC_PATTERNS = (
+    "earnings",
+    "results",
+    "quarter",
+    "q1",
+    "q2",
+    "q3",
+    "q4",
+    "fy",
+    "financial",
+    "shareholder",
+    "exhibit99",
+    "ex-99",
+    "press",
+)
+NON_EARNINGS_DOC_PATTERNS = (
+    "dividend",
+    "director",
+    "compensation",
+    "bylaw",
+    "governance",
+    "presentation",
+    "investor",
+    "acquisition",
+    "credit",
+    "employment",
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +123,21 @@ def dedupe_events(events: Iterable[EarningsEvent]) -> list[EarningsEvent]:
     return sorted(by_key.values(), key=lambda e: (e.earnings_date, e.clean_ticker))
 
 
+def is_likely_earnings_filing(row: pd.Series) -> bool:
+    form = str(row.get("form") or "").upper().strip()
+    if form in {"10-Q", "10-K"}:
+        return True
+    if form != "8-K":
+        return False
+    text = " ".join(
+        str(row.get(col) or "")
+        for col in ("primaryDocDescription", "primaryDocument", "fileNumber", "filmNumber")
+    ).lower()
+    if any(pattern in text for pattern in NON_EARNINGS_DOC_PATTERNS) and not any(pattern in text for pattern in EARNINGS_DOC_PATTERNS):
+        return False
+    return any(pattern in text for pattern in EARNINGS_DOC_PATTERNS)
+
+
 def discover_sec_filing_events(
     tickers: Iterable[str],
     *,
@@ -122,8 +164,11 @@ def discover_sec_filing_events(
                 continue
             df["filingDate"] = pd.to_datetime(df["filingDate"], errors="coerce")
             mask = df["form"].isin(forms) & df["filingDate"].between(start_ts, end_ts)
+            candidates = df.loc[mask].copy()
+            if not candidates.empty:
+                candidates = candidates.loc[candidates.apply(is_likely_earnings_filing, axis=1)]
             sector, sector_etf = _sector_for_ticker(ticker)
-            for _, row in df.loc[mask].iterrows():
+            for _, row in candidates.iterrows():
                 filing_date = row["filingDate"].date().isoformat()
                 events.append(
                     EarningsEvent(

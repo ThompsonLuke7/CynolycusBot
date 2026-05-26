@@ -40,6 +40,7 @@ def build_context_backtest_universe(
     include_funds: bool = False,
     include_blacklist: bool = False,
     output_path: Path | str = CONTEXT_BACKTEST_UNIVERSE_PATH,
+    limit: int | None = None,
 ) -> pd.DataFrame:
     """Build a combined context universe from swing and momentum-expansion sources."""
     ensure_dirs()
@@ -126,6 +127,8 @@ def build_context_backtest_universe(
             }
         )
     df = pd.DataFrame(rows).sort_values("ticker").reset_index(drop=True)
+    if limit:
+        df = df.head(int(limit)).copy()
     df.to_csv(output_path, index=False)
     return df
 
@@ -243,6 +246,7 @@ def build_all_context_backtest_inputs(
     include_momentum: bool = True,
     include_funds: bool = False,
     include_blacklist: bool = False,
+    limit: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     universe = build_context_backtest_universe(
         universe_csv=universe_csv,
@@ -250,6 +254,7 @@ def build_all_context_backtest_inputs(
         include_momentum=include_momentum,
         include_funds=include_funds,
         include_blacklist=include_blacklist,
+        limit=limit,
     )
     bars = load_cached_bars_for_universe(universe, raw_dir=raw_dir, start=start, end=end)
     timestamps = build_context_backtest_timestamps(bars)
@@ -267,6 +272,7 @@ def main() -> int:
     parser.add_argument("--momentum-only", action="store_true")
     parser.add_argument("--include-funds", action="store_true")
     parser.add_argument("--include-blacklist", action="store_true")
+    parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
     include_swing = not args.momentum_only
     include_momentum = not args.swing_only
@@ -279,6 +285,7 @@ def main() -> int:
         include_momentum=include_momentum,
         include_funds=args.include_funds,
         include_blacklist=args.include_blacklist,
+        limit=args.limit,
     )
     print(f"universe={len(universe)} timestamps={len(timestamps)} labels={len(labels)}")
     print(f"universe_path={CONTEXT_BACKTEST_UNIVERSE_PATH}")

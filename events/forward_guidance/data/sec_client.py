@@ -164,6 +164,36 @@ class SecClient:
             force=force,
         )
 
+    def submission_archive(self, archive_name: str, *, force: bool = False) -> dict[str, Any]:
+        safe_name = str(archive_name).strip().split("/")[-1]
+        return self._request_json(
+            f"https://data.sec.gov/submissions/{safe_name}",
+            cache_name=safe_name,
+            force=force,
+        )
+
+    def all_submission_filings(self, cik: str | int, *, include_archives: bool = True, force: bool = False) -> pd.DataFrame:
+        sub = self.submissions(cik, force=force)
+        frames = []
+        recent = pd.DataFrame(sub.get("filings", {}).get("recent", {}))
+        if not recent.empty:
+            frames.append(recent)
+        if include_archives:
+            for item in sub.get("filings", {}).get("files", []) or []:
+                name = item.get("name") if isinstance(item, dict) else None
+                if not name:
+                    continue
+                try:
+                    archive = self.submission_archive(name, force=force)
+                    frame = pd.DataFrame(archive)
+                except Exception:
+                    continue
+                if not frame.empty:
+                    frames.append(frame)
+        frames = [frame.dropna(axis=1, how="all") for frame in frames if not frame.empty]
+        frames = [frame for frame in frames if not frame.empty]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
     def companyfacts(self, cik: str | int, *, force: bool = False) -> dict[str, Any]:
         clean = _clean_cik(cik)
         return self._request_json(

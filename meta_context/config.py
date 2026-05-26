@@ -19,6 +19,7 @@ CONTEXT_FORWARD_LABELS_PATH = PROCESSED_DIR / "context_forward_labels.parquet"
 META_FEATURE_COLUMNS = [
     "ta_expansion_prob",
     "news_catalyst_score",
+    "catalyst_score",
     "social_velocity_score",
     "event_risk_score",
     "theme_rotation_score",

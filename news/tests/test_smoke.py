@@ -113,7 +113,11 @@ def test_news_labels_and_features_are_time_aligned(tmp_path) -> None:
     emb_path = tmp_path / "emb.parquet"
     emb.to_parquet(emb_path, index=False)
     win = emb.copy()
+    win["record_id"] = "prior_winner"
+    win["timestamp"] = pd.Timestamp("2025-12-30T14:00:00Z")
     lose = emb.copy()
+    lose["record_id"] = "prior_loser"
+    lose["timestamp"] = pd.Timestamp("2025-12-30T14:00:00Z")
     lose["embedding"] = json.dumps([0.0, 1.0])
     win_path = tmp_path / "win.parquet"
     lose_path = tmp_path / "lose.parquet"

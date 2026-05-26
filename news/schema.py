@@ -46,11 +46,12 @@ class NewsRecord:
 
     @property
     def text(self) -> str:
-        return " ".join(x for x in (self.headline, self.summary or self.body) if x).strip()
+        return " ".join(x for x in (self.headline, self.summary, self.body) if x).strip()
 
     @property
     def record_id(self) -> str:
-        return self.source_id or text_fingerprint(self.clean_ticker, self.timestamp_utc.isoformat(), self.url, self.headline)
+        source_key = self.source_id or text_fingerprint(self.timestamp_utc.isoformat(), self.url, self.headline)
+        return text_fingerprint(self.clean_ticker, source_key)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -109,4 +110,3 @@ def empty_news_frame() -> pd.DataFrame:
             "content_hash",
         ]
     )
-
