@@ -10,6 +10,7 @@ RAW_DAILY_DIR = DATA_DIR / "daily_bars"
 OUTPUT_DIR = ROOT / "outputs"
 BACKTEST_DIR = OUTPUT_DIR / "backtests"
 PLOTS_DIR = OUTPUT_DIR / "plots"
+REPORT_DIR = OUTPUT_DIR / "reports"
 
 DEFAULT_THEME_MAP_PATH = DATA_DIR / "default_theme_map.csv"
 THEME_DEFINITION_PATH = DATA_DIR / "theme_definition.csv"
@@ -39,6 +40,8 @@ THEME_SCORES_PATH = OUTPUT_DIR / "theme_scores.parquet"
 THEME_LEADERS_PATH = OUTPUT_DIR / "theme_leaders.parquet"
 THEME_MEMBER_GRAPH_PATH = OUTPUT_DIR / "theme_member_graph.parquet"
 LIVE_RANKING_PATH = OUTPUT_DIR / "live_theme_ranking.csv"
+THEME_SIGNAL_LABELS_PATH = OUTPUT_DIR / "theme_signal_labels.parquet"
+LIVE_THEME_SIGNAL_RANKING_PATH = OUTPUT_DIR / "live_theme_signal_ranking.csv"
 
 START_DATE = "2018-01-01"
 # yfinance treats end as exclusive, so this includes bars through 2026-05-21.
@@ -75,7 +78,7 @@ THEME_SCORE_WEIGHTS = {
 
 
 def ensure_dirs() -> None:
-    for path in (DATA_DIR, RAW_DAILY_DIR, OUTPUT_DIR, BACKTEST_DIR, PLOTS_DIR):
+    for path in (DATA_DIR, RAW_DAILY_DIR, OUTPUT_DIR, BACKTEST_DIR, PLOTS_DIR, REPORT_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 
