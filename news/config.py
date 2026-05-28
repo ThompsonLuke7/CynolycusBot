@@ -24,6 +24,9 @@ LOSER_LIBRARY_PATH = PROCESSED_DIR / "loser_news_library.parquet"
 DEFAULT_BGE_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_FINBERT_MODEL = "ProsusAI/finbert"
 
+LABEL_HORIZON_DAYS = 10
+LABEL_HORIZON_BARS_PER_DAY = 13
+
 SEC_ALPHA_FORMS = [
     "8-K",
     "10-Q",

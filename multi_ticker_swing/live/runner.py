@@ -61,6 +61,26 @@ _ET = ZoneInfo("America/New_York")
 _CONFIRM_START = _time(10, 0)   # no entries in first 30 min (matches backtest)
 _CONFIRM_END   = _time(15, 55)  # last 5m bar of regular session (3:55-3:59 ET)
 _SCAN_END_TS   = _time(15, 55)  # skip 30m bar whose last 5m opens at 3:55 (post-close confirm impossible)
+_LIVE_OPTION_FILTER_POLICY = "baseline"
+_CHALLENGER_OPTION_FILTER_POLICY = "calls_only_best_filter_v1"
+_CHALLENGER_ALLOW_SHORT_ENTRIES = False
+_CHALLENGER_BLOCKED_LONG_ENTRY_BUCKETS = {"12:30", "15:00", "15:30"}
+_CHALLENGER_BLOCKED_LONG_ENTRY_TICKERS = {
+    # Challenger policy from live fill audit through 2026-05-26.
+    "ADI",
+    "SPY",
+    "SOXL",
+    "RDDT",
+    "MRNA",
+    "IREN",
+    "TGT",
+    "ABNB",
+    "CVNA",
+}
+
+
+def _challenger_policy_enabled() -> bool:
+    return _LIVE_OPTION_FILTER_POLICY == _CHALLENGER_OPTION_FILTER_POLICY
 
 # Regular trading hours gate for bar aggregation (drop pre/post-market bars entirely)
 _RTH_START = _time(9, 30)
@@ -90,6 +110,11 @@ EventSink = Callable[[str, dict], None]
 
 def _utc_iso(ts: datetime | None = None) -> str:
     return (ts or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+
+
+def _entry_bucket(now_et: datetime) -> str:
+    minute = 30 if now_et.minute >= 30 else 0
+    return f"{now_et.hour:02d}:{minute:02d}"
 
 
 # ---------------------------------------------------------------------------
@@ -964,6 +989,26 @@ class SwingLiveRunner:
         spy_p_long, spy_p_short = None, None
         filtered_signals = []
         for sig in signals:
+            if _challenger_policy_enabled() and sig.direction < 0 and not _CHALLENGER_ALLOW_SHORT_ENTRIES:
+                logger.info("[%s] VETOED by live option policy (short/put entries disabled)", sig.ticker)
+                self._emit("entry_skipped", {
+                    "ticker": sig.ticker,
+                    "direction": int(sig.direction),
+                    "reason": "short_entries_disabled",
+                })
+                continue
+            if (
+                _challenger_policy_enabled()
+                and sig.direction > 0
+                and sig.ticker.upper() in _CHALLENGER_BLOCKED_LONG_ENTRY_TICKERS
+            ):
+                logger.info("[%s] VETOED by live option policy (call ticker blocked)", sig.ticker)
+                self._emit("entry_skipped", {
+                    "ticker": sig.ticker,
+                    "direction": int(sig.direction),
+                    "reason": "long_ticker_blocked",
+                })
+                continue
             spy_min = sig.config.spy_min if sig.config else 0.0
             if spy_min > 0:
                 if spy_p_long is None:
@@ -1141,6 +1186,21 @@ class SwingLiveRunner:
         # Entry at close of confirmation bar (matches backtest realism)
         entry_price = float(conf_bar["close"])
         now_et = datetime.now(_ET)
+        bucket = _entry_bucket(now_et)
+        if (
+            _challenger_policy_enabled()
+            and sig.direction > 0
+            and bucket in _CHALLENGER_BLOCKED_LONG_ENTRY_BUCKETS
+        ):
+            logger.info("[%s] entry skipped by live option policy bucket=%s", ticker, bucket)
+            self._emit("entry_skipped", {
+                "ticker": ticker,
+                "direction": int(sig.direction),
+                "reason": "long_entry_time_blocked",
+                "entry_price": entry_price,
+                "entry_bucket": bucket,
+            })
+            return
         contract_ref_date = _entry_contract_ref_date(now_et)
         if contract_ref_date != now_et.date():
             logger.info(

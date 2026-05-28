@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from news.config import (
+    LABEL_HORIZON_DAYS,
     LOSER_LIBRARY_PATH,
     NEWS_EMBEDDINGS_PATH,
     NEWS_FEATURE_COLUMNS,
@@ -324,6 +325,7 @@ def build_news_features(
     winner_path: Path | str = WINNER_LIBRARY_PATH,
     loser_path: Path | str = LOSER_LIBRARY_PATH,
     output_path: Path | str = NEWS_FEATURE_MATRIX_PATH,
+    label_horizon_days: int = LABEL_HORIZON_DAYS,
 ) -> pd.DataFrame:
     ensure_data_dirs()
     base = timestamps.copy()
@@ -372,10 +374,21 @@ def build_news_features(
     def _clean_ts(value: pd.Timestamp) -> np.datetime64:
         return pd.Timestamp(value).tz_convert("UTC").tz_localize(None).to_datetime64()
 
+    horizon = pd.Timedelta(days=int(label_horizon_days))
+
     def _prepare_library(lib: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        """Return (label_ready_times, normalized_matrix) sorted by label_ready_times.
+
+        A record's vector only contributes to a similarity score once its forward-return
+        label was already realized. Sorting by ``timestamp + horizon`` and cutting off
+        with ``searchsorted(side='right')`` against the prediction timestamp enforces
+        that invariant.
+        """
         if lib.empty or "timestamp" not in lib.columns or "embedding" not in lib.columns:
             return np.asarray([], dtype="datetime64[ns]"), np.empty((0, 0), dtype=np.float32)
-        ordered = lib.sort_values("timestamp").copy()
+        ordered = lib.copy()
+        ordered["__label_ready_ts"] = ordered["timestamp"] + horizon
+        ordered = ordered.sort_values("__label_ready_ts")
         vectors = [parse_embedding(value) for value in ordered["embedding"]]
         valid = [(i, vec) for i, vec in enumerate(vectors) if vec is not None]
         if not valid:
@@ -383,7 +396,7 @@ def build_news_features(
         idx, vecs = zip(*valid)
         mat = np.vstack(vecs).astype(np.float32)
         mat = mat / np.maximum(np.linalg.norm(mat, axis=1, keepdims=True), 1e-12)
-        times = _clean_times(ordered.iloc[list(idx)]["timestamp"])
+        times = _clean_times(ordered.iloc[list(idx)]["__label_ready_ts"])
         return times, mat
 
     winner_times, winner_matrix = _prepare_library(winners)
@@ -391,9 +404,15 @@ def build_news_features(
     similarity_cache: dict[tuple[str, str], tuple[float, float]] = {}
 
     def _library_similarity(vector: np.ndarray | None, cutoff: pd.Timestamp, times: np.ndarray, matrix: np.ndarray) -> float:
+        """Max cosine of ``vector`` against library entries whose labels were ready by ``cutoff``.
+
+        ``times`` here are label-ready timestamps (record_ts + horizon), not record
+        timestamps, so ``side='right'`` admits entries whose horizon has fully elapsed
+        at or before ``cutoff``.
+        """
         if vector is None or len(times) == 0 or matrix.size == 0:
             return float("nan")
-        end_idx = int(np.searchsorted(times, _clean_ts(cutoff), side="left"))
+        end_idx = int(np.searchsorted(times, _clean_ts(cutoff), side="right"))
         if end_idx <= 0:
             return float("nan")
         x = vector.astype(np.float32)
@@ -421,7 +440,7 @@ def build_news_features(
             ts64 = _clean_ts(ts)
             start64 = _clean_ts(ts - pd.Timedelta(hours=24))
             start_idx = int(np.searchsorted(news_times, start64, side="left"))
-            end_idx = int(np.searchsorted(news_times, ts64, side="right"))
+            end_idx = int(np.searchsorted(news_times, ts64, side="left"))
             count = max(end_idx - start_idx, 0)
             latest_row = ticker_news.iloc[end_idx - 1] if count > 0 else None
             if latest_row is not None:

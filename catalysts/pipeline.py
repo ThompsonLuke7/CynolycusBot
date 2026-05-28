@@ -30,20 +30,31 @@ def _clean_ticker(series: pd.Series) -> pd.Series:
     return series.astype(str).str.upper().str.replace("$", "", regex=False).str.strip()
 
 
+def _event_type_from_source(source: pd.Series) -> pd.Series:
+    """Preserve the actual SEC form (or 'company_news' for press wire) in event_type."""
+    s = source.astype(str)
+    is_sec = s.str.startswith("sec")
+    # Strip the leading 'sec_' so 'sec_10-q' -> '10-q', 'sec_8-k' -> '8-k', etc.
+    sec_form = s.str.replace("^sec_", "", regex=True)
+    return s.where(~is_sec, "sec_" + sec_form).where(is_sec, "company_news")
+
+
 def news_to_catalysts(news: pd.DataFrame) -> pd.DataFrame:
     if news.empty:
         return pd.DataFrame()
+    source = news["source"].astype(str) if "source" in news.columns else pd.Series([""] * len(news), index=news.index)
+    is_sec = source.str.startswith("sec")
     out = pd.DataFrame(
         {
             "catalyst_id": news["record_id"],
             "record_id": news["record_id"],
             "ticker": _clean_ticker(news["ticker"]),
             "timestamp": pd.to_datetime(news["timestamp"], utc=True, errors="coerce"),
-            "catalyst_kind": np.where(news["source"].astype(str).str.startswith("sec"), "sec_filing", "news"),
-            "event_type": np.where(news["source"].astype(str).str.startswith("sec"), "sec_8k", "company_news"),
+            "catalyst_kind": np.where(is_sec, "sec_filing", "news"),
+            "event_type": _event_type_from_source(source),
             "headline": news.get("headline", ""),
             "summary": news.get("summary", ""),
-            "source": news.get("source", ""),
+            "source": source,
             "url": news.get("url", ""),
             "relation_type": news.get("relation_type", "ambiguous"),
             "impact_role": news.get("impact_role", "unknown"),
