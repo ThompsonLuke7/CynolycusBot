@@ -1,5 +1,7 @@
-Verification policy: Never run test suites, training, eval, or any command expected to take >10min unless explicitly requested by the user or within reason. If you foresee a task taking longer than 10 minutes to run, please try to break the runs into smaller chunks. If not possible, ask for permission to run the long-running task. Prefer static checks.
-
+Always notify if using the GPU.
 When giving a powershell command to run, keep it on one line
-Do not run any ai training modules that would use the gpu.
 when giving a ticker such as "$SPY" exclude the "$" dollar sign please so it would just be "SPY"
+
+Living summary policy: At the end of every response, append an entry to `LIVING_SUMMARY.md` at the repo root using `{date/time EST}{user: codex or claude}{what part(s) of the project were discussed}{brief description of discussion or changes}`. Keep each message summary to no more than 3 lines.
+When starting work in a new chat, read `LIVING_SUMMARY.md` first if it exists so current context carries across Codex and Claude sessions.
+Prefer durable facts, decisions, open questions, commands run, files changed, and next steps. Avoid copying large command outputs, secrets, or noisy transient details. It shouldn't look like regular git commit messages; it should follow a story.

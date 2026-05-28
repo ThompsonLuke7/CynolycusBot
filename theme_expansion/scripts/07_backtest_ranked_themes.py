@@ -8,6 +8,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from config import (
@@ -34,6 +35,73 @@ def load_stock_returns() -> pd.DataFrame:
     return bars.pivot(index="date", columns="ticker", values="stock_return_1d").sort_index()
 
 
+def load_price_panel() -> pd.DataFrame:
+    bars = pd.read_parquet(DAILY_BARS_PATH)
+    bars["date"] = pd.to_datetime(bars["date"])
+    bars["px"] = bars["adj_close"].fillna(bars["close"])
+    return bars.pivot(index="date", columns="ticker", values="px").sort_index()
+
+
+def download_vix(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    raw = yf.download(
+        "^VIX",
+        start=start.strftime("%Y-%m-%d"),
+        end=(end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+    )
+    if raw.empty:
+        return pd.DataFrame(columns=["date", "vix"])
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
+    out = raw.reset_index()
+    out.columns = [str(c).lower().replace(" ", "_") for c in out.columns]
+    px_col = "adj_close" if "adj_close" in out.columns else "close"
+    out["date"] = pd.to_datetime(out["date"]).dt.tz_localize(None)
+    return out[["date", px_col]].rename(columns={px_col: "vix"})
+
+
+def build_market_regime() -> pd.DataFrame:
+    wide = load_price_panel()
+    out = pd.DataFrame(index=wide.index)
+    for ticker in ["SPY", "QQQ"]:
+        out[f"{ticker.lower()}_above_200dma"] = wide[ticker] > wide[ticker].rolling(200, min_periods=100).mean()
+    stock_cols = [
+        col
+        for col in wide.columns
+        if col not in {"SPY", "QQQ", "IWM", "TLT", "GLD", "SLV", "USO", "SMH", "XLK", "XLF", "XLV", "XLE"}
+    ]
+    sma200 = wide[stock_cols].rolling(200, min_periods=100).mean()
+    out["market_breadth"] = (wide[stock_cols] > sma200).mean(axis=1)
+    vix = download_vix(wide.index.min(), wide.index.max())
+    if not vix.empty:
+        out = out.reset_index().rename(columns={"index": "date"}).merge(vix, on="date", how="left").set_index("date")
+        out["vix"] = out["vix"].ffill()
+        out["vix_20d_trend"] = out["vix"].pct_change(20)
+    else:
+        out["vix"] = np.nan
+        out["vix_20d_trend"] = np.nan
+
+    risk_off = (
+        (~out["spy_above_200dma"].fillna(False) & ~out["qqq_above_200dma"].fillna(False))
+        | (out["market_breadth"] < 0.40)
+        | (out["vix_20d_trend"] > 0.15)
+    )
+    risk_on = (
+        out["spy_above_200dma"].fillna(False)
+        & out["qqq_above_200dma"].fillna(False)
+        & (out["market_breadth"] > 0.55)
+        & (out["vix_20d_trend"].fillna(0.0) <= 0.10)
+    )
+    out["regime"] = np.select([risk_on, risk_off], ["risk_on", "risk_off"], default="neutral")
+    return out.reset_index().rename(columns={"index": "date"})
+
+
+def exposure_for(regime: str) -> float:
+    return {"risk_on": 1.0, "neutral": 0.70, "risk_off": 0.30}.get(regime, 0.70)
+
+
 def build_trade_calendar(scores: pd.DataFrame, returns: pd.DataFrame) -> list[pd.Timestamp]:
     return sorted(set(scores["date"]).intersection(returns.index))
 
@@ -52,15 +120,21 @@ def run_backtest(
     leaders_per_theme: int,
 ) -> pd.DataFrame:
     dates = build_trade_calendar(scores, returns)
-    positions: list[dict] = []
+    regimes = build_market_regime().set_index("date")["regime"]
+    score_lookup = scores.set_index(["date", "theme"])
+    active: dict[str, dict] = {}
     prev_weights = pd.Series(dtype=float)
     rows = []
 
     for i, date in enumerate(dates):
-        positions = [p for p in positions if p["exit_i"] >= i]
-        if positions:
-            weights = pd.DataFrame(positions).groupby("ticker")["weight"].sum()
-            weights = weights / weights.abs().sum()
+        regime = regimes.get(date, "neutral")
+        target_exposure = exposure_for(regime)
+        if active and target_exposure > 0:
+            holdings = []
+            for state in active.values():
+                for ticker in state["tickers"]:
+                    holdings.append({"ticker": ticker, "weight": target_exposure * state["weight"] / len(state["tickers"])})
+            weights = pd.DataFrame(holdings).groupby("ticker")["weight"].sum()
             gross_return = float((returns.loc[date].reindex(weights.index).fillna(0.0) * weights).sum())
             exposure = float(weights.abs().sum())
         else:
@@ -68,20 +142,39 @@ def run_backtest(
             gross_return = 0.0
             exposure = 0.0
 
-        turnover = 0.0
+        updated = dict(active)
+        for theme, state in list(active.items()):
+            held_days = i - state["start_i"] + 1
+            row = score_lookup.loc[(date, theme)] if (date, theme) in score_lookup.index else pd.Series(dtype=float)
+            rank = row.get("theme_regime_rank", np.nan)
+            if held_days >= HOLD_DAYS and (pd.isna(rank) or rank > 12):
+                updated.pop(theme, None)
+
         if i % REBALANCE_EVERY_DAYS == 0:
-            day_scores = scores[scores["date"].eq(date)].copy()
-            if "is_tradable" in day_scores.columns:
-                day_scores = day_scores[day_scores["is_tradable"].fillna(False).astype(bool)]
-            top_themes = day_scores.nsmallest(top_themes_n, "theme_rank")["theme"].tolist()
-            tickers = pick_daily_tickers(leaders, date, top_themes, leaders_per_theme)
-            if tickers:
-                new_lot = pd.Series(1.0 / len(tickers), index=tickers)
-                after_trade = weights.add(new_lot, fill_value=0.0)
-                after_trade = after_trade / after_trade.abs().sum()
-                turnover = float(after_trade.sub(prev_weights, fill_value=0.0).abs().sum())
-                prev_weights = after_trade
-                positions.extend({"ticker": t, "weight": 1.0 / len(tickers), "exit_i": i + HOLD_DAYS} for t in tickers)
+            day_scores = scores[scores["date"].eq(date)].sort_values("theme_regime_rank")
+            entries = day_scores[day_scores["theme_regime_rank"] <= top_themes_n]
+            for entry in entries.itertuples(index=False):
+                if entry.theme in updated:
+                    continue
+                tickers = pick_daily_tickers(leaders, date, [entry.theme], leaders_per_theme)
+                tickers = [ticker for ticker in tickers if ticker in returns.columns]
+                if tickers:
+                    updated[entry.theme] = {"start_i": i + 1, "tickers": tickers, "weight": 1.0}
+
+        if updated and target_exposure > 0:
+            theme_weight = 1.0 / len(updated)
+            for state in updated.values():
+                state["weight"] = theme_weight
+            new_holdings = []
+            for state in updated.values():
+                for ticker in state["tickers"]:
+                    new_holdings.append({"ticker": ticker, "weight": target_exposure * state["weight"] / len(state["tickers"])})
+            after_trade = pd.DataFrame(new_holdings).groupby("ticker")["weight"].sum()
+        else:
+            after_trade = pd.Series(dtype=float)
+        turnover = float(after_trade.sub(prev_weights, fill_value=0.0).abs().sum())
+        prev_weights = after_trade
+        active = updated
 
         cost = turnover * TRANSACTION_COST_BPS / 10_000.0
         rows.append(
@@ -92,6 +185,8 @@ def run_backtest(
                 "turnover": turnover,
                 "exposure": exposure,
                 "n_positions": int(len(weights)),
+                "regime": regime,
+                "active_themes": "|".join(sorted(active)),
             }
         )
     out = pd.DataFrame(rows)
@@ -108,13 +203,13 @@ def benchmark_returns(dates: pd.Series) -> pd.DataFrame:
 
 
 def forward_pick_stats(scores: pd.DataFrame, leaders: pd.DataFrame, returns: pd.DataFrame) -> dict[str, float]:
-    score_cols = ["date", "theme", "theme_rank"]
+    score_cols = ["date", "theme", "theme_regime_rank"]
     if "is_tradable" in scores.columns:
         score_cols.append("is_tradable")
     picks = leaders.merge(scores[score_cols], on=["date", "theme"], how="inner")
     if "is_tradable" in picks.columns:
         picks = picks[picks["is_tradable"].fillna(False).astype(bool)]
-    picks = picks[picks["theme_rank"] <= TOP_N_THEMES].copy()
+    picks = picks[picks["theme_regime_rank"] <= TOP_N_THEMES].copy()
     if picks.empty:
         return {"mean_forward_5d_return": np.nan, "mean_forward_5d_return_vs_spy": np.nan}
     close_like = (1.0 + returns.fillna(0.0)).cumprod()
@@ -158,9 +253,9 @@ def top_theme_behavior_stats(scores: pd.DataFrame, top_n: int) -> dict[str, floa
     tradable = scores.copy()
     if "is_tradable" in tradable.columns:
         tradable = tradable[tradable["is_tradable"].fillna(False).astype(bool)]
-    tradable = tradable.dropna(subset=["theme_rank"]).sort_values(["date", "theme_rank"])
-    top = tradable[tradable["theme_rank"] <= top_n][["date", "theme"]].copy()
-    top10 = tradable[tradable["theme_rank"] <= 10][["date", "theme"]].copy()
+    tradable = tradable.dropna(subset=["theme_regime_rank"]).sort_values(["date", "theme_regime_rank"])
+    top = tradable[tradable["theme_regime_rank"] <= top_n][["date", "theme"]].copy()
+    top10 = tradable[tradable["theme_regime_rank"] <= 10][["date", "theme"]].copy()
 
     dates = sorted(top["date"].unique())
     repeats = []
@@ -228,6 +323,8 @@ def main() -> None:
     leaders = pd.read_parquet(THEME_LEADERS_PATH)
     scores["date"] = pd.to_datetime(scores["date"])
     leaders["date"] = pd.to_datetime(leaders["date"])
+    if "is_tradable" in scores.columns:
+        scores = scores[scores["is_tradable"].fillna(False).astype(bool)].copy()
     returns = load_stock_returns()
     bt = run_backtest(scores, leaders, returns, args.top_themes, args.leaders_per_theme)
     bench = benchmark_returns(bt["date"])
