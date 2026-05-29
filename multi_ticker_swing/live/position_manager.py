@@ -81,6 +81,7 @@ class SwingPosition:
     qty: int
     config: TickerConfig
     option_entry_price: float | None = None
+    option_entry_meta: dict[str, Any] | None = None
 
     # Derived at entry
     sl_price: float | None = None
@@ -318,6 +319,7 @@ class SwingPosition:
             "bars_held": int(self.bar_count_5m),
             "atr_at_entry": float(self.atr_at_entry) if not _isnan(self.atr_at_entry) else None,
             "option_symbol": str(self.option_symbol),
+            "option_entry_meta": self.option_entry_meta if isinstance(self.option_entry_meta, dict) else None,
             "qty": int(self.qty),
             "tier": int(self.config.tier) if self.config else None,
         }
@@ -988,6 +990,7 @@ class SwingPositionManager:
                     "qty": pos.qty,
                     "exit_price": exit_price,
                     "limit_price": close_result.get("limit_price"),
+                    "close_quote": close_result.get("close_quote"),
                     "response": _safe_response(order_resp),
                     "verification": close_result.get("verification"),
                 })
@@ -1195,6 +1198,7 @@ class SwingPositionManager:
     def _submit_close_order(self, pos: SwingPosition, *, reason: str) -> dict[str, Any]:
         symbol = str(pos.option_symbol).strip().upper()
         qty = int(pos.qty)
+        quote_meta = self._get_contract_quote_context(symbol=symbol)
         base_limit = self._get_contract_price(symbol=symbol, mode="bid")
         close_bid = base_limit
         if not math.isfinite(base_limit) or base_limit <= 0.0:
@@ -1249,6 +1253,7 @@ class SwingPositionManager:
                             "error": str(exc),
                         },
                         "limit_price": limit_price,
+                        "close_quote": quote_meta,
                         "verified": False,
                         "abandoned_worthless": True,
                     }
@@ -1271,6 +1276,7 @@ class SwingPositionManager:
                 "response": resp,
                 "verification": verify,
                 "limit_price": limit_price,
+                "close_quote": quote_meta,
                 "verified": bool(verify.get("verified")),
             }
             if verify.get("verified"):
@@ -1322,7 +1328,18 @@ class SwingPositionManager:
             return _quote_price(quotes[-1], mode=mode)
         except Exception as exc:
             logger.warning("quote fetch failed symbol=%s mode=%s: %s", symbol, mode, exc)
-            return float("nan")
+        return float("nan")
+
+    def _get_contract_quote_context(self, *, symbol: str) -> dict[str, Any]:
+        try:
+            resp = self._client.get_option_quotes(symbols=symbol, limit=1)
+            quotes = _extract_quotes(resp, symbol=symbol)
+            if not quotes:
+                return {"quote_error": "no_quotes"}
+            return _quote_context(quotes[-1])
+        except Exception as exc:
+            logger.warning("quote context fetch failed symbol=%s: %s", symbol, exc)
+            return {"quote_error": str(exc)}
 
     def _verify_close_order(self, *, submitted_resp: dict[str, Any], symbol: str) -> dict[str, Any]:
         order_id = str(submitted_resp.get("id", "")).strip()
@@ -1587,6 +1604,8 @@ def _quote_price(quote: dict[str, Any], *, mode: str) -> float:
     mark = _as_float(quote.get("mark_price", quote.get("mark")))
     if mode_key == "bid":
         return bid
+    if mode_key == "ask":
+        return ask
     if mode_key == "last":
         return last
     if mode_key == "mark":
@@ -1615,6 +1634,30 @@ def _quote_price(quote: dict[str, Any], *, mode: str) -> float:
     if math.isfinite(ask):
         return ask
     return float("nan")
+
+
+def _quote_context(quote: dict[str, Any]) -> dict[str, Any]:
+    bid = _quote_price(quote, mode="bid")
+    ask = _quote_price(quote, mode="ask")
+    mid = _quote_price(quote, mode="mid")
+    mark = _quote_price(quote, mode="mark")
+    last = _quote_price(quote, mode="last")
+    spread = ask - bid if math.isfinite(bid) and math.isfinite(ask) else float("nan")
+    spread_pct_mid = spread / mid if math.isfinite(spread) and math.isfinite(mid) and mid > 0 else float("nan")
+    return {
+        "bid": float(bid) if math.isfinite(bid) else None,
+        "ask": float(ask) if math.isfinite(ask) else None,
+        "mid": float(mid) if math.isfinite(mid) else None,
+        "mark": float(mark) if math.isfinite(mark) else None,
+        "last": float(last) if math.isfinite(last) else None,
+        "spread": float(spread) if math.isfinite(spread) else None,
+        "spread_pct_mid": float(spread_pct_mid) if math.isfinite(spread_pct_mid) else None,
+        "quote_timestamp": (
+            quote.get("timestamp")
+            or quote.get("t")
+            or quote.get("updated_at")
+        ),
+    }
 
 
 def _round_option_limit(value: float) -> float:

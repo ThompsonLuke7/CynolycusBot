@@ -199,9 +199,9 @@ class _ConfirmState:
 _MIN_DTE_DAYS = 0    # allow the nearest listed expiry, including 0DTE/1DTE weeklies
 _EXPIRY_LOOKAHEAD_DAYS = 90
 _ZERO_DTE_CUTOFF = _time(13, 0)
-_DELTA_LO    = 0.20  # minimum |delta| for OTM contract selection
-_DELTA_HI    = 0.40  # maximum |delta| — stays slightly OTM
-_DELTA_TGT   = 0.30  # preferred |delta| within the range
+_DELTA_LO    = 0.35  # minimum |delta| for contract selection
+_DELTA_HI    = 0.60  # maximum |delta| for contract selection
+_DELTA_TGT   = 0.45  # preferred |delta| within the range
 
 def _next_monthly_expiry(ref_date: date) -> date:
     """Return the next monthly options expiry (third Friday of the month).
@@ -261,6 +261,50 @@ def _is_standard_100_contract(contract: dict, ticker: str) -> bool:
     if size is not None and str(size) != "100":
         return False
     return True
+
+
+def _contract_symbol(contract: dict) -> str:
+    return str(contract.get("symbol", "")).strip().upper()
+
+
+def _contract_selection_meta(
+    *,
+    ticker: str,
+    cp: str,
+    symbol: str,
+    current_price: float,
+    expiry_str: str | None,
+    strike: float,
+    selected_delta: float | None,
+    method: str,
+) -> dict[str, Any]:
+    dte = None
+    if expiry_str:
+        try:
+            dte = (date.fromisoformat(expiry_str) - datetime.now(_ET).date()).days
+        except Exception:
+            dte = None
+    moneyness_pct = (
+        (float(strike) / float(current_price) - 1.0)
+        if cp == "call"
+        else (float(current_price) / float(strike) - 1.0)
+        if strike else None
+    )
+    return {
+        "underlying": ticker.upper(),
+        "option_symbol": symbol,
+        "option_type": "C" if cp == "call" else "P",
+        "selection_method": method,
+        "target_delta": float(_DELTA_TGT),
+        "delta_min": float(_DELTA_LO),
+        "delta_max": float(_DELTA_HI),
+        "selected_abs_delta": float(selected_delta) if selected_delta is not None else None,
+        "expiration": expiry_str,
+        "dte": int(dte) if dte is not None else None,
+        "strike": float(strike) if math.isfinite(float(strike or 0.0)) else None,
+        "underlying_price_at_selection": float(current_price),
+        "moneyness_pct": float(moneyness_pct) if moneyness_pct is not None else None,
+    }
 
 
 def _available_contracts(
@@ -333,9 +377,9 @@ def _select_contract(
     direction: int,
     current_price: float,
     ref_date: date,
-) -> str | None:
+) -> tuple[str | None, dict[str, Any]]:
     """
-    Select a slightly-OTM option contract targeting delta 0.2–0.4 (|delta| ~0.30).
+    Select an option contract targeting delta 0.35–0.60 (|delta| ~0.45).
 
     Strategy:
       1. Discover the nearest listed expiry with at least _MIN_DTE_DAYS remaining.
@@ -344,23 +388,32 @@ def _select_contract(
       4. Pick the contract closest to _DELTA_TGT.
       5. If Greeks are unavailable (pre-market, API gap), fall back to nearest ATM strike.
 
-    Returns OCC-format symbol string, or None if selection fails.
+    Returns (OCC-format symbol string, metadata), or (None, metadata) if selection fails.
     """
     cp = "call" if direction == 1 else "put"
+    base_meta = {
+        "underlying": ticker.upper(),
+        "option_type": "C" if cp == "call" else "P",
+        "target_delta": float(_DELTA_TGT),
+        "delta_min": float(_DELTA_LO),
+        "delta_max": float(_DELTA_HI),
+        "underlying_price_at_selection": float(current_price),
+    }
     try:
         expiry_str, contracts = _available_contracts(client, ticker, cp, current_price, ref_date)
     except Exception as exc:
         logger.error("[%s] get_option_contracts failed: %s", ticker, exc)
-        return None
+        return None, {**base_meta, "selection_error": str(exc)}
 
     if not expiry_str or not contracts:
         logger.warning(
             "[%s] no standard 100-share %s contracts found near ATM (%.2f)",
             ticker, cp, current_price,
         )
-        return None
+        return None, {**base_meta, "selection_error": "no_standard_contracts"}
 
-    available_symbols = {str(c.get("symbol", "")) for c in contracts}
+    available_symbols = {_contract_symbol(c) for c in contracts}
+    contract_by_symbol = {_contract_symbol(c): c for c in contracts}
 
     # --- Primary path: delta-based selection via snapshots ---
     try:
@@ -372,6 +425,7 @@ def _select_contract(
         if snapshots:
             candidates = []
             for occ_sym, snap in snapshots.items():
+                occ_sym = str(occ_sym).strip().upper()
                 if available_symbols and occ_sym not in available_symbols:
                     continue
                 greeks = snap.get("greeks") or {}
@@ -379,25 +433,58 @@ def _select_contract(
                 if raw_delta is None:
                     continue
                 abs_delta = abs(float(raw_delta))
-                candidates.append((occ_sym, abs_delta))
+                candidates.append((occ_sym, abs_delta, snap))
 
             if candidates:
                 # Prefer contracts in [_DELTA_LO, _DELTA_HI], else take closest overall
-                in_range = [(s, d) for s, d in candidates if _DELTA_LO <= d <= _DELTA_HI]
+                in_range = [(s, d, snap) for s, d, snap in candidates if _DELTA_LO <= d <= _DELTA_HI]
                 pool = in_range if in_range else candidates
-                best_sym, best_d = min(pool, key=lambda x: abs(x[1] - _DELTA_TGT))
+                best_sym, best_d, best_snap = min(pool, key=lambda x: abs(x[1] - _DELTA_TGT))
+                contract = contract_by_symbol.get(best_sym, {})
+                strike = _contract_strike(contract)
+                meta = _contract_selection_meta(
+                    ticker=ticker,
+                    cp=cp,
+                    symbol=best_sym,
+                    current_price=current_price,
+                    expiry_str=expiry_str,
+                    strike=strike,
+                    selected_delta=best_d,
+                    method="delta_snapshot",
+                )
+                greeks = best_snap.get("greeks") if isinstance(best_snap, dict) else None
+                if isinstance(greeks, dict):
+                    meta["greeks"] = {
+                        k: _as_float(greeks.get(k))
+                        for k in ("delta", "gamma", "theta", "vega", "rho")
+                        if greeks.get(k) is not None
+                    }
+                if not in_range:
+                    meta["selection_warning"] = "no_contract_in_target_delta_range"
                 logger.info(
                     "[%s] selected %s %s (|delta|=%.3f, exp=%s)",
                     ticker, cp, best_sym, best_d, expiry_str,
                 )
-                return best_sym
+                return best_sym, meta
     except Exception as exc:
         logger.warning("[%s] snapshot delta selection failed (%s); falling back to ATM.", ticker, exc)
 
     # --- Fallback: nearest ATM strike via contracts list ---
     best = min(contracts, key=lambda c: abs(_contract_strike(c) - current_price))
-    logger.info("[%s] ATM fallback: selected %s %s (exp=%s)", ticker, cp, best.get("symbol"), expiry_str)
-    return str(best.get("symbol", ""))
+    best_sym = _contract_symbol(best)
+    strike = _contract_strike(best)
+    meta = _contract_selection_meta(
+        ticker=ticker,
+        cp=cp,
+        symbol=best_sym,
+        current_price=current_price,
+        expiry_str=expiry_str,
+        strike=strike,
+        selected_delta=None,
+        method="atm_fallback",
+    )
+    logger.info("[%s] ATM fallback: selected %s %s (exp=%s)", ticker, cp, best_sym, expiry_str)
+    return best_sym, meta
 
 
 # ---------------------------------------------------------------------------
@@ -1210,7 +1297,7 @@ class SwingLiveRunner:
                 contract_ref_date.isoformat(),
             )
 
-        option_symbol = _select_contract(
+        option_symbol, option_selection_meta = _select_contract(
             self._client, ticker, sig.direction, entry_price, contract_ref_date
         )
         if not option_symbol:
@@ -1220,6 +1307,7 @@ class SwingLiveRunner:
                 "direction": int(sig.direction),
                 "reason": "no_contract_found",
                 "entry_price": entry_price,
+                "option_selection": option_selection_meta,
             })
             return
 
@@ -1227,11 +1315,16 @@ class SwingLiveRunner:
         order_resp: Any = None
         order_error: str | None = None
         verification: dict[str, Any] | None = None
-        limit_prices = _entry_buy_limit_ladder(
+        limit_prices, quote_meta = _entry_buy_limit_ladder(
             self._client,
             symbol=option_symbol,
             attempts=_ENTRY_ORDER_ATTEMPTS,
         )
+        option_entry_meta = {
+            **(option_selection_meta or {}),
+            "entry_quote": quote_meta,
+            "entry_limit_prices": limit_prices,
+        }
         if not limit_prices:
             logger.warning("[%s] no quote for buy limit price; skipping entry symbol=%s", ticker, option_symbol)
             self._emit("entry_skipped", {
@@ -1240,6 +1333,7 @@ class SwingLiveRunner:
                 "reason": "no_quote_for_buy_limit",
                 "entry_price": entry_price,
                 "option_symbol": option_symbol,
+                "option_entry_meta": option_entry_meta,
             })
             return
         if not self._dry_run:
@@ -1274,6 +1368,7 @@ class SwingLiveRunner:
                         "attempt": attempt,
                         "attempts": len(limit_prices),
                         "error": order_error,
+                        "option_entry_meta": option_entry_meta,
                     })
                     return
                 verification = _verify_entry_order(
@@ -1291,6 +1386,7 @@ class SwingLiveRunner:
                     "attempt": attempt,
                     "attempts": len(limit_prices),
                     "entry_price": entry_price,
+                    "option_entry_meta": option_entry_meta,
                     "response": _safe_response(order_resp),
                     "verification": verification,
                 })
@@ -1330,6 +1426,7 @@ class SwingLiveRunner:
                     "reason": "buy_order_not_verified",
                     "entry_price": entry_price,
                     "option_symbol": option_symbol,
+                    "option_entry_meta": option_entry_meta,
                     "verification": verification,
                 })
                 return
@@ -1346,6 +1443,7 @@ class SwingLiveRunner:
                 "order_type": "limit",
                 "limit_prices": limit_prices,
                 "entry_price": entry_price,
+                "option_entry_meta": option_entry_meta,
             })
 
         entry_time = datetime.now(timezone.utc)
@@ -1365,6 +1463,7 @@ class SwingLiveRunner:
             qty=qty,
             config=sig.config,
             option_entry_price=option_entry_price,
+            option_entry_meta=option_entry_meta,
         )
         self._pos_mgr.open_position(pos)
 
@@ -1376,6 +1475,8 @@ class SwingLiveRunner:
             "entry_price": float(entry_price),
             "entry_time": int(entry_time.timestamp()),
             "sl_price": float(pos.sl_price) if pos.sl_price is not None else None,
+            "option_symbol": option_symbol,
+            "option_entry_meta": option_entry_meta,
             "pre_entry_bars": pre_bars,
         })
 
@@ -1445,28 +1546,32 @@ def _entry_buy_limit_ladder(
     *,
     symbol: str,
     attempts: int,
-) -> list[float]:
+) -> tuple[list[float], dict[str, Any]]:
     try:
         resp = client.get_option_quotes(symbols=symbol, limit=1)
         quotes = _extract_option_quotes(resp, symbol=symbol)
     except Exception as exc:
         logger.warning("entry quote fetch failed symbol=%s: %s", symbol, exc)
-        return []
+        return [], {"quote_error": str(exc)}
     if not quotes:
-        return []
+        return [], {"quote_error": "no_quotes"}
     quote = quotes[-1]
     bid = _option_quote_price(quote, mode="bid")
     ask = _option_quote_price(quote, mode="ask")
     mid = _option_quote_price(quote, mode="mid")
+    quote_meta = _option_quote_context(quote)
     if not math.isfinite(ask) or ask <= 0.0:
-        return []
+        quote_meta["quote_error"] = "missing_ask"
+        return [], quote_meta
     if not math.isfinite(mid) or mid <= 0.0:
         mid = ask
     mid = min(mid, ask)
 
     count = max(1, int(attempts))
     if count == 1 or math.isclose(mid, ask, rel_tol=0.0, abs_tol=1e-9):
-        return [_round_option_limit(mid)]
+        prices = [_round_option_limit(mid)]
+        quote_meta["limit_prices"] = prices
+        return prices, quote_meta
 
     prices: list[float] = []
     distance = ask - mid
@@ -1486,7 +1591,8 @@ def _entry_buy_limit_ladder(
         ask,
         prices,
     )
-    return prices
+    quote_meta["limit_prices"] = prices
+    return prices, quote_meta
 
 
 def _extract_option_quotes(resp: Any, *, symbol: str) -> list[dict[str, Any]]:
@@ -1526,6 +1632,30 @@ def _extract_option_quotes(resp: Any, *, symbol: str) -> list[dict[str, Any]]:
     return []
 
 
+def _option_quote_context(quote: dict[str, Any]) -> dict[str, Any]:
+    bid = _option_quote_price(quote, mode="bid")
+    ask = _option_quote_price(quote, mode="ask")
+    mid = _option_quote_price(quote, mode="mid")
+    mark = _option_quote_price(quote, mode="mark")
+    last = _option_quote_price(quote, mode="last")
+    spread = ask - bid if math.isfinite(bid) and math.isfinite(ask) else float("nan")
+    spread_pct_mid = spread / mid if math.isfinite(spread) and math.isfinite(mid) and mid > 0 else float("nan")
+    return {
+        "bid": float(bid) if math.isfinite(bid) else None,
+        "ask": float(ask) if math.isfinite(ask) else None,
+        "mid": float(mid) if math.isfinite(mid) else None,
+        "mark": float(mark) if math.isfinite(mark) else None,
+        "last": float(last) if math.isfinite(last) else None,
+        "spread": float(spread) if math.isfinite(spread) else None,
+        "spread_pct_mid": float(spread_pct_mid) if math.isfinite(spread_pct_mid) else None,
+        "quote_timestamp": (
+            quote.get("timestamp")
+            or quote.get("t")
+            or quote.get("updated_at")
+        ),
+    }
+
+
 def _option_quote_price(quote: dict[str, Any], *, mode: str) -> float:
     mode_key = str(mode or "ask").strip().lower()
     ask = _as_float(quote.get("ask_price", quote.get("ap", quote.get("ask"))))
@@ -1534,6 +1664,8 @@ def _option_quote_price(quote: dict[str, Any], *, mode: str) -> float:
     mark = _as_float(quote.get("mark_price", quote.get("mark")))
     if mode_key == "bid":
         return bid
+    if mode_key == "ask":
+        return ask
     if mode_key == "last":
         return last
     if mode_key == "mark":
