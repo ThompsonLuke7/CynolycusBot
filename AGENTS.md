@@ -1,6 +1,6 @@
 Keep responses concise and efficient to not waste tokens.
-Always notify if using the GPU. If not using, don't say anything.
-When giving a powershell command to run, keep it on one line
+Always notify if using the GPU. If not using, don't say anything about it.
+When giving the user a powershell command to run, keep it on one line
 when giving a ticker such as "$SPY" exclude the "$" dollar sign so it's just "SPY"
 
 Living summary policy: At the end of every response, append an entry to `LIVING_SUMMARY.md` at the repo root using `{date/time EST}{user: codex or claude}{what part(s) of the project were discussed}{brief description of discussion or changes}`. Keep each message summary to no more than 3 lines.
