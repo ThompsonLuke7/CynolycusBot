@@ -3326,8 +3326,28 @@ class LiveSession:
                     last = last_broker_snapshot_by_symbol.get(symbol, 0.0)
                     if not force and now - last < float(cfg.broker_snapshot_interval_sec):
                         return None
-                    broker_state = policy.snapshot_broker_state(orders_limit=20)
                     last_broker_snapshot_by_symbol[symbol] = now
+                    try:
+                        broker_state = policy.snapshot_broker_state(orders_limit=20)
+                    except Exception as exc:
+                        broker_state = {
+                            "underlying": symbol,
+                            "ok": False,
+                            "error": f"{exc}",
+                            "via": "snapshot_broker_state",
+                        }
+                        self._policy_logger(symbol).warning(
+                            "broker state snapshot failed: %s",
+                            exc,
+                            exc_info=True,
+                        )
+                        self._store.add_log_event(
+                            {
+                                "symbol": symbol,
+                                "message": f"broker state snapshot failed: {exc}",
+                                "traceback": traceback.format_exc(limit=8),
+                            }
+                        )
                     self._store.set_broker_state(symbol, broker_state)
                     self._emit("broker_state", {"symbol": symbol, "state": broker_state})
                     self._audit("broker_state", {"symbol": symbol, "state": broker_state})
@@ -4184,31 +4204,11 @@ class LiveSession:
                         last_broker_poll = now
                         for symbol, policy in order_policies.items():
                             reconcile_event: dict[str, Any] | None = None
-                            if policy.has_pending_broker_reconcile():
-                                reconcile_result = policy.reconcile_pending_broker_order(
-                                    logger=self._policy_logger(symbol)
-                                )
-                                if cfg.use_execution_latch:
-                                    execution_latches[symbol].set_position(
-                                        policy.snapshot_state().get("position", 0)
+                            try:
+                                if policy.has_pending_broker_reconcile():
+                                    reconcile_result = policy.reconcile_pending_broker_order(
+                                        logger=self._policy_logger(symbol)
                                     )
-                                self._store.set_policy_state(symbol, policy.snapshot_state())
-                                _persist_policy_runtime_cache_throttled(force=True)
-                                reconcile_event = {
-                                    "symbol": symbol,
-                                    "timestamp": _ts_iso(datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))),
-                                    "result": {
-                                        "event": "broker_reconcile",
-                                        "pending_reconcile_result": reconcile_result,
-                                    },
-                                    "policy_state": policy.snapshot_state(),
-                                }
-                            else:
-                                reconcile_result = policy.reconcile_with_broker(
-                                    logger=self._policy_logger(symbol),
-                                    force=True,
-                                )
-                                if reconcile_result.get("changed"):
                                     if cfg.use_execution_latch:
                                         execution_latches[symbol].set_position(
                                             policy.snapshot_state().get("position", 0)
@@ -4219,37 +4219,94 @@ class LiveSession:
                                         "symbol": symbol,
                                         "timestamp": _ts_iso(datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))),
                                         "result": {
-                                            "event": "broker_sync",
-                                            "broker_sync_result": reconcile_result,
+                                            "event": "broker_reconcile",
+                                            "pending_reconcile_result": reconcile_result,
                                         },
                                         "policy_state": policy.snapshot_state(),
                                     }
-                            force_close_fn = getattr(policy, "_maybe_force_close_expiring_positions", None)
-                            if callable(force_close_fn) and not policy.has_pending_broker_reconcile():
-                                local_now = datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))
-                                forced_flat = force_close_fn(
-                                    local_ts=local_now,
-                                    logger=self._policy_logger(symbol),
-                                )
-                                if forced_flat is not None:
-                                    if cfg.use_execution_latch:
-                                        execution_latches[symbol].set_position(
-                                            policy.snapshot_state().get("position", 0)
-                                        )
-                                    self._store.set_policy_state(symbol, policy.snapshot_state())
-                                    _persist_policy_runtime_cache_throttled(force=True)
-                                    force_event = {
+                                else:
+                                    reconcile_result = policy.reconcile_with_broker(
+                                        logger=self._policy_logger(symbol),
+                                        force=True,
+                                    )
+                                    if reconcile_result.get("changed"):
+                                        if cfg.use_execution_latch:
+                                            execution_latches[symbol].set_position(
+                                                policy.snapshot_state().get("position", 0)
+                                            )
+                                        self._store.set_policy_state(symbol, policy.snapshot_state())
+                                        _persist_policy_runtime_cache_throttled(force=True)
+                                        reconcile_event = {
+                                            "symbol": symbol,
+                                            "timestamp": _ts_iso(datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))),
+                                            "result": {
+                                                "event": "broker_sync",
+                                                "broker_sync_result": reconcile_result,
+                                            },
+                                            "policy_state": policy.snapshot_state(),
+                                        }
+                                force_close_fn = getattr(policy, "_maybe_force_close_expiring_positions", None)
+                                if callable(force_close_fn) and not policy.has_pending_broker_reconcile():
+                                    local_now = datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))
+                                    forced_flat = force_close_fn(
+                                        local_ts=local_now,
+                                        logger=self._policy_logger(symbol),
+                                    )
+                                    if forced_flat is not None:
+                                        if cfg.use_execution_latch:
+                                            execution_latches[symbol].set_position(
+                                                policy.snapshot_state().get("position", 0)
+                                            )
+                                        self._store.set_policy_state(symbol, policy.snapshot_state())
+                                        _persist_policy_runtime_cache_throttled(force=True)
+                                        force_event = {
+                                            "symbol": symbol,
+                                            "timestamp": _ts_iso(local_now),
+                                            "result": forced_flat,
+                                            "policy_state": policy.snapshot_state(),
+                                        }
+                                        self._emit("order_policy", force_event)
+                                        self._audit("order_policy", force_event)
+                                if reconcile_event is not None:
+                                    self._emit("order_policy", reconcile_event)
+                                    self._audit("order_policy", reconcile_event)
+                                _snapshot_broker_state(symbol, policy, force=True)
+                            except Exception as exc:
+                                logger = self._policy_logger(symbol)
+                                logger.warning("idle broker maintenance failed: %s", exc, exc_info=True)
+                                policy_state = policy.snapshot_state()
+                                error_traceback = traceback.format_exc(limit=8)
+                                error_event = {
+                                    "symbol": symbol,
+                                    "timestamp": _ts_iso(datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))),
+                                    "result": {
+                                        "event": "broker_sync_error",
+                                        "error": f"{exc}",
+                                        "traceback": error_traceback,
+                                        "retryable": True,
+                                    },
+                                    "policy_state": policy_state,
+                                }
+                                self._store.set_policy_state(symbol, policy_state)
+                                self._store.add_log_event(
+                                    {
                                         "symbol": symbol,
-                                        "timestamp": _ts_iso(local_now),
-                                        "result": forced_flat,
-                                        "policy_state": policy.snapshot_state(),
+                                        "message": f"idle broker maintenance failed: {exc}",
+                                        "traceback": error_traceback,
                                     }
-                                    self._emit("order_policy", force_event)
-                                    self._audit("order_policy", force_event)
-                            if reconcile_event is not None:
-                                self._emit("order_policy", reconcile_event)
-                                self._audit("order_policy", reconcile_event)
-                            _snapshot_broker_state(symbol, policy, force=True)
+                                )
+                                self._emit("order_policy", error_event)
+                                self._audit("order_policy", error_event)
+                                broker_error_state = {
+                                    "underlying": symbol,
+                                    "ok": False,
+                                    "error": f"{exc}",
+                                    "via": "idle_broker_maintenance",
+                                }
+                                self._store.set_broker_state(symbol, broker_error_state)
+                                self._emit("broker_state", {"symbol": symbol, "state": broker_error_state})
+                                self._audit("broker_state", {"symbol": symbol, "state": broker_error_state})
+                                continue
 
         except Exception as exc:
             error_message = f"{exc}"
