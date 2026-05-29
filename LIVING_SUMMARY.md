@@ -26,3 +26,4 @@
 {2026-05-28 12:39:26 EST}{user: codex}{Added NVDA theme-membership rotation script/plot showing NVDA mapped themes rotate in/out of top ranks repeatedly; generated plot and summary CSV.}
 {2026-05-28 12:53:20 EST}{user: codex}{Added active strategy backtest plot script 29; generated active_theme_strategy_backtest.png plus summary/period CSVs clarifying passive diagnostics vs active top5/exit12 leader strategy.}
 {2026-05-28 13:00:00 EST}{user: codex}{Explained active theme-strategy labels and performance ranking; original rule-based beat top5 full/cash risk-off in the saved run, while existing top3 scaled was just the prior baseline and the weakest of the four compared.}
+{2026-05-29 16:43:20 EDT}{user: codex}{Counted tracked source code files in the repo; 414 `.py/.sh/.ps1` files total 128,180 lines.}
