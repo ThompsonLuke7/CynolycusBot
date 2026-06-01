@@ -15,3 +15,5 @@ gymnasium
 regex
 TA-Lib
 numba
+praw
+lightgbm

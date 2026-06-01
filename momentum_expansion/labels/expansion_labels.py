@@ -34,6 +34,7 @@ from momentum_expansion.config.momentum_config import (
     MOMENTUM_CANDIDATE_FILTER_CONFIG,
     PROCESSED_FEAT_DIR,
     RAW_4H_DIR,
+    TRAINING_MATRIX_CONFIG,
     TRAINING_MATRIX,
 )
 from momentum_expansion.data.load_bars import load_4h
@@ -364,7 +365,7 @@ def build_training_matrix(
     df = df.dropna(subset=[c for c in label_cols if c in df.columns], how="any")
     feature_cols = [c for c in FEATURE_COLUMNS_4H if c in df.columns]
     df = df.dropna(subset=feature_cols, how="any")
-    if MOMENTUM_CANDIDATE_FILTER_CONFIG.get("enabled", True):
+    if TRAINING_MATRIX_CONFIG.get("apply_momentum_candidate_filter", False):
         before = len(df)
         df["momentum_candidate"] = momentum_candidate_mask(df).astype(float)
         df = df[df["momentum_candidate"] > 0].copy()

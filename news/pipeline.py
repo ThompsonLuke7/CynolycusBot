@@ -21,16 +21,24 @@ from news.config import (
     WINNER_LIBRARY_PATH,
     ensure_data_dirs,
 )
-from news.catalyst_types import classify_catalyst_types
+from news.catalyst_types import classify_catalyst_types, refine_catalyst_types_from_clusters
 from news.dedup import deduplicate_news
 from news.earnings import enrich_earnings_catalyst_fields
 from news.nlp import embed_texts_bge, finbert_scores_batch
 from news.relations import classify_news_relations
 from news.schema import empty_news_frame, records_from_frame
 from news.sources import (
-    fetch_sec_alpha_filings,
+    enrich_sec_8k_ex99_text,
+    fetch_clinicaltrials_updates,
+    fetch_fed_press_releases,
     fetch_finnhub_company_news,
+    fetch_fmp_earnings_transcripts,
+    fetch_google_news_rss,
+    fetch_openfda_drug_approvals,
     fetch_sec_8k_news,
+    fetch_sec_alpha_filings,
+    fetch_yfinance_news,
+    fetch_yfinance_unusual_options_activity,
 )
 
 
@@ -39,26 +47,35 @@ def collect_company_news(
     *,
     start: str,
     end: str,
-    sources: Iterable[str] = ("finnhub", "sec_8k"),
+    sources: Iterable[str] = ("finnhub", "sec_8k", "sec_alpha", "yfinance", "google_news"),
     sec_include_archives: bool = True,
     sec_full_text_limit: int = 0,
+    sec_enrich_ex99: bool = True,
     output_path: Path | str = NEWS_RECORDS_PATH,
+    merge_with_existing: bool = True,
 ) -> pd.DataFrame:
+    """Collect company news across all enabled sources.
+
+    By default merges into the existing ``news_records.parquet`` so multiple
+    pulls accumulate rather than overwrite. Set ``merge_with_existing=False``
+    for a clean rebuild.
+    """
     ensure_data_dirs()
     frames = []
     source_set = set(sources)
     if "finnhub" in source_set:
         frames.append(fetch_finnhub_company_news(tickers, start=start, end=end))
     if "sec_8k" in source_set:
-        frames.append(
-            fetch_sec_8k_news(
-                tickers,
-                start=start,
-                end=end,
-                include_archives=sec_include_archives,
-                full_text_limit=sec_full_text_limit,
-            )
+        sec_frame = fetch_sec_8k_news(
+            tickers,
+            start=start,
+            end=end,
+            include_archives=sec_include_archives,
+            full_text_limit=sec_full_text_limit,
         )
+        if sec_enrich_ex99 and not sec_frame.empty:
+            sec_frame = enrich_sec_8k_ex99_text(sec_frame)
+        frames.append(sec_frame)
     if "sec_alpha" in source_set:
         frames.append(
             fetch_sec_alpha_filings(
@@ -69,12 +86,33 @@ def collect_company_news(
                 full_text_limit=sec_full_text_limit,
             )
         )
+    if "yfinance" in source_set:
+        frames.append(fetch_yfinance_news(tickers, start=start, end=end))
+    if "google_news" in source_set:
+        frames.append(fetch_google_news_rss(tickers, start=start, end=end))
+    if "fed_rss" in source_set:
+        frames.append(fetch_fed_press_releases(start=start, end=end))
+    if "openfda" in source_set:
+        frames.append(fetch_openfda_drug_approvals(start=start, end=end))
+    if "clinicaltrials" in source_set:
+        frames.append(fetch_clinicaltrials_updates(tickers, start=start, end=end))
+    if "yf_options_flow" in source_set:
+        frames.append(fetch_yfinance_unusual_options_activity(tickers))
+    if "fmp_transcripts" in source_set:
+        frames.append(fetch_fmp_earnings_transcripts(tickers))
     raw = pd.concat(frames, ignore_index=True) if frames else empty_news_frame()
     if not raw.empty:
         raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True, errors="coerce")
         start_ts = pd.Timestamp(start, tz="UTC")
         end_ts = pd.Timestamp(end, tz="UTC") + pd.Timedelta(days=1)
         raw = raw.loc[raw["timestamp"].between(start_ts, end_ts)].copy()
+    if merge_with_existing and Path(output_path).exists():
+        existing = pd.read_parquet(output_path)
+        if not existing.empty:
+            existing_cols = set(existing.columns)
+            raw_cols = set(raw.columns)
+            shared = list(existing_cols & raw_cols)
+            raw = pd.concat([existing[shared], raw[shared]], ignore_index=True) if shared else raw
     out = deduplicate_news(raw)
     out = classify_catalyst_types(enrich_earnings_catalyst_fields(classify_news_relations(out)))
     out.to_parquet(output_path, index=False)
@@ -217,11 +255,70 @@ def cluster_news_embeddings(
     return df
 
 
+def refine_news_records_from_clusters(
+    news_path: Path | str = NEWS_RECORDS_PATH,
+    embeddings_path: Path | str = NEWS_EMBEDDINGS_PATH,
+    *,
+    output_path: Path | str = NEWS_RECORDS_PATH,
+    cluster_label_threshold: float = 0.35,
+    min_cluster_size: int = 4,
+) -> pd.DataFrame:
+    """Join cluster ids from embeddings parquet onto news_records and re-derive
+    catalyst_family/catalyst_subtype from cluster modal tags.
+
+    This is the post-clustering refinement step that lets a cluster of
+    options-flow alerts override the regex-assigned ``earnings_guidance``
+    family even though the headlines mention ``earnings``.
+    """
+    news = pd.read_parquet(news_path) if Path(news_path).exists() else empty_news_frame()
+    if news.empty:
+        news.to_parquet(output_path, index=False)
+        return news
+    emb = pd.read_parquet(embeddings_path) if Path(embeddings_path).exists() else pd.DataFrame()
+    if emb.empty or "news_cluster_id" not in emb.columns:
+        news.to_parquet(output_path, index=False)
+        return news
+    keep = [c for c in ("record_id", "news_cluster_id", "news_cluster_key") if c in emb.columns]
+    news = news.drop(columns=[c for c in ("news_cluster_id", "news_cluster_key") if c in news.columns])
+    news = news.merge(emb[keep], on="record_id", how="left")
+    news = refine_catalyst_types_from_clusters(
+        news,
+        cluster_label_threshold=cluster_label_threshold,
+        min_cluster_size=min_cluster_size,
+    )
+    news.to_parquet(output_path, index=False)
+    return news
+
+
+def _detect_bars_per_day(bars: pd.DataFrame) -> int:
+    """Infer bars-per-trading-day from the median intra-ticker interval.
+
+    A 4-hour bar at ~6.5h/day trading yields ~2 bars/day; a 30-minute bar
+    yields ~13. Daily bars yield 1.
+    """
+    if bars.empty or "timestamp" not in bars.columns or "ticker" not in bars.columns:
+        return 0
+    sample = bars.sort_values(["ticker", "timestamp"]).head(50000).copy()
+    sample["timestamp"] = pd.to_datetime(sample["timestamp"], utc=True, errors="coerce")
+    sample = sample.dropna(subset=["timestamp"])
+    deltas = sample.groupby("ticker")["timestamp"].diff().dropna()
+    if deltas.empty:
+        return 0
+    intraday = deltas[(deltas > pd.Timedelta(seconds=0)) & (deltas < pd.Timedelta(hours=12))]
+    if intraday.empty:
+        return 1  # daily bars
+    median_seconds = float(intraday.median().total_seconds())
+    if median_seconds <= 0:
+        return 0
+    trading_seconds_per_day = 6.5 * 3600
+    return max(1, int(round(trading_seconds_per_day / median_seconds)))
+
+
 def label_news_forward_returns(
     news_path: Path | str,
     bars: pd.DataFrame,
     *,
-    bars_per_day: int = 13,
+    bars_per_day: int | None = None,
     expansion_threshold: float = 0.10,
     max_entry_gap_days: float = 7.0,
     output_path: Path | str = NEWS_LABELS_PATH,
@@ -235,6 +332,12 @@ def label_news_forward_returns(
     bars["timestamp"] = pd.to_datetime(bars["timestamp"], utc=True, errors="coerce")
     bars["ticker"] = bars["ticker"].astype(str).str.upper().str.replace("$", "", regex=False)
     bars = bars.sort_values(["ticker", "timestamp"])
+    if bars_per_day is None or int(bars_per_day) <= 0:
+        detected = _detect_bars_per_day(bars)
+        if detected > 0:
+            bars_per_day = detected
+        else:
+            bars_per_day = 13  # legacy default
     bars_by_ticker: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for ticker, ticker_bars in bars.groupby("ticker", sort=False):
         clean_times = (

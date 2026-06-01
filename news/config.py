@@ -45,6 +45,8 @@ SEC_ALPHA_FORMS = [
     "SC TO-T",
     "DEFM14A",
     "PREM14A",
+    "4",       # insider transactions — open market purchases are strong signal
+    "4/A",     # amended Form 4
 ]
 
 SEC_LOW_SIGNAL_FORMS = [

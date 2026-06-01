@@ -114,10 +114,9 @@ CORRELATION_PRUNE_THRESHOLD = 0.995
 # ---------------------------------------------------------------------------
 # Momentum candidate filter
 # ---------------------------------------------------------------------------
-# The expansion model is meant to rank actionable momentum-continuation setups,
-# not every possible ticker/bar in the historical cache. Training and live
-# ranking both use this same coarse gate so the model is fit on the same kind of
-# rows it will later score.
+# Coarse live/execution gate for actionable momentum-continuation setups.
+# Keep this separate from training scope: the May 31, 2026 cached-data sweep
+# found broad cross-sectional ranker training beat training only on this gate.
 MOMENTUM_CANDIDATE_FILTER_CONFIG: dict = {
     "enabled": True,
     "exclude_low_price": True,
@@ -127,6 +126,17 @@ MOMENTUM_CANDIDATE_FILTER_CONFIG: dict = {
     "min_rs_spy_20": 0.0,
     "min_xsec_ret_20_rank": 0.60,
     "min_range_pos_20": 0.45,
+}
+
+# ---------------------------------------------------------------------------
+# Training matrix
+# ---------------------------------------------------------------------------
+TRAINING_MATRIX_CONFIG: dict = {
+    "target_column": "expansion_survival_score",
+    "target_kind": "regression",
+    # Train the ranker on broad valid rows, then apply candidate/setup filters
+    # after scoring for execution.
+    "apply_momentum_candidate_filter": False,
 }
 
 # ---------------------------------------------------------------------------

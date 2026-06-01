@@ -41,6 +41,29 @@ DEFAULT_PORT_SWING = 8766
 DEFAULT_AUDIT_ROOT = str(Path(__file__).resolve().parent / "swing_audit")
 
 
+def _env_profile_exists(env_file: str, profile: str) -> bool:
+    try:
+        from API.Alpaca_API.core.config import _read_env_file, _split_env_file_profile
+
+        env_path, _ = _split_env_file_profile(env_file)
+        values = _read_env_file(env_path or ".env")
+    except Exception:
+        return False
+    suffix = str(profile).strip().upper()
+    return bool(
+        values.get(f"APCA_API_KEY_ID_{suffix}")
+        or values.get(f"ALPACA_API_KEY_{suffix}")
+        or values.get(f"{suffix}_APCA_API_KEY_ID")
+        or values.get(f"{suffix}_ALPACA_API_KEY")
+    )
+
+
+def _default_profile_env(env_file: str, profile: str) -> str:
+    if "#" in str(env_file):
+        return str(env_file)
+    return f"{env_file}#{profile}"
+
+
 def _build_symbol_union(env_file: str) -> list[str]:
     """Union of all symbols needed by both dashboards."""
     from multi_ticker_swing.config.pipeline_config import CONTEXT_TICKERS
@@ -56,11 +79,20 @@ def run_combined(
     host: str = DEFAULT_HOST,
     port_intraday: int = DEFAULT_PORT_INTRADAY,
     port_swing: int = DEFAULT_PORT_SWING,
+    port_swing_live: int | None = None,
     env_file: str = ".env",
+    paper_env_file: str | None = None,
+    live_env_file: str | None = None,
     audit_root: Path | None = None,
 ) -> None:
     if audit_root is None:
         audit_root = Path(DEFAULT_AUDIT_ROOT)
+    if paper_env_file is None and _env_profile_exists(env_file, "paper"):
+        paper_env_file = _default_profile_env(env_file, "paper")
+    if live_env_file is None and _env_profile_exists(env_file, "live"):
+        live_env_file = _default_profile_env(env_file, "live")
+    if "#" not in str(env_file) and _env_profile_exists(env_file, "paper"):
+        env_file = _default_profile_env(env_file, "paper")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -74,15 +106,18 @@ def run_combined(
     all_symbols = _build_symbol_union(env_file)
     logger.info("Symbol universe: %d symbols", len(all_symbols))
 
-    # Two separate queues — one per dashboard.  SharedBarStream fans each bar
-    # into both queues regardless of which runner is active.
+    # Separate queues per dashboard. SharedBarStream fans each bar into every
+    # queue regardless of which runner is active.
     intraday_queue: queue_mod.Queue = queue_mod.Queue(maxsize=10_000)
-    swing_queue: queue_mod.Queue = queue_mod.Queue(maxsize=10_000)
+    swing_paper_queue: queue_mod.Queue = queue_mod.Queue(maxsize=10_000)
+    swing_live_queue: queue_mod.Queue | None = queue_mod.Queue(maxsize=10_000) if live_env_file else None
 
     from UI.shared_stream import get_shared_bar_stream
     stream = get_shared_bar_stream()
     stream.register(intraday_queue)
-    stream.register(swing_queue)
+    stream.register(swing_paper_queue)
+    if swing_live_queue is not None:
+        stream.register(swing_live_queue)
     stream.start(all_symbols, env_file=env_file)
     logger.info("Shared bar stream started.")
 
@@ -113,7 +148,14 @@ def run_combined(
         SwingDashboardHTTPServer,
     )
 
-    swing_app = SwingDashboardApp(audit_root=audit_root, bar_queue=swing_queue)
+    paper_env_file = paper_env_file or env_file
+    swing_app = SwingDashboardApp(
+        audit_root=audit_root / "paper" if live_env_file else audit_root,
+        bar_queue=swing_paper_queue,
+        default_env_file=paper_env_file,
+        default_dry_run=False,
+        default_real_account_policy=False,
+    )
     swing_server = SwingDashboardHTTPServer((host, port_swing), SwingDashboardHandler)
     swing_server.daemon_threads = True
     swing_server.app = swing_app
@@ -124,12 +166,39 @@ def run_combined(
         name="swing-http",
     )
     swing_thread.start()
-    logger.info("Swing dashboard:         http://%s:%d", host, port_swing)
+    logger.info("Swing paper dashboard:   http://%s:%d", host, port_swing)
+
+    swing_live_app = None
+    swing_live_server = None
+    if live_env_file:
+        live_port = int(port_swing_live or (port_swing + 1))
+        swing_live_app = SwingDashboardApp(
+            audit_root=audit_root / "live",
+            bar_queue=swing_live_queue,
+            default_env_file=live_env_file,
+            default_dry_run=False,
+            default_real_account_policy=True,
+            default_real_account_policy_state_path=(
+                "Data/inference/multi_ticker_swing/real_account_book_live.json"
+            ),
+        )
+        swing_live_server = SwingDashboardHTTPServer((host, live_port), SwingDashboardHandler)
+        swing_live_server.daemon_threads = True
+        swing_live_server.app = swing_live_app
+        swing_live_thread = threading.Thread(
+            target=swing_live_server.serve_forever,
+            daemon=True,
+            name="swing-live-http",
+        )
+        swing_live_thread.start()
+        logger.info("Swing live dashboard:    http://%s:%d", host, live_port)
 
     print()
     print("=" * 60)
     print(f"  Intraday SPY dashboard:  http://{host}:{port_intraday}")
-    print(f"  Swing dashboard:         http://{host}:{port_swing}")
+    print(f"  Swing paper dashboard:   http://{host}:{port_swing}")
+    if live_env_file:
+        print(f"  Swing live dashboard:    http://{host}:{int(port_swing_live or (port_swing + 1))}")
     print(f"  Shared stream:           {len(all_symbols)} symbols")
     print("  Press Ctrl+C to stop.")
     print("=" * 60)
@@ -157,14 +226,23 @@ def run_combined(
         swing_app.stop()
     except Exception as exc:
         logger.warning("swing_app.stop(): %s", exc)
+    if swing_live_app is not None:
+        try:
+            swing_live_app.stop()
+        except Exception as exc:
+            logger.warning("swing_live_app.stop(): %s", exc)
 
     logger.info("Stopping HTTP servers...")
     intraday_server.shutdown()
     swing_server.shutdown()
+    if swing_live_server is not None:
+        swing_live_server.shutdown()
 
     logger.info("Stopping shared bar stream...")
     stream.unregister(intraday_queue)
-    stream.unregister(swing_queue)
+    stream.unregister(swing_paper_queue)
+    if swing_live_queue is not None:
+        stream.unregister(swing_live_queue)
     stream.stop()
 
     logger.info("Combined server stopped.")
@@ -178,8 +256,15 @@ def main() -> None:
     parser.add_argument("--port-intraday", type=int, default=DEFAULT_PORT_INTRADAY,
                         help="Port for intraday SPY dashboard (default 8765).")
     parser.add_argument("--port-swing", type=int, default=DEFAULT_PORT_SWING,
-                        help="Port for swing dashboard (default 8766).")
-    parser.add_argument("--env", default=".env", help="Path to .env file.")
+                        help="Port for paper swing dashboard (default 8766).")
+    parser.add_argument("--port-swing-live", type=int, default=None,
+                        help="Port for live swing dashboard when --live-env is set (default port-swing+1).")
+    parser.add_argument("--env", default=".env",
+                        help="Path to env file for the shared market-data stream.")
+    parser.add_argument("--paper-env", default=None,
+                        help="Path to Alpaca paper env file for paper swing orders (default --env).")
+    parser.add_argument("--live-env", default=None,
+                        help="Path to Alpaca live env file. When set, starts a protected live swing dashboard.")
     parser.add_argument(
         "--audit-root",
         default=DEFAULT_AUDIT_ROOT,
@@ -191,7 +276,10 @@ def main() -> None:
         host=args.host,
         port_intraday=args.port_intraday,
         port_swing=args.port_swing,
+        port_swing_live=args.port_swing_live,
         env_file=args.env,
+        paper_env_file=args.paper_env,
+        live_env_file=args.live_env,
         audit_root=Path(args.audit_root),
     )
 

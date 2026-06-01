@@ -525,7 +525,15 @@ class SwingSession:
 
     # ------------------------------------------------------------------
 
-    def start(self, *, max_entries: int, dry_run: bool, env_file: str) -> dict:
+    def start(
+        self,
+        *,
+        max_entries: int,
+        dry_run: bool,
+        env_file: str,
+        real_account_policy_enabled: bool | None = None,
+        real_account_policy_state_path: str | None = None,
+    ) -> dict:
         if self.is_running():
             raise RuntimeError("Session already running.")
 
@@ -561,6 +569,8 @@ class SwingSession:
                 max_entries_per_bar=max_entries,
                 event_sink=self._on_event,
                 bar_queue=self._bar_queue,
+                real_account_policy_enabled=real_account_policy_enabled,
+                real_account_policy_state_path=real_account_policy_state_path,
             )
         except Exception as exc:
             err = f"runner_init_failed: {exc}"
@@ -625,6 +635,7 @@ class SwingSession:
                 "max_entries": max_entries,
                 "dry_run": dry_run,
                 "env_file": env_file,
+                "real_account_policy": bool(real_account_policy_enabled),
                 "stream_symbols": len(runner.stream_symbols),
                 "universe_size": runner.universe_size,
                 "audit_log": str(audit_path),
@@ -661,10 +672,23 @@ class SwingSession:
 # ---------------------------------------------------------------------------
 
 class SwingDashboardApp:
-    def __init__(self, audit_root: Path, bar_queue: queue_mod.Queue | None = None) -> None:
+    def __init__(
+        self,
+        audit_root: Path,
+        bar_queue: queue_mod.Queue | None = None,
+        *,
+        default_env_file: str = ".env",
+        default_dry_run: bool = False,
+        default_real_account_policy: bool | None = None,
+        default_real_account_policy_state_path: str | None = None,
+    ) -> None:
         self.store = SwingDashboardStore()
         self.broker = EventBroker()
         self.session = SwingSession(self.store, self.broker, audit_root, bar_queue=bar_queue)
+        self.default_env_file = default_env_file
+        self.default_dry_run = bool(default_dry_run)
+        self.default_real_account_policy = default_real_account_policy
+        self.default_real_account_policy_state_path = default_real_account_policy_state_path
 
     def snapshot(self) -> dict:
         snap = self.store.snapshot()
@@ -675,10 +699,22 @@ class SwingDashboardApp:
         max_entries = int(payload.get("max_entries", 5) or 5)
         if max_entries < 1:
             max_entries = 1
-        dry_run = bool(payload.get("dry_run", False))
-        env_file = str(payload.get("env_file") or ".env")
+        dry_run = bool(payload["dry_run"]) if "dry_run" in payload else self.default_dry_run
+        env_file = str(payload.get("env_file") or self.default_env_file)
+        real_policy = (
+            bool(payload["real_account_policy"])
+            if "real_account_policy" in payload
+            else self.default_real_account_policy
+        )
+        real_policy_state = str(
+            payload.get("real_account_policy_state") or self.default_real_account_policy_state_path or ""
+        ) or None
         return self.session.start(
-            max_entries=max_entries, dry_run=dry_run, env_file=env_file,
+            max_entries=max_entries,
+            dry_run=dry_run,
+            env_file=env_file,
+            real_account_policy_enabled=real_policy,
+            real_account_policy_state_path=real_policy_state,
         )
 
     def stop(self) -> dict:

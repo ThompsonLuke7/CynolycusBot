@@ -8,7 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from ..core.config import AlpacaConfig
+from ..core.config import AlpacaConfig, _profile_env_value, _read_env_file, _split_env_file_profile
 
 
 @dataclass(frozen=True)
@@ -18,13 +18,17 @@ class OptionsClientConfig:
     timeout_sec: int = 30
 
     @classmethod
-    def from_env(cls) -> "OptionsClientConfig":
+    def from_env(cls, env_file: str | None = ".env") -> "OptionsClientConfig":
+        env_path, profile = _split_env_file_profile(env_file)
+        file_values = _read_env_file(env_path) if env_path else {}
         trading = (
-            os.getenv("APCA_API_BASE_URL")
-            or os.getenv("ALPACA_TRADING_API_BASE_URL")
+            _profile_env_value(file_values, profile, "APCA_API_BASE_URL", "ALPACA_TRADING_API_BASE_URL")
             or "https://paper-api.alpaca.markets"
         )
-        data = os.getenv("ALPACA_DATA_API_BASE_URL") or "https://data.alpaca.markets"
+        data = (
+            _profile_env_value(file_values, profile, "ALPACA_DATA_API_BASE_URL")
+            or "https://data.alpaca.markets"
+        )
         return cls(trading_base_url=trading, data_base_url=data)
 
 
@@ -47,7 +51,7 @@ class AlpacaOptionsClient:
         timeout_sec: int = 30,
     ) -> None:
         cfg = AlpacaConfig.from_env(env_file)
-        defaults = OptionsClientConfig.from_env()
+        defaults = OptionsClientConfig.from_env(env_file)
         self._key = cfg.key_id
         self._secret = cfg.secret_key
         self._trading_base = (trading_base_url or defaults.trading_base_url).rstrip("/")
