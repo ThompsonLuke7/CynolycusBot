@@ -27,3 +27,11 @@
 {2026-05-28 12:53:20 EST}{user: codex}{Added active strategy backtest plot script 29; generated active_theme_strategy_backtest.png plus summary/period CSVs clarifying passive diagnostics vs active top5/exit12 leader strategy.}
 {2026-05-28 13:00:00 EST}{user: codex}{Explained active theme-strategy labels and performance ranking; original rule-based beat top5 full/cash risk-off in the saved run, while existing top3 scaled was just the prior baseline and the weakest of the four compared.}
 {2026-05-29 16:43:20 EDT}{user: codex}{Counted tracked source code files in the repo; 414 `.py/.sh/.ps1` files total 128,180 lines.}
+{2026-06-01 11:24:51 EST}{user: codex}{Reviewed theme rotation module readiness, training gap, label quality, and universe expansion questions.}
+{2026-06-01 11:24:51 EST}{user: codex}{Conclusion: rule-based module is research/live-radar usable but not production trading ready; ML ranker training, walk-forward validation, label calibration, and broader theme/ticker coverage remain next steps.}
+{2026-06-01 13:14:05 EST}{user: codex}{Discussed theme discovery risk: current theme taxonomy can miss future narratives unless refreshed from market/news/filing/clustering signals.}
+{2026-06-01 13:14:05 EST}{user: codex}{Added theme Colab export/training files and generated theme_expansion/outputs/training_export/theme_colab_bundle.tgz for upload.}
+{2026-06-01 13:34:34 EDT}{user: codex}{Discussed frustration/FOMO around fast AI-related momentum runners and the need for earlier, more selective capture.}
+{2026-06-01 13:34:34 EDT}{user: codex}{Reviewed existing theme signals and framed next step as a small-account runner playbook: theme leadership, ticker leadership, catalyst, setup, and execution rules.}
+{2026-06-01 13:55:29 EDT}{user: codex}{User pushed for repo-specific monetization plan, not generic trading advice.}
+{2026-06-01 13:55:29 EDT}{user: codex}{Audited current repo wiring: only multi_ticker_swing model exists; theme, momentum expansion, forward-guidance, and meta models are not imported/trained yet.}
