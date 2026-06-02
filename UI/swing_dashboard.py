@@ -43,6 +43,7 @@ MAX_EVENTS_LOG  = 500   # generic event log (signals, confirmations, scans, ...)
 MAX_ORDERS_LOG  = 500   # alpaca order submissions (buy/sell/dry/failed)
 MAX_TRADES_LOG  = 500   # closed positions
 MAX_WARMUP_LOG  = 600   # warmup progress lines
+MAX_SNAPSHOT_CHART_SEEDS = 24
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +317,19 @@ class SwingDashboardStore:
 
     def snapshot(self) -> dict:
         with self._lock:
+            open_tickers = {
+                str(pos.get("ticker", "")).upper()
+                for pos in self._positions
+                if pos.get("ticker")
+            }
+            chart_items = list(self._chart_seeds.items())
+            chart_items.sort(
+                key=lambda item: (
+                    str(item[0]).upper() not in open_tickers,
+                    bool(item[1].get("closed")),
+                )
+            )
+            chart_items = chart_items[:MAX_SNAPSHOT_CHART_SEEDS]
             return {
                 "status": self._status.__dict__.copy(),
                 "positions": list(self._positions),
@@ -327,7 +341,7 @@ class SwingDashboardStore:
                 "warmup": list(self._warmup)[-30:],
                 "chart_seeds": [
                     {**seed, "post_entry_bars": list(self._chart_bars.get(ticker, []))}
-                    for ticker, seed in self._chart_seeds.items()
+                    for ticker, seed in chart_items
                 ],
                 "ts": _utc_iso(),
             }
@@ -525,7 +539,15 @@ class SwingSession:
 
     # ------------------------------------------------------------------
 
-    def start(self, *, max_entries: int, dry_run: bool, env_file: str) -> dict:
+    def start(
+        self,
+        *,
+        max_entries: int,
+        dry_run: bool,
+        env_file: str,
+        real_account_policy_enabled: bool | None = None,
+        real_account_policy_state_path: str | None = None,
+    ) -> dict:
         if self.is_running():
             raise RuntimeError("Session already running.")
 
@@ -561,6 +583,8 @@ class SwingSession:
                 max_entries_per_bar=max_entries,
                 event_sink=self._on_event,
                 bar_queue=self._bar_queue,
+                real_account_policy_enabled=real_account_policy_enabled,
+                real_account_policy_state_path=real_account_policy_state_path,
             )
         except Exception as exc:
             err = f"runner_init_failed: {exc}"
@@ -625,6 +649,7 @@ class SwingSession:
                 "max_entries": max_entries,
                 "dry_run": dry_run,
                 "env_file": env_file,
+                "real_account_policy": bool(real_account_policy_enabled),
                 "stream_symbols": len(runner.stream_symbols),
                 "universe_size": runner.universe_size,
                 "audit_log": str(audit_path),
@@ -661,10 +686,23 @@ class SwingSession:
 # ---------------------------------------------------------------------------
 
 class SwingDashboardApp:
-    def __init__(self, audit_root: Path, bar_queue: queue_mod.Queue | None = None) -> None:
+    def __init__(
+        self,
+        audit_root: Path,
+        bar_queue: queue_mod.Queue | None = None,
+        *,
+        default_env_file: str = ".env",
+        default_dry_run: bool = False,
+        default_real_account_policy: bool | None = None,
+        default_real_account_policy_state_path: str | None = None,
+    ) -> None:
         self.store = SwingDashboardStore()
         self.broker = EventBroker()
         self.session = SwingSession(self.store, self.broker, audit_root, bar_queue=bar_queue)
+        self.default_env_file = default_env_file
+        self.default_dry_run = bool(default_dry_run)
+        self.default_real_account_policy = default_real_account_policy
+        self.default_real_account_policy_state_path = default_real_account_policy_state_path
 
     def snapshot(self) -> dict:
         snap = self.store.snapshot()
@@ -675,10 +713,22 @@ class SwingDashboardApp:
         max_entries = int(payload.get("max_entries", 5) or 5)
         if max_entries < 1:
             max_entries = 1
-        dry_run = bool(payload.get("dry_run", False))
-        env_file = str(payload.get("env_file") or ".env")
+        dry_run = bool(payload["dry_run"]) if "dry_run" in payload else self.default_dry_run
+        env_file = str(payload.get("env_file") or self.default_env_file)
+        real_policy = (
+            bool(payload["real_account_policy"])
+            if "real_account_policy" in payload
+            else self.default_real_account_policy
+        )
+        real_policy_state = str(
+            payload.get("real_account_policy_state") or self.default_real_account_policy_state_path or ""
+        ) or None
         return self.session.start(
-            max_entries=max_entries, dry_run=dry_run, env_file=env_file,
+            max_entries=max_entries,
+            dry_run=dry_run,
+            env_file=env_file,
+            real_account_policy_enabled=real_policy,
+            real_account_policy_state_path=real_policy_state,
         )
 
     def stop(self) -> dict:

@@ -38,6 +38,7 @@ class SharedBarStream:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._queues: list[queue_mod.Queue] = []
+        self._queue_labels: dict[int, str] = {}
         self._started = False
         self._streamer = None
         self._symbols: list[str] = []
@@ -58,17 +59,20 @@ class SharedBarStream:
         with self._lock:
             return self._started
 
-    def register(self, q: queue_mod.Queue) -> None:
+    def register(self, q: queue_mod.Queue, *, name: str | None = None) -> None:
         """Subscribe a queue to receive every incoming bar dict."""
         with self._lock:
             if q not in self._queues:
                 self._queues.append(q)
-        logger.debug("SharedBarStream: registered queue (%d total)", len(self._queues))
+            if name:
+                self._queue_labels[id(q)] = name
+        logger.debug("SharedBarStream: registered queue %s (%d total)", name or "?", len(self._queues))
 
     def unregister(self, q: queue_mod.Queue) -> None:
         """Stop delivering bars to this queue."""
         with self._lock:
             self._queues = [x for x in self._queues if x is not q]
+            self._queue_labels.pop(id(q), None)
         logger.debug("SharedBarStream: unregistered queue (%d total)", len(self._queues))
 
     def start(self, symbols: Iterable[str], env_file: str = ".env") -> None:
@@ -176,6 +180,7 @@ class SharedBarStream:
             self._dropped_count += 1
             dropped = self._dropped_count
             delivered = self._delivered_count
+            label = self._queue_labels.get(id(q), "?")
             should_log = now - self._last_drop_log_monotonic >= 60.0
             if should_log:
                 self._last_drop_log_monotonic = now
@@ -188,7 +193,8 @@ class SharedBarStream:
                 maxsize = "?"
             logger.warning(
                 "SharedBarStream queue full; dropping bars for one subscriber "
-                "(queue=%s/%s delivered=%d dropped=%d)",
+                "(subscriber=%s queue=%s/%s delivered=%d dropped=%d)",
+                label,
                 qsize,
                 maxsize,
                 delivered,

@@ -27,6 +27,7 @@ from momentum_expansion.config.momentum_config import (
     MOMENTUM_CANDIDATE_FILTER_CONFIG,
     TRAINING_EXPORT_DIR,
     TRAINING_MATRIX,
+    TRAINING_MATRIX_CONFIG,
     WALK_FORWARD_CONFIG,
 )
 from momentum_expansion.features.feature_matrix_4h import FEATURE_COLUMNS_4H
@@ -53,14 +54,23 @@ def export_training_bundle(
     feature_manifest = {
         "feature_columns": [c for c in FEATURE_COLUMNS_4H if c in df.columns],
         "label_columns":   [c for c in df.columns if c.startswith("fwd_") or c.startswith("expansion_") or c == "trend_persistence"],
-        "target_column":   "expansion_survival_score",
-        "target_kind":     "regression",
+        "target_column":   TRAINING_MATRIX_CONFIG["target_column"],
+        "target_kind":     TRAINING_MATRIX_CONFIG["target_kind"],
         "n_rows":          int(len(df)),
         "n_tickers":       int(df.index.get_level_values("ticker").nunique()) if "ticker" in df.index.names else None,
         "date_min":        str(df.index.get_level_values(0).min()),
         "date_max":        str(df.index.get_level_values(0).max()),
         "label_cfg":       LABEL_CONFIG,
+        "training_matrix_cfg": TRAINING_MATRIX_CONFIG,
         "momentum_candidate_filter": MOMENTUM_CANDIDATE_FILTER_CONFIG,
+        "primary_eval_metrics": [
+            "spearman_to_target",
+            "top_score_bucket_avg_fwd_max_return",
+            "top_score_bucket_pct_gt_20",
+            "top5_per_4h_bar_avg_fwd_max_return",
+            "top5_per_4h_bar_pct_gt_20",
+            "drawdown",
+        ],
         "walk_forward":    WALK_FORWARD_CONFIG,
     }
     feature_manifest_path = out_dir / "feature_manifest.json"
@@ -69,8 +79,9 @@ def export_training_bundle(
 
     label_manifest = {k: LABEL_CONFIG[k] for k in LABEL_CONFIG}
     label_manifest["momentum_candidate_filter"] = MOMENTUM_CANDIDATE_FILTER_CONFIG
-    label_manifest["target_column"] = "expansion_survival_score"
-    label_manifest["target_kind"] = "regression"
+    label_manifest["training_matrix_cfg"] = TRAINING_MATRIX_CONFIG
+    label_manifest["target_column"] = TRAINING_MATRIX_CONFIG["target_column"]
+    label_manifest["target_kind"] = TRAINING_MATRIX_CONFIG["target_kind"]
     label_manifest_path = out_dir / "label_manifest.json"
     with open(label_manifest_path, "w") as f:
         json.dump(label_manifest, f, default=str, indent=2)

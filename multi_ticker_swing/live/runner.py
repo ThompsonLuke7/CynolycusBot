@@ -40,6 +40,10 @@ from multi_ticker_swing.live.feature_builder import (
     get_shared_feature_builder,
 )
 from multi_ticker_swing.live.position_manager import SwingPosition, SwingPositionManager
+from multi_ticker_swing.live.real_account_policy import (
+    RealAccountBookkeeper,
+    config_from_env as real_account_policy_from_env,
+)
 from multi_ticker_swing.live.scanner import Signal, SwingScanner
 from multi_ticker_swing.live.universe import load_universe
 
@@ -501,6 +505,8 @@ class SwingLiveRunner:
         feature_builder: LiveSwingFeatureBuilder | None = None,
         bar_queue: queue.Queue | None = None,
         auto_flatten_assigned_equities: bool = True,
+        real_account_policy_enabled: bool | None = None,
+        real_account_policy_state_path: str | None = None,
     ) -> None:
         self._dry_run = dry_run
         self._env_file = env_file
@@ -519,6 +525,12 @@ class SwingLiveRunner:
             max_entries_per_bar=max_entries_per_bar,
         )
         self._client = AlpacaOptionsClient(env_file=env_file)
+        self._real_policy = RealAccountBookkeeper(
+            real_account_policy_from_env(
+                enabled=real_account_policy_enabled,
+                state_path=real_account_policy_state_path,
+            )
+        )
         self._pos_mgr = SwingPositionManager(
             self._client,
             dry_run=dry_run,
@@ -571,12 +583,28 @@ class SwingLiveRunner:
     # ------------------------------------------------------------------
 
     def _emit(self, kind: str, payload: dict) -> None:
+        self._on_internal_event(kind, payload)
         if self._sink is None:
             return
         try:
             self._sink(kind, payload)
         except Exception as exc:
             logger.warning("event_sink raised on %s: %s", kind, exc)
+
+    def _on_internal_event(self, kind: str, payload: dict) -> None:
+        if self._dry_run or not getattr(self, "_real_policy", None) or not self._real_policy.enabled:
+            return
+        if kind not in {"position_closed", "position_close_abandoned", "broker_position_missing"}:
+            return
+        try:
+            self._real_policy.mark_position_closed(
+                ticker=str(payload.get("ticker") or ""),
+                option_symbol=str(payload.get("option_symbol") or ""),
+                entry_premium=payload.get("option_entry_price"),
+                qty=payload.get("qty"),
+            )
+        except Exception as exc:
+            logger.warning("real-account policy close bookkeeping failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Public state accessors (for dashboard snapshots)
@@ -632,6 +660,7 @@ class SwingLiveRunner:
             "last_broker_reconcile_ts": self._last_broker_reconcile_ts,
             "last_broker_reconcile_ok": self._last_broker_reconcile_ok,
             "last_broker_reconcile_error": self._last_broker_reconcile_error,
+            "real_account_policy": self._real_policy.snapshot(),
         }
 
     # ------------------------------------------------------------------
@@ -1245,11 +1274,13 @@ class SwingLiveRunner:
                 confirmed = True
 
         if confirmed:
+            candle_metrics = _bar_shape_metrics(bar5, atr=sig.atr)
             self._emit("confirmation", {
                 "ticker": ticker,
                 "direction": int(sig.direction),
                 "bars_watched": int(state.bars_watched),
                 "close": float(c),
+                **candle_metrics,
             })
             self._enter_trade(sig, bar5)
             with self._lock:
@@ -1322,6 +1353,8 @@ class SwingLiveRunner:
         )
         option_entry_meta = {
             **(option_selection_meta or {}),
+            "confirmation_bar": _bar_to_event(conf_bar),
+            "confirmation_metrics": _bar_shape_metrics(conf_bar, atr=sig.atr),
             "entry_quote": quote_meta,
             "entry_limit_prices": limit_prices,
         }
@@ -1336,6 +1369,55 @@ class SwingLiveRunner:
                 "option_entry_meta": option_entry_meta,
             })
             return
+        account_snapshot = None
+        if self._real_policy.enabled and not self._dry_run:
+            try:
+                account_resp = self._client.get_account()
+                account_snapshot = account_resp if isinstance(account_resp, dict) else None
+            except Exception as exc:
+                logger.warning("[%s] real account policy account fetch failed: %s", ticker, exc)
+                self._emit("entry_skipped", {
+                    "ticker": ticker,
+                    "direction": int(sig.direction),
+                    "reason": "real_policy_account_unavailable",
+                    "entry_price": entry_price,
+                    "option_symbol": option_symbol,
+                    "option_entry_meta": option_entry_meta,
+                    "error": str(exc),
+                })
+                return
+        real_decision = self._real_policy.evaluate_entry(
+            signal=sig,
+            option_symbol=option_symbol,
+            option_meta=option_selection_meta or {},
+            quote_meta=quote_meta or {},
+            limit_prices=limit_prices,
+            open_positions_count=len(self._pos_mgr.open_tickers),
+            account=account_snapshot,
+            entry_quality=option_entry_meta.get("confirmation_metrics") or {},
+        )
+        option_entry_meta["real_account_policy"] = {
+            "enabled": self._real_policy.enabled,
+            "allowed": bool(real_decision.allowed),
+            "reason": real_decision.reason,
+            "qty": int(real_decision.qty),
+            "premium_at_risk": float(real_decision.premium_at_risk),
+            "details": real_decision.details,
+        }
+        if not real_decision.allowed:
+            logger.info("[%s] entry skipped by real-account policy: %s", ticker, real_decision.reason)
+            self._emit("entry_skipped", {
+                "ticker": ticker,
+                "direction": int(sig.direction),
+                "reason": real_decision.reason,
+                "entry_price": entry_price,
+                "option_symbol": option_symbol,
+                "option_entry_meta": option_entry_meta,
+                "real_account_policy": option_entry_meta["real_account_policy"],
+            })
+            return
+        if self._real_policy.enabled:
+            qty = int(real_decision.qty)
         if not self._dry_run:
             for attempt, limit_price in enumerate(limit_prices, start=1):
                 try:
@@ -1466,6 +1548,14 @@ class SwingLiveRunner:
             option_entry_meta=option_entry_meta,
         )
         self._pos_mgr.open_position(pos)
+        if not self._dry_run:
+            self._real_policy.record_entry(
+                ticker=ticker,
+                option_symbol=option_symbol,
+                qty=qty,
+                premium_at_risk=float(real_decision.premium_at_risk) if self._real_policy.enabled else 0.0,
+                reason=real_decision.reason,
+            )
 
         # Attach pre-entry 5m bar history so the chart can show context before the entry
         pre_bars = [_bar_to_event(b) for b in self._buf_5m.get(ticker, [])]
@@ -1497,6 +1587,38 @@ def _bar_to_event(bar: dict) -> dict:
         "high":  float(bar.get("high",  float("nan"))),
         "low":   float(bar.get("low",   float("nan"))),
         "close": float(bar.get("close", float("nan"))),
+        "volume": float(bar.get("volume", 0.0) or 0.0),
+    }
+
+
+def _bar_shape_metrics(bar: dict, *, atr: float | None = None) -> dict[str, float | None]:
+    o = float(bar.get("open", float("nan")))
+    h = float(bar.get("high", float("nan")))
+    l = float(bar.get("low", float("nan")))
+    c = float(bar.get("close", float("nan")))
+    volume_raw = bar.get("volume")
+    volume = float(volume_raw) if volume_raw is not None else None
+    if not all(math.isfinite(v) for v in (o, h, l, c)):
+        return {
+            "range": None,
+            "range_atr": None,
+            "body_frac": None,
+            "upper_wick_frac": None,
+            "lower_wick_frac": None,
+            "volume": volume,
+        }
+    bar_range = h - l
+    body = abs(c - o)
+    upper = h - max(o, c)
+    lower = min(o, c) - l
+    atr_value = float(atr) if atr is not None else float("nan")
+    return {
+        "range": float(bar_range),
+        "range_atr": float(bar_range / atr_value) if math.isfinite(atr_value) and atr_value > 0 else None,
+        "body_frac": float(body / bar_range) if bar_range > 0 else None,
+        "upper_wick_frac": float(upper / bar_range) if bar_range > 0 else None,
+        "lower_wick_frac": float(lower / bar_range) if bar_range > 0 else None,
+        "volume": volume,
     }
 
 
@@ -1829,6 +1951,10 @@ def main() -> None:
                    help="Max new entries per 30m bar (default 5)")
     p.add_argument("--auto-flatten-assigned-equities", action=argparse.BooleanOptionalAction, default=True,
                    help="Market-close possible exercised/assigned 100-share equity lots detected during broker reconcile")
+    p.add_argument("--real-account-policy", action=argparse.BooleanOptionalAction, default=None,
+                   help="Enable real-money bookkeeping/risk policy for new option entries")
+    p.add_argument("--real-account-policy-state", default=None,
+                   help="Path for persistent real-account bookkeeping state")
     args = p.parse_args()
 
     runner = SwingLiveRunner(
@@ -1836,6 +1962,8 @@ def main() -> None:
         dry_run=args.dry_run,
         max_entries_per_bar=args.max_entries,
         auto_flatten_assigned_equities=args.auto_flatten_assigned_equities,
+        real_account_policy_enabled=args.real_account_policy,
+        real_account_policy_state_path=args.real_account_policy_state,
     )
     runner.start()
 

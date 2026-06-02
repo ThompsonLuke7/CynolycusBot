@@ -460,6 +460,7 @@
   // Position charts (TradingView Lightweight Charts)
   // --------------------------------------------------------------
   const posCharts = {};  // ticker → { chart, series, el, seed, closeTimer }
+  const MAX_POSITION_CHARTS = 24;
 
   const LW_THEME = {
     layout: { background: { color: "#161b22" }, textColor: "#8b949e" },
@@ -504,6 +505,10 @@
   function createPositionChart(seed) {
     const { ticker, direction, entry_price, entry_time, sl_price, pre_entry_bars } = seed;
     if (posCharts[ticker]) destroyPositionChart(ticker, false);
+    if (Object.keys(posCharts).length >= MAX_POSITION_CHARTS) {
+      console.warn("position chart limit reached; skipping chart", ticker);
+      return;
+    }
 
     const card = document.createElement("div");
     card.className = "pos-chart-card";
@@ -590,7 +595,7 @@
     });
     ro.observe(el);
 
-    posCharts[ticker] = { chart, series, preSeries, el, card, seed, ro, trailLine: null };
+    posCharts[ticker] = { chart, series, preSeries, el, card, seed, ro, trailLine: null, updates: 0 };
     if (seed.closed) {
       closePositionChart(ticker, seed.exit_price, seed.exit_reason, false);
     }
@@ -604,7 +609,10 @@
     // Push live bar onto the post-entry series
     if (bar && bar.time >= (pc.seed.entry_time || 0)) {
       pc.series.update(bar);
-      pc.chart.timeScale().fitContent();
+      pc.updates = (pc.updates || 0) + 1;
+      if (pc.updates % 12 === 0) {
+        pc.chart.timeScale().scrollToRealTime();
+      }
     }
 
     // Update trail floor price line
@@ -1210,7 +1218,7 @@
     }
     if (t === "position_closed") {
       const p = evt.payload || {};
-      closePositionChart(p.ticker, p.exit_price, p.exit_reason);
+      closePositionChart(p.ticker, p.exit_price, p.exit_reason, true);
       addTrade({ ts: evt.ts, ...(p) });
       addEvent(evt);
       return;

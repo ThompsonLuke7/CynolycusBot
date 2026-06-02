@@ -62,6 +62,20 @@ if TARGET not in df.columns:
     raise ValueError(f"Missing target column {TARGET}; rebuild/export the training matrix")
 print(df.shape, df.head().T)
 
+DIAGNOSTIC_COLUMNS = [
+    c for c in [
+        "fwd_max_return",
+        "fwd_max_alpha",
+        "fwd_atr_adj_return",
+        "fwd_max_drawdown",
+        "fwd_close_return",
+        "trend_persistence",
+        "expansion_score",
+        "expansion_target",
+    ]
+    if c in df.columns
+]
+
 # %%
 # Cell 3 — walk-forward CV split
 # Each fold trains on train_years of history, leaves embargo_days, then
@@ -245,6 +259,8 @@ for fi, f in enumerate(folds):
     print(fold_metrics[-1])
 
     fold_oof = pd.DataFrame({"score": p, "y": yte.values}, index=Xte.index)
+    if DIAGNOSTIC_COLUMNS:
+        fold_oof = fold_oof.join(df.loc[m_test, DIAGNOSTIC_COLUMNS], how="left")
     oof_rows.append(fold_oof)
 
 if oof_rows:
@@ -254,30 +270,56 @@ if oof_rows:
     print("aggregate OOF MAE :", mean_absolute_error(oof["y"], oof["score"]))
     print("aggregate OOF Spearman:", oof["score"].corr(oof["y"], method="spearman"))
 
-    bucket_rows = []
-    ranked = oof["score"].rank(method="first")
-    oof_diag = oof.copy()
-    oof_diag["decile"] = pd.qcut(ranked, 10, labels=False) + 1
-    for decile, g in oof_diag.groupby("decile"):
-        bucket_rows.append({
-            "bucket": f"decile_{int(decile)}",
+    def _diagnostic_record(bucket, g):
+        rec = {
+            "bucket": bucket,
             "n": int(len(g)),
             "score_min": float(g["score"].min()),
             "score_mean": float(g["score"].mean()),
             "score_max": float(g["score"].max()),
             "target_mean": float(g["y"].mean()),
-        })
+        }
+        if "fwd_max_return" in g.columns:
+            rec["avg_fwd_max_return"] = float(g["fwd_max_return"].mean())
+            rec["median_fwd_max_return"] = float(g["fwd_max_return"].median())
+            rec["pct_gt_20"] = float((g["fwd_max_return"] >= 0.20).mean())
+            rec["pct_gt_25"] = float((g["fwd_max_return"] >= 0.25).mean())
+            rec["pct_gt_40"] = float((g["fwd_max_return"] >= 0.40).mean())
+        if "fwd_max_alpha" in g.columns:
+            rec["avg_fwd_alpha"] = float(g["fwd_max_alpha"].mean())
+        if "fwd_max_drawdown" in g.columns:
+            rec["avg_drawdown"] = float(g["fwd_max_drawdown"].mean())
+            rec["median_drawdown"] = float(g["fwd_max_drawdown"].median())
+            if "fwd_max_return" in g.columns:
+                rec["pct_clean_gt20_dd_lte_15"] = float(
+                    ((g["fwd_max_return"] >= 0.20) & (g["fwd_max_drawdown"] <= 0.15)).mean()
+                )
+        if "fwd_close_return" in g.columns:
+            rec["avg_fwd_close_return"] = float(g["fwd_close_return"].mean())
+            rec["close_win_rate"] = float((g["fwd_close_return"] > 0).mean())
+        return rec
+
+    bucket_rows = []
+    ranked = oof["score"].rank(method="first")
+    oof_diag = oof.copy()
+    oof_diag["decile"] = pd.qcut(ranked, 10, labels=False) + 1
+    for decile, g in oof_diag.groupby("decile"):
+        bucket_rows.append(_diagnostic_record(f"decile_{int(decile)}", g))
     for pct in (0.01, 0.02, 0.05, 0.10, 0.20):
         threshold = float(oof["score"].quantile(1.0 - pct))
         g = oof[oof["score"] >= threshold]
-        bucket_rows.append({
-            "bucket": f"top_{int(pct * 100)}pct",
-            "n": int(len(g)),
-            "score_min": threshold,
-            "score_mean": float(g["score"].mean()),
-            "score_max": float(g["score"].max()),
-            "target_mean": float(g["y"].mean()),
-        })
+        bucket_rows.append(_diagnostic_record(f"top_{int(pct * 100)}pct", g))
+    if isinstance(oof.index, pd.MultiIndex):
+        ts_level = "timestamp" if "timestamp" in oof.index.names else oof.index.names[0]
+        top5_idx = (
+            oof.reset_index()
+            .sort_values([ts_level, "score"], ascending=[True, False])
+            .groupby(ts_level)
+            .head(5)
+            .set_index(oof.index.names)
+            .index
+        )
+        bucket_rows.append(_diagnostic_record("top5_per_4h_bar", oof.loc[oof.index.isin(top5_idx)]))
     bucket_metrics = pd.DataFrame(bucket_rows)
     bucket_metrics.to_csv(WORK / "oof_score_buckets.csv", index=False)
     print(bucket_metrics.to_string(index=False))
