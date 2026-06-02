@@ -21,6 +21,11 @@ NEWS_FEATURE_MATRIX_PATH = PROCESSED_DIR / "news_feature_matrix.parquet"
 WINNER_LIBRARY_PATH = PROCESSED_DIR / "winner_news_library.parquet"
 LOSER_LIBRARY_PATH = PROCESSED_DIR / "loser_news_library.parquet"
 
+# Per-ticker reference + per-day market data parquets
+TICKER_PROFILE_PATH = PROCESSED_DIR / "ticker_profiles.parquet"
+FINRA_SHORT_VOLUME_PATH = PROCESSED_DIR / "finra_short_volume.parquet"
+CBOE_OPTIONS_SUMMARY_PATH = PROCESSED_DIR / "cboe_options_summary.parquet"
+
 DEFAULT_BGE_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_FINBERT_MODEL = "ProsusAI/finbert"
 

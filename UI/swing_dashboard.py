@@ -43,6 +43,7 @@ MAX_EVENTS_LOG  = 500   # generic event log (signals, confirmations, scans, ...)
 MAX_ORDERS_LOG  = 500   # alpaca order submissions (buy/sell/dry/failed)
 MAX_TRADES_LOG  = 500   # closed positions
 MAX_WARMUP_LOG  = 600   # warmup progress lines
+MAX_SNAPSHOT_CHART_SEEDS = 24
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +317,19 @@ class SwingDashboardStore:
 
     def snapshot(self) -> dict:
         with self._lock:
+            open_tickers = {
+                str(pos.get("ticker", "")).upper()
+                for pos in self._positions
+                if pos.get("ticker")
+            }
+            chart_items = list(self._chart_seeds.items())
+            chart_items.sort(
+                key=lambda item: (
+                    str(item[0]).upper() not in open_tickers,
+                    bool(item[1].get("closed")),
+                )
+            )
+            chart_items = chart_items[:MAX_SNAPSHOT_CHART_SEEDS]
             return {
                 "status": self._status.__dict__.copy(),
                 "positions": list(self._positions),
@@ -327,7 +341,7 @@ class SwingDashboardStore:
                 "warmup": list(self._warmup)[-30:],
                 "chart_seeds": [
                     {**seed, "post_entry_bars": list(self._chart_bars.get(ticker, []))}
-                    for ticker, seed in self._chart_seeds.items()
+                    for ticker, seed in chart_items
                 ],
                 "ts": _utc_iso(),
             }

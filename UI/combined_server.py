@@ -114,10 +114,10 @@ def run_combined(
 
     from UI.shared_stream import get_shared_bar_stream
     stream = get_shared_bar_stream()
-    stream.register(intraday_queue)
-    stream.register(swing_paper_queue)
+    stream.register(intraday_queue, name="intraday")
+    stream.register(swing_paper_queue, name="swing-paper")
     if swing_live_queue is not None:
-        stream.register(swing_live_queue)
+        stream.register(swing_live_queue, name="swing-live")
     stream.start(all_symbols, env_file=env_file)
     logger.info("Shared bar stream started.")
 

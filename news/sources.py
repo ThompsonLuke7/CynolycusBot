@@ -962,3 +962,378 @@ def fetch_fmp_earnings_transcripts(
                 }
             )
     return records_from_frame(pd.DataFrame(rows), source="fmp_transcripts")
+
+
+# ---------------------------------------------------------------------------
+# CBOE delayed options-chain snapshot (per-ticker, no auth)
+# ---------------------------------------------------------------------------
+
+def _cboe_options_aggregate(payload: dict, *, sigma_threshold: float = 3.0) -> dict:
+    """Reduce a CBOE options chain payload into a per-ticker daily summary
+    plus a list of unusual-flow strikes (volume > sigma * sqrt(open_interest))."""
+    data = payload.get("data") or {}
+    options = data.get("options") or []
+    summary: dict = {
+        "current_price": float(data.get("current_price") or 0),
+        "stock_volume": int(data.get("volume") or 0),
+        "iv30": float(data.get("iv30") or 0),
+        "iv30_change_percent": float(data.get("iv30_change_percent") or 0),
+        "snapshot_timestamp": payload.get("timestamp"),
+    }
+    call_vol = put_vol = 0
+    call_oi = put_oi = 0
+    call_premium = put_premium = 0.0
+    unusual_strikes: list[dict] = []
+    for opt in options:
+        sym = str(opt.get("option") or "")
+        # OCC symbol convention: ROOT[date 6 chars]C/P[strike 8 chars]
+        if len(sym) < 15:
+            continue
+        side_char = sym[-9:-8]
+        is_call = side_char == "C"
+        vol = int(opt.get("volume") or 0)
+        oi = int(opt.get("open_interest") or 0)
+        last = float(opt.get("last_trade_price") or 0)
+        if is_call:
+            call_vol += vol
+            call_oi += oi
+            call_premium += vol * last * 100
+        else:
+            put_vol += vol
+            put_oi += oi
+            put_premium += vol * last * 100
+        baseline = max(oi, 1) ** 0.5 * sigma_threshold
+        if vol > baseline and vol > 50:  # also require minimum absolute volume
+            unusual_strikes.append(
+                {
+                    "contract": sym,
+                    "side": "call" if is_call else "put",
+                    "strike": float(opt.get("option") and sym[-8:]) / 1000.0 if sym[-8:].isdigit() else 0.0,
+                    "volume": vol,
+                    "open_interest": oi,
+                    "iv": float(opt.get("iv") or 0),
+                    "delta": float(opt.get("delta") or 0),
+                    "last": last,
+                    "ratio": vol / max(oi, 1),
+                }
+            )
+    summary.update(
+        {
+            "call_volume": call_vol,
+            "put_volume": put_vol,
+            "call_open_interest": call_oi,
+            "put_open_interest": put_oi,
+            "call_premium": call_premium,
+            "put_premium": put_premium,
+            "put_call_volume_ratio": (put_vol / call_vol) if call_vol > 0 else None,
+            "unusual_strike_count": len(unusual_strikes),
+            "unusual_total_volume": sum(s["volume"] for s in unusual_strikes),
+        }
+    )
+    # Keep top 20 most-unusual strikes by ratio for downstream inspection
+    unusual_strikes.sort(key=lambda s: -s["ratio"])
+    summary["unusual_strikes"] = unusual_strikes[:20]
+    return summary
+
+
+def fetch_cboe_options_snapshot(
+    tickers: Iterable[str],
+    *,
+    sigma_threshold: float = 3.0,
+    min_interval_s: float = 0.5,
+    timeout: int = 45,
+    max_retries: int = 3,
+    retry_backoff_s: float = 1.5,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Pull per-ticker delayed options chains from CBOE's free CDN.
+
+    Returns two frames:
+    - summary_df: one row per ticker with aggregate flow metrics + iv30 +
+      stock volume + put-call ratio + unusual-strike count.
+    - records_df: catalyst-shaped records (one per ticker with unusual flow)
+      suitable for merging into ``news_records.parquet``.
+    """
+    summary_rows: list[dict] = []
+    record_rows: list[dict] = []
+    last_request = 0.0
+    today = pd.Timestamp.utcnow().normalize()
+    for ticker in _clean_tickers(tickers):
+        elapsed = time.monotonic() - last_request
+        if elapsed < min_interval_s:
+            time.sleep(min_interval_s - elapsed)
+        url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/{ticker}.json"
+        payload = None
+        for attempt in range(max_retries + 1):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (CynolycusBot research)"})
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    payload = json.loads(resp.read())
+                break
+            except Exception:
+                if attempt >= max_retries:
+                    payload = None
+                else:
+                    time.sleep(retry_backoff_s * (attempt + 1))
+        last_request = time.monotonic()
+        if not payload or "data" not in payload:
+            continue
+        try:
+            summary = _cboe_options_aggregate(payload, sigma_threshold=sigma_threshold)
+        except Exception:
+            continue
+        summary["ticker"] = ticker
+        summary["snapshot_date"] = today
+        summary_rows.append(summary)
+
+        # Emit a catalyst news_record only if there's meaningful unusual flow
+        if summary["unusual_strike_count"] >= 3 and summary["unusual_total_volume"] >= 1000:
+            cp = summary["call_premium"]
+            pp = summary["put_premium"]
+            bias = "bullish" if cp > pp * 1.5 else ("bearish" if pp > cp * 1.5 else "mixed")
+            headline = (
+                f"Unusual options activity ({bias}): "
+                f"{summary['unusual_total_volume']:,} contracts across "
+                f"{summary['unusual_strike_count']} strikes; call premium ${cp:,.0f} put premium ${pp:,.0f}; "
+                f"iv30={summary['iv30']:.1f} ({summary['iv30_change_percent']:+.1f}%)"
+            )
+            record_rows.append(
+                {
+                    "ticker": ticker,
+                    "timestamp": today,
+                    "headline": headline,
+                    "summary": json.dumps(summary["unusual_strikes"][:10]),
+                    "url": f"https://www.cboe.com/delayed_quote/{ticker}/quote_table",
+                    "source": "cboe_options_flow",
+                    "source_id": f"{ticker}-{today.strftime('%Y%m%d')}",
+                }
+            )
+    summary_df = pd.DataFrame(summary_rows)
+    if not summary_df.empty:
+        # Drop the heavyweight unusual_strikes column from the summary parquet
+        # — it's preserved inside the news_record summary field as JSON.
+        if "unusual_strikes" in summary_df.columns:
+            summary_df = summary_df.drop(columns=["unusual_strikes"])
+    records_df = records_from_frame(pd.DataFrame(record_rows), source="cboe_options_flow")
+    return summary_df, records_df
+
+
+# ---------------------------------------------------------------------------
+# FINRA daily short-sale volume backfill
+# ---------------------------------------------------------------------------
+
+
+def fetch_finra_short_volume_day(
+    date: str | pd.Timestamp,
+    *,
+    timeout: int = 20,
+) -> pd.DataFrame:
+    """Pull one trading-day's Consolidated NMS short-sale volume CSV.
+
+    Returns long-format frame with columns:
+    date, ticker, short_volume, short_exempt_volume, total_volume, market.
+    """
+    ts = pd.Timestamp(date)
+    url = f"https://cdn.finra.org/equity/regsho/daily/CNMSshvol{ts.strftime('%Y%m%d')}.txt"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (CynolycusBot research)"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return pd.DataFrame(columns=["date", "ticker", "short_volume", "short_exempt_volume", "total_volume", "market"])
+    rows: list[dict] = []
+    for line in text.splitlines()[1:]:  # skip header
+        parts = line.split("|")
+        if len(parts) < 5 or parts[0] == "" or parts[1] in {"", "Symbol"}:
+            continue
+        try:
+            rows.append(
+                {
+                    "date": pd.to_datetime(parts[0], format="%Y%m%d"),
+                    "ticker": parts[1].upper(),
+                    "short_volume": float(parts[2] or 0),
+                    "short_exempt_volume": float(parts[3] or 0),
+                    "total_volume": float(parts[4] or 0),
+                    "market": parts[5] if len(parts) > 5 else "",
+                }
+            )
+        except (ValueError, IndexError):
+            continue
+    return pd.DataFrame(rows)
+
+
+def backfill_finra_short_volume(
+    *,
+    start: str,
+    end: str,
+    output_path: object,
+    min_interval_s: float = 0.3,
+    progress_every: int = 50,
+) -> pd.DataFrame:
+    """Backfill the consolidated NMS short-sale volume CSV for every
+    trading day in [start, end] into a single long parquet.
+
+    Skips weekends and silently skips any day where FINRA returns 404
+    (market holidays).
+    """
+    from pathlib import Path
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+    days = pd.date_range(start_ts, end_ts, freq="B")  # business days
+    frames: list[pd.DataFrame] = []
+    last_request = 0.0
+    for i, d in enumerate(days):
+        elapsed = time.monotonic() - last_request
+        if elapsed < min_interval_s:
+            time.sleep(min_interval_s - elapsed)
+        df = fetch_finra_short_volume_day(d)
+        last_request = time.monotonic()
+        if not df.empty:
+            frames.append(df)
+        if (i + 1) % progress_every == 0:
+            print(f"  finra backfill: {i + 1}/{len(days)} days, rows so far: {sum(len(f) for f in frames):,}", flush=True)
+    if not frames:
+        out = pd.DataFrame()
+        out.to_parquet(output_path, index=False)
+        return out
+    out = pd.concat(frames, ignore_index=True)
+    out.to_parquet(output_path, index=False)
+    return out
+
+
+def emit_finra_short_spike_records(
+    short_volume_path: object,
+    *,
+    z_threshold: float = 2.0,
+    window: int = 20,
+    min_total_volume: float = 100000.0,
+) -> pd.DataFrame:
+    """Generate news_record-shaped catalyst events from a FINRA short-volume
+    backfill parquet. Emits one record per (ticker, date) where the
+    z-score of short_ratio (per ticker, rolling-mean centered) exceeds
+    ``z_threshold`` in either direction.
+    """
+    from pathlib import Path
+    df = pd.read_parquet(short_volume_path) if Path(short_volume_path).exists() else pd.DataFrame()
+    if df.empty:
+        return records_from_frame(pd.DataFrame(), source="finra_short_spike")
+    df = df[df["total_volume"] >= float(min_total_volume)].copy()
+    df["short_ratio"] = df["short_volume"] / df["total_volume"].clip(lower=1)
+    df = df.sort_values(["ticker", "date"])
+    grp = df.groupby("ticker")
+    df["mean_ratio"] = grp["short_ratio"].transform(lambda s: s.rolling(window, min_periods=5).mean())
+    df["std_ratio"] = grp["short_ratio"].transform(lambda s: s.rolling(window, min_periods=5).std())
+    df["zscore"] = (df["short_ratio"] - df["mean_ratio"]) / df["std_ratio"].replace(0, pd.NA)
+    spikes = df[df["zscore"].abs() >= float(z_threshold)].copy()
+    if spikes.empty:
+        return records_from_frame(pd.DataFrame(), source="finra_short_spike")
+    rows: list[dict] = []
+    for _, r in spikes.iterrows():
+        direction = "elevated" if r["zscore"] > 0 else "depressed"
+        headline = (
+            f"Short-volume {direction} (z={r['zscore']:+.1f}σ): "
+            f"{int(r['short_volume']):,} shorted of {int(r['total_volume']):,} "
+            f"({r['short_ratio'] * 100:.1f}% vs {r['mean_ratio'] * 100:.1f}% baseline)"
+        )
+        ts = pd.Timestamp(r["date"]).tz_localize("UTC")
+        rows.append(
+            {
+                "ticker": r["ticker"],
+                "timestamp": ts,
+                "headline": headline,
+                "summary": f"short_ratio={r['short_ratio']:.4f} mean={r['mean_ratio']:.4f} std={r['std_ratio']:.4f} z={r['zscore']:.2f}",
+                "url": "https://www.finra.org/finra-data/browse-catalog/short-sale-volume-data/daily-short-sale-volume-files",
+                "source": "finra_short_spike",
+                "source_id": f"{r['ticker']}-{ts.strftime('%Y%m%d')}",
+            }
+        )
+    return records_from_frame(pd.DataFrame(rows), source="finra_short_spike")
+
+
+# ---------------------------------------------------------------------------
+# yfinance company profile backfill (replaces FMP profile)
+# ---------------------------------------------------------------------------
+
+YFINANCE_PROFILE_FIELDS: tuple[str, ...] = (
+    "symbol",
+    "shortName",
+    "longName",
+    "sector",
+    "sectorDisp",
+    "industry",
+    "industryDisp",
+    "country",
+    "marketCap",
+    "enterpriseValue",
+    "sharesOutstanding",
+    "floatShares",
+    "exchange",
+    "quoteType",
+    "fullTimeEmployees",
+    "longBusinessSummary",
+    "website",
+    "beta",
+    "averageVolume",
+    "averageVolume10days",
+    "trailingPE",
+    "forwardPE",
+    "priceToBook",
+    "profitMargins",
+    "operatingMargins",
+    "totalRevenue",
+    "grossProfits",
+    "earningsGrowth",
+    "revenueGrowth",
+    "dividendYield",
+    "shortRatio",
+    "heldPercentInstitutions",
+    "heldPercentInsiders",
+)
+
+
+def fetch_yfinance_profiles(
+    tickers: Iterable[str],
+    *,
+    min_interval_s: float = 0.4,
+    progress_every: int = 100,
+) -> pd.DataFrame:
+    """Pull yf.Ticker(t).info for each ticker and reduce to a fixed schema.
+
+    Free, unlimited. ~0.5s per ticker — full 1077 takes ~9 minutes.
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        return pd.DataFrame()
+
+    cleaned = _clean_tickers(tickers)
+    rows: list[dict] = []
+    last_request = 0.0
+    for i, ticker in enumerate(cleaned):
+        elapsed = time.monotonic() - last_request
+        if elapsed < min_interval_s:
+            time.sleep(min_interval_s - elapsed)
+        info: dict = {}
+        try:
+            info = yf.Ticker(ticker).info or {}
+        except Exception:
+            info = {}
+        last_request = time.monotonic()
+        if not info:
+            continue
+        row: dict = {"ticker": ticker, "snapshot_date": pd.Timestamp.utcnow().normalize()}
+        for f in YFINANCE_PROFILE_FIELDS:
+            val = info.get(f)
+            if isinstance(val, (list, dict)):
+                val = json.dumps(val)[:1000]
+            # yfinance occasionally returns the string "Infinity" or "-Infinity"
+            # in numeric fields (e.g. trailingPE when earnings are negative).
+            # pyarrow can't mix str + float in one column, so coerce here.
+            if isinstance(val, str) and val.strip().lower() in {"infinity", "-infinity", "nan"}:
+                val = None
+            row[f] = val
+        rows.append(row)
+        if (i + 1) % progress_every == 0:
+            print(f"  yfinance profile: {i + 1}/{len(cleaned)} tickers ({len(rows)} successful)", flush=True)
+    return pd.DataFrame(rows)
