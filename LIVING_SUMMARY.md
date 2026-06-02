@@ -86,3 +86,11 @@
 {2026-06-01 19:27:56 EDT}{user: codex}{swing dashboard renderer crash diagnosis}{Found VS Code webview crashed while combined server/runner kept running; audit showed 74 open positions, 115 chart seeds, and thousands of chart events stressing the embedded renderer.}
 {2026-06-01 19:27:56 EDT}{user: codex}{swing dashboard stability patch}{Capped swing chart snapshots/widgets at 24, removed closed charts after close, throttled chart auto-scroll, and labeled shared-stream queues so future queue-full warnings identify the subscriber.}
 {2026-06-01 21:54:07 EDT}{user: codex}{6/1 closed-trade analysis}{Parsed swing paper audit and SPY live run: swing had 35 closed positions, 55 pending close polls, option-mark PnL -710; SPY had one verified close_long at 0.80 vs 1.89 entry, approx -109.}
+{2026-06-01 11:24:51 EST}{user: codex}{Reviewed theme rotation module readiness, training gap, label quality, and universe expansion questions.}
+{2026-06-01 11:24:51 EST}{user: codex}{Conclusion: rule-based module is research/live-radar usable but not production trading ready; ML ranker training, walk-forward validation, label calibration, and broader theme/ticker coverage remain next steps.}
+{2026-06-01 13:14:05 EST}{user: codex}{Discussed theme discovery risk: current theme taxonomy can miss future narratives unless refreshed from market/news/filing/clustering signals.}
+{2026-06-01 13:14:05 EST}{user: codex}{Added theme Colab export/training files and generated theme_expansion/outputs/training_export/theme_colab_bundle.tgz for upload.}
+{2026-06-01 13:34:34 EDT}{user: codex}{Discussed frustration/FOMO around fast AI-related momentum runners and the need for earlier, more selective capture.}
+{2026-06-01 13:34:34 EDT}{user: codex}{Reviewed existing theme signals and framed next step as a small-account runner playbook: theme leadership, ticker leadership, catalyst, setup, and execution rules.}
+{2026-06-01 13:55:29 EDT}{user: codex}{User pushed for repo-specific monetization plan, not generic trading advice.}
+{2026-06-01 13:55:29 EDT}{user: codex}{Audited current repo wiring: only multi_ticker_swing model exists; theme, momentum expansion, forward-guidance, and meta models are not imported/trained yet.}
