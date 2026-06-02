@@ -35,3 +35,5 @@
 {2026-06-01 13:34:34 EDT}{user: codex}{Reviewed existing theme signals and framed next step as a small-account runner playbook: theme leadership, ticker leadership, catalyst, setup, and execution rules.}
 {2026-06-01 13:55:29 EDT}{user: codex}{User pushed for repo-specific monetization plan, not generic trading advice.}
 {2026-06-01 13:55:29 EDT}{user: codex}{Audited current repo wiring: only multi_ticker_swing model exists; theme, momentum expansion, forward-guidance, and meta models are not imported/trained yet.}
+{2026-06-02 14:20:46 EST}{user: codex}{Discussed whether to build standalone higher-timeframe pivot swing models for 1H/4H/1D to support runner radar and longer swing entries.}
+{2026-06-02 14:26:11 EST}{user: codex}{Clarified that repo already has favorable swing labeling in 30m multi_ticker_swing; higher timeframe pivot work should be additive context/duration scoring for week-plus trades.}
