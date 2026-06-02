@@ -96,3 +96,4 @@
 {2026-06-01 13:55:29 EDT}{user: codex}{Audited current repo wiring: only multi_ticker_swing model exists; theme, momentum expansion, forward-guidance, and meta models are not imported/trained yet.}
 {2026-06-02 14:20:46 EST}{user: codex}{Discussed whether to build standalone higher-timeframe pivot swing models for 1H/4H/1D to support runner radar and longer swing entries.}
 {2026-06-02 14:26:11 EST}{user: codex}{Clarified that repo already has favorable swing labeling in 30m multi_ticker_swing; higher timeframe pivot work should be additive context/duration scoring for week-plus trades.}
+{2026-06-02 15:59:20 EST}{user: codex}{Designed multi-timeframe swing/momentum architecture: use base execution frames plus higher-timeframe context, avoiding redundant one-model-per-timeframe sprawl.}
