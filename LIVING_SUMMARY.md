@@ -97,3 +97,21 @@
 {2026-06-02 14:20:46 EST}{user: codex}{Discussed whether to build standalone higher-timeframe pivot swing models for 1H/4H/1D to support runner radar and longer swing entries.}
 {2026-06-02 14:26:11 EST}{user: codex}{Clarified that repo already has favorable swing labeling in 30m multi_ticker_swing; higher timeframe pivot work should be additive context/duration scoring for week-plus trades.}
 {2026-06-02 15:59:20 EST}{user: codex}{Designed multi-timeframe swing/momentum architecture: use base execution frames plus higher-timeframe context, avoiding redundant one-model-per-timeframe sprawl.}
+{2026-06-03 10:01:14 EST}{user: codex}{Analyzed SPY daytrader backtest vs live discrepancy.}
+{2026-06-03 10:01:14 EST}{user: codex}{Found good SPY tests are mostly underlying-price/research execution assumptions, while live trades short-dated options with bid/ask, theta, delayed/confirmed entries, and different exit behavior.}
+{2026-06-03 10:08:47 EST}{user: codex}{Discussed whether SPY daytrader base model is worth salvaging.}
+{2026-06-03 10:08:47 EST}{user: codex}{Conclusion: live directional correctness appears weak, likely alpha ceiling for pure 1m/10m technical SPY signals; suggested only narrow salvage tests before prioritizing larger swing bot.}
+{2026-06-03 10:15:27 EST}{user: codex}{Discussed resources needed to make SPY/SPX daytrader viable.}
+{2026-06-03 10:15:27 EST}{user: codex}{Recommended adding live/historical OPRA options data, options flow/gamma levels, and ES/SPY order-flow context before expecting intraday SPY edge from models.}
+{2026-06-03 10:17:32 EST}{user: codex}{Answered what additional resources could improve SPY/SPX daytrader.}
+{2026-06-03 10:17:32 EST}{user: codex}{Framed viable next stack as OPRA options data, flow/gamma analytics, futures/order-book context, event regimes, and a live recorder before spending heavily.}
+{2026-06-03 10:27:10 EST}{user: codex}{Drafted advisor-facing capstone direction summary.}
+{2026-06-03 10:27:10 EST}{user: codex}{Created AdvisorResearchProjectUpdate.md recommending multi-ticker swing as revised final focus, with SPY daytrader as baseline/limitation study and HTF momentum/catalyst as extension.}
+{2026-06-03 10:40:15 EST}{user: codex}{Updated advisor research summary with multi-ticker performance evidence.}
+{2026-06-03 10:40:15 EST}{user: codex}{Added long vs short directional win-rate comparison and recent live/paper call-side return evidence, while noting puts/shorts and option execution remain the main weakness.}
+{2026-06-03 10:47:08 EST}{user: codex}{Refined advisor summary framing around multi-ticker swing.}
+{2026-06-03 10:47:08 EST}{user: codex}{Corrected overclaim that multi-ticker better showcases ML skills; clarified it uses the same ML pipeline as SPY daytrader but has better real/paper trading results due to ticker breadth/timeframe.}
+{2026-06-03 16:14:36 EST}{user: codex}{Computed multi-ticker swing hold-time and top-trade metrics from May 28-29 logs.}
+{2026-06-03 16:14:36 EST}{user: codex}{Added hold-time section to AdvisorResearchProjectUpdate.md: 123 closed trades averaged 157.5 min, fresh entries averaged 131.1 min, and top logged/fresh trades were listed with timestamps.}
+{2026-06-03 16:34:51 EST}{user: codex}{Recomputed multi-ticker swing hold-time metrics including the June 1 paper audit log.}
+{2026-06-03 16:34:51 EST}{user: codex}{Updated AdvisorResearchProjectUpdate.md to use May 28-June 1 logs: 157 closed trades averaged 151.2 min, fresh entries averaged 125.0 min; top winners unchanged.}
