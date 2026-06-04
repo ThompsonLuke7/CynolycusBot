@@ -86,14 +86,19 @@ def main() -> int:
     if args.tickers:
         tickers = list(args.tickers)
     else:
-        snap = pd.DataFrame()
-        if list_snapshots():
-            snap = load_snapshot_for(pd.Timestamp.utcnow())
-        tickers = snap["ticker"].astype(str).tolist() if not snap.empty else get_candidate_pool()
+        try:
+            from shared_universe.universe import shared_tickers
+
+            tickers = shared_tickers(eligible_only=True, rebuild=True)
+        except Exception:
+            snap = pd.DataFrame()
+            if list_snapshots():
+                snap = load_snapshot_for(pd.Timestamp.utcnow())
+            tickers = snap["ticker"].astype(str).tolist() if not snap.empty else get_candidate_pool()
     candidate_tickers = filter_context_only_tickers(tickers)
 
     if args.refresh_universe:
-        write_weekly_snapshot(as_of=pd.Timestamp.utcnow().normalize())
+        write_weekly_snapshot(as_of=pd.Timestamp.utcnow().normalize(), candidates=candidate_tickers)
 
     if args.fetch_daily_only:
         fetch_daily_for_universe_scoring(tickers=candidate_tickers, force=args.force)

@@ -223,6 +223,9 @@ momentum_expansion/data/training_export/*.parquet
 momentum_expansion/data/processed/*.parquet
 momentum_expansion/data/processed/features_4h/*.parquet
 theme_expansion/outputs/**/*.parquet
+theme_expansion/data/daily_bars/
+theme_expansion/data/**/*.parquet
+theme_expansion/data/ticker_profiles_cache/
 catalysts/data/processed/*.parquet
 events/data/processed/*.parquet
 meta_context/data/processed/*.parquet

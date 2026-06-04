@@ -13,13 +13,14 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT   = Path(__file__).resolve().parents[2]
+SHARED_DATA_ROOT = REPO_ROOT / "Data" / "shared"
 
-RAW_DIR              = MODULE_ROOT / "data" / "raw"
+RAW_DIR              = SHARED_DATA_ROOT / "bars"
 RAW_1H_DIR           = RAW_DIR / "1h"
 RAW_4H_DIR           = RAW_DIR / "4h"
 RAW_1D_DIR           = RAW_DIR / "1d"
 RAW_CONTEXT_DIR      = RAW_DIR / "context"
-DEFAULT_SCAN_UNIVERSE = RAW_DIR / "MomentumExpansionUniverse.xlsx"
+DEFAULT_SCAN_UNIVERSE = SHARED_DATA_ROOT / "universe" / "MomentumExpansionUniverse.xlsx"
 
 UNIVERSE_DIR         = MODULE_ROOT / "data" / "universe_snapshots"
 PROCESSED_DIR        = MODULE_ROOT / "data" / "processed"
@@ -42,8 +43,10 @@ PLOTS_DIR            = MODULE_ROOT / "plots" / "output"
 # ---------------------------------------------------------------------------
 # Date range — Alpaca historical depth on most names is reliable from ~2016
 # ---------------------------------------------------------------------------
-TRAIN_START = "2018-01-01"
-TRAIN_END   = "2026-04-30"
+TRAIN_START = "2020-01-01"
+# Date-only fetch endpoints are effectively end-exclusive in the current cache,
+# so 2026-06-02 includes bars through 2026-06-01.
+TRAIN_END   = "2026-06-02"
 
 # ---------------------------------------------------------------------------
 # Context tickers — fetched once, reused by every feature build
@@ -99,6 +102,7 @@ BAR_CONFIG: dict = {
     "context_timeframe": "1Hour",   # context tickers stored at same cadence
     "daily_timeframe":   "1Day",
     "adjustment":        "split",
+    "feed":              "sip",
     # 4H aggregation: align to RTH so each session yields exactly two 4H bars
     # (09:30-13:30 and 13:30-17:30 ET, last bar can be partial). We label by
     # the bar's *start* timestamp.

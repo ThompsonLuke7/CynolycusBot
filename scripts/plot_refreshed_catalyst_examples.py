@@ -15,10 +15,11 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from momentum_expansion.config.momentum_config import RAW_1D_DIR
 
 OUT_DIR = Path("catalysts/data/processed/example_plots")
 NEWS_RECORDS = Path("news/data/processed/news_records.parquet")
-BARS_DIR = Path("momentum_expansion/data/raw/1d")
+BARS_DIR = RAW_1D_DIR
 
 
 def load_bars_window(ticker: str, event_ts: pd.Timestamp, before: int = 15, after: int = 40) -> tuple[pd.DataFrame, int]:

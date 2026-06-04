@@ -111,9 +111,15 @@ for f in folds:
 
 # %%
 # Cell 4 — tune XGBoost, fit per fold, gather clean OOF predictions
+import shutil
+
 import xgboost as xgb
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import ParameterSampler
+
+# Use the Colab GPU when present (nvidia-smi on PATH), else CPU. Override with XGB_DEVICE.
+XGB_DEVICE = os.environ.get("XGB_DEVICE") or ("cuda" if shutil.which("nvidia-smi") else "cpu")
+print("xgb device:", XGB_DEVICE)
 
 BASE_XGB_PARAMS = dict(
     objective="reg:squarederror",
@@ -121,6 +127,7 @@ BASE_XGB_PARAMS = dict(
     random_state=42,
     n_jobs=-1,
     tree_method="hist",
+    device=XGB_DEVICE,
     early_stopping_rounds=100,
 )
 
@@ -135,7 +142,7 @@ PARAM_SPACE = {
     "reg_lambda": [0.75, 1.0, 2.0, 4.0],
     "max_delta_step": [0, 1],
 }
-N_PARAM_TRIALS = int(os.environ.get("MOMENTUM_XGB_PARAM_TRIALS", "8"))
+N_PARAM_TRIALS = int(os.environ.get("MOMENTUM_XGB_PARAM_TRIALS", "25"))
 VAL_FRACTION = 0.20
 RANDOM_STATE = 42
 
@@ -243,7 +250,7 @@ for fi, f in enumerate(folds):
     model = _fit_xgb(Xtr, ytr, Xval, yval, BEST_PARAMS)
     p = _predict(model, Xte)
 
-    rmse = mean_squared_error(yte, p, squared=False)
+    rmse = np.sqrt(mean_squared_error(yte, p))
     mae = mean_absolute_error(yte, p)
     spearman = pd.Series(p, index=yte.index).corr(yte, method="spearman")
     fold_metrics.append({
@@ -266,7 +273,7 @@ for fi, f in enumerate(folds):
 if oof_rows:
     oof = pd.concat(oof_rows)
     oof.to_parquet(WORK / "oof_preds.parquet")
-    print("aggregate OOF RMSE:", mean_squared_error(oof["y"], oof["score"], squared=False))
+    print("aggregate OOF RMSE:", np.sqrt(mean_squared_error(oof["y"], oof["score"])))
     print("aggregate OOF MAE :", mean_absolute_error(oof["y"], oof["score"]))
     print("aggregate OOF Spearman:", oof["score"].corr(oof["y"], method="spearman"))
 

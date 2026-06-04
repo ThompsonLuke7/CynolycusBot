@@ -93,8 +93,8 @@ def export_training_bundle(
         "date_max": str(matrix["date"].max().date()),
         "source_labels": str(labels_path),
         "walk_forward": {
-            "train_years": 4,
-            "embargo_days": 20,
+            "train_years": 3,  # Alpaca daily history starts ~2020-07; 3y keeps ~5 OOF folds
+            "embargo_days": 30,  # > 20d label horizon (fwd_theme_excess_benchmark_20d)
             "test_months": 6,
             "min_train_rows": 30000,
             "min_test_rows": 1000,

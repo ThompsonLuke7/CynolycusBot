@@ -1,0 +1,36 @@
+themes: 103 -> 85 (removed 23, added 5)
+removed themes: ['ai_apps', 'asset_managers', 'biotech', 'consumer', 'copper', 'data_centers', 'defense', 'energy', 'fintech', 'gold', 'managed_care', 'medtech', 'memory', 'networking', 'nuclear', 'payments', 'pharma', 'restaurants', 'retail', 'semis', 'silver', 'storage', 'uranium']
+map tickers: 795 -> 1307
+new equities assigned: 507
+  by confidence: {'H': 275, 'M': 194, 'L': 38}
+excluded (non-equity): 26
+UNMAPPED (need manual): 2
+  unmapped tickers: LION(nan), XXI(Shell Companies)
+
+new constituents per theme (top 25):
+theme_1
+biotech_innovation             59
+enterprise_software            42
+autos                          26
+industrial_automation          24
+medtech_devices                19
+retail_consumer                16
+semis_compute                  16
+real_estate_reits              15
+diagnostics_tools              15
+consumer_internet              15
+banks_brokers_exchanges        14
+fintech_payments               13
+chemicals                      13
+copper_metals                  13
+defense_aerospace              12
+transport_logistics            11
+construction_infrastructure    11
+apparel_beauty_lifestyle       11
+telecom                        10
+streaming_entertainment         9
+travel                          9
+oil_services                    8
+gaming_sports_betting           8
+consumer_staples                8
+gold_silver_miners              7

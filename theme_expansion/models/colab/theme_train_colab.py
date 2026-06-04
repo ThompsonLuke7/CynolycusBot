@@ -96,9 +96,15 @@ for fold in folds:
     print(fold)
 
 # %%
+import shutil
+
 import xgboost as xgb
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import ParameterSampler
+
+# Use the Colab GPU when present (nvidia-smi on PATH), else CPU. Override with XGB_DEVICE.
+XGB_DEVICE = os.environ.get("XGB_DEVICE") or ("cuda" if shutil.which("nvidia-smi") else "cpu")
+print("xgb device:", XGB_DEVICE)
 
 BASE_PARAMS = {
     "objective": "reg:squarederror",
@@ -106,6 +112,7 @@ BASE_PARAMS = {
     "random_state": 42,
     "n_jobs": -1,
     "tree_method": "hist",
+    "device": XGB_DEVICE,
     "early_stopping_rounds": 75,
 }
 PARAM_SPACE = {
@@ -118,7 +125,7 @@ PARAM_SPACE = {
     "reg_alpha": [0.0, 0.05, 0.20],
     "reg_lambda": [1.0, 2.0, 5.0],
 }
-N_TRIALS = int(os.environ.get("THEME_XGB_PARAM_TRIALS", "10"))
+N_TRIALS = int(os.environ.get("THEME_XGB_PARAM_TRIALS", "30"))
 
 
 def time_train_val_split(frame, val_fraction=0.20):
@@ -192,7 +199,7 @@ for i, fold in enumerate(folds):
         "fold": i,
         "n_train": int(len(train_frame)),
         "n_test": int(len(test_frame)),
-        "rmse": float(mean_squared_error(yte, p, squared=False)),
+        "rmse": float(np.sqrt(mean_squared_error(yte, p))),
         "mae": float(mean_absolute_error(yte, p)),
         "spearman": float(pd.Series(p).corr(pd.Series(yte.values), method="spearman")),
     }
@@ -204,7 +211,7 @@ for i, fold in enumerate(folds):
 
 oof = pd.concat(oof_rows, ignore_index=True)
 oof.to_parquet(WORK / "oof_preds.parquet", index=False)
-print("OOF RMSE:", mean_squared_error(oof["y"], oof["score"], squared=False))
+print("OOF RMSE:", np.sqrt(mean_squared_error(oof["y"], oof["score"])))
 print("OOF MAE:", mean_absolute_error(oof["y"], oof["score"]))
 print("OOF Spearman:", oof["score"].corr(oof["y"], method="spearman"))
 

@@ -14,19 +14,25 @@ REPORT_DIR = OUTPUT_DIR / "reports"
 
 DEFAULT_THEME_MAP_PATH = DATA_DIR / "default_theme_map.csv"
 THEME_DEFINITION_PATH = DATA_DIR / "theme_definition.csv"
+THEME_MAP_V4_PATH = DATA_DIR / "theme_map_v4.csv"
+THEME_DEFINITION_V4_PATH = DATA_DIR / "theme_definition_v4.csv"
 THEME_MAP_V3_1_PATH = DATA_DIR / "theme_map_v3_1.csv"
 THEME_DEFINITION_V3_1_PATH = DATA_DIR / "theme_definition_v3_1.csv"
 THEME_MAP_V2_PATH = DATA_DIR / "theme_map_v2.csv"
 THEME_DEFINITION_V2_PATH = DATA_DIR / "theme_definition_v2.csv"
 THEME_MAP_PATH = (
-    THEME_MAP_V3_1_PATH
+    THEME_MAP_V4_PATH
+    if THEME_MAP_V4_PATH.exists()
+    else THEME_MAP_V3_1_PATH
     if THEME_MAP_V3_1_PATH.exists()
     else THEME_MAP_V2_PATH
     if THEME_MAP_V2_PATH.exists()
     else DEFAULT_THEME_MAP_PATH
 )
 ACTIVE_THEME_DEFINITION_PATH = (
-    THEME_DEFINITION_V3_1_PATH
+    THEME_DEFINITION_V4_PATH
+    if THEME_DEFINITION_V4_PATH.exists()
+    else THEME_DEFINITION_V3_1_PATH
     if THEME_DEFINITION_V3_1_PATH.exists()
     else THEME_DEFINITION_V2_PATH
     if THEME_DEFINITION_V2_PATH.exists()
@@ -43,9 +49,9 @@ LIVE_RANKING_PATH = OUTPUT_DIR / "live_theme_ranking.csv"
 THEME_SIGNAL_LABELS_PATH = OUTPUT_DIR / "theme_signal_labels.parquet"
 LIVE_THEME_SIGNAL_RANKING_PATH = OUTPUT_DIR / "live_theme_signal_ranking.csv"
 
-START_DATE = "2018-01-01"
-# yfinance treats end as exclusive, so this includes bars through 2026-05-21.
-END_DATE = "2026-05-22"
+START_DATE = "2020-01-01"
+# yfinance treats end as exclusive, so this includes bars through 2026-06-01.
+END_DATE = "2026-06-02"
 BENCHMARK_TICKERS = ("SPY", "QQQ")
 
 TOP_N_THEMES = 3

@@ -5,10 +5,10 @@ Wraps the existing Alpaca fetcher (`API.Alpaca_API.market_data.fetch_intraday`)
 so credentials, pagination, and adjustment policy match the SPY live system.
 
 Storage layout:
-  momentum_expansion/data/raw/1h/{TICKER}.parquet   — native 1H pull
-  momentum_expansion/data/raw/4h/{TICKER}.parquet   — derived from 1H
-  momentum_expansion/data/raw/1d/{TICKER}.parquet   — native daily pull
-  momentum_expansion/data/raw/context/{TICKER}.parquet — SPY/QQQ/IWM/VIXY/sector ETFs at 1H
+  Data/shared/bars/1h/{TICKER}.parquet   — native 1H pull
+  Data/shared/bars/4h/{TICKER}.parquet   — derived from 1H
+  Data/shared/bars/1d/{TICKER}.parquet   — native daily pull
+  Data/shared/bars/context/{TICKER}.parquet — SPY/QQQ/IWM/VIXY/sector ETFs at 1H
 
 All parquets store UTC tz-aware timestamps in column `timestamp` (or index
 fall-through). The 4H resample anchors to NY local 09:30 / 13:30 so each
@@ -110,7 +110,8 @@ def fetch_one(
             timeframe=timeframe,
             limit=10_000,
             adjustment=BAR_CONFIG["adjustment"],
-            save_path=None,
+            feed=BAR_CONFIG.get("feed", "sip"),
+            save_path="",
         )
     except Exception as exc:
         logger.warning("[%s/%s] fetch failed: %s", ticker, kind, exc)
@@ -195,13 +196,21 @@ def resample_1h_to_4h(df_1h: pd.DataFrame) -> pd.DataFrame:
 def build_4h_for(ticker: str, *, force: bool = False) -> pd.DataFrame | None:
     """Resample cached 1H bars to 4H and persist."""
     out_path = _path_for(ticker, "4h")
+    src = _path_for(ticker, "1h")
     if out_path.exists() and not force:
         try:
-            return pd.read_parquet(out_path)
+            cached_4h = pd.read_parquet(out_path)
+            if not src.exists() or cached_4h.empty:
+                return cached_4h
+            df_1h_head = pd.read_parquet(src, columns=["timestamp"])
+            last_1h = pd.to_datetime(df_1h_head["timestamp"], utc=True, errors="coerce").max()
+            last_4h = pd.to_datetime(cached_4h["timestamp"], utc=True, errors="coerce").max()
+            if pd.notna(last_1h) and pd.notna(last_4h) and last_4h >= last_1h - pd.Timedelta(hours=4):
+                return cached_4h
+            logger.info("[%s] rebuilding stale 4h cache (last_4h=%s, last_1h=%s)", ticker, last_4h, last_1h)
         except Exception as exc:
             logger.warning("[%s] existing 4h cache unreadable, rebuilding: %s", ticker, exc)
 
-    src = _path_for(ticker, "1h")
     if not src.exists():
         logger.warning("[%s] no 1h cache to resample to 4h", ticker)
         return None
