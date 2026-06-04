@@ -115,3 +115,5 @@
 {2026-06-03 16:14:36 EST}{user: codex}{Added hold-time section to AdvisorResearchProjectUpdate.md: 123 closed trades averaged 157.5 min, fresh entries averaged 131.1 min, and top logged/fresh trades were listed with timestamps.}
 {2026-06-03 16:34:51 EST}{user: codex}{Recomputed multi-ticker swing hold-time metrics including the June 1 paper audit log.}
 {2026-06-03 16:34:51 EST}{user: codex}{Updated AdvisorResearchProjectUpdate.md to use May 28-June 1 logs: 157 closed trades averaged 151.2 min, fresh entries averaged 125.0 min; top winners unchanged.}
+{2026-06-04 13:22:59 EST}{user: codex}{multi-ticker scale-out exits}{Implemented and ran fresh-call 3-lot scale-out experiment through 6/1 with option-mark and underlying proxy modes; outputs written under Data/analysis/multi_ticker_swing_live/experiments/scaleout_exits.}
+{2026-06-04 13:25:40 EST}{user: codex}{workflow correction}{User pointed out repeated sandbox refresh failures and that the scale-out experiment was limited by missing raw 5m bars; future commands in this repo should avoid repeated sandbox retries and escalate/read via approved prefixes sooner.}
