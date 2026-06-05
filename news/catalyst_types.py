@@ -236,6 +236,37 @@ RECORD_LEVEL_OVERRIDES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
 )
 
+# Form 4 transactions default to insider_buying. Override to insider_selling
+# when the body text shows a disposition. SEC Form 4 uses transaction codes:
+#  S = open-market sale, D = disposition, F = payment of tax via shares,
+#  G = gift, M = exercise of derivative, A = grant/award.
+# We promote to insider_selling only on language patterns that unambiguously
+# indicate the insider received cash for shares; routine F/M/G/A transactions
+# stay tagged as the generic insider_activity / insider_buying default.
+FORM4_SELLING_PATTERNS: tuple[str, ...] = (
+    r"\binsider (?:sale|sells|sold|selling)\b",
+    r"\b(?:director|ceo|cfo|coo|cto|president|officer|executive)\s+.{0,40}\bsell(?:s|ing)?\b",
+    r"\bsell(?:s|ing|er)?\s+.{0,40}\bshares\b",
+    r"\bsold\s+(?:about\s+)?[\d,]+ shares\b",
+    r"\bsold\s+\$[\d,.]+[mk]?\s+(?:in|worth|of)\s+shares\b",
+    r"\bdisposition of shares\b",
+    r"\bopen[- ]market sale\b",
+    r"\bdisposed of .{0,40} shares\b",
+    r"\bform 144\b",
+    r"\b10b5[- ]1\b.*\bsale\b",
+    r"\bplanned sale\b",
+    r"\btransaction code[\s:]+[\"\']?s[\"\']?\b",
+)
+FORM4_BUYING_PATTERNS: tuple[str, ...] = (
+    r"\binsider (?:buy|buys|bought|buying|purchase|purchases|purchased)\b",
+    r"\b(?:director|ceo|cfo|coo|cto|president|officer|executive)\s+.{0,40}\b(?:buy|bought|purchas)\b",
+    r"\bopen[- ]market purchase\b",
+    r"\bbought\s+(?:about\s+)?[\d,]+ shares\b",
+    r"\bpurchased\s+(?:about\s+)?[\d,]+ shares\b",
+    r"\bacquired\s+(?:about\s+)?[\d,]+ shares\b",
+    r"\btransaction code[\s:]+[\"\']?p[\"\']?\b",
+)
+
 
 def refine_catalyst_types_from_clusters(
     news: pd.DataFrame,
@@ -287,4 +318,20 @@ def refine_catalyst_types_from_clusters(
             if hit_mask.any():
                 out.loc[hit_mask, "catalyst_family"] = family
                 out.loc[hit_mask, "catalyst_subtype"] = subtype
+
+    # Pass 3: insider buying/selling detection across all sources.
+    # Form 4 records typically have no body, but Google News and yfinance
+    # cover insider transactions in headlines ("Director sells X shares",
+    # "CFO sells $181k in shares", etc.). Reuse texts_all from pass 2.
+    if RECORD_LEVEL_OVERRIDES:
+        sell_hit = texts_all.apply(lambda t: any(re.search(p, t) for p in FORM4_SELLING_PATTERNS))
+        buy_hit = texts_all.apply(lambda t: any(re.search(p, t) for p in FORM4_BUYING_PATTERNS))
+        sell_only = sell_hit & ~buy_hit
+        buy_only = buy_hit & ~sell_hit
+        if sell_only.any():
+            out.loc[sell_only, "catalyst_family"] = "insider_activity"
+            out.loc[sell_only, "catalyst_subtype"] = "insider_selling"
+        if buy_only.any():
+            out.loc[buy_only, "catalyst_family"] = "insider_activity"
+            out.loc[buy_only, "catalyst_subtype"] = "insider_buying"
     return out

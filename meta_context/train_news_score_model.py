@@ -92,22 +92,54 @@ def evaluate(
     }
 
 
+def _train_lightgbm(X_tr, y_tr, X_val, y_val, *, params, num_boost_round, early_stopping):
+    import lightgbm as lgb
+    train_ds = lgb.Dataset(X_tr, label=y_tr)
+    val_ds = lgb.Dataset(X_val, label=y_val, reference=train_ds)
+    booster = lgb.train(
+        params,
+        train_ds,
+        num_boost_round=int(num_boost_round),
+        valid_sets=[val_ds],
+        valid_names=["val"],
+        callbacks=[lgb.early_stopping(int(early_stopping)), lgb.log_evaluation(50)],
+    )
+    return booster, "lightgbm"
+
+
+def _train_xgboost(X_tr, y_tr, X_val, y_val, *, params, num_boost_round, early_stopping, device):
+    import xgboost as xgb
+    booster = xgb.XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="logloss",
+        tree_method="hist",
+        device=device,  # 'cuda' or 'cpu'
+        n_estimators=int(num_boost_round),
+        learning_rate=float(params["learning_rate"]),
+        max_depth=int(params["max_depth"]),
+        subsample=float(params.get("bagging_fraction", 0.85)),
+        colsample_bytree=float(params.get("feature_fraction", 0.85)),
+        early_stopping_rounds=int(early_stopping),
+        random_state=42,
+        verbosity=1,
+    )
+    booster.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+    return booster, "xgboost"
+
+
 def train(
     matrix_path: Path = DEFAULT_MATRIX,
     model_path: Path = DEFAULT_MODEL,
     metrics_path: Path = DEFAULT_METRICS,
     *,
+    engine: str = "lightgbm",
+    device: str = "cpu",
     num_boost_round: int = 600,
     learning_rate: float = 0.03,
     max_depth: int = 6,
     num_leaves: int = 63,
     early_stopping: int = 40,
 ) -> dict:
-    try:
-        import lightgbm as lgb
-    except ImportError as exc:
-        raise SystemExit("lightgbm is required: install in .venv before training") from exc
-
     if not matrix_path.exists():
         raise SystemExit(
             f"Feature matrix not found at {matrix_path}. Build it first:\n"
@@ -127,9 +159,7 @@ def train(
 
     print(f"feature count: {X_tr.shape[1]}")
     print(f"train rows: {len(X_tr):,}  val rows: {len(X_val):,}  test rows: {len(X_te):,}")
-
-    train_ds = lgb.Dataset(X_tr, label=y_tr)
-    val_ds = lgb.Dataset(X_val, label=y_val, reference=train_ds)
+    print(f"engine: {engine}  device: {device}")
 
     params = {
         "objective": "binary",
@@ -144,17 +174,35 @@ def train(
         "seed": 42,
     }
 
-    booster = lgb.train(
-        params,
-        train_ds,
-        num_boost_round=int(num_boost_round),
-        valid_sets=[val_ds],
-        valid_names=["val"],
-        callbacks=[lgb.early_stopping(int(early_stopping)), lgb.log_evaluation(50)],
-    )
+    if engine == "lightgbm":
+        if device == "gpu":
+            params["device"] = "gpu"
+            print("(note: lightgbm GPU requires the OpenCL-built wheel; falls back to CPU if not present)")
+        booster, kind = _train_lightgbm(
+            X_tr, y_tr, X_val, y_val,
+            params=params,
+            num_boost_round=num_boost_round,
+            early_stopping=early_stopping,
+        )
+    elif engine == "xgboost":
+        booster, kind = _train_xgboost(
+            X_tr, y_tr, X_val, y_val,
+            params=params,
+            num_boost_round=num_boost_round,
+            early_stopping=early_stopping,
+            device=device,
+        )
+    else:
+        raise SystemExit(f"unknown engine: {engine}. Choose 'lightgbm' or 'xgboost'.")
 
     model_path.parent.mkdir(parents=True, exist_ok=True)
-    booster.save_model(str(model_path))
+    if kind == "lightgbm":
+        booster.save_model(str(model_path))
+    else:
+        # XGBoost classifier has its own format
+        xgb_path = model_path.with_suffix(".xgb.json")
+        booster.save_model(str(xgb_path))
+        model_path = xgb_path
     print(f"\nsaved booster -> {model_path}")
 
     metrics = {
@@ -162,15 +210,19 @@ def train(
         "val": evaluate(booster, X_val, y_val, meta_val, name="val"),
         "test": evaluate(booster, X_te, y_te, meta_te, name="test"),
     }
+    metrics["engine"] = kind
+    metrics["device"] = device
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_path.write_text(json.dumps(metrics, indent=2))
     print(f"saved metrics -> {metrics_path}")
     print(json.dumps(metrics, indent=2))
 
     # Persist feature importance for sanity-check
-    importance = pd.DataFrame(
-        {"feature": X_tr.columns, "gain": booster.feature_importance(importance_type="gain")}
-    ).sort_values("gain", ascending=False)
+    if kind == "lightgbm":
+        gains = booster.feature_importance(importance_type="gain")
+    else:
+        gains = booster.feature_importances_
+    importance = pd.DataFrame({"feature": X_tr.columns, "gain": gains}).sort_values("gain", ascending=False)
     importance_path = metrics_path.with_name("news_catalyst_feature_importance.csv")
     importance.to_csv(importance_path, index=False)
     print(f"saved feature importance -> {importance_path}")
@@ -183,6 +235,10 @@ def main() -> int:
     parser.add_argument("--matrix", default=str(DEFAULT_MATRIX))
     parser.add_argument("--model", default=str(DEFAULT_MODEL))
     parser.add_argument("--metrics", default=str(DEFAULT_METRICS))
+    parser.add_argument("--engine", choices=["lightgbm", "xgboost"], default="lightgbm",
+                        help="GBM engine. lightgbm = CPU default; xgboost supports CUDA via --device cuda.")
+    parser.add_argument("--device", default="cpu",
+                        help="cpu / gpu (lightgbm) / cuda (xgboost). xgboost + cuda is the simplest GPU path.")
     parser.add_argument("--num-boost-round", type=int, default=600)
     parser.add_argument("--learning-rate", type=float, default=0.03)
     parser.add_argument("--max-depth", type=int, default=6)
@@ -194,6 +250,8 @@ def main() -> int:
         matrix_path=Path(args.matrix),
         model_path=Path(args.model),
         metrics_path=Path(args.metrics),
+        engine=args.engine,
+        device=args.device,
         num_boost_round=args.num_boost_round,
         learning_rate=args.learning_rate,
         max_depth=args.max_depth,

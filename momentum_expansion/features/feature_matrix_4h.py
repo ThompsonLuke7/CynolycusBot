@@ -183,7 +183,11 @@ def _bars_since_true(mask: pd.Series, *, cap: int = 252) -> pd.Series:
             last_seen = i
             out.append(0.0)
         elif last_seen is None:
-            out.append(np.nan)
+            # Condition has never occurred yet (e.g. a chronic downtrend that
+            # never prints a new 52w high). Treat as maximally stale rather than
+            # NaN so a single never-true column doesn't drop the whole ticker
+            # in build_training_matrix's dropna(how="any").
+            out.append(float(cap))
         else:
             out.append(float(min(i - last_seen, cap)))
     return pd.Series(out, index=mask.index)
@@ -281,9 +285,14 @@ def build_ticker_features_4h(
     df["bars_since_volume_spike"] = _bars_since_true(df["volume_spike_20"] > 0, cap=252)
 
     # --- STRUCTURE ---
-    # 52-week high distance — at 2 4H bars/day * ~252 trading days = ~504 bars
-    roll_high_252d = h.rolling(504).max()
-    roll_low_252d = lo.rolling(504).min()
+    # 52-week high distance — at 2 4H bars/day * ~252 trading days = ~504 bars.
+    # min_periods=252 (~6 months) lets young listings compute a partial-window
+    # "high so far" instead of NaN (NaN would drop the whole ticker in the
+    # build_training_matrix dropna). insufficient_52w_history flags those rows so
+    # the model can discount the approximate value.
+    roll_high_252d = h.rolling(504, min_periods=252).max()
+    roll_low_252d = lo.rolling(504, min_periods=252).min()
+    df["insufficient_52w_history"] = (c.rolling(504, min_periods=1).count() < 504).astype(float)
     df["dist_to_52w_high_atr"] = ((roll_high_252d - c) / atr14).clip(0, 50)
     df["dist_to_52w_low_atr"] = ((c - roll_low_252d) / atr14).clip(0, 50)
 
@@ -391,7 +400,7 @@ def build_ticker_features_4h(
             + 2 * (d_ema50 > d_ema100).astype(int)
             + 4 * (d_ema100 > d_ema200).astype(int)
         ).shift(1)
-        d_high_252 = d["high"].rolling(252).max()
+        d_high_252 = d["high"].rolling(252, min_periods=126).max()  # ~6mo partial window for young names
         d_dist_52w = ((d_high_252 - dc) / d_atr.replace(0, np.nan)).shift(1).clip(0, 50)
         d_dist_200 = ((dc - d_ema200) / d_atr.replace(0, np.nan)).shift(1).clip(-50, 50)
         d_new_high_252 = (dc >= d_high_252.shift(1)).astype(float)
@@ -516,6 +525,7 @@ FEATURE_COLUMNS_4H: list[str] = [
     "breakout_attempts_60", "bars_since_breakout_20",
     "base_range_60_atr", "base_position_60", "close_tightness_10",
     "range_contraction_20_60", "near_52w_high", "bars_since_52w_high",
+    "insufficient_52w_history",
     "open_to_prev_close_ret",
     # Relative strength
     "rs_spy_1", "rs_spy_5", "rs_spy_20",

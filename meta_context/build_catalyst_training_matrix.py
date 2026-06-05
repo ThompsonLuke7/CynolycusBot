@@ -31,9 +31,11 @@ from news.config import (
 
 OUTPUT_PATH = Path("meta_context/data/processed/catalyst_training_matrix.parquet")
 
-# Train through 2025-09; validate 2025-10 to 2026-02; test 2026-03+
-TRAIN_END = pd.Timestamp("2025-10-01", tz="UTC")
-VAL_END = pd.Timestamp("2026-03-01", tz="UTC")
+# Chronological splits sized roughly 70K / 20K / 20K against the current
+# corpus distribution. Recompute these if the corpus shape changes:
+#   .venv/bin/python -c "import pandas as pd; m=pd.read_parquet('meta_context/data/processed/catalyst_training_matrix.parquet'); m=m.sort_values('timestamp').reset_index(drop=True); print(m.iloc[70000]['timestamp'], m.iloc[90000]['timestamp'])"
+TRAIN_END = pd.Timestamp("2026-04-29", tz="UTC")
+VAL_END = pd.Timestamp("2026-05-17", tz="UTC")
 
 
 def _parse_embedding(value) -> np.ndarray:
