@@ -17,3 +17,4 @@ TA-Lib
 numba
 praw
 lightgbm
+pytest
