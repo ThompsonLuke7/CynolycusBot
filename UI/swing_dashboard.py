@@ -167,6 +167,11 @@ class _Status:
     stream_symbols: int = 0
     bar_count: int = 0
     raw_bar_count: int = 0
+    window_unique_symbols: int = 0
+    window_coverage_pct: float | None = None
+    recent_unique_symbols: int = 0
+    recent_coverage_pct: float | None = None
+    recent_missing_symbols: int = 0
     rth_bar_count: int = 0
     non_rth_bar_count: int = 0
     five_min_bar_count: int = 0
@@ -194,8 +199,8 @@ class SwingDashboardStore:
         self._orders: deque[dict] = deque(maxlen=MAX_ORDERS_LOG)
         self._trades: deque[dict] = deque(maxlen=MAX_TRADES_LOG)
         self._warmup: deque[dict] = deque(maxlen=MAX_WARMUP_LOG)
-        # chart seeds keyed by ticker; retained after close so late/reloaded
-        # clients can still render closed trade charts.
+        # chart seeds keyed by ticker; closed positions are removed so the grid
+        # stays focused on positions that are currently open.
         self._chart_seeds: dict[str, dict] = {}
         self._chart_bars: dict[str, deque[dict]] = {}
 
@@ -234,6 +239,11 @@ class SwingDashboardStore:
             self._status.stream_symbols = int(meta.get("stream_symbols", 0))
             self._status.bar_count = int(meta.get("bar_count", 0))
             self._status.raw_bar_count = int(meta.get("raw_bar_count", 0))
+            self._status.window_unique_symbols = int(meta.get("window_unique_symbols", 0))
+            self._status.window_coverage_pct = meta.get("window_coverage_pct")
+            self._status.recent_unique_symbols = int(meta.get("recent_unique_symbols", 0))
+            self._status.recent_coverage_pct = meta.get("recent_coverage_pct")
+            self._status.recent_missing_symbols = int(meta.get("recent_missing_symbols", 0))
             self._status.rth_bar_count = int(meta.get("rth_bar_count", 0))
             self._status.non_rth_bar_count = int(meta.get("non_rth_bar_count", 0))
             self._status.five_min_bar_count = int(meta.get("five_min_bar_count", 0))
@@ -294,15 +304,8 @@ class SwingDashboardStore:
         with self._lock:
             if not ticker:
                 return
-            seed = self._chart_seeds.get(ticker)
-            if seed is None:
-                seed = {"ticker": ticker}
-                self._chart_seeds[ticker] = seed
-            seed["closed"] = True
-            seed["exit_price"] = payload.get("exit_price")
-            seed["exit_reason"] = payload.get("exit_reason")
-            seed["exit_time"] = payload.get("exit_time") or payload.get("ts")
-            seed["exit_pnl_pct"] = payload.get("exit_pnl_pct")
+            self._chart_seeds.pop(ticker, None)
+            self._chart_bars.pop(ticker, None)
 
     def append_warmup(self, line: dict) -> None:
         with self._lock:

@@ -214,6 +214,92 @@ def _row_text(row: pd.Series) -> str:
     )
 
 
+# Source quality tags. These DO NOT remove records — they tag each record with
+# a category so downstream features can (a) weight high-alpha sources more in the
+# catalyst classifier and (b) compute mention frequency from aggregators/listicles
+# as a social-momentum / attention-peak signal in its own right.
+SOURCE_QUALITY_AGGREGATORS = (
+    "gurufocus",
+    "simplywall.st",
+    "stocktitan",
+    "tipranks",
+    "quiverquant",
+    "kavout",
+    "marketbeat",
+    "zacks.com",
+    "msn.com",
+    "wallstreetzen",
+    "stocknews",
+    "chartmill",
+    "trefis",
+    "stockstotrade",
+    "stockstory",
+    "intellectia",
+    "wallstcheatsheet",
+)
+SOURCE_QUALITY_OPINION_PATTERNS = (
+    r"\bis\s+\(?[A-Z]{1,5}\)?\s+a\s+(?:buy|sell|hold)\b",
+    r"\b[A-Z]{1,5}\s+stock(?:s)? to (?:buy|sell|watch)\b",
+    r"\bhow\s+much\s+have\s+you\s+made\b",
+    r"\bbest\s+(?:stocks?|dividend\s+stocks?)\s+for\b",
+    r"\b[A-Z]{1,5}\s+to\s+\$\d+\??\b",  # "XOM To $120?"
+    r"\bwhy\s+[a-z\s]+(?:could|might)\b",
+    r"\b\(?[A-Z]{1,5}\)?\s+stock\s+price,?\s*quote\b",
+    r"\bvaluation\s+check\b",
+    r"\bdividend\s+aristocrats\s+in\s+focus\b",
+    r"\bafter\s+(?:rapid|recent)\s+(?:multi[-\s]month\s+)?(?:share\s+price\s+)?surge\b",
+)
+SOURCE_QUALITY_BREAKING_PATTERNS = (
+    r"\bbreaking\b",
+    r"\b(?:announces|releases|reports|files)\b",
+    r"\b(?:fda|pdufa)\s+(?:approval|grant|clearance)\b",
+    r"\bcontract\s+(?:award|win|signing)\b",
+    r"\bguidance\s+(?:raise|cut|update)\b",
+    r"\bunusual\s+options\b",
+    r"\bearnings\s+(?:beat|miss|result)\b",
+    r"\bphase\s+[123]\s+(?:data|results|update)\b",
+    r"\bmerger\s+(?:agreement|announcement)\b",
+    r"\bdefinitive\s+agreement\b",
+    r"\b8-?K\s+(?:filed|item)\b",
+)
+
+
+def classify_source_quality(news: pd.DataFrame) -> pd.DataFrame:
+    """Tag each record with source_quality ∈ {breaking, high_alpha, opinion, aggregator}.
+
+    NOT a filter — every record keeps its row, but the tag flows downstream as a
+    feature (`source_quality`). Aggregator/opinion records contribute to the
+    mention-frequency / social-buzz signal even when their text has no alpha.
+    """
+    if news.empty:
+        return news
+    out = news.copy()
+    url_lower = out.get("url", pd.Series([""] * len(out))).fillna("").str.lower()
+    headline_lower = out.get("headline", pd.Series([""] * len(out))).fillna("").str.lower()
+    source_lower = out.get("source", pd.Series([""] * len(out))).fillna("").str.lower()
+
+    is_agg = url_lower.apply(lambda u: any(a in u for a in SOURCE_QUALITY_AGGREGATORS)) | \
+             headline_lower.str.contains(
+                 "|".join([a.replace(".", r"\.") for a in SOURCE_QUALITY_AGGREGATORS]),
+                 regex=True,
+             )
+    is_opinion = headline_lower.apply(
+        lambda h: any(re.search(p, h, re.IGNORECASE) for p in SOURCE_QUALITY_OPINION_PATTERNS)
+    )
+    is_breaking = headline_lower.apply(
+        lambda h: any(re.search(p, h, re.IGNORECASE) for p in SOURCE_QUALITY_BREAKING_PATTERNS)
+    ) | source_lower.str.startswith("sec_") | source_lower.isin(
+        {"fed_rss", "openfda", "clinicaltrials", "cboe_options_flow", "finra_short_spike"}
+    )
+
+    quality = pd.Series(["high_alpha"] * len(out), index=out.index)
+    quality[is_agg] = "aggregator"
+    quality[is_opinion & ~is_agg] = "opinion"
+    quality[is_breaking] = "breaking"
+    out["source_quality"] = quality
+    return out
+
+
 # Subtypes that are too distinctive to lose to a cluster-majority vote.
 # After cluster-driven refinement, any record whose text individually matches
 # one of these patterns gets overridden, even if its cluster as a whole was

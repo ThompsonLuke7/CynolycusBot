@@ -119,6 +119,10 @@ PARAM_SPACE = {
 N_TRIALS = int(os.environ.get("HTF_XGB_PARAM_TRIALS", "25"))
 VAL_FRACTION = 0.20
 INT_KEYS = {"n_estimators", "max_depth", "min_child_weight"}
+# Floor for the final-model tree count. A single held-out tail can early-stop at
+# tree 0 in a regime-shifted recent window, which previously produced a
+# degenerate 1-tree export. Never ship a final model shallower than this.
+MIN_FINAL_ESTIMATORS = 50
 
 
 def time_train_val_split(index, fraction=VAL_FRACTION):
@@ -226,8 +230,15 @@ if oof_rows:
 final_tr, final_val = time_train_val_split(df.index)
 selector = fit_xgb(df.loc[final_tr, FEATURES], df.loc[final_tr, TARGET].astype(float),
                    df.loc[final_val, FEATURES], df.loc[final_val, TARGET].astype(float), BEST_PARAMS)
-best_n = int(selector.best_iteration) + 1 if getattr(selector, "best_iteration", None) is not None else int(BEST_PARAMS["n_estimators"])
-print("final best_n_estimators:", best_n)
+selector_n = int(selector.best_iteration) + 1 if getattr(selector, "best_iteration", None) is not None else int(BEST_PARAMS["n_estimators"])
+# The single-tail selector is brittle: a regime-shifted recent window can
+# early-stop at tree 0 (this shipped a degenerate 1-tree model). Floor the count
+# at the median of the walk-forward fold best_iterations so the final model is
+# never shallower than what cross-validation actually supported.
+fold_best = [m["best_iteration"] + 1 for m in fold_metrics if m.get("best_iteration") is not None]
+fold_floor = int(np.median(fold_best)) if fold_best else selector_n
+best_n = max(selector_n, fold_floor, MIN_FINAL_ESTIMATORS)
+print(f"final n_estimators: selector={selector_n} fold_floor={fold_floor} -> best_n={best_n}")
 
 final_params = {**BEST_PARAMS, "n_estimators": best_n}
 final_model = xgb.XGBRegressor(

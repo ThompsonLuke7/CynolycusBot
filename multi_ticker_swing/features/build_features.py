@@ -57,8 +57,8 @@ def _downcast_numeric(df: pd.DataFrame) -> pd.DataFrame:
     if len(float_cols):
         out[float_cols] = out[float_cols].astype(np.float32)
     int_cols = out.select_dtypes(include=["int64", "int32"]).columns
-    for col in int_cols:
-        out[col] = pd.to_numeric(out[col], downcast="integer")
+    if len(int_cols):
+        out[int_cols] = out[int_cols].astype(np.int32)
     return out
 
 
