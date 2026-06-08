@@ -32,6 +32,24 @@ def _read_table(path: str) -> pd.DataFrame:
     return pd.read_parquet(p) if p.suffix.lower() == ".parquet" else pd.read_csv(p)
 
 
+def _load_context_universe(limit: int | None = None) -> pd.DataFrame:
+    from meta_context.config import CONTEXT_BACKTEST_UNIVERSE_PATH
+    from meta_context.backtest_inputs import build_context_backtest_universe
+
+    shared_path = Path("Data/shared/universe/shared_universe.csv")
+    if shared_path.exists():
+        universe = pd.read_csv(shared_path)
+        if "is_eligible" in universe.columns:
+            universe = universe[universe["is_eligible"].astype(bool)].copy()
+    elif CONTEXT_BACKTEST_UNIVERSE_PATH.exists():
+        universe = pd.read_csv(CONTEXT_BACKTEST_UNIVERSE_PATH)
+    else:
+        universe = build_context_backtest_universe(limit=limit)
+    if limit:
+        universe = universe.head(int(limit)).copy()
+    return universe
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Unscheduled catalyst news pipeline.")
     parser.add_argument("--stage", choices=["collect", "collect-sec-history", "sec-full-text", "sec-mda", "enrich-ex99", "classify", "earnings", "embed", "cluster", "refine", "label", "score", "features", "profiles", "finra-backfill", "finra-spikes", "cboe-snapshot", "scrape-bodies", "incremental"], required=True)
@@ -159,12 +177,9 @@ def main() -> int:
         if args.bars_csv:
             bars = _read_table(args.bars_csv)
         else:
-            from meta_context.config import CONTEXT_BACKTEST_UNIVERSE_PATH
-            from meta_context.backtest_inputs import build_context_backtest_universe, load_cached_30m_bars_for_universe
+            from meta_context.backtest_inputs import load_cached_30m_bars_for_universe
 
-            universe = pd.read_csv(CONTEXT_BACKTEST_UNIVERSE_PATH) if CONTEXT_BACKTEST_UNIVERSE_PATH.exists() else build_context_backtest_universe(limit=args.limit)
-            if args.limit:
-                universe = universe.head(int(args.limit)).copy()
+            universe = _load_context_universe(args.limit)
             bars = load_cached_30m_bars_for_universe(universe)
         label_news_forward_returns(NEWS_RECORDS_PATH, bars, bars_per_day=args.bars_per_day, incremental=not args.full_refit)
         build_winner_loser_libraries()
@@ -173,8 +188,7 @@ def main() -> int:
         # clusters using saved KMeans, re-apply refine, label only records whose
         # forward window has matured, append libraries.
         from news.pipeline import label_news_forward_returns
-        from meta_context.config import CONTEXT_BACKTEST_UNIVERSE_PATH
-        from meta_context.backtest_inputs import build_context_backtest_universe, load_cached_30m_bars_for_universe
+        from meta_context.backtest_inputs import load_cached_30m_bars_for_universe
 
         print("=== incremental update ===")
         print("[1/4] embed (incremental)")
@@ -184,9 +198,7 @@ def main() -> int:
         print("[3/4] refine (full re-apply; cheap)")
         refine_news_records_from_clusters()
         print("[4/4] label + winner/loser libraries (incremental)")
-        universe = pd.read_csv(CONTEXT_BACKTEST_UNIVERSE_PATH) if CONTEXT_BACKTEST_UNIVERSE_PATH.exists() else build_context_backtest_universe(limit=args.limit)
-        if args.limit:
-            universe = universe.head(int(args.limit)).copy()
+        universe = _load_context_universe(args.limit)
         bars = load_cached_30m_bars_for_universe(universe)
         label_news_forward_returns(NEWS_RECORDS_PATH, bars, bars_per_day=args.bars_per_day, incremental=True)
         build_winner_loser_libraries()
@@ -195,14 +207,11 @@ def main() -> int:
         build_news_similarity_scores()
     elif args.stage == "profiles":
         from news.sources import fetch_yfinance_profiles
-        from meta_context.config import CONTEXT_BACKTEST_UNIVERSE_PATH
 
         if args.tickers:
             tickers = list(args.tickers)
         else:
-            universe = pd.read_csv(CONTEXT_BACKTEST_UNIVERSE_PATH)
-            if args.limit:
-                universe = universe.head(int(args.limit)).copy()
+            universe = _load_context_universe(args.limit)
             tickers = universe["ticker"].astype(str).tolist()
         out_path = Path(args.output) if args.output else TICKER_PROFILE_PATH
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -225,18 +234,15 @@ def main() -> int:
         print(f"finra short-volume spike records: {len(records)}")
     elif args.stage == "cboe-snapshot":
         from news.sources import fetch_cboe_options_snapshot
-        from meta_context.config import CONTEXT_BACKTEST_UNIVERSE_PATH
 
         if args.tickers:
             tickers = list(args.tickers)
         else:
-            universe = pd.read_csv(CONTEXT_BACKTEST_UNIVERSE_PATH)
-            if args.limit:
-                universe = universe.head(int(args.limit)).copy()
+            universe = _load_context_universe(args.limit)
             tickers = universe["ticker"].astype(str).tolist()
         summary_path = Path(args.output) if args.output else CBOE_OPTIONS_SUMMARY_PATH
         summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_df, records_df = fetch_cboe_options_snapshot(tickers)
+        summary_df, records_df, strike_df = fetch_cboe_options_snapshot(tickers)
         # Append to historical summary if it exists; one row per ticker per day
         if summary_path.exists():
             try:
@@ -248,9 +254,32 @@ def main() -> int:
                 pass
         summary_df.to_parquet(summary_path, index=False)
         records_path = Path("news/data/processed/cboe_unusual_records.parquet")
+        if records_path.exists():
+            try:
+                prior_records = pd.read_parquet(records_path)
+                if not prior_records.empty and not records_df.empty:
+                    records_df = pd.concat([prior_records, records_df], ignore_index=True)
+                    records_df = records_df.drop_duplicates(["record_id"], keep="last")
+                elif records_df.empty:
+                    records_df = prior_records
+            except Exception:
+                pass
         records_df.to_parquet(records_path, index=False)
+        strikes_path = Path("news/data/processed/cboe_unusual_strikes.parquet")
+        if strikes_path.exists():
+            try:
+                prior_strikes = pd.read_parquet(strikes_path)
+                if not prior_strikes.empty and not strike_df.empty:
+                    strike_df = pd.concat([prior_strikes, strike_df], ignore_index=True)
+                    strike_df = strike_df.drop_duplicates(["ticker", "snapshot_date", "contract"], keep="last")
+                elif strike_df.empty:
+                    strike_df = prior_strikes
+            except Exception:
+                pass
+        strike_df.to_parquet(strikes_path, index=False)
         print(f"cboe snapshot: {len(summary_df)} summary rows -> {summary_path}")
         print(f"cboe unusual catalyst records: {len(records_df)} -> {records_path}")
+        print(f"cboe unusual strike rows: {len(strike_df)} -> {strikes_path}")
     else:
         if not args.timestamps_csv:
             raise ValueError("--timestamps-csv is required for --stage features")
