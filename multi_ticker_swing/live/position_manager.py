@@ -36,12 +36,15 @@ _ORDER_VERIFY_TIMEOUT_SECS = 2.5
 _ORDER_VERIFY_POLL_SECS = 0.5
 _OPTION_TICK = 0.01
 _PENDING_CLOSE_REFRESH_SECS = 30.0
+_PENDING_CLOSE_CHASE_SECS = 60.0
 _LIQUIDATION_CLOSE_REASONS = {
     "sl",
     "no_progress",
     "deferred_trail_failed",
     "deferred_trail_timeout",
     "expiration_itm_cutoff",
+    "restored_unknown_expiring",
+    "restored_unknown_loss_cut",
 }
 _ET = ZoneInfo("America/New_York")
 _DEFER_TRAIL_AFTER_HOUR = 15
@@ -50,6 +53,7 @@ _DEFER_RECOVERY_BARS = 3
 _DEFER_RECOVERY_PCT = 0.0025
 _DEFERRED_TRAIL_STATE_PATH = Path("Data/inference/multi_ticker_swing/deferred_trails.json")
 _WORTHLESS_CLOSE_STATE_PATH = Path("Data/inference/multi_ticker_swing/worthless_close_abandoned.json")
+_OPEN_POSITION_STATE_PATH = Path("Data/inference/multi_ticker_swing/open_positions.json")
 _EXPIRING_ITM_CLOSE_HOUR = 15
 _EXPIRING_ITM_CLOSE_MINUTE = 45
 _ASSIGNED_EQUITY_MIN_SHARES = 100
@@ -58,6 +62,7 @@ _OPTION_VALUE_QUOTE_MODE = "bid"
 _OPTION_PROFIT_TRAIL_ARM_PCT = 1.00
 _OPTION_PROFIT_TRAIL_GIVEBACK_PCT = 0.25
 _OPTION_TAKE_PROFIT_PCT = 3.00
+_RESTORED_UNKNOWN_MAX_LOSS_PCT = -0.35
 
 EventSink = Callable[[str, dict], None]
 
@@ -82,6 +87,8 @@ class SwingPosition:
     config: TickerConfig
     option_entry_price: float | None = None
     option_entry_meta: dict[str, Any] | None = None
+    restored_from_broker: bool = False
+    restore_source: str | None = None
 
     # Derived at entry
     sl_price: float | None = None
@@ -320,6 +327,8 @@ class SwingPosition:
             "atr_at_entry": float(self.atr_at_entry) if not _isnan(self.atr_at_entry) else None,
             "option_symbol": str(self.option_symbol),
             "option_entry_meta": self.option_entry_meta if isinstance(self.option_entry_meta, dict) else None,
+            "restored_from_broker": bool(self.restored_from_broker),
+            "restore_source": self.restore_source,
             "qty": int(self.qty),
             "tier": int(self.config.tier) if self.config else None,
         }
@@ -428,6 +437,24 @@ def _expiring_itm_exit_reason(pos: SwingPosition, bar: dict) -> str | None:
     return None
 
 
+def _restored_unknown_exit_reason(pos: SwingPosition, bar: dict) -> str | None:
+    if not bool(pos.restored_from_broker) or str(pos.restore_source or "") != "broker_snapshot":
+        return None
+
+    parsed = _parse_occ_option_symbol(pos.option_symbol)
+    ts = bar.get("timestamp")
+    if parsed is not None and isinstance(ts, datetime):
+        local = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=_ET)
+        if parsed.expiration <= local.date():
+            return "restored_unknown_expiring"
+
+    meta = pos.option_entry_meta if isinstance(pos.option_entry_meta, dict) else {}
+    broker_plpc = _as_float(meta.get("broker_unrealized_plpc"))
+    if math.isfinite(broker_plpc) and broker_plpc <= _RESTORED_UNKNOWN_MAX_LOSS_PCT:
+        return "restored_unknown_loss_cut"
+    return None
+
+
 def _safe_bar(bar: dict) -> dict[str, Any]:
     ts = bar.get("timestamp")
     return {
@@ -462,6 +489,7 @@ class SwingPositionManager:
         self._pending_close_orders: dict[str, dict[str, Any]] = {}
         self._deferred_trail_cache = self._load_deferred_trail_cache()
         self._worthless_close_abandoned = self._load_worthless_close_abandoned()
+        self._position_state_cache = self._load_open_position_state_cache()
 
     def _emit(self, kind: str, payload: dict) -> None:
         if self._sink is None:
@@ -651,6 +679,8 @@ class SwingPositionManager:
                 "count": len(assigned_equities),
             })
         self._emit("broker_reconcile", result)
+        if removed or replaced or restored or qty_updates:
+            self._persist_open_position_state()
         return result
 
     def _broker_swing_positions(
@@ -809,26 +839,61 @@ class SwingPositionManager:
             ignored.append({"symbol": symbol, "ticker": ticker, "reason": "outside_universe"})
             return None
 
-        entry_price = price_lookup(ticker)
+        latest_price = price_lookup(ticker)
         atr = atr_lookup(ticker)
-        if entry_price is None or not math.isfinite(float(entry_price)):
+        if latest_price is None or not math.isfinite(float(latest_price)):
             ignored.append({"symbol": symbol, "ticker": ticker, "reason": "missing_underlying_price"})
             return None
         if atr is None or not math.isfinite(float(atr)) or float(atr) <= 0:
             ignored.append({"symbol": symbol, "ticker": ticker, "reason": "missing_atr"})
             return None
 
+        cached = self._cached_position_state(ticker=ticker, symbol=symbol)
+        restore_source = "local_state" if cached else "broker_snapshot"
+        entry_price = _finite_or_none(cached.get("entry_price")) if cached else None
+        if entry_price is None:
+            entry_price = float(latest_price)
+        cached_atr = _finite_or_none(cached.get("atr_at_entry")) if cached else None
+        atr_at_entry = float(cached_atr if cached_atr is not None and cached_atr > 0 else atr)
+        cached_entry_time = _parse_dt(cached.get("entry_time")) if cached else None
+        entry_time = cached_entry_time or datetime.now(timezone.utc)
+
+        broker_avg = _finite_or_none(broker_pos.get("avg_entry_price"))
+        cached_option_entry = _finite_or_none(cached.get("option_entry_price")) if cached else None
+        option_entry_price = broker_avg if broker_avg is not None and broker_avg > 0 else cached_option_entry
+        option_entry_meta = (
+            cached.get("option_entry_meta")
+            if cached and isinstance(cached.get("option_entry_meta"), dict)
+            else None
+        )
+        if option_entry_meta is None:
+            option_entry_meta = {}
+        option_entry_meta = {
+            **option_entry_meta,
+            "restored_from_broker": True,
+            "restore_source": restore_source,
+            "missing_local_state": not bool(cached),
+            "broker_unrealized_plpc": broker_pos.get("unrealized_plpc"),
+            "broker_unrealized_pl": broker_pos.get("unrealized_pl"),
+            "broker_market_value": broker_pos.get("market_value"),
+        }
+
         pos = SwingPosition(
             ticker=ticker,
             direction=int(broker_pos.get("direction", 1) or 1),
             entry_price=float(entry_price),
-            entry_time=datetime.now(timezone.utc),
-            atr_at_entry=float(atr),
+            entry_time=entry_time,
+            atr_at_entry=atr_at_entry,
             option_symbol=symbol,
             qty=int(broker_pos.get("qty", 0) or 0),
             config=universe[ticker],
-            option_entry_price=_finite_or_none(broker_pos.get("avg_entry_price")),
+            option_entry_price=option_entry_price,
+            option_entry_meta=option_entry_meta,
+            restored_from_broker=True,
+            restore_source=restore_source,
         )
+        if cached:
+            self._restore_cached_tracking_state(pos, cached, latest_price=float(latest_price))
         self._apply_deferred_trail_cache(pos)
         self.open_position(pos)
         return pos
@@ -843,6 +908,7 @@ class SwingPositionManager:
             pos.option_symbol, pos.qty,
         )
         self._emit("position_opened", pos.to_dict())
+        self._persist_open_position_state()
 
     def on_5m_bar(self, ticker: str, bar: dict) -> None:
         """
@@ -851,6 +917,21 @@ class SwingPositionManager:
         """
         pos = self._positions.get(ticker)
         if pos is None:
+            return
+
+        pending = self._pending_close_orders.get(pos.ticker)
+        if pending is not None and not self._dry_run:
+            self._close_position(pos, str(pending.get("reason") or "pending_close_reconcile"), bar)
+            return
+
+        restored_reason = _restored_unknown_exit_reason(pos, bar)
+        if restored_reason:
+            self._emit("restored_position_defensive_exit_triggered", {
+                **pos.to_dict(),
+                "reason": restored_reason,
+                "bar": _safe_bar(bar),
+            })
+            self._close_position(pos, restored_reason, bar)
             return
 
         expiration_reason = _expiring_itm_exit_reason(pos, bar)
@@ -895,6 +976,7 @@ class SwingPositionManager:
                     "bar": _safe_bar(bar),
                 })
                 self._remove_deferred_trail_cache(pos)
+            self._persist_open_position_state()
             return
 
         reason = pos.update(bar)
@@ -902,6 +984,7 @@ class SwingPositionManager:
             if reason == "trail" and _should_defer_trail_exit(bar):
                 pos.mark_deferred_trail(bar)
                 self._persist_deferred_trail_cache()
+                self._persist_open_position_state()
                 logger.info(
                     "[%s] DEFER trail exit until next session  pnl=%+.2f%%  bars=%d  option=%s",
                     pos.ticker,
@@ -918,6 +1001,8 @@ class SwingPositionManager:
                 })
                 return
             self._close_position(pos, reason, bar)
+            return
+        self._persist_open_position_state()
 
     def _option_value_exit_reason(self, pos: SwingPosition) -> str | None:
         if not _OPTION_VALUE_EXIT_ENABLED:
@@ -965,6 +1050,17 @@ class SwingPositionManager:
                     "pending_since": pending.get("created_wall"),
                 })
                 return
+            if state.get("retry_now"):
+                self._last_close_failure_wall.pop(pos.ticker, None)
+                self._emit("position_close_retry", {
+                    **pos.to_dict(),
+                    "exit_price": exit_price,
+                    "exit_pnl_pct": float(pnl_pct),
+                    "exit_reason": reason,
+                    "retry_reason": state.get("reason"),
+                    "verification": state.get("verification"),
+                    "order_response": _safe_response(state.get("order")),
+                })
             self._pending_close_orders.pop(pos.ticker, None)
 
         if not self._dry_run:
@@ -1014,12 +1110,16 @@ class SwingPositionManager:
                             "created_wall": time.monotonic(),
                             "last_checked_wall": time.monotonic(),
                             "order": (close_result.get("verification") or {}).get("order"),
+                            "limit_price": close_result.get("limit_price"),
+                            "close_quote": close_result.get("close_quote"),
                         }
                     self._emit("position_close_pending", {
                         **pos.to_dict(),
                         "exit_price": exit_price,
                         "exit_pnl_pct": float(pnl_pct),
                         "exit_reason": reason,
+                        "limit_price": close_result.get("limit_price"),
+                        "close_quote": close_result.get("close_quote"),
                         "order_response": _safe_response(order_resp),
                         "verification": close_result.get("verification"),
                     })
@@ -1080,6 +1180,7 @@ class SwingPositionManager:
         self._pending_close_orders.pop(pos.ticker, None)
         self._remove_deferred_trail_cache(pos)
         del self._positions[pos.ticker]
+        self._persist_open_position_state()
 
     def _abandon_worthless_close(
         self,
@@ -1108,6 +1209,7 @@ class SwingPositionManager:
             "verification": (close_result or {}).get("verification"),
         })
         self._positions.pop(pos.ticker, None)
+        self._persist_open_position_state()
 
     def _load_deferred_trail_cache(self) -> dict[str, dict[str, Any]]:
         try:
@@ -1195,6 +1297,93 @@ class SwingPositionManager:
         self._deferred_trail_cache.pop(pos.ticker.upper(), None)
         self._persist_deferred_trail_cache()
 
+    def _load_open_position_state_cache(self) -> dict[str, dict[str, Any]]:
+        try:
+            if not _OPEN_POSITION_STATE_PATH.exists():
+                return {}
+            raw = json.loads(_OPEN_POSITION_STATE_PATH.read_text())
+            rows = raw.get("positions") if isinstance(raw, dict) else raw
+            if not isinstance(rows, list):
+                return {}
+            out: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                ticker = str(row.get("ticker", "")).strip().upper()
+                symbol = str(row.get("option_symbol", "")).strip().upper()
+                if ticker and symbol:
+                    out[ticker] = row
+            return out
+        except Exception as exc:
+            logger.warning("open position state load failed: %s", exc)
+        return {}
+
+    def _persist_open_position_state(self) -> None:
+        try:
+            _OPEN_POSITION_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            positions = [pos.to_dict() for pos in self._positions.values()]
+            payload = {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "positions": positions,
+            }
+            _OPEN_POSITION_STATE_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True))
+            self._position_state_cache = {
+                str(pos.get("ticker", "")).strip().upper(): pos
+                for pos in positions
+                if str(pos.get("ticker", "")).strip()
+            }
+        except Exception as exc:
+            logger.warning("open position state persist failed: %s", exc)
+
+    def _cached_position_state(self, *, ticker: str, symbol: str) -> dict[str, Any] | None:
+        cached = self._position_state_cache.get(str(ticker).strip().upper())
+        if not isinstance(cached, dict):
+            return None
+        cached_symbol = str(cached.get("option_symbol", "")).strip().upper()
+        if cached_symbol != str(symbol).strip().upper():
+            return None
+        return cached
+
+    def _restore_cached_tracking_state(
+        self,
+        pos: SwingPosition,
+        cached: dict[str, Any],
+        *,
+        latest_price: float,
+    ) -> None:
+        cached_sl = _finite_or_none(cached.get("sl_price"))
+        if cached_sl is not None:
+            pos.sl_price = float(cached_sl)
+
+        last_price = latest_price if math.isfinite(latest_price) else _as_float(cached.get("last_price"))
+        if math.isfinite(last_price) and last_price > 0.0:
+            pos.last_price = float(last_price)
+
+        cached_best = _as_float(cached.get("best_price"))
+        if math.isfinite(cached_best) and cached_best > 0.0:
+            if pos.direction == 1:
+                pos.best_price = max(float(cached_best), float(pos.entry_price), float(pos.last_price))
+            else:
+                pos.best_price = min(float(cached_best), float(pos.entry_price), float(pos.last_price))
+
+        pos.trail_armed = bool(cached.get("trail_armed"))
+        try:
+            pos.bar_count_5m = max(0, int(cached.get("bars_held") or 0))
+        except Exception:
+            pos.bar_count_5m = 0
+
+        option_last = _finite_or_none(cached.get("option_last_price"))
+        option_best = _finite_or_none(cached.get("option_best_price"))
+        if option_last is not None and option_last > 0:
+            pos.option_last_price = float(option_last)
+        if option_best is not None and option_best > 0:
+            entry = _as_float(pos.option_entry_price)
+            if math.isfinite(entry) and entry > 0:
+                pos.option_best_price = max(float(option_best), float(entry), float(pos.option_last_price or entry))
+            else:
+                pos.option_best_price = float(option_best)
+        pos.option_trail_armed = bool(cached.get("option_trail_armed"))
+
     def _submit_close_order(self, pos: SwingPosition, *, reason: str) -> dict[str, Any]:
         symbol = str(pos.option_symbol).strip().upper()
         qty = int(pos.qty)
@@ -1220,6 +1409,7 @@ class SwingPositionManager:
         limit_prices = _close_limit_ladder(
             base_limit=base_limit,
             close_bid=close_bid,
+            quote_meta=quote_meta,
             reason=reason,
             attempts=_CLOSE_ORDER_ATTEMPTS,
         )
@@ -1460,6 +1650,41 @@ class SwingPositionManager:
         except Exception:
             pass
 
+        pending_age = now - float(pending.get("created_wall") or now)
+        if pending_age >= _PENDING_CLOSE_CHASE_SECS and order_id:
+            try:
+                self._client.cancel_order(order_id)
+            except Exception as exc:
+                logger.warning("pending close order chase cancel warning order_id=%s: %s", order_id, exc)
+                return {
+                    "still_pending": True,
+                    "verification": {
+                        "verified": False,
+                        "status": status or "unknown",
+                        "order_id": order_id,
+                        "via": "pending_order_chase_cancel_failed",
+                        "retryable": False,
+                        "error": str(exc),
+                        "order": last,
+                    },
+                    "order": last,
+                }
+            return {
+                "retry_now": True,
+                "reason": "stale_pending_close_chase",
+                "verification": {
+                    "verified": False,
+                    "status": status or "unknown",
+                    "order_id": order_id,
+                    "via": "pending_order_chase_cancel",
+                    "retryable": True,
+                    "canceled_order_id": order_id,
+                    "pending_age_sec": float(pending_age),
+                    "order": last,
+                },
+                "order": last,
+            }
+
         return {
             "still_pending": True,
             "verification": {
@@ -1675,12 +1900,14 @@ def _close_limit_ladder(
     *,
     base_limit: float,
     close_bid: float,
+    quote_meta: dict[str, Any] | None = None,
     reason: str,
     attempts: int,
 ) -> list[float]:
     attempts = max(1, int(attempts))
     base = _round_option_limit(base_limit if math.isfinite(base_limit) and base_limit > 0 else _OPTION_TICK)
     bid = close_bid if math.isfinite(close_bid) and close_bid > 0.0 else float("nan")
+    spread = _as_float((quote_meta or {}).get("spread"))
 
     prices: list[float] = []
     if str(reason or "").strip().lower() in _LIQUIDATION_CLOSE_REASONS:
@@ -1713,14 +1940,23 @@ def _close_limit_ladder(
             prices.append(_OPTION_TICK)
         return prices
 
-    for attempt in range(1, attempts + 1):
-        if math.isfinite(bid) and bid > 0.0:
-            price = base if attempt == 1 else bid - (attempt - 1) * _OPTION_TICK
-        else:
-            price = base - (attempt - 1) * _OPTION_TICK * 2.0
-        rounded = _round_option_limit(price)
+    anchor = bid if math.isfinite(bid) and bid > 0.0 else base
+    if math.isfinite(spread) and spread > _OPTION_TICK:
+        offsets = [
+            0.0,
+            _OPTION_TICK,
+            max(_OPTION_TICK * 2.0, spread * 0.25),
+            max(_OPTION_TICK * 4.0, spread * 0.50),
+            max(_OPTION_TICK * 8.0, spread * 0.75),
+        ]
+    else:
+        offsets = [attempt * _OPTION_TICK for attempt in range(0, attempts)]
+    for offset in offsets:
+        rounded = _round_option_limit(anchor - offset)
         if rounded not in prices:
             prices.append(rounded)
+        if len(prices) >= attempts:
+            break
     return prices or [_OPTION_TICK]
 
 

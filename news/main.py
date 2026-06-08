@@ -34,7 +34,8 @@ def _read_table(path: str) -> pd.DataFrame:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Unscheduled catalyst news pipeline.")
-    parser.add_argument("--stage", choices=["collect", "collect-sec-history", "sec-full-text", "enrich-ex99", "classify", "earnings", "embed", "cluster", "refine", "label", "score", "features", "profiles", "finra-backfill", "finra-spikes", "cboe-snapshot"], required=True)
+    parser.add_argument("--stage", choices=["collect", "collect-sec-history", "sec-full-text", "sec-mda", "enrich-ex99", "classify", "earnings", "embed", "cluster", "refine", "label", "score", "features", "profiles", "finra-backfill", "finra-spikes", "cboe-snapshot", "scrape-bodies", "incremental"], required=True)
+    parser.add_argument("--full-refit", action="store_true", help="Force a full re-embed / re-cluster (default is incremental). Use weekly.")
     parser.add_argument("--tickers", nargs="*", default=[])
     parser.add_argument(
         "--sources",
@@ -113,6 +114,23 @@ def main() -> int:
             full_text_limit=args.sec_full_text_limit or 20000,
             limit=args.limit,
         )
+    elif args.stage == "sec-mda":
+        from news.sec_text import backfill_sec_mda
+
+        backfill_sec_mda(
+            NEWS_RECORDS_PATH,
+            output_path=Path(args.output) if args.output else NEWS_RECORDS_PATH,
+            forms=args.forms,
+            limit=args.limit,
+        )
+    elif args.stage == "scrape-bodies":
+        from news.body_scraper import backfill_google_news_bodies
+
+        backfill_google_news_bodies(
+            NEWS_RECORDS_PATH,
+            output_path=Path(args.output) if args.output else NEWS_RECORDS_PATH,
+            limit=args.limit,
+        )
     elif args.stage == "enrich-ex99":
         from news.sources import enrich_sec_8k_ex99_text
 
@@ -126,9 +144,13 @@ def main() -> int:
     elif args.stage in {"classify", "earnings"}:
         classify_existing_news()
     elif args.stage == "embed":
-        build_news_embeddings(generate_embeddings=not args.no_embeddings, generate_finbert=not args.no_finbert)
+        build_news_embeddings(
+            generate_embeddings=not args.no_embeddings,
+            generate_finbert=not args.no_finbert,
+            incremental=not args.full_refit,
+        )
     elif args.stage == "cluster":
-        cluster_news_embeddings()
+        cluster_news_embeddings(incremental=not args.full_refit)
     elif args.stage == "refine":
         refine_news_records_from_clusters()
     elif args.stage == "label":
@@ -144,8 +166,31 @@ def main() -> int:
             if args.limit:
                 universe = universe.head(int(args.limit)).copy()
             bars = load_cached_30m_bars_for_universe(universe)
-        label_news_forward_returns(NEWS_RECORDS_PATH, bars, bars_per_day=args.bars_per_day)
+        label_news_forward_returns(NEWS_RECORDS_PATH, bars, bars_per_day=args.bars_per_day, incremental=not args.full_refit)
         build_winner_loser_libraries()
+    elif args.stage == "incremental":
+        # Lightweight nightly pass: embed only new records, predict-assign their
+        # clusters using saved KMeans, re-apply refine, label only records whose
+        # forward window has matured, append libraries.
+        from news.pipeline import label_news_forward_returns
+        from meta_context.config import CONTEXT_BACKTEST_UNIVERSE_PATH
+        from meta_context.backtest_inputs import build_context_backtest_universe, load_cached_30m_bars_for_universe
+
+        print("=== incremental update ===")
+        print("[1/4] embed (incremental)")
+        build_news_embeddings(generate_embeddings=True, generate_finbert=True, incremental=True)
+        print("[2/4] cluster (incremental — uses saved KMeans models)")
+        cluster_news_embeddings(incremental=True)
+        print("[3/4] refine (full re-apply; cheap)")
+        refine_news_records_from_clusters()
+        print("[4/4] label + winner/loser libraries (incremental)")
+        universe = pd.read_csv(CONTEXT_BACKTEST_UNIVERSE_PATH) if CONTEXT_BACKTEST_UNIVERSE_PATH.exists() else build_context_backtest_universe(limit=args.limit)
+        if args.limit:
+            universe = universe.head(int(args.limit)).copy()
+        bars = load_cached_30m_bars_for_universe(universe)
+        label_news_forward_returns(NEWS_RECORDS_PATH, bars, bars_per_day=args.bars_per_day, incremental=True)
+        build_winner_loser_libraries()
+        print("=== incremental update complete ===")
     elif args.stage == "score":
         build_news_similarity_scores()
     elif args.stage == "profiles":

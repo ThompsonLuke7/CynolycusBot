@@ -44,6 +44,7 @@ from multi_ticker_swing.live.real_account_policy import (
     RealAccountBookkeeper,
     config_from_env as real_account_policy_from_env,
 )
+from multi_ticker_swing.live.risk_profile_policy import RiskProfilePolicy, config_from_env as risk_profile_policy_from_env
 from multi_ticker_swing.live.scanner import Signal, SwingScanner
 from multi_ticker_swing.live.session import (
     confirmation_breakout,
@@ -534,6 +535,7 @@ class SwingLiveRunner:
                 state_path=real_account_policy_state_path,
             )
         )
+        self._risk_policy = RiskProfilePolicy(risk_profile_policy_from_env())
         self._pos_mgr = SwingPositionManager(
             self._client,
             dry_run=dry_run,
@@ -556,7 +558,7 @@ class SwingLiveRunner:
 
         # If an external queue is provided (e.g. from SharedBarStream) use it directly
         # and skip creating / managing an AlpacaBarStreamer in start().
-        self._bar_queue: queue.Queue = bar_queue if bar_queue is not None else queue.Queue(maxsize=10_000)
+        self._bar_queue: queue.Queue = bar_queue if bar_queue is not None else queue.Queue(maxsize=50_000)
         self._external_queue: bool = bar_queue is not None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -571,6 +573,7 @@ class SwingLiveRunner:
         self._last_bar_ticker: str | None = None
         self._last_heartbeat_wall = 0.0
         self._heartbeat_window_counts: dict[str, int] = defaultdict(int)
+        self._recent_symbol_seen: dict[str, float] = {}
         self._last_bar_ts: datetime | None = None
         self._last_bar_lag_secs: int | None = None
         self._last_queue_size: int | None = None
@@ -735,6 +738,7 @@ class SwingLiveRunner:
             "tickers": len(self._stream_symbols),
             **counts,
         })
+        self._emit("risk_profile_policy_config", self._risk_policy.snapshot())
 
         if self._stop_event.is_set():
             self._emit("stopped", {"reason": "stop requested during warmup"})
@@ -924,6 +928,7 @@ class SwingLiveRunner:
             self._raw_bar_count_total += 1
             self._last_bar_ticker = ticker
             self._heartbeat_window_counts[ticker] += 1
+            self._recent_symbol_seen[ticker] = time.monotonic()
             self._last_queue_size = self._queue_size()
             lag_secs = self._bar_lag_secs(bar)
             if lag_secs is not None:
@@ -1019,11 +1024,32 @@ class SwingLiveRunner:
         window_counts = dict(self._heartbeat_window_counts)
         self._heartbeat_window_counts.clear()
         top_symbols = sorted(window_counts.items(), key=lambda item: item[1], reverse=True)[:8]
+        stream_symbol_set = set(self._stream_symbols)
+        window_seen = set(window_counts) & stream_symbol_set
+        recent_cutoff = now - 300.0
+        recent_seen = {
+            ticker for ticker, seen_at in self._recent_symbol_seen.items()
+            if seen_at >= recent_cutoff and ticker in stream_symbol_set
+        }
+        missing_recent = sorted(stream_symbol_set - recent_seen)[:20]
+        stream_symbol_count = len(stream_symbol_set)
         payload = self.snapshot_meta()
         payload.update({
             "reason": reason,
             "window_unique_symbols": len(window_counts),
             "window_bar_count": int(sum(window_counts.values())),
+            "window_stream_symbols": stream_symbol_count,
+            "window_coverage_pct": (
+                round((len(window_seen) / stream_symbol_count) * 100.0, 2)
+                if stream_symbol_count else None
+            ),
+            "recent_unique_symbols": len(recent_seen),
+            "recent_coverage_pct": (
+                round((len(recent_seen) / stream_symbol_count) * 100.0, 2)
+                if stream_symbol_count else None
+            ),
+            "recent_missing_symbols": max(0, stream_symbol_count - len(recent_seen)),
+            "recent_missing_sample": missing_recent,
             "window_top_symbols": [
                 {"ticker": ticker, "bars": int(count)}
                 for ticker, count in top_symbols
@@ -1031,7 +1057,7 @@ class SwingLiveRunner:
         })
         logger.info(
             "Swing stream heartbeat: raw=%d accepted=%d rth=%d 5m=%d 30m=%d scans=%d "
-            "last=%s ts=%s lag=%s queue=%s unique=%d",
+            "last=%s ts=%s lag=%s queue=%s unique=%d recent=%d/%d",
             self._raw_bar_count_total,
             self._bar_count_total,
             self._rth_bar_count_total,
@@ -1043,6 +1069,8 @@ class SwingLiveRunner:
             self._last_bar_lag_secs,
             self._last_queue_size,
             len(window_counts),
+            len(recent_seen),
+            stream_symbol_count,
         )
         self._emit("stream_heartbeat", payload)
 
@@ -1127,6 +1155,29 @@ class SwingLiveRunner:
                     "reason": "long_ticker_blocked",
                 })
                 continue
+            risk_decision = self._risk_policy.evaluate(sig)
+            self._emit("risk_profile_policy_decision", {
+                "ticker": sig.ticker,
+                "direction": int(sig.direction),
+                "p_dir": float(sig.p_dir),
+                "ev_score": float(sig.ev_score),
+                "allowed": bool(risk_decision.allowed),
+                "reason": risk_decision.reason,
+                "profile": risk_decision.profile,
+                "details": risk_decision.details,
+            })
+            if not risk_decision.allowed:
+                logger.info("[%s] VETOED by risk profile policy: %s", sig.ticker, risk_decision.reason)
+                self._emit("entry_skipped", {
+                    "ticker": sig.ticker,
+                    "direction": int(sig.direction),
+                    "reason": risk_decision.reason,
+                    "risk_profile_policy": {
+                        "profile": risk_decision.profile,
+                        "details": risk_decision.details,
+                    },
+                })
+                continue
             spy_min = sig.config.spy_min if sig.config else 0.0
             if spy_min > 0:
                 if spy_p_long is None:
@@ -1159,6 +1210,7 @@ class SwingLiveRunner:
                 "ref_high": float(sig.ref_high),
                 "ref_low": float(sig.ref_low),
                 "atr": float(sig.atr),
+                "risk_profile_policy": self._risk_policy.evaluate(sig).details,
             })
 
     # ------------------------------------------------------------------
@@ -1352,6 +1404,7 @@ class SwingLiveRunner:
             "confirmation_metrics": _bar_shape_metrics(conf_bar, atr=sig.atr),
             "entry_quote": quote_meta,
             "entry_limit_prices": limit_prices,
+            "risk_profile_policy": self._risk_policy.evaluate(sig).details,
         }
         if not limit_prices:
             logger.warning("[%s] no quote for buy limit price; skipping entry symbol=%s", ticker, option_symbol)

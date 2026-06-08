@@ -508,6 +508,10 @@ def _build_ticker_training_frame(
 
     before = len(merged)
     merged = merged.dropna(subset=available)
+    if merged.empty:
+        logger.warning("[%s] all matrix rows dropped after NaN filtering — skipping", ticker)
+        return None, before, available
+    merged["ticker"] = merged["ticker"].astype(str)
     merged = _downcast_numeric(merged)
     return merged, before, available
 

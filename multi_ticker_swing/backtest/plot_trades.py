@@ -22,13 +22,22 @@ import numpy as np
 import pandas as pd
 
 from multi_ticker_swing.config.pipeline_config import RAW_30M_DIR, BACKTEST_RESULTS_DIR
-from Data.plots.plots import _plot_candles, _compute_time_ticks, _apply_time_ticks
+from shared_plotting import (
+    DEFAULT_THEME,
+    apply_mpl_defaults,
+    apply_time_ticks,
+    compute_time_ticks,
+    plot_candles,
+    style_figure,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
 logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 TAIL_BARS = 315          # ~24 trading days ≈ 1 month
+
+apply_mpl_defaults()
 
 
 def load_raw(ticker: str) -> pd.DataFrame:
@@ -67,9 +76,11 @@ def plot_ticker_trades(
                               sharex=True, gridspec_kw={"hspace": 0.05})
     ax_candle = axes[0]
     ax_proba = axes[1]
+    theme = DEFAULT_THEME
+    style_figure(fig, axes, theme)
 
     # ── Candles ───────────────────────────────────────────────────────────────
-    _plot_candles(
+    plot_candles(
         ax_candle, pos,
         raw["open"].values, raw["high"].values,
         raw["low"].values, raw["close"].values,
@@ -88,7 +99,7 @@ def plot_ticker_trades(
 
         is_long = t["direction"] == 1
         is_win = t["pnl_pct"] > 0
-        color = "#2E7D32" if is_win else "#C62828"
+        color = theme.win if is_win else theme.loss
         marker_entry = "^" if is_long else "v"
 
         ax_candle.plot(entry_pos, t["entry_price"], marker=marker_entry,
@@ -139,12 +150,12 @@ def plot_ticker_trades(
         p_short_dir = np.array(p_short_dir)
 
         ax_proba.plot(proba_positions, p_long_dir,
-                      color="#1565C0", linewidth=1.5, label="P(long|dir)")
+                      color=theme.long, linewidth=1.5, label="P(long|dir)")
         ax_proba.plot(proba_positions, p_short_dir,
-                      color="#FB8C00", linewidth=1.5, label="P(short|dir)")
+                      color=theme.short, linewidth=1.5, label="P(short|dir)")
 
     # Entry threshold line — entries fire when directional prob crosses this
-    ax_proba.axhline(0.5, color="gray", linewidth=0.8, linestyle="--", alpha=0.4, label="50%")
+    ax_proba.axhline(0.5, color=theme.neutral, linewidth=0.8, linestyle="--", alpha=0.4, label="50%")
 
     ax_proba.set_ylabel("Directional probability", fontsize=11)
     ax_proba.set_ylim(0, 1.02)
@@ -152,13 +163,13 @@ def plot_ticker_trades(
 
     # ── Time axis ─────────────────────────────────────────────────────────────
     date_idx = pd.DatetimeIndex(raw["timestamp"])
-    tick_pos, tick_labels = _compute_time_ticks(date_idx, pos, max_ticks=18)
-    _apply_time_ticks(ax_proba, tick_pos, tick_labels)
+    tick_pos, tick_labels = compute_time_ticks(date_idx, pos, max_ticks=18)
+    apply_time_ticks(ax_proba, tick_pos, tick_labels, color=theme.muted_text)
 
     # ── Trade legend ──────────────────────────────────────────────────────────
     legend_elements = [
-        mpatches.Patch(color="#2E7D32", label="Win"),
-        mpatches.Patch(color="#C62828", label="Loss"),
+        mpatches.Patch(color=theme.win, label="Win"),
+        mpatches.Patch(color=theme.loss, label="Loss"),
         plt.Line2D([0], [0], marker="^", color="gray", markersize=8, linestyle="None", label="Long entry"),
         plt.Line2D([0], [0], marker="v", color="gray", markersize=8, linestyle="None", label="Short entry"),
         plt.Line2D([0], [0], marker="P", color="gray", markersize=8, linestyle="None", label="Trail exit"),

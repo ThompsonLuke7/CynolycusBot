@@ -109,8 +109,8 @@ def run_combined(
     # Separate queues per dashboard. SharedBarStream fans each bar into every
     # queue regardless of which runner is active.
     intraday_queue: queue_mod.Queue = queue_mod.Queue(maxsize=10_000)
-    swing_paper_queue: queue_mod.Queue = queue_mod.Queue(maxsize=10_000)
-    swing_live_queue: queue_mod.Queue | None = queue_mod.Queue(maxsize=10_000) if live_env_file else None
+    swing_paper_queue: queue_mod.Queue = queue_mod.Queue(maxsize=50_000)
+    swing_live_queue: queue_mod.Queue | None = queue_mod.Queue(maxsize=50_000) if live_env_file else None
 
     from UI.shared_stream import get_shared_bar_stream
     stream = get_shared_bar_stream()

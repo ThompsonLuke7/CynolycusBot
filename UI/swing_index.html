@@ -714,6 +714,14 @@
     if (rawCount !== barCount) {
       lastBarParts.push("raw " + rawCount.toLocaleString());
     }
+    if (Number(status.recent_unique_symbols) > 0 && Number(status.stream_symbols) > 0) {
+      const recentPct = status.recent_coverage_pct == null ? "?" : Number(status.recent_coverage_pct).toFixed(1) + "%";
+      lastBarParts.push(
+        "stream " + Number(status.recent_unique_symbols).toLocaleString()
+        + "/" + Number(status.stream_symbols).toLocaleString()
+        + " seen 5m (" + recentPct + ")"
+      );
+    }
     if (Number(status.five_min_bar_count) > 0 || Number(status.thirty_min_bar_count) > 0 || Number(status.scan_count) > 0) {
       lastBarParts.push(
         "5m " + Number(status.five_min_bar_count || 0).toLocaleString()
@@ -1218,7 +1226,8 @@
     }
     if (t === "position_closed") {
       const p = evt.payload || {};
-      closePositionChart(p.ticker, p.exit_price, p.exit_reason, true);
+      closePositionChart(p.ticker, p.exit_price, p.exit_reason, false);
+      destroyPositionChart(p.ticker, true);
       addTrade({ ts: evt.ts, ...(p) });
       addEvent(evt);
       return;

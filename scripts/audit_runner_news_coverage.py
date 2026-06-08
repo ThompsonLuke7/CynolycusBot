@@ -14,8 +14,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from momentum_expansion.config.momentum_config import RAW_1D_DIR
 
-BARS_DIR = Path("momentum_expansion/data/raw/1d")
+BARS_DIR = RAW_1D_DIR
 NEWS_RECORDS = Path("news/data/processed/news_records.parquet")
 WINNER_LIB = Path("news/data/processed/winner_news_library.parquet")
 

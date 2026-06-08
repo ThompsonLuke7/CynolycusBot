@@ -30,7 +30,23 @@ logger = logging.getLogger(__name__)
 
 def load_universe(csv_path: Path | str = UNIVERSE_CSV) -> pd.DataFrame:
     """Return universe DataFrame with columns: ticker, sector, cap_bucket, asset_type."""
-    return pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path)
+    if "ticker" in df.columns:
+        df = df.copy()
+        df["ticker"] = df["ticker"].astype(str).str.strip().str.upper().str.replace("$", "", regex=False)
+        df = df[df["ticker"] != ""]
+
+    # The shared universe is broader than the swing model universe.  When the
+    # caller points this loader at Data/shared/universe/shared_universe.csv,
+    # keep only names that passed the shared liquidity/eligibility filter.
+    if "is_eligible" in df.columns:
+        df = df[df["is_eligible"].fillna(False).astype(bool)].copy()
+
+    for col in ("sector", "market_cap_bucket", "type", "asset_type"):
+        if col in df.columns:
+            df[col] = df[col].fillna("Unknown").astype(str)
+
+    return df.drop_duplicates("ticker").reset_index(drop=True)
 
 
 def universe_tickers(csv_path: Path | str = UNIVERSE_CSV) -> list[str]:

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing as mp
 import time
 from pathlib import Path
 
@@ -95,21 +96,24 @@ def load_proba(split: str = "test") -> pd.DataFrame:
     return df
 
 
-def load_raw_30m(ticker: str) -> pd.DataFrame:
-    df = pd.read_parquet(RAW_30M_DIR / f"{ticker}.parquet")
+def _normalise_raw(df: pd.DataFrame) -> pd.DataFrame:
+    """Promote timestamp index to a column if needed, lowercase all column names."""
     df.columns = [c.lower() for c in df.columns]
+    if "timestamp" not in df.columns and df.index.name == "timestamp":
+        df = df.reset_index()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df.sort_values("timestamp").reset_index(drop=True)
+
+
+def load_raw_30m(ticker: str) -> pd.DataFrame:
+    return _normalise_raw(pd.read_parquet(RAW_30M_DIR / f"{ticker}.parquet"))
 
 
 def load_raw_5m(ticker: str) -> pd.DataFrame | None:
     path = RAW_5M_DIR / f"{ticker}.parquet"
     if not path.exists():
         return None
-    df = pd.read_parquet(path)
-    df.columns = [c.lower() for c in df.columns]
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    return df.sort_values("timestamp").reset_index(drop=True)
+    return _normalise_raw(pd.read_parquet(path))
 
 
 def compute_atr(df: pd.DataFrame, period: int = 14) -> np.ndarray:
@@ -456,10 +460,33 @@ def compute_metrics(trades_df: pd.DataFrame) -> dict:
 # Main sweep
 # ---------------------------------------------------------------------------
 
+TRADE_COLS = ["ticker", "direction", "signal_idx", "exit_idx",
+              "entry_price", "exit_price", "pnl_pct", "exit_reason", "holding_bars"]
+
+_WORKER_TICKER_DATA: dict[str, TickerData] = {}
+
+
+def _run_combo_worker(spec: tuple[int, int, float, dict]) -> tuple[int, dict, list[tuple], float]:
+    k, n_combos, threshold, ex = spec
+    t0 = time.time()
+    combo_name = f"e{threshold}_c{CONFIRM_MAX_5M}_{ex['name']}"
+    all_trades: list[tuple] = []
+    for td in _WORKER_TICKER_DATA.values():
+        trades = simulate_ticker_5m(td, threshold, CONFIRM_MAX_5M, ex)
+        all_trades.extend(trades)
+
+    tdf = pd.DataFrame(all_trades, columns=TRADE_COLS) if all_trades else pd.DataFrame(columns=TRADE_COLS)
+    m = compute_metrics(tdf)
+    row = {"combo_name": combo_name, "entry_threshold": threshold,
+           "confirm_5m_bars": CONFIRM_MAX_5M, **ex, **m}
+    return k, row, all_trades, time.time() - t0
+
+
 def run_sweep(
     top_n: int = 200,
     split: str = "test",
     apply_blacklist: bool = True,
+    jobs: int = 1,
 ) -> pd.DataFrame:
     SWEEP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -495,44 +522,46 @@ def run_sweep(
     n_combos = len(ENTRY_THRESHOLDS) * len(EXIT_STRATEGIES)
     logger.info("Running %d combos...", n_combos)
 
-    all_rows, best_trades, best_sharpe = [], [], -999.0
+    combo_specs = []
     k = 0
     for threshold in ENTRY_THRESHOLDS:
         for ex in EXIT_STRATEGIES:
             k += 1
-            t0 = time.time()
-            combo_name = f"e{threshold}_c{CONFIRM_MAX_5M}_{ex['name']}"
-            all_trades = []
-            for td in ticker_data.values():
-                trades = simulate_ticker_5m(td, threshold, CONFIRM_MAX_5M, ex)
-                all_trades.extend(trades)
+            combo_specs.append((k, n_combos, threshold, ex))
 
-            cols = ["ticker", "direction", "signal_idx", "exit_idx",
-                    "entry_price", "exit_price", "pnl_pct", "exit_reason", "holding_bars"]
-            tdf = pd.DataFrame(all_trades, columns=cols) if all_trades else pd.DataFrame(columns=cols)
-            m   = compute_metrics(tdf)
-            elapsed = time.time() - t0
-
-            row = {"combo_name": combo_name, "entry_threshold": threshold,
-                   "confirm_5m_bars": CONFIRM_MAX_5M, **ex, **m}
+    all_rows, best_trades, best_sharpe = [], [], -999.0
+    global _WORKER_TICKER_DATA
+    _WORKER_TICKER_DATA = ticker_data
+    if jobs > 1:
+        ctx = mp.get_context("fork")
+        with ctx.Pool(processes=jobs) as pool:
+            results_iter = pool.imap_unordered(_run_combo_worker, combo_specs)
+            for k, row, all_trades, elapsed in results_iter:
+                all_rows.append(row)
+                if row["sharpe"] > best_sharpe and row["n_trades"] >= 100:
+                    best_sharpe = row["sharpe"]
+                    best_trades = all_trades
+                logger.info("(%d/%d) %-52s %5d trades  WR=%.1f%%  PF=%.2f  Sharpe=%.2f  [%.1fs]",
+                            k, n_combos, row["combo_name"], row["n_trades"],
+                            row["win_rate"] * 100, row["profit_factor"], row["sharpe"], elapsed)
+    else:
+        for spec in combo_specs:
+            k, _, _, _ = spec
+            k, row, all_trades, elapsed = _run_combo_worker(spec)
             all_rows.append(row)
-
-            if m["sharpe"] > best_sharpe and m["n_trades"] >= 100:
-                best_sharpe = m["sharpe"]
+            if row["sharpe"] > best_sharpe and row["n_trades"] >= 100:
+                best_sharpe = row["sharpe"]
                 best_trades = all_trades
-
             logger.info("(%d/%d) %-52s %5d trades  WR=%.1f%%  PF=%.2f  Sharpe=%.2f  [%.1fs]",
-                        k, n_combos, combo_name, m["n_trades"],
-                        m["win_rate"] * 100, m["profit_factor"], m["sharpe"], elapsed)
+                        k, n_combos, row["combo_name"], row["n_trades"],
+                        row["win_rate"] * 100, row["profit_factor"], row["sharpe"], elapsed)
 
     summary_df = pd.DataFrame(all_rows).sort_values("sharpe", ascending=False)
     summary_df.to_csv( SWEEP_DIR / "sweep_v3_summary.csv",    index=False)
     summary_df.to_parquet(SWEEP_DIR / "sweep_v3_summary.parquet", index=False)
 
     if best_trades:
-        cols = ["ticker", "direction", "signal_idx", "exit_idx",
-                "entry_price", "exit_price", "pnl_pct", "exit_reason", "holding_bars"]
-        pd.DataFrame(best_trades, columns=cols).to_parquet(
+        pd.DataFrame(best_trades, columns=TRADE_COLS).to_parquet(
             SWEEP_DIR / "best_v3_trades.parquet", index=False)
 
     # Per-ticker breakdown for best combo
@@ -547,9 +576,7 @@ def run_sweep(
         trades = simulate_ticker_5m(td, best_thr, CONFIRM_MAX_5M, best_cfg)
         if not trades:
             continue
-        cols = ["ticker", "direction", "signal_idx", "exit_idx",
-                "entry_price", "exit_price", "pnl_pct", "exit_reason", "holding_bars"]
-        tdf = pd.DataFrame(trades, columns=cols)
+        tdf = pd.DataFrame(trades, columns=TRADE_COLS)
         m   = compute_metrics(tdf)
         per_ticker.append({"ticker": td.ticker, **m})
     per_df = pd.DataFrame(per_ticker).sort_values("sharpe", ascending=False)
@@ -571,9 +598,10 @@ if __name__ == "__main__":
     p.add_argument("--no-blacklist", action="store_true")
     p.add_argument("--proba",       default=None)
     p.add_argument("--out-dir",     default=None)
+    p.add_argument("--jobs",        type=int, default=1)
     args = p.parse_args()
     if args.proba:
         PROBA_PATH = Path(args.proba)
     if args.out_dir:
         SWEEP_DIR = Path(args.out_dir)
-    run_sweep(top_n=args.top_n, split=args.split, apply_blacklist=not args.no_blacklist)
+    run_sweep(top_n=args.top_n, split=args.split, apply_blacklist=not args.no_blacklist, jobs=max(1, args.jobs))

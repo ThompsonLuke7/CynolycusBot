@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import multiprocessing as mp
 import time
 from pathlib import Path
 
@@ -443,48 +444,72 @@ def compute_metrics(trades_df: pd.DataFrame) -> dict:
 TRADE_COLS = ["ticker", "direction", "signal_idx", "exit_idx",
               "entry_price", "exit_price", "pnl_pct", "exit_reason", "holding_bars"]
 
+_WORKER_TICKER_DATA: dict[str, TickerData] = {}
+
+
+def _run_tier_combo_worker(spec: tuple[str, int, int, list[str], float, dict]) -> tuple[int, dict, list[tuple], float]:
+    tier_name, k, n_combos, tickers, threshold, ex = spec
+    t0 = time.time()
+    combo_name = f"e{threshold}_c{CONFIRM_MAX_5M}_{ex['name']}"
+    all_trades: list[tuple] = []
+    for t in tickers:
+        if t not in _WORKER_TICKER_DATA:
+            continue
+        trades = simulate_ticker_5m(_WORKER_TICKER_DATA[t], threshold, CONFIRM_MAX_5M, ex)
+        all_trades.extend(trades)
+
+    tdf = pd.DataFrame(all_trades, columns=TRADE_COLS) if all_trades else pd.DataFrame(columns=TRADE_COLS)
+    m = compute_metrics(tdf)
+    row = {"combo_name": combo_name, "tier": tier_name,
+           "entry_threshold": threshold, "confirm_5m_bars": CONFIRM_MAX_5M,
+           **ex, **m}
+    return k, row, all_trades, time.time() - t0
+
 
 def run_tier_sweep(
     tier_name: str,
     tickers: list[str],
     ticker_data: dict,
     out_dir: Path,
+    jobs: int = 1,
 ) -> pd.DataFrame:
     out_dir.mkdir(parents=True, exist_ok=True)
     n_tickers = len([t for t in tickers if t in ticker_data])
     n_combos  = len(ENTRY_THRESHOLDS) * len(EXIT_STRATEGIES)
     logger.info("=== %s: %d tickers, %d combos ===", tier_name, n_tickers, n_combos)
 
-    all_rows, best_trades, best_sharpe = [], [], -999.0
+    combo_specs = []
     k = 0
     for threshold in ENTRY_THRESHOLDS:
         for ex in EXIT_STRATEGIES:
             k += 1
-            t0 = time.time()
-            combo_name = f"e{threshold}_c{CONFIRM_MAX_5M}_{ex['name']}"
-            all_trades = []
-            for t in tickers:
-                if t not in ticker_data:
-                    continue
-                trades = simulate_ticker_5m(ticker_data[t], threshold, CONFIRM_MAX_5M, ex)
-                all_trades.extend(trades)
+            combo_specs.append((tier_name, k, n_combos, tickers, threshold, ex))
 
-            tdf = pd.DataFrame(all_trades, columns=TRADE_COLS) if all_trades else pd.DataFrame(columns=TRADE_COLS)
-            m   = compute_metrics(tdf)
-            elapsed = time.time() - t0
-
-            row = {"combo_name": combo_name, "tier": tier_name,
-                   "entry_threshold": threshold, "confirm_5m_bars": CONFIRM_MAX_5M,
-                   **ex, **m}
+    all_rows, best_trades, best_sharpe = [], [], -999.0
+    global _WORKER_TICKER_DATA
+    _WORKER_TICKER_DATA = ticker_data
+    if jobs > 1:
+        ctx = mp.get_context("fork")
+        with ctx.Pool(processes=jobs) as pool:
+            results_iter = pool.imap_unordered(_run_tier_combo_worker, combo_specs)
+            for k, row, all_trades, elapsed in results_iter:
+                all_rows.append(row)
+                if row["sharpe"] > best_sharpe and row["n_trades"] >= 30:
+                    best_sharpe = row["sharpe"]
+                    best_trades = all_trades
+                logger.info("[%s] (%d/%d) %-52s %4d trades  WR=%.1f%%  PF=%.2f  Sharpe=%.2f  [%.1fs]",
+                            tier_name, k, n_combos, row["combo_name"], row["n_trades"],
+                            row["win_rate"] * 100, row["profit_factor"], row["sharpe"], elapsed)
+    else:
+        for spec in combo_specs:
+            k, row, all_trades, elapsed = _run_tier_combo_worker(spec)
             all_rows.append(row)
-
-            if m["sharpe"] > best_sharpe and m["n_trades"] >= 30:
-                best_sharpe = m["sharpe"]
+            if row["sharpe"] > best_sharpe and row["n_trades"] >= 30:
+                best_sharpe = row["sharpe"]
                 best_trades = all_trades
-
             logger.info("[%s] (%d/%d) %-52s %4d trades  WR=%.1f%%  PF=%.2f  Sharpe=%.2f  [%.1fs]",
-                        tier_name, k, n_combos, combo_name, m["n_trades"],
-                        m["win_rate"] * 100, m["profit_factor"], m["sharpe"], elapsed)
+                        tier_name, k, n_combos, row["combo_name"], row["n_trades"],
+                        row["win_rate"] * 100, row["profit_factor"], row["sharpe"], elapsed)
 
     summary_df = pd.DataFrame(all_rows).sort_values("sharpe", ascending=False)
     summary_df.to_csv(out_dir / f"summary_{tier_name}.csv", index=False)
@@ -524,7 +549,7 @@ def run_tier_sweep(
 # Main
 # ---------------------------------------------------------------------------
 
-def run_sweep(split: str = "test", top_n: int = 200) -> None:
+def run_sweep(split: str = "test", top_n: int = 200, jobs: int = 1) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Load tier assignments from sweep_v3 per-ticker results
@@ -568,7 +593,7 @@ def run_sweep(split: str = "test", top_n: int = 200) -> None:
     results = {}
     for tier_name, tickers in (("tier1", tier1_tickers), ("tier2", tier2_tickers), ("tier3", tier3_tickers)):
         tier_dir = OUT_DIR / tier_name
-        summary  = run_tier_sweep(tier_name, tickers, ticker_data, tier_dir)
+        summary  = run_tier_sweep(tier_name, tickers, ticker_data, tier_dir, jobs=jobs)
         results[tier_name] = summary
 
     # Save combined summary
@@ -592,6 +617,7 @@ if __name__ == "__main__":
     p.add_argument("--proba",        default=None)
     p.add_argument("--v3-per-ticker", default=None)
     p.add_argument("--out-dir",      default=None)
+    p.add_argument("--jobs",         type=int, default=1)
     args = p.parse_args()
     if args.proba:
         PROBA_PATH = Path(args.proba)
@@ -599,4 +625,4 @@ if __name__ == "__main__":
         V3_PER_TICKER = Path(args.v3_per_ticker)
     if args.out_dir:
         OUT_DIR = Path(args.out_dir)
-    run_sweep(split=args.split, top_n=args.top_n)
+    run_sweep(split=args.split, top_n=args.top_n, jobs=max(1, args.jobs))

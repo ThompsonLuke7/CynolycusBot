@@ -127,8 +127,13 @@ def build_ticker_labels_4h(
 # ---------------------------------------------------------------------------
 
 def _rolling_quantile_rank(s: pd.Series, window: int) -> pd.Series:
-    """Rolling-window quantile rank of a series (causal, no future leakage)."""
-    return s.rolling(window, min_periods=max(50, window // 4)).rank(pct=True)
+    """Rolling-window quantile rank of a series (causal, no future leakage).
+
+    min_periods is ~window/8 (~6 months at 2 4H bars/day) so young listings get a
+    binary expansion_target from a partial window instead of NaN — matching the
+    ~6-month feature warmup so the two don't gate the universe differently.
+    """
+    return s.rolling(window, min_periods=max(50, window // 8)).rank(pct=True)
 
 
 def _cross_sectional_expansion_survival_score(df: pd.DataFrame) -> pd.Series:

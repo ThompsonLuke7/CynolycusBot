@@ -6,10 +6,18 @@ import math
 from pathlib import Path
 from typing import Any
 
-import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import pandas as pd
-from matplotlib.patches import Rectangle
+
+from shared_plotting import (
+    DEFAULT_THEME,
+    apply_mpl_defaults,
+    plot_candles_from_frame,
+    save_figure,
+    setup_datetime_axis,
+    style_figure,
+    to_mpl_time,
+)
 
 
 DEFAULT_AUDITS = [
@@ -18,6 +26,8 @@ DEFAULT_AUDITS = [
 ]
 OUT_DIR = Path("Data/analysis/multi_ticker_swing_live/signal_plots")
 RAW_30M_DIR = Path("multi_ticker_swing/data/raw/30m")
+
+apply_mpl_defaults()
 
 
 def _ts(value: Any) -> pd.Timestamp:
@@ -166,17 +176,8 @@ def _bars_for_ticker(ticker: str, bars5: pd.DataFrame, start: pd.Timestamp, end:
 def _draw_candles(ax: plt.Axes, bars: pd.DataFrame) -> None:
     if bars.empty:
         return
-    x = mdates.date2num(bars["ts"].dt.tz_convert("America/New_York").dt.tz_localize(None))
-    width = 0.012
-    for xpos, row in zip(x, bars.itertuples(index=False), strict=False):
-        color = "#0f9d76" if row.close >= row.open else "#d94c4c"
-        ax.vlines(xpos, row.low, row.high, color=color, linewidth=1.1, alpha=0.95)
-        body_low = min(row.open, row.close)
-        body_h = max(abs(row.close - row.open), 0.01)
-        ax.add_patch(Rectangle((xpos - width / 2, body_low), width, body_h, color=color, alpha=0.85))
-    ax.xaxis_date()
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-    ax.grid(True, alpha=0.25)
+    plot_candles_from_frame(ax, bars, time_col="ts", compressed=False, theme=DEFAULT_THEME)
+    setup_datetime_axis(ax, date_format="%m-%d %H:%M")
 
 
 def _nearest_close(bars: pd.DataFrame, ts: pd.Timestamp) -> float:
@@ -204,53 +205,54 @@ def _plot_ticker(ticker: str, bars: pd.DataFrame, signals: pd.DataFrame, positio
     if bars.empty:
         return
     fig, ax = plt.subplots(figsize=(15, 7))
+    style_figure(fig, [ax], DEFAULT_THEME)
     _draw_candles(ax, bars)
-    local_dates = bars["ts"].dt.tz_convert("America/New_York").dt.tz_localize(None)
+    x_values = to_mpl_time(bars["ts"])
+    theme = DEFAULT_THEME
     for _, sig in signals.iterrows():
         price = _nearest_close(bars, sig["ts"])
-        xpos = mdates.date2num(sig["ts"].tz_convert("America/New_York").tz_localize(None))
+        xpos = to_mpl_time([sig["ts"]])[0]
         if sig["direction"] == 1:
-            ax.scatter(xpos, price, marker="^", s=110, color="#1f77b4", zorder=5)
+            ax.scatter(xpos, price, marker="^", s=110, color=theme.long, zorder=5)
             label_y = price * 1.005
         else:
-            ax.scatter(xpos, price, marker="v", s=110, color="#b00020", zorder=5)
+            ax.scatter(xpos, price, marker="v", s=110, color=theme.short, zorder=5)
             label_y = price * 0.995
         ax.text(
             xpos,
             label_y,
             f"{'L' if sig['direction'] == 1 else 'S'} p={sig['p_dir']:.2f}",
             fontsize=8,
+            color=theme.text,
             ha="center",
             va="bottom" if sig["direction"] == 1 else "top",
         )
         if pd.notna(sig.get("ref_high")):
-            ax.hlines(sig["ref_high"], xmin=xpos - 0.02, xmax=xpos + 0.08, color="#1f77b4", linestyle=":", alpha=0.5)
+            ax.hlines(sig["ref_high"], xmin=xpos - 0.02, xmax=xpos + 0.08, color=theme.long, linestyle=":", alpha=0.5)
         if pd.notna(sig.get("ref_low")):
-            ax.hlines(sig["ref_low"], xmin=xpos - 0.02, xmax=xpos + 0.08, color="#b00020", linestyle=":", alpha=0.5)
+            ax.hlines(sig["ref_low"], xmin=xpos - 0.02, xmax=xpos + 0.08, color=theme.short, linestyle=":", alpha=0.5)
 
     for _, pos in positions.iterrows():
         price = pos.get("entry_price") if pos["event"] == "position_opened" else pos.get("exit_price")
         if pd.isna(price):
             price = _nearest_close(bars, pos["ts"])
-        xpos = mdates.date2num(pos["ts"].tz_convert("America/New_York").tz_localize(None))
+        xpos = to_mpl_time([pos["ts"]])[0]
         if pos["event"] == "position_opened":
-            ax.scatter(xpos, price, marker="o", s=75, facecolors="none", edgecolors="black", linewidths=1.7, zorder=6)
-            ax.text(xpos, price, "open", fontsize=7, ha="left", va="bottom")
+            ax.scatter(xpos, price, marker="o", s=75, facecolors="none", edgecolors=theme.text, linewidths=1.7, zorder=6)
+            ax.text(xpos, price, "open", fontsize=7, color=theme.text, ha="left", va="bottom")
         elif pos["event"] == "position_closed":
-            ax.scatter(xpos, price, marker="x", s=90, color="black", zorder=6)
-            ax.text(xpos, price, f"close {pos.get('exit_reason') or ''}", fontsize=7, ha="left", va="top")
+            ax.scatter(xpos, price, marker="x", s=90, color=theme.text, zorder=6)
+            ax.text(xpos, price, f"close {pos.get('exit_reason') or ''}", fontsize=7, color=theme.text, ha="left", va="top")
         elif pos["event"] == "position_close_failed":
-            ax.scatter(xpos, price, marker="X", s=110, color="#ff7f0e", zorder=6)
-            ax.text(xpos, price, "close failed", fontsize=7, ha="left", va="top")
+            ax.scatter(xpos, price, marker="X", s=110, color=theme.warning, zorder=6)
+            ax.text(xpos, price, "close failed", fontsize=7, color=theme.text, ha="left", va="top")
 
     ax.set_title(f"{ticker} 30m Candles With Live Multi-Ticker Swing Signals")
     ax.set_ylabel("Underlying price")
-    if len(local_dates):
-        ax.set_xlim(local_dates.min(), local_dates.max())
+    if len(x_values):
+        ax.set_xlim(float(x_values.min()), float(x_values.max()))
     fig.autofmt_xdate()
-    fig.tight_layout()
-    fig.savefig(out, dpi=150)
-    plt.close(fig)
+    save_figure(fig, out, dpi=150, close=True)
 
 
 def run(audits: list[Path], tickers: list[str], days_before: int, days_after: int) -> None:

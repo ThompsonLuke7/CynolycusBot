@@ -12,6 +12,15 @@ import pandas as pd
 
 from Data.retrieve_data import normalize_ticker
 from Features.label_generations import _apply_leg_reset_bridge
+from shared_plotting import (
+    apply_time_ticks as _shared_apply_time_ticks,
+    compute_marker_offset as _shared_compute_marker_offset,
+    compute_time_ticks as _shared_compute_time_ticks,
+    draw_day_lines as _shared_draw_day_lines,
+    extract_ohlc as _shared_extract_ohlc,
+    infer_bar_label as _shared_infer_bar_label,
+    plot_candles as _shared_plot_candles,
+)
 
 if TYPE_CHECKING:
     from xgboost import XGBClassifier
@@ -64,24 +73,7 @@ _LABEL_PLOT_FILES = {
 _PLOT_TAIL_BARS = 200
 
 def _infer_bar_label(index: pd.DatetimeIndex) -> str:
-    if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
-        return "Unknown bars"
-    deltas = index.to_series().diff().dropna().dt.total_seconds()
-    if deltas.empty:
-        return "Unknown bars"
-    seconds = float(deltas.median())
-    if not np.isfinite(seconds) or seconds <= 0:
-        return "Unknown bars"
-    if seconds % 86400 == 0:
-        days = int(seconds / 86400)
-        return f"{days} day bars"
-    if seconds % 3600 == 0:
-        hours = int(seconds / 3600)
-        return f"{hours} hour bars"
-    if seconds % 60 == 0:
-        minutes = int(seconds / 60)
-        return f"{minutes} min bars"
-    return f"{int(seconds)} sec bars"
+    return _shared_infer_bar_label(index)
 
 
 def _normalize_plot_type(plot_type: str) -> str:
@@ -116,12 +108,7 @@ def _select_plot_window(
 def _extract_ohlc(
     df: pd.DataFrame,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    pos = np.arange(len(df))
-    open_y = df["open"].to_numpy()
-    high_y = df["high"].to_numpy()
-    low_y = df["low"].to_numpy()
-    close_y = df["close"].to_numpy()
-    return pos, open_y, high_y, low_y, close_y
+    return _shared_extract_ohlc(df)
 
 
 def _compute_marker_offset(
@@ -132,13 +119,13 @@ def _compute_marker_offset(
     atr_col: str = "atr",
     fallback_scale: float = 0.001,
 ) -> float:
-    if atr_col in df.columns:
-        marker_offset = np.nanmedian(df[atr_col].to_numpy())
-    else:
-        marker_offset = np.nanmedian(high_y - low_y)
-    if not np.isfinite(marker_offset) or marker_offset <= 0:
-        marker_offset = np.nanmax(high_y) * fallback_scale
-    return marker_offset
+    return _shared_compute_marker_offset(
+        df,
+        high_y,
+        low_y,
+        atr_col=atr_col,
+        fallback_scale=fallback_scale,
+    )
 
 
 def _plot_candles(
@@ -149,35 +136,23 @@ def _plot_candles(
     low_y: np.ndarray,
     close_y: np.ndarray,
     *,
-    wick_color: str = "#444444",
-    up_color: str = "#1976D2",
-    down_color: str = "#E53935",
-    width: float = 0.8,
+    wick_color: str | None = None,
+    up_color: str | None = None,
+    down_color: str | None = None,
+    width: float | None = 0.8,
 ) -> tuple[np.ndarray, np.ndarray]:
-    up = close_y >= open_y
-    down = ~up
-    ax.vlines(pos, low_y, high_y, color=wick_color, linewidth=1.0, zorder=1)
-    ax.bar(
-        pos[up],
-        close_y[up] - open_y[up],
+    return _shared_plot_candles(
+        ax,
+        pos,
+        open_y,
+        high_y,
+        low_y,
+        close_y,
+        wick_color=wick_color,
+        up_color=up_color,
+        down_color=down_color,
         width=width,
-        bottom=open_y[up],
-        color=up_color,
-        edgecolor="none",
-        label="Bull candle",
-        zorder=1.2,
     )
-    ax.bar(
-        pos[down],
-        close_y[down] - open_y[down],
-        width=width,
-        bottom=open_y[down],
-        color=down_color,
-        edgecolor="none",
-        label="Bear candle",
-        zorder=1.2,
-    )
-    return up, down
 
 
 def _compute_time_ticks(
@@ -186,17 +161,7 @@ def _compute_time_ticks(
     *,
     max_ticks: int = 25,
 ) -> tuple[np.ndarray | None, list[str] | None]:
-    if not isinstance(date_index, pd.DatetimeIndex):
-        return None, None
-    dates = pd.Series(date_index)
-    day_start = dates.dt.normalize().ne(dates.dt.normalize().shift())
-    tick_positions = pos[day_start.to_numpy()]
-    tick_labels = dates[day_start].dt.strftime("%Y-%m-%d").to_list()
-    if len(tick_positions) > max_ticks:
-        step = int(np.ceil(len(tick_positions) / max_ticks))
-        tick_positions = tick_positions[::step]
-        tick_labels = tick_labels[::step]
-    return tick_positions, tick_labels
+    return _shared_compute_time_ticks(date_index, pos, max_ticks=max_ticks)
 
 
 def _apply_time_ticks(
@@ -204,10 +169,7 @@ def _apply_time_ticks(
     tick_positions: np.ndarray | None,
     tick_labels: list[str] | None,
 ) -> None:
-    if tick_positions is None or tick_labels is None:
-        return
-    ax.set_xticks(tick_positions)
-    ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
+    _shared_apply_time_ticks(ax, tick_positions, tick_labels)
 
 
 def _draw_day_lines(
@@ -216,13 +178,7 @@ def _draw_day_lines(
     *,
     line_color: str = "#d0d0d000",
 ) -> None:
-    if tick_positions is None:
-        return
-    for ax in axes:
-        for x in tick_positions:
-            ax.axvline(
-                x, color=line_color, linestyle="--", linewidth=1, alpha=0.7, zorder=0.5
-            )
+    _shared_draw_day_lines(axes, tick_positions, line_color=line_color, alpha=0.7)
 
 
 def _finalize_plot(

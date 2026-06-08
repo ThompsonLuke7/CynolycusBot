@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,7 @@ class Signal:
     ref_low: float          # signal bar low (confirmation reference)
     signal_ts: datetime = field(default_factory=lambda: datetime.now())
     config: TickerConfig | None = None
+    features: dict[str, Any] = field(default_factory=dict)
 
 
 class SwingScanner:
@@ -135,6 +137,20 @@ class SwingScanner:
 
             bar = self._fb.get_last_bar(ticker)
             atr = self._fb.get_atr(ticker)
+            risk_features = {
+                key: _jsonable(feat.get(key))
+                for key in (
+                    "qqq_ret_16",
+                    "rel_str_qqq_4",
+                    "rel_str_spy_16",
+                    "stock_beta_bucket",
+                    "beta_like_spy_64",
+                    "daily_range_pos_20",
+                    "zscore_close_64",
+                    "range_pos_20",
+                )
+                if key in feat.index
+            }
             signals.append(Signal(
                 ticker=ticker,
                 direction=direction,
@@ -146,6 +162,7 @@ class SwingScanner:
                 ref_low=float(bar.get("low",  float("nan"))) if bar else float("nan"),
                 signal_ts=datetime.now(),
                 config=cfg,
+                features=risk_features,
             ))
 
         signals.sort(key=lambda s: s.ev_score, reverse=True)
@@ -183,3 +200,14 @@ class SwingScanner:
         if p_sum < 1e-8:
             return nan, nan
         return p_long / p_sum, p_short / p_sum
+
+
+def _jsonable(value: Any) -> Any:
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, np.generic):
+        return value.item()
+    return value

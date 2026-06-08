@@ -21,7 +21,7 @@ from news.config import (
     WINNER_LIBRARY_PATH,
     ensure_data_dirs,
 )
-from news.catalyst_types import classify_catalyst_types, refine_catalyst_types_from_clusters
+from news.catalyst_types import classify_catalyst_types, classify_source_quality, refine_catalyst_types_from_clusters
 from news.dedup import deduplicate_news
 from news.earnings import enrich_earnings_catalyst_fields
 from news.nlp import embed_texts_bge, finbert_scores_batch
@@ -114,14 +114,14 @@ def collect_company_news(
             shared = list(existing_cols & raw_cols)
             raw = pd.concat([existing[shared], raw[shared]], ignore_index=True) if shared else raw
     out = deduplicate_news(raw)
-    out = classify_catalyst_types(enrich_earnings_catalyst_fields(classify_news_relations(out)))
+    out = classify_source_quality(classify_catalyst_types(enrich_earnings_catalyst_fields(classify_news_relations(out))))
     out.to_parquet(output_path, index=False)
     return out
 
 
 def collect_news_from_csv(input_csv: Path | str, *, output_path: Path | str = NEWS_RECORDS_PATH) -> pd.DataFrame:
     ensure_data_dirs()
-    out = classify_catalyst_types(enrich_earnings_catalyst_fields(classify_news_relations(deduplicate_news(records_from_frame(pd.read_csv(input_csv), source="csv")))))
+    out = classify_source_quality(classify_catalyst_types(enrich_earnings_catalyst_fields(classify_news_relations(deduplicate_news(records_from_frame(pd.read_csv(input_csv), source="csv"))))))
     out.to_parquet(output_path, index=False)
     return out
 
@@ -133,7 +133,7 @@ def classify_existing_news(
 ) -> pd.DataFrame:
     ensure_data_dirs()
     news = pd.read_parquet(news_path) if Path(news_path).exists() else empty_news_frame()
-    out = classify_catalyst_types(enrich_earnings_catalyst_fields(classify_news_relations(news)))
+    out = classify_source_quality(classify_catalyst_types(enrich_earnings_catalyst_fields(classify_news_relations(news))))
     out.to_parquet(output_path, index=False)
     return out
 
@@ -144,7 +144,15 @@ def build_news_embeddings(
     output_path: Path | str = NEWS_EMBEDDINGS_PATH,
     generate_embeddings: bool = True,
     generate_finbert: bool = True,
+    incremental: bool = True,
 ) -> pd.DataFrame:
+    """Compute BGE + FinBERT for news_records.
+
+    With ``incremental=True`` (default), only records whose ``record_id`` is
+    not yet present in the existing embeddings parquet are embedded; the new
+    rows are appended to the saved file. With ``incremental=False`` the full
+    parquet is rewritten from scratch (the legacy behavior).
+    """
     ensure_data_dirs()
     news = pd.read_parquet(news_path) if Path(news_path).exists() else empty_news_frame()
     if news.empty:
@@ -156,23 +164,77 @@ def build_news_embeddings(
     for col in ("catalyst_family", "catalyst_subtype"):
         if col in news.columns:
             keep_cols.append(col)
-    out = news[keep_cols].copy()
+    full = news[keep_cols].copy()
     if "earnings_embedding_text" in news.columns:
         enriched_text = news["earnings_embedding_text"].fillna("").astype(str)
-        out["text"] = np.where(enriched_text.str.len() > 0, enriched_text, out["text"].fillna("").astype(str))
-    out["embedding"] = None
-    out["embedding_available"] = 0.0
+        full["text"] = np.where(enriched_text.str.len() > 0, enriched_text, full["text"].fillna("").astype(str))
+
+    # Incremental: embed records that aren't yet in the parquet OR whose text
+    # has changed since the prior embedding (e.g. after a body backfill).
+    prior = pd.DataFrame()
+    to_embed = full
+    if incremental and Path(output_path).exists():
+        try:
+            prior = pd.read_parquet(output_path)
+        except Exception:
+            prior = pd.DataFrame()
+        if not prior.empty and "record_id" in prior.columns:
+            # Hash current text to compare against prior. If the embedded text
+            # changed (e.g. body was filled in), re-embed.
+            import hashlib
+
+            def _text_hash(s: str) -> str:
+                return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()[:16] if s else ""
+
+            full = full.copy()
+            full["_text_hash"] = full["text"].fillna("").astype(str).apply(_text_hash)
+            if "_text_hash" in prior.columns:
+                prior_hashes = dict(zip(prior["record_id"].astype(str), prior["_text_hash"].fillna("").astype(str)))
+            else:
+                # First migration — derive prior hashes from cached text column if present
+                if "text" in prior.columns:
+                    prior_hashes = dict(
+                        zip(
+                            prior["record_id"].astype(str),
+                            prior["text"].fillna("").astype(str).apply(_text_hash),
+                        )
+                    )
+                else:
+                    prior_hashes = {rid: "<unknown>" for rid in prior["record_id"].astype(str)}
+
+            current_hashes = dict(zip(full["record_id"].astype(str), full["_text_hash"]))
+            changed_or_new = []
+            for rid, h in current_hashes.items():
+                prior_h = prior_hashes.get(rid)
+                if prior_h is None or prior_h != h:
+                    changed_or_new.append(rid)
+            to_embed = full[full["record_id"].astype(str).isin(set(changed_or_new))].copy()
+            new_count = sum(1 for rid in changed_or_new if rid not in prior_hashes)
+            changed_count = len(changed_or_new) - new_count
+            print(
+                f"  incremental: {len(prior):,} prior, {len(to_embed):,} to embed "
+                f"({new_count:,} new + {changed_count:,} text changed)"
+            )
+
+    if to_embed.empty:
+        print("  nothing new to embed — re-saving prior parquet")
+        prior.to_parquet(output_path, index=False)
+        return prior
+
+    to_embed = to_embed.reset_index(drop=True)
+    to_embed["embedding"] = None
+    to_embed["embedding_available"] = 0.0
     if generate_embeddings:
         try:
-            vectors = embed_texts_bge(out["text"].fillna("").tolist())
-            out["embedding"] = [json.dumps(v.astype(float).tolist()) for v in vectors]
-            out["embedding_available"] = 1.0
+            vectors = embed_texts_bge(to_embed["text"].fillna("").tolist())
+            to_embed["embedding"] = [json.dumps(v.astype(float).tolist()) for v in vectors]
+            to_embed["embedding_available"] = 1.0
         except ImportError:
-            out["embedding_available"] = 0.0
+            to_embed["embedding_available"] = 0.0
 
     if generate_finbert:
         try:
-            tone_rows = finbert_scores_batch(out["text"].fillna("").tolist())
+            tone_rows = finbert_scores_batch(to_embed["text"].fillna("").tolist())
             for scores in tone_rows:
                 scores["finbert_available"] = 1.0
         except ImportError:
@@ -183,7 +245,7 @@ def build_news_embeddings(
                     "finbert_neutral_score": np.nan,
                     "finbert_available": 0.0,
                 }
-                for _ in range(len(out))
+                for _ in range(len(to_embed))
             ]
     else:
         tone_rows = [
@@ -193,9 +255,29 @@ def build_news_embeddings(
                 "finbert_neutral_score": np.nan,
                 "finbert_available": 0.0,
             }
-            for _ in range(len(out))
+            for _ in range(len(to_embed))
         ]
-    out = pd.concat([out, pd.DataFrame(tone_rows)], axis=1)
+    to_embed = pd.concat([to_embed, pd.DataFrame(tone_rows)], axis=1)
+    # Ensure _text_hash is persisted so future incremental runs can detect changes
+    if "_text_hash" not in to_embed.columns:
+        import hashlib
+        to_embed["_text_hash"] = (
+            to_embed["text"].fillna("").astype(str)
+            .apply(lambda s: hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()[:16] if s else "")
+        )
+
+    if not prior.empty:
+        # Align columns; new rows will inherit NaN for cluster fields until refit/predict
+        shared_cols = list(set(prior.columns) | set(to_embed.columns))
+        for col in shared_cols:
+            if col not in to_embed.columns:
+                to_embed[col] = np.nan
+            if col not in prior.columns:
+                prior[col] = np.nan
+        out = pd.concat([prior, to_embed[prior.columns]], ignore_index=True)
+        out = out.drop_duplicates(subset=["record_id"], keep="last")
+    else:
+        out = to_embed
     out.to_parquet(output_path, index=False)
     return out
 
@@ -213,44 +295,118 @@ def parse_embedding(value: object) -> np.ndarray | None:
         return None
 
 
+KMEANS_MODELS_PATH = Path(__file__).resolve().parent / "data" / "processed" / "kmeans_per_family.pkl"
+
+
 def cluster_news_embeddings(
     embeddings_path: Path | str = NEWS_EMBEDDINGS_PATH,
     *,
     output_path: Path | str = NEWS_EMBEDDINGS_PATH,
     n_clusters: int = 12,
+    incremental: bool = True,
+    models_path: Path | str = KMEANS_MODELS_PATH,
 ) -> pd.DataFrame:
+    """Cluster BGE embeddings within each catalyst_family.
+
+    With ``incremental=True`` (default), load the saved per-family KMeans
+    models and call ``.predict()`` for records that don't yet have a
+    cluster_id. Falls back to a full ``.fit_predict()`` if no saved models
+    exist or ``incremental=False`` is passed (the legacy weekly refit path).
+
+    Saved models live at ``models_path`` as a pickled dict
+    ``{family: (KMeans, base_cluster_id)}``.
+    """
+    import pickle
+
     df = pd.read_parquet(embeddings_path) if Path(embeddings_path).exists() else pd.DataFrame()
     if df.empty or "embedding" not in df.columns:
         df["news_cluster_id"] = np.nan
         df.to_parquet(output_path, index=False)
         return df
+
     vectors = [parse_embedding(v) for v in df["embedding"]]
     valid_idx = [i for i, v in enumerate(vectors) if v is not None]
-    df["news_cluster_id"] = np.nan
-    df["news_cluster_key"] = ""
-    if len(valid_idx) >= 2:
-        from sklearn.cluster import KMeans
+    if "news_cluster_id" not in df.columns:
+        df["news_cluster_id"] = np.nan
+    if "news_cluster_key" not in df.columns:
+        df["news_cluster_key"] = ""
 
-        valid = df.iloc[valid_idx].copy()
-        if "catalyst_family" not in valid.columns:
-            valid["catalyst_family"] = "all"
+    if len(valid_idx) < 2:
+        df.to_parquet(output_path, index=False)
+        return df
+
+    from sklearn.cluster import KMeans
+
+    valid = df.iloc[valid_idx].copy()
+    if "catalyst_family" not in valid.columns:
+        valid["catalyst_family"] = "all"
+
+    models_path = Path(models_path)
+    saved_models: dict[str, tuple] = {}
+    if incremental and models_path.exists():
+        try:
+            with open(models_path, "rb") as fh:
+                saved_models = pickle.load(fh)
+        except Exception:
+            saved_models = {}
+
+    needs_full_refit = (not incremental) or not saved_models
+    if needs_full_refit:
+        # Full refit path — re-fit per family from scratch and re-save models
+        models_path.parent.mkdir(parents=True, exist_ok=True)
+        new_models: dict[str, tuple] = {}
         next_cluster_id = 0
         for family, group in valid.groupby("catalyst_family", sort=True):
             group_positions = group.index.tolist()
             if len(group_positions) < 2:
                 df.loc[group_positions, "news_cluster_id"] = float(next_cluster_id)
                 df.loc[group_positions, "news_cluster_key"] = f"{family}:0"
+                new_models[str(family)] = (None, next_cluster_id)
                 next_cluster_id += 1
                 continue
             x = np.vstack([vectors[df.index.get_loc(i)] for i in group_positions])
             k = min(max(2, min(int(n_clusters), len(group_positions) // 8 or 2)), len(group_positions))
-            labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(x)
+            km = KMeans(n_clusters=k, random_state=42, n_init=10).fit(x)
+            labels = km.labels_
+            base_id = next_cluster_id
+            new_models[str(family)] = (km, base_id)
             for local_label in sorted(set(labels)):
                 mask = labels == local_label
                 idx = list(np.asarray(group_positions)[mask])
-                df.loc[idx, "news_cluster_id"] = float(next_cluster_id)
+                df.loc[idx, "news_cluster_id"] = float(base_id + int(local_label))
                 df.loc[idx, "news_cluster_key"] = f"{family}:{local_label}"
-                next_cluster_id += 1
+            next_cluster_id = base_id + k
+        with open(models_path, "wb") as fh:
+            pickle.dump(new_models, fh)
+        print(f"  cluster: full refit, {len(new_models)} family models saved -> {models_path}")
+    else:
+        # Incremental path — use saved models to predict for rows missing cluster_id
+        unassigned_mask = df["news_cluster_id"].isna() & df.index.isin(valid_idx)
+        unassigned_count = int(unassigned_mask.sum())
+        if unassigned_count == 0:
+            print("  cluster: no unassigned rows, nothing to do")
+        else:
+            print(f"  cluster: {unassigned_count:,} rows need assignment via saved KMeans")
+            for family, group in valid[unassigned_mask.loc[valid.index]].groupby("catalyst_family", sort=True):
+                group_positions = group.index.tolist()
+                if family not in saved_models:
+                    # Family seen for the first time post-refit — assign a placeholder cluster
+                    df.loc[group_positions, "news_cluster_id"] = -1.0
+                    df.loc[group_positions, "news_cluster_key"] = f"{family}:unassigned"
+                    continue
+                km, base_id = saved_models[family]
+                if km is None:
+                    df.loc[group_positions, "news_cluster_id"] = float(base_id)
+                    df.loc[group_positions, "news_cluster_key"] = f"{family}:0"
+                    continue
+                x = np.vstack([vectors[df.index.get_loc(i)] for i in group_positions])
+                labels = km.predict(x)
+                for local_label in sorted(set(labels)):
+                    mask = labels == local_label
+                    idx = list(np.asarray(group_positions)[mask])
+                    df.loc[idx, "news_cluster_id"] = float(int(base_id) + int(local_label))
+                    df.loc[idx, "news_cluster_key"] = f"{family}:{local_label}"
+
     df.to_parquet(output_path, index=False)
     return df
 
@@ -322,12 +478,35 @@ def label_news_forward_returns(
     expansion_threshold: float = 0.10,
     max_entry_gap_days: float = 7.0,
     output_path: Path | str = NEWS_LABELS_PATH,
+    incremental: bool = True,
 ) -> pd.DataFrame:
+    """Label forward returns for news records.
+
+    With ``incremental=True`` (default), skip records that already have a
+    label row (by record_id) in the existing news_labels parquet. Appends
+    any newly-computed labels for records whose forward window has matured.
+    """
     news = pd.read_parquet(news_path) if Path(news_path).exists() else empty_news_frame()
     if news.empty:
         out = pd.DataFrame()
         out.to_parquet(output_path, index=False)
         return out
+
+    prior_labels = pd.DataFrame()
+    if incremental and Path(output_path).exists():
+        try:
+            prior_labels = pd.read_parquet(output_path)
+        except Exception:
+            prior_labels = pd.DataFrame()
+        if not prior_labels.empty and "record_id" in prior_labels.columns:
+            already = set(prior_labels["record_id"].dropna().astype(str))
+            news = news[~news["record_id"].astype(str).isin(already)].copy()
+            print(f"  incremental label: {len(prior_labels):,} already labeled, {len(news):,} new to label")
+        if news.empty:
+            print("  nothing new to label")
+            prior_labels.to_parquet(output_path, index=False)
+            return prior_labels
+
     bars = bars.copy()
     bars["timestamp"] = pd.to_datetime(bars["timestamp"], utc=True, errors="coerce")
     bars["ticker"] = bars["ticker"].astype(str).str.upper().str.replace("$", "", regex=False)
@@ -383,6 +562,9 @@ def label_news_forward_returns(
             }
         )
     out = pd.DataFrame(rows)
+    if not prior_labels.empty:
+        out = pd.concat([prior_labels, out], ignore_index=True)
+        out = out.drop_duplicates(subset=["record_id"], keep="last")
     out.to_parquet(output_path, index=False)
     return out
 
