@@ -90,22 +90,7 @@ class SharedBarStream:
         self._symbols = symbols_list
         self._env_file = env_file
 
-        def _on_bar(bar: dict) -> None:
-            now = time.monotonic()
-            with self._lock:
-                self._last_bar_monotonic = now
-                self._last_bar_symbol = str(bar.get("symbol") or "")
-                self._last_bar_ts = bar.get("timestamp")
-                queues = list(self._queues)
-            for q in queues:
-                try:
-                    q.put_nowait(bar)
-                    with self._lock:
-                        self._delivered_count += 1
-                except queue_mod.Full:
-                    self._record_drop(q)
-
-        streamer = self._new_streamer(symbols_list, env_file, _on_bar)
+        streamer = self._new_streamer(symbols_list, env_file, self._make_on_bar())
         streamer.start_in_thread(daemon=True)
         with self._lock:
             self._streamer = streamer
@@ -123,6 +108,42 @@ class SharedBarStream:
             env_file=env_file,
             on_bar=on_bar,
         )
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "started": self._started,
+                "registered_queues": len(self._queues),
+                "queue_labels": list(self._queue_labels.values()),
+                "symbols": list(self._symbols),
+                "env_file": self._env_file,
+                "last_bar_symbol": self._last_bar_symbol,
+                "last_bar_ts": self._last_bar_ts,
+                "delivered_count": self._delivered_count,
+                "dropped_count": self._dropped_count,
+                "reconnect_count": self._reconnect_count,
+            }
+
+    def _make_on_bar(self):
+        def _on_bar(bar: dict) -> None:
+            self._fanout_bar(bar)
+
+        return _on_bar
+
+    def _fanout_bar(self, bar: dict) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._last_bar_monotonic = now
+            self._last_bar_symbol = str(bar.get("symbol") or "")
+            self._last_bar_ts = bar.get("timestamp")
+            queues = list(self._queues)
+        for q in queues:
+            try:
+                q.put_nowait(bar)
+                with self._lock:
+                    self._delivered_count += 1
+            except queue_mod.Full:
+                self._record_drop(q)
 
     @staticmethod
     def _is_rth_watch_window() -> bool:
@@ -223,22 +244,7 @@ class SharedBarStream:
                 except Exception:
                     pass
 
-            def _on_bar(bar: dict) -> None:
-                now = time.monotonic()
-                with self._lock:
-                    self._last_bar_monotonic = now
-                    self._last_bar_symbol = str(bar.get("symbol") or "")
-                    self._last_bar_ts = bar.get("timestamp")
-                    queues = list(self._queues)
-                for q in queues:
-                    try:
-                        q.put_nowait(bar)
-                        with self._lock:
-                            self._delivered_count += 1
-                    except queue_mod.Full:
-                        self._record_drop(q)
-
-            new_streamer = self._new_streamer(symbols, env_file, _on_bar)
+            new_streamer = self._new_streamer(symbols, env_file, self._make_on_bar())
             new_streamer.start_in_thread(daemon=True)
             with self._lock:
                 self._streamer = new_streamer

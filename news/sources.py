@@ -973,8 +973,10 @@ def _cboe_options_aggregate(payload: dict, *, sigma_threshold: float = 3.0) -> d
     plus a list of unusual-flow strikes (volume > sigma * sqrt(open_interest))."""
     data = payload.get("data") or {}
     options = data.get("options") or []
+    current_price = float(data.get("current_price") or 0)
+    snapshot_day = pd.Timestamp.utcnow().normalize()
     summary: dict = {
-        "current_price": float(data.get("current_price") or 0),
+        "current_price": current_price,
         "stock_volume": int(data.get("volume") or 0),
         "iv30": float(data.get("iv30") or 0),
         "iv30_change_percent": float(data.get("iv30_change_percent") or 0),
@@ -1004,17 +1006,25 @@ def _cboe_options_aggregate(payload: dict, *, sigma_threshold: float = 3.0) -> d
             put_premium += vol * last * 100
         baseline = max(oi, 1) ** 0.5 * sigma_threshold
         if vol > baseline and vol > 50:  # also require minimum absolute volume
+            strike = float(opt.get("option") and sym[-8:]) / 1000.0 if sym[-8:].isdigit() else 0.0
+            expiry_raw = sym[-15:-9]
+            expiry = pd.to_datetime(f"20{expiry_raw}", format="%Y%m%d", errors="coerce") if expiry_raw.isdigit() else pd.NaT
+            dte = int((expiry - snapshot_day.tz_localize(None)).days) if pd.notna(expiry) else None
             unusual_strikes.append(
                 {
                     "contract": sym,
                     "side": "call" if is_call else "put",
-                    "strike": float(opt.get("option") and sym[-8:]) / 1000.0 if sym[-8:].isdigit() else 0.0,
+                    "expiry": expiry.date().isoformat() if pd.notna(expiry) else "",
+                    "dte": dte,
+                    "strike": strike,
                     "volume": vol,
                     "open_interest": oi,
                     "iv": float(opt.get("iv") or 0),
                     "delta": float(opt.get("delta") or 0),
                     "last": last,
+                    "premium": vol * last * 100,
                     "ratio": vol / max(oi, 1),
+                    "strike_distance_pct": (strike / current_price - 1.0) if current_price > 0 else None,
                 }
             )
     summary.update(
@@ -1030,9 +1040,10 @@ def _cboe_options_aggregate(payload: dict, *, sigma_threshold: float = 3.0) -> d
             "unusual_total_volume": sum(s["volume"] for s in unusual_strikes),
         }
     )
-    # Keep top 20 most-unusual strikes by ratio for downstream inspection
+    # Keep all unusual strikes for the strike-level table; ticker-level
+    # catalyst records only serialize the top few for readability.
     unusual_strikes.sort(key=lambda s: -s["ratio"])
-    summary["unusual_strikes"] = unusual_strikes[:20]
+    summary["unusual_strikes"] = unusual_strikes
     return summary
 
 
@@ -1044,7 +1055,7 @@ def fetch_cboe_options_snapshot(
     timeout: int = 45,
     max_retries: int = 3,
     retry_backoff_s: float = 1.5,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Pull per-ticker delayed options chains from CBOE's free CDN.
 
     Returns two frames:
@@ -1054,6 +1065,7 @@ def fetch_cboe_options_snapshot(
       suitable for merging into ``news_records.parquet``.
     """
     summary_rows: list[dict] = []
+    strike_rows: list[dict] = []
     record_rows: list[dict] = []
     last_request = 0.0
     today = pd.Timestamp.utcnow().normalize()
@@ -1084,6 +1096,16 @@ def fetch_cboe_options_snapshot(
         summary["ticker"] = ticker
         summary["snapshot_date"] = today
         summary_rows.append(summary)
+        for strike in summary.get("unusual_strikes", []):
+            strike_rows.append(
+                {
+                    "ticker": ticker,
+                    "snapshot_date": today,
+                    "snapshot_timestamp": summary.get("snapshot_timestamp"),
+                    "current_price": summary.get("current_price"),
+                    **strike,
+                }
+            )
 
         # Emit a catalyst news_record only if there's meaningful unusual flow
         if summary["unusual_strike_count"] >= 3 and summary["unusual_total_volume"] >= 1000:
@@ -1114,7 +1136,8 @@ def fetch_cboe_options_snapshot(
         if "unusual_strikes" in summary_df.columns:
             summary_df = summary_df.drop(columns=["unusual_strikes"])
     records_df = records_from_frame(pd.DataFrame(record_rows), source="cboe_options_flow")
-    return summary_df, records_df
+    strike_df = pd.DataFrame(strike_rows)
+    return summary_df, records_df, strike_df
 
 
 # ---------------------------------------------------------------------------

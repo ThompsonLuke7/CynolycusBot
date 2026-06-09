@@ -84,11 +84,14 @@ def cluster_social_embeddings(
     ]
     cur["narrative_cluster_id"] = -1.0
     if len(valid_idx) >= max(2, min_cluster_size):
-        from sklearn.cluster import HDBSCAN
-
-        x = np.vstack([vectors[i] for i in valid_idx])
-        labels = HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples).fit_predict(x)
-        cur.loc[cur.index[valid_idx], "narrative_cluster_id"] = labels.astype(float)
+        try:
+            from sklearn.cluster import HDBSCAN
+        except ImportError:
+            HDBSCAN = None
+        if HDBSCAN is not None:
+            x = np.vstack([vectors[i] for i in valid_idx])
+            labels = HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples).fit_predict(x)
+            cur.loc[cur.index[valid_idx], "narrative_cluster_id"] = labels.astype(float)
 
     cluster_rows = []
     clustered = cur.loc[cur["narrative_cluster_id"].ge(0)].copy()

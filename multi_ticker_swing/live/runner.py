@@ -46,6 +46,14 @@ from multi_ticker_swing.live.real_account_policy import (
 )
 from multi_ticker_swing.live.risk_profile_policy import RiskProfilePolicy, config_from_env as risk_profile_policy_from_env
 from multi_ticker_swing.live.scanner import Signal, SwingScanner
+from multi_ticker_swing.live.session import (
+    confirmation_breakout,
+    entry_bucket as _entry_bucket,
+    is_log_window,
+    is_regular_trading_time,
+    should_check_confirmation,
+    should_scan_after_30m_close,
+)
 from multi_ticker_swing.live.universe import load_universe
 
 logging.basicConfig(
@@ -115,11 +123,6 @@ EventSink = Callable[[str, dict], None]
 
 def _utc_iso(ts: datetime | None = None) -> str:
     return (ts or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-
-
-def _entry_bucket(now_et: datetime) -> str:
-    minute = 30 if now_et.minute >= 30 else 0
-    return f"{now_et.hour:02d}:{minute:02d}"
 
 
 # ---------------------------------------------------------------------------
@@ -967,8 +970,7 @@ class SwingLiveRunner:
     def _bar_is_too_stale(lag_secs: float | None) -> bool:
         if lag_secs is None or lag_secs < _STALE_BAR_LAG_SECS:
             return False
-        now_et = datetime.now(_ET)
-        return _RTH_START <= now_et.time() < _RTH_END
+        return is_regular_trading_time(datetime.now(_ET))
 
     @staticmethod
     def _bar_after_log_cutoff(bar: dict) -> bool:
@@ -982,7 +984,7 @@ class SwingLiveRunner:
 
     @staticmethod
     def _within_log_window(now_et: datetime) -> bool:
-        return _RTH_START <= now_et.time() < _LOG_END
+        return is_log_window(now_et)
 
     def _reset_ticker_accumulators(self, ticker: str) -> None:
         acc5 = self._acc_5m.get(ticker)
@@ -1219,10 +1221,8 @@ class SwingLiveRunner:
         # Drop pre-market and post-market bars — only aggregate RTH bars so the
         # 30m accumulator aligns cleanly with the 9:30/10:00/.../15:30 schedule.
         ts = bar.get("timestamp")
-        if hasattr(ts, "astimezone"):
-            bar_et_t = ts.astimezone(_ET).time()
-            if not (_RTH_START <= bar_et_t < _RTH_END):
-                return False
+        if hasattr(ts, "astimezone") and not is_regular_trading_time(ts):
+            return False
 
         bar5 = self._acc_5m[ticker].push(bar)
         if bar5 is not None:
@@ -1249,8 +1249,7 @@ class SwingLiveRunner:
         # Market hours gate for confirmations and new entries.
         # Exits (handled above by pos_mgr.on_5m_bar) always run regardless of time.
         ts = bar5["timestamp"]
-        bar_et_t = ts.astimezone(_ET).time() if hasattr(ts, "astimezone") else None
-        if bar_et_t is None or _CONFIRM_START <= bar_et_t <= _CONFIRM_END:
+        if should_check_confirmation(ts):
             self._check_confirmation(ticker, bar5)
 
         # Aggregate 5m → 30m
@@ -1269,9 +1268,8 @@ class SwingLiveRunner:
         # Market hours gate: the 30m bar whose last 5m bar opens at 3:55 closes right
         # at the market end — no 5m bars remain to confirm, so skip scanning.
         ts30 = bar30.get("timestamp")
-        if hasattr(ts30, "astimezone"):
-            if ts30.astimezone(_ET).time() >= _SCAN_END_TS:
-                return
+        if not should_scan_after_30m_close(ts30):
+            return
 
         # Run scanner once per 30m close for this ticker only.
         #
@@ -1315,15 +1313,12 @@ class SwingLiveRunner:
         h, l = float(bar5["high"]), float(bar5["low"])
         o, c = float(bar5["open"]), float(bar5["close"])
 
-        confirmed = False
-        if sig.direction == 1:
-            # Body-close breakout above signal bar high
-            if h >= sig.ref_high and c > o and c > sig.ref_high:
-                confirmed = True
-        else:
-            # Body-close breakout below signal bar low
-            if l <= sig.ref_low and c < o and c < sig.ref_low:
-                confirmed = True
+        confirmed = confirmation_breakout(
+            direction=sig.direction,
+            ref_high=sig.ref_high,
+            ref_low=sig.ref_low,
+            bar=bar5,
+        )
 
         if confirmed:
             candle_metrics = _bar_shape_metrics(bar5, atr=sig.atr)

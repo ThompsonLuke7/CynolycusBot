@@ -172,6 +172,7 @@ def test_embeddings_degrade_cleanly(tmp_path, monkeypatch) -> None:
 
 
 def test_hdbscan_and_narrative_features(tmp_path) -> None:
+    pytest.importorskip("sklearn")
     posts = pd.DataFrame(
         [
             {"post_id": "p1", "timestamp": "2026-01-01T10:00:00Z", "text": "space contract rocket win", "subreddit": "stocks"},

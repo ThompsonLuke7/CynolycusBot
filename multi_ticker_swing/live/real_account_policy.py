@@ -6,10 +6,11 @@ import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from multi_ticker_swing.live.scanner import Signal
+if TYPE_CHECKING:
+    from multi_ticker_swing.live.scanner import Signal
 
 
 ET = ZoneInfo("America/New_York")

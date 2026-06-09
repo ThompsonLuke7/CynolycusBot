@@ -55,6 +55,10 @@ Some optional research paths need extra packages that are not in the base requir
 These commands inspect local CLIs and should not train models or submit orders:
 
 ```bash
+python scripts/run_safe_smoke_tests.py
+```
+
+```bash
 ./.venv/bin/python main.py -h
 ```
 
@@ -81,6 +85,8 @@ These commands inspect local CLIs and should not train models or submit orders:
 ```bash
 ./.venv/bin/python -m momentum_expansion.main -h
 ```
+
+For a compact status map of what is operable, research-ready, or legacy/experimental, see `docs/PROJECT_STATUS.md`. For the loose collection of one-off research scripts, see `scripts/README.md` before running broad sweeps or API-fetching jobs.
 
 ## SPY Research Pipeline
 

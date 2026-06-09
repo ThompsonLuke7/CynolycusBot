@@ -247,3 +247,17 @@ Data/
 *.zip
 *.dot
 logs/
+
+# Local live/paper run churn and generated research artifacts.
+UI/swing_audit/**/*.jsonl
+UI/swing_audit/**/*.json
+Data/analysis/
+Data/inference/**/*.json
+Data/inference/**/*.jsonl
+Data/inference/**/*.parquet
+Data/models/**/*.json
+Data/models/**/*.pkl
+Data/models/**/*.ubj
+Data/models/**/*.joblib
+Data/models/**/*.parquet
+**/plots/output/

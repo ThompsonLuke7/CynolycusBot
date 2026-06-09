@@ -1,0 +1,21 @@
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = [
+    "catalysts/tests",
+    "events/tests",
+    "events/forward_guidance/tests",
+    "meta_context/tests",
+    "momentum_expansion/tests",
+    "multi_ticker_swing/tests",
+    "news/tests",
+    "social_attention/tests",
+    "UI/tests",
+]
+python_files = ["test_*.py"]
+markers = [
+    "safe: local smoke tests that should not submit orders or require broad recomputation",
+    "network: tests that may call external APIs",
+    "slow: tests that are intentionally long-running",
+    "live: tests that touch live trading/session behavior",
+]
+addopts = "-ra"

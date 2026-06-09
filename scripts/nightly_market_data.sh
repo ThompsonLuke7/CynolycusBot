@@ -49,10 +49,8 @@ sys.path.insert(0, ".")
 from news.sources import fetch_finra_short_volume_day
 
 target = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=1)
-# Skip weekends
-if target.weekday() >= 5:
-    print(f"  skipping non-business day {target.date()}")
-    sys.exit(0)
+while target.weekday() >= 5:
+    target -= pd.Timedelta(days=1)
 
 out_path = Path(f"news/data/processed/finra_daily/{target.strftime('%Y%m%d')}.parquet")
 if out_path.exists():
