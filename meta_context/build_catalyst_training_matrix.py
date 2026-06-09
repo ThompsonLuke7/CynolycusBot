@@ -340,7 +340,11 @@ def build() -> pd.DataFrame:
     # so the live scorer can reproduce the feature vector layout one-shot.
     drop_for_features = [
         "record_id", "ticker", "timestamp", "catalyst_family", "catalyst_subtype",
-        "expansion_label", "max_forward_return", "max_drawdown",
+        "source_quality",
+        "expansion_label",
+        "target_expansion_10pct", "target_expansion_5pct", "target_crash_5pct",
+        "target_fwd_10d_reg", "target_trajectory", "target_trajectory_code",
+        "max_forward_return", "max_drawdown",
         "forward_5d_return", "forward_10d_return", "split",
     ]
     feature_cols = [c for c in out.columns if c not in drop_for_features]

@@ -43,11 +43,14 @@ def split_xy(df: pd.DataFrame, split: str, *, target: str = "expansion_label") -
         "timestamp",
         "catalyst_family",
         "catalyst_subtype",
+        "source_quality",  # tag column — we use sq_* one-hots as features instead
         "expansion_label",
         "target_expansion_10pct",
         "target_expansion_5pct",
         "target_crash_5pct",
         "target_fwd_10d_reg",
+        "target_trajectory",
+        "target_trajectory_code",
         "max_forward_return",
         "max_drawdown",
         "forward_5d_return",
@@ -67,6 +70,9 @@ def split_xy(df: pd.DataFrame, split: str, *, target: str = "expansion_label") -
     return X, y, meta
 
 
+TRAJECTORY_NAMES = {0: "flat", 1: "bull_steady", 2: "bull_volatile", 3: "v_bounce", 4: "crash_stayed"}
+
+
 def evaluate(
     booster,
     X: pd.DataFrame,
@@ -75,11 +81,58 @@ def evaluate(
     *,
     name: str,
     is_regression: bool = False,
+    is_multiclass: bool = False,
 ) -> dict:
     """Compute headline metrics on a held-out split."""
-    pred = booster.predict(X)
-    if pred.ndim > 1:
-        pred = pred[:, 1] if pred.shape[1] > 1 else pred[:, 0]
+    # Multiclass branch — returns per-class metrics
+    if is_multiclass:
+        from sklearn.metrics import roc_auc_score, log_loss
+        proba = booster.predict_proba(X) if hasattr(booster, "predict_proba") else booster.predict(X)
+        classes = sorted(set(y))
+        per_class = {}
+        for c in classes:
+            y_bin = (y == c).astype(int)
+            if y_bin.nunique() < 2:
+                per_class[TRAJECTORY_NAMES.get(int(c), str(c))] = {"auc": None, "n_positive": int(y_bin.sum())}
+                continue
+            auc = float(roc_auc_score(y_bin, proba[:, int(c)]))
+            df = pd.DataFrame({"y": y_bin.values, "p": proba[:, int(c)],
+                               "fwd10": meta["forward_10d_return"].fillna(0).values,
+                               "max_fwd": meta["max_forward_return"].fillna(0).values,
+                               "dd": meta["max_drawdown"].fillna(0).values})
+            df = df.sort_values("p", ascending=False)
+            n_top = max(1, int(len(df) * 0.10))
+            top_winrate = float(df.head(n_top)["y"].mean())
+            baseline = float(y_bin.mean())
+            lift = top_winrate / baseline if baseline > 0 else float("nan")
+            per_class[TRAJECTORY_NAMES.get(int(c), str(c))] = {
+                "auc": auc,
+                "baseline_rate": baseline,
+                "top_decile_winrate": top_winrate,
+                "top_decile_lift": lift,
+                "top_decile_mean_fwd_10d": float(df.head(n_top)["fwd10"].mean()),
+                "top_decile_mean_max_fwd": float(df.head(n_top)["max_fwd"].mean()),
+                "top_decile_mean_drawdown": float(df.head(n_top)["dd"].mean()),
+                "n_positive": int(y_bin.sum()),
+            }
+        return {
+            "split": name,
+            "n": int(len(y)),
+            "objective": "multiclass",
+            "n_classes": len(classes),
+            "log_loss": float(log_loss(y, proba, labels=list(range(proba.shape[1])))),
+            "per_class": per_class,
+        }
+
+    # XGBClassifier.predict() returns CLASS LABELS (0/1) — must use predict_proba
+    # for ranking metrics. LightGBM Booster.predict() returns probabilities.
+    if hasattr(booster, "predict_proba") and not is_regression:
+        pred = booster.predict_proba(X)
+        pred = pred[:, 1] if pred.ndim > 1 and pred.shape[1] > 1 else pred[:, 0] if pred.ndim > 1 else pred
+    else:
+        pred = booster.predict(X)
+        if pred.ndim > 1:
+            pred = pred[:, 1] if pred.shape[1] > 1 else pred[:, 0]
 
     if is_regression:
         from sklearn.metrics import mean_squared_error, r2_score
@@ -149,38 +202,31 @@ def _train_lightgbm(X_tr, y_tr, X_val, y_val, *, params, num_boost_round, early_
     return booster, "lightgbm"
 
 
-def _train_xgboost(X_tr, y_tr, X_val, y_val, *, params, num_boost_round, early_stopping, device, is_regression=False):
+def _train_xgboost(X_tr, y_tr, X_val, y_val, *, params, num_boost_round, early_stopping, device, is_regression=False, num_class=None):
     import xgboost as xgb
+    common = dict(
+        tree_method="hist",
+        device=device,
+        n_estimators=int(num_boost_round),
+        learning_rate=float(params["learning_rate"]),
+        max_depth=int(params["max_depth"]),
+        subsample=float(params.get("bagging_fraction", 0.85)),
+        colsample_bytree=float(params.get("feature_fraction", 0.85)),
+        early_stopping_rounds=int(early_stopping),
+        random_state=42,
+        verbosity=1,
+    )
     if is_regression:
-        booster = xgb.XGBRegressor(
-            objective="reg:squarederror",
-            eval_metric="rmse",
-            tree_method="hist",
-            device=device,
-            n_estimators=int(num_boost_round),
-            learning_rate=float(params["learning_rate"]),
-            max_depth=int(params["max_depth"]),
-            subsample=float(params.get("bagging_fraction", 0.85)),
-            colsample_bytree=float(params.get("feature_fraction", 0.85)),
-            early_stopping_rounds=int(early_stopping),
-            random_state=42,
-            verbosity=1,
+        booster = xgb.XGBRegressor(objective="reg:squarederror", eval_metric="rmse", **common)
+    elif num_class and num_class > 2:
+        booster = xgb.XGBClassifier(
+            objective="multi:softprob",
+            eval_metric="mlogloss",
+            num_class=int(num_class),
+            **common,
         )
     else:
-        booster = xgb.XGBClassifier(
-            objective="binary:logistic",
-            eval_metric="logloss",
-            tree_method="hist",
-            device=device,
-            n_estimators=int(num_boost_round),
-            learning_rate=float(params["learning_rate"]),
-            max_depth=int(params["max_depth"]),
-            subsample=float(params.get("bagging_fraction", 0.85)),
-            colsample_bytree=float(params.get("feature_fraction", 0.85)),
-            early_stopping_rounds=int(early_stopping),
-            random_state=42,
-            verbosity=1,
-        )
+        booster = xgb.XGBClassifier(objective="binary:logistic", eval_metric="logloss", **common)
     booster.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
     return booster, "xgboost"
 
@@ -206,6 +252,7 @@ def train(
         )
 
     is_regression = target == "target_fwd_10d_reg"
+    is_multiclass = target == "target_trajectory_code"
     print(f"loading feature matrix from {matrix_path}")
     df = pd.read_parquet(matrix_path)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
@@ -269,6 +316,7 @@ def train(
             early_stopping=early_stopping,
             device=device,
             is_regression=is_regression,
+            num_class=(int(y_tr.nunique()) if is_multiclass else None),
         )
     else:
         raise SystemExit(f"unknown engine: {engine}. Choose 'lightgbm' or 'xgboost'.")
@@ -285,9 +333,9 @@ def train(
 
     train_meta_df = split_xy(df, "train", target=target)[2]
     metrics = {
-        "train": evaluate(booster, X_tr, y_tr, train_meta_df, name="train", is_regression=is_regression),
-        "val": evaluate(booster, X_val, y_val, meta_val, name="val", is_regression=is_regression),
-        "test": evaluate(booster, X_te, y_te, meta_te, name="test", is_regression=is_regression),
+        "train": evaluate(booster, X_tr, y_tr, train_meta_df, name="train", is_regression=is_regression, is_multiclass=is_multiclass),
+        "val": evaluate(booster, X_val, y_val, meta_val, name="val", is_regression=is_regression, is_multiclass=is_multiclass),
+        "test": evaluate(booster, X_te, y_te, meta_te, name="test", is_regression=is_regression, is_multiclass=is_multiclass),
     }
     metrics["engine"] = kind
     metrics["device"] = device
@@ -321,8 +369,9 @@ def main() -> int:
                         help="cpu / gpu (lightgbm) / cuda (xgboost). xgboost + cuda is the simplest GPU path.")
     parser.add_argument("--target",
                         default="target_expansion_10pct",
-                        choices=["target_expansion_10pct", "target_expansion_5pct", "target_crash_5pct", "target_fwd_10d_reg"],
-                        help="Which target column to predict. Default is the legacy 10pct binary.")
+                        choices=["target_expansion_10pct", "target_expansion_5pct", "target_crash_5pct",
+                                 "target_fwd_10d_reg", "target_trajectory_code"],
+                        help="Which target column to predict. trajectory_code is 5-class softprob.")
     parser.add_argument("--num-boost-round", type=int, default=600)
     parser.add_argument("--learning-rate", type=float, default=0.03)
     parser.add_argument("--max-depth", type=int, default=6)

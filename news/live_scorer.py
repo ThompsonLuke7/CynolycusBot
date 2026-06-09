@@ -36,10 +36,14 @@ from news.config import (
 )
 
 
-DEFAULT_MODEL_PATH = Path("meta_context/models/news_catalyst_target_expansion_10pct_v2.json")
+DEFAULT_MODEL_PATH = Path("meta_context/models/news_catalyst_target_expansion_10pct_v3.xgb.json")
+DEFAULT_TRAJECTORY_MODEL_PATH = Path("meta_context/models/news_catalyst_trajectory_v3.xgb.json")
 DEFAULT_MANIFEST_PATH = Path("meta_context/data/processed/catalyst_training_manifest.json")
 BARS_DAILY_DIR = Path("Data/shared/bars/1d")
 KAGGLE_MARKET_PRICES = Path("/home/luket/.cache/kagglehub/datasets/belbino/financial-news-sentiment-vs-market-2020-present/versions/50/market_prices.csv")
+
+# Multiclass trajectory ordering — must match train_news_score_model.TRAJECTORY_NAMES.
+TRAJECTORY_LABELS = ("flat", "bull_steady", "bull_volatile", "v_bounce", "crash_stayed")
 
 
 class CatalystScorer:
@@ -49,6 +53,7 @@ class CatalystScorer:
         self,
         *,
         model_path: Path = DEFAULT_MODEL_PATH,
+        trajectory_model_path: Path | None = DEFAULT_TRAJECTORY_MODEL_PATH,
         manifest_path: Path = DEFAULT_MANIFEST_PATH,
         engine: str = "auto",
         use_finbert: bool = True,
@@ -68,6 +73,16 @@ class CatalystScorer:
         self.engine = engine
 
         self.booster = self._load_booster()
+
+        # Optional multiclass trajectory model (5 probabilities per record)
+        self.trajectory_booster = None
+        if trajectory_model_path is not None and Path(trajectory_model_path).exists():
+            try:
+                import xgboost as xgb
+                self.trajectory_booster = xgb.XGBClassifier()
+                self.trajectory_booster.load_model(str(trajectory_model_path))
+            except Exception:
+                self.trajectory_booster = None
 
         # Defer BGE / FinBERT loading until first scoring call (heavy imports)
         self._bge_model = None
@@ -232,6 +247,67 @@ class CatalystScorer:
         X = self._assemble_feature_matrix(df, emb)
         proba = self._predict(X)
         return proba
+
+    def score_trajectory(self, records: Iterable[dict] | dict) -> pd.DataFrame:
+        """Return per-trajectory probabilities for each record.
+
+        Output columns: ``flat, bull_steady, bull_volatile, v_bounce, crash_stayed``
+        (one row per input record, sum-to-1 across columns).
+
+        Raises if no trajectory model was loaded at construction time.
+        """
+        if self.trajectory_booster is None:
+            raise RuntimeError(
+                "No trajectory model loaded. Pass trajectory_model_path to "
+                "CatalystScorer(...) or ensure the default v3 artifact exists."
+            )
+        if isinstance(records, dict):
+            records = [records]
+        records = list(records)
+        if not records:
+            return pd.DataFrame(columns=list(TRAJECTORY_LABELS))
+
+        df = pd.DataFrame(records)
+        df["ticker"] = df["ticker"].astype(str).str.upper()
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        df = classify_catalyst_types(df)
+        texts = (df.get("headline", "").fillna("") + " "
+                 + df.get("summary", "").fillna("") + " "
+                 + df.get("body", "").fillna("")).tolist()
+        embed_fn = self._ensure_bge()
+        emb = embed_fn(texts)
+        if emb.shape[1] != self.bge_dim:
+            raise RuntimeError(f"BGE returned {emb.shape[1]} dims, expected {self.bge_dim}")
+        finbert_fn = self._ensure_finbert()
+        if finbert_fn is not None:
+            fb_rows = finbert_fn(texts)
+            df["finbert_positive_score"] = [float(r.get("positive", 0)) for r in fb_rows]
+            df["finbert_negative_score"] = [float(r.get("negative", 0)) for r in fb_rows]
+            df["finbert_neutral_score"] = [float(r.get("neutral", 0)) for r in fb_rows]
+        else:
+            df["finbert_positive_score"] = 0.0
+            df["finbert_negative_score"] = 0.0
+            df["finbert_neutral_score"] = 0.0
+
+        X = self._assemble_feature_matrix(df, emb)
+        feat_names = self.trajectory_booster.get_booster().feature_names
+        proba = self.trajectory_booster.predict_proba(X[feat_names])
+        return pd.DataFrame(proba, columns=list(TRAJECTORY_LABELS))
+
+    def score_both(self, records: Iterable[dict] | dict) -> pd.DataFrame:
+        """Return a wide frame with the binary expansion score AND the 5
+        trajectory probabilities side by side. One row per input record."""
+        if isinstance(records, dict):
+            records = [records]
+        records = list(records)
+        binary = self.score(records)
+        if self.trajectory_booster is not None:
+            traj = self.score_trajectory(records)
+        else:
+            traj = pd.DataFrame(0.0, index=range(len(records)), columns=list(TRAJECTORY_LABELS))
+        out = traj.copy()
+        out.insert(0, "catalyst_score", binary)
+        return out
 
     # ------------------------------------------------------------------
     # Feature assembly
