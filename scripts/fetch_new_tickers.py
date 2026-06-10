@@ -8,8 +8,8 @@ Run:
 from __future__ import annotations
 
 import logging
-from multi_ticker_swing.data.fetch_data import fetch_ticker
-from multi_ticker_swing.config.pipeline_config import (
+from strategies.multi_ticker_swing.data.fetch_data import fetch_ticker
+from strategies.multi_ticker_swing.config.pipeline_config import (
     RAW_30M_DIR, RAW_5M_DIR, TRAIN_START, TRAIN_END,
 )
 

@@ -45,7 +45,7 @@ def _check(name: str, df: pd.DataFrame, required_cols: list[str], min_rows: int 
 def test_earnings_calendar() -> bool:
     print("\n[1/4] earnings-calendar (yfinance)")
     try:
-        from news.sources import fetch_earnings_calendar
+        from signals.news.sources import fetch_earnings_calendar
 
         df = fetch_earnings_calendar(SMOKE_TICKERS)
         return _check(
@@ -65,7 +65,7 @@ def test_earnings_calendar() -> bool:
 def test_economic_calendar() -> bool:
     print("\n[2/4] economic-calendar (TradingView)")
     try:
-        from news.sources import fetch_economic_calendar
+        from signals.news.sources import fetch_economic_calendar
 
         df = fetch_economic_calendar(
             start=(pd.Timestamp.now() - pd.Timedelta(days=14)).strftime("%Y-%m-%d"),
@@ -92,7 +92,7 @@ def test_economic_calendar() -> bool:
 def test_nasdaq_short_interest() -> bool:
     print("\n[3/4] nasdaq-short-interest (nasdaqtrader.com)")
     try:
-        from news.sources import fetch_nasdaq_short_interest
+        from signals.news.sources import fetch_nasdaq_short_interest
 
         df = fetch_nasdaq_short_interest(SMOKE_TICKERS)
         ok = _check(
@@ -119,7 +119,7 @@ def test_nasdaq_short_interest() -> bool:
 def test_usaspending_contracts() -> bool:
     print("\n[4/4] usaspending-contracts (api.usaspending.gov)")
     try:
-        from news.sources import fetch_usaspending_contracts
+        from signals.news.sources import fetch_usaspending_contracts
 
         df = fetch_usaspending_contracts(
             SMOKE_TICKERS,

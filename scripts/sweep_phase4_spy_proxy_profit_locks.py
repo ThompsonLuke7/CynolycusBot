@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
-from Models.ga_xgboost.analyze_phase4_triggers import (  # noqa: E402
+from strategies.spy_intraday.Models.ga_xgboost.analyze_phase4_triggers import (  # noqa: E402
     _apply_conflict_cooldown_cluster,
     _expand_recent_setup,
     _load_execution_1m,
@@ -22,7 +22,7 @@ from Models.ga_xgboost.analyze_phase4_triggers import (  # noqa: E402
     _post_setup_side_candidates,
     _session_reset_mask,
 )
-from Models.ga_xgboost.swing_label_weights import compute_wilder_atr  # noqa: E402
+from strategies.spy_intraday.Models.ga_xgboost.swing_label_weights import compute_wilder_atr  # noqa: E402
 
 
 DEFAULT_ANALYSIS_DIR = (

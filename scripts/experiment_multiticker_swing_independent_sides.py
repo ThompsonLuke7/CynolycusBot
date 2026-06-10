@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from multi_ticker_swing.backtest.sweep_v4 import (  # noqa: E402
+from strategies.multi_ticker_swing.backtest.sweep_v4 import (  # noqa: E402
     COMMISSION_PCT,
     CONFIRM_MAX_5M,
     MAX_HOLD_5M,
@@ -32,8 +32,8 @@ from scripts.plot_multiticker_swing_ticker_action import _infer_trade_times, _lo
 
 
 ET = ZoneInfo("America/New_York")
-DEFAULT_PROBA = Path("multi_ticker_swing/models/p_swing_probs.parquet")
-DEFAULT_UNIVERSE = Path("multi_ticker_swing/config/trading_universe.json")
+DEFAULT_PROBA = Path("strategies/multi_ticker_swing/models/p_swing_probs.parquet")
+DEFAULT_UNIVERSE = Path("strategies/multi_ticker_swing/config/trading_universe.json")
 DEFAULT_OUT_DIR = Path("UI/swing_audit/independent_sides_20260607")
 
 

@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from Policy.replay_option_proxy import ReplayOptionPriceProxy
+from strategies.spy_intraday.Policy.replay_option_proxy import ReplayOptionPriceProxy
 
 
 DEFAULT_RUN_ROOT = Path("Data/inference/live_runs")

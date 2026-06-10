@@ -1,0 +1,226 @@
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+
+def _resolve_repo_root() -> Path:
+    try:
+        return Path(__file__).resolve().parents[3]
+    except NameError:
+        return Path.cwd()
+
+
+REPO_ROOT = _resolve_repo_root()
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from Data.load_data import get_ticker_processed_base_dir
+from Data.retrieve_data import normalize_ticker
+from strategies.spy_intraday.Features.feature_matrix import _collect_label_columns
+from strategies.spy_intraday.Features.feature_sets.custom_indicators import add_fractal_pivots
+from strategies.spy_intraday.Features.label_generations import add_all_labels
+
+
+def _resolve_plot_frame_path(*, ticker: str, dataset_name: str) -> Path:
+    clean = normalize_ticker(ticker)
+    dataset_dir = get_ticker_processed_base_dir(clean) / "datasets" / dataset_name
+    return dataset_dir / "plot_frame.parquet"
+
+
+def _load_plot_frame(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing plot_frame.parquet at {path}")
+    df = pd.read_parquet(path)
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("plot_frame.parquet must have a DatetimeIndex")
+    if not df.index.is_monotonic_increasing:
+        df = df.sort_index()
+    return df
+
+
+def _print_triple_barrier_stats(df: pd.DataFrame) -> None:
+    if "tb_label" not in df.columns:
+        print("[labels] tb_label: missing")
+        return
+    s = df["tb_label"]
+    total = len(s)
+    nan_count = int(s.isna().sum())
+    valid = s.dropna().to_numpy(dtype=float)
+    if valid.size == 0:
+        print(f"[labels] tb_label: n={total}, nan={nan_count}, no valid values")
+        return
+    pos = int((valid > 0.5).sum())
+    neg = int((valid < -0.5).sum())
+    zero = int(valid.size - pos - neg)
+    print(
+        "[labels] tb_label: "
+        f"n={total}, nan={nan_count}, +1={pos}, -1={neg}, 0={zero}"
+    )
+
+
+def _print_pivot_stats(df: pd.DataFrame) -> None:
+    pivot_cols = ["pivot_up", "pivot_down", "super_pivot_up", "super_pivot_down"]
+    present = [c for c in pivot_cols if c in df.columns]
+    if not present:
+        print("[labels] pivots: missing")
+        return
+    stats = []
+    for col in present:
+        count = int((df[col].fillna(0).astype(int) == 1).sum())
+        stats.append(f"{col}={count}")
+    print("[labels] pivots: " + ", ".join(stats))
+
+
+def _clone_dataset_support_files(
+    *,
+    clean_ticker: str,
+    source_dataset_name: str,
+    output_dataset_name: str,
+) -> None:
+    if source_dataset_name == output_dataset_name:
+        return
+    base_dir = get_ticker_processed_base_dir(clean_ticker)
+    src_dir = base_dir / "datasets" / source_dataset_name
+    dst_dir = base_dir / "datasets" / output_dataset_name
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    support_files = [
+        "plot_frame.parquet",
+        "plot_frame.csv",
+        f"X_{source_dataset_name}_tree.parquet",
+        f"X_{source_dataset_name}_tree.csv",
+        f"X_{source_dataset_name}_lstm.parquet",
+        f"X_{source_dataset_name}_lstm.csv",
+        f"features_X_{source_dataset_name}_tree.txt",
+        f"features_X_{source_dataset_name}_lstm.txt",
+        "phase3_swing_event_metadata.parquet",
+        "phase3_swing_event_metadata.csv",
+        "phase3_macro_swing_event_metadata.parquet",
+        "phase3_macro_swing_event_metadata.csv",
+    ]
+    for name in support_files:
+        src = src_dir / name
+        if not src.exists():
+            continue
+        dst_name = name.replace(source_dataset_name, output_dataset_name)
+        shutil.copy2(src, dst_dir / dst_name)
+
+    splits_src = base_dir / "splits" / source_dataset_name
+    splits_dst = base_dir / "splits" / output_dataset_name
+    if splits_src.exists() and not splits_dst.exists():
+        shutil.copytree(splits_src, splits_dst)
+        src_tree_split = splits_dst / f"X_{source_dataset_name}_tree"
+        dst_tree_split = splits_dst / f"X_{output_dataset_name}_tree"
+        if src_tree_split.exists() and not dst_tree_split.exists():
+            src_tree_split.rename(dst_tree_split)
+        src_lstm_split = splits_dst / f"X_{source_dataset_name}_lstm"
+        dst_lstm_split = splits_dst / f"X_{output_dataset_name}_lstm"
+        if src_lstm_split.exists() and not dst_lstm_split.exists():
+            src_lstm_split.rename(dst_lstm_split)
+
+    stats_src = base_dir / "stats" / f"norm_stats_{source_dataset_name}_X_{source_dataset_name}_tree_train.json"
+    stats_dst = base_dir / "stats" / f"norm_stats_{output_dataset_name}_X_{output_dataset_name}_tree_train.json"
+    if stats_src.exists() and not stats_dst.exists():
+        shutil.copy2(stats_src, stats_dst)
+
+
+def generate_labels(
+    *,
+    ticker: str,
+    dataset_name: str,
+    plot_frame_path: Path | None = None,
+    output_dataset_name: str | None = None,
+    swing_label_shift_bars: int = 0,
+) -> Path:
+    plot_path = plot_frame_path or _resolve_plot_frame_path(
+        ticker=ticker, dataset_name=dataset_name
+    )
+    df = _load_plot_frame(plot_path)
+
+    df = add_fractal_pivots(df)
+    df = add_all_labels(
+        df,
+        atr_pivot_kwargs={
+            "shift_pivot_labels_back_bars": int(swing_label_shift_bars),
+        },
+    )
+
+    _print_triple_barrier_stats(df)
+    _print_pivot_stats(df)
+
+    label_cols = _collect_label_columns(df)
+    if not label_cols:
+        raise ValueError("No label columns were generated.")
+
+    labels_df = df[label_cols].copy()
+
+    clean = normalize_ticker(ticker)
+    resolved_output_dataset = (
+        str(output_dataset_name).strip() if output_dataset_name else dataset_name
+    )
+    _clone_dataset_support_files(
+        clean_ticker=clean,
+        source_dataset_name=dataset_name,
+        output_dataset_name=resolved_output_dataset,
+    )
+    dataset_dir = get_ticker_processed_base_dir(clean) / "datasets" / (
+        resolved_output_dataset
+    )
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+
+    y_parquet = dataset_dir / "y.parquet"
+    y_csv = dataset_dir / "y.csv"
+    # Preserve the datetime index so downstream joins against plot_frame.parquet
+    # stay aligned by timestamp instead of silently degrading to NaNs.
+    labels_df.to_parquet(y_parquet, index=True)
+    labels_df.to_csv(y_csv, index=True)
+    return y_parquet
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Recompute labels from plot_frame.parquet and save y.parquet/y.csv."
+    )
+    parser.add_argument("--ticker", type=str, default="$SPY")
+    parser.add_argument("--dataset", type=str, default="15min")
+    parser.add_argument(
+        "--output-dataset",
+        type=str,
+        default=None,
+        help="Optional alternate dataset dir to write labels into instead of overwriting --dataset.",
+    )
+    parser.add_argument(
+        "--swing-label-shift-bars",
+        type=int,
+        default=0,
+        help="Shift long/short swing labels earlier by this many bars within the same session.",
+    )
+    parser.add_argument(
+        "--plot-frame",
+        type=str,
+        default=None,
+        help="Override plot_frame.parquet path.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    plot_path = Path(args.plot_frame) if args.plot_frame else None
+    out_path = generate_labels(
+        ticker=args.ticker,
+        dataset_name=args.dataset,
+        plot_frame_path=plot_path,
+        output_dataset_name=args.output_dataset,
+        swing_label_shift_bars=int(args.swing_label_shift_bars),
+    )
+    print(f"Wrote {out_path} and y.csv")
+
+
+if __name__ == "__main__":
+    main()

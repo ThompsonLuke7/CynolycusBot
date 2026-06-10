@@ -22,7 +22,7 @@ from scripts.analyze_multiticker_swing_20260608_forensics import build_trade_tab
 
 ET = ZoneInfo("America/New_York")
 DEFAULT_OUT = Path("UI/swing_audit/forensics_20260608")
-RAW_5M_DIR = Path("multi_ticker_swing/data/raw/5m")
+RAW_5M_DIR = Path("strategies/multi_ticker_swing/data/raw/5m")
 FRIDAY_AUDIT = Path("UI/swing_audit/paper/swing_session_20260605T122235Z.jsonl")
 MONDAY_AUDIT = Path("UI/swing_audit/paper/swing_session_20260608T121654Z.jsonl")
 

@@ -16,9 +16,9 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from API.Alpaca_API.core.config import AlpacaConfig
-from multi_ticker_swing.config.pipeline_config import RAW_30M_DIR, RAW_5M_DIR, TRADING_BLACKLIST
-from multi_ticker_swing.data.fetch_data import universe_tickers
+from core.API.Alpaca_API.core.config import AlpacaConfig
+from strategies.multi_ticker_swing.config.pipeline_config import RAW_30M_DIR, RAW_5M_DIR, TRADING_BLACKLIST
+from strategies.multi_ticker_swing.data.fetch_data import universe_tickers
 
 
 def parse_time(value: str) -> dt.datetime:
@@ -100,7 +100,7 @@ def save_symbol_frame(symbol: str, fetched: pd.DataFrame, raw_dir: Path) -> bool
 def main() -> int:
     parser = argparse.ArgumentParser(description="Batch-fetch and merge multi-ticker swing 5m execution bars.")
     parser.add_argument("--universe", default="Data/shared/universe/shared_universe.csv")
-    parser.add_argument("--trading-universe-json", default="multi_ticker_swing/config/trading_universe.json")
+    parser.add_argument("--trading-universe-json", default="strategies/multi_ticker_swing/config/trading_universe.json")
     parser.add_argument("--tickers", nargs="*", default=None)
     parser.add_argument("--tiers", nargs="+", default=["1", "2"])
     parser.add_argument("--start", default="2026-05-01T13:30:00Z")

@@ -36,12 +36,12 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from news.catalyst_types import classify_catalyst_types
-from news.config import NEWS_RECORDS_PATH
-from news.dedup import deduplicate_news
-from news.live_scorer import CatalystScorer
-from news.schema import empty_news_frame
-from news.sources import (
+from signals.news.catalyst_types import classify_catalyst_types
+from signals.news.config import NEWS_RECORDS_PATH
+from signals.news.dedup import deduplicate_news
+from signals.news.live_scorer import CatalystScorer
+from signals.news.schema import empty_news_frame
+from signals.news.sources import (
     fetch_clinicaltrials_updates,
     fetch_fed_press_releases,
     fetch_finnhub_company_news,
@@ -50,12 +50,12 @@ from news.sources import (
 )
 
 
-LIVE_LEDGER_PATH = Path("news/data/processed/live_catalyst_records.parquet")
+LIVE_LEDGER_PATH = Path("signals/news/data/processed/live_catalyst_records.parquet")
 
 
 def load_universe(path: Path | None) -> list[str]:
     if path is None or not path.exists():
-        from meta_context.config import CONTEXT_BACKTEST_UNIVERSE_PATH
+        from signals.meta_context.config import CONTEXT_BACKTEST_UNIVERSE_PATH
         path = CONTEXT_BACKTEST_UNIVERSE_PATH
     df = pd.read_csv(path)
     if "ticker" not in df.columns:

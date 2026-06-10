@@ -25,7 +25,7 @@ from scripts.plot_multiticker_swing_backtest_overview import (
     _local_naive,
 )
 from scripts.plot_multiticker_swing_recent_week_action import _load_bars
-from shared_plotting import (
+from core.shared_plotting import (
     DEFAULT_THEME,
     apply_mpl_defaults,
     apply_time_ticks,

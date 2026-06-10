@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from multi_ticker_swing.backtest.sweep_v2 import (
+from strategies.multi_ticker_swing.backtest.sweep_v2 import (
     TickerData,
     compute_grouped_metrics,
     compute_metrics,
@@ -23,7 +23,7 @@ from multi_ticker_swing.backtest.sweep_v2 import (
     simulate_ticker,
     SWEEP_DIR,
 )
-from multi_ticker_swing.config.pipeline_config import (
+from strategies.multi_ticker_swing.config.pipeline_config import (
     RAW_30M_DIR,
     TRADING_BLACKLIST,
     UNIVERSE_CSV,

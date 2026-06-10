@@ -24,7 +24,7 @@ from scripts.sweep_phase4_spy_proxy_profit_locks import (  # noqa: E402
     _load_scoreboard,
     _parse_float_list,
 )
-from Models.ga_xgboost.analyze_phase4_triggers import _load_execution_1m  # noqa: E402
+from strategies.spy_intraday.Models.ga_xgboost.analyze_phase4_triggers import _load_execution_1m  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:

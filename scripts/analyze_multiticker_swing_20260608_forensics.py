@@ -22,7 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from shared_plotting import (
+from core.shared_plotting import (
     DEFAULT_THEME,
     apply_mpl_defaults,
     apply_time_ticks,
@@ -37,8 +37,8 @@ from shared_plotting import (
 ET = ZoneInfo("America/New_York")
 DEFAULT_AUDIT = Path("UI/swing_audit/paper/swing_session_20260608T121654Z.jsonl")
 DEFAULT_OUT = Path("UI/swing_audit/forensics_20260608")
-RAW_5M_DIR = Path("multi_ticker_swing/data/raw/5m")
-RAW_30M_DIR = Path("multi_ticker_swing/data/raw/30m")
+RAW_5M_DIR = Path("strategies/multi_ticker_swing/data/raw/5m")
+RAW_30M_DIR = Path("strategies/multi_ticker_swing/data/raw/30m")
 
 
 def _num(value: Any) -> float | None:

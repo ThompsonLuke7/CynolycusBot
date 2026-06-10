@@ -14,11 +14,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from momentum_expansion.config.momentum_config import RAW_1D_DIR
+from strategies.momentum_expansion.config.momentum_config import RAW_1D_DIR
 
 BARS_DIR = RAW_1D_DIR
-NEWS_RECORDS = Path("news/data/processed/news_records.parquet")
-WINNER_LIB = Path("news/data/processed/winner_news_library.parquet")
+NEWS_RECORDS = Path("signals/news/data/processed/news_records.parquet")
+WINNER_LIB = Path("signals/news/data/processed/winner_news_library.parquet")
 
 
 def find_runners(min_runup: float = 1.0, window: int = 20, start: str = "2023-01-01") -> pd.DataFrame:

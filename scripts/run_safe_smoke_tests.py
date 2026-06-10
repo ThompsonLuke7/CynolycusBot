@@ -7,14 +7,14 @@ from pathlib import Path
 
 
 SAFE_TEST_SUITES = [
-    ("catalysts/tests", ()),
-    ("events/tests", ()),
-    ("events/forward_guidance/tests", ("sklearn",)),
-    ("meta_context/tests", ()),
-    ("momentum_expansion/tests", ("alpaca",)),
-    ("multi_ticker_swing/tests", ()),
-    ("news/tests", ()),
-    ("social_attention/tests", ()),
+    ("signals/catalysts/tests", ()),
+    ("signals/events/tests", ()),
+    ("signals/events/forward_guidance/tests", ("sklearn",)),
+    ("signals/meta_context/tests", ()),
+    ("strategies/momentum_expansion/tests", ("alpaca",)),
+    ("strategies/multi_ticker_swing/tests", ()),
+    ("signals/news/tests", ()),
+    ("signals/social_attention/tests", ()),
     ("UI/tests", ()),
 ]
 

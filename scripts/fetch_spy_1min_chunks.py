@@ -18,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import pandas as pd
 
-from API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
+from core.API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
 
 
 def _month_starts(start: dt.datetime, end: dt.datetime) -> list[dt.datetime]:

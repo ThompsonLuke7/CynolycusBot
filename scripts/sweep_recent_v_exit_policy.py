@@ -15,12 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from Policy.order_policy import (  # noqa: E402
+from strategies.spy_intraday.Policy.order_policy import (  # noqa: E402
     PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1,
     OptionOrderPolicy,
     OptionOrderPolicyConfig,
 )
-from Policy.replay_option_proxy import ReplayOptionPriceProxy  # noqa: E402
+from strategies.spy_intraday.Policy.replay_option_proxy import ReplayOptionPriceProxy  # noqa: E402
 from scripts.analyze_confirmed_entry_trade_quality import (  # noqa: E402
     _as_float,
     _extract_fill,

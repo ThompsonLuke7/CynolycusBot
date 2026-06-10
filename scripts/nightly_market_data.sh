@@ -4,7 +4,7 @@
 #
 # Pulls today's CBOE per-ticker options snapshot (appends to
 # cboe_options_summary.parquet) and yesterday's FINRA short-volume CSV
-# (appends to a per-day file under news/data/processed/finra_daily/).
+# (appends to a per-day file under signals/news/data/processed/finra_daily/).
 #
 # Designed to be invoked from cron. Safe to re-run multiple times per day
 # — the CBOE collector de-dupes by (ticker, snapshot_date), and the FINRA
@@ -13,7 +13,7 @@
 # Usage (manual): bash scripts/nightly_market_data.sh
 # Usage (cron):   30 23 * * 1-5 bash /home/luket/repos/CynolycusBot/scripts/nightly_market_data.sh
 #
-# Logs go to news/data/processed/nightly_cron.log
+# Logs go to signals/news/data/processed/nightly_cron.log
 #
 set -uo pipefail
 
@@ -21,7 +21,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 PYTHON="$REPO_ROOT/.venv/bin/python"
-LOG_DIR="$REPO_ROOT/news/data/processed"
+LOG_DIR="$REPO_ROOT/signals/news/data/processed"
 LOG_FILE="$LOG_DIR/nightly_cron.log"
 mkdir -p "$LOG_DIR/finra_daily"
 
@@ -35,7 +35,7 @@ ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 
   # 1) CBOE per-ticker options snapshot (full universe, ~30 min)
   echo "[$(ts)] CBOE snapshot — full universe"
-  "$PYTHON" -u -m news.main --stage cboe-snapshot
+  "$PYTHON" -u -m signals.news.main --stage cboe-snapshot
   cboe_exit=$?
   echo "[$(ts)] CBOE snapshot exit=$cboe_exit"
 
@@ -46,13 +46,13 @@ from pathlib import Path
 import pandas as pd
 import sys
 sys.path.insert(0, ".")
-from news.sources import fetch_finra_short_volume_day
+from signals.news.sources import fetch_finra_short_volume_day
 
 target = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=1)
 while target.weekday() >= 5:
     target -= pd.Timedelta(days=1)
 
-out_path = Path(f"news/data/processed/finra_daily/{target.strftime('%Y%m%d')}.parquet")
+out_path = Path(f"signals/news/data/processed/finra_daily/{target.strftime('%Y%m%d')}.parquet")
 if out_path.exists():
     print(f"  {out_path} already exists — skipping")
     sys.exit(0)
@@ -74,8 +74,8 @@ PYEOF
 from pathlib import Path
 import pandas as pd
 
-daily_dir = Path("news/data/processed/finra_daily")
-consolidated = Path("news/data/processed/finra_short_volume.parquet")
+daily_dir = Path("signals/news/data/processed/finra_daily")
+consolidated = Path("signals/news/data/processed/finra_short_volume.parquet")
 
 dailies = sorted(daily_dir.glob("*.parquet"))
 if not dailies:

@@ -30,7 +30,7 @@ from Data.plots.plots import (  # noqa: E402
     _select_plot_window,
 )
 from Data.retrieve_data import normalize_ticker  # noqa: E402
-from Models.ga_xgboost.swing_label_weights import (  # noqa: E402
+from strategies.spy_intraday.Models.ga_xgboost.swing_label_weights import (  # noqa: E402
     apply_swing_pivot_zone_weights_session_aware,
     build_phase3_swing_event_labels,
     keep_first_same_side_event_session_reset,

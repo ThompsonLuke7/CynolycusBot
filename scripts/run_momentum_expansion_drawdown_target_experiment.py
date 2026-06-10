@@ -23,8 +23,8 @@ from scripts.run_momentum_expansion_label_model_experiment import (
 )
 
 
-DEFAULT_MATRIX = Path("momentum_expansion/data/processed/training_matrix_4h.parquet")
-DEFAULT_OUT = Path("momentum_expansion/data/processed/drawdown_target_experiment")
+DEFAULT_MATRIX = Path("strategies/momentum_expansion/data/processed/training_matrix_4h.parquet")
+DEFAULT_OUT = Path("strategies/momentum_expansion/data/processed/drawdown_target_experiment")
 RANDOM_STATE = 42
 
 

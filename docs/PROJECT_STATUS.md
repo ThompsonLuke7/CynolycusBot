@@ -4,24 +4,24 @@ This repo is an active trading-research workspace, not a single production packa
 
 ## Production-ish / Operable
 
-- `multi_ticker_swing/live/`: most relevant live/paper swing bot path; still needs conservative controls and audit-first operation.
-- `API/Alpaca_API/core/` and `API/Alpaca_API/options/`: shared broker/data plumbing used by live workflows.
+- `strategies/multi_ticker_swing/live/`: most relevant live/paper swing bot path; still needs conservative controls and audit-first operation.
+- `core/API/Alpaca_API/core/` and `core/API/Alpaca_API/options/`: shared broker/data plumbing used by live workflows.
 - `UI/combined_server.py`, `UI/swing_dashboard.py`, `UI/shared_stream.py`: current monitoring surface for paper/live swing sessions.
-- `multi_ticker_swing/live/real_account_policy.py`: real-account guardrail layer for new option entries.
+- `strategies/multi_ticker_swing/live/real_account_policy.py`: real-account guardrail layer for new option entries.
 
 ## Research-Ready
 
-- `multi_ticker_swing/`: current best candidate research line for broader swing setups.
-- `news/` and `catalysts/`: catalyst ingestion/scoring pipeline with useful collectors and labels.
+- `strategies/multi_ticker_swing/`: current best candidate research line for broader swing setups.
+- `signals/news/` and `signals/catalysts/`: catalyst ingestion/scoring pipeline with useful collectors and labels.
 - `theme_expansion/`: rule-based theme rotation and Colab export work.
-- `momentum_expansion/`: promising ranker/playbook research, especially broad training plus filtered execution.
-- `events/forward_guidance/`: read-only post-earnings guidance module.
-- `social_attention/`: Reddit/social attention pipeline MVP.
+- `strategies/momentum_expansion/`: promising ranker/playbook research, especially broad training plus filtered execution.
+- `signals/events/forward_guidance/`: read-only post-earnings guidance module.
+- `signals/social_attention/`: Reddit/social attention pipeline MVP.
 
 ## Legacy / Experimental
 
-- SPY daytrader and Phase 4 scripts under `Models/ga_xgboost/`, `Policy/`, and many root `scripts/` files remain valuable as research history, but recent live evidence suggests they are not the leading monetization path.
-- Deep-learning folders such as `Models/iTransformer/`, `Models/bilstm/`, and `Models/tcn/` should be treated as archived experiments unless intentionally revived.
+- SPY daytrader and Phase 4 scripts under `strategies/spy_intraday/Models/ga_xgboost/`, `strategies/spy_intraday/Policy/`, and many root `scripts/` files remain valuable as research history, but recent live evidence suggests they are not the leading monetization path.
+- Deep-learning folders such as `strategies/spy_intraday/Models/iTransformer/`, `bilstm/`, and `tcn/` should be treated as archived experiments unless intentionally revived.
 
 ## Local-Device Priorities
 

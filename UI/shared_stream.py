@@ -100,7 +100,7 @@ class SharedBarStream:
 
     def _new_streamer(self, symbols: list[str], env_file: str, on_bar):
         from alpaca.data.enums import DataFeed
-        from API.Alpaca_API.market_data.live_stream import AlpacaBarStreamer
+        from core.API.Alpaca_API.market_data.live_stream import AlpacaBarStreamer
 
         return AlpacaBarStreamer(
             symbols=symbols,

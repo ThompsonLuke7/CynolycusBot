@@ -27,7 +27,7 @@ These may call Alpaca, yfinance, SEC, Reddit, or other external services:
 
 - `fetch_*`
 - `backfill_*`
-- pipeline stages in `news/`, `catalysts/`, `events/`, `social_attention/`, and `theme_expansion/`
+- pipeline stages in `signals/news/`, `signals/catalysts/`, `signals/events/`, `signals/social_attention/`, and `themes/theme_expansion_legacy/`
 
 ## Live-Risk Rule
 

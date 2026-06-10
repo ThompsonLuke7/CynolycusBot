@@ -13,12 +13,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from momentum_expansion.data.load_bars import load_1h
+from strategies.momentum_expansion.data.load_bars import load_1h
 
 
-DEFAULT_MATRIX = Path("momentum_expansion/data/processed/training_matrix_4h.parquet")
-DEFAULT_PREDS = Path("momentum_expansion/data/processed/label_model_experiment/holdout_predictions.parquet")
-DEFAULT_OUT = Path("momentum_expansion/data/processed/trigger_variant_experiment")
+DEFAULT_MATRIX = Path("strategies/momentum_expansion/data/processed/training_matrix_4h.parquet")
+DEFAULT_PREDS = Path("strategies/momentum_expansion/data/processed/label_model_experiment/holdout_predictions.parquet")
+DEFAULT_OUT = Path("strategies/momentum_expansion/data/processed/trigger_variant_experiment")
 
 
 @dataclass(frozen=True)

@@ -7,8 +7,8 @@ import numpy as np
 import pandas as pd
 
 
-DEFAULT_MATRIX = Path("momentum_expansion/data/processed/training_matrix_4h.parquet")
-DEFAULT_OUT = Path("momentum_expansion/data/processed/label_variant_experiment")
+DEFAULT_MATRIX = Path("strategies/momentum_expansion/data/processed/training_matrix_4h.parquet")
+DEFAULT_OUT = Path("strategies/momentum_expansion/data/processed/label_variant_experiment")
 
 
 WEIGHTS = {

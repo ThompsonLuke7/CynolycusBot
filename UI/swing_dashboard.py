@@ -555,7 +555,7 @@ class SwingSession:
             raise RuntimeError("Session already running.")
 
         # Lazy import to keep the dashboard importable even without xgboost installed.
-        from multi_ticker_swing.live.runner import SwingLiveRunner
+        from strategies.multi_ticker_swing.live.runner import SwingLiveRunner
 
         self._store.reset_for_session(
             max_entries=max_entries, dry_run=dry_run, env_file=env_file,

@@ -11,9 +11,9 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 
-PROBS_PATH = Path("multi_ticker_swing/models/p_swing_probs_600.parquet")
-FEATURES_PATH = Path("multi_ticker_swing/data/processed/features_30m.parquet")
-UNIVERSE_PATH = Path("multi_ticker_swing/config/trading_universe.json")
+PROBS_PATH = Path("strategies/multi_ticker_swing/models/p_swing_probs_600.parquet")
+FEATURES_PATH = Path("strategies/multi_ticker_swing/data/processed/features_30m.parquet")
+UNIVERSE_PATH = Path("strategies/multi_ticker_swing/config/trading_universe.json")
 OUT_DIR = Path("Data/analysis/multi_ticker_swing_live/experiments/option_routing")
 
 HORIZONS = [1, 2, 4, 8, 13, 26]

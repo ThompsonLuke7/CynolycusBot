@@ -21,7 +21,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from multi_ticker_swing.backtest.sweep_v4 import (
+from strategies.multi_ticker_swing.backtest.sweep_v4 import (
     CONFIRM_MAX_5M,
     TRADE_COLS,
     TickerData,
@@ -29,13 +29,13 @@ from multi_ticker_swing.backtest.sweep_v4 import (
     load_raw_5m,
     simulate_ticker_5m,
 )
-from multi_ticker_swing.config.pipeline_config import RAW_30M_DIR, RAW_5M_DIR, TRADING_BLACKLIST
-from shared_plotting import DEFAULT_THEME, apply_mpl_defaults, save_figure, style_figure
+from strategies.multi_ticker_swing.config.pipeline_config import RAW_30M_DIR, RAW_5M_DIR, TRADING_BLACKLIST
+from core.shared_plotting import DEFAULT_THEME, apply_mpl_defaults, save_figure, style_figure
 
 
 ET = ZoneInfo("America/New_York")
-DEFAULT_PROBA = Path("multi_ticker_swing/models/p_swing_probs.parquet")
-DEFAULT_UNIVERSE = Path("multi_ticker_swing/config/trading_universe.json")
+DEFAULT_PROBA = Path("strategies/multi_ticker_swing/models/p_swing_probs.parquet")
+DEFAULT_UNIVERSE = Path("strategies/multi_ticker_swing/config/trading_universe.json")
 DEFAULT_OUT_DIR = Path("UI/swing_audit/backtest_may_20260607")
 
 

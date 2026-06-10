@@ -15,9 +15,9 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.run_momentum_expansion_label_model_experiment import _selection_summary
 
 
-DEFAULT_MATRIX = Path("momentum_expansion/data/processed/training_matrix_4h.parquet")
-DEFAULT_PREDS = Path("momentum_expansion/data/processed/label_model_experiment/holdout_predictions.parquet")
-DEFAULT_OUT = Path("momentum_expansion/data/processed/gentle_post_rank_experiment")
+DEFAULT_MATRIX = Path("strategies/momentum_expansion/data/processed/training_matrix_4h.parquet")
+DEFAULT_PREDS = Path("strategies/momentum_expansion/data/processed/label_model_experiment/holdout_predictions.parquet")
+DEFAULT_OUT = Path("strategies/momentum_expansion/data/processed/gentle_post_rank_experiment")
 
 
 def _date_rank(df: pd.DataFrame, col: str, *, ascending: bool = True) -> pd.Series:

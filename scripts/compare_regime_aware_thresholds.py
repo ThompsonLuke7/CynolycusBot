@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from Policy.replay_option_proxy import ReplayOptionPriceProxy
-from Policy.regime_filter import StickyRegimeConfig, add_sticky_trend_regime
-from Policy.regime_probability_filter import (
+from strategies.spy_intraday.Policy.replay_option_proxy import ReplayOptionPriceProxy
+from strategies.spy_intraday.Policy.regime_filter import StickyRegimeConfig, add_sticky_trend_regime
+from strategies.spy_intraday.Policy.regime_probability_filter import (
     RegimeProbabilityCalibrator,
     RegimeProbabilityThresholdConfig,
 )

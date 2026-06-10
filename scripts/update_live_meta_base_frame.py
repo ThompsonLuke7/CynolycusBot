@@ -10,8 +10,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from API.Alpaca_API.inference.live_inference import LiveGAXGBPredictor, build_meta_feature_frame_from_1m
-from API.Alpaca_API.runners.live_runner import _load_prefill_frame, _load_precomputed_meta_frame
+from core.API.Alpaca_API.inference.live_inference import LiveGAXGBPredictor, build_meta_feature_frame_from_1m
+from core.API.Alpaca_API.runners.live_runner import _load_prefill_frame, _load_precomputed_meta_frame
 
 
 def _parse_args() -> argparse.Namespace:

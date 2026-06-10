@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from Policy.execution_latch import DirectionExecutionLatch
+from strategies.spy_intraday.Policy.execution_latch import DirectionExecutionLatch
 
 
 @dataclass
@@ -300,7 +300,7 @@ def _load_meta_matrix(path: Path, *, end: pd.Timestamp | None) -> pd.DataFrame:
 
 
 def _build_meta_sweep_cache(*, meta_matrix_path: Path, model_root: Path, end: pd.Timestamp | None) -> _MetaSweepCache:
-    from API.Alpaca_API.inference.live_inference import LiveMetaXGBAgent
+    from core.API.Alpaca_API.inference.live_inference import LiveMetaXGBAgent
 
     base_frame = _load_meta_matrix(meta_matrix_path, end=end)
     if base_frame.empty:

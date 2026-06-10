@@ -16,8 +16,8 @@ from scripts.evaluate_multiticker_swing_policy_filters import FEATURE_COLS, _loa
 from scripts.plot_multiticker_swing_backtest_overview import _load_best_trades
 
 
-DEFAULT_SWEEP_DIR = Path("multi_ticker_swing/backtest/results/sweep_v4_shared_20260606")
-DEFAULT_RAW_30M_DIR = Path("multi_ticker_swing/data/raw/30m")
+DEFAULT_SWEEP_DIR = Path("strategies/multi_ticker_swing/backtest/results/sweep_v4_shared_20260606")
+DEFAULT_RAW_30M_DIR = Path("strategies/multi_ticker_swing/data/raw/30m")
 DEFAULT_THEME_DAILY = Path("theme_expansion/outputs/theme_daily.parquet")
 DEFAULT_THEME_MAP = Path("theme_expansion/data/theme_map_v4.csv")
 DEFAULT_PROFILES = Path("theme_expansion/data/ticker_profiles_new.csv")

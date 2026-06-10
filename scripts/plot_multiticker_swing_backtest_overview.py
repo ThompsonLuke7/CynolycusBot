@@ -21,11 +21,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from shared_plotting import DEFAULT_THEME, apply_mpl_defaults, save_figure, style_figure
+from core.shared_plotting import DEFAULT_THEME, apply_mpl_defaults, save_figure, style_figure
 
 
-DEFAULT_SWEEP_DIR = Path("multi_ticker_swing/backtest/results/sweep_v4_shared_20260606")
-DEFAULT_RAW_30M_DIR = Path("multi_ticker_swing/data/raw/30m")
+DEFAULT_SWEEP_DIR = Path("strategies/multi_ticker_swing/backtest/results/sweep_v4_shared_20260606")
+DEFAULT_RAW_30M_DIR = Path("strategies/multi_ticker_swing/data/raw/30m")
 DEFAULT_OUT_DIR = Path("UI/swing_audit/backtest_overview_20260606")
 DEFAULT_OUT = DEFAULT_OUT_DIR / "multiticker_swing_30m_backtest_overview.png"
 DEFAULT_METRICS_OUT = DEFAULT_OUT_DIR / "multiticker_swing_30m_backtest_overview_metrics.csv"

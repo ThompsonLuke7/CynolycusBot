@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from API.Alpaca_API.inference.live_inference import LiveMetaXGBAgent  # noqa: E402
+from core.API.Alpaca_API.inference.live_inference import LiveMetaXGBAgent  # noqa: E402
 from scripts.compare_baseline_vs_profit_protect_exit import (  # noqa: E402
     _equity_curve_from_events,
     _event_metrics,

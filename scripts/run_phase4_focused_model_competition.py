@@ -72,7 +72,7 @@ def _command(run: tuple[str, float, float, float | None, int, float, float]) -> 
     out_dir = OUT_ROOT / _run_name(model_name, long_thr, short_thr, lag, horizon_bars, tp_atr, sl_atr)
     cmd = [
         sys.executable,
-        "Models/ga_xgboost/analyze_phase4_triggers.py",
+        "strategies/spy_intraday/Models/ga_xgboost/analyze_phase4_triggers.py",
         "--ticker",
         "SPY",
         "--dataset-name",

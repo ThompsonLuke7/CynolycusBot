@@ -4,9 +4,9 @@ set -e
 REPO=/home/luket/repos/CynolycusBot
 export PYTHONPATH=$REPO
 PY=$REPO/.venv/bin/python
-SCRIPT=$REPO/multi_ticker_swing/backtest/simulate.py
-MODELS=$REPO/multi_ticker_swing/models
-RESULTS=$REPO/multi_ticker_swing/backtest/results
+SCRIPT=$REPO/strategies/multi_ticker_swing/backtest/simulate.py
+MODELS=$REPO/strategies/multi_ticker_swing/models
+RESULTS=$REPO/strategies/multi_ticker_swing/backtest/results
 
 mkdir -p $RESULTS/oof_1500 $RESULTS/oof_600 $RESULTS/3m_1500 $RESULTS/3m_600
 

@@ -9,7 +9,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from shared_plotting import (
+from core.shared_plotting import (
     DEFAULT_THEME,
     apply_mpl_defaults,
     plot_candles_from_frame,
@@ -25,7 +25,7 @@ DEFAULT_AUDITS = [
     Path("UI/swing_audit/swing_session_20260529T120845Z.jsonl"),
 ]
 OUT_DIR = Path("Data/analysis/multi_ticker_swing_live/signal_plots")
-RAW_30M_DIR = Path("multi_ticker_swing/data/raw/30m")
+RAW_30M_DIR = Path("strategies/multi_ticker_swing/data/raw/30m")
 
 apply_mpl_defaults()
 

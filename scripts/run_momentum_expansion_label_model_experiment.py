@@ -20,8 +20,8 @@ from scripts.analyze_momentum_expansion_label_variants import (
 )
 
 
-DEFAULT_MATRIX = Path("momentum_expansion/data/processed/training_matrix_4h.parquet")
-DEFAULT_OUT = Path("momentum_expansion/data/processed/label_model_experiment")
+DEFAULT_MATRIX = Path("strategies/momentum_expansion/data/processed/training_matrix_4h.parquet")
+DEFAULT_OUT = Path("strategies/momentum_expansion/data/processed/label_model_experiment")
 RANDOM_STATE = 42
 
 

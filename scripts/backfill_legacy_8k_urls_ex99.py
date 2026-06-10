@@ -17,8 +17,8 @@ import pandas as pd
 import urllib.request
 import json
 
-from news.config import NEWS_RECORDS_PATH
-from news.sources import enrich_sec_8k_ex99_text
+from signals.news.config import NEWS_RECORDS_PATH
+from signals.news.sources import enrich_sec_8k_ex99_text
 
 
 HEADERS = {"User-Agent": "CynolycusBot research@example.com"}

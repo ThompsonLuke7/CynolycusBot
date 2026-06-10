@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from momentum_expansion.data.load_bars import load_1h, load_4h
+from strategies.momentum_expansion.data.load_bars import load_1h, load_4h
 from scripts.plot_momentum_expansion_order_policy_replay import (
     _add_1h_indicators,
     _add_4h_indicators,
@@ -25,10 +25,10 @@ from scripts.plot_momentum_expansion_order_policy_replay import (
 )
 
 
-DEFAULT_MATRIX = Path("momentum_expansion/data/processed/training_matrix_4h.parquet")
-DEFAULT_OUT = Path("momentum_expansion/data/processed/adaptive_campaign_policy_experiment")
+DEFAULT_MATRIX = Path("strategies/momentum_expansion/data/processed/training_matrix_4h.parquet")
+DEFAULT_OUT = Path("strategies/momentum_expansion/data/processed/adaptive_campaign_policy_experiment")
 DEFAULT_ARCHETYPE_TRADES = Path(
-    "momentum_expansion/data/processed/campaign_guard_experiment_top200/campaign_guard_trades.csv"
+    "strategies/momentum_expansion/data/processed/campaign_guard_experiment_top200/campaign_guard_trades.csv"
 )
 
 

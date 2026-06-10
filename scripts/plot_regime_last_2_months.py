@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from Data.plots.plots import _extract_ohlc, _plot_candles
-from Policy.regime_filter import StickyRegimeConfig, add_sticky_trend_regime
+from strategies.spy_intraday.Policy.regime_filter import StickyRegimeConfig, add_sticky_trend_regime
 
 
 DEFAULT_ANALYSIS_DIR = Path(

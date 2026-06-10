@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 
 from Data.retrieve_data import normalize_ticker
-from Features.label_generations import _apply_leg_reset_bridge
-from shared_plotting import (
+from strategies.spy_intraday.Features.label_generations import _apply_leg_reset_bridge
+from core.shared_plotting import (
     apply_time_ticks as _shared_apply_time_ticks,
     compute_marker_offset as _shared_compute_marker_offset,
     compute_time_ticks as _shared_compute_time_ticks,
@@ -2405,8 +2405,8 @@ def plot_bilstm_inference_vs_actual(
     import torch
     from torch.utils.data import DataLoader
 
-    from Models.bilstm.mabilstm_dataset import SequenceRegressionDataset
-    from Models.bilstm.mabilstm_model import MABiLSTM
+    from strategies.spy_intraday.Models.bilstm.mabilstm_dataset import SequenceRegressionDataset
+    from strategies.spy_intraday.Models.bilstm.mabilstm_model import MABiLSTM
 
     if x_filename is None:
         x_filename = f"X_{dataset_name}_lstm.parquet"

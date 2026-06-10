@@ -13,13 +13,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from momentum_expansion.config.momentum_config import FEATURES_COMBINED, LABELS_COMBINED
-from momentum_expansion.features.feature_matrix_4h import FEATURE_COLUMNS_4H
-from momentum_expansion.inference.candidate_filter import momentum_candidate_mask
+from strategies.momentum_expansion.config.momentum_config import FEATURES_COMBINED, LABELS_COMBINED
+from strategies.momentum_expansion.features.feature_matrix_4h import FEATURE_COLUMNS_4H
+from strategies.momentum_expansion.inference.candidate_filter import momentum_candidate_mask
 from scripts.analyze_momentum_expansion_label_variants import _rank_by_date, _raw_cross_sectional_score
 
 
-DEFAULT_OUT = Path("momentum_expansion/data/processed/candidate_filter_experiment")
+DEFAULT_OUT = Path("strategies/momentum_expansion/data/processed/candidate_filter_experiment")
 RANDOM_STATE = 42
 
 LABEL_COLUMNS = [

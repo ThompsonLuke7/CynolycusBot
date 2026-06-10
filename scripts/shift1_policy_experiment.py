@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from Models.ga_xgboost.analyze_phase4_triggers import (  # noqa: E402
+from strategies.spy_intraday.Models.ga_xgboost.analyze_phase4_triggers import (  # noqa: E402
     _add_phase4_features,
     _evaluate_asymmetric_policy,
     _load_execution_1m,

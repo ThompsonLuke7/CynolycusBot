@@ -8,8 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from multi_ticker_swing.config.pipeline_config import RAW_30M_DIR, TRAIN_END, TRAIN_START
-from multi_ticker_swing.data.fetch_data import fetch_ticker, universe_tickers
+from strategies.multi_ticker_swing.config.pipeline_config import RAW_30M_DIR, TRAIN_END, TRAIN_START
+from strategies.multi_ticker_swing.data.fetch_data import fetch_ticker, universe_tickers
 
 
 def main() -> int:

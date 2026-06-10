@@ -19,12 +19,12 @@ def _iter_files(path: Path) -> list[Path]:
 
 def build_zip(output_path: Path) -> tuple[int, int]:
     include_paths = [
-        REPO_ROOT / "Models" / "ga_xgboost",
-        REPO_ROOT / "Features",
+        REPO_ROOT / "strategies" / "spy_intraday" / "Models" / "ga_xgboost",
+        REPO_ROOT / "strategies" / "spy_intraday" / "Features",
         REPO_ROOT / "Data" / "load_data.py",
         REPO_ROOT / "Data" / "retrieve_data.py",
         REPO_ROOT / "Data" / "plots" / "plots.py",
-        REPO_ROOT / "Policy" / "training_logging.py",
+        REPO_ROOT / "strategies" / "spy_intraday" / "Policy" / "training_logging.py",
         REPO_ROOT / "Data" / "processed" / "spy" / "datasets" / "10min_shift1",
         REPO_ROOT / "Data" / "processed" / "spy" / "splits" / "10min_shift1",
         REPO_ROOT / "Data" / "processed" / "spy" / "stats" / "norm_stats_10min_shift1_X_10min_shift1_tree_train.json",

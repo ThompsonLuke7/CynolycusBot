@@ -80,7 +80,7 @@ def _command(model: dict[str, str], threshold: tuple[float, float], lag: float |
     out_dir = OUT_ROOT / run_name
     cmd = [
         sys.executable,
-        "Models/ga_xgboost/analyze_phase4_triggers.py",
+        "strategies/spy_intraday/Models/ga_xgboost/analyze_phase4_triggers.py",
         "--ticker",
         "SPY",
         "--dataset-name",

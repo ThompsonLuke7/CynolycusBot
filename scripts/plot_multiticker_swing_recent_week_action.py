@@ -29,7 +29,7 @@ from scripts.plot_multiticker_swing_backtest_overview import (
     _local_naive,
     _metrics,
 )
-from shared_plotting import (
+from core.shared_plotting import (
     DEFAULT_THEME,
     apply_mpl_defaults,
     apply_time_ticks,

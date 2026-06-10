@@ -1,14 +1,14 @@
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = [
-    "catalysts/tests",
-    "events/tests",
-    "events/forward_guidance/tests",
-    "meta_context/tests",
-    "momentum_expansion/tests",
-    "multi_ticker_swing/tests",
-    "news/tests",
-    "social_attention/tests",
+    "signals/catalysts/tests",
+    "signals/events/tests",
+    "signals/events/forward_guidance/tests",
+    "signals/meta_context/tests",
+    "strategies/momentum_expansion/tests",
+    "strategies/multi_ticker_swing/tests",
+    "signals/news/tests",
+    "signals/social_attention/tests",
     "UI/tests",
 ]
 python_files = ["test_*.py"]

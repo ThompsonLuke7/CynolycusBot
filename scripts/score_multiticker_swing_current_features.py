@@ -14,8 +14,8 @@ import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from multi_ticker_swing.config.pipeline_config import MODELS_DIR, MODEL_PATH, PROCESSED_30M_DIR
-from multi_ticker_swing.data.fetch_data import universe_tickers
+from strategies.multi_ticker_swing.config.pipeline_config import MODELS_DIR, MODEL_PATH, PROCESSED_30M_DIR
+from strategies.multi_ticker_swing.data.fetch_data import universe_tickers
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

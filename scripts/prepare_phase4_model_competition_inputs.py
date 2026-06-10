@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from Models.ga_xgboost.train import _load_split_indices
+from strategies.spy_intraday.Models.ga_xgboost.train import _load_split_indices
 
 
 DATASET = "10min"

@@ -43,7 +43,7 @@ DEFAULT_AUDIT_ROOT = str(Path(__file__).resolve().parent / "swing_audit")
 
 def _env_profile_exists(env_file: str, profile: str) -> bool:
     try:
-        from API.Alpaca_API.core.config import _read_env_file, _split_env_file_profile
+        from core.API.Alpaca_API.core.config import _read_env_file, _split_env_file_profile
 
         env_path, _ = _split_env_file_profile(env_file)
         values = _read_env_file(env_path or ".env")
@@ -66,8 +66,8 @@ def _default_profile_env(env_file: str, profile: str) -> str:
 
 def _build_symbol_union(env_file: str) -> list[str]:
     """Union of all symbols needed by both dashboards."""
-    from multi_ticker_swing.config.pipeline_config import CONTEXT_TICKERS
-    from multi_ticker_swing.live.universe import load_universe
+    from strategies.multi_ticker_swing.config.pipeline_config import CONTEXT_TICKERS
+    from strategies.multi_ticker_swing.live.universe import load_universe
 
     swing_universe = set(load_universe().keys())
     combined = swing_universe | set(CONTEXT_TICKERS) | set(_INTRADAY_EXTRA_SYMBOLS)

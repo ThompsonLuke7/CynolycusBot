@@ -16,7 +16,7 @@ import pandas as pd
 
 
 TRADE_PATH = Path("UI/swing_audit/live_policy_experiments_20260608/audit_fresh_option_trades.csv")
-CBOE_SUMMARY_PATH = Path("news/data/processed/cboe_options_summary.parquet")
+CBOE_SUMMARY_PATH = Path("signals/news/data/processed/cboe_options_summary.parquet")
 OUT_DIR = Path("UI/swing_audit/live_policy_experiments_20260608")
 
 OI_THRESHOLDS = (10, 100, 1000)

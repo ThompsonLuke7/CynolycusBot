@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 
 import pandas as pd
 
-from shared_plotting import (
+from core.shared_plotting import (
     DEFAULT_THEME,
     apply_mpl_defaults,
     make_price_probability_figure,
@@ -21,10 +21,10 @@ from shared_plotting import (
 )
 
 
-ROOT = Path("multi_ticker_swing/backtest/results/sweep_v4_shared_20260606")
-PROBA_PATH = Path("multi_ticker_swing/models/p_swing_probs.parquet")
-RAW_5M = Path("multi_ticker_swing/data/raw/5m")
-RAW_30M = Path("multi_ticker_swing/data/raw/30m")
+ROOT = Path("strategies/multi_ticker_swing/backtest/results/sweep_v4_shared_20260606")
+PROBA_PATH = Path("strategies/multi_ticker_swing/models/p_swing_probs.parquet")
+RAW_5M = Path("strategies/multi_ticker_swing/data/raw/5m")
+RAW_30M = Path("strategies/multi_ticker_swing/data/raw/30m")
 OUT_DIR = Path("UI/swing_audit/backtest_examples_20260606")
 
 apply_mpl_defaults()

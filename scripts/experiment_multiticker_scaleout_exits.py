@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from multi_ticker_swing.backtest.sweep_v4 import load_raw_5m
+from strategies.multi_ticker_swing.backtest.sweep_v4 import load_raw_5m
 from scripts.analyze_multiticker_entry_timing_experiment import _events_to_frames, _load_events
 
 

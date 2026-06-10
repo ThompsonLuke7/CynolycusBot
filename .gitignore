@@ -206,58 +206,55 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# ============================================================
+# Project data & generated artifacts (do not commit)
+# ============================================================
+
+# Blanket data-format ignores (re-includes below for configs/live deps)
 *.csv
-*.zip
-*.dot
-*.tgz
 *.parquet
-colab_minimal.zip
-colab_intraday_spy_minimal.zip
-colab_minimal.zip
-multi_ticker_swing/data/processed/*.parquet
-multi_ticker_swing/data/processed/**/*.parquet
-multi_ticker_swing/data/training_export/
-multi_ticker_swing/models/*.parquet
-multi_ticker_swing/data/processed/30min/*.parquet
-multi_ticker_swing/data/processed/30m/*.parquet
-multi_ticker_swing/data/processed/labels/*.parquet
-multi_ticker_swing/data/raw/**/*.parquet
-multi_ticker_swing_htf/data/**/*.parquet
-multi_ticker_swing_htf/models/*.parquet
-momentum_expansion/data/raw/**/*.parquet
-local_artifacts/
-momentum_expansion/data/processed/**/*.parquet
-momentum_expansion/data/training_export/*.parquet
-momentum_expansion/data/processed/*.parquet
-momentum_expansion/data/processed/features_4h/*.parquet
-theme_expansion/outputs/**/*.parquet
-theme_expansion/data/daily_bars/
-theme_expansion/data/**/*.parquet
-theme_expansion/data/ticker_profiles_cache/
-catalysts/data/processed/*.parquet
-events/data/processed/*.parquet
-meta_context/data/processed/*.parquet
-news/data/processed/*.parquet
-Data/raw/spy/_tmp_1min_chunks/
-multi_ticker_swing/data/processed/30m/*.parquet
-multi_ticker_swing/data/processed/30m/*.parquet
-Data/
 *.parquets
 *.json
 *.zip
 *.dot
+*.tgz
+*:Zone.Identifier
 logs/
+local_artifacts/
+
+# Data/ holds generated market data, datasets, and model artifacts.
+# Only the utility scripts inside it are source.
+Data/**
+!Data/*.py
+!Data/plots/
+!Data/plots/*.py
 
 # Local live/paper run churn and generated research artifacts.
 UI/swing_audit/**/*.jsonl
 UI/swing_audit/**/*.json
-Data/analysis/
-Data/inference/**/*.json
-Data/inference/**/*.jsonl
-Data/inference/**/*.parquet
-Data/models/**/*.json
-Data/models/**/*.pkl
-Data/models/**/*.ubj
-Data/models/**/*.joblib
-Data/models/**/*.parquet
 **/plots/output/
+
+# Generated/exported per-module data directories
+strategies/multi_ticker_swing/data/training_export/
+themes/theme_expansion_legacy/data/daily_bars/
+themes/theme_expansion_legacy/data/ticker_profiles_cache/
+themes/theme_expansion_legacy/outputs/**
+!themes/theme_expansion_legacy/outputs/**/
+!themes/theme_expansion_legacy/outputs/**/*.py
+
+# Broker credentials — never commit (rotate if ever leaked)
+core/API/Schwab_API/schwab_token.json
+core/API/Schwab_API/schwab_tokens.json
+
+# Re-include editor settings and code/config caught by blanket rules
+!.vscode/settings.json
+!**/config/*.json
+!**/config/*.csv
+
+# Re-include live pipeline dependencies (read by shared_universe / dynamic_theme)
+!themes/theme_expansion_legacy/data/*.csv
+!themes/theme_expansion_legacy/outputs/universe_filter.csv
+
+# Re-include trained models distributed via git (loaded by live scorers)
+!strategies/multi_ticker_swing/models/*.json
+!strategies/multi_ticker_swing_htf/models/*.json
