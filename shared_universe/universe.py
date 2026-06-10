@@ -12,8 +12,8 @@ DATA_DIR = REPO_ROOT / "Data" / "shared" / "universe"
 SHARED_UNIVERSE_CSV = DATA_DIR / "shared_universe.csv"
 MANUAL_AI_WATCHLIST = DATA_DIR / "manual_ai_watchlist.csv"
 
-THEME_MAP_V4 = REPO_ROOT / "theme_expansion" / "data" / "theme_map_v4.csv"
-THEME_ELIGIBLE = REPO_ROOT / "theme_expansion" / "outputs" / "universe_filter.csv"
+THEME_MAP_V4 = REPO_ROOT / "theme_expansion_legacy" / "data" / "theme_map_v4.csv"
+THEME_ELIGIBLE = REPO_ROOT / "theme_expansion_legacy" / "outputs" / "universe_filter.csv"
 SWING_TRAIN = REPO_ROOT / "multi_ticker_swing" / "config" / "swing_trader_universe_v3.csv"
 SWING_LIVE_JSON = REPO_ROOT / "multi_ticker_swing" / "config" / "trading_universe.json"
 

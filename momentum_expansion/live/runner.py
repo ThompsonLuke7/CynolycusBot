@@ -70,7 +70,18 @@ def _emit_alert(payload: dict, *, log_path: Path | None = None) -> None:
 
 def refresh_weekly_universe(*, as_of: pd.Timestamp | None = None) -> Path:
     as_of = as_of or pd.Timestamp.now(tz="UTC").normalize()
-    return write_weekly_snapshot(as_of=as_of, candidates=get_candidate_pool())
+    snapshot_path = write_weekly_snapshot(as_of=as_of, candidates=get_candidate_pool())
+    _refresh_dynamic_theme_taxonomy(as_of=as_of)
+    return snapshot_path
+
+
+def _refresh_dynamic_theme_taxonomy(*, as_of: pd.Timestamp | None = None) -> None:
+    """Run the dynamic theme weekly pipeline (recluster + Claude labeling + features)."""
+    try:
+        from dynamic_theme.pipeline import weekly_run
+        weekly_run(as_of=as_of)
+    except Exception as exc:
+        logger.error("Dynamic theme weekly run failed: %s", exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
