@@ -1360,3 +1360,368 @@ def fetch_yfinance_profiles(
         if (i + 1) % progress_every == 0:
             print(f"  yfinance profile: {i + 1}/{len(cleaned)} tickers ({len(rows)} successful)", flush=True)
     return pd.DataFrame(rows)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Earnings Calendar / Economic Calendar / NASDAQ Short Interest /
+# USAspending Government Contracts
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_earnings_calendar(
+    tickers: Iterable[str],
+    *,
+    min_interval_s: float = 0.4,
+) -> pd.DataFrame:
+    """Pull upcoming earnings dates from yfinance.
+
+    Schema: ticker | next_earnings_date | days_to_earnings | is_earnings_week | snapshot_date
+    is_earnings_week=True when the date falls within [-3, +7] calendar days of today.
+    """
+    _empty = pd.DataFrame(columns=["ticker", "next_earnings_date", "days_to_earnings", "is_earnings_week", "snapshot_date"])
+    try:
+        import yfinance as yf
+    except ImportError:
+        return _empty
+
+    today = pd.Timestamp.now().normalize()
+    rows: list[dict] = []
+    last_req = 0.0
+
+    for ticker in _clean_tickers(tickers):
+        elapsed = time.monotonic() - last_req
+        if elapsed < min_interval_s:
+            time.sleep(min_interval_s - elapsed)
+        try:
+            cal = yf.Ticker(ticker).calendar or {}
+        except Exception:
+            cal = {}
+        last_req = time.monotonic()
+
+        earn_raw = cal.get("Earnings Date") or cal.get("earningsDate")
+        if earn_raw is None:
+            continue
+        if isinstance(earn_raw, (list, tuple)):
+            earn_raw = earn_raw[0] if earn_raw else None
+        if earn_raw is None:
+            continue
+        try:
+            next_date = pd.Timestamp(earn_raw).normalize()
+        except Exception:
+            continue
+
+        days = int((next_date - today).days)
+        rows.append({
+            "ticker": ticker,
+            "next_earnings_date": next_date,
+            "days_to_earnings": days,
+            "is_earnings_week": -3 <= days <= 7,
+            "snapshot_date": today,
+        })
+
+    return pd.DataFrame(rows) if rows else _empty
+
+
+# ── Economic calendar (TradingView public endpoint) ───────────────────────────
+
+_TV_ECON_URL = "https://economic-calendar.tradingview.com/events"
+_TV_ECON_HEADERS = {
+    "Accept": "application/json",
+    "Origin": "https://www.tradingview.com",
+    "Referer": "https://www.tradingview.com/",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    ),
+}
+
+
+def _safe_float(val: object) -> float | None:
+    if val is None:
+        return None
+    try:
+        return float(str(val).replace("%", "").replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def fetch_economic_calendar(
+    *,
+    start: str | None = None,
+    end: str | None = None,
+    countries: str = "US",
+    timeout: int = 20,
+) -> pd.DataFrame:
+    """Fetch macro events (CPI, NFP, FOMC) from TradingView's public economic calendar.
+
+    No API key required. Returns actual/forecast/previous where available.
+    Schema: event | event_date | actual | forecast | previous | surprise | importance | country
+    """
+    _empty = pd.DataFrame(columns=["event", "event_date", "actual", "forecast", "previous", "surprise", "importance", "country"])
+    today = pd.Timestamp.now().normalize()
+    _start = pd.Timestamp(start) if start else today - pd.Timedelta(days=30)
+    _end = pd.Timestamp(end) if end else today + pd.Timedelta(days=30)
+
+    params = urllib.parse.urlencode({
+        "from": _start.strftime("%Y-%m-%dT00:00:00.000Z"),
+        "to": _end.strftime("%Y-%m-%dT23:59:59.000Z"),
+        "countries": countries,
+    })
+    url = f"{_TV_ECON_URL}?{params}"
+
+    try:
+        req = urllib.request.Request(url, headers=_TV_ECON_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("fetch_economic_calendar failed: %s", exc)
+        return _empty
+
+    events = raw if isinstance(raw, list) else raw.get("result", raw.get("data", raw.get("events", [])))
+    if not events:
+        return _empty
+
+    rows = []
+    for ev in events:
+        try:
+            actual = _safe_float(ev.get("actual") or ev.get("actual_value"))
+            forecast = _safe_float(ev.get("forecast") or ev.get("consensus"))
+            previous = _safe_float(ev.get("previous") or ev.get("prev"))
+            surprise = (actual - forecast) if (actual is not None and forecast is not None) else None
+            rows.append({
+                "event": str(ev.get("title") or ev.get("event") or ev.get("name") or ""),
+                "event_date": str(ev.get("date") or ev.get("datetime") or ev.get("time") or ""),
+                "actual": actual,
+                "forecast": forecast,
+                "previous": previous,
+                "surprise": surprise,
+                "importance": str(ev.get("importance") or ev.get("impact") or ""),
+                "country": str(ev.get("country") or countries),
+            })
+        except Exception:
+            continue
+
+    if not rows:
+        return _empty
+    df = pd.DataFrame(rows)
+    df["event_date"] = pd.to_datetime(df["event_date"], utc=True, errors="coerce")
+    return df
+
+
+# ── NASDAQ/NYSE bi-monthly short interest (via yfinance) ─────────────────────
+#
+# The old nasdaqtrader.com CDN URLs are defunct and the FINRA API requires
+# OAuth for data after 2018. yfinance surfaces the same FINRA-reported
+# sharesShort / shortRatio fields, updated bi-monthly, from its info endpoint.
+
+
+def fetch_nasdaq_short_interest(
+    tickers: "Iterable[str] | None" = None,
+    *,
+    min_interval_s: float = 0.4,
+) -> pd.DataFrame:
+    """Fetch bi-monthly short interest per ticker via yfinance (FINRA-sourced).
+
+    Returns total shares short, days-to-cover, and short % of float — the same
+    figures NASDAQ/NYSE publish bi-monthly, proxied through yfinance.info.
+
+    Schema: ticker | settlement_date | short_interest | avg_daily_vol |
+            days_to_cover | short_pct_float | source
+    """
+    _empty = pd.DataFrame(columns=[
+        "ticker", "settlement_date", "short_interest",
+        "avg_daily_vol", "days_to_cover", "short_pct_float", "source",
+    ])
+    try:
+        import yfinance as yf
+    except ImportError:
+        return _empty
+
+    if tickers is None:
+        return _empty
+
+    today = pd.Timestamp.now().normalize()
+    rows: list[dict] = []
+    last_req = 0.0
+
+    for ticker in _clean_tickers(tickers):
+        elapsed = time.monotonic() - last_req
+        if elapsed < min_interval_s:
+            time.sleep(min_interval_s - elapsed)
+        try:
+            info = yf.Ticker(ticker).info or {}
+        except Exception:
+            info = {}
+        last_req = time.monotonic()
+
+        shares_short = info.get("sharesShort")
+        if shares_short is None:
+            continue
+        rows.append({
+            "ticker": ticker,
+            "settlement_date": today,
+            "short_interest": int(shares_short),
+            "avg_daily_vol": info.get("averageVolume"),
+            "days_to_cover": info.get("shortRatio"),
+            "short_pct_float": info.get("shortPercentOfFloat"),
+            "source": "yfinance_short_interest",
+        })
+
+    return pd.DataFrame(rows) if rows else _empty
+
+
+# ── USAspending.gov government contracts ──────────────────────────────────────
+
+# Known-contractor name fragments → ticker (case-insensitive substring match)
+_USASPENDING_HINTS: dict[str, str] = {
+    "lockheed martin": "LMT",
+    "raytheon": "RTX",
+    "rtx corporation": "RTX",
+    "boeing": "BA",
+    "northrop grumman": "NOC",
+    "general dynamics": "GD",
+    "l3harris": "LHX",
+    "l3 harris": "LHX",
+    "leidos": "LDOS",
+    "science applications international": "SAIC",
+    "saic-frederick": "SAIC",
+    "booz allen": "BAH",
+    "caci international": "CACI",
+    "parsons corporation": "PSN",
+    "parsons government": "PSN",
+    "palantir": "PLTR",
+    "ibm corporation": "IBM",
+    "microsoft corporation": "MSFT",
+    "amazon web services": "AMZN",
+    "amazon.com services": "AMZN",
+    "alphabet": "GOOGL",
+    "google llc": "GOOGL",
+    "verizon": "VZ",
+    "at&t": "T",
+    "dell technologies": "DELL",
+    "hewlett packard enterprise": "HPE",
+    "hp inc": "HPQ",
+    "accenture federal": "ACN",
+    "general electric": "GE",
+    "textron": "TXT",
+    "huntington ingalls": "HII",
+    "transdigm": "TDG",
+    "heico": "HEI",
+    "kratos defense": "KTOS",
+    "aerojet rocketdyne": "AJRD",
+    "bae systems": "BAESY",
+    "leonardo drs": "DRS",
+}
+
+_USASPENDING_URL = "https://api.usaspending.gov/api/v2/search/spending_by_award/"
+# Windows corporate proxy chains often present self-signed certs; create an
+# unverified SSL context used only for the government API endpoint.
+import ssl as _ssl
+_USASPENDING_SSL_CTX = _ssl.create_default_context()
+_USASPENDING_SSL_CTX.check_hostname = False
+_USASPENDING_SSL_CTX.verify_mode = _ssl.CERT_NONE
+
+
+def _recipient_to_ticker(name: str, universe: list[str] | None) -> str | None:
+    name_lo = name.lower()
+    for frag, ticker in _USASPENDING_HINTS.items():
+        if frag in name_lo:
+            if universe is None or ticker in universe:
+                return ticker
+    if universe:
+        clean = "".join(c for c in name_lo if c.isalnum())
+        for t in universe:
+            if t.lower() in name_lo or clean.startswith(t.lower()):
+                return t
+    return None
+
+
+def fetch_usaspending_contracts(
+    tickers: "Iterable[str] | None" = None,
+    *,
+    start: "str | None" = None,
+    end: "str | None" = None,
+    min_award_amount: float = 10_000_000,
+    limit_per_page: int = 100,
+    max_pages: int = 5,
+    timeout: int = 30,
+) -> pd.DataFrame:
+    """Fetch US government contract awards ≥ $10M from USAspending.gov (no API key).
+
+    Matches recipient names to tickers via a known-contractor hints map plus
+    direct ticker substring matching if a universe list is supplied.
+
+    Schema: ticker | award_id | recipient_name | award_amount | award_date |
+            description | agency | snapshot_date
+    """
+    _empty = pd.DataFrame(columns=[
+        "ticker", "award_id", "recipient_name", "award_amount",
+        "award_date", "description", "agency", "snapshot_date",
+    ])
+    today = pd.Timestamp.now().normalize()
+    _start = (pd.Timestamp(start) if start else today - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
+    _end = (pd.Timestamp(end) if end else today).strftime("%Y-%m-%d")
+    universe = _clean_tickers(tickers) if tickers else None
+
+    rows: list[dict] = []
+    for page in range(1, max_pages + 1):
+        body = json.dumps({
+            "filters": {
+                "award_type_codes": ["A", "B", "C", "D"],
+                "time_period": [{"start_date": _start, "end_date": _end}],
+                "award_amounts": [{"lower_bound": min_award_amount}],
+            },
+            "fields": ["Award ID", "Recipient Name", "Award Amount", "Start Date", "Description", "Awarding Agency Name"],
+            "sort": "Award Amount",
+            "order": "desc",
+            "limit": limit_per_page,
+            "page": page,
+        }).encode("utf-8")
+
+        try:
+            req = urllib.request.Request(
+                _USASPENDING_URL,
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "CynolycusBot-research/1.0",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout, context=_USASPENDING_SSL_CTX) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("fetch_usaspending_contracts page=%d failed: %s", page, exc)
+            break
+
+        results = payload.get("results", [])
+        if not results:
+            break
+
+        for rec in results:
+            recipient = str(rec.get("Recipient Name") or "")
+            matched = _recipient_to_ticker(recipient, universe)
+            if universe and matched is None:
+                continue
+            try:
+                award_date = pd.Timestamp(str(rec.get("Start Date") or ""))
+            except Exception:
+                award_date = pd.NaT
+            rows.append({
+                "ticker": matched or "",
+                "award_id": str(rec.get("Award ID") or ""),
+                "recipient_name": recipient,
+                "award_amount": float(rec.get("Award Amount") or 0),
+                "award_date": award_date,
+                "description": str(rec.get("Description") or "")[:500],
+                "agency": str(rec.get("Awarding Agency Name") or ""),
+                "snapshot_date": today,
+            })
+
+        has_next = payload.get("page_metadata", {}).get("hasNext", len(results) == limit_per_page)
+        if not has_next:
+            break
+
+    return pd.DataFrame(rows) if rows else _empty

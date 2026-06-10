@@ -9,10 +9,14 @@ import pandas as pd
 
 from news.config import (
     CBOE_OPTIONS_SUMMARY_PATH,
+    EARNINGS_CALENDAR_PATH,
+    ECONOMIC_CALENDAR_PATH,
     FINRA_SHORT_VOLUME_PATH,
+    NASDAQ_SHORT_INTEREST_PATH,
     NEWS_FEATURE_MATRIX_PATH,
     NEWS_RECORDS_PATH,
     TICKER_PROFILE_PATH,
+    USASPENDING_CONTRACTS_PATH,
 )
 from news.pipeline import (
     build_news_embeddings,
@@ -52,7 +56,7 @@ def _load_context_universe(limit: int | None = None) -> pd.DataFrame:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Unscheduled catalyst news pipeline.")
-    parser.add_argument("--stage", choices=["collect", "collect-sec-history", "sec-full-text", "sec-mda", "enrich-ex99", "classify", "earnings", "embed", "cluster", "refine", "label", "score", "features", "profiles", "finra-backfill", "finra-spikes", "cboe-snapshot", "scrape-bodies", "incremental"], required=True)
+    parser.add_argument("--stage", choices=["collect", "collect-sec-history", "sec-full-text", "sec-mda", "enrich-ex99", "classify", "earnings", "embed", "cluster", "refine", "label", "score", "features", "profiles", "finra-backfill", "finra-spikes", "cboe-snapshot", "scrape-bodies", "incremental", "earnings-calendar", "economic-calendar", "nasdaq-short-interest", "usaspending-contracts"], required=True)
     parser.add_argument("--full-refit", action="store_true", help="Force a full re-embed / re-cluster (default is incremental). Use weekly.")
     parser.add_argument("--tickers", nargs="*", default=[])
     parser.add_argument(
@@ -280,6 +284,73 @@ def main() -> int:
         print(f"cboe snapshot: {len(summary_df)} summary rows -> {summary_path}")
         print(f"cboe unusual catalyst records: {len(records_df)} -> {records_path}")
         print(f"cboe unusual strike rows: {len(strike_df)} -> {strikes_path}")
+    elif args.stage == "earnings-calendar":
+        from news.sources import fetch_earnings_calendar
+
+        if args.tickers:
+            tickers = list(args.tickers)
+        else:
+            universe = _load_context_universe(args.limit)
+            tickers = universe["ticker"].astype(str).tolist()
+        out_path = Path(args.output) if args.output else EARNINGS_CALENDAR_PATH
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        df = fetch_earnings_calendar(tickers)
+        if out_path.exists():
+            try:
+                prior = pd.read_parquet(out_path)
+                df = pd.concat([prior, df], ignore_index=True).drop_duplicates(["ticker", "snapshot_date"], keep="last")
+            except Exception:
+                pass
+        df.to_parquet(out_path, index=False)
+        print(f"earnings-calendar: {len(df)} rows -> {out_path}")
+    elif args.stage == "economic-calendar":
+        from news.sources import fetch_economic_calendar
+
+        out_path = Path(args.output) if args.output else ECONOMIC_CALENDAR_PATH
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        df = fetch_economic_calendar(start=args.start, end=args.end)
+        if out_path.exists():
+            try:
+                prior = pd.read_parquet(out_path)
+                df = pd.concat([prior, df], ignore_index=True).drop_duplicates(["event", "event_date"], keep="last")
+            except Exception:
+                pass
+        df.to_parquet(out_path, index=False)
+        print(f"economic-calendar: {len(df)} rows -> {out_path}")
+    elif args.stage == "nasdaq-short-interest":
+        from news.sources import fetch_nasdaq_short_interest
+
+        if args.tickers:
+            tickers = list(args.tickers)
+        else:
+            universe = _load_context_universe(args.limit)
+            tickers = universe["ticker"].astype(str).tolist()
+        out_path = Path(args.output) if args.output else NASDAQ_SHORT_INTEREST_PATH
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        df = fetch_nasdaq_short_interest(tickers)
+        if out_path.exists():
+            try:
+                prior = pd.read_parquet(out_path)
+                df = pd.concat([prior, df], ignore_index=True).drop_duplicates(["ticker", "settlement_date"], keep="last")
+            except Exception:
+                pass
+        df.to_parquet(out_path, index=False)
+        print(f"nasdaq-short-interest: {len(df)} rows -> {out_path}")
+    elif args.stage == "usaspending-contracts":
+        from news.sources import fetch_usaspending_contracts
+
+        tickers = list(args.tickers) if args.tickers else None
+        out_path = Path(args.output) if args.output else USASPENDING_CONTRACTS_PATH
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        df = fetch_usaspending_contracts(tickers, start=args.start, end=args.end)
+        if out_path.exists():
+            try:
+                prior = pd.read_parquet(out_path)
+                df = pd.concat([prior, df], ignore_index=True).drop_duplicates(["award_id"], keep="last")
+            except Exception:
+                pass
+        df.to_parquet(out_path, index=False)
+        print(f"usaspending-contracts: {len(df)} rows -> {out_path}")
     else:
         if not args.timestamps_csv:
             raise ValueError("--timestamps-csv is required for --stage features")
