@@ -207,6 +207,8 @@ class _ConfirmState:
 _MIN_DTE_DAYS = 0    # allow the nearest listed expiry, including 0DTE/1DTE weeklies
 _EXPIRY_LOOKAHEAD_DAYS = 90
 _ZERO_DTE_CUTOFF = _time(13, 0)
+_FRIDAY_LATE_EXPIRY_CUTOFF = _time(13, 0)
+_MAX_ENTRY_SPREAD_PCT_MID = 0.18
 _DELTA_LO    = 0.35  # minimum |delta| for contract selection
 _DELTA_HI    = 0.60  # maximum |delta| for contract selection
 _DELTA_TGT   = 0.45  # preferred |delta| within the range
@@ -374,6 +376,8 @@ def _available_contracts(
 
 def _entry_contract_ref_date(now_et: datetime) -> date:
     ref_date = now_et.date()
+    if now_et.weekday() == 4 and now_et.time() >= _FRIDAY_LATE_EXPIRY_CUTOFF:
+        return ref_date + timedelta(days=4)
     if now_et.time() >= _ZERO_DTE_CUTOFF:
         return ref_date + timedelta(days=1)
     return ref_date
@@ -1369,9 +1373,8 @@ class SwingLiveRunner:
         contract_ref_date = _entry_contract_ref_date(now_et)
         if contract_ref_date != now_et.date():
             logger.info(
-                "[%s] after %s ET; skipping same-day expiry and selecting next listed expiry >= %s",
+                "[%s] entry time requires later expiry; selecting next listed expiry >= %s",
                 ticker,
-                _ZERO_DTE_CUTOFF.strftime("%H:%M"),
                 contract_ref_date.isoformat(),
             )
 
@@ -1415,6 +1418,27 @@ class SwingLiveRunner:
                 "entry_price": entry_price,
                 "option_symbol": option_symbol,
                 "option_entry_meta": option_entry_meta,
+            })
+            return
+        spread_ok, spread_reason, spread_pct = _entry_quote_spread_ok(quote_meta)
+        if not spread_ok:
+            logger.info(
+                "[%s] entry skipped by option spread gate: %s symbol=%s spread_pct_mid=%s max=%.3f",
+                ticker,
+                spread_reason,
+                option_symbol,
+                f"{spread_pct:.4f}" if math.isfinite(spread_pct) else "nan",
+                _MAX_ENTRY_SPREAD_PCT_MID,
+            )
+            self._emit("entry_skipped", {
+                "ticker": ticker,
+                "direction": int(sig.direction),
+                "reason": spread_reason,
+                "entry_price": entry_price,
+                "option_symbol": option_symbol,
+                "option_entry_meta": option_entry_meta,
+                "spread_pct_mid": spread_pct if math.isfinite(spread_pct) else None,
+                "max_spread_pct_mid": _MAX_ENTRY_SPREAD_PCT_MID,
             })
             return
         account_snapshot = None
@@ -1824,6 +1848,15 @@ def _option_quote_context(quote: dict[str, Any]) -> dict[str, Any]:
             or quote.get("updated_at")
         ),
     }
+
+
+def _entry_quote_spread_ok(quote_meta: dict[str, Any] | None) -> tuple[bool, str, float]:
+    spread_pct = _as_float((quote_meta or {}).get("spread_pct_mid"))
+    if not math.isfinite(spread_pct):
+        return False, "entry_spread_missing", spread_pct
+    if spread_pct >= _MAX_ENTRY_SPREAD_PCT_MID:
+        return False, "entry_spread_too_wide", spread_pct
+    return True, "entry_spread_ok", spread_pct
 
 
 def _option_quote_price(quote: dict[str, Any], *, mode: str) -> float:

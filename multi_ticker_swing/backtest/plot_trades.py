@@ -42,6 +42,8 @@ apply_mpl_defaults()
 
 def load_raw(ticker: str) -> pd.DataFrame:
     df = pd.read_parquet(RAW_30M_DIR / f"{ticker}.parquet")
+    if "timestamp" not in df.columns:
+        df = df.reset_index()
     df.columns = [c.lower() for c in df.columns]
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df = df.sort_values("timestamp").reset_index(drop=True)
