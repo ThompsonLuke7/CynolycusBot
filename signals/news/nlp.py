@@ -21,17 +21,22 @@ def embedding_path(record_id: str, content_hash: str, model_name: str = DEFAULT_
     return EMBEDDINGS_DIR / slug / f"{record_id}_{content_hash}.npy"
 
 
+@lru_cache(maxsize=4)
+def _bge_model(model_name: str, device: str):
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:
+        raise ImportError("Install sentence-transformers to generate BGE news embeddings.") from exc
+    return SentenceTransformer(model_name, device=device)
+
+
 def embed_texts_bge(
     texts: Iterable[str],
     *,
     model_name: str = DEFAULT_BGE_MODEL,
     device: str | None = None,
 ) -> np.ndarray:
-    """Embed text with BGE on CPU, raising a helpful ImportError if optional deps are absent."""
-    try:
-        from sentence_transformers import SentenceTransformer
-    except ImportError as exc:
-        raise ImportError("Install sentence-transformers to generate BGE news embeddings.") from exc
+    """Embed text with a cached BGE model."""
     if device is None:
         try:
             import torch
@@ -39,7 +44,7 @@ def embed_texts_bge(
             device = "cuda" if torch.cuda.is_available() else "cpu"
         except Exception:
             device = "cpu"
-    model = SentenceTransformer(model_name, device=device)
+    model = _bge_model(model_name, device)
     return np.asarray(model.encode(list(texts), normalize_embeddings=True), dtype=np.float32)
 
 

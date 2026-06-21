@@ -1,0 +1,91 @@
+ticker,sector,cap_bucket,asset_type
+AAPL,Technology,large,stock
+MSFT,Technology,large,stock
+GOOGL,Communication Services,large,stock
+AMZN,Consumer Discretionary,large,stock
+NVDA,Technology,large,stock
+META,Communication Services,large,stock
+TSLA,Consumer Discretionary,large,stock
+JPM,Financials,large,stock
+V,Financials,large,stock
+UNH,Healthcare,large,stock
+JNJ,Healthcare,large,stock
+XOM,Energy,large,stock
+PG,Consumer Staples,large,stock
+HD,Consumer Discretionary,large,stock
+CVX,Energy,large,stock
+LLY,Healthcare,large,stock
+ABBV,Healthcare,large,stock
+MRK,Healthcare,large,stock
+BAC,Financials,large,stock
+AVGO,Technology,large,stock
+PEP,Consumer Staples,large,stock
+KO,Consumer Staples,large,stock
+COST,Consumer Staples,large,stock
+WMT,Consumer Staples,large,stock
+DIS,Communication Services,large,stock
+NFLX,Communication Services,large,stock
+ADBE,Technology,large,stock
+CRM,Technology,large,stock
+TMO,Healthcare,large,stock
+AMD,Technology,large,stock
+ROKU,Communication Services,mid,stock
+PINS,Communication Services,mid,stock
+TWLO,Technology,mid,stock
+NET,Technology,mid,stock
+ZS,Technology,mid,stock
+DDOG,Technology,mid,stock
+MDB,Technology,mid,stock
+SNOW,Technology,mid,stock
+PLTR,Technology,mid,stock
+CRWD,Technology,mid,stock
+COIN,Financials,mid,stock
+AFRM,Financials,mid,stock
+SOFI,Financials,mid,stock
+BILL,Financials,mid,stock
+SHOP,Consumer Discretionary,mid,stock
+UBER,Consumer Discretionary,mid,stock
+LYFT,Consumer Discretionary,mid,stock
+ABNB,Consumer Discretionary,mid,stock
+DASH,Consumer Discretionary,mid,stock
+RIVN,Consumer Discretionary,mid,stock
+LCID,Consumer Discretionary,mid,stock
+NIO,Consumer Discretionary,mid,stock
+XPEV,Consumer Discretionary,mid,stock
+SQ,Financials,mid,stock
+PYPL,Financials,mid,stock
+MELI,Consumer Discretionary,mid,stock
+SE,Consumer Discretionary,mid,stock
+TTD,Technology,mid,stock
+RBLX,Technology,mid,stock
+U,Technology,mid,stock
+AMC,Communication Services,small,stock
+GME,Consumer Discretionary,small,stock
+BB,Technology,small,stock
+SPCE,Industrials,small,stock
+TLRY,Consumer Staples,small,stock
+CGC,Consumer Staples,small,stock
+SNDL,Consumer Staples,small,stock
+CLOV,Healthcare,small,stock
+WKHS,Consumer Discretionary,small,stock
+NKLA,Consumer Discretionary,small,stock
+MARA,Technology,small,stock
+RIOT,Technology,small,stock
+HUT,Technology,small,stock
+BTBT,Technology,small,stock
+CLSK,Technology,small,stock
+CIFR,Technology,small,stock
+BITF,Technology,small,stock
+RIDE,Consumer Discretionary,small,stock
+HYLN,Consumer Discretionary,small,stock
+GOEV,Consumer Discretionary,small,stock
+PTRA,Consumer Discretionary,small,stock
+ARVL,Consumer Discretionary,small,stock
+REI,Energy,small,stock
+NTIC,Technology,small,stock
+VINC,Healthcare,small,stock
+SAVA,Healthcare,small,stock
+ACMR,Technology,small,stock
+SPY,Broad Market,ETF,ETF
+QQQ,Technology,ETF,ETF
+IWM,Small Cap,ETF,ETF

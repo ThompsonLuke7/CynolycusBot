@@ -223,6 +223,8 @@ def _replay_snapshot_signature(cfg: "SessionConfig") -> dict[str, Any]:
         "meta_entry_threshold": cfg.meta_entry_threshold,
         "meta_exit_threshold": cfg.meta_exit_threshold,
         "meta_intrabar_entry_policy": str(cfg.meta_intrabar_entry_policy),
+        "meta_intrabar_long_trigger_mode": str(cfg.meta_intrabar_long_trigger_mode),
+        "meta_intrabar_short_trigger_mode": str(cfg.meta_intrabar_short_trigger_mode),
         "meta_intrabar_setup_max_bars": int(cfg.meta_intrabar_setup_max_bars),
         "meta_intrabar_max_confirmation_age_minutes": int(cfg.meta_intrabar_max_confirmation_age_minutes),
         "meta_intrabar_ref_chase_atr": float(cfg.meta_intrabar_ref_chase_atr),
@@ -835,7 +837,7 @@ class SessionConfig:
     assume_tz: str = "UTC"
     model_path: str = "Data/outputs/agent/ppo_model.pt"
     meta_model_root: str = "Data/models/meta_xgboost/10min"
-    meta_entry_prob_source: str = "swing_support_single"
+    meta_entry_prob_source: str = "competition_long_active_short"
     swing_setup_single_model_dir: str = "Data/models/ga_xgboost/10min/single/swing_support_single"
     meta_base_frame_path: str = "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet"
     meta_base_frame_append_lookback_days: int = 900
@@ -857,11 +859,13 @@ class SessionConfig:
     meta_entry_threshold: float | None = None
     meta_exit_threshold: float | None = None
     meta_intrabar_entry_policy: str = PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1
+    meta_intrabar_long_trigger_mode: str = "next_open"
+    meta_intrabar_short_trigger_mode: str = "inherit"
     meta_intrabar_setup_max_bars: int = 3
     meta_intrabar_max_confirmation_age_minutes: int = 30
     meta_intrabar_ref_chase_atr: float = 0.50
-    meta_intrabar_long_setup_threshold: float | None = 0.35
-    meta_intrabar_short_setup_threshold: float | None = 0.65
+    meta_intrabar_long_setup_threshold: float | None = 0.85
+    meta_intrabar_short_setup_threshold: float | None = 0.50
     scalp_mode_enabled: bool = False
     scalp_long_setup_threshold: float = 0.30
     scalp_short_setup_threshold: float = 0.55
@@ -978,7 +982,9 @@ class SessionConfig:
             assume_tz=str(payload.get("assume_tz", "UTC")),
             model_path=str(payload.get("model_path", "Data/outputs/agent/ppo_model.pt")),
             meta_model_root=str(payload.get("meta_model_root", "Data/models/meta_xgboost/10min")),
-            meta_entry_prob_source=str(payload.get("meta_entry_prob_source", "swing_support_single")).strip().lower(),
+            meta_entry_prob_source=str(
+                payload.get("meta_entry_prob_source", "competition_long_active_short")
+            ).strip().lower(),
             swing_setup_single_model_dir=str(
                 payload.get(
                     "swing_setup_single_model_dir",
@@ -1024,6 +1030,12 @@ class SessionConfig:
             meta_intrabar_entry_policy=str(
                 payload.get("meta_intrabar_entry_policy", PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1)
             ),
+            meta_intrabar_long_trigger_mode=str(
+                payload.get("meta_intrabar_long_trigger_mode", "next_open")
+            ).strip().lower(),
+            meta_intrabar_short_trigger_mode=str(
+                payload.get("meta_intrabar_short_trigger_mode", "inherit")
+            ).strip().lower(),
             meta_intrabar_setup_max_bars=max(1, _coerce_int(payload.get("meta_intrabar_setup_max_bars"), 3)),
             meta_intrabar_max_confirmation_age_minutes=max(
                 0, _coerce_int(payload.get("meta_intrabar_max_confirmation_age_minutes"), 30)
@@ -1032,10 +1044,10 @@ class SessionConfig:
                 0.0, _coerce_float(payload.get("meta_intrabar_ref_chase_atr"), 0.50)
             ),
             meta_intrabar_long_setup_threshold=_coerce_optional_float(
-                payload.get("meta_intrabar_long_setup_threshold", 0.35)
+                payload.get("meta_intrabar_long_setup_threshold", 0.85)
             ),
             meta_intrabar_short_setup_threshold=_coerce_optional_float(
-                payload.get("meta_intrabar_short_setup_threshold", 0.65)
+                payload.get("meta_intrabar_short_setup_threshold", 0.50)
             ),
             scalp_mode_enabled=_coerce_bool(payload.get("scalp_mode_enabled"), False),
             scalp_long_setup_threshold=max(
@@ -2193,7 +2205,8 @@ class LiveSession:
             swing_setup_probs_frame = None
             if (
                 inference_mode == "meta"
-                and str(cfg.meta_entry_prob_source or "").strip().lower() == "swing_support_single"
+                and str(cfg.meta_entry_prob_source or "").strip().lower()
+                in {"swing_support_single", "competition_long_active_short"}
             ):
                 swing_setup_probs_frame = _load_swing_setup_probs_frame(
                     model_dir=cfg.swing_setup_single_model_dir,
@@ -2292,7 +2305,8 @@ class LiveSession:
                                 f"[replay] Swing setup wrapper enabled: model_dir={cfg.swing_setup_single_model_dir} "
                                 f"timeframe={cfg.interval}min"
                             )
-                            if str(cfg.meta_entry_prob_source or "").strip().lower() == "swing_support_single"
+                            if str(cfg.meta_entry_prob_source or "").strip().lower()
+                            in {"swing_support_single", "competition_long_active_short"}
                             else (
                                     f"[replay] Legacy probability wrapper enabled: model_root={cfg.meta_model_root} "
                                 f"entry_source={cfg.meta_entry_prob_source} timeframe={cfg.interval}min"
@@ -2371,6 +2385,8 @@ class LiveSession:
                     meta_intrabar_execution_enabled=True,
                     meta_intrabar_breakout_entry_only=True,
                     meta_intrabar_entry_policy=str(cfg.meta_intrabar_entry_policy),
+                    meta_intrabar_long_trigger_mode=str(cfg.meta_intrabar_long_trigger_mode),
+                    meta_intrabar_short_trigger_mode=str(cfg.meta_intrabar_short_trigger_mode),
                     meta_intrabar_setup_max_bars=int(cfg.meta_intrabar_setup_max_bars),
                     meta_intrabar_setup_bar_minutes=int(cfg.interval),
                     meta_intrabar_max_confirmation_age_minutes=int(cfg.meta_intrabar_max_confirmation_age_minutes),
@@ -3154,7 +3170,8 @@ class LiveSession:
                                     f"[live] Swing setup wrapper enabled: model_dir={cfg.swing_setup_single_model_dir} "
                                     f"timeframe={cfg.interval}min"
                                 )
-                                if str(cfg.meta_entry_prob_source or "").strip().lower() == "swing_support_single"
+                                if str(cfg.meta_entry_prob_source or "").strip().lower()
+                                in {"swing_support_single", "competition_long_active_short"}
                                 else (
                                     f"[live] Legacy probability wrapper enabled: model_root={cfg.meta_model_root} "
                                     f"entry_source={cfg.meta_entry_prob_source} timeframe={cfg.interval}min"
@@ -3226,6 +3243,8 @@ class LiveSession:
                         meta_intrabar_execution_enabled=True,
                         meta_intrabar_breakout_entry_only=True,
                         meta_intrabar_entry_policy=str(cfg.meta_intrabar_entry_policy),
+                        meta_intrabar_long_trigger_mode=str(cfg.meta_intrabar_long_trigger_mode),
+                        meta_intrabar_short_trigger_mode=str(cfg.meta_intrabar_short_trigger_mode),
                         meta_intrabar_setup_max_bars=int(cfg.meta_intrabar_setup_max_bars),
                         meta_intrabar_setup_bar_minutes=int(cfg.interval),
                         meta_intrabar_max_confirmation_age_minutes=int(cfg.meta_intrabar_max_confirmation_age_minutes),
@@ -4394,6 +4413,11 @@ class DashboardHTTPServer(ThreadingHTTPServer):
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "CynolycusLiveDashboard/1.0"
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        if self.path.startswith(("/api/events", "/api/state")):
+            return
+        super().log_message(format, *args)
 
     def _read_json_body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or 0)

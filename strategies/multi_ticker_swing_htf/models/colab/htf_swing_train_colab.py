@@ -8,273 +8,186 @@
 # ---
 
 # %% [markdown]
-# # multi_ticker_swing_htf — Colab training notebook (4H pivot-swing model)
+# # multi_ticker_swing_htf — Colab model-competition trainer (4H pivot-swing model)
 #
-# Upload `htf_swing_colab_bundle.tgz`, then run the cells top to bottom.
+# Upload `htf_swing_colab_bundle.tgz`, then run top to bottom (GPU/Colab work).
 #
-# Inputs:
-#   - htf_training_matrix_4h.parquet   (features + htf_swing_score)
+# Trains a competition across model families × seeds:
+#   - XGBoost / LightGBM **regressor** on the continuous `htf_swing_score`
+#   - XGBoost / LightGBM **classifier** on the binary strong-swing flag
+#   - XGBoost / LightGBM **ranker** (`rank:ndcg`, query groups = candidates per 4H bar)
+# Reports averaged metrics, top-feature stability, and top-pick overlap.
+#
+# Inputs (inside the bundle):
+#   - htf_training_matrix_4h.parquet   (features + htf_swing_score + fwd_* labels)
 #   - feature_manifest.json
-#   - label_manifest.json
+#   - colab_competition.py             (shared harness)
 #
 # Outputs (download via htf_swing_model_bundle.tgz):
-#   - htf_swing_xgb.json
-#   - eval_metrics.json
-#   - oof_preds.parquet           (out-of-fold predictions for backtesting)
-#   - oof_score_buckets.csv
-#   - feature_importance.csv
+#   - htf_swing_xgb.json           (best XGB booster — live-inference compatible)
+#   - best_model.joblib            (overall winner, any family)
+#   - oof_preds.parquet            (walk-forward OOF of the winner — feeds the meta matrix)
+#   - seed_results.csv, model_family_summary.csv, feature_stability.csv,
+#     top_pick_overlap.csv, competition_meta.json, eval_metrics.json
 
 # %%
-# !pip install -q xgboost==2.* pandas pyarrow scikit-learn
+# !pip install -q "xgboost==2.*" lightgbm joblib pandas pyarrow scikit-learn
 
 import json
 import os
 import shutil
 import tarfile
-from datetime import timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from colab_competition import (
+    ALL_FAMILIES,
+    CompetitionConfig,
+    load_bundle,
+    parse_families,
+    parse_seeds,
+    primary_metric_name,
+    run_competition,
+    fit_family,
+    walk_forward_oof,
+    write_artifact_bundle,
+)
+
 # %%
-BUNDLE = Path("htf_swing_colab_bundle.tgz")
+BUNDLE = Path(os.environ.get("HTF_BUNDLE", "htf_swing_colab_bundle.tgz"))
 WORK = Path("htf_work")
-WORK.mkdir(exist_ok=True)
-with tarfile.open(BUNDLE, "r:gz") as tar:
-    try:
-        tar.extractall(WORK, filter="data")
-    except TypeError:
-        tar.extractall(WORK)
+manifest = load_bundle(BUNDLE, WORK, "feature_manifest.json")
 
-manifest = json.loads((WORK / "feature_manifest.json").read_text())
 FEATURES = manifest["feature_columns"]
-TARGET = manifest["target_column"]
-TARGET_KIND = manifest.get("target_kind", "regression")
-if TARGET_KIND != "regression":
-    raise ValueError(f"HTF trainer expects regression target, got {TARGET_KIND}")
+REG_TARGET = manifest.get("regression_target_column", manifest.get("target_column", "htf_swing_score"))
+RELEVANCE_COL = manifest.get("relevance_column", "is_strong_swing")
+STRONG_SOURCE = manifest.get("strong_setup_source_column", "fwd_best_high_return")
+STRONG_THRESH = float(os.environ.get("STRONG_SETUP_THRESHOLD", manifest.get("strong_setup_threshold", 0.15)))
+TRAIN_FRAC = float(os.environ.get("TRAIN_FRAC", manifest.get("train_frac", 0.6)))
+VAL_FRAC = float(os.environ.get("VAL_FRAC", manifest.get("val_frac", 0.2)))
+RANK_GROUP = os.environ.get("RANK_GROUP", manifest.get("rank_group", "timestamp"))
+TOP_K = int(os.environ.get("TOP_K", manifest.get("top_k", 20)))
+SEEDS = parse_seeds(os.environ.get("MODEL_SEEDS"), int(os.environ.get("N_SEEDS", "7")))
+FAMILIES = parse_families(os.environ.get("MODEL_FAMILIES")) if os.environ.get("MODEL_FAMILIES") else list(ALL_FAMILIES)
 WF = manifest["walk_forward"]
-print("features:", len(FEATURES), "| target:", TARGET, "| rows:", manifest["n_rows"])
 
-df = pd.read_parquet(WORK / "htf_training_matrix_4h.parquet")
-df = df[df[TARGET].notna()].copy()
-print(df.shape)
+DIAGNOSTIC_COLUMNS = [
+    "htf_top_swing_target", "target", "fwd_best_high_return", "fwd_worst_low_return",
+    "fwd_close_return", "long_persistence", "short_persistence",
+]
 
-DIAGNOSTIC_COLUMNS = [c for c in manifest.get("label_columns", []) if c in df.columns]
+df = pd.read_parquet(WORK / "htf_training_matrix_4h.parquet").reset_index()
+df = df.rename(columns={df.columns[0]: "timestamp"}) if "timestamp" not in df.columns else df
+df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+df["ticker"] = df["ticker"].astype(str).str.upper().str.replace("$", "", regex=False)
+df = df.sort_values("timestamp").reset_index(drop=True)
 
-# %%
-# Walk-forward folds: train_years window, embargo gap, non-overlapping test_months.
-TRAIN_YEARS = float(WF["train_years"])
-EMBARGO_DAYS = int(WF["embargo_days"])
-TEST_MONTHS = int(WF["test_months"])
+if STRONG_SOURCE not in df.columns:
+    raise ValueError(f"strong-setup source column {STRONG_SOURCE!r} missing from matrix")
+df[RELEVANCE_COL] = (pd.to_numeric(df[STRONG_SOURCE], errors="coerce") >= STRONG_THRESH).astype(int)
+DIAGNOSTIC_COLUMNS = [c for c in DIAGNOSTIC_COLUMNS if c in df.columns]
 
-ts = pd.to_datetime(df.index.get_level_values(0))
-date_min, date_max = ts.min(), ts.max()
-print("range", date_min, "->", date_max)
-
-folds = []
-test_end = date_max
-while True:
-    test_start = test_end - pd.DateOffset(months=TEST_MONTHS)
-    train_end = test_start - timedelta(days=EMBARGO_DAYS)
-    train_start = train_end - pd.DateOffset(years=int(TRAIN_YEARS))
-    if train_start < date_min:
-        break
-    folds.append({"train_start": train_start, "train_end": train_end,
-                  "test_start": test_start, "test_end": test_end})
-    test_end = test_start
-folds = list(reversed(folds))
-print("folds:", len(folds))
-for f in folds:
-    print(f)
+print("matrix", df.shape, "tickers", df["ticker"].nunique(), "range", df["timestamp"].min(), "->", df["timestamp"].max())
+print("reg target", REG_TARGET, "| relevance", RELEVANCE_COL, f"(>= {STRONG_THRESH} of {STRONG_SOURCE})",
+      "| positive rate", round(float(df[RELEVANCE_COL].mean()), 4))
+print("families", FAMILIES, "| seeds", SEEDS)
 
 # %%
-import xgboost as xgb
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.model_selection import ParameterSampler
+device = os.environ.get("XGB_DEVICE") or ("cuda" if shutil.which("nvidia-smi") else "cpu")
+print("xgb device:", device)
 
-# Use the Colab GPU when present (nvidia-smi on PATH), else CPU. Override with XGB_DEVICE.
-XGB_DEVICE = os.environ.get("XGB_DEVICE") or ("cuda" if shutil.which("nvidia-smi") else "cpu")
-print("xgb device:", XGB_DEVICE)
-
-BASE_PARAMS = dict(
-    objective="reg:squarederror",
-    eval_metric="rmse",
-    random_state=42,
-    n_jobs=-1,
-    tree_method="hist",
-    device=XGB_DEVICE,
-    early_stopping_rounds=75,
+cfg = CompetitionConfig(
+    task_name="multi_ticker_swing_htf_4h",
+    target_column=RELEVANCE_COL,
+    regression_target_column=REG_TARGET,
+    relevance_column=RELEVANCE_COL,
+    feature_columns=FEATURES,
+    train_frac=TRAIN_FRAC,
+    val_frac=VAL_FRAC,
+    seeds=SEEDS,
+    families=FAMILIES,
+    output_dir=WORK / "artifacts",
+    rank_group=RANK_GROUP,
+    top_k=TOP_K,
+    xgb_config=dict(manifest.get("xgboost_config", {"early_stopping_rounds": 75})),
+    lgbm_config=dict(manifest.get("lightgbm_config", {})),
+    device=device,
+    timestamp_column="timestamp",
+    id_columns=("timestamp", "ticker"),
 )
-PARAM_SPACE = {
-    "n_estimators": [800, 1200, 1800, 2400],
-    "learning_rate": [0.015, 0.025, 0.04, 0.06],
-    "max_depth": [3, 4, 5, 6],
-    "min_child_weight": [10, 20, 40, 80],
-    "subsample": [0.70, 0.80, 0.90],
-    "colsample_bytree": [0.60, 0.75, 0.90],
-    "reg_alpha": [0.0, 0.05, 0.20],
-    "reg_lambda": [1.0, 2.0, 4.0],
-}
-N_TRIALS = int(os.environ.get("HTF_XGB_PARAM_TRIALS", "25"))
-VAL_FRACTION = 0.20
-INT_KEYS = {"n_estimators", "max_depth", "min_child_weight"}
-# Floor for the final-model tree count. A single held-out tail can early-stop at
-# tree 0 in a regime-shifted recent window, which previously produced a
-# degenerate 1-tree export. Never ship a final model shallower than this.
-MIN_FINAL_ESTIMATORS = 50
+result = run_competition(df, cfg)
+print("best\n", result["best"])
+print("family summary\n", result["summary"])
+print("feature stability (head)\n", result["stability"].head(20))
+print("top-pick overlap\n", result["pick_overlap"])
 
-
-def time_train_val_split(index, fraction=VAL_FRACTION):
-    fold_ts = pd.to_datetime(index.get_level_values(0))
-    days = pd.Series(fold_ts.normalize().unique()).sort_values().to_numpy()
-    split_at = min(max(1, int(len(days) * (1.0 - fraction))), len(days) - 1)
-    val_start = pd.Timestamp(days[split_at])
-    return fold_ts < val_start, fold_ts >= val_start
-
-
-def fit_xgb(Xtr, ytr, Xval, yval, params):
-    model = xgb.XGBRegressor(**BASE_PARAMS, **params)
-    model.fit(Xtr, ytr, eval_set=[(Xval, yval)], verbose=False)
-    return model
-
-
-def predict(model, X):
-    bi = getattr(model, "best_iteration", None)
-    return model.predict(X) if bi is None else model.predict(X, iteration_range=(0, int(bi) + 1))
-
-
-def coerce(params):
-    return {k: (int(v) if k in INT_KEYS else float(v)) for k, v in params.items()}
-
+OUT = cfg.output_dir
 
 # %%
-# Hyperparameter search: score by mean validation Spearman across folds' inner-val.
-candidates = list(ParameterSampler(PARAM_SPACE, n_iter=N_TRIALS, random_state=42))
-tuning_rows = []
-for pi, params in enumerate(candidates):
-    scores = []
-    for f in folds:
-        m_train = (ts >= f["train_start"]) & (ts <= f["train_end"])
-        train_full = df.loc[m_train]
-        if len(train_full) < int(WF["min_train_rows"]):
-            continue
-        itr, ival = time_train_val_split(train_full.index)
-        Xtr, ytr = train_full.loc[itr, FEATURES], train_full.loc[itr, TARGET].astype(float)
-        Xval, yval = train_full.loc[ival, FEATURES], train_full.loc[ival, TARGET].astype(float)
-        if len(Xtr) < int(WF["min_train_rows"]) // 2 or len(Xval) < 500:
-            continue
-        model = fit_xgb(Xtr, ytr, Xval, yval, params)
-        scores.append(pd.Series(predict(model, Xval), index=yval.index).corr(yval, method="spearman"))
-    tuning_rows.append({"trial": pi, "mean_val_spearman": float(np.mean(scores)) if scores else float("nan"),
-                        "n_folds": len(scores), **params})
-    print(tuning_rows[-1])
-
-tuning = pd.DataFrame(tuning_rows).sort_values("mean_val_spearman", ascending=False)
-tuning.to_csv(WORK / "xgb_param_search.csv", index=False)
-BEST_PARAMS = coerce({k: tuning.iloc[0][k] for k in PARAM_SPACE})
-print("best params:", BEST_PARAMS)
-
-# %%
-# Walk-forward OOF predictions (each fold trained only on prior data).
-oof_rows, fold_metrics = [], []
-for fi, f in enumerate(folds):
-    m_train = (ts >= f["train_start"]) & (ts <= f["train_end"])
-    m_test = (ts >= f["test_start"]) & (ts <= f["test_end"])
-    train_full = df.loc[m_train]
-    Xte, yte = df.loc[m_test, FEATURES], df.loc[m_test, TARGET].astype(float)
-    if len(train_full) < int(WF["min_train_rows"]) or len(Xte) < 500:
-        continue
-    itr, ival = time_train_val_split(train_full.index)
-    Xtr, ytr = train_full.loc[itr, FEATURES], train_full.loc[itr, TARGET].astype(float)
-    Xval, yval = train_full.loc[ival, FEATURES], train_full.loc[ival, TARGET].astype(float)
-    if len(Xtr) < int(WF["min_train_rows"]) // 2 or len(Xval) < 500:
-        continue
-    model = fit_xgb(Xtr, ytr, Xval, yval, BEST_PARAMS)
-    p = predict(model, Xte)
-    fold_metrics.append({
-        "fold": fi, "n_train": len(Xtr), "n_val": len(Xval), "n_test": len(Xte),
-        "best_iteration": int(model.best_iteration) if getattr(model, "best_iteration", None) is not None else None,
-        "rmse": float(np.sqrt(mean_squared_error(yte, p))),
-        "mae": float(mean_absolute_error(yte, p)),
-        "spearman": float(pd.Series(p, index=yte.index).corr(yte, method="spearman")),
-    })
-    print(fold_metrics[-1])
-    fold_oof = pd.DataFrame({"score": p, "y": yte.values}, index=Xte.index)
-    if DIAGNOSTIC_COLUMNS:
-        fold_oof = fold_oof.join(df.loc[m_test, DIAGNOSTIC_COLUMNS], how="left")
-    oof_rows.append(fold_oof)
-
-if oof_rows:
-    oof = pd.concat(oof_rows)
-    oof.to_parquet(WORK / "oof_preds.parquet")
-    print("aggregate OOF RMSE:", float(np.sqrt(mean_squared_error(oof["y"], oof["score"]))))
-    print("aggregate OOF Spearman:", oof["score"].corr(oof["y"], method="spearman"))
-
-    bucket_rows = []
-    ranked = oof["score"].rank(method="first")
-    oof_diag = oof.copy()
-    oof_diag["decile"] = pd.qcut(ranked, 10, labels=False) + 1
-    for decile, g in oof_diag.groupby("decile"):
-        rec = {"bucket": f"decile_{int(decile)}", "n": int(len(g)),
-               "score_mean": float(g["score"].mean()), "target_mean": float(g["y"].mean())}
-        for col in ("fwd_best_high_return", "fwd_worst_low_return", "fwd_close_return"):
-            if col in g.columns:
-                rec[f"avg_{col}"] = float(g[col].mean())
-        bucket_rows.append(rec)
-    pd.DataFrame(bucket_rows).to_csv(WORK / "oof_score_buckets.csv", index=False)
-    print(pd.DataFrame(bucket_rows).to_string(index=False))
-
-# %%
-# Final fit on all rows: pick n_estimators via a held-out tail, then refit on everything.
-final_tr, final_val = time_train_val_split(df.index)
-selector = fit_xgb(df.loc[final_tr, FEATURES], df.loc[final_tr, TARGET].astype(float),
-                   df.loc[final_val, FEATURES], df.loc[final_val, TARGET].astype(float), BEST_PARAMS)
-selector_n = int(selector.best_iteration) + 1 if getattr(selector, "best_iteration", None) is not None else int(BEST_PARAMS["n_estimators"])
-# The single-tail selector is brittle: a regime-shifted recent window can
-# early-stop at tree 0 (this shipped a degenerate 1-tree model). Floor the count
-# at the median of the walk-forward fold best_iterations so the final model is
-# never shallower than what cross-validation actually supported.
-fold_best = [m["best_iteration"] + 1 for m in fold_metrics if m.get("best_iteration") is not None]
-fold_floor = int(np.median(fold_best)) if fold_best else selector_n
-best_n = max(selector_n, fold_floor, MIN_FINAL_ESTIMATORS)
-print(f"final n_estimators: selector={selector_n} fold_floor={fold_floor} -> best_n={best_n}")
-
-final_params = {**BEST_PARAMS, "n_estimators": best_n}
-final_model = xgb.XGBRegressor(
-    **{k: v for k, v in BASE_PARAMS.items() if k != "early_stopping_rounds"}, **final_params,
+# Walk-forward OOF of the winner → feeds the meta-ranker spine (HTF_OOF score).
+best = result["best"]
+best_family, best_seed = str(best["family"]), int(best["seed"])
+train_months = int(round(float(WF["train_years"]) * 12))
+oof = walk_forward_oof(
+    df, cfg, best_family, best_seed,
+    train_months=train_months,
+    embargo_days=int(WF["embargo_days"]),
+    test_months=int(WF["test_months"]),
+    min_train_rows=int(WF.get("min_train_rows", 20000)),
+    diagnostic_columns=DIAGNOSTIC_COLUMNS,
 )
-final_model.fit(df[FEATURES], df[TARGET].astype(float), verbose=False)
-final_model.get_booster().save_model(str(WORK / "htf_swing_xgb.json"))
-print("saved booster")
+if not oof.empty:
+    oof.to_parquet(OUT / "oof_preds.parquet")
+    print("OOF rows", len(oof), "| OOF Spearman(score,y)", round(float(oof["score"].corr(oof["y"], method="spearman")), 4))
 
-importance_rows = []
-for kind in ("gain", "weight", "cover"):
-    for feature, value in final_model.get_booster().get_score(importance_type=kind).items():
-        importance_rows.append({"importance_type": kind, "feature": feature, "value": float(value)})
-pd.DataFrame(importance_rows).to_csv(WORK / "feature_importance.csv", index=False)
+# %%
+# Final full-data fit for the shippable boosters (live inference loads htf_swing_xgb.json).
+def _final_fit(family: str, seed: int):
+    days = np.sort(df["timestamp"].dt.normalize().unique())
+    cut = pd.Timestamp(days[min(max(1, int(len(days) * (1 - VAL_FRAC))), len(days) - 1)])
+    tr, va = df[df["timestamp"] < cut], df[df["timestamp"] >= cut]
+    return fit_family(family, seed, tr, va, cfg)
 
-metrics = {
-    "fold_metrics": fold_metrics,
-    "n_folds": len(fold_metrics),
-    "base_params": BASE_PARAMS,
-    "best_params": BEST_PARAMS,
-    "best_n_estimators": best_n,
-    "n_param_trials": N_TRIALS,
-    "target_column": TARGET,
+results = result["results"]
+xgb_rows = results[results["family"].str.startswith("xgb")]
+if not xgb_rows.empty:
+    metric = primary_metric_name(results)
+    best_xgb = xgb_rows.sort_values(metric, ascending=False, na_position="last").iloc[0] if metric else xgb_rows.iloc[0]
+    xgb_model = _final_fit(str(best_xgb["family"]), int(best_xgb["seed"]))
+    booster = xgb_model.get_booster() if hasattr(xgb_model, "get_booster") else xgb_model
+    booster.save_model(str(OUT / "htf_swing_xgb.json"))
+    print("saved live-compat booster from", best_xgb["family"], "seed", int(best_xgb["seed"]))
+
+import joblib
+winner_full = _final_fit(best_family, best_seed)
+joblib.dump(winner_full, OUT / "best_model_full.joblib")
+
+# %%
+(OUT / "eval_metrics.json").write_text(json.dumps({
+    "best": best.to_dict(),
+    "winner_family": best_family,
+    "winner_seed": best_seed,
+    "primary_metric": primary_metric_name(results),
+    "target_column": REG_TARGET,
+    "relevance_column": RELEVANCE_COL,
+    "strong_setup_threshold": STRONG_THRESH,
     "feature_columns": FEATURES,
-}
-(WORK / "eval_metrics.json").write_text(json.dumps(metrics, indent=2, default=str))
-(WORK / "feature_manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+}, indent=2, default=str))
+(OUT / "feature_manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
 
-# %%
+meta = {
+    "run_id": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ_htf_swing_4h_competition"),
+    "created_at_utc": datetime.now(timezone.utc).isoformat(),
+    "winner": {"family": best_family, "seed": best_seed},
+    "feature_names": FEATURES,
+    "manifest": manifest,
+    "competition_artifacts": sorted(p.name for p in OUT.iterdir() if p.is_file()),
+}
+(OUT / "meta.json").write_text(json.dumps(meta, default=str, indent=2))
+
 out_bundle = Path("htf_swing_model_bundle.tgz")
-with tarfile.open(out_bundle, "w:gz") as tar:
-    for name in ("htf_swing_xgb.json", "feature_manifest.json", "eval_metrics.json",
-                 "xgb_param_search.csv", "oof_score_buckets.csv", "feature_importance.csv"):
-        p = WORK / name
-        if p.exists():
-            tar.add(p, arcname=name)
-    if (WORK / "oof_preds.parquet").exists():
-        tar.add(WORK / "oof_preds.parquet", arcname="oof_preds.parquet")
+write_artifact_bundle(OUT, out_bundle)
 print("download:", out_bundle)

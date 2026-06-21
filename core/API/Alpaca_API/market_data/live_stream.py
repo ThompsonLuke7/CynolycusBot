@@ -125,6 +125,7 @@ class AlpacaBarStreamer:
         self._stream = StockDataStream(cfg.key_id, cfg.secret_key, feed=feed)
         self._thread: Optional[threading.Thread] = None
         self._thread_error: BaseException | None = None
+        self._drop_count = 0
 
     async def _handle_bar(self, bar: Bar) -> None:
         payload = bar_to_dict(bar)
@@ -133,6 +134,14 @@ class AlpacaBarStreamer:
                 self._queue.put_nowait(payload)
             except queue_mod.Full:
                 # Drop newest on overflow to avoid backpressure in the stream callback.
+                self._drop_count += 1
+                if self._drop_count in {1, 10} or self._drop_count % 100 == 0:
+                    logging.getLogger(__name__).warning(
+                        "Alpaca stream queue full; dropped %s bar(s). Latest bar=%s %s",
+                        self._drop_count,
+                        payload.get("symbol"),
+                        payload.get("timestamp"),
+                    )
                 pass
         if self._on_bar is not None:
             self._on_bar(payload)

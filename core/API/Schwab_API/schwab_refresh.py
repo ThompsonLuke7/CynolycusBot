@@ -3,13 +3,14 @@
 import base64
 import json
 import time
+from pathlib import Path
 import requests
 
 CLIENT_ID = "DodBaa8AR1twJGwT5srKqFUdl6SepUnCwck38IGFlxc8QVt9"
 CLIENT_SECRET = "GAq7IMKHL5AiIJrZunI13WP7z7nGgAy0USgUxB0zZA3hTUP260kAJidKxjsAETBj"
 
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
-TOKENS_FILE = "schwab_tokens.json"
+TOKENS_FILE = Path(__file__).resolve().with_name("schwab_tokens.json")
 
 
 def load_tokens():

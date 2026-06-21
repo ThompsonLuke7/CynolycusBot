@@ -8,15 +8,20 @@
 # ---
 
 # %% [markdown]
-# # multi_ticker_swing — Colab trainer (30m multiclass swing model)
+# # multi_ticker_swing — Colab model competition trainer
 #
-# Upload `swing_colab_bundle.tgz`, then run this file/cells top to bottom.
+# Upload `swing_context_colab_bundle.tgz`, then run this file/cells top to bottom.
 #
-# Output: `swing_model_bundle.tgz`, containing the model and probability artifacts
-# expected by the local sweep scripts.
+# Trains 5+ seeds across:
+# - XGBoost classifier
+# - XGBoost ranker
+# - LightGBM classifier
+# - LightGBM ranker
+#
+# Outputs averaged metrics, top-feature stability, and top-pick overlap.
 
 # %%
-# !pip install -q "xgboost==2.*" pandas pyarrow scikit-learn
+# !pip install -q "xgboost==2.*" lightgbm joblib pandas pyarrow scikit-learn
 
 import json
 import os
@@ -28,138 +33,141 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from colab_competition import (
+    CompetitionConfig,
+    load_bundle,
+    parse_families,
+    parse_seeds,
+    run_competition,
+    write_artifact_bundle,
+)
+
 # %%
-BUNDLE = Path("swing_colab_bundle.tgz")
+BUNDLE = Path(os.environ.get("SWING_BUNDLE", "swing_context_colab_bundle.tgz"))
+if not BUNDLE.exists() and Path("swing_colab_bundle.tgz").exists():
+    BUNDLE = Path("swing_colab_bundle.tgz")
 WORK = Path("swing_work")
-WORK.mkdir(exist_ok=True)
-with tarfile.open(BUNDLE, "r:gz") as tar:
-    try:
-        tar.extractall(WORK, filter="data")
-    except TypeError:
-        tar.extractall(WORK)
+manifest = load_bundle(BUNDLE, WORK, "feature_manifest.json")
 
-manifest = json.loads((WORK / "feature_manifest.json").read_text())
 FEATURES = manifest["feature_columns"]
-TARGET = manifest["target_column"]
-TRAIN_FRAC = float(manifest["train_frac"])
-VAL_FRAC = float(manifest["val_frac"])
-NEUTRAL_WEIGHT_FACTOR = float(manifest["neutral_weight_factor"])
-XGB_CONFIG = dict(manifest["xgboost_config"])
+TARGET = os.environ.get("SWING_TARGET", manifest["target_column"])
+MATRIX_FILE = manifest.get("matrix_file", "training_matrix_30m.parquet")
+TRAIN_FRAC = float(os.environ.get("TRAIN_FRAC", manifest["train_frac"]))
+VAL_FRAC = float(os.environ.get("VAL_FRAC", manifest["val_frac"]))
+NEUTRAL_WEIGHT_FACTOR = float(os.environ.get("NEUTRAL_WEIGHT_FACTOR", manifest["neutral_weight_factor"]))
+SEEDS = parse_seeds(os.environ.get("MODEL_SEEDS"), int(os.environ.get("N_SEEDS", "5")))
+FAMILIES = parse_families(os.environ.get("MODEL_FAMILIES"))
+TOP_K = int(os.environ.get("TOP_K", "10"))
+RANK_GROUP = os.environ.get("RANK_GROUP", "timestamp")
+POSITIVE_LABEL = os.environ.get("POSITIVE_LABEL")
+POSITIVE_LABEL = int(POSITIVE_LABEL) if POSITIVE_LABEL not in {None, ""} else None
 
-df = pd.read_parquet(WORK / "training_matrix_30m.parquet")
+df = pd.read_parquet(WORK / MATRIX_FILE)
 df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+df["ticker"] = df["ticker"].astype(str).str.upper().str.replace("$", "", regex=False)
+
+bar_context_file = manifest.get("bar_context_file")
+if bar_context_file:
+    bar_context = pd.read_parquet(WORK / bar_context_file)
+    bar_context["timestamp"] = pd.to_datetime(bar_context["timestamp"], utc=True)
+    bar_context["ticker"] = bar_context["ticker"].astype(str).str.upper().str.replace("$", "", regex=False)
+    df = df.merge(bar_context, on=["timestamp", "ticker"], how="left")
+
+context_file = manifest.get("context_file")
+if context_file:
+    context = pd.read_parquet(WORK / context_file)
+    context["date"] = pd.to_datetime(context["date"], errors="coerce").dt.tz_localize(None).dt.normalize()
+    context["ticker"] = context["ticker"].astype(str).str.upper().str.replace("$", "", regex=False)
+    df["_context_date"] = df["timestamp"].dt.tz_convert(None).dt.normalize()
+    df = df.merge(
+        context.rename(columns={"date": "_context_date"}),
+        on=["ticker", "_context_date"],
+        how="left",
+    ).drop(columns=["_context_date"])
+
 df = df.sort_values("timestamp").reset_index(drop=True)
-print("matrix", df.shape, "tickers", df["ticker"].nunique() if "ticker" in df.columns else None)
-print("features", len(FEATURES), "range", df["timestamp"].min(), "->", df["timestamp"].max())
+print("matrix", df.shape, "tickers", df["ticker"].nunique())
+print("target", TARGET, "features", len(FEATURES), "range", df["timestamp"].min(), "->", df["timestamp"].max())
+print("families", FAMILIES, "seeds", SEEDS)
 
 # %%
-import xgboost as xgb
-from sklearn.metrics import accuracy_score, classification_report, log_loss
-
 device = os.environ.get("XGB_DEVICE") or ("cuda" if shutil.which("nvidia-smi") else "cpu")
 print("xgb device:", device)
-XGB_CONFIG["tree_method"] = "hist"
-XGB_CONFIG["device"] = device
 
-early = XGB_CONFIG.pop("early_stopping_rounds", 60)
+cfg = CompetitionConfig(
+    task_name="multi_ticker_swing_30m",
+    target_column=TARGET,
+    feature_columns=FEATURES,
+    train_frac=TRAIN_FRAC,
+    val_frac=VAL_FRAC,
+    seeds=SEEDS,
+    families=FAMILIES,
+    output_dir=WORK / "artifacts",
+    sample_weight_column=manifest.get("sample_weight_column", "sample_weight"),
+    neutral_weight_factor=NEUTRAL_WEIGHT_FACTOR,
+    positive_label=POSITIVE_LABEL,
+    rank_group=RANK_GROUP,
+    top_k=TOP_K,
+    xgb_config=dict(manifest.get("xgboost_config", {})),
+    device=device,
+    timestamp_column="timestamp",
+    id_columns=("timestamp", "ticker"),
+)
+result = run_competition(df, cfg)
 
-
-def split_time(frame):
-    n = len(frame)
-    t1 = int(n * TRAIN_FRAC)
-    t2 = int(n * (TRAIN_FRAC + VAL_FRAC))
-    return frame.iloc[:t1].copy(), frame.iloc[t1:t2].copy(), frame.iloc[t2:].copy()
-
-
-def weights(frame):
-    y = frame[TARGET].to_numpy(int)
-    soft = frame.get("sample_weight", pd.Series(1.0, index=frame.index)).to_numpy(float)
-    return (soft * np.where(y == 1, NEUTRAL_WEIGHT_FACTOR, 1.0)).astype(np.float32)
-
-
-def metrics(y_true, proba, split):
-    pred = np.argmax(proba, axis=1)
-    rep = classification_report(
-        y_true, pred, labels=[0, 1, 2], target_names=["short", "neutral", "long"],
-        output_dict=True, zero_division=0,
-    )
-    out = {
-        f"{split}_accuracy": float(accuracy_score(y_true, pred)),
-        f"{split}_log_loss": float(log_loss(y_true, proba, labels=[0, 1, 2])),
-    }
-    for name in ["short", "neutral", "long"]:
-        out[f"{split}_{name}_precision"] = float(rep[name]["precision"])
-        out[f"{split}_{name}_recall"] = float(rep[name]["recall"])
-        out[f"{split}_{name}_f1"] = float(rep[name]["f1-score"])
-    return out
-
-
-train_df, val_df, test_df = split_time(df)
-X_train = train_df[FEATURES].to_numpy(np.float32)
-y_train = train_df[TARGET].to_numpy(int)
-X_val = val_df[FEATURES].to_numpy(np.float32)
-y_val = val_df[TARGET].to_numpy(int)
-X_test = test_df[FEATURES].to_numpy(np.float32)
-y_test = test_df[TARGET].to_numpy(int)
-
-print("splits", len(train_df), len(val_df), len(test_df))
-print("class counts train", np.bincount(y_train, minlength=3))
-
-model = xgb.XGBClassifier(**XGB_CONFIG, early_stopping_rounds=early, verbosity=1)
-model.fit(X_train, y_train, sample_weight=weights(train_df), eval_set=[(X_val, y_val)], verbose=50)
+print("best")
+print(result["best"])
+print("family summary")
+print(result["summary"])
+print("top-pick overlap")
+print(result["pick_overlap"])
 
 # %%
-OUT = WORK / "artifacts"
-OUT.mkdir(exist_ok=True)
-model.save_model(OUT / "swing_xgb_model.json")
+# Backward-compatible swing artifacts for local scripts that expect the old XGB-classifier bundle shape.
+OUT = cfg.output_dir
+xgb_rows = result["results"][result["results"]["family"] == "xgb_classifier"].copy()
+if not xgb_rows.empty:
+    best_xgb = xgb_rows.sort_values(["val_log_loss", "test_positive_f1"], ascending=[True, False], na_position="last").iloc[0]
+    import joblib
 
-val_proba = model.predict_proba(X_val)
-test_proba = model.predict_proba(X_test)
-all_proba = model.predict_proba(df[FEATURES].to_numpy(np.float32))
+    model = joblib.load(OUT / f"model_xgb_classifier_seed{int(best_xgb['seed'])}.joblib")
+    if hasattr(model, "save_model"):
+        model.save_model(OUT / "swing_xgb_model.json")
+    fi_path = OUT / f"feature_importance_xgb_classifier_seed{int(best_xgb['seed'])}.csv"
+    if fi_path.exists():
+        shutil.copy2(fi_path, OUT / "feature_importance.csv")
+    proba_chunks = []
+    chunk_size = int(os.environ.get("PROBA_CHUNK_SIZE", "1000000"))
+    for start in range(0, len(df), chunk_size):
+        chunk = df.iloc[start : start + chunk_size]
+        p = model.predict_proba(chunk[FEATURES].to_numpy(np.float32))
+        out = chunk[["timestamp", "ticker"]].copy()
+        out["p_short"] = p[:, 0] if p.shape[1] > 0 else np.nan
+        out["p_neutral"] = p[:, 1] if p.shape[1] > 1 else np.nan
+        out["p_long"] = p[:, 2] if p.shape[1] > 2 else np.nan
+        out["split"] = "train"
+        out.loc[result["val_df"].index.intersection(out.index), "split"] = "val"
+        out.loc[result["test_df"].index.intersection(out.index), "split"] = "test"
+        proba_chunks.append(out[["timestamp", "ticker", "split", "p_long", "p_short", "p_neutral"]])
+    pd.concat(proba_chunks, ignore_index=True).to_parquet(OUT / "p_swing_probs.parquet", index=False)
+    if str(result["best"]["family"]) != "xgb_classifier":
+        print("overall best was not xgb_classifier; compatibility model is documented in seed_results.csv")
 
-eval_metrics = {
-    "created_at_utc": datetime.now(timezone.utc).isoformat(),
-    "features_used": len(FEATURES),
-    "n_rows": int(len(df)),
-    "n_tickers": int(df["ticker"].nunique()) if "ticker" in df.columns else None,
-    "best_iteration": int(getattr(model, "best_iteration", -1)) + 1,
-    "xgb_device": device,
-    **metrics(y_val, val_proba, "val"),
-    **metrics(y_test, test_proba, "test"),
-}
-(OUT / "eval_metrics.json").write_text(json.dumps(eval_metrics, indent=2))
-(OUT / "selected_features.txt").write_text("\n".join(FEATURES))
-
-fi = (
-    pd.DataFrame({"feature": FEATURES, "importance": model.feature_importances_})
-    .sort_values("importance", ascending=False)
-    .reset_index(drop=True)
-)
-fi.to_csv(OUT / "feature_importance.csv", index=False)
-
-proba = df[["timestamp", "ticker"]].copy()
-proba["p_short"] = all_proba[:, 0]
-proba["p_neutral"] = all_proba[:, 1]
-proba["p_long"] = all_proba[:, 2]
-proba["split"] = "train"
-proba.loc[val_df.index, "split"] = "val"
-proba.loc[test_df.index, "split"] = "test"
-proba = proba[["timestamp", "ticker", "split", "p_long", "p_short", "p_neutral"]]
-proba.to_parquet(OUT / "p_swing_probs.parquet", index=False)
+selected = "\n".join(FEATURES)
+(OUT / "selected_features.txt").write_text(selected)
+(OUT / "eval_metrics.json").write_text(json.dumps(result["best"].to_dict(), indent=2, default=str))
 
 meta = {
-    "run_id": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ_swing_30m_colab"),
+    "run_id": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ_swing_30m_colab_competition"),
     "created_at_utc": datetime.now(timezone.utc).isoformat(),
     "dataset_name": "30m_multi_ticker_shared_universe",
     "classes": ["short", "neutral", "long"],
     "feature_names": FEATURES,
     "manifest": manifest,
-    "artifact_paths": {p.name: p.name for p in OUT.iterdir()},
+    "competition_artifacts": sorted(p.name for p in OUT.iterdir() if p.is_file()),
 }
 (OUT / "meta.json").write_text(json.dumps(meta, default=str, indent=2))
 
-bundle_out = Path("swing_model_bundle.tgz")
-with tarfile.open(bundle_out, "w:gz") as tar:
-    for path in OUT.iterdir():
-        tar.add(path, arcname=path.name)
+bundle_out = Path("swing_model_competition_bundle.tgz")
+write_artifact_bundle(OUT, bundle_out)
 print("download:", bundle_out)

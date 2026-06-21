@@ -47,11 +47,17 @@ logger = logging.getLogger(__name__)
 
 # ── price helpers ─────────────────────────────────────────────────────────────
 
-def _load_daily_returns(tickers: list[str], *, window: int) -> pd.DataFrame:
+def _load_daily_returns(
+    tickers: list[str],
+    *,
+    window: int,
+    as_of: pd.Timestamp | None = None,
+) -> pd.DataFrame:
     """Load last `window` trading days of daily close returns for given tickers.
 
     Returns wide DataFrame: index=date, columns=ticker, values=pct_change.
-    Missing tickers silently dropped.
+    Missing tickers silently dropped. `as_of` caps the date range to avoid
+    lookahead during historical backfill.
     """
     frames: dict[str, pd.Series] = {}
     for ticker in tickers:
@@ -69,6 +75,8 @@ def _load_daily_returns(tickers: list[str], *, window: int) -> pd.DataFrame:
             continue
         df[time_col] = pd.to_datetime(df[time_col], utc=True, errors="coerce").dt.tz_localize(None).dt.normalize()
         series = df.set_index(time_col)[close_col].sort_index()
+        if as_of is not None:
+            series = series[series.index <= as_of]
         frames[ticker] = series
 
     if not frames:
@@ -139,16 +147,18 @@ def build_meta_features(
     all_tickers = primary["ticker"].tolist()
     all_themes = memberships_df["theme"].unique().tolist()
 
-    # members per theme
+    # members per theme — use only primary members (highest membership theme per
+    # ticker) so that heat/breadth reflect that cluster's actual movers, not the
+    # full market. This prevents all themes sharing identical breadth values.
     theme_members: dict[str, list[str]] = {}
-    for theme, grp in memberships_df.groupby("theme"):
+    for theme, grp in primary.groupby("primary_theme"):
         theme_members[str(theme)] = grp["ticker"].tolist()
 
     # Load price returns for all tickers in the universe
     needed_window = HEAT_WINDOW_DAYS + HEAT_PRIOR_WINDOW_DAYS + 2
     all_member_tickers = list(set(t for members in theme_members.values() for t in members))
     logger.info("Loading daily returns for %d tickers ...", len(all_member_tickers))
-    returns = _load_daily_returns(all_member_tickers, window=needed_window)
+    returns = _load_daily_returns(all_member_tickers, window=needed_window, as_of=as_of)
 
     # ── per-theme aggregates ───────────────────────────────────────────────────
     theme_heat: dict[str, float] = {}
@@ -250,9 +260,9 @@ def build_meta_features(
         related_heat = float(np.nanmean([theme_heat[r] for r in related])) if related else np.nan
         related_rank = float(np.nanmean([theme_heat_rank[r] for r in related if r in theme_heat_rank])) if related else np.nan
 
-        # age
+        # age — clamp to 0 for backfill dates before registry was created
         first_seen = theme_first_seen.get(theme)
-        age_days = float((as_of - first_seen).days) if first_seen is not None else np.nan
+        age_days = float(max(0, (as_of - first_seen).days)) if first_seen is not None else np.nan
         newness_score = float(1.0 / (1.0 + age_days / 30.0)) if not np.isnan(age_days) else np.nan
 
         rows.append(

@@ -37,8 +37,24 @@ class SharedStreamTests(unittest.TestCase):
         stream._fanout_bar({"symbol": "QQQ"})
 
         stats = stream.snapshot()
-        self.assertEqual(stats["delivered_count"], 1)
+        self.assertEqual(q.get_nowait()["symbol"], "QQQ")
+        self.assertEqual(stats["delivered_count"], 2)
         self.assertEqual(stats["dropped_count"], 1)
+
+    def test_shared_stream_filters_symbols_per_subscriber(self) -> None:
+        stream = SharedBarStream()
+        spy_only: queue.Queue = queue.Queue(maxsize=4)
+        all_symbols: queue.Queue = queue.Queue(maxsize=4)
+        stream.register(spy_only, name="spy-only", symbols=("SPY",))
+        stream.register(all_symbols, name="all")
+
+        stream._fanout_bar({"symbol": "QQQ", "close": 1.0})
+        stream._fanout_bar({"symbol": "SPY", "close": 2.0})
+
+        self.assertEqual(spy_only.get_nowait()["symbol"], "SPY")
+        self.assertEqual(all_symbols.get_nowait()["symbol"], "QQQ")
+        self.assertEqual(all_symbols.get_nowait()["symbol"], "SPY")
+        self.assertEqual(stream.snapshot()["queue_symbols"]["spy-only"], ["SPY"])
 
 
 if __name__ == "__main__":

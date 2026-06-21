@@ -19,6 +19,10 @@ import pandas as pd
 from strategies.multi_ticker_swing.config.pipeline_config import FEATURE_COLUMNS, MODEL_PATH
 from strategies.multi_ticker_swing.live.universe import TickerConfig, load_universe
 from strategies.multi_ticker_swing.live.feature_builder import LiveSwingFeatureBuilder
+from strategies.multi_ticker_swing.live.catalyst_signal import (
+    LiveCatalystSignal,
+    catalyst_ev_multiplier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,8 @@ class Signal:
     signal_ts: datetime = field(default_factory=lambda: datetime.now())
     config: TickerConfig | None = None
     features: dict[str, Any] = field(default_factory=dict)
+    catalyst_score: float = float("nan")   # recency-weighted live catalyst strength (NaN = none)
+    catalyst_count: int = 0                 # fresh catalyst records in the lookback window
 
 
 class SwingScanner:
@@ -50,6 +56,8 @@ class SwingScanner:
         model_path: Path | str = MODEL_PATH,
         max_entries_per_bar: int = 5,
         universe_path: Path | str | None = None,
+        catalyst_signal: LiveCatalystSignal | None = None,
+        catalyst_ev_alpha: float = 0.5,
     ) -> None:
         from xgboost import XGBClassifier
         self._clf = XGBClassifier()
@@ -59,7 +67,15 @@ class SwingScanner:
         self._fb = feature_builder
         self._universe = load_universe(universe_path) if universe_path else load_universe()
         self._max_entries = max_entries_per_bar
-        logger.info("Universe: %d tradeable tickers", len(self._universe))
+        # Optional live news tilt: re-ranks signals by fresh catalyst strength.
+        # When None (or the ledger is absent) the scanner is unchanged.
+        self._catalyst = catalyst_signal
+        self._cat_alpha = float(catalyst_ev_alpha)
+        logger.info(
+            "Universe: %d tradeable tickers (live catalyst tilt %s)",
+            len(self._universe),
+            f"on, alpha={self._cat_alpha}" if catalyst_signal is not None else "off",
+        )
 
     @property
     def universe(self) -> dict[str, TickerConfig]:
@@ -135,6 +151,15 @@ class SwingScanner:
             if ev <= 0:
                 continue
 
+            # Live news tilt: bullish catalysts boost longs / dampen shorts. The
+            # multiplier is positive, so it only re-ranks — it never turns a
+            # positive-EV signal negative.
+            hit = self._catalyst.for_ticker(ticker) if self._catalyst is not None else None
+            ev_base = ev
+            ev = ev_base * catalyst_ev_multiplier(hit, direction, alpha=self._cat_alpha)
+            cat_score = hit.score if hit is not None else float("nan")
+            cat_count = hit.count if hit is not None else 0
+
             bar = self._fb.get_last_bar(ticker)
             atr = self._fb.get_atr(ticker)
             risk_features = {
@@ -151,6 +176,10 @@ class SwingScanner:
                 )
                 if key in feat.index
             }
+            risk_features["ev_score_base"] = float(ev_base)
+            if hit is not None and hit.count:
+                risk_features["catalyst_top_family"] = hit.top_family
+                risk_features["catalyst_top_headline"] = hit.top_headline
             signals.append(Signal(
                 ticker=ticker,
                 direction=direction,
@@ -163,6 +192,8 @@ class SwingScanner:
                 signal_ts=datetime.now(),
                 config=cfg,
                 features=risk_features,
+                catalyst_score=cat_score,
+                catalyst_count=cat_count,
             ))
 
         signals.sort(key=lambda s: s.ev_score, reverse=True)

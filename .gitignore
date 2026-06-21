@@ -258,3 +258,32 @@ core/API/Schwab_API/schwab_tokens.json
 # Re-include trained models distributed via git (loaded by live scorers)
 !strategies/multi_ticker_swing/models/*.json
 !strategies/multi_ticker_swing_htf/models/*.json
+
+# ============================================================
+# Model binaries & research artifacts (regenerable; do not commit)
+# Live path uses the re-included *.json models above, not these bundles.
+# ============================================================
+
+# Serialized model bundles (none are tracked; live scorers read *.json)
+*.joblib
+*.native
+*.npz
+
+# Research model dirs (competition/OOF/expansion runs — bundles, metrics, plots)
+strategies/momentum_expansion/models/expansion_v1/
+strategies/multi_ticker_swing/models/competition_*/
+strategies/multi_ticker_swing/models/oof_ranker_*/
+
+# Backtest & forensics output (keep top-level analysis scripts in backtests/)
+backtests/**
+!backtests/*.py
+strategies/**/backtest/results_*/
+**/plots/family_compare/
+UI/swing_audit/forensics_*/
+
+# Generated data & exports
+signals/meta_context/data/
+themes/dynamic_theme/outputs/
+
+# Plots/charts are all generated research output (none are UI assets)
+*.png

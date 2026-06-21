@@ -94,8 +94,9 @@ def collect_recent_records(
     if raw.empty:
         return raw
     raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True, errors="coerce")
-    # Keep only the lookback window
-    cutoff = pd.Timestamp(start, tz="UTC")
+    # Keep only the lookback window. `start` is already a tz-aware (UTC) datetime,
+    # so wrap it without the tz= kwarg (which rejects already-aware inputs).
+    cutoff = pd.Timestamp(start)
     raw = raw[raw["timestamp"] >= cutoff].copy()
     return deduplicate_news(raw)
 

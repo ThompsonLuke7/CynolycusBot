@@ -15,11 +15,16 @@ import numpy as np
 import pandas as pd
 
 from themes.dynamic_theme.config import (
+    HDBSCAN_CLUSTER_SELECTION_METHOD,
     HDBSCAN_METRIC,
     HDBSCAN_MIN_CLUSTER_SIZE,
     HDBSCAN_MIN_SAMPLES,
     TICKER_CLUSTERS_PATH,
     TICKER_EMBEDDINGS_PATH,
+    UMAP_METRIC,
+    UMAP_MIN_DIST,
+    UMAP_N_COMPONENTS,
+    UMAP_N_NEIGHBORS,
     ensure_outputs,
 )
 from themes.dynamic_theme.stages.step02_embed import load_embeddings_matrix
@@ -33,14 +38,26 @@ def cluster_tickers(
     min_cluster_size: int = HDBSCAN_MIN_CLUSTER_SIZE,
     min_samples: int = HDBSCAN_MIN_SAMPLES,
     metric: str = HDBSCAN_METRIC,
+    cluster_selection_method: str = HDBSCAN_CLUSTER_SELECTION_METHOD,
 ) -> pd.DataFrame:
-    """Run HDBSCAN on the ticker embedding matrix and write ticker_clusters.parquet."""
+    """Run UMAP + HDBSCAN on the ticker embedding matrix and write ticker_clusters.parquet.
+
+    UMAP reduces the 384-dim BGE embeddings to a low-dim space where HDBSCAN
+    can discover fine-grained cluster structure (otherwise collapses to 2-3 blobs).
+    Soft membership (step08) scores every ticker against every cluster centroid,
+    so hard cluster assignment precision matters less than richness of structure.
+    """
     ensure_outputs()
 
     try:
         import hdbscan as hdbscan_lib
     except ImportError as exc:
         raise ImportError("Install hdbscan: pip install hdbscan") from exc
+
+    try:
+        import umap
+    except ImportError as exc:
+        raise ImportError("Install umap-learn: pip install umap-learn") from exc
 
     if embeddings_df is not None:
         tickers = embeddings_df["ticker"].astype(str).tolist()
@@ -53,18 +70,35 @@ def cluster_tickers(
         logger.warning("No embeddings to cluster")
         return pd.DataFrame(columns=["ticker", "cluster_id", "probability", "date"])
 
+    # ── UMAP dimensionality reduction ─────────────────────────────────────────
+    n_components = min(UMAP_N_COMPONENTS, matrix.shape[1] - 1, len(tickers) - 2)
     logger.info(
-        "Clustering %d tickers (min_cluster_size=%d, min_samples=%d, metric=%s) ...",
-        len(tickers), min_cluster_size, min_samples, metric,
+        "UMAP: %d-dim → %d-dim  (n_neighbors=%d, min_dist=%.2f, metric=%s) ...",
+        matrix.shape[1], n_components, UMAP_N_NEIGHBORS, UMAP_MIN_DIST, UMAP_METRIC,
     )
+    reducer = umap.UMAP(
+        n_components=n_components,
+        n_neighbors=UMAP_N_NEIGHBORS,
+        min_dist=UMAP_MIN_DIST,
+        metric=UMAP_METRIC,
+        random_state=42,
+        low_memory=False,
+    )
+    reduced = reducer.fit_transform(matrix).astype(np.float32)
 
+    # ── HDBSCAN on UMAP output ────────────────────────────────────────────────
+    logger.info(
+        "HDBSCAN: min_cluster_size=%d, min_samples=%d, metric=%s, selection=%s ...",
+        min_cluster_size, min_samples, metric, cluster_selection_method,
+    )
     clusterer = hdbscan_lib.HDBSCAN(
         min_cluster_size=min_cluster_size,
         min_samples=min_samples,
         metric=metric,
+        cluster_selection_method=cluster_selection_method,
         prediction_data=True,
     )
-    clusterer.fit(matrix)
+    clusterer.fit(reduced)
 
     labels: np.ndarray = clusterer.labels_
     probs: np.ndarray = clusterer.probabilities_

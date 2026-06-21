@@ -4,13 +4,13 @@ When giving the user a powershell command to run, keep it on one line
 when giving a ticker such as "$SPY" exclude the "$" dollar sign so it's just "SPY"
 
 Living summary policy: At the end of every response, append an entry to `LIVING_SUMMARY.md` at the repo root using `{date/time EST}{user: codex or claude}{what part(s) of the project were discussed}{brief description of discussion or changes}`. Keep each message summary to no more than 3 lines.
-When starting work in a new chat, read `LIVING_SUMMARY.md` first if it exists so current context carries across Codex and Claude sessions.
+If you need additional context for a user's request, read `LIVING_SUMMARY.md` first if it exists so current context carries across Codex and Claude sessions.
 Prefer durable facts, decisions, open questions, commands run, files changed, and next steps. Avoid copying large command outputs, secrets, or noisy transient details. It shouldn't look like regular git commit messages; it should follow a story.
 
 Before you do anything, ask me questions until you’re confident you understand the goal and constraints.
 Always run a post-pass “what didn’t you finish?” verification
 Only recommend next steps that follow the active roadmap. If you want to propose anything outside the roadmap, label it clearly as ‘Optional / Outside Roadmap’.
-
+When plotting anything, please check the core shared plotting directory for any reusable code, especially for plotting price vs time plots. 
 Architecture & Code Quality
 KISS (Keep It Simple, Stupid): Avoid unnecessary complexity. Simple code is easier for both humans and AI agents to understand, maintain, and debug.
 

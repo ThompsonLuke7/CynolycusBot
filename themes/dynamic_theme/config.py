@@ -32,15 +32,61 @@ THEME_REGISTRY_PATH     = OUTPUTS_DIR / "theme_registry.parquet"
 THEME_RELATIONSHIPS_PATH = OUTPUTS_DIR / "theme_relationships.parquet"
 TICKER_MEMBERSHIP_PATH  = OUTPUTS_DIR / "ticker_theme_membership.parquet"
 TICKER_THEME_FEATURES_PATH = OUTPUTS_DIR / "ticker_theme_features.parquet"
+PENDING_THEME_CANDIDATES_PATH = OUTPUTS_DIR / "pending_theme_candidates.parquet"
+PENDING_THEME_REGISTRY_PATH = OUTPUTS_DIR / "pending_theme_registry.parquet"
+PENDING_THEME_MEMBERSHIP_PATH = OUTPUTS_DIR / "pending_theme_membership.parquet"
+PENDING_THEME_HISTORY_PATH = OUTPUTS_DIR / "pending_theme_history.parquet"
+PENDING_THEME_NEWS_PATH = OUTPUTS_DIR / "pending_theme_news.parquet"
+PENDING_THEME_PROFILES_PATH = OUTPUTS_DIR / "pending_theme_profiles.parquet"
 
 # ── Embedding model ───────────────────────────────────────────────────────────
 BGE_MODEL = "BAAI/bge-small-en-v1.5"
 EMBEDDING_DIM = 384  # bge-small-en-v1.5
 
+# ── Text-vector composition ───────────────────────────────────────────────────
+# The text portion of a ticker's embedding anchors on its Yahoo business
+# description ("what the company IS") and blends in a cleaned news mean ("what
+# it's DOING"). Without the description anchor, a mega-cap whose feed is full of
+# "AAPL is now Fund X's 9th largest position" 13F spam gets embedded as
+# institutional-ownership news and lands in a junk holdings cluster instead of
+# consumer tech. DESC_BLEND_WEIGHT is the weight on the description vector.
+DESC_BLEND_WEIGHT = 0.6
+
+# Headlines/bodies matching these (case-insensitive) are ownership-filing /
+# 13F / analyst-coverage spam or HTML scaffolding — dropped before averaging a
+# ticker's article embeddings (unless dropping would leave it with no news).
+NEWS_SPAM_PATTERNS = [
+    r"largest position",
+    r"\b13[FDG]\b",
+    r"\bSC 13[DG]\b",
+    r"\bstake in\b",
+    r"holdings in\b",
+    r"\bshares (?:of|in)\b.*\b(?:bought|sold|acquired|purchased)\b",
+    r"\b(?:boosts|trims|lowers|raises|cuts|reduces|increases|decreases)\b.*\b(?:holdings|stake|position|shares)\b",
+    r"\b(?:buys|sells|acquires|purchases)\b.*\bshares\b",
+    r"market ?beat",
+    r"hedge fund",
+    r"institutional (?:investor|ownership|holdings)",
+    r"\bhas \$[\d.,]+ (?:million|billion) (?:stock )?(?:holdings|position)",
+]
+
 # ── Clustering ───────────────────────────────────────────────────────────────
-HDBSCAN_MIN_CLUSTER_SIZE = 3
+# UMAP reduces 384-dim embeddings to a low-dim space where HDBSCAN can find
+# fine-grained density structure. Without it, HDBSCAN collapses to 2-3 blobs.
+UMAP_N_COMPONENTS = 20
+UMAP_N_NEIGHBORS = 15
+UMAP_MIN_DIST = 0.0           # tight packing — best for clustering
+UMAP_METRIC = "cosine"        # BGE embeddings are cosine-similarity aligned
+
+# min_cluster_size=2 gives maximum granularity (every pair can be a theme).
+# cluster_selection_method='leaf' keeps fine-grained leaf clusters instead of
+# merging them upward — produces many more, smaller themes.
+# Soft membership (step08) means every ticker scores against every cluster
+# centroid, so hard assignment precision matters less than having rich structure.
+HDBSCAN_MIN_CLUSTER_SIZE = 5
 HDBSCAN_MIN_SAMPLES = 2
-HDBSCAN_METRIC = "euclidean"  # cosine-normalized embeddings → euclidean OK
+HDBSCAN_METRIC = "euclidean"  # UMAP output is Euclidean
+HDBSCAN_CLUSTER_SELECTION_METHOD = "leaf"
 
 # ── Discovery engine ─────────────────────────────────────────────────────────
 # Centroid cosine similarity below this → new theme detected
@@ -60,8 +106,14 @@ TOP_Q_STRENGTH = 0.75         # top-quartile cutoff for theme_strength
 CLAUDE_MODEL = "claude-sonnet-4-6"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-# Max tokens returned per Claude call (labeling / relationship graph)
-CLAUDE_MAX_TOKENS = 1024
+# Labeling: ~300 tokens per cluster is plenty
+CLAUDE_LABEL_MAX_TOKENS = 512
+# Relationship graph: ~85 themes × ~5 edges each is a large JSON array. At 8192
+# tokens the response truncated mid-object and the whole graph was discarded,
+# leaving stale edges that no longer matched the relabeled registry. Sonnet
+# supports far larger outputs, so give it ample room.
+CLAUDE_RELATIONSHIP_MAX_TOKENS = 32000
+CLAUDE_MAX_TOKENS = 512  # default fallback
 
 
 def ensure_outputs() -> None:

@@ -10,11 +10,16 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 import pandas as pd
 
-from themes.dynamic_theme.client.claude_client import call_claude_json
-from themes.dynamic_theme.config import THEME_RELATIONSHIPS_PATH, ensure_outputs
+from themes.dynamic_theme.client.claude_client import call_claude, call_claude_json
+from themes.dynamic_theme.config import (
+    CLAUDE_RELATIONSHIP_MAX_TOKENS,
+    THEME_RELATIONSHIPS_PATH,
+    ensure_outputs,
+)
 from themes.dynamic_theme.stages.step05_claude_labeling import load_registry
 
 logger = logging.getLogger(__name__)
@@ -70,11 +75,14 @@ def build_relationship_graph(
     prompt = _RELATIONSHIP_PROMPT.format(themes_json=json.dumps(theme_names, indent=2))
 
     try:
-        result = call_claude_json(prompt)
+        result = call_claude_json(prompt, max_tokens=CLAUDE_RELATIONSHIP_MAX_TOKENS)
         relationships = result.get("relationships", [])
     except Exception as exc:
-        logger.error("Claude relationship graph call failed: %s", exc)
-        relationships = []
+        # A truncated/oversized response is no longer valid JSON. Rather than
+        # discard the whole graph (which strands the registry with stale edges),
+        # salvage every complete relationship object from the raw text.
+        logger.warning("Relationship JSON parse failed (%s) — salvaging partial edges", exc)
+        relationships = _salvage_relationships(prompt)
 
     rows = []
     for rel in relationships:
@@ -108,6 +116,29 @@ def build_relationship_graph(
         THEME_RELATIONSHIPS_PATH, len(rows), len(out),
     )
     return out
+
+
+def _salvage_relationships(prompt: str) -> list[dict]:
+    """Re-call Claude and regex-extract every complete relationship object.
+
+    Tolerant of a truncated trailing object: only fully-closed { ... } blocks
+    containing the four expected keys are kept.
+    """
+    try:
+        raw = call_claude(prompt, max_tokens=CLAUDE_RELATIONSHIP_MAX_TOKENS)
+    except Exception as exc:
+        logger.error("Relationship salvage re-call failed: %s", exc)
+        return []
+    salvaged: list[dict] = []
+    for blob in re.findall(r"\{[^{}]*\}", raw):
+        try:
+            obj = json.loads(blob)
+        except json.JSONDecodeError:
+            continue
+        if {"source", "target", "relationship", "strength"} <= obj.keys():
+            salvaged.append(obj)
+    logger.info("Salvaged %d relationship edges from partial response", len(salvaged))
+    return salvaged
 
 
 def _load_relationships_or_empty() -> pd.DataFrame:

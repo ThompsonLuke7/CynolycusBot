@@ -3,6 +3,7 @@
 import base64
 import json
 import webbrowser
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote
 
 import requests
@@ -14,7 +15,7 @@ REDIRECT_URI = "https://127.0.0.1"   # must exactly match your app's Callback UR
 
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 AUTH_URL_BASE = "https://api.schwabapi.com/v1/oauth/authorize"
-TOKENS_FILE = "schwab_tokens.json"   # where we'll save the tokens
+TOKENS_FILE = Path(__file__).resolve().with_name("schwab_tokens.json")   # where we'll save the tokens
 
 
 def build_auth_url():

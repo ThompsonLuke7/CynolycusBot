@@ -494,10 +494,18 @@ def write_outputs(audit: Path, out_dir: Path, worst_n: int) -> None:
     trades.to_csv(out_dir / "trade_forensics_all.csv", index=False)
     fresh = trades[~trades["restored"].fillna(False)].copy()
     fresh.to_csv(out_dir / "trade_forensics_fresh.csv", index=False)
+    restored = trades[trades["restored"].fillna(False)].copy()
+    restored.to_csv(out_dir / "trade_forensics_restored.csv", index=False)
 
     closed_or_marked = fresh.dropna(subset=["option_pnl_dollars"]).copy()
     worst = closed_or_marked.sort_values("option_pnl_dollars").head(worst_n)
     worst.to_csv(out_dir / "worst_fresh_trades.csv", index=False)
+    top_restored = (
+        restored.dropna(subset=["option_pnl_dollars"])
+        .sort_values("option_pnl_dollars", ascending=False)
+        .head(worst_n)
+    )
+    top_restored.to_csv(out_dir / "top_restored_winners.csv", index=False)
     chart_rows = []
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
@@ -564,6 +572,8 @@ def write_outputs(audit: Path, out_dir: Path, worst_n: int) -> None:
         "diagnosis",
     ]
     print(worst[cols].round(3).to_string(index=False))
+    print("\ntop restored winners")
+    print(top_restored[cols].round(3).to_string(index=False))
     print(f"\nwrote {out_dir}")
 
 

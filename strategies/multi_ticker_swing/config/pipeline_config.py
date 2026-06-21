@@ -311,6 +311,7 @@ BACKTEST_CONFIG: dict = {
     "tp_atr_mult":          2.5,
     "sl_atr_mult":          4.0,     # 4.0×ATR stop — wider stop improves WR and trail exit rate
     "entry_bars_max":       3,       # max 5m bars after signal before giving up
+    "max_entry_delay_days": 4,       # skip signal if no exec bar within N days (stale/missing exec data)
     "prob_threshold_long":  0.70,    # directional-conditional P(long|dir) threshold
     "prob_threshold_short": 0.70,
     "arm_pct":              0.025,   # underlying move to arm trailing exit (2.5%)
@@ -321,4 +322,25 @@ BACKTEST_CONFIG: dict = {
     "position_size_pct":    0.02,    # 2 % of equity per trade
     "initial_capital":      100_000.0,
     "commission_pct":       0.001,   # 0.10 % round-trip
+}
+
+# ---------------------------------------------------------------------------
+# Order policy v2 — for the OOF long/short rankers (2026-06).
+# v1 (BACKTEST_CONFIG above) is kept for reference. v2 is PER-SIDE: the grids showed
+# longs want a wide TP / tight stop (let winners run) while shorts want a tight TP /
+# tight stop (bank the sharp drop fast, ~2x the drawdown). The SPY macro filter is OFF
+# here on purpose — this is a new model, so we run it unfiltered live first and learn
+# which filters it actually needs. tp/sl resolve per-direction via *_long / *_short.
+# ---------------------------------------------------------------------------
+BACKTEST_CONFIG_V2: dict = {
+    **BACKTEST_CONFIG,
+    "tp_atr_mult_long":   3.5,
+    "sl_atr_mult_long":   2.25,   # midpoint of the 2.0–2.5 sweet spot
+    "tp_atr_mult_short":  2.5,
+    "sl_atr_mult_short":  2.0,
+    # back-compat scalars (used if a side-specific key is absent)
+    "tp_atr_mult":        3.5,
+    "sl_atr_mult":        2.25,
+    "macro_filter":       False,  # SPY spy_min veto disabled for the ranker policy
+    "spy_min":            0.0,
 }

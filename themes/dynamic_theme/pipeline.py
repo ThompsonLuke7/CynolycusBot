@@ -25,6 +25,13 @@ from typing import Iterable
 
 import pandas as pd
 
+# Load .env so ANTHROPIC_API_KEY and other secrets are available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from themes.dynamic_theme.config import ensure_outputs
 from themes.dynamic_theme.stages.step01_build_documents import build_ticker_documents
 from themes.dynamic_theme.stages.step02_embed import generate_embeddings
@@ -79,7 +86,7 @@ def daily_run(
     logger.info("=== Dynamic Theme Daily Run [%s] ===", as_of.date())
 
     docs = build_ticker_documents(tickers, as_of=as_of)
-    embeddings = generate_embeddings(docs)
+    embeddings = generate_embeddings(docs, as_of=as_of)
     memberships = compute_memberships(embeddings_df=embeddings, as_of=as_of)
     build_meta_features(memberships_df=memberships, as_of=as_of)
 
@@ -98,9 +105,9 @@ def weekly_run(
 
     logger.info("=== Dynamic Theme Weekly Run [%s] — %d tickers ===", as_of.date(), len(tickers))
 
-    # Step 1 + 2: documents + embeddings
+    # Step 1 + 2: documents + embeddings (pass as_of for price co-movement lookback)
     docs = build_ticker_documents(tickers, as_of=as_of)
-    embeddings = generate_embeddings(docs)
+    embeddings = generate_embeddings(docs, as_of=as_of)
 
     # Step 3: cluster
     clusters = cluster_tickers(embeddings_df=embeddings)

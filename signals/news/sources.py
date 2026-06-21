@@ -968,19 +968,30 @@ def fetch_fmp_earnings_transcripts(
 # CBOE delayed options-chain snapshot (per-ticker, no auth)
 # ---------------------------------------------------------------------------
 
+def _cboe_market_snapshot_day(payload: dict) -> pd.Timestamp:
+    data = payload.get("data") or {}
+    raw = data.get("last_trade_time") or payload.get("timestamp")
+    ts = pd.to_datetime(raw, utc=True, errors="coerce")
+    if pd.isna(ts):
+        return pd.Timestamp.utcnow().normalize()
+    return ts.normalize()
+
+
 def _cboe_options_aggregate(payload: dict, *, sigma_threshold: float = 3.0) -> dict:
     """Reduce a CBOE options chain payload into a per-ticker daily summary
     plus a list of unusual-flow strikes (volume > sigma * sqrt(open_interest))."""
     data = payload.get("data") or {}
     options = data.get("options") or []
     current_price = float(data.get("current_price") or 0)
-    snapshot_day = pd.Timestamp.utcnow().normalize()
+    snapshot_day = _cboe_market_snapshot_day(payload)
     summary: dict = {
         "current_price": current_price,
         "stock_volume": int(data.get("volume") or 0),
         "iv30": float(data.get("iv30") or 0),
         "iv30_change_percent": float(data.get("iv30_change_percent") or 0),
         "snapshot_timestamp": payload.get("timestamp"),
+        "market_last_trade_time": data.get("last_trade_time"),
+        "snapshot_date": snapshot_day,
     }
     call_vol = put_vol = 0
     call_oi = put_oi = 0
@@ -1068,7 +1079,6 @@ def fetch_cboe_options_snapshot(
     strike_rows: list[dict] = []
     record_rows: list[dict] = []
     last_request = 0.0
-    today = pd.Timestamp.utcnow().normalize()
     for ticker in _clean_tickers(tickers):
         elapsed = time.monotonic() - last_request
         if elapsed < min_interval_s:
@@ -1094,14 +1104,15 @@ def fetch_cboe_options_snapshot(
         except Exception:
             continue
         summary["ticker"] = ticker
-        summary["snapshot_date"] = today
+        snapshot_date = summary.get("snapshot_date") or pd.Timestamp.utcnow().normalize()
         summary_rows.append(summary)
         for strike in summary.get("unusual_strikes", []):
             strike_rows.append(
                 {
                     "ticker": ticker,
-                    "snapshot_date": today,
+                    "snapshot_date": snapshot_date,
                     "snapshot_timestamp": summary.get("snapshot_timestamp"),
+                    "market_last_trade_time": summary.get("market_last_trade_time"),
                     "current_price": summary.get("current_price"),
                     **strike,
                 }
@@ -1121,12 +1132,12 @@ def fetch_cboe_options_snapshot(
             record_rows.append(
                 {
                     "ticker": ticker,
-                    "timestamp": today,
+                    "timestamp": snapshot_date,
                     "headline": headline,
                     "summary": json.dumps(summary["unusual_strikes"][:10]),
                     "url": f"https://www.cboe.com/delayed_quote/{ticker}/quote_table",
                     "source": "cboe_options_flow",
-                    "source_id": f"{ticker}-{today.strftime('%Y%m%d')}",
+                    "source_id": f"{ticker}-{pd.Timestamp(snapshot_date).strftime('%Y%m%d')}",
                 }
             )
     summary_df = pd.DataFrame(summary_rows)

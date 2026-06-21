@@ -56,6 +56,16 @@ def export_training_bundle(
         "label_columns":   [c for c in df.columns if c.startswith("fwd_") or c.startswith("expansion_") or c == "trend_persistence"],
         "target_column":   TRAINING_MATRIX_CONFIG["target_column"],
         "target_kind":     TRAINING_MATRIX_CONFIG["target_kind"],
+        # Competition harness config (colab_competition.py): regression on the
+        # continuous expansion score + classifier/ranker on a binary strong-setup flag.
+        "regression_target_column": TRAINING_MATRIX_CONFIG["target_column"],
+        "relevance_column": "is_strong_setup",
+        "strong_setup_source_column": "fwd_max_return",
+        "strong_setup_threshold": 0.20,
+        "train_frac": 0.6,
+        "val_frac": 0.2,
+        "rank_group": "timestamp",
+        "top_k": 20,
         "n_rows":          int(len(df)),
         "n_tickers":       int(df.index.get_level_values("ticker").nunique()) if "ticker" in df.index.names else None,
         "date_min":        str(df.index.get_level_values(0).min()),
@@ -94,10 +104,17 @@ def export_training_bundle(
     else:
         notebook_path = None
 
+    # Shared competition harness the trainer imports (`from colab_competition import ...`).
+    repo_root = Path(__file__).resolve().parents[3]
+    harness_src = repo_root / "strategies" / "model_training" / "colab_competition.py"
+    harness_dst = out_dir / harness_src.name
+    shutil.copy2(harness_src, harness_dst)
+
     with tarfile.open(bundle_path, "w:gz") as tar:
         tar.add(target_path, arcname=target_path.name)
         tar.add(feature_manifest_path, arcname=feature_manifest_path.name)
         tar.add(label_manifest_path, arcname=label_manifest_path.name)
+        tar.add(harness_dst, arcname=harness_dst.name)
         if notebook_path is not None:
             tar.add(notebook_path, arcname=notebook_path.name)
 

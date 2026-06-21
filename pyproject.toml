@@ -1,11 +1,13 @@
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = [
+    "core/shared_universe/tests",
     "signals/catalysts/tests",
     "signals/events/tests",
     "signals/events/forward_guidance/tests",
     "signals/meta_context/tests",
     "strategies/momentum_expansion/tests",
+    "strategies/dealer_positioning/tests",
     "strategies/multi_ticker_swing/tests",
     "signals/news/tests",
     "signals/social_attention/tests",

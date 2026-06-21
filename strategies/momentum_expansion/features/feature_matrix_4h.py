@@ -545,6 +545,9 @@ FEATURE_COLUMNS_4H: list[str] = [
     "is_morning_4h", "dow", "month", "quarter", "week_of_year", "day_of_month",
     "dow_sin", "dow_cos", "month_sin", "month_cos", "week_sin", "week_cos",
     "is_month_start", "is_month_end",
+    # Earnings proximity (point-in-time from the earnings calendar; known at decision time)
+    "days_to_earnings", "days_since_earnings",
+    "is_pre_earnings_3d", "is_post_earnings_3d", "earnings_in_fwd_window",
     # Identity / tradability context
     "sector_id", "market_cap_bucket", "asset_type", "is_etf", "low_price_flag",
     # Cross-sectional ranks added after all tickers are combined
@@ -598,6 +601,40 @@ def _load_context_4h() -> dict[str, pd.DataFrame]:
         except Exception as exc:
             logger.warning("[%s] load_4h failed: %s", sym, exc)
     return ctx
+
+
+# Momentum's expansion label looks ~25x4H bars ≈ 10 trading days forward.
+_EARNINGS_FWD_WINDOW_DAYS = 10
+
+
+def _add_earnings_features_4h(combined: pd.DataFrame) -> pd.DataFrame:
+    """Join point-in-time earnings-proximity features onto the (timestamp, ticker) matrix.
+
+    Earnings act as a binary wall on momentum (kill / continue / reset), so the
+    model gets days_to/since_earnings, pre/post flags, and an earnings_in_fwd_window
+    flag marking bars whose forward label straddles a report (event-driven, not
+    momentum-driven). No-op (NaN columns) if the calendar isn't fetched yet.
+    """
+    try:
+        from signals.events.earnings_calendar import add_earnings_features
+    except Exception as exc:  # pragma: no cover - optional dependency
+        logger.warning("earnings_calendar unavailable (%s) — skipping earnings features", exc)
+        return combined
+
+    idx_names = list(combined.index.names)
+    flat = combined.reset_index()
+    ts_col = idx_names[0] if idx_names and idx_names[0] in flat.columns else "timestamp"
+    flat["__date"] = pd.to_datetime(flat[ts_col], utc=True, errors="coerce").dt.tz_convert(None).dt.normalize()
+    flat = add_earnings_features(
+        flat, date_col="__date", ticker_col="ticker",
+        fwd_window_days=_EARNINGS_FWD_WINDOW_DAYS,
+    )
+    flat = flat.drop(columns="__date")
+    out = flat.set_index(idx_names).sort_index()
+    added = ["days_to_earnings", "days_since_earnings", "is_pre_earnings_3d", "is_post_earnings_3d", "earnings_in_fwd_window"]
+    cov = out["days_to_earnings"].notna().mean() if "days_to_earnings" in out.columns else 0.0
+    logger.info("Added earnings features %s (days_to_earnings coverage %.1f%%)", added, 100 * cov)
+    return out
 
 
 def build_all_features_4h(
@@ -685,6 +722,7 @@ def build_all_features_4h(
     ts_col = "timestamp" if "timestamp" in combined.columns else combined.columns[0]
     combined = combined.set_index([ts_col, "ticker"]).sort_index()
     combined = _add_cross_sectional_features(combined)
+    combined = _add_earnings_features_4h(combined)
     combined.to_parquet(out_path)
     logger.info("Saved combined 4H features (%d rows) -> %s", len(combined), out_path)
     return combined

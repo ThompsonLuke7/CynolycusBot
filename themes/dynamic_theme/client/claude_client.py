@@ -47,12 +47,15 @@ def call_claude(
     last_exc: Exception | None = None
     for attempt in range(retries):
         try:
-            response = client.messages.create(
+            # Stream so large max_tokens (relationship graph) don't trip the
+            # SDK's "streaming required for long requests" guard. Streaming is
+            # equally fine for the small labeling calls.
+            with client.messages.stream(
                 model=model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
-            )
-            return response.content[0].text
+            ) as stream:
+                return stream.get_final_message().content[0].text
         except Exception as exc:
             last_exc = exc
             wait = backoff_base ** attempt

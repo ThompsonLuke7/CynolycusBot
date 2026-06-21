@@ -54,6 +54,7 @@ from strategies.spy_intraday.Features.feature_matrix_regime import (
 )
 from strategies.spy_intraday.Features.label_generations import add_trend_phase_labels
 from strategies.spy_intraday.Features.multi_timeframe_features import ensure_time_index, resample_ohlcv
+from strategies.spy_intraday.Models.competition_ranker import CompetitionSwingRanker
 
 
 _EMITTED_RUNTIME_WARNINGS: set[str] = set()
@@ -1768,6 +1769,7 @@ class LiveIndependentMetaXGBAgent:
         profit_protect_giveback_atr_short: float = 1.0,
         entry_prob_source: str = "meta",
         swing_setup_single_model_dir: str | Path | None = None,
+        competition_swing_model_dir: str | Path = "Data/models/ga_xgboost/10min/competition_20260619",
         swing_setup_probs_frame: pd.DataFrame | None = None,
         regime_probability_calibrator: RegimeProbabilityCalibrator | None = None,
     ) -> None:
@@ -1829,17 +1831,54 @@ class LiveIndependentMetaXGBAgent:
         self._last_processed_ts: pd.Timestamp | None = None
         self._entry_prob_source = str(entry_prob_source or "meta").strip().lower()
         self._swing_setup_single: _LiveMulticlassXGBArtifact | None = None
+        self._competition_swing: CompetitionSwingRanker | None = None
         self._swing_setup_probs_frame = self._normalize_swing_setup_probs_frame(swing_setup_probs_frame)
         self._swing_setup_missing_warned = False
         self._swing_setup_annotated_cache: pd.DataFrame | None = None
         self._swing_setup_annotated_cache_key: tuple[int, object, object, int] | None = None
         self._regime_probability_calibrator = regime_probability_calibrator
-        if self._entry_prob_source == "swing_support_single":
+        if self._entry_prob_source in {"swing_support_single", "competition_long_active_short"}:
             if swing_setup_single_model_dir is None:
-                raise ValueError("swing_setup_single_model_dir is required when entry_prob_source='swing_support_single'")
+                raise ValueError(
+                    "swing_setup_single_model_dir is required for the active swing-support source"
+                )
             self._swing_setup_single = _LiveMulticlassXGBArtifact(Path(swing_setup_single_model_dir))
-        elif self._entry_prob_source != "meta":
-            raise ValueError(f"Unsupported entry_prob_source={entry_prob_source!r}; expected 'meta' or 'swing_support_single'")
+        if self._entry_prob_source in {"competition_ranker", "competition_long_active_short"}:
+            self._competition_swing = CompetitionSwingRanker(competition_swing_model_dir)
+            if entry_threshold_override is None and entry_long_threshold_override is None:
+                self._entry_thresholds["enter_long"] = (
+                    0.85 if self._entry_prob_source == "competition_long_active_short" else 0.872
+                )
+            if (
+                self._entry_prob_source == "competition_ranker"
+                and entry_threshold_override is None
+                and entry_short_threshold_override is None
+            ):
+                self._entry_thresholds["enter_short"] = 0.872
+            elif (
+                self._entry_prob_source == "competition_long_active_short"
+                and entry_threshold_override is None
+                and entry_short_threshold_override is None
+            ):
+                self._entry_thresholds["enter_short"] = 0.50
+        if self._entry_prob_source not in {
+            "meta",
+            "swing_support_single",
+            "competition_ranker",
+            "competition_long_active_short",
+        }:
+            raise ValueError(
+                f"Unsupported entry_prob_source={entry_prob_source!r}; "
+                "expected 'meta', 'swing_support_single', 'competition_ranker', "
+                "or 'competition_long_active_short'"
+            )
+
+    def _uses_direct_setup_probs(self) -> bool:
+        return self._entry_prob_source in {
+            "swing_support_single",
+            "competition_ranker",
+            "competition_long_active_short",
+        }
 
     def _normalize_swing_setup_probs_frame(self, frame: pd.DataFrame | None) -> pd.DataFrame | None:
         if frame is None or frame.empty:
@@ -1971,10 +2010,49 @@ class LiveIndependentMetaXGBAgent:
         if frame_probs is not None:
             saved_required = ["p_swing_setup_short", "p_swing_setup_long"]
             saved_complete_mask = frame_probs[saved_required].notna().all(axis=1)
-        if frame_probs is not None and bool(saved_complete_mask.all()):
+        if (
+            self._entry_prob_source == "swing_support_single"
+            and frame_probs is not None
+            and bool(saved_complete_mask.all())
+        ):
             self._swing_setup_annotated_cache = frame_probs
             self._swing_setup_annotated_cache_key = cache_key
             return frame_probs
+
+        if self._entry_prob_source in {"competition_ranker", "competition_long_active_short"}:
+            if self._competition_swing is None:
+                return frame_probs if frame_probs is not None else base_frame
+            setup_frame = self._build_setup_feature_frame(df_1m=df_1m, base_frame=base_frame)
+            probs = self._competition_swing.predict_frame(setup_frame)
+            if self._entry_prob_source == "competition_long_active_short":
+                if frame_probs is not None and saved_complete_mask is not None and bool(saved_complete_mask.all()):
+                    active_probs = frame_probs
+                elif self._swing_setup_single is not None:
+                    active_probs = self._swing_setup_single.predict_frame(setup_frame)
+                else:
+                    active_probs = None
+                out = base_frame.copy()
+                out["p_swing_setup_long"] = probs["long"].reindex(out.index)
+                out["p_swing_setup_short"] = (
+                    active_probs["p_swing_setup_short"].reindex(out.index)
+                    if active_probs is not None and "p_swing_setup_short" in active_probs.columns
+                    else active_probs["short"].reindex(out.index)
+                    if active_probs is not None and "short" in active_probs.columns
+                    else np.nan
+                )
+                out["p_swing_setup_neutral"] = 1.0 - out[
+                    ["p_swing_setup_long", "p_swing_setup_short"]
+                ].max(axis=1)
+                self._swing_setup_annotated_cache = out
+                self._swing_setup_annotated_cache_key = cache_key
+                return out
+            out = base_frame.copy()
+            out["p_swing_setup_short"] = probs["short"].reindex(out.index)
+            out["p_swing_setup_neutral"] = probs["neutral"].reindex(out.index)
+            out["p_swing_setup_long"] = probs["long"].reindex(out.index)
+            self._swing_setup_annotated_cache = out
+            self._swing_setup_annotated_cache_key = cache_key
+            return out
 
         if self._swing_setup_single is None:
             return frame_probs if frame_probs is not None else base_frame
@@ -2003,7 +2081,7 @@ class LiveIndependentMetaXGBAgent:
 
     def _build_independent_base_frame(self, *, df_1m: pd.DataFrame) -> pd.DataFrame:
         base_frame = self._base_agent._build_base_frame(df_1m=df_1m)
-        if self._entry_prob_source == "swing_support_single":
+        if self._uses_direct_setup_probs():
             base_frame = self._annotate_swing_setup_probs(df_1m=df_1m, base_frame=base_frame)
         if self._regime_probability_calibrator is not None and not base_frame.empty:
             try:
@@ -2013,7 +2091,7 @@ class LiveIndependentMetaXGBAgent:
         return base_frame
 
     def _row_with_entries(self, base_frame: pd.DataFrame, row: pd.Series) -> tuple[pd.Series, float, float]:
-        if self._entry_prob_source == "swing_support_single":
+        if self._uses_direct_setup_probs():
             p_enter_long = float(row.get("p_swing_setup_long", np.nan))
             p_enter_short = float(row.get("p_swing_setup_short", np.nan))
         else:
@@ -2026,7 +2104,7 @@ class LiveIndependentMetaXGBAgent:
 
     def _score_row(self, base_frame: pd.DataFrame, row: pd.Series) -> tuple[pd.Series, dict[str, object]]:
         work_row, p_enter_long, p_enter_short = self._row_with_entries(base_frame, row)
-        if self._entry_prob_source == "swing_support_single":
+        if self._uses_direct_setup_probs():
             p_exit_long = float("nan")
             p_exit_short = float("nan")
         else:
@@ -2198,8 +2276,12 @@ class LiveIndependentMetaXGBAgent:
             self._last_prob_sources = self._base_agent._extract_last_prob_sources(base_frame, row.name)
             if self._last_prob_sources is None:
                 self._last_prob_sources = {}
-            self._last_prob_sources["p_enter_long_source"] = self._entry_prob_source
-            self._last_prob_sources["p_enter_short_source"] = self._entry_prob_source
+            if self._entry_prob_source == "competition_long_active_short":
+                self._last_prob_sources["p_enter_long_source"] = "competition_ranker"
+                self._last_prob_sources["p_enter_short_source"] = "swing_support_single"
+            else:
+                self._last_prob_sources["p_enter_long_source"] = self._entry_prob_source
+                self._last_prob_sources["p_enter_short_source"] = self._entry_prob_source
             action = self._advance_independent_state(work_row=work_row, probs=probs)
             self._last_processed_ts = pd.Timestamp(row.name)
             out.append(

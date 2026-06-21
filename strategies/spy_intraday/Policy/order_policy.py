@@ -96,6 +96,8 @@ class OptionOrderPolicyConfig:
     meta_intrabar_execution_enabled: bool = True
     meta_intrabar_breakout_entry_only: bool = False
     meta_intrabar_entry_policy: str = "legacy_breakout_touch"
+    meta_intrabar_long_trigger_mode: str = "inherit"
+    meta_intrabar_short_trigger_mode: str = "inherit"
     meta_intrabar_setup_max_bars: int = 3
     meta_intrabar_setup_bar_minutes: int = 10
     meta_intrabar_max_confirmation_age_minutes: int = 30
@@ -1454,6 +1456,15 @@ class OptionOrderPolicy:
     def _intrabar_entry_policy_name(self) -> str:
         return str(self.cfg.meta_intrabar_entry_policy or "legacy_breakout_touch").strip().lower()
 
+    def _intrabar_trigger_mode(self, *, side: str) -> str:
+        configured = (
+            self.cfg.meta_intrabar_long_trigger_mode
+            if str(side).strip().lower() == "long"
+            else self.cfg.meta_intrabar_short_trigger_mode
+        )
+        mode = str(configured or "inherit").strip().lower()
+        return self._intrabar_entry_policy_name() if mode in {"", "inherit"} else mode
+
     def _phase4_intrabar_entry_enabled(self) -> bool:
         return self._intrabar_entry_policy_name() in {
             PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1,
@@ -1682,6 +1693,9 @@ class OptionOrderPolicy:
         if not math.isfinite(ref):
             self._clear_intrabar_entry_intent(side=side, reason="intrabar_setup_missing_ref")
             return False
+
+        if self._intrabar_trigger_mode(side=side) == "next_open":
+            return True
 
         if self._phase4_intrabar_entry_enabled():
             if side == "long":
@@ -4083,17 +4097,26 @@ class OptionOrderPolicy:
                 side_bar["p_enter_long"] = float("nan")
             if not short_triggered and self._short_contracts <= 0:
                 side_bar["p_enter_short"] = float("nan")
-        result = self._on_independent_meta_decision(
-            closed_bar=side_bar,
-            logger=logger,
-            close=close,
-            atr=atr,
-            local_ts=local_ts,
-            prev_close=open_,
-            enforce_trend_gate=True,
-            allow_new_entries=allow_new_entries,
-            allow_exits=allow_exits,
-        )
+        try:
+            result = self._on_independent_meta_decision(
+                closed_bar=side_bar,
+                logger=logger,
+                close=close,
+                atr=atr,
+                local_ts=local_ts,
+                prev_close=open_,
+                enforce_trend_gate=True,
+                allow_new_entries=allow_new_entries,
+                allow_exits=allow_exits,
+            )
+        except Exception as exc:
+            logger(f"[order_policy] intrabar order action failed; will retry on a later bar: {exc}")
+            return {
+                "event": "error",
+                "mode": "intrabar_meta",
+                "reason": "order_action_failed",
+                "error": str(exc),
+            }
         if isinstance(result, dict):
             result.setdefault("mode", "intrabar_meta")
         return result

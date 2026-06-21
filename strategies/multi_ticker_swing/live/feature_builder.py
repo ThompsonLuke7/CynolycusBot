@@ -501,7 +501,8 @@ class LiveSwingFeatureBuilder:
         df.columns = [c.lower() for c in df.columns]
         return df
 
-    def _compute_latest(self, ticker: str) -> pd.Series | None:
+    def _feature_frame(self, ticker: str) -> pd.DataFrame | None:
+        """Full per-bar feature frame (OHLCV + atr_14 + base features), indexed by timestamp."""
         df_ticker = self._to_df(ticker)
         if df_ticker is None:
             return None
@@ -530,14 +531,41 @@ class LiveSwingFeatureBuilder:
         except Exception as exc:
             logger.warning("[%s] feature build failed: %s", ticker, exc)
             return None
+        return feat_df if feat_df is not None and not feat_df.empty else None
 
-        if feat_df is None or feat_df.empty:
+    def _compute_latest(self, ticker: str) -> pd.Series | None:
+        feat_df = self._feature_frame(ticker)
+        if feat_df is None:
             return None
-
         last = feat_df.iloc[-1]
         # Keep only model feature columns that are present
         avail = [c for c in FEATURE_COLUMNS if c in last.index]
         return last[avail]
+
+    def compute_latest_full(self, ticker: str) -> pd.Series | None:
+        """Latest row with the FULL 192-feature ranker set: base features + live bar-location
+        (validated identical to the offline parquet) + as-of daily context. Used by the
+        RankerSwingScanner so the live feature set has no gap vs training."""
+        from strategies.multi_ticker_swing.live.context_features import (
+            compute_bar_location, DailyContextLookup,
+        )
+        if not hasattr(self, "_daily_ctx"):
+            from strategies.multi_ticker_swing.config.pipeline_config import MODULE_ROOT
+            self._daily_ctx = DailyContextLookup(
+                MODULE_ROOT / "data" / "training_export" / "daily_context_features.parquet"
+            )
+        frame = self._feature_frame(ticker)
+        if frame is None:
+            return None
+        out = frame.iloc[-1].copy()
+        try:
+            for k, v in compute_bar_location(frame, self._feature_frame("SPY")).items():
+                out[k] = v
+        except Exception as exc:
+            logger.warning("[%s] bar-location build failed: %s", ticker, exc)
+        for k, v in self._daily_ctx.get(ticker, frame.index[-1]).items():
+            out[k] = v
+        return out
 
     def get_atr(self, ticker: str) -> float:
         """Return the ATR value at the last available bar (for SL computation)."""

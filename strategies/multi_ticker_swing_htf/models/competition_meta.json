@@ -1,0 +1,50 @@
+{
+  "created_at_utc": "2026-06-15T01:03:39.636642+00:00",
+  "task_name": "multi_ticker_swing_htf_4h",
+  "target_column": "is_strong_swing",
+  "families": [
+    "xgb_classifier",
+    "xgb_ranker",
+    "lgbm_classifier",
+    "lgbm_ranker"
+  ],
+  "seeds": [
+    42,
+    43,
+    44,
+    45,
+    46
+  ],
+  "positive_label": 1,
+  "rank_group": "timestamp",
+  "top_k": 10,
+  "best": {
+    "family": "lgbm_classifier",
+    "seed": 46,
+    "positive_label": 1,
+    "n_features": 108,
+    "n_train": 680266,
+    "n_val": 226755,
+    "n_test": 226756,
+    "best_iteration": 67,
+    "val_accuracy": 0.7885691605477277,
+    "val_balanced_accuracy": 0.5222672287123968,
+    "val_f1_macro": 0.4930002894251151,
+    "val_positive_precision": 0.5258381181700315,
+    "val_positive_recall": 0.05887354319605159,
+    "val_positive_f1": 0.10589134853881875,
+    "val_log_loss": 0.4439244354787689,
+    "test_accuracy": 0.7512789077246027,
+    "test_balanced_accuracy": 0.5153053713626242,
+    "test_f1_macro": 0.46646766474917695,
+    "test_positive_precision": 0.5679281901989326,
+    "test_positive_recall": 0.0410997384083288,
+    "test_positive_f1": 0.07665231414024001,
+    "test_log_loss": 0.5131187996590585,
+    "test_ndcg_at_10": 0.6719213379070211,
+    "test_precision_at_10": 0.5334759053321928,
+    "test_positives_at_10": 4.793413173652695,
+    "test_spearman": 0.004616892874162421
+  },
+  "errors": []
+}

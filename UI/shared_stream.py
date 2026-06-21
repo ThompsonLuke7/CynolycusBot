@@ -39,6 +39,7 @@ class SharedBarStream:
         self._lock = threading.Lock()
         self._queues: list[queue_mod.Queue] = []
         self._queue_labels: dict[int, str] = {}
+        self._queue_symbols: dict[int, set[str] | None] = {}
         self._started = False
         self._streamer = None
         self._symbols: list[str] = []
@@ -59,13 +60,23 @@ class SharedBarStream:
         with self._lock:
             return self._started
 
-    def register(self, q: queue_mod.Queue, *, name: str | None = None) -> None:
+    def register(
+        self,
+        q: queue_mod.Queue,
+        *,
+        name: str | None = None,
+        symbols: Iterable[str] | None = None,
+    ) -> None:
         """Subscribe a queue to receive every incoming bar dict."""
+        symbol_filter = None
+        if symbols is not None:
+            symbol_filter = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
         with self._lock:
             if q not in self._queues:
                 self._queues.append(q)
             if name:
                 self._queue_labels[id(q)] = name
+            self._queue_symbols[id(q)] = symbol_filter
         logger.debug("SharedBarStream: registered queue %s (%d total)", name or "?", len(self._queues))
 
     def unregister(self, q: queue_mod.Queue) -> None:
@@ -73,6 +84,7 @@ class SharedBarStream:
         with self._lock:
             self._queues = [x for x in self._queues if x is not q]
             self._queue_labels.pop(id(q), None)
+            self._queue_symbols.pop(id(q), None)
         logger.debug("SharedBarStream: unregistered queue (%d total)", len(self._queues))
 
     def start(self, symbols: Iterable[str], env_file: str = ".env") -> None:
@@ -115,6 +127,12 @@ class SharedBarStream:
                 "started": self._started,
                 "registered_queues": len(self._queues),
                 "queue_labels": list(self._queue_labels.values()),
+                "queue_symbols": {
+                    self._queue_labels.get(queue_id, str(queue_id)): (
+                        sorted(symbols) if symbols is not None else None
+                    )
+                    for queue_id, symbols in self._queue_symbols.items()
+                },
                 "symbols": list(self._symbols),
                 "env_file": self._env_file,
                 "last_bar_symbol": self._last_bar_symbol,
@@ -136,13 +154,29 @@ class SharedBarStream:
             self._last_bar_monotonic = now
             self._last_bar_symbol = str(bar.get("symbol") or "")
             self._last_bar_ts = bar.get("timestamp")
-            queues = list(self._queues)
-        for q in queues:
+            queues = [
+                (q, self._queue_symbols.get(id(q)))
+                for q in self._queues
+            ]
+        symbol = str(bar.get("symbol") or "").strip().upper()
+        for q, symbol_filter in queues:
+            if symbol_filter is not None and symbol not in symbol_filter:
+                continue
             try:
                 q.put_nowait(bar)
                 with self._lock:
                     self._delivered_count += 1
             except queue_mod.Full:
+                replaced = False
+                try:
+                    q.get_nowait()
+                    q.put_nowait(bar)
+                    replaced = True
+                except Exception:
+                    replaced = False
+                if replaced:
+                    with self._lock:
+                        self._delivered_count += 1
                 self._record_drop(q)
 
     @staticmethod

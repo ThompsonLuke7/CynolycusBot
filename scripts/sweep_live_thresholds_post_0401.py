@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from strategies.spy_intraday.Policy.replay_option_proxy import ReplayOptionPriceProxy
+from strategies.spy_intraday.Policy.regime_filter import add_sticky_trend_regime
 
 
 DEFAULT_RUN_ROOT = Path("Data/inference/live_runs")
@@ -30,16 +31,21 @@ class PendingSetup:
     side: str
     ref: float
     setup_ts: pd.Timestamp
+    setup_spot: float
     start_ts: pd.Timestamp
     expires_at: pd.Timestamp
     prob: float
     threshold: float
     entry_kind: str
+    confirmation_count: int = 0
 
 
 @dataclass
 class Position:
     side: str
+    setup_ts: pd.Timestamp
+    setup_spot: float
+    setup_ref: float
     entry_ts: pd.Timestamp
     entry_spot: float
     entry_premium: float
@@ -183,6 +189,16 @@ def _load_decisions_from_signal_frame(
     out["p_enter_long"] = _first_finite_column(frame, long_candidates)
     out["p_enter_short"] = _first_finite_column(frame, short_candidates)
     out["p_neutral"] = _first_finite_column(frame, neutral_candidates)
+    for col in (
+        "above_vwap_flag",
+        "vix_trend_ema_8_21",
+        "support_proximity",
+        "inside_support_zone",
+        "inside_resistance_zone",
+        "ema_20_50_ratio",
+    ):
+        if col in frame.columns:
+            out[col] = pd.to_numeric(frame[col], errors="coerce")
     if "atr" in frame.columns:
         out["atr"] = pd.to_numeric(frame["atr"], errors="coerce")
     else:
@@ -195,6 +211,11 @@ def _load_decisions_from_signal_frame(
             axis=1,
         ).max(axis=1)
         out["atr"] = tr.rolling(14, min_periods=1).mean()
+    regime_frame = out.set_index("timestamp")[["open", "high", "low", "close"]].copy()
+    regime_frame["ema_fast"] = regime_frame["close"].ewm(span=8, adjust=False).mean()
+    regime_frame["ema_slow"] = regime_frame["close"].ewm(span=21, adjust=False).mean()
+    regime_frame = add_sticky_trend_regime(regime_frame)
+    out["trend_regime"] = regime_frame["trend_regime"].reindex(out["timestamp"]).to_numpy()
     start_ts = _to_et(start)
     out = out[out["timestamp"] >= start_ts].copy()
     out = out.dropna(subset=["open", "high", "low", "close", "p_enter_long", "p_enter_short"])
@@ -263,6 +284,12 @@ def _update_setups(
     candidate_short_enabled: bool,
     candidate_start_hhmm: str,
     candidate_end_hhmm: str,
+    long_entry_end_hhmm: str,
+    short_entry_end_hhmm: str,
+    long_regime_filter: str,
+    short_regime_filter: str,
+    long_context_filter: str,
+    short_context_filter: str,
     pending: dict[str, PendingSetup | None],
     above: dict[str, bool],
     peak: dict[str, float],
@@ -275,6 +302,13 @@ def _update_setups(
     short_margin = p_short - short_thr if short_above else float("-inf")
     long_valid = long_above and not (short_above and short_margin > long_margin)
     short_valid = short_above and not (long_above and long_margin > short_margin)
+    long_valid = long_valid and _time_in_window(row["timestamp"], "09:30", long_entry_end_hhmm)
+    short_valid = short_valid and _time_in_window(row["timestamp"], "09:30", short_entry_end_hhmm)
+    regime = str(row.get("trend_regime") or "neutral").strip().lower()
+    long_valid = long_valid and _regime_allowed(regime, long_regime_filter)
+    short_valid = short_valid and _regime_allowed(regime, short_regime_filter)
+    long_valid = long_valid and _context_allowed(row, long_context_filter)
+    short_valid = short_valid and _context_allowed(row, short_context_filter)
 
     signal_high = _as_float(row.get("high"))
     signal_low = _as_float(row.get("low"))
@@ -405,6 +439,7 @@ def _update_setups(
                 side=side,
                 ref=float(ref),
                 setup_ts=setup_ts,
+                setup_spot=float(signal_close),
                 start_ts=setup_ts + pd.Timedelta(minutes=10),
                 expires_at=setup_ts + pd.Timedelta(minutes=10 * (max_bars + 1)),
                 prob=float(prob),
@@ -415,11 +450,69 @@ def _update_setups(
         above[side] = bool(valid and prob >= threshold)
 
 
-def _triggered(setup: PendingSetup, row: pd.Series) -> bool:
+def _regime_allowed(regime: str, filter_name: str) -> bool:
+    key = str(filter_name or "all").strip().lower()
+    allowed = {
+        "all": {"bullish", "bearish", "neutral"},
+        "bullish": {"bullish"},
+        "bearish": {"bearish"},
+        "neutral": {"neutral"},
+        "bullish_neutral": {"bullish", "neutral"},
+        "bearish_neutral": {"bearish", "neutral"},
+    }
+    if key not in allowed:
+        raise ValueError(f"Unsupported regime filter: {filter_name}")
+    return str(regime or "neutral").strip().lower() in allowed[key]
+
+
+def _context_allowed(row: pd.Series, filter_name: str) -> bool:
+    key = str(filter_name or "all").strip().lower()
+    above_vwap = _as_float(row.get("above_vwap_flag"))
+    vix_trend = _as_float(row.get("vix_trend_ema_8_21"))
+    support_proximity = _as_float(row.get("support_proximity"))
+    inside_support = _as_float(row.get("inside_support_zone"))
+    inside_resistance = _as_float(row.get("inside_resistance_zone"))
+    ema_ratio = _as_float(row.get("ema_20_50_ratio"))
+    checks = {
+        "all": True,
+        "above_vwap": above_vwap >= 0.5,
+        "below_vwap": above_vwap < 0.5,
+        "vix_nonrising": vix_trend <= 0.0,
+        "vix_rising": vix_trend > 0.0,
+        "ema_bullish": ema_ratio >= 1.0,
+        "ema_bearish": ema_ratio < 1.0,
+        "near_support": support_proximity >= 0.5,
+        "inside_support": inside_support >= 0.5,
+        "not_inside_resistance": inside_resistance < 0.5,
+        "above_vwap_vix_nonrising": above_vwap >= 0.5 and vix_trend <= 0.0,
+        "near_support_vix_nonrising": support_proximity >= 0.5 and vix_trend <= 0.0,
+    }
+    if key not in checks:
+        raise ValueError(f"Unsupported context filter: {filter_name}")
+    return bool(checks[key])
+
+
+def _triggered(setup: PendingSetup, row: pd.Series, *, mode: str = "breakout") -> bool:
     open_ = _as_float(row.get("open"))
     high = _as_float(row.get("high"))
     low = _as_float(row.get("low"))
     close = _as_float(row.get("close"))
+    mode_key = str(mode or "breakout").strip().lower()
+    if mode_key == "next_open":
+        return True
+    body_confirmed = bool(close > open_) if setup.side == "long" else bool(close < open_)
+    if mode_key in {"reversal", "body_1m"}:
+        return body_confirmed
+    if mode_key == "body_2m":
+        setup.confirmation_count = setup.confirmation_count + 1 if body_confirmed else 0
+        return setup.confirmation_count >= 2
+    if mode_key == "reclaim_setup_close":
+        return bool(
+            body_confirmed
+            and (close > setup.setup_spot if setup.side == "long" else close < setup.setup_spot)
+        )
+    if mode_key != "breakout":
+        raise ValueError(f"Unsupported trigger mode: {mode}")
     if setup.side == "long":
         return bool(high >= setup.ref and close > open_ and close > setup.ref)
     return bool(low <= setup.ref and close < open_ and close < setup.ref)
@@ -430,6 +523,9 @@ def _close_event(pos: Position, ts: pd.Timestamp, spot: float, premium: float, r
     mfe = (pos.best_premium / pos.entry_premium) - 1.0 if pos.entry_premium > 0 else float("nan")
     return {
         "side": pos.side,
+        "setup_ts": pos.setup_ts,
+        "setup_spot": pos.setup_spot,
+        "setup_ref": pos.setup_ref,
         "entry_ts": pos.entry_ts,
         "exit_ts": ts,
         "entry_spot": pos.entry_spot,
@@ -484,6 +580,16 @@ def _run_one(
     candidate_short_enabled: bool,
     candidate_start_hhmm: str,
     candidate_end_hhmm: str,
+    long_entry_end_hhmm: str = "16:00",
+    short_entry_end_hhmm: str = "16:00",
+    long_regime_filter: str = "all",
+    short_regime_filter: str = "all",
+    long_context_filter: str = "all",
+    short_context_filter: str = "all",
+    trigger_mode: str = "breakout",
+    long_trigger_mode: str | None = None,
+    short_trigger_mode: str | None = None,
+    strike_atr_mult: float = 1.0,
 ) -> list[dict[str, Any]]:
     proxy = ReplayOptionPriceProxy(
         tz_name="America/New_York",
@@ -542,6 +648,12 @@ def _run_one(
                 candidate_short_enabled=candidate_short_enabled,
                 candidate_start_hhmm=candidate_start_hhmm,
                 candidate_end_hhmm=candidate_end_hhmm,
+                long_entry_end_hhmm=long_entry_end_hhmm,
+                short_entry_end_hhmm=short_entry_end_hhmm,
+                long_regime_filter=long_regime_filter,
+                short_regime_filter=short_regime_filter,
+                long_context_filter=long_context_filter,
+                short_context_filter=short_context_filter,
                 pending=pending,
                 above=above,
                 peak=peak,
@@ -601,18 +713,38 @@ def _run_one(
                 for setup in (pending.get("long"), pending.get("short"))
                 if setup is not None and setup.start_ts <= ts < setup.expires_at
             ]
-            triggered = [setup for setup in live_setups if _triggered(setup, pd.Series(row))]
+            triggered = [
+                setup
+                for setup in live_setups
+                if _triggered(
+                    setup,
+                    pd.Series(row),
+                    mode=(
+                        long_trigger_mode or trigger_mode
+                        if setup.side == "long"
+                        else short_trigger_mode or trigger_mode
+                    ),
+                )
+            ]
             if triggered:
                 if len(triggered) > 1:
                     triggered.sort(key=lambda s: s.prob - (long_thr if s.side == "long" else short_thr), reverse=True)
                 setup = triggered[0]
                 right = "C" if setup.side == "long" else "P"
-                strike = round(close + latest_atr) if setup.side == "long" else round(close - latest_atr)
+                strike_offset = float(strike_atr_mult) * latest_atr
+                strike = (
+                    round(close + strike_offset)
+                    if setup.side == "long"
+                    else round(close - strike_offset)
+                )
                 symbol = _sim_symbol("SPY", ts, right, strike, cutoff_hhmm)
                 premium = proxy.price(symbol, mode=entry_quote_mode)
                 if math.isfinite(premium) and premium > 0:
                     pos = Position(
                         side=setup.side,
+                        setup_ts=setup.setup_ts,
+                        setup_spot=float(setup.setup_spot),
+                        setup_ref=float(setup.ref),
                         entry_ts=ts,
                         entry_spot=float(close),
                         entry_premium=float(premium),
@@ -683,6 +815,7 @@ def main() -> None:
     )
     parser.add_argument("--one-min", default=str(DEFAULT_ONE_MIN))
     parser.add_argument("--start", default="2026-04-01T00:00:00-04:00")
+    parser.add_argument("--end", default="", help="Optional exclusive decision timestamp bound.")
     parser.add_argument("--long-grid", default="0.35")
     parser.add_argument("--short-grid", default="0.65,0.75,0.85")
     parser.add_argument("--setup-max-bars", type=int, default=3)
@@ -717,6 +850,31 @@ def main() -> None:
     parser.add_argument("--candidate-short-enabled-grid", default="true")
     parser.add_argument("--candidate-start-hhmm-grid", default="09:30")
     parser.add_argument("--candidate-end-hhmm-grid", default="16:00")
+    parser.add_argument("--long-entry-end-hhmm-grid", default="16:00")
+    parser.add_argument("--short-entry-end-hhmm-grid", default="16:00")
+    parser.add_argument(
+        "--long-regime-filter-grid",
+        default="all",
+        help="Comma-separated: all, bullish, bearish, neutral, bullish_neutral, bearish_neutral.",
+    )
+    parser.add_argument("--short-regime-filter-grid", default="all")
+    parser.add_argument("--long-context-filter-grid", default="all")
+    parser.add_argument("--short-context-filter-grid", default="all")
+    parser.add_argument(
+        "--trigger-mode-grid",
+        default="breakout",
+        help=(
+            "Comma-separated setup triggers: breakout, next_open, body_1m, "
+            "body_2m, reclaim_setup_close."
+        ),
+    )
+    parser.add_argument("--long-trigger-mode-grid", default="")
+    parser.add_argument("--short-trigger-mode-grid", default="")
+    parser.add_argument(
+        "--strike-atr-mult-grid",
+        default="1.0",
+        help="Comma-separated option strike offsets in ATR (0=ATM, 1=one ATR OTM).",
+    )
     parser.add_argument("--out", default=str(DEFAULT_OUT))
     parser.add_argument("--events-out", default=str(DEFAULT_EVENTS_OUT))
     args = parser.parse_args()
@@ -730,6 +888,8 @@ def main() -> None:
         )
     else:
         decisions = _load_decisions(Path(args.run_root), args.start)
+    if str(args.end or "").strip():
+        decisions = decisions[decisions["timestamp"] < _to_et(args.end)].copy()
     if decisions.empty:
         raise SystemExit("No decision rows found.")
     end = decisions["timestamp"].max()
@@ -793,6 +953,42 @@ def main() -> None:
     candidate_end_hhmm_grid = [
         x.strip() for x in str(args.candidate_end_hhmm_grid).split(",") if x.strip()
     ]
+    long_entry_end_hhmm_grid = [
+        x.strip() for x in str(args.long_entry_end_hhmm_grid).split(",") if x.strip()
+    ]
+    short_entry_end_hhmm_grid = [
+        x.strip() for x in str(args.short_entry_end_hhmm_grid).split(",") if x.strip()
+    ]
+    long_regime_filter_grid = [
+        x.strip().lower() for x in str(args.long_regime_filter_grid).split(",") if x.strip()
+    ]
+    short_regime_filter_grid = [
+        x.strip().lower() for x in str(args.short_regime_filter_grid).split(",") if x.strip()
+    ]
+    long_context_filter_grid = [
+        x.strip().lower() for x in str(args.long_context_filter_grid).split(",") if x.strip()
+    ]
+    short_context_filter_grid = [
+        x.strip().lower() for x in str(args.short_context_filter_grid).split(",") if x.strip()
+    ]
+    trigger_mode_grid = [
+        x.strip().lower() for x in str(args.trigger_mode_grid).split(",") if x.strip()
+    ]
+    if str(args.long_trigger_mode_grid or "").strip() or str(args.short_trigger_mode_grid or "").strip():
+        long_trigger_modes = [
+            x.strip().lower()
+            for x in str(args.long_trigger_mode_grid or args.trigger_mode_grid).split(",")
+            if x.strip()
+        ]
+        short_trigger_modes = [
+            x.strip().lower()
+            for x in str(args.short_trigger_mode_grid or args.trigger_mode_grid).split(",")
+            if x.strip()
+        ]
+        trigger_mode_pairs = list(product(long_trigger_modes, short_trigger_modes))
+    else:
+        trigger_mode_pairs = [(mode, mode) for mode in trigger_mode_grid]
+    strike_atr_mult_grid = _parse_grid(args.strike_atr_mult_grid)
     grid = product(
         _parse_grid(args.long_grid),
         _parse_grid(args.short_grid),
@@ -824,6 +1020,14 @@ def main() -> None:
         candidate_short_enabled_grid,
         candidate_start_hhmm_grid,
         candidate_end_hhmm_grid,
+        long_entry_end_hhmm_grid,
+        short_entry_end_hhmm_grid,
+        long_regime_filter_grid,
+        short_regime_filter_grid,
+        long_context_filter_grid,
+        short_context_filter_grid,
+        trigger_mode_pairs,
+        strike_atr_mult_grid,
     )
     for (
         long_thr,
@@ -856,7 +1060,16 @@ def main() -> None:
         candidate_short_enabled,
         candidate_start_hhmm,
         candidate_end_hhmm,
+        long_entry_end_hhmm,
+        short_entry_end_hhmm,
+        long_regime_filter,
+        short_regime_filter,
+        long_context_filter,
+        short_context_filter,
+        trigger_mode_pair,
+        strike_atr_mult,
     ) in grid:
+        long_trigger_mode, short_trigger_mode = trigger_mode_pair
         events = _run_one(
             decisions=decisions,
             one_min=one_min,
@@ -893,6 +1106,16 @@ def main() -> None:
             candidate_short_enabled=bool(candidate_short_enabled),
             candidate_start_hhmm=str(candidate_start_hhmm),
             candidate_end_hhmm=str(candidate_end_hhmm),
+            long_entry_end_hhmm=str(long_entry_end_hhmm),
+            short_entry_end_hhmm=str(short_entry_end_hhmm),
+            long_regime_filter=str(long_regime_filter),
+            short_regime_filter=str(short_regime_filter),
+            long_context_filter=str(long_context_filter),
+            short_context_filter=str(short_context_filter),
+            trigger_mode=str(long_trigger_mode),
+            long_trigger_mode=str(long_trigger_mode),
+            short_trigger_mode=str(short_trigger_mode),
+            strike_atr_mult=float(strike_atr_mult),
         )
         summary = {
             "long_threshold": float(long_thr),
@@ -927,6 +1150,20 @@ def main() -> None:
             "candidate_short_enabled": bool(candidate_short_enabled),
             "candidate_start_hhmm": str(candidate_start_hhmm),
             "candidate_end_hhmm": str(candidate_end_hhmm),
+            "long_entry_end_hhmm": str(long_entry_end_hhmm),
+            "short_entry_end_hhmm": str(short_entry_end_hhmm),
+            "long_regime_filter": str(long_regime_filter),
+            "short_regime_filter": str(short_regime_filter),
+            "long_context_filter": str(long_context_filter),
+            "short_context_filter": str(short_context_filter),
+            "trigger_mode": (
+                str(long_trigger_mode)
+                if long_trigger_mode == short_trigger_mode
+                else "side_specific"
+            ),
+            "long_trigger_mode": str(long_trigger_mode),
+            "short_trigger_mode": str(short_trigger_mode),
+            "strike_atr_mult": float(strike_atr_mult),
             "decision_rows": int(len(decisions)),
             "first_decision": decisions["timestamp"].min(),
             "last_decision": decisions["timestamp"].max(),

@@ -45,7 +45,9 @@ from strategies.multi_ticker_swing.live.real_account_policy import (
     config_from_env as real_account_policy_from_env,
 )
 from strategies.multi_ticker_swing.live.risk_profile_policy import RiskProfilePolicy, config_from_env as risk_profile_policy_from_env
-from strategies.multi_ticker_swing.live.scanner import Signal, SwingScanner
+from strategies.multi_ticker_swing.live.scanner import Signal, SwingScanner  # noqa: F401 (Signal used)
+from strategies.multi_ticker_swing.live.ranker_scanner import RankerSwingScanner
+from strategies.multi_ticker_swing.live.catalyst_signal import LiveCatalystSignal
 from strategies.multi_ticker_swing.live.session import (
     confirmation_breakout,
     entry_bucket as _entry_bucket,
@@ -515,6 +517,7 @@ class SwingLiveRunner:
         auto_flatten_assigned_equities: bool = True,
         real_account_policy_enabled: bool | None = None,
         real_account_policy_state_path: str | None = None,
+        catalyst_tilt_enabled: bool = True,
     ) -> None:
         self._dry_run = dry_run
         self._env_file = env_file
@@ -527,10 +530,15 @@ class SwingLiveRunner:
         # Reuse the shared (process-wide) feature builder so a Stop → Run cycle
         # skips the parquet load entirely when the in-memory cache is still fresh.
         self._fb = feature_builder if feature_builder is not None else get_shared_feature_builder()
-        self._scanner = SwingScanner(
+        # Live news tilt: re-ranks signals by fresh catalyst strength from the
+        # intraday poller's ledger. Neutral (no effect) until the ledger exists.
+        catalyst_signal = LiveCatalystSignal() if catalyst_tilt_enabled else None
+        # OOF long+short ranker scanner (v2). Drop-in: same Signal surface. To revert to the
+        # classifier, swap RankerSwingScanner -> SwingScanner(..., model_path=MODEL_PATH).
+        self._scanner = RankerSwingScanner(
             self._fb,
-            model_path=MODEL_PATH,
             max_entries_per_bar=max_entries_per_bar,
+            catalyst_signal=catalyst_signal,
         )
         self._client = AlpacaOptionsClient(env_file=env_file)
         self._real_policy = RealAccountBookkeeper(
@@ -937,6 +945,38 @@ class SwingLiveRunner:
             lag_secs = self._bar_lag_secs(bar)
             if lag_secs is not None:
                 self._last_bar_lag_secs = int(round(lag_secs))
+            if self._external_queue and self._bar_is_too_stale(lag_secs):
+                bar = self._drop_stale_external_backlog(bar)
+                if bar is None:
+                    continue
+                if bar.get("_sentinel"):
+                    err = bar.get("_error")
+                    if err:
+                        logger.error("Stream fatal error: %s", err)
+                        self._emit("stream_error", {
+                            "error": err,
+                            "hint": (
+                                "Alpaca connection limit exceeded. Only one WebSocket stream "
+                                "is allowed per account on the IEX free tier. Close any other "
+                                "running sessions and wait ~60s for the old connection to expire, "
+                                "then click Run again."
+                            ),
+                        })
+                        self._stop_event.set()
+                    break
+                ticker = bar.get("symbol", bar.get("ticker", "")).upper()
+                if not ticker:
+                    continue
+                if self._bar_after_log_cutoff(bar):
+                    continue
+                self._raw_bar_count_total += 1
+                self._last_bar_ticker = ticker
+                self._heartbeat_window_counts[ticker] += 1
+                self._recent_symbol_seen[ticker] = time.monotonic()
+                self._last_queue_size = self._queue_size()
+                lag_secs = self._bar_lag_secs(bar)
+                if lag_secs is not None:
+                    self._last_bar_lag_secs = int(round(lag_secs))
             if self._bar_is_too_stale(lag_secs):
                 self._dropped_stale_bars += 1
                 self._reset_ticker_accumulators(ticker)
@@ -975,6 +1015,46 @@ class SwingLiveRunner:
         if lag_secs is None or lag_secs < _STALE_BAR_LAG_SECS:
             return False
         return is_regular_trading_time(datetime.now(_ET))
+
+    def _drop_stale_external_backlog(self, first_bar: dict) -> dict | None:
+        current = first_bar
+        last_stale_bar = first_bar
+        last_stale_ticker = str(first_bar.get("symbol", first_bar.get("ticker", ""))).upper()
+        last_stale_lag = self._bar_lag_secs(first_bar)
+        dropped = 0
+
+        while True:
+            if current.get("_sentinel"):
+                break
+            ticker = str(current.get("symbol", current.get("ticker", ""))).upper()
+            lag_secs = self._bar_lag_secs(current)
+            if not self._bar_is_too_stale(lag_secs):
+                break
+            dropped += 1
+            self._dropped_stale_bars += 1
+            if ticker:
+                self._reset_ticker_accumulators(ticker)
+            last_stale_bar = current
+            last_stale_ticker = ticker
+            last_stale_lag = lag_secs
+            try:
+                current = self._bar_queue.get_nowait()
+            except queue.Empty:
+                current = None
+                break
+            except Exception:
+                current = None
+                break
+
+        if dropped:
+            self._last_queue_size = self._queue_size()
+            self._emit_backlog_event(
+                ticker=last_stale_ticker,
+                bar=last_stale_bar,
+                lag_secs=last_stale_lag,
+            )
+            self._maybe_emit_heartbeat(reason="stale_drop")
+        return current
 
     @staticmethod
     def _bar_after_log_cutoff(bar: dict) -> bool:

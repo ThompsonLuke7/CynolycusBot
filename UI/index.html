@@ -259,7 +259,7 @@
             <div class="field"><label>Feed</label><select id="feed"><option value="IEX">IEX</option><option value="SIP">SIP</option></select></div>
             <div class="field"><label>Interval (min)</label><input id="interval" type="number" value="10" min="1" /></div>
             <div class="field"><label>Signal Model</label><input value="Swing Support Single + Phase4 1m trigger" disabled /></div>
-            <div class="field"><label>Entry Source</label><input value="swing_support_single" disabled /></div>
+            <div class="field"><label>Entry Source</label><input value="competition long + active short" disabled /></div>
             <input id="metaModelRoot" type="hidden" value="Data/models/meta_xgboost/10min" />
             <input id="metaBaseFramePath" type="hidden" value="Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet" />
             <div class="field"><label>Live Prefill Start</label><input id="prefillStart" value="2026-01-30" /></div>
@@ -476,7 +476,7 @@
 
     function renderWarmupBadge() {
       const running = !!(state.running || state.session_alive);
-      if (getRunnerModeValue() !== "live" || (!warmupTimer.active && !Number.isFinite(warmupTimer.durationMs))) {
+      if (!running || state.last_error || getRunnerModeValue() !== "live" || (!warmupTimer.active && !Number.isFinite(warmupTimer.durationMs))) {
         warmupBadge.style.display = "none";
         warmupBadge.className = "warmup";
         return;
@@ -631,7 +631,8 @@
         ? `hedged${lastRaw !== null ? ` (${lastRaw})` : ""}`
         : (action ? `${lastClass}${lastRaw !== null ? ` (${lastRaw})` : ""}` : "-");
       const netPositionText = hedged ? "hedged" : (pol.position ?? "-");
-      const usingSwingSetupEntry = [ag.p_enter_long_source, ag.p_enter_short_source].includes("swing_support_single")
+      const usingSwingSetupEntry = [ag.p_enter_long_source, ag.p_enter_short_source]
+        .some((source) => ["swing_support_single", "competition_ranker"].includes(source))
         || Number.isFinite(Number(ag.p_swing_setup_long))
         || Number.isFinite(Number(ag.p_swing_setup_short));
       const diag = pol.missed_trade_diagnostics || {};
@@ -2059,12 +2060,14 @@
         use_wall_clock_entry_cutoff: true,
         model_path: null,
         meta_model_root: document.getElementById("metaModelRoot").value,
-        meta_entry_prob_source: "swing_support_single",
+        meta_entry_prob_source: "competition_long_active_short",
         swing_setup_single_model_dir: "Data/models/ga_xgboost/10min/single/swing_support_single",
         meta_intrabar_entry_policy: "phase4_swing_setup_bodyclose_bodyclose_v1",
+        meta_intrabar_long_trigger_mode: "next_open",
+        meta_intrabar_short_trigger_mode: "inherit",
         meta_intrabar_setup_max_bars: 3,
-        meta_intrabar_long_setup_threshold: 0.35,
-        meta_intrabar_short_setup_threshold: 0.65,
+        meta_intrabar_long_setup_threshold: 0.85,
+        meta_intrabar_short_setup_threshold: 0.50,
         scalp_mode_enabled: false,
         scalp_long_setup_threshold: 0.30,
         scalp_short_setup_threshold: 0.55,

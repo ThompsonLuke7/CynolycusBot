@@ -11,6 +11,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "Data" / "shared" / "universe"
 SHARED_UNIVERSE_CSV = DATA_DIR / "shared_universe.csv"
 MANUAL_AI_WATCHLIST = DATA_DIR / "manual_ai_watchlist.csv"
+# Dynamic discovery queue (see core.shared_universe.discovery). Tickers whose
+# status has been promoted by the nightly screen are folded in as eligible.
+PENDING_TICKERS_CSV = DATA_DIR / "pending_tickers.csv"
+PENDING_NOVEL_TICKERS_CSV = DATA_DIR / "pending_tickers_novel.csv"
 
 THEME_MAP_V4 = REPO_ROOT / "themes" / "theme_expansion_legacy" / "data" / "theme_map_v4.csv"
 THEME_ELIGIBLE = REPO_ROOT / "themes" / "theme_expansion_legacy" / "outputs" / "universe_filter.csv"
@@ -103,6 +107,27 @@ def _load_swing_train() -> pd.DataFrame:
     return out
 
 
+def _load_discovered_promoted() -> pd.DataFrame:
+    """Promoted rows from the dynamic discovery queue become eligible names."""
+    empty = pd.DataFrame(columns=["ticker", "in_discovered", "discovered_eligible", "cap_tier", "stock_only"])
+    if not PENDING_TICKERS_CSV.exists():
+        return empty
+    df = pd.read_csv(PENDING_TICKERS_CSV)
+    if df.empty or "status" not in df.columns:
+        return empty
+    promoted = df[df["status"].astype(str) == "promoted"].copy()
+    if promoted.empty:
+        return empty
+    promoted["ticker"] = promoted["ticker"].map(clean_ticker)
+    promoted = promoted[promoted["ticker"] != ""].drop_duplicates("ticker")
+    out = promoted[["ticker"]].copy()
+    out["in_discovered"] = True
+    out["discovered_eligible"] = True
+    out["cap_tier"] = promoted["cap_tier"].values if "cap_tier" in promoted.columns else ""
+    out["stock_only"] = promoted["stock_only"].values if "stock_only" in promoted.columns else False
+    return out
+
+
 def _load_swing_live() -> pd.DataFrame:
     if not SWING_LIVE_JSON.exists():
         return _source_frame([], "in_swing_live")
@@ -126,6 +151,7 @@ def build_shared_universe(*, out_path: Path = SHARED_UNIVERSE_CSV) -> pd.DataFra
         "momentum": _load_momentum_candidates(),
         "swing_train": _load_swing_train(),
         "swing_live": _load_swing_live(),
+        "discovered": _load_discovered_promoted(),
     }
     tickers = sorted(set().union(*(set(df["ticker"]) for df in frames.values() if "ticker" in df.columns)))
     out = pd.DataFrame({"ticker": tickers})
@@ -136,19 +162,20 @@ def build_shared_universe(*, out_path: Path = SHARED_UNIVERSE_CSV) -> pd.DataFra
             if dup_cols:
                 out = out.drop(columns=dup_cols)
 
-    for col in ["in_theme_v4", "in_manual_ai_watchlist", "in_momentum_candidate", "in_swing_train", "in_swing_live", "is_eligible", "manual_eligible"]:
+    for col in ["in_theme_v4", "in_manual_ai_watchlist", "in_momentum_candidate", "in_swing_train", "in_swing_live", "in_discovered", "is_eligible", "manual_eligible", "discovered_eligible"]:
         if col not in out.columns:
             out[col] = False
         out[col] = out[col].where(out[col].notna(), False).astype(bool)
-    out["is_eligible"] = out["is_eligible"] | out["manual_eligible"]
+    out["is_eligible"] = out["is_eligible"] | out["manual_eligible"] | out["discovered_eligible"]
     if "asset_type" not in out.columns:
         out["asset_type"] = ""
     if "type" in out.columns:
         out["asset_type"] = out["asset_type"].where(out["asset_type"].astype(str).str.len() > 0, out["type"])
     out["eligible_reason"] = ""
     out.loc[out["is_eligible"], "eligible_reason"] = "theme_liquidity_filter"
+    out.loc[out["discovered_eligible"], "eligible_reason"] = "dynamic_discovery"
     out.loc[out["manual_eligible"], "eligible_reason"] = "manual_ai_watchlist"
-    source_cols = ["in_theme_v4", "in_manual_ai_watchlist", "in_momentum_candidate", "in_swing_train", "in_swing_live"]
+    source_cols = ["in_theme_v4", "in_manual_ai_watchlist", "in_momentum_candidate", "in_swing_train", "in_swing_live", "in_discovered"]
     out["source_count"] = out[source_cols].sum(axis=1).astype(int)
     out = out.sort_values(["is_eligible", "source_count", "ticker"], ascending=[False, False, True]).reset_index(drop=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,7 +188,7 @@ def load_shared_universe(*, eligible_only: bool = True, rebuild: bool = False) -
         df = build_shared_universe()
     else:
         df = pd.read_csv(SHARED_UNIVERSE_CSV)
-        for col in ["in_theme_v4", "in_momentum_candidate", "in_swing_train", "in_swing_live", "is_eligible"]:
+        for col in ["in_theme_v4", "in_momentum_candidate", "in_swing_train", "in_swing_live", "in_discovered", "is_eligible"]:
             if col in df.columns:
                 df[col] = df[col].astype(bool)
     if eligible_only and "is_eligible" in df.columns:
@@ -182,4 +209,5 @@ def summarize_universe(df: pd.DataFrame) -> dict[str, int]:
         "momentum_candidate": int(df["in_momentum_candidate"].sum()) if "in_momentum_candidate" in df.columns else 0,
         "swing_train": int(df["in_swing_train"].sum()) if "in_swing_train" in df.columns else 0,
         "swing_live": int(df["in_swing_live"].sum()) if "in_swing_live" in df.columns else 0,
+        "discovered": int(df["in_discovered"].sum()) if "in_discovered" in df.columns else 0,
     }

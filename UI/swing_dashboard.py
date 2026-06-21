@@ -747,7 +747,7 @@ class SwingDashboardHandler(BaseHTTPRequestHandler):
 
     # Quieter access logs
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        if self.path.startswith("/api/events"):
+        if self.path.startswith(("/api/events", "/api/state")):
             return
         super().log_message(format, *args)
 

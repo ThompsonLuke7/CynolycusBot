@@ -31,6 +31,7 @@ from strategies.multi_ticker_swing_htf.config import PIVOT_LABEL_CONFIG, TRAININ
 logger = logging.getLogger(__name__)
 
 EXPORT_DIR = TRAINING_MATRIX.parent.parent / "training_export"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 TARGET_COLUMN = "htf_swing_score"
 DIAGNOSTIC_COLUMNS = [
     "htf_top_swing_target",
@@ -81,6 +82,16 @@ def export_training_bundle(
         "label_columns": [c for c in DIAGNOSTIC_COLUMNS if c in df.columns],
         "target_column": target_column,
         "target_kind": "regression",
+        # Competition harness config (colab_competition.py): regression on the
+        # continuous swing score + classifier/ranker on a binary strong-swing flag.
+        "regression_target_column": target_column,
+        "relevance_column": "is_strong_swing",
+        "strong_setup_source_column": "fwd_best_high_return",
+        "strong_setup_threshold": 0.15,
+        "train_frac": 0.6,
+        "val_frac": 0.2,
+        "rank_group": "timestamp",
+        "top_k": 20,
         "n_rows": int(len(df)),
         "n_tickers": int(df.index.get_level_values("ticker").nunique()) if "ticker" in df.index.names else None,
         "date_min": str(df.index.get_level_values(0).min()),
@@ -110,11 +121,17 @@ def export_training_bundle(
     if trainer_dst is not None:
         shutil.copy2(trainer_src, trainer_dst)
 
+    # Shared competition harness the trainer imports (`from colab_competition import ...`).
+    harness_src = REPO_ROOT / "strategies" / "model_training" / "colab_competition.py"
+    harness_dst = out_dir / harness_src.name
+    shutil.copy2(harness_src, harness_dst)
+
     bundle_path = out_dir / "htf_swing_colab_bundle.tgz"
     with tarfile.open(bundle_path, "w:gz") as tar:
         tar.add(target_path, arcname=target_path.name)
         tar.add(feature_manifest_path, arcname=feature_manifest_path.name)
         tar.add(label_manifest_path, arcname=label_manifest_path.name)
+        tar.add(harness_dst, arcname=harness_dst.name)
         if trainer_dst is not None:
             tar.add(trainer_dst, arcname=trainer_dst.name)
 

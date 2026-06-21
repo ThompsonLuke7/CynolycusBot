@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Theme Explorer — Variations</title>
+<style>
+  *{box-sizing:border-box;}
+  body{margin:0;min-height:100%;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    background:radial-gradient(ellipse at 30% 10%,#10182e,#070a14 60%,#03040a);color:#dce5f5;padding:48px 32px;}
+  h1{font-size:22px;letter-spacing:.5px;margin:0 0 4px;}
+  .sub{color:#8a97b4;font-size:13px;margin-bottom:28px;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:18px;max-width:1100px;}
+  .card{display:flex;flex-direction:column;text-decoration:none;color:inherit;border:1px solid #23314c;
+    border-radius:14px;overflow:hidden;background:#0d1220;transition:transform .12s,border-color .12s,box-shadow .12s;}
+  .card:hover{transform:translateY(-3px);border-color:#5db0ff;box-shadow:0 10px 30px rgba(10,20,50,.5);}
+  .swatch{height:150px;}
+  .meta{padding:14px 16px 16px;}
+  .meta h2{margin:0 0 5px;font-size:15px;}
+  .meta p{margin:0;font-size:12.5px;color:#8a97b4;line-height:1.5;}
+  .card.nebula .swatch{background:radial-gradient(ellipse at 32% 18%, #1b1145 0%, #0a0a26 42%, #03020c 100%);}
+  .card.synthwave .swatch{background:linear-gradient(180deg, #1a0633 0%, #2b0a4d 38%, #5b0f53 64%, #11041f 100%);}
+  .card.blueprint .swatch{background:linear-gradient(180deg, #0a2a52 0%, #07223f 100%);}
+  .card.constellation .swatch{background:radial-gradient(ellipse at 50% 40%, #05060d 0%, #020308 70%, #000000 100%);}
+  .card.aurora .swatch{background:linear-gradient(155deg, #d7f5ee 0%, #cfe3ff 38%, #e8d9ff 70%, #ffe1ef 100%);}
+</style></head><body>
+  <h1>Theme Explorer — 5 Variations</h1>
+  <div class="sub">Same data, five renderings. Click one to open it.</div>
+  <div class="grid">
+    <a class="card nebula" href="theme_explorer_nebula.html">
+      <div class="swatch"></div>
+      <div class="meta"><h2>Nebula</h2><p>Glowing additive orbs drifting through a deep-space haze.</p></div>
+    </a>
+    <a class="card synthwave" href="theme_explorer_synthwave.html">
+      <div class="swatch"></div>
+      <div class="meta"><h2>Synthwave</h2><p>Neon wireframe nodes hovering over a retro horizon grid.</p></div>
+    </a>
+    <a class="card blueprint" href="theme_explorer_blueprint.html">
+      <div class="swatch"></div>
+      <div class="meta"><h2>Blueprint</h2><p>Crisp schematic rings and straight technical wiring.</p></div>
+    </a>
+    <a class="card constellation" href="theme_explorer_constellation.html">
+      <div class="swatch"></div>
+      <div class="meta"><h2>Constellation</h2><p>Minimalist star-points joined by hair-thin lines.</p></div>
+    </a>
+    <a class="card aurora" href="theme_explorer_aurora.html">
+      <div class="swatch"></div>
+      <div class="meta"><h2>Aurora Glass</h2><p>Frosted translucent spheres lit by soft aurora light.</p></div>
+    </a>
+  </div>
+</body></html>

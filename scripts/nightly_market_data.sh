@@ -4,7 +4,9 @@
 #
 # Pulls today's CBOE per-ticker options snapshot (appends to
 # cboe_options_summary.parquet) and yesterday's FINRA short-volume CSV
-# (appends to a per-day file under signals/news/data/processed/finra_daily/).
+# (appends to a per-day file under signals/news/data/processed/finra_daily/),
+# runs ticker discovery, then collects + processes the day's catalyst news and
+# rebuilds the per-(ticker, day) news_catalyst_signal the meta-ranker consumes.
 #
 # Designed to be invoked from cron. Safe to re-run multiple times per day
 # — the CBOE collector de-dupes by (ticker, snapshot_date), and the FINRA
@@ -91,6 +93,71 @@ all_df = pd.concat(frames, ignore_index=True).drop_duplicates(["date", "ticker"]
 all_df.to_parquet(consolidated, index=False)
 print(f"  consolidated: {len(all_df):,} rows -> {consolidated}")
 PYEOF
+
+  # 4) Dynamic ticker discovery + promotion gate
+  #    Broad Alpaca market screen + catalyst-ledger discovery -> pending queue;
+  #    releases names meeting the price/ADV/market-cap/history minimums and
+  #    folds promoted tickers into shared_universe.csv.
+  echo "[$(ts)] ticker discovery — broad screen + catalyst, promotion gate"
+  "$PYTHON" -u -m scripts.nightly_ticker_discovery --rebuild-universe
+  discovery_exit=$?
+  echo "[$(ts)] ticker discovery exit=$discovery_exit"
+
+  # 5) Catalyst news — collect the day's headlines across the eligible universe.
+  #    collect_company_news merges into news_records.parquet (de-dupes), so the
+  #    small look-back overlap is safe to re-run.
+  echo "[$(ts)] news — collecting headlines (eligible universe)"
+  "$PYTHON" -u <<'PYEOF'
+import pandas as pd
+from signals.news.pipeline import collect_company_news
+from signals.news.config import NEWS_RECORDS_PATH
+
+uni = pd.read_csv("Data/shared/universe/shared_universe.csv")
+if "is_eligible" in uni.columns:
+    uni = uni[uni["is_eligible"].astype(bool)]
+tickers = sorted(uni["ticker"].astype(str).unique().tolist())
+
+end = pd.Timestamp.utcnow().normalize()
+start = end - pd.Timedelta(days=3)  # overlap; merge_with_existing de-dupes
+df = collect_company_news(
+    tickers,
+    start=start.strftime("%Y-%m-%d"),
+    end=end.strftime("%Y-%m-%d"),
+    output_path=NEWS_RECORDS_PATH,
+)
+print(f"  news_records now {len(df):,} rows ({len(tickers)} eligible tickers)")
+PYEOF
+  news_collect_exit=$?
+  echo "[$(ts)] news collect exit=$news_collect_exit"
+
+  # 6) Catalyst news — incremental embed/cluster/refine/label of only-new records
+  #    (~minutes; chains embed-new -> cluster-predict -> refine -> label-mature).
+  echo "[$(ts)] news — incremental processing (new records only)"
+  "$PYTHON" -u -m signals.news.main --stage incremental
+  news_incr_exit=$?
+  echo "[$(ts)] news incremental exit=$news_incr_exit"
+
+  # 7) Catalyst news — refresh per-record predictions only for new/stale records,
+  #    then aggregate to the per-(ticker, day) signal the meta-ranker reads.
+  echo "[$(ts)] news — rebuilding news_catalyst_signal.parquet"
+  "$PYTHON" -u -m signals.meta_context.build_news_signal --incremental-cache
+  news_signal_exit=$?
+  echo "[$(ts)] news signal rebuild exit=$news_signal_exit"
+
+  # 8) Emerging themes — enrich a bounded pending-ticker shortlist, map strong
+  #    matches into established themes, cluster novel residuals, and regenerate
+  #    the standalone visualizers. Production theme features remain untouched.
+  echo "[$(ts)] themes — pending ticker enrichment + provisional discovery"
+  "$PYTHON" -u -m themes.dynamic_theme.emerging --limit 300
+  emerging_theme_exit=$?
+  echo "[$(ts)] emerging themes exit=$emerging_theme_exit"
+
+  if [ "$emerging_theme_exit" -eq 0 ]; then
+    echo "[$(ts)] themes — rebuilding explorer variants and dreamscapes"
+    "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_explorer
+    "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_variants
+    "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_dreamscapes
+  fi
 
   echo "[$(ts)] nightly_market_data.sh complete"
 } >> "$LOG_FILE" 2>&1

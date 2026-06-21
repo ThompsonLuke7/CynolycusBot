@@ -205,48 +205,65 @@ class CatalystScorer:
             self._finbert_pipeline = finbert_scores_batch
         return self._finbert_pipeline
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-    def score(self, records: Iterable[dict] | dict) -> np.ndarray:
-        """Score one record (dict) or a list of records. Returns float array."""
+    def _apply_finbert_scores(self, df: pd.DataFrame, texts: list[str]) -> None:
+        finbert_fn = self._ensure_finbert()
+        if finbert_fn is None:
+            df["finbert_positive_score"] = 0.0
+            df["finbert_negative_score"] = 0.0
+            df["finbert_neutral_score"] = 0.0
+            return
+
+        fb_rows = finbert_fn(texts)
+
+        def _score(row: dict, key: str) -> float:
+            return float(
+                row.get(f"finbert_{key}_score", row.get(key, 0.0)) if isinstance(row, dict) else 0.0
+            )
+
+        df["finbert_positive_score"] = [_score(r, "positive") for r in fb_rows]
+        df["finbert_negative_score"] = [_score(r, "negative") for r in fb_rows]
+        df["finbert_neutral_score"] = [_score(r, "neutral") for r in fb_rows]
+
+    def _prepare_feature_matrix(self, records: Iterable[dict] | dict) -> tuple[pd.DataFrame, pd.DataFrame]:
         if isinstance(records, dict):
             records = [records]
         records = list(records)
         if not records:
-            return np.array([], dtype=np.float32)
+            return pd.DataFrame(), pd.DataFrame()
 
         df = pd.DataFrame(records)
         df["ticker"] = df["ticker"].astype(str).str.upper()
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-
-        # Classify (regex pass — same as the offline pipeline's first stage)
         df = classify_catalyst_types(df)
 
-        # Text → BGE
-        texts = (df.get("headline", "").fillna("") + " "
-                 + df.get("summary", "").fillna("") + " "
-                 + df.get("body", "").fillna("")).tolist()
+        def _series(col: str) -> pd.Series:
+            if col in df.columns:
+                return df[col].fillna("").astype(str)
+            return pd.Series([""] * len(df), index=df.index, dtype="object")
+
+        texts = (
+            _series("headline") + " "
+            + _series("summary") + " "
+            + _series("body")
+        ).tolist()
         embed_fn = self._ensure_bge()
         emb = embed_fn(texts)
         if emb.shape[1] != self.bge_dim:
             raise RuntimeError(f"BGE returned {emb.shape[1]} dims, expected {self.bge_dim}")
 
-        # FinBERT scores (optional but recommended for parity with training)
-        finbert_fn = self._ensure_finbert()
-        if finbert_fn is not None:
-            fb_rows = finbert_fn(texts)  # list of dicts {positive, negative, neutral}
-            df["finbert_positive_score"] = [float(r.get("positive", 0)) for r in fb_rows]
-            df["finbert_negative_score"] = [float(r.get("negative", 0)) for r in fb_rows]
-            df["finbert_neutral_score"] = [float(r.get("neutral", 0)) for r in fb_rows]
-        else:
-            df["finbert_positive_score"] = 0.0
-            df["finbert_negative_score"] = 0.0
-            df["finbert_neutral_score"] = 0.0
-
+        self._apply_finbert_scores(df, texts)
         X = self._assemble_feature_matrix(df, emb)
-        proba = self._predict(X)
-        return proba
+        return df, X
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def score(self, records: Iterable[dict] | dict) -> np.ndarray:
+        """Score one record (dict) or a list of records. Returns float array."""
+        _, X = self._prepare_feature_matrix(records)
+        if X.empty:
+            return np.array([], dtype=np.float32)
+        return self._predict(X)
 
     def score_trajectory(self, records: Iterable[dict] | dict) -> pd.DataFrame:
         """Return per-trajectory probabilities for each record.
@@ -261,35 +278,9 @@ class CatalystScorer:
                 "No trajectory model loaded. Pass trajectory_model_path to "
                 "CatalystScorer(...) or ensure the default v3 artifact exists."
             )
-        if isinstance(records, dict):
-            records = [records]
-        records = list(records)
-        if not records:
+        _, X = self._prepare_feature_matrix(records)
+        if X.empty:
             return pd.DataFrame(columns=list(TRAJECTORY_LABELS))
-
-        df = pd.DataFrame(records)
-        df["ticker"] = df["ticker"].astype(str).str.upper()
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-        df = classify_catalyst_types(df)
-        texts = (df.get("headline", "").fillna("") + " "
-                 + df.get("summary", "").fillna("") + " "
-                 + df.get("body", "").fillna("")).tolist()
-        embed_fn = self._ensure_bge()
-        emb = embed_fn(texts)
-        if emb.shape[1] != self.bge_dim:
-            raise RuntimeError(f"BGE returned {emb.shape[1]} dims, expected {self.bge_dim}")
-        finbert_fn = self._ensure_finbert()
-        if finbert_fn is not None:
-            fb_rows = finbert_fn(texts)
-            df["finbert_positive_score"] = [float(r.get("positive", 0)) for r in fb_rows]
-            df["finbert_negative_score"] = [float(r.get("negative", 0)) for r in fb_rows]
-            df["finbert_neutral_score"] = [float(r.get("neutral", 0)) for r in fb_rows]
-        else:
-            df["finbert_positive_score"] = 0.0
-            df["finbert_negative_score"] = 0.0
-            df["finbert_neutral_score"] = 0.0
-
-        X = self._assemble_feature_matrix(df, emb)
         feat_names = self.trajectory_booster.get_booster().feature_names
         proba = self.trajectory_booster.predict_proba(X[feat_names])
         return pd.DataFrame(proba, columns=list(TRAJECTORY_LABELS))
@@ -297,14 +288,19 @@ class CatalystScorer:
     def score_both(self, records: Iterable[dict] | dict) -> pd.DataFrame:
         """Return a wide frame with the binary expansion score AND the 5
         trajectory probabilities side by side. One row per input record."""
-        if isinstance(records, dict):
-            records = [records]
-        records = list(records)
-        binary = self.score(records)
+        _, X = self._prepare_feature_matrix(records)
+        if X.empty:
+            cols = ["catalyst_score", *TRAJECTORY_LABELS]
+            return pd.DataFrame(columns=cols)
+        binary = self._predict(X)
         if self.trajectory_booster is not None:
-            traj = self.score_trajectory(records)
+            feat_names = self.trajectory_booster.get_booster().feature_names
+            traj = pd.DataFrame(
+                self.trajectory_booster.predict_proba(X[feat_names]),
+                columns=list(TRAJECTORY_LABELS),
+            )
         else:
-            traj = pd.DataFrame(0.0, index=range(len(records)), columns=list(TRAJECTORY_LABELS))
+            traj = pd.DataFrame(0.0, index=range(len(X)), columns=list(TRAJECTORY_LABELS))
         out = traj.copy()
         out.insert(0, "catalyst_score", binary)
         return out

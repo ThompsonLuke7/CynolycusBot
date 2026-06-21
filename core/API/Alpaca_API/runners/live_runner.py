@@ -183,6 +183,13 @@ def _format_ts_local(ts: object, *, tz: str = "America/New_York") -> str:
         return str(ts)
 
 
+def _bar_age_seconds(bar: dict) -> float | None:
+    ts = pd.to_datetime(bar.get("timestamp"), utc=True, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return max(0.0, float((pd.Timestamp.now(tz="UTC") - ts).total_seconds()))
+
+
 def _hhmm_to_minutes(hhmm: str, *, default: int) -> int:
     try:
         parts = str(hhmm).strip().split(":")
@@ -360,6 +367,7 @@ def _build_meta_agent(
     profit_protect_giveback_atr_short: float = 1.0,
     entry_prob_source: str = "swing_support_single",
     swing_setup_single_model_dir: str | None = "Data/models/ga_xgboost/10min/single/swing_support_single",
+    competition_swing_model_dir: str = "Data/models/ga_xgboost/10min/competition_20260619",
     swing_setup_probs_frame: pd.DataFrame | None = None,
     regime_probability_calibrator: RegimeProbabilityCalibrator | None = None,
 ) -> LiveIndependentMetaXGBAgent:
@@ -404,6 +412,7 @@ def _build_meta_agent(
         profit_protect_giveback_atr_short=float(profit_protect_giveback_atr_short),
         entry_prob_source=entry_prob_source,
         swing_setup_single_model_dir=swing_setup_single_model_dir,
+        competition_swing_model_dir=competition_swing_model_dir,
         swing_setup_probs_frame=swing_setup_probs_frame,
         regime_probability_calibrator=regime_probability_calibrator,
     )
@@ -482,6 +491,8 @@ def _build_option_order_policy(
     meta_intrabar_execution_enabled: bool = True,
     meta_intrabar_breakout_entry_only: bool = False,
     meta_intrabar_entry_policy: str = "legacy_breakout_touch",
+    meta_intrabar_long_trigger_mode: str = "inherit",
+    meta_intrabar_short_trigger_mode: str = "inherit",
     meta_intrabar_setup_max_bars: int = 3,
     meta_intrabar_setup_bar_minutes: int = 10,
     meta_intrabar_max_confirmation_age_minutes: int = 30,
@@ -568,6 +579,8 @@ def _build_option_order_policy(
         meta_intrabar_execution_enabled=bool(meta_intrabar_execution_enabled),
         meta_intrabar_breakout_entry_only=bool(meta_intrabar_breakout_entry_only),
         meta_intrabar_entry_policy=str(meta_intrabar_entry_policy),
+        meta_intrabar_long_trigger_mode=str(meta_intrabar_long_trigger_mode),
+        meta_intrabar_short_trigger_mode=str(meta_intrabar_short_trigger_mode),
         meta_intrabar_setup_max_bars=int(meta_intrabar_setup_max_bars),
         meta_intrabar_setup_bar_minutes=int(meta_intrabar_setup_bar_minutes),
         meta_intrabar_max_confirmation_age_minutes=int(meta_intrabar_max_confirmation_age_minutes),
@@ -1786,6 +1799,12 @@ def _parse_args() -> argparse.Namespace:
         description="Stream 1m bars from Alpaca and aggregate into 15m candles."
     )
     parser.add_argument("--symbols", default="SPY", help="Comma-separated symbols.")
+    parser.add_argument(
+        "--stream-provider",
+        choices=["alpaca", "schwab"],
+        default="alpaca",
+        help="1m live bar source for the SPY runner.",
+    )
     parser.add_argument("--feed", default="IEX", help="IEX or SIP.")
     parser.add_argument("--interval", type=int, default=10, help="Aggregation interval in minutes.")
     parser.add_argument(
@@ -1795,6 +1814,18 @@ def _parse_args() -> argparse.Namespace:
         help="Ring buffer size in 1m bars. Use 0 for unlimited history in memory.",
     )
     parser.add_argument("--queue-size", type=int, default=5000, help="Max queued bars before dropping.")
+    parser.add_argument(
+        "--warn-stale-bar-seconds",
+        type=float,
+        default=180.0,
+        help="Warn when dequeued live bars are older than this many seconds; <=0 disables.",
+    )
+    parser.add_argument(
+        "--warn-queue-backlog",
+        type=int,
+        default=1000,
+        help="Warn when pending queued bars exceed this threshold; <=0 disables.",
+    )
     parser.add_argument("--print-1m", action="store_true", help="Print each 1m bar.")
     parser.add_argument("--print-15m", action="store_true", help="Print completed 15m bars.")
     parser.add_argument("--resample-label", default="left", help="Resample label (left/right).")
@@ -1853,8 +1884,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--meta-use-tp-to-tighten-trail", action=argparse.BooleanOptionalAction, default=True, help="Mirror training trail-tightening behavior in live exit context.")
     parser.add_argument(
         "--meta-entry-prob-source",
-        choices=["meta", "swing_support_single"],
-        default="swing_support_single",
+        choices=[
+            "meta",
+            "swing_support_single",
+            "competition_ranker",
+            "competition_long_active_short",
+        ],
+        default="competition_long_active_short",
         help="Entry/setup probability source. Use swing_support_single for the Phase 4 single-head setup model.",
     )
     parser.add_argument(
@@ -1862,6 +1898,13 @@ def _parse_args() -> argparse.Namespace:
         default="Data/models/ga_xgboost/10min/single/swing_support_single",
         help="Single-head swing support model dir used when --meta-entry-prob-source=swing_support_single.",
     )
+    parser.add_argument(
+        "--competition-swing-model-dir",
+        default="Data/models/ga_xgboost/10min/competition_20260619",
+        help="Paired long/short competition ranker directory used when --meta-entry-prob-source=competition_ranker.",
+    )
+    parser.add_argument("--meta-intrabar-long-trigger-mode", default="next_open")
+    parser.add_argument("--meta-intrabar-short-trigger-mode", default="inherit")
     parser.add_argument("--env-file", default=".env", help="Path to .env with Alpaca credentials.")
     parser.add_argument(
         "--prefill-path",
@@ -1901,13 +1944,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--meta-intrabar-long-setup-threshold",
         type=float,
-        default=0.35,
+        default=0.85,
         help="Optional long setup threshold override used by the intrabar policy.",
     )
     parser.add_argument(
         "--meta-intrabar-short-setup-threshold",
         type=float,
-        default=0.65,
+        default=0.50,
         help="Optional short setup threshold override used by the intrabar policy.",
     )
     parser.add_argument(
@@ -2036,13 +2079,13 @@ def _parse_args() -> argparse.Namespace:
         "--option-exit-stop-loss-pct",
         type=float,
         default=1.0,
-        help="Software option-value stop-loss trigger as fractional loss from entry (0.55 = -55%; 1.0 disables for long options).",
+        help="Software option-value stop-loss trigger as fractional loss from entry (0.55 = -55%%; 1.0 disables for long options).",
     )
     parser.add_argument(
         "--option-exit-profit-lock-arm-pct",
         type=float,
         default=2.0,
-        help="Legacy profit-lock arm threshold for bracket-style exits (+2.0 = +200%).",
+        help="Legacy profit-lock arm threshold for bracket-style exits (+2.0 = +200%%).",
     )
     parser.add_argument(
         "--option-exit-profit-lock-floor-pct",
@@ -2054,7 +2097,7 @@ def _parse_args() -> argparse.Namespace:
         "--option-exit-trailing-arm-pct",
         type=float,
         default=1.0,
-        help="Adaptive trail arms after this fractional gain over entry (1.0 = +100%).",
+        help="Adaptive trail arms after this fractional gain over entry (1.0 = +100%%).",
     )
     parser.add_argument(
         "--option-exit-trailing-giveback-pct",
@@ -2072,7 +2115,7 @@ def _parse_args() -> argparse.Namespace:
         "--option-exit-no-progress-mfe-pct",
         type=float,
         default=0.0,
-        help="Adaptive no-progress MFE threshold as fractional gain over entry (0.05 = +5%).",
+        help="Adaptive no-progress MFE threshold as fractional gain over entry (0.05 = +5%%).",
     )
     parser.add_argument(
         "--option-exit-time-decay-minutes",
@@ -2084,7 +2127,7 @@ def _parse_args() -> argparse.Namespace:
         "--option-exit-time-decay-progress-pct",
         type=float,
         default=0.5,
-        help="Adaptive time-decay only applies before this MFE threshold (0.5 = before +50%).",
+        help="Adaptive time-decay only applies before this MFE threshold (0.5 = before +50%%).",
     )
     parser.add_argument(
         "--option-exit-opposite-prob",
@@ -2155,6 +2198,7 @@ def main() -> None:
     args = _parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     feed = _parse_feed(args.feed)
+    stream_provider = str(args.stream_provider).strip().lower()
     inference_mode = "none" if args.no_agent else str(args.inference_mode).strip().lower()
 
     bar_queue: queue_mod.Queue = queue_mod.Queue(maxsize=args.queue_size)
@@ -2218,7 +2262,10 @@ def main() -> None:
             except Exception as exc:
                 print(f"[live] Cached setup feature frame unavailable: {exc}")
         swing_setup_probs_frame = None
-        if str(args.meta_entry_prob_source or "").strip().lower() == "swing_support_single":
+        if str(args.meta_entry_prob_source or "").strip().lower() in {
+            "swing_support_single",
+            "competition_long_active_short",
+        }:
             swing_setup_probs_frame = _load_swing_setup_probs_frame(
                 model_dir=args.swing_setup_single_model_dir,
                 tz=args.tz or "America/New_York",
@@ -2270,9 +2317,13 @@ def main() -> None:
             profit_protect_giveback_atr_short=1.0,
             entry_prob_source=args.meta_entry_prob_source,
             swing_setup_single_model_dir=args.swing_setup_single_model_dir,
+            competition_swing_model_dir=args.competition_swing_model_dir,
             swing_setup_probs_frame=swing_setup_probs_frame,
         )
-        if str(args.meta_entry_prob_source or "").strip().lower() == "swing_support_single":
+        if str(args.meta_entry_prob_source or "").strip().lower() in {
+            "swing_support_single",
+            "competition_long_active_short",
+        }:
             print(
                 "[live] Swing setup wrapper enabled: "
                 f"model_dir={args.swing_setup_single_model_dir} timeframe={args.interval}min"
@@ -2325,6 +2376,8 @@ def main() -> None:
                 meta_intrabar_execution_enabled=str(args.meta_execution_mode).strip().lower() == "intrabar",
                 meta_intrabar_breakout_entry_only=str(args.meta_execution_mode).strip().lower() == "intrabar",
                 meta_intrabar_entry_policy=str(args.meta_intrabar_entry_policy),
+                meta_intrabar_long_trigger_mode=str(args.meta_intrabar_long_trigger_mode),
+                meta_intrabar_short_trigger_mode=str(args.meta_intrabar_short_trigger_mode),
                 meta_intrabar_setup_max_bars=int(args.meta_intrabar_setup_max_bars),
                 meta_intrabar_setup_bar_minutes=int(args.interval),
                 meta_intrabar_long_setup_threshold=args.meta_intrabar_long_setup_threshold,
@@ -2632,12 +2685,22 @@ def main() -> None:
         if aux_symbol not in stream_symbols:
             stream_symbols.append(aux_symbol)
 
-    streamer = AlpacaBarStreamer(
-        symbols=stream_symbols,
-        feed=feed,
-        env_file=args.env_file,
-        queue=bar_queue,
-    )
+    if stream_provider == "schwab":
+        from core.API.Schwab_API.live_stream import SchwabBarStreamer
+
+        streamer = SchwabBarStreamer(
+            symbols=stream_symbols,
+            queue=bar_queue,
+        )
+        print(f"[live] Stream provider: Schwab CHART_EQUITY ({len(stream_symbols)} symbols)")
+    else:
+        streamer = AlpacaBarStreamer(
+            symbols=stream_symbols,
+            feed=feed,
+            env_file=args.env_file,
+            queue=bar_queue,
+        )
+        print(f"[live] Stream provider: Alpaca {feed.value} ({len(stream_symbols)} symbols)")
     streamer.start_in_thread()
 
     print("Streaming started. Ctrl+C to stop.")
@@ -2653,7 +2716,12 @@ def main() -> None:
 
     try:
         last_broker_poll = 0.0
+        last_stale_warn_at = 0.0
+        last_backlog_warn_at = 0.0
         while not stop_event.is_set():
+            thread_error = getattr(streamer, "thread_error", None)
+            if thread_error is not None:
+                raise RuntimeError(f"Live stream thread failed: {thread_error}") from thread_error
             if order_policies is not None:
                 now = time.monotonic()
                 if now - last_broker_poll >= 30.0:
@@ -2677,7 +2745,37 @@ def main() -> None:
             try:
                 bar = bar_queue.get(timeout=0.5)
             except queue_mod.Empty:
+                thread_error = getattr(streamer, "thread_error", None)
+                if thread_error is not None:
+                    raise RuntimeError(f"Live stream thread failed: {thread_error}") from thread_error
                 continue
+            queue_depth = bar_queue.qsize()
+            now_mono = time.monotonic()
+            warn_queue_backlog = int(args.warn_queue_backlog)
+            if (
+                warn_queue_backlog > 0
+                and queue_depth >= warn_queue_backlog
+                and now_mono - last_backlog_warn_at >= 60.0
+            ):
+                last_backlog_warn_at = now_mono
+                print(
+                    f"[live] Warning: bar queue backlog is {queue_depth:,} items "
+                    f"(provider={stream_provider})."
+                )
+            stale_bar_seconds = float(args.warn_stale_bar_seconds)
+            age_seconds = _bar_age_seconds(bar)
+            if (
+                stale_bar_seconds > 0.0
+                and age_seconds is not None
+                and age_seconds >= stale_bar_seconds
+                and now_mono - last_stale_warn_at >= 60.0
+            ):
+                last_stale_warn_at = now_mono
+                print(
+                    f"[live] Warning: processing stale bar age={age_seconds:.1f}s "
+                    f"symbol={bar.get('symbol')} ts={bar.get('timestamp')} "
+                    f"queue_depth={queue_depth:,} provider={stream_provider}"
+                )
             bar_symbol = str(bar.get("symbol", "")).upper()
             aux_processor = aux_processors.get(bar_symbol)
             if aux_processor is not None:

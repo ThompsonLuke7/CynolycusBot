@@ -212,7 +212,24 @@ def resolve_intraday_parquet_path(
         return Path(parquet_path)
 
     raw_dir = get_ticker_raw_dir(ticker)
-    candidates = sorted(raw_dir.glob(f"{slug}_intraday_*.parquet"))
+    preferred_names = [
+        f"{slug}_intraday_1min_runtime_rth_cache.parquet",
+        f"{slug}_intraday_runtime_rth_cache.parquet",
+        f"{slug}_10min_live_runtime.parquet",
+        f"{slug}_5min_live_runtime.parquet",
+        f"{slug}_intraday_10min.parquet",
+        f"{slug}_10min.parquet",
+        f"{slug}_intraday_5min.parquet",
+        f"{slug}_5min.parquet",
+        f"{slug}_intraday_1min.parquet",
+        f"{slug}_1min.parquet",
+    ]
+    for name in preferred_names:
+        candidate = raw_dir / name
+        if candidate.exists():
+            return candidate
+
+    candidates = sorted(raw_dir.glob(f"{slug}_*.parquet"))
     if candidates:
         return max(candidates, key=lambda p: p.stat().st_mtime)
 

@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Dealer Positioning</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel2: #1f2630;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+    --border: #30363d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 13px; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 15px; }
+  .pill { padding: 2px 8px; border-radius: 10px; background: #30363d; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+  .pill.running { background: #0f3a1f; color: var(--green); }
+  .pill.error { background: #2d1010; color: var(--red); }
+  .controls { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  input, button { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 6px 10px; font: inherit; }
+  input { width: 92px; }
+  button:hover { background: #2c3340; cursor: pointer; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; }
+  button.danger { background: #6e1f1f; border-color: #6e1f1f; }
+  main { padding: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .full { grid-column: 1 / -1; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .card-head { padding: 8px 12px; background: var(--panel2); border-bottom: 1px solid var(--border); color: var(--muted); font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .levels-wrap { padding: 12px; display: grid; gap: 12px; }
+  .symbol-card { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .symbol-head { padding: 8px 12px; background: #19202a; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  .symbol-name { font-weight: 700; font-size: 12px; letter-spacing: 0.4px; text-transform: uppercase; }
+  .symbol-sub { color: var(--muted); font-size: 11px; }
+  .stats { display: grid; grid-template-columns: repeat(8, minmax(90px, 1fr)); gap: 10px; padding: 12px; }
+  .stat { background: var(--panel2); border: 1px solid var(--border); border-radius: 5px; padding: 8px; min-height: 62px; }
+  .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .value { margin-top: 4px; font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .sub { margin-top: 2px; color: var(--muted); font-size: 11px; }
+  .dte-grid { display: grid; grid-template-columns: repeat(3, minmax(240px, 1fr)); gap: 10px; padding: 0 12px 12px; }
+  .dte-card { background: #131920; border: 1px solid var(--border); border-radius: 5px; padding: 10px; }
+  .dte-title { color: var(--text); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+  .dte-meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .dte-values { display: grid; grid-template-columns: repeat(2, minmax(90px, 1fr)); gap: 8px; margin-top: 10px; }
+  .dte-stat { background: var(--panel2); border: 1px solid #2b333d; border-radius: 5px; padding: 7px 8px; }
+  .dte-stat .label { font-size: 9px; }
+  .dte-stat .value { font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  th { text-align: left; padding: 7px 10px; color: var(--muted); border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
+  td { padding: 7px 10px; border-bottom: 1px solid #1c232c; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .muted { color: var(--muted); }
+  .log { max-height: 320px; overflow: auto; padding: 6px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+  .line { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid #1c232c; }
+  .ts { flex: 0 0 80px; color: var(--muted); }
+  .kind { flex: 0 0 130px; color: var(--blue); text-transform: uppercase; font-size: 10px; font-weight: 700; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } .full { grid-column: auto; } .stats { grid-template-columns: repeat(2, 1fr); } .dte-grid { grid-template-columns: 1fr; } .controls { margin-left: 0; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Dealer Positioning</h1>
+  <span id="state" class="pill">idle</span>
+  <span id="meta" class="muted">SPY, SPX, QQQ, SLV, IWM, GLD, SMH | D0-D2</span>
+  <div class="controls">
+    <input id="symbols" value="SPY,SPX,QQQ,SLV,IWM,GLD,SMH" />
+    <input id="poll" type="number" min="15" step="15" value="60" />
+    <label class="muted" style="display:flex;align-items:center;gap:6px;"><input id="submit-orders" type="checkbox" /> paper orders</label>
+    <input id="alpaca-env-file" value=".env#paper" style="width:110px;" />
+    <button id="start" class="primary">Start</button>
+    <button id="stop" class="danger">Stop</button>
+  </div>
+</header>
+<main>
+  <section class="card full">
+    <div class="card-head">Live Levels</div>
+    <div id="levels"></div>
+  </section>
+  <section class="card">
+    <div class="card-head">Open Trades</div>
+    <table>
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Target</th><th>Contract</th><th>Mode</th></tr></thead>
+      <tbody id="open-trades"></tbody>
+    </table>
+  </section>
+  <section class="card">
+    <div class="card-head">Closed Trades</div>
+    <table>
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Mode</th></tr></thead>
+      <tbody id="closed-trades"></tbody>
+    </table>
+  </section>
+  <section class="card full">
+    <div class="card-head">Event Log</div>
+    <div id="events" class="log"></div>
+  </section>
+</main>
+<script>
+const fmt = (v, d=2) => (v === null || v === undefined || Number.isNaN(Number(v))) ? "-" : Number(v).toFixed(d);
+const timeOnly = (ts) => ts ? new Date(ts).toLocaleTimeString([], {hour12:false}) : "";
+
+async function post(path, body) {
+  const res = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body || {})});
+  return await res.json();
+}
+
+document.getElementById("start").onclick = () => {
+  post("/api/start", {
+    symbols: document.getElementById("symbols").value,
+    poll_seconds: Number(document.getElementById("poll").value || 60),
+    submit_orders: document.getElementById("submit-orders").checked,
+    alpaca_env_file: document.getElementById("alpaca-env-file").value
+  }).then(render);
+};
+document.getElementById("stop").onclick = () => post("/api/stop", {}).then(render);
+
+function render(state) {
+  const data = state.runner ? state : (state.state || state.ok ? state.state : state);
+  const pill = document.getElementById("state");
+  pill.textContent = data.state || "idle";
+  pill.className = "pill " + (data.state || "idle");
+  const runner = data.runner || {};
+  const cfg = runner.config || {};
+  document.getElementById("meta").textContent = `${(cfg.symbols || ["SPY","SPX","QQQ","SLV","IWM","GLD","SMH"]).join(", ")} | poll ${cfg.poll_seconds || 60}s | ${cfg.output_root || "Data/dealer_positioning"}`;
+  document.getElementById("submit-orders").checked = !!cfg.submit_orders;
+  document.getElementById("alpaca-env-file").value = cfg.alpaca_env_file || ".env#paper";
+  renderLevels(runner.levels || {});
+  renderTrades("open-trades", runner.open_trades || [], true);
+  renderTrades("closed-trades", runner.closed_trades || [], false);
+  renderEvents(data.events || []);
+}
+
+function renderLevels(levels) {
+  const root = document.getElementById("levels");
+  const symbols = Object.keys(levels).sort();
+  if (!symbols.length) {
+    root.innerHTML = '<div class="levels-wrap"><div class="muted">No level snapshot yet.</div></div>';
+    return;
+  }
+  root.innerHTML = `<div class="levels-wrap">${symbols.map(sym => renderSymbolLevels(sym, levels[sym])).join("")}</div>`;
+}
+
+function stat(label, value, sub) {
+  return `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub || ""}</div></div>`;
+}
+
+function dteStat(label, value, sub) {
+  return `<div class="dte-stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub || ""}</div></div>`;
+}
+
+function renderSymbolLevels(sym, x) {
+  const dtes = x.per_dte_levels || {};
+  const order = ["D0", "D1"];
+  const dteCards = order.filter(key => dtes[key]).map(key => renderDteCard(dtes[key])).join("");
+  return `<div class="symbol-card">
+    <div class="symbol-head">
+      <div class="symbol-name">${sym}</div>
+      <div class="symbol-sub">${timeOnly(x.timestamp)} | ${((x.expirations || []).join(", ")) || "no expiries"}</div>
+    </div>
+    <div class="stats">
+      ${stat("Spot", fmt(x.spot), "combined D0-D2")}
+      ${stat("Call Wall", fmt(x.call_wall), "largest call GEX above")}
+      ${stat("Put Wall", fmt(x.put_wall), "largest put GEX below")}
+      ${stat("Magnet", fmt(x.nearest_magnet), "nearest top-decile net GEX")}
+      ${stat("Next Above", fmt(x.next_magnet_above), "target")}
+      ${stat("Next Below", fmt(x.next_magnet_below), "target")}
+      ${stat("Gamma Flip", fmt(x.gamma_flip), x.total_gex >= 0 ? "long bias" : "risk-off")}
+      ${stat("Air Gap", `${fmt(x.air_gap_above_score,1)} / ${fmt(x.air_gap_below_score,1)}`, "above / below")}
+    </div>
+    ${dteCards ? `<div class="dte-grid">${dteCards}</div>` : ""}
+  </div>`;
+}
+
+function renderDteCard(x) {
+  return `<div class="dte-card">
+    <div class="dte-title">${x.label}</div>
+    <div class="dte-meta">${(x.expirations || []).join(", ") || "no expiry listed"}</div>
+    <div class="dte-values">
+      ${dteStat("Call Wall", fmt(x.call_wall), "")}
+      ${dteStat("Put Wall", fmt(x.put_wall), "")}
+      ${dteStat("Magnet", fmt(x.nearest_magnet), "")}
+      ${dteStat("Gamma Flip", fmt(x.gamma_flip), "")}
+      ${dteStat("Next Above", fmt(x.next_magnet_above), "")}
+      ${dteStat("Next Below", fmt(x.next_magnet_below), "")}
+    </div>
+  </div>`;
+}
+
+function renderTrades(id, rows, open) {
+  const el = document.getElementById(id);
+  if (!rows.length) {
+    el.innerHTML = '<tr><td colspan="6" class="muted">None</td></tr>';
+    return;
+  }
+  el.innerHTML = rows.slice().reverse().slice(0, 50).map(t => open
+    ? `<tr><td>${t.symbol}</td><td class="${t.direction === "long" ? "pos" : "neg"}">${t.direction}</td><td>${fmt(t.entry)}</td><td>${fmt(t.target)}</td><td class="mono">${contractLabel(t)}</td><td>${t.order_mode || ""}</td></tr>`
+    : `<tr><td>${t.symbol}</td><td class="${t.direction === "long" ? "pos" : "neg"}">${t.direction}</td><td>${fmt(t.entry)}</td><td>${fmt(t.exit_price)}</td><td class="${tradePnl(t) >= 0 ? "pos" : "neg"}">${fmt(tradePnl(t))}</td><td>${t.order_mode || t.exit_reason || ""}</td></tr>`
+  ).join("");
+}
+
+function contractLabel(t) {
+  if (!t.contract_symbol) return "-";
+  const strike = fmt(t.contract_strike);
+  return `${t.contract_side || ""} ${strike} ${t.contract_expiration || ""}`.trim();
+}
+
+function tradePnl(t) {
+  if (t.pnl_dollars !== null && t.pnl_dollars !== undefined && !Number.isNaN(Number(t.pnl_dollars))) return Number(t.pnl_dollars);
+  return Number(t.pnl_points || 0);
+}
+
+function renderEvents(events) {
+  const el = document.getElementById("events");
+  if (!events.length) {
+    el.innerHTML = '<div class="muted">No events yet.</div>';
+    return;
+  }
+  el.innerHTML = events.slice(0, 100).map(e => `<div class="line"><span class="ts">${timeOnly(e.ts)}</span><span class="kind">${e.type}</span><span>${brief(e)}</span></div>`).join("");
+}
+
+function brief(e) {
+  const p = e.payload || {};
+  if (e.type === "levels") return `${p.symbol}: ${p.rows} strikes`;
+  if (e.type === "signal") return `${p.symbol} ${p.direction} ${p.signal_type} target ${fmt(p.target)} stop ${fmt(p.stop)}`;
+  if (e.type === "trade_opened" || e.type === "trade_closed") return `${p.symbol} ${p.direction} ${fmt(p.entry)} -> ${fmt(p.exit_price || p.target)}`;
+  if (e.type === "poll_error" || e.type === "error") return p.error || "";
+  return JSON.stringify(p).slice(0, 180);
+}
+
+fetch("/api/state").then(r => r.json()).then(render);
+const source = new EventSource("/api/events");
+source.onmessage = (ev) => fetch("/api/state").then(r => r.json()).then(render);
+</script>
+</body>
+</html>
