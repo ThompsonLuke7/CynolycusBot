@@ -43,6 +43,19 @@ from strategies.multi_ticker_swing.data.load_data import load_raw_30m
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_logret(num: pd.Series, den: pd.Series) -> pd.Series:
+    """``log(num/den)`` with non-positive ratios mapped to NaN.
+
+    A zero/negative close (halted or bad bar) makes the ratio 0 → ``log(0) = -inf``,
+    which spams ``RuntimeWarning: divide by zero encountered in log`` once per bad
+    bar across the whole universe on every feature build. A return across a
+    non-positive price is undefined, so NaN is the correct value anyway.
+    """
+    ratio = num / den
+    return np.log(ratio.where(ratio > 0))
+
+
 # 13 RTH bars/day at 30-min (09:30 – 16:00 = 13 bars)
 BARS_PER_DAY = 13
 
@@ -89,7 +102,7 @@ def _add_cat1_price(df: pd.DataFrame) -> pd.DataFrame:
     for n in (1, 2, 4, 8, 16):
         df[f"ret_{n}"] = c.pct_change(n)
 
-    df["log_ret_1"] = np.log(c / c.shift(1))
+    df["log_ret_1"] = _safe_logret(c, c.shift(1))
 
     # z-score of 1-bar close-to-close return over 20-bar rolling window
     r1 = df["log_ret_1"]
@@ -120,7 +133,7 @@ def _add_cat2_volatility(df: pd.DataFrame) -> pd.DataFrame:
     roll_std_64  = atr_pct.rolling(64).std().replace(0, np.nan)
     df["atr_pct_z_64"] = (atr_pct - roll_mean_64) / roll_std_64
 
-    log_r = np.log(c / c_p)
+    log_r = _safe_logret(c, c_p)
     for n in (4, 16, 32):
         df[f"realized_vol_{n}"] = log_r.rolling(n).std()
 
@@ -431,7 +444,7 @@ def _add_cat8_context(
     c   = df["close"]
     idx = df.index
 
-    own_logret = np.log(c / c.shift(1))
+    own_logret = _safe_logret(c, c.shift(1))
 
     def _ctx_close(name: str) -> pd.Series:
         if name not in ctx:
@@ -443,7 +456,7 @@ def _add_cat8_context(
 
     def _ctx_logret(name: str) -> pd.Series:
         cc = _ctx_close(name)
-        return np.log(cc / cc.shift(1))
+        return _safe_logret(cc, cc.shift(1))
 
     def _rolling_beta(y: pd.Series, x: pd.Series, w: int) -> pd.Series:
         cov  = y.rolling(w).cov(x)

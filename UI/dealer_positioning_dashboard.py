@@ -274,7 +274,17 @@ class DealerDashboardHandler(BaseHTTPRequestHandler):
             if not index_path.exists():
                 self._write_text("Missing UI/dealer_positioning_index.html", status=HTTPStatus.NOT_FOUND)
                 return
-            self._write_text(index_path.read_text(encoding="utf-8"), content_type="text/html")
+            from UI.ui_chrome import NAV_HTML
+            html = index_path.read_text(encoding="utf-8").replace("<!--CYNO_NAV-->", NAV_HTML)
+            self._write_text(html, content_type="text/html")
+            return
+        if parsed.path == "/static/cynolycus_theme.css":
+            from UI.ui_chrome import serve_theme_css
+            serve_theme_css(self)
+            return
+        if parsed.path.startswith("/static/themes/"):
+            from UI.ui_chrome import serve_theme_asset
+            serve_theme_asset(self, parsed.path)
             return
         if parsed.path == "/api/state":
             self._write_json(app.snapshot())

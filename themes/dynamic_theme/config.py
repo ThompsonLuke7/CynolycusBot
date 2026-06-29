@@ -92,6 +92,46 @@ HDBSCAN_CLUSTER_SELECTION_METHOD = "leaf"
 # Centroid cosine similarity below this → new theme detected
 NEW_THEME_SIMILARITY_THRESHOLD = 0.75
 
+# ── Label stability ───────────────────────────────────────────────────────────
+# HDBSCAN cluster ids are NOT stable week to week, so the labeler used to call
+# Claude on EVERY cluster every week — re-naming themes that were already correct.
+# Instead, match each current cluster to the prior week's theme centroids; if the
+# best match's cosine similarity clears this threshold, CARRY FORWARD the prior
+# label (no Claude call, no rename). Only clusters with no strong prior match
+# (genuinely new, or grown from sub-threshold/noise into a real cluster) get
+# (re)labeled by Claude. Set high so only near-identical clusters are reused.
+LABEL_STABILITY_THRESHOLD = 0.90
+
+# ── Seeded / anchor themes ────────────────────────────────────────────────────
+# Unsupervised HDBSCAN gives no coverage guarantee: a real, coherent group can
+# fail to form its own cluster and scatter into neighbours (e.g. the whole
+# memory/storage complex landed in semiconductor_capital_equipment / batteries /
+# copper_mining). Seed themes are HAND-PINNED: their anchor centroid is the mean
+# embedding of the anchor tickers, injected alongside the emergent centroids in
+# step08 so the theme ALWAYS exists and any similar name (incl. the anchors) maps
+# to it. They survive the weekly recluster because they are config-driven, not
+# emergent, and are never sent to Claude for (re)labeling.
+#
+# Reserved cluster-id range so seeds never collide with HDBSCAN ids (>= 0; -1 is
+# HDBSCAN noise). Seed i gets SEED_CLUSTER_ID_BASE - i.
+SEED_CLUSTER_ID_BASE = -1000
+
+SEED_THEMES = [
+    {
+        "theme_name": "memory_storage",
+        "parent_theme": "semiconductors",
+        "description": (
+            "Memory and data-storage hardware makers: DRAM, NAND flash, HBM, "
+            "SSDs and hard disk drives (distinct from chip-making capital "
+            "equipment and from energy/battery storage)."
+        ),
+        # Pure-play memory/storage hardware names define the anchor; other names
+        # (NTAP, PSTG, SMCI, etc.) are then ASSIGNED to it by similarity.
+        "anchor_tickers": ["MU", "WDC", "STX", "SNDK"],
+        "related_themes": ["semiconductor_capital_equipment", "ai_infrastructure", "data_centers"],
+    },
+]
+
 # ── News window ───────────────────────────────────────────────────────────────
 NEWS_LOOKBACK_DAYS = 30
 MAX_HEADLINES_PER_TICKER = 10

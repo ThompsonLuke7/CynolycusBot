@@ -132,7 +132,10 @@ class RealAccountPolicyTests(unittest.TestCase):
                 reason=decision.reason,
                 now=datetime(2026, 6, 5, 11, 0, tzinfo=ET),
             )
-            self.assertEqual(policy.snapshot()["state"]["open_premium"], decision.premium_at_risk)
+            self.assertEqual(
+                policy.snapshot(now=datetime(2026, 6, 5, 11, 0, tzinfo=ET))["state"]["open_premium"],
+                decision.premium_at_risk,
+            )
 
             policy.mark_position_closed(
                 ticker="AMD",
@@ -141,7 +144,10 @@ class RealAccountPolicyTests(unittest.TestCase):
                 qty=1,
                 now=datetime(2026, 6, 5, 12, 0, tzinfo=ET),
             )
-            self.assertEqual(policy.snapshot()["state"]["open_premium"], 0.0)
+            self.assertEqual(
+                policy.snapshot(now=datetime(2026, 6, 5, 12, 0, tzinfo=ET))["state"]["open_premium"],
+                0.0,
+            )
 
 
 if __name__ == "__main__":

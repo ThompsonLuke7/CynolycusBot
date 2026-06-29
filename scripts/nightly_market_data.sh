@@ -103,30 +103,13 @@ PYEOF
   discovery_exit=$?
   echo "[$(ts)] ticker discovery exit=$discovery_exit"
 
-  # 5) Catalyst news — collect the day's headlines across the eligible universe.
-  #    collect_company_news merges into news_records.parquet (de-dupes), so the
-  #    small look-back overlap is safe to re-run.
-  echo "[$(ts)] news — collecting headlines (eligible universe)"
-  "$PYTHON" -u <<'PYEOF'
-import pandas as pd
-from signals.news.pipeline import collect_company_news
-from signals.news.config import NEWS_RECORDS_PATH
-
-uni = pd.read_csv("Data/shared/universe/shared_universe.csv")
-if "is_eligible" in uni.columns:
-    uni = uni[uni["is_eligible"].astype(bool)]
-tickers = sorted(uni["ticker"].astype(str).unique().tolist())
-
-end = pd.Timestamp.utcnow().normalize()
-start = end - pd.Timedelta(days=3)  # overlap; merge_with_existing de-dupes
-df = collect_company_news(
-    tickers,
-    start=start.strftime("%Y-%m-%d"),
-    end=end.strftime("%Y-%m-%d"),
-    output_path=NEWS_RECORDS_PATH,
-)
-print(f"  news_records now {len(df):,} rows ({len(tickers)} eligible tickers)")
-PYEOF
+  # 5) Catalyst news — collect headlines for the PRIORITY scope only (the names
+  #    the live system actually trades/ranks: swing universe ∪ momentum snapshot).
+  #    The broad full-universe sweep is the weekly job's responsibility — that's
+  #    the ~3h tail we moved off the nightly path. Breaking news on tradeable
+  #    names still flows through the same incremental embed/cluster + signal below.
+  echo "[$(ts)] news — collecting headlines (PRIORITY scope: swing ∪ momentum)"
+  "$PYTHON" -u -m scripts.collect_news_scope --scope priority
   news_collect_exit=$?
   echo "[$(ts)] news collect exit=$news_collect_exit"
 

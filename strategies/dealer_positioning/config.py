@@ -8,7 +8,11 @@ from pathlib import Path
 class DealerPositioningConfig:
     """Runtime knobs for the non-ML dealer positioning module."""
 
-    symbols: tuple[str, ...] = ("SPY", "SPX", "QQQ", "SLV", "IWM", "GLD", "SMH")
+    # SMH has no 0–2 DTE options, so it never produces rows in the short-dated
+    # gamma window and only logged "no rows inside configured strike window"
+    # every poll — dropped. Re-add via DEALER_POSITIONING_SYMBOLS if it ever
+    # lists dailies/weeklies.
+    symbols: tuple[str, ...] = ("SPY", "SPX", "QQQ", "SLV", "IWM", "GLD")
     dte_offsets: tuple[int, ...] = (0, 1, 2)
     poll_seconds: int = 60
     output_root: Path = Path("Data/dealer_positioning")

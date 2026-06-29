@@ -11,7 +11,7 @@ Routes:
   GET  /                → swing_index.html
   GET  /api/state       → snapshot JSON
   GET  /api/events      → SSE stream of session events
-  POST /api/start       → start a session ({"max_entries": 5, "dry_run": true})
+  POST /api/start       → start a session ({"max_entries": 5, "live": false})
   POST /api/stop        → stop the running session
 """
 from __future__ import annotations
@@ -546,7 +546,6 @@ class SwingSession:
         self,
         *,
         max_entries: int,
-        dry_run: bool,
         env_file: str,
         real_account_policy_enabled: bool | None = None,
         real_account_policy_state_path: str | None = None,
@@ -557,6 +556,9 @@ class SwingSession:
         # Lazy import to keep the dashboard importable even without xgboost installed.
         from strategies.multi_ticker_swing.live.runner import SwingLiveRunner
 
+        # Orders are always submitted (paper account by default, real-money when
+        # the LIVE toggle is on). There is no dry-run / no-orders path.
+        dry_run = False
         self._store.reset_for_session(
             max_entries=max_entries, dry_run=dry_run, env_file=env_file,
         )
@@ -650,7 +652,6 @@ class SwingSession:
             "ts": _utc_iso(),
             "payload": {
                 "max_entries": max_entries,
-                "dry_run": dry_run,
                 "env_file": env_file,
                 "real_account_policy": bool(real_account_policy_enabled),
                 "stream_symbols": len(runner.stream_symbols),
@@ -695,41 +696,48 @@ class SwingDashboardApp:
         bar_queue: queue_mod.Queue | None = None,
         *,
         default_env_file: str = ".env",
-        default_dry_run: bool = False,
-        default_real_account_policy: bool | None = None,
+        live_env_file: str | None = None,
         default_real_account_policy_state_path: str | None = None,
+        live_real_account_policy_state_path: str | None = None,
     ) -> None:
         self.store = SwingDashboardStore()
         self.broker = EventBroker()
         self.session = SwingSession(self.store, self.broker, audit_root, bar_queue=bar_queue)
+        # Paper is the default account; orders are always submitted (no dry-run).
         self.default_env_file = default_env_file
-        self.default_dry_run = bool(default_dry_run)
-        self.default_real_account_policy = default_real_account_policy
+        # When set, a truthy ``live`` flag in the start payload routes orders to
+        # this real-money env (with the real-account policy enabled). Off by default.
+        self.live_env_file = live_env_file
         self.default_real_account_policy_state_path = default_real_account_policy_state_path
+        self.live_real_account_policy_state_path = live_real_account_policy_state_path
 
     def snapshot(self) -> dict:
         snap = self.store.snapshot()
         snap["session_alive"] = self.session.is_running()
+        snap["live_available"] = bool(self.live_env_file)
         return snap
 
     def start(self, payload: dict) -> dict:
         max_entries = int(payload.get("max_entries", 5) or 5)
         if max_entries < 1:
             max_entries = 1
-        dry_run = bool(payload["dry_run"]) if "dry_run" in payload else self.default_dry_run
-        env_file = str(payload.get("env_file") or self.default_env_file)
-        real_policy = (
-            bool(payload["real_account_policy"])
-            if "real_account_policy" in payload
-            else self.default_real_account_policy
-        )
-        real_policy_state = str(
-            payload.get("real_account_policy_state") or self.default_real_account_policy_state_path or ""
-        ) or None
+        live = bool(payload.get("live"))
+        if live and not self.live_env_file:
+            raise RuntimeError(
+                "LIVE requested but no real-money env configured "
+                "(start the combined server with --live-env)."
+            )
+        if live:
+            env_file = self.live_env_file
+            real_policy = True
+            real_policy_state = self.live_real_account_policy_state_path or None
+        else:
+            env_file = self.default_env_file
+            real_policy = False
+            real_policy_state = self.default_real_account_policy_state_path or None
         return self.session.start(
             max_entries=max_entries,
-            dry_run=dry_run,
-            env_file=env_file,
+            env_file=str(env_file),
             real_account_policy_enabled=real_policy,
             real_account_policy_state_path=real_policy_state,
         )
@@ -786,7 +794,8 @@ class SwingDashboardHandler(BaseHTTPRequestHandler):
             self._write_text("Missing UI/swing_index.html",
                              status=HTTPStatus.NOT_FOUND)
             return
-        html = index_path.read_text(encoding="utf-8")
+        from UI.ui_chrome import NAV_HTML
+        html = index_path.read_text(encoding="utf-8").replace("<!--CYNO_NAV-->", NAV_HTML)
         self._write_text(html, status=HTTPStatus.OK, content_type="text/html")
 
     def _app(self) -> SwingDashboardApp:
@@ -802,6 +811,15 @@ class SwingDashboardHandler(BaseHTTPRequestHandler):
 
         if parsed.path in {"/", "/index.html", "/swing"}:
             self._serve_index()
+            return
+
+        if parsed.path == "/static/cynolycus_theme.css":
+            from UI.ui_chrome import serve_theme_css
+            serve_theme_css(self)
+            return
+        if parsed.path.startswith("/static/themes/"):
+            from UI.ui_chrome import serve_theme_asset
+            serve_theme_asset(self, parsed.path)
             return
 
         if parsed.path == "/api/state":

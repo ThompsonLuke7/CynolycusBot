@@ -4,24 +4,13 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Cynolycus Live Dashboard</title>
+  <link rel="stylesheet" href="/static/cynolycus_theme.css">
   <style>
-    :root {
-      --bg: #08131f;
-      --panel: #0f1f31;
-      --panel-2: #122941;
-      --text: #d7e4f7;
-      --muted: #90a5c2;
-      --good: #2ccf7a;
-      --bad: #f05c52;
-      --accent: #4cb8ff;
-      --gold: #f0b04f;
-      --line: #1f3a56;
-    }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: "Segoe UI Variable", "Bahnschrift", "Trebuchet MS", sans-serif;
-      background: radial-gradient(1200px 700px at 10% 0%, #173455 0%, var(--bg) 45%);
+      font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
       color: var(--text);
       min-height: 100vh;
     }
@@ -92,10 +81,36 @@
       padding: 12px;
     }
     .controls {
-      display: grid;
-      grid-template-columns: repeat(6, minmax(120px, 1fr));
-      gap: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
       align-items: end;
+    }
+    .controls > .field { min-width: 130px; }
+    .tog {
+      display: inline-flex; align-items: center; gap: 6px;
+      color: var(--muted); font-size: 0.82rem; text-transform: uppercase;
+      letter-spacing: 0.4px; padding-bottom: 8px;
+    }
+    .tog input[type="checkbox"] { width: 15px; height: 15px; }
+    details.advanced {
+      flex-basis: 100%;
+      margin-top: 6px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel2);
+      padding: 0 10px;
+    }
+    details.advanced > summary {
+      cursor: pointer; padding: 8px 2px;
+      font-size: 0.78rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.4px;
+    }
+    .adv-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+      padding: 6px 0 10px;
     }
     .field {
       display: grid;
@@ -241,6 +256,7 @@
   </style>
 </head>
 <body>
+  <!--CYNO_NAV-->
   <div class="page">
     <div class="top">
       <h1>10min Swing Runner Dashboard</h1>
@@ -254,40 +270,44 @@
       <div class="left-stack">
         <div class="card">
           <div class="controls">
-            <div class="field"><label>Mode</label><select id="runnerMode"><option value="live">Live</option><option value="replay" selected>Replay</option></select></div>
-            <div class="field"><label>Symbols</label><input id="symbols" value="SPY" /></div>
-            <div class="field"><label>Feed</label><select id="feed"><option value="IEX">IEX</option><option value="SIP">SIP</option></select></div>
-            <div class="field"><label>Interval (min)</label><input id="interval" type="number" value="10" min="1" /></div>
-            <div class="field"><label>Signal Model</label><input value="Swing Support Single + Phase4 1m trigger" disabled /></div>
-            <div class="field"><label>Entry Source</label><input value="competition long + active short" disabled /></div>
-            <input id="metaModelRoot" type="hidden" value="Data/models/meta_xgboost/10min" />
-            <input id="metaBaseFramePath" type="hidden" value="Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet" />
-            <div class="field"><label>Live Prefill Start</label><input id="prefillStart" value="2026-01-30" /></div>
-            <div class="field"><label>Prefill Path</label><input id="prefillPath" value="Data/raw/spy/spy_intraday_1min.parquet" /></div>
-            <div class="field"><label>Env File</label><input id="envFile" value=".env" /></div>
-            <div class="field"><label>Replay Data Path</label><input id="replayDataPath" value="Data/raw/spy/spy_intraday_1min.parquet" /></div>
-            <div class="field"><label>Replay Start</label><input id="replayStart" value="2026-03-14T00:00:00Z" placeholder="optional ISO datetime" /></div>
-            <div class="field"><label>Replay End</label><input id="replayEnd" value="2026-03-23T23:59:59Z" placeholder="optional ISO datetime" /></div>
-            <div class="field"><label>Replay Sleep (sec)</label><input id="replaySleep" type="number" step="0.01" min="0" value="0.0" /></div>
-            <div class="field"><label>Flip Abs Min</label><input id="execFlipAbsThreshold" type="number" step="0.01" min="0" value="0.05" /></div>
-            <div class="field"><label>Hard Stop ATR</label><input id="metaHardStopAtr" type="number" step="0.1" min="0" value="0.0" /></div>
-            <div class="field"><label>Replay Option Proxy</label><select id="replayOptionProxyMode"><option value="black_scholes" selected>Black-Scholes</option><option value="none">None</option></select></div>
-            <div class="field"><label>Catch-up Max Age (min)</label><input id="startupCatchupMaxAgeMin" type="number" min="0" value="120" /></div>
-            <div class="field"><label>Replay Max Bars</label><input id="replayMaxBars" type="number" min="1" placeholder="all" /></div>
-            <div class="field"><label>Replay Warmup Bars</label><input id="replayWarmupBars" type="number" min="0" value="250000" /></div>
-            <div class="checks">
-              <label><input id="enableOrders" type="checkbox" checked /> Option Orders</label>
-              <label><input id="simulateOrders" type="checkbox" checked /> Simulate</label>
-              <label><input id="noPrefillFetch" type="checkbox" /> No Prefill Fetch</label>
-              <label><input id="startupCatchupOrder" type="checkbox" /> Startup Catch-up Order</label>
-              <label><input id="replayRegularOnly" type="checkbox" /> Replay RTH Only</label>
-              <label><input id="replayNoWarmup" type="checkbox" /> Replay No Warmup</label>
-            </div>
+            <div class="field"><label>Mode</label><select id="runnerMode"><option value="live" selected>Live</option><option value="replay">Replay</option></select></div>
+            <label class="tog" title="Off: submit real option orders on the Alpaca PAPER account (default). On: route to the real-money account. Replay always simulates."><input id="liveToggle" type="checkbox" /> Real money account</label>
             <div class="btns">
               <button id="refreshBtn">Refresh</button>
               <button id="startBtn">Start</button>
               <button id="stopBtn" class="stop">Stop</button>
             </div>
+            <details class="advanced">
+              <summary>Advanced (replay &amp; tuning)</summary>
+              <div class="adv-grid">
+                <div class="field"><label>Symbols</label><input id="symbols" value="SPY" /></div>
+                <div class="field"><label>Feed</label><select id="feed"><option value="IEX">IEX</option><option value="SIP">SIP</option></select></div>
+                <div class="field"><label>Interval (min)</label><input id="interval" type="number" value="10" min="1" /></div>
+                <div class="field"><label>Signal Model</label><input value="Swing Support Single + Phase4 1m trigger" disabled /></div>
+                <div class="field"><label>Entry Source</label><input value="competition long + active short" disabled /></div>
+                <input id="metaModelRoot" type="hidden" value="Data/models/meta_xgboost/10min" />
+                <input id="metaBaseFramePath" type="hidden" value="Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet" />
+                <div class="field"><label>Live Prefill Start</label><input id="prefillStart" value="2026-01-30" /></div>
+                <div class="field"><label>Prefill Path</label><input id="prefillPath" value="Data/raw/spy/spy_intraday_1min.parquet" /></div>
+                <div class="field"><label>Paper Env File</label><input id="envFile" value=".env" /></div>
+                <div class="field"><label>Replay Data Path</label><input id="replayDataPath" value="Data/raw/spy/spy_intraday_1min.parquet" /></div>
+                <div class="field"><label>Replay Start</label><input id="replayStart" value="2026-03-14T00:00:00Z" placeholder="optional ISO datetime" /></div>
+                <div class="field"><label>Replay End</label><input id="replayEnd" value="2026-03-23T23:59:59Z" placeholder="optional ISO datetime" /></div>
+                <div class="field"><label>Replay Sleep (sec)</label><input id="replaySleep" type="number" step="0.01" min="0" value="0.0" /></div>
+                <div class="field"><label>Flip Abs Min</label><input id="execFlipAbsThreshold" type="number" step="0.01" min="0" value="0.05" /></div>
+                <div class="field"><label>Hard Stop ATR</label><input id="metaHardStopAtr" type="number" step="0.1" min="0" value="0.0" /></div>
+                <div class="field"><label>Replay Option Proxy</label><select id="replayOptionProxyMode"><option value="black_scholes" selected>Black-Scholes</option><option value="none">None</option></select></div>
+                <div class="field"><label>Catch-up Max Age (min)</label><input id="startupCatchupMaxAgeMin" type="number" min="0" value="120" /></div>
+                <div class="field"><label>Replay Max Bars</label><input id="replayMaxBars" type="number" min="1" placeholder="all" /></div>
+                <div class="field"><label>Replay Warmup Bars</label><input id="replayWarmupBars" type="number" min="0" value="250000" /></div>
+              </div>
+              <div class="checks">
+                <label><input id="noPrefillFetch" type="checkbox" /> No Prefill Fetch</label>
+                <label><input id="startupCatchupOrder" type="checkbox" /> Startup Catch-up Order</label>
+                <label><input id="replayRegularOnly" type="checkbox" /> Replay RTH Only</label>
+                <label><input id="replayNoWarmup" type="checkbox" /> Replay No Warmup</label>
+              </div>
+            </details>
           </div>
         </div>
         <div class="card">
@@ -354,9 +374,10 @@
     function applyModeUi() {
       const mode = document.getElementById("runnerMode").value;
       const replay = mode === "replay";
-      const simulate = document.getElementById("simulateOrders");
-      if (replay) simulate.checked = true;
-      simulate.disabled = replay;
+      // Live always submits (paper by default, real account when LIVE is on);
+      // replay always simulates and disables the LIVE toggle.
+      const live = document.getElementById("liveToggle");
+      if (live) live.disabled = replay;
       document.getElementById("feed").disabled = replay;
       document.getElementById("prefillStart").disabled = replay;
       const replayIds = [
@@ -2089,8 +2110,9 @@
         replay_no_prepend_split_test_warmup: document.getElementById("replayNoWarmup").checked,
         exec_flip_abs_threshold: Number(document.getElementById("execFlipAbsThreshold").value || 0),
         env_file: document.getElementById("envFile").value,
-        enable_option_orders: document.getElementById("enableOrders").checked,
-        simulate_orders: document.getElementById("simulateOrders").checked,
+        live: document.getElementById("liveToggle").checked,
+        enable_option_orders: true,
+        simulate_orders: document.getElementById("runnerMode").value === "replay",
         option_exit_policy: "option_adaptive_trail_v1",
         option_exit_take_profit_pct: 0.0,
         option_exit_stop_loss_pct: 1.0,

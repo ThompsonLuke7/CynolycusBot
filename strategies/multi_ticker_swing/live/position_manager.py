@@ -23,6 +23,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+from core.calendar import next_trading_day
 from strategies.multi_ticker_swing.live.universe import TickerConfig
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ _LIQUIDATION_CLOSE_REASONS = {
     "deferred_trail_failed",
     "deferred_trail_timeout",
     "expiration_itm_cutoff",
+    "expiring_before_closure",
     "restored_unknown_expiring",
     "restored_unknown_loss_cut",
 }
@@ -57,6 +59,7 @@ _OPEN_POSITION_STATE_PATH = Path("Data/inference/multi_ticker_swing/open_positio
 _EXPIRING_ITM_CLOSE_HOUR = 15
 _EXPIRING_ITM_CLOSE_MINUTE = 45
 _ASSIGNED_EQUITY_MIN_SHARES = 100
+_ASSIGNED_EQUITY_FLATTEN_COOLDOWN_S = 180.0  # min seconds between flatten attempts per symbol
 _OPTION_VALUE_EXIT_ENABLED = True
 _OPTION_VALUE_QUOTE_MODE = "bid"
 _OPTION_PROFIT_TRAIL_ARM_PCT = 1.00
@@ -437,6 +440,30 @@ def _expiring_itm_exit_reason(pos: SwingPosition, bar: dict) -> str | None:
     return None
 
 
+def _expiring_before_closure_exit_reason(pos: SwingPosition, bar: dict) -> str | None:
+    """Force-close any option that won't see another tradable session.
+
+    Past the EOD cutoff, if the next market session opens *after* the contract's
+    expiration (0DTE, or the last session before a weekend/holiday closure), the
+    option can't be exited on-screen again — so flatten it now instead of letting
+    it expire/auto-exercise into assigned equity over the closure. This is the
+    holiday-aware backstop the 2026-06-18 Juneteenth weekend exposed.
+    """
+    parsed = _parse_occ_option_symbol(pos.option_symbol)
+    if parsed is None:
+        return None
+    ts = bar.get("timestamp")
+    if not isinstance(ts, datetime):
+        return None
+    local = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=_ET)
+    if not _past_expiring_itm_close_cutoff(ts):
+        return None
+    # next_trading_day(today) > expiry  ==>  today is the last tradable session.
+    if next_trading_day(local.date()) > parsed.expiration:
+        return "expiring_before_closure"
+    return None
+
+
 def _restored_unknown_exit_reason(pos: SwingPosition, bar: dict) -> str | None:
     if not bool(pos.restored_from_broker) or str(pos.restore_source or "") != "broker_snapshot":
         return None
@@ -487,6 +514,7 @@ class SwingPositionManager:
         self._positions: dict[str, SwingPosition] = {}   # ticker → position
         self._last_close_failure_wall: dict[str, float] = {}
         self._pending_close_orders: dict[str, dict[str, Any]] = {}
+        self._assigned_flatten_last_attempt: dict[str, float] = {}  # symbol → wall time
         self._deferred_trail_cache = self._load_deferred_trail_cache()
         self._worthless_close_abandoned = self._load_worthless_close_abandoned()
         self._position_state_cache = self._load_open_position_state_cache()
@@ -569,7 +597,12 @@ class SwingPositionManager:
             return {"ok": True, "simulated": True, "reason": reason}
 
         broker_positions, ignored = self._broker_swing_positions(universe)
-        assigned_equities = self._broker_assigned_equity_positions(universe)
+        # Capture swing's own option-ownership scope BEFORE any reconcile
+        # mutation: tickers we currently track plus those persisted from a
+        # prior session (an assignment can land while we were offline). This is
+        # what keeps the flattener from selling another module's equity.
+        owned_tickers = set(self._positions.keys()) | set(self._position_state_cache.keys())
+        assigned_equities = self._broker_assigned_equity_positions(universe, owned_tickers)
         broker_by_ticker: dict[str, dict[str, Any]] = {}
         duplicates: list[dict[str, Any]] = []
         for broker_pos in broker_positions:
@@ -726,12 +759,17 @@ class SwingPositionManager:
     def _broker_assigned_equity_positions(
         self,
         universe: dict[str, TickerConfig],
+        owned_tickers: set[str],
     ) -> list[dict[str, Any]]:
         """Detect possible exercised/assigned option lots now held as shares.
 
         Alpaca exposes exercised/assigned options as plain equity positions. The
-        live option manager cannot prove intent here, so this method only flags
-        whole 100-share lots in the swing universe for operator/audit handling.
+        account is shared with other strategies (Meta Ranker, Momentum), whose
+        deliberate equity lots also live in the swing universe — so universe
+        membership alone is NOT enough to claim a lot. We only flag a lot when
+        the swing book actually has option-ownership history for that ticker
+        (currently tracked, or persisted before a restart). Anything else is
+        another module's position and must be left untouched.
         """
         resp = self._client.get_positions()
         raw_positions = _extract_positions(resp)
@@ -740,6 +778,10 @@ class SwingPositionManager:
         for raw in raw_positions:
             symbol = str(raw.get("symbol", "")).strip().upper()
             if symbol not in universe:
+                continue
+            if symbol not in owned_tickers:
+                # Equity lot owned by another module (or never an assignment of
+                # ours) — out of this module's scope; never flatten it.
                 continue
             if _parse_occ_option_symbol(symbol) is not None:
                 continue
@@ -784,6 +826,7 @@ class SwingPositionManager:
                 self._emit("assigned_equity_flatten_dry_run", result)
             return results
 
+        now = time.time()
         for pos in positions:
             symbol = str(pos.get("symbol", "")).strip().upper()
             qty_val = _as_float(pos.get("qty"))
@@ -794,6 +837,18 @@ class SwingPositionManager:
                 results.append(result)
                 self._emit("assigned_equity_flatten_failed", result)
                 continue
+
+            # Don't resubmit the same flatten every reconcile (which spams broker
+            # 403s while the prior order is still pending / settling). A market
+            # order placed before the open is also rejected, so a cooldown lets
+            # the next attempt land after the bell instead of every bar.
+            last = self._assigned_flatten_last_attempt.get(symbol)
+            if last is not None and (now - last) < _ASSIGNED_EQUITY_FLATTEN_COOLDOWN_S:
+                result = {**pos, "submitted": False, "skipped": "flatten_cooldown"}
+                results.append(result)
+                self._emit("assigned_equity_flatten_skipped", result)
+                continue
+            self._assigned_flatten_last_attempt[symbol] = now
 
             try:
                 resp = self._client.submit_order(
@@ -943,6 +998,17 @@ class SwingPositionManager:
                 "cutoff_et": f"{_EXPIRING_ITM_CLOSE_HOUR:02d}:{_EXPIRING_ITM_CLOSE_MINUTE:02d}",
             })
             self._close_position(pos, expiration_reason, bar)
+            return
+
+        closure_reason = _expiring_before_closure_exit_reason(pos, bar)
+        if closure_reason:
+            self._emit("expiring_before_closure_exit_triggered", {
+                **pos.to_dict(),
+                "reason": closure_reason,
+                "bar": _safe_bar(bar),
+                "cutoff_et": f"{_EXPIRING_ITM_CLOSE_HOUR:02d}:{_EXPIRING_ITM_CLOSE_MINUTE:02d}",
+            })
+            self._close_position(pos, closure_reason, bar)
             return
 
         option_reason = self._option_value_exit_reason(pos)

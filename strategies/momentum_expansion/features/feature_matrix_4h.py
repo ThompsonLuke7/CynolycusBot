@@ -260,7 +260,11 @@ def build_ticker_features_4h(
 
     # --- VOLATILITY ---
     df["atr_expand_14_60"] = (atr14 / atr60).clip(0, 5)
-    log_ret = np.log(c / c.shift(1))
+    # Guard zero/negative closes (halted or bad bars): a 0 price makes the ratio 0
+    # → log(0) = -inf and floods the logs with divide-by-zero RuntimeWarnings. A
+    # return across a non-positive price is undefined, so emit NaN instead.
+    _c_ratio = c / c.shift(1)
+    log_ret = np.log(_c_ratio.where(_c_ratio > 0))
     rv5 = log_ret.rolling(5).std()
     rv20 = log_ret.rolling(20).std()
     rv60 = log_ret.rolling(60).std()
@@ -355,7 +359,8 @@ def build_ticker_features_4h(
 
     # Beta & corr to SPY (60-bar)
     own_lr = log_ret
-    spy_lr = np.log(spy_c / spy_c.shift(1))
+    _spy_ratio = spy_c / spy_c.shift(1)
+    spy_lr = np.log(_spy_ratio.where(_spy_ratio > 0))
     if ticker == "SPY":
         df["beta_spy_60"] = 1.0
         df["corr_spy_60"] = 1.0

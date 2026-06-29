@@ -63,11 +63,13 @@ PENDING_COLUMNS = [
     "cap_tier",
     "stock_only",
     "history_days",
+    "atr_expand",
     "catalyst_mentions",
     "passes_price",
     "passes_adv",
     "passes_market_cap",
     "passes_history",
+    "passes_atr",
     "passes_observation",
     "meets_all",
     "promoted_date",
@@ -91,6 +93,12 @@ class DiscoveryConfig:
     min_history_days: int = 200
     min_observation_days: int = 2
     adv_window: int = 20
+    # Movement gate: don't promote names that barely move. atr_expand = ATR(14)/
+    # ATR(60) — the recent 14-day true range vs the 60-day baseline. >1.0 means the
+    # name is moving more than its own recent norm (an active mover); a quiet/dead
+    # name sits at/under 1.0. Set 0.0 to disable. (This is the universe-level slow-
+    # mover filter — it replaces the old momentum-snapshot ATR filter.)
+    min_atr_expand: float = 1.10
     # Sub-$1B names route stock-only: listed options are unreliable / absent.
     options_market_cap_floor: float = 1_000_000_000.0
     catalyst_lookback_days: int = 30
@@ -137,11 +145,13 @@ def compute_daily_metrics(bars: pd.DataFrame, *, adv_window: int = 20) -> dict[s
     Accepts a frame with ``close``/``volume`` columns (case-insensitive). Returns
     NaNs / 0 when the frame is empty so callers can filter uniformly.
     """
+    _empty = {"last_price": float("nan"), "avg_dollar_volume_20d": float("nan"),
+              "history_days": 0, "atr_expand": float("nan")}
     if bars is None or bars.empty:
-        return {"last_price": float("nan"), "avg_dollar_volume_20d": float("nan"), "history_days": 0}
+        return dict(_empty)
     df = bars.rename(columns={c: str(c).lower() for c in bars.columns})
     if "close" not in df.columns or "volume" not in df.columns:
-        return {"last_price": float("nan"), "avg_dollar_volume_20d": float("nan"), "history_days": 0}
+        return dict(_empty)
     close = pd.to_numeric(df["close"], errors="coerce")
     volume = pd.to_numeric(df["volume"], errors="coerce")
     dollar_vol = (close * volume).tail(adv_window)
@@ -149,7 +159,26 @@ def compute_daily_metrics(bars: pd.DataFrame, *, adv_window: int = 20) -> dict[s
         "last_price": float(close.iloc[-1]) if len(close) else float("nan"),
         "avg_dollar_volume_20d": float(dollar_vol.mean()) if len(dollar_vol) else float("nan"),
         "history_days": int(close.notna().sum()),
+        "atr_expand": _atr_expand(df, close),
     }
+
+
+def _atr_expand(df: pd.DataFrame, close: pd.Series, *, fast: int = 14, slow: int = 60) -> float:
+    """ATR(fast)/ATR(slow): recent true-range vs the longer baseline. >1 = moving
+    more than its own norm. NaN when high/low missing or <slow bars of history."""
+    if "high" not in df.columns or "low" not in df.columns:
+        return float("nan")
+    high = pd.to_numeric(df["high"], errors="coerce")
+    low = pd.to_numeric(df["low"], errors="coerce")
+    prev_close = close.shift(1)
+    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    if int(tr.notna().sum()) < slow:
+        return float("nan")
+    atr_fast = tr.rolling(fast).mean().iloc[-1]
+    atr_slow = tr.rolling(slow).mean().iloc[-1]
+    if not np.isfinite(atr_slow) or atr_slow <= 0:
+        return float("nan")
+    return float(atr_fast / atr_slow)
 
 
 def normalize_exchange(value: object) -> str:
@@ -168,6 +197,7 @@ def screen_filters(row: dict, cfg: DiscoveryConfig) -> dict:
     adv = row.get("avg_dollar_volume_20d")
     mcap = row.get("market_cap")
     hist = row.get("history_days", 0)
+    atr_expand = row.get("atr_expand")
 
     def _num(x):
         try:
@@ -185,6 +215,13 @@ def screen_filters(row: dict, cfg: DiscoveryConfig) -> dict:
     except (TypeError, ValueError):
         hist_num = 0
     passes_history = hist_num >= cfg.min_history_days
+    # Movement gate: require demonstrated range expansion. Disabled when
+    # min_atr_expand <= 0. Fail-closed on a non-finite value (can't confirm it moves).
+    atr_val = _num(atr_expand)
+    passes_atr = (
+        cfg.min_atr_expand <= 0.0
+        or (np.isfinite(atr_val) and atr_val >= cfg.min_atr_expand)
+    )
     first_seen = pd.to_datetime(row.get("first_seen"), errors="coerce")
     today = pd.Timestamp(row.get("_evaluation_date") or _today_str())
     observation_days = (
@@ -198,6 +235,7 @@ def screen_filters(row: dict, cfg: DiscoveryConfig) -> dict:
         and passes_adv
         and passes_market_cap
         and passes_history
+        and passes_atr
         and passes_observation
     )
     return {
@@ -205,6 +243,7 @@ def screen_filters(row: dict, cfg: DiscoveryConfig) -> dict:
         "passes_adv": bool(passes_adv),
         "passes_market_cap": bool(passes_market_cap),
         "passes_history": bool(passes_history),
+        "passes_atr": bool(passes_atr),
         "passes_observation": bool(passes_observation),
         "meets_all": meets_all,
     }
@@ -289,6 +328,7 @@ def evaluate_promotions(
             "passes_adv",
             "passes_market_cap",
             "passes_history",
+            "passes_atr",
             "passes_observation",
             "meets_all",
         )
@@ -325,6 +365,7 @@ def evaluate_promotions(
                     "passes_adv",
                     "passes_market_cap",
                     "passes_history",
+                    "passes_atr",
                     "passes_observation",
                 )
                 if not flags[name]

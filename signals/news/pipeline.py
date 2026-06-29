@@ -53,6 +53,8 @@ def collect_company_news(
     sec_enrich_ex99: bool = True,
     output_path: Path | str = NEWS_RECORDS_PATH,
     merge_with_existing: bool = True,
+    google_news_min_interval_s: float = 0.25,
+    google_news_workers: int = 8,
 ) -> pd.DataFrame:
     """Collect company news across all enabled sources.
 
@@ -89,7 +91,10 @@ def collect_company_news(
     if "yfinance" in source_set:
         frames.append(fetch_yfinance_news(tickers, start=start, end=end))
     if "google_news" in source_set:
-        frames.append(fetch_google_news_rss(tickers, start=start, end=end))
+        frames.append(fetch_google_news_rss(
+            tickers, start=start, end=end,
+            min_interval_s=google_news_min_interval_s, workers=google_news_workers,
+        ))
     if "fed_rss" in source_set:
         frames.append(fetch_fed_press_releases(start=start, end=end))
     if "openfda" in source_set:

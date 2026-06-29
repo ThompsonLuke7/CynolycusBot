@@ -239,3 +239,39 @@ class MomentumLiveRunner:
                 _emit_alert(payload)
                 out.append(payload)
         return out
+
+
+def main() -> None:
+    """One scheduled Momentum pass: score (ExpansionRanker, same as Meta's mom_score)
+    -> entry triggers -> this module's own MomentumOptionPolicy. Dry-run/paper by
+    default; --submit places orders, --live targets the real-money account."""
+    import argparse
+
+    from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+    from strategies.momentum_expansion.policy.momentum_option_policy import (
+        MomentumOptionConfig,
+        MomentumOptionPolicy,
+    )
+
+    ap = argparse.ArgumentParser(description="Standalone Momentum Expansion harness — one pass.")
+    ap.add_argument("--submit", action="store_true", help="Place orders (default: dry-run / alerts only).")
+    ap.add_argument("--live", action="store_true", help="Target the LIVE account (default: paper).")
+    args = ap.parse_args()
+
+    profile = "LIVE" if args.live else "PAPER"
+    env_file = f".env#{profile}"
+    mode = "SUBMIT" if args.submit else "DRY-RUN"
+    print(f"=== Momentum Expansion harness | account={profile} | mode={mode} ===")
+
+    policy = MomentumOptionPolicy(
+        cfg=MomentumOptionConfig(submit_orders=bool(args.submit)),
+        client=AlpacaOptionsClient(env_file=env_file),
+    )
+    runner = MomentumLiveRunner(policy=policy, auto_trade=bool(args.submit))
+    entries = runner.evaluate_now()
+    exits = runner.manage_open_positions()
+    print(f"entries/triggers: {len(entries)}  exits: {len(exits)}")
+
+
+if __name__ == "__main__":
+    main()

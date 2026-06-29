@@ -25,14 +25,23 @@ Per-position management:
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time as time_mod
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+# Durable record of the option contracts this strategy has opened, so the
+# Momentum dashboard can show only its own book (the Alpaca account is shared
+# across every module). Keyed by OCC symbol; reconciled against the live broker
+# account for display so expired/closed contracts drop off automatically.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_BOOK_PATH = _REPO_ROOT / "Data/inference/momentum_expansion/book.json"
 
 try:
     from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
@@ -255,6 +264,7 @@ class MomentumOptionPolicy:
         *,
         cfg: MomentumOptionConfig | None = None,
         client: Any = None,
+        book_path: Path | str | None = DEFAULT_BOOK_PATH,
     ):
         self.cfg = cfg or MomentumOptionConfig()
         if client is None and AlpacaOptionsClient is not None:
@@ -266,6 +276,37 @@ class MomentumOptionPolicy:
         self.client = client
         self.positions: dict[str, MomentumOptionPosition] = {}
         self.campaigns: dict[str, MomentumCampaignState] = {}
+        self._book_path = Path(book_path) if book_path else None
+
+    # ---- own-book persistence (display/attribution; shared Alpaca account) ----
+    def _book_record_open(self, position: "MomentumOptionPosition") -> None:
+        if self._book_path is None:
+            return
+        try:
+            book = {}
+            if self._book_path.exists():
+                book = json.loads(self._book_path.read_text())
+            book[position.contract.occ_symbol] = {
+                "underlying": position.underlying,
+                "qty": int(position.qty),
+                "direction": int(position.direction),
+                "entry_underlying": float(position.entry_underlying),
+                "entry_time": str(position.entry_time),
+            }
+            self._book_path.parent.mkdir(parents=True, exist_ok=True)
+            self._book_path.write_text(json.dumps(book, indent=2))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("book record-open failed: %s", exc)
+
+    def _book_record_close(self, occ_symbol: str) -> None:
+        if self._book_path is None or not self._book_path.exists():
+            return
+        try:
+            book = json.loads(self._book_path.read_text())
+            if book.pop(occ_symbol, None) is not None:
+                self._book_path.write_text(json.dumps(book, indent=2))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("book record-close failed: %s", exc)
 
     # ---- campaign controls ----
     def _campaign_state_for(self, ticker: str, as_of: pd.Timestamp) -> MomentumCampaignState:
@@ -480,6 +521,7 @@ class MomentumOptionPolicy:
                     time_in_force="day",
                 )
                 logger.info("[%s] submitted BUY %d × %s", ticker, qty, contract.occ_symbol)
+                self._book_record_open(position)
             except Exception as exc:
                 logger.warning("[%s] order submit failed: %s", ticker, exc)
         else:
@@ -562,6 +604,7 @@ class MomentumOptionPolicy:
                 )
                 logger.info("[%s] submitted SELL %d × %s (%s)",
                             ticker, pos.qty, pos.contract.occ_symbol, reason)
+                self._book_record_close(pos.contract.occ_symbol)
             except Exception as exc:
                 logger.warning("[%s] close failed: %s", ticker, exc)
         else:

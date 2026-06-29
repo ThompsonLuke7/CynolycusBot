@@ -16,13 +16,10 @@ import pandas as pd
 
 from themes.dynamic_theme.config import (
     NEW_THEME_SIMILARITY_THRESHOLD,
-    THEME_REGISTRY_PATH,
     TICKER_CLUSTERS_PATH,
-    TICKER_EMBEDDINGS_PATH,
 )
 from themes.dynamic_theme.stages.step03_cluster import compute_centroids
-from themes.dynamic_theme.stages.step04_cluster_summary import build_cluster_summaries
-from themes.dynamic_theme.stages.step05_claude_labeling import _label_cluster, _load_registry_or_empty, load_registry
+from themes.dynamic_theme.stages.step05_claude_labeling import _load_registry_or_empty
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +79,6 @@ def discover_new_themes(
 
     Returns (new_theme_count, updated_registry_df).
     """
-    import json
-
     as_of = (as_of or pd.Timestamp.now(tz="UTC")).normalize().tz_localize(None)
     registry = _load_registry_or_empty()
 
@@ -92,59 +87,27 @@ def discover_new_themes(
     current_centroids = compute_centroids(matrix, tickers, current_clusters_df)
     prior_centroids = _load_prior_centroids(registry, current_embeddings_df)
 
-    # summary lookup
-    summary_by_id = {s["cluster_id"]: s for s in cluster_summaries}
-
-    new_rows: list[dict] = []
+    # NOTE: as of the label-stability change, step05 already (a) carries forward
+    # stable prior labels and (b) Claude-labels clusters with no strong prior
+    # match — i.e. exactly the "new" clusters this step used to label. So we no
+    # longer re-label here (that would double-spend Claude and write duplicate
+    # (cluster_id, date) rows). This step now just *reports* how many clusters
+    # look new and — critically — persists the current clusters as the ".prior"
+    # snapshot that step05's stability matching reads next week.
     new_count = 0
-
     for cid, centroid in current_centroids.items():
         if not prior_centroids:
-            # First run: all clusters are new
-            is_new = True
-        else:
-            max_sim = max(
-                _cosine_similarity(centroid, pc) for pc in prior_centroids.values()
-            )
-            is_new = max_sim < similarity_threshold
-            if is_new:
-                logger.info(
-                    "New theme detected: cluster %d (max_sim=%.3f < threshold=%.3f)",
-                    cid, max_sim, similarity_threshold,
-                )
-
-        if is_new:
-            summary = summary_by_id.get(cid)
-            if summary is None:
-                continue
-            label = _label_cluster(summary)
             new_count += 1
-            logger.info(
-                "  → labeled as '%s' (parent: %s)",
-                label.get("theme_name"), label.get("parent_theme"),
-            )
-            new_rows.append(
-                {
-                    "cluster_id": int(cid),
-                    "theme_name": str(label.get("theme_name", f"cluster_{cid}")),
-                    "parent_theme": str(label.get("parent_theme", "unknown")),
-                    "description": str(label.get("description", "")),
-                    "related_themes": json.dumps(label.get("related_themes") or []),
-                    "confidence": float(label.get("confidence", 0.0)),
-                    "date": as_of,
-                }
-            )
+            continue
+        max_sim = max(_cosine_similarity(centroid, pc) for pc in prior_centroids.values())
+        if max_sim < similarity_threshold:
+            new_count += 1
+            logger.info("New theme detected: cluster %d (max_sim=%.3f < %.3f)",
+                        cid, max_sim, similarity_threshold)
 
-    if new_rows:
-        new_df = pd.DataFrame(new_rows)
-        registry = pd.concat([registry, new_df], ignore_index=True)
-        registry = registry.sort_values(["date", "cluster_id"]).reset_index(drop=True)
-        registry.to_parquet(THEME_REGISTRY_PATH, index=False)
-        logger.info("Discovery: %d new themes added. Registry total=%d rows", new_count, len(registry))
-    else:
-        logger.info("Discovery: no new themes detected this week")
+    logger.info("Discovery: %d cluster(s) look new (labeled in step05; none re-labeled here)", new_count)
 
-    # save current clusters as "prior" for next week's comparison
+    # save current clusters as "prior" for next week's stability + discovery compare
     current_clusters_df.to_parquet(TICKER_CLUSTERS_PATH.with_suffix(".prior.parquet"), index=False)
 
     return new_count, registry

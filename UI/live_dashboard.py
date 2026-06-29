@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import math
 import queue as queue_mod
 import re
@@ -30,6 +31,8 @@ from strategies.spy_intraday.Policy.regime_probability_filter import (
     RegimeProbabilityThresholdConfig,
 )
 from strategies.spy_intraday.Policy.replay_option_proxy import ReplayOptionPriceProxy
+
+logger = logging.getLogger(__name__)
 
 UI_BUILD = "2026-04-18-regime-percentile-thresholds"
 DEFAULT_SPY_1M_PATH = "Data/raw/spy/spy_intraday_1min.parquet"
@@ -3355,8 +3358,9 @@ class LiveSession:
                             "error": f"{exc}",
                             "via": "snapshot_broker_state",
                         }
-                        self._policy_logger(symbol).warning(
-                            "broker state snapshot failed: %s",
+                        logger.warning(
+                            "[%s] broker state snapshot failed: %s",
+                            symbol,
                             exc,
                             exc_info=True,
                         )
@@ -4265,8 +4269,17 @@ class LiveSession:
                                             "policy_state": policy.snapshot_state(),
                                         }
                                 force_close_fn = getattr(policy, "_maybe_force_close_expiring_positions", None)
-                                if callable(force_close_fn) and not policy.has_pending_broker_reconcile():
-                                    local_now = datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))
+                                local_now = datetime.now(tz=ZoneInfo(cfg.tz or "America/New_York"))
+                                # Never attempt an option order after the close: options stop
+                                # quoting, so a forced exit can't be priced and would raise
+                                # no_quote_for_limit_pricing on every idle-maintenance cycle.
+                                # An unexited 0DTE simply expires; that's handled by reconcile.
+                                try:
+                                    _sc = str(cfg.session_close or "16:00").split(":")
+                                    within_rth = (local_now.hour, local_now.minute) <= (int(_sc[0]), int(_sc[1]))
+                                except Exception:
+                                    within_rth = True
+                                if callable(force_close_fn) and within_rth and not policy.has_pending_broker_reconcile():
                                     forced_flat = force_close_fn(
                                         local_ts=local_now,
                                         logger=self._policy_logger(symbol),
@@ -4291,8 +4304,10 @@ class LiveSession:
                                     self._audit("order_policy", reconcile_event)
                                 _snapshot_broker_state(symbol, policy, force=True)
                             except Exception as exc:
-                                logger = self._policy_logger(symbol)
-                                logger.warning("idle broker maintenance failed: %s", exc, exc_info=True)
+                                logger.warning(
+                                    "[%s] idle broker maintenance failed: %s",
+                                    symbol, exc, exc_info=True,
+                                )
                                 policy_state = policy.snapshot_state()
                                 error_traceback = traceback.format_exc(limit=8)
                                 error_event = {
@@ -4383,12 +4398,23 @@ class LiveSession:
 
 
 class DashboardApp:
-    def __init__(self, bar_queue: queue_mod.Queue | None = None) -> None:
+    def __init__(self, bar_queue: queue_mod.Queue | None = None,
+                 live_env_file: str | None = None) -> None:
         self.store = DashboardStore(max_bars=900, max_events=400)
         self.broker = EventBroker()
         self.session = LiveSession(self.store, self.broker, external_bar_queue=bar_queue)
+        # When set, a truthy ``live`` flag in the start payload routes orders to
+        # this real-money env instead of the paper env. Off by default.
+        self.live_env_file = live_env_file
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("live"):
+            if not self.live_env_file:
+                raise RuntimeError(
+                    "LIVE requested but no real-money env configured "
+                    "(start the combined server with --live-env)."
+                )
+            payload = {**payload, "env_file": self.live_env_file}
         cfg = SessionConfig.from_payload(payload)
         if self.session.is_running():
             self.session.stop()
@@ -4452,7 +4478,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not index_path.exists():
             self._write_text("Missing UI/index.html", status=HTTPStatus.NOT_FOUND)
             return
-        html = index_path.read_text(encoding="utf-8")
+        from UI.ui_chrome import NAV_HTML
+        html = index_path.read_text(encoding="utf-8").replace("<!--CYNO_NAV-->", NAV_HTML)
         self._write_text(html, status=HTTPStatus.OK, content_type="text/html")
 
     def do_GET(self) -> None:  # noqa: N802
@@ -4461,6 +4488,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if parsed.path in {"/", "/index.html"}:
             self._serve_index()
+            return
+        if parsed.path == "/static/cynolycus_theme.css":
+            from UI.ui_chrome import serve_theme_css
+            serve_theme_css(self)
+            return
+        if parsed.path.startswith("/static/themes/"):
+            from UI.ui_chrome import serve_theme_asset
+            serve_theme_asset(self, parsed.path)
             return
         if parsed.path == "/api/state":
             self._write_json(app.snapshot())

@@ -102,20 +102,37 @@ def fetch_one(
                 logger.info("[%s/%s] cache fresh (last=%s) — skip", ticker, kind, last_ts)
                 return cached
 
-    try:
-        df_new = fetch_intraday(
-            ticker=ticker,
-            start=fetch_start,
-            end=end,
-            timeframe=timeframe,
-            limit=10_000,
-            adjustment=BAR_CONFIG["adjustment"],
-            feed=BAR_CONFIG.get("feed", "sip"),
-            save_path="",
-        )
-    except Exception as exc:
-        logger.warning("[%s/%s] fetch failed: %s", ticker, kind, exc)
-        return cached
+    # Retry with exponential backoff on rate limits (Alpaca 429 / "too many
+    # requests"). A whole-universe catch-up otherwise gives up on hundreds of
+    # tickers under load and silently leaves their bars stale.
+    df_new = None
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        try:
+            df_new = fetch_intraday(
+                ticker=ticker,
+                start=fetch_start,
+                end=end,
+                timeframe=timeframe,
+                limit=10_000,
+                adjustment=BAR_CONFIG["adjustment"],
+                feed=BAR_CONFIG.get("feed", "sip"),
+                save_path="",
+            )
+            break
+        except Exception as exc:
+            msg = str(exc).lower()
+            rate_limited = (
+                "429" in msg or "too many requests" in msg or "rate limit" in msg
+            )
+            if rate_limited and attempt < max_attempts:
+                backoff = min(60.0, 2.0 ** attempt)  # 2, 4, 8, 16s …
+                logger.info("[%s/%s] rate limited (attempt %d/%d) — backing off %.0fs",
+                            ticker, kind, attempt, max_attempts, backoff)
+                time_mod.sleep(backoff)
+                continue
+            logger.warning("[%s/%s] fetch failed: %s", ticker, kind, exc)
+            return cached
 
     if df_new is None or df_new.empty:
         if cached is not None:

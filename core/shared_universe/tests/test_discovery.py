@@ -62,14 +62,16 @@ def test_compute_daily_metrics_empty():
 
 def test_screen_filters_pass_and_fail():
     passing = screen_filters(
-        {"last_price": 12.0, "avg_dollar_volume_20d": 8e6, "market_cap": 250e6, "history_days": 300},
+        {"last_price": 12.0, "avg_dollar_volume_20d": 8e6, "market_cap": 250e6,
+         "history_days": 300, "atr_expand": 1.3},
         CFG,
     )
     assert passing["meets_all"] is True
 
     # $150M cap passes the $100M floor; too-thin ADV fails.
     thin = screen_filters(
-        {"last_price": 12.0, "avg_dollar_volume_20d": 1e6, "market_cap": 150e6, "history_days": 300},
+        {"last_price": 12.0, "avg_dollar_volume_20d": 1e6, "market_cap": 150e6,
+         "history_days": 300, "atr_expand": 1.3},
         CFG,
     )
     assert thin["passes_market_cap"] is True
@@ -78,17 +80,28 @@ def test_screen_filters_pass_and_fail():
 
     # Missing market cap is a soft fail.
     no_cap = screen_filters(
-        {"last_price": 12.0, "avg_dollar_volume_20d": 8e6, "market_cap": float("nan"), "history_days": 300},
+        {"last_price": 12.0, "avg_dollar_volume_20d": 8e6, "market_cap": float("nan"),
+         "history_days": 300, "atr_expand": 1.3},
         CFG,
     )
     assert no_cap["passes_market_cap"] is False
 
     nan_history = screen_filters(
-        {"last_price": 12.0, "avg_dollar_volume_20d": 8e6, "market_cap": 150e6, "history_days": float("nan")},
+        {"last_price": 12.0, "avg_dollar_volume_20d": 8e6, "market_cap": 150e6,
+         "history_days": float("nan"), "atr_expand": 1.3},
         CFG,
     )
     assert nan_history["passes_history"] is False
     assert nan_history["meets_all"] is False
+
+    # A quiet name (low ATR expansion) is rejected for not moving enough.
+    quiet = screen_filters(
+        {"last_price": 12.0, "avg_dollar_volume_20d": 8e6, "market_cap": 250e6,
+         "history_days": 300, "atr_expand": 0.95},
+        CFG,
+    )
+    assert quiet["passes_atr"] is False
+    assert quiet["meets_all"] is False
 
 
 def test_normalize_exchange_handles_alpaca_enum():
@@ -130,9 +143,9 @@ def test_save_novel_pending_view_excludes_known_and_promoted(tmp_path):
 def test_promotion_gate_releases_when_metrics_met():
     pending = pd.DataFrame(
         [
-            {"ticker": "GOOD", "status": "pending", "last_price": 15.0, "avg_dollar_volume_20d": 9e6, "market_cap": 300e6, "history_days": 260},
-            {"ticker": "THIN", "status": "pending", "last_price": 15.0, "avg_dollar_volume_20d": 1e6, "market_cap": 300e6, "history_days": 260},
-            {"ticker": "NEW", "status": "pending", "last_price": 15.0, "avg_dollar_volume_20d": 9e6, "market_cap": 300e6, "history_days": 40},
+            {"ticker": "GOOD", "status": "pending", "last_price": 15.0, "avg_dollar_volume_20d": 9e6, "market_cap": 300e6, "history_days": 260, "atr_expand": 1.3},
+            {"ticker": "THIN", "status": "pending", "last_price": 15.0, "avg_dollar_volume_20d": 1e6, "market_cap": 300e6, "history_days": 260, "atr_expand": 1.3},
+            {"ticker": "NEW", "status": "pending", "last_price": 15.0, "avg_dollar_volume_20d": 9e6, "market_cap": 300e6, "history_days": 40, "atr_expand": 1.3},
         ]
     )
     out = evaluate_promotions(pending, CFG, already_eligible=[], today="2026-06-10")
@@ -156,6 +169,7 @@ def test_promotion_gate_requires_multiple_observation_days():
                 "avg_dollar_volume_20d": 9e6,
                 "market_cap": 300e6,
                 "history_days": 260,
+                "atr_expand": 1.3,
             }
         ]
     )

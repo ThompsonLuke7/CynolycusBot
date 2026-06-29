@@ -495,7 +495,13 @@ def load_snapshot_for(date_or_ts: pd.Timestamp | str) -> pd.DataFrame:
 
     Returns an empty DataFrame if no snapshot exists at or before that date.
     """
-    target = pd.Timestamp(date_or_ts).normalize()
+    # Snapshot filenames are tz-naive dates; drop any tz from the query so a
+    # tz-aware live `bar_ts` (pd.Timestamp.now(tz="UTC")) can be compared to them
+    # without raising "cannot compare tz-naive and tz-aware timestamps".
+    target = pd.Timestamp(date_or_ts)
+    if target.tzinfo is not None:
+        target = target.tz_localize(None)
+    target = target.normalize()
     candidates = list_snapshots()
     if not candidates:
         return pd.DataFrame()

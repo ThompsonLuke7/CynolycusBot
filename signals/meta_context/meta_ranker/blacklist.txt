@@ -1,0 +1,13 @@
+# Meta Ranker live hard-exclusion list — one ticker per line, '#' starts a comment.
+# Read by live_runner.py; these symbols are NEVER entered regardless of combo score.
+#
+# IMPORTANT: this is for MANUAL, STRUCTURAL exclusions only (e.g. names you refuse to
+# trade for liquidity/borrow/fundamental/compliance reasons).
+#
+# Do NOT paste a "tickers that lost money in backtest" list here. That was tested and
+# does NOT generalize: names that lost in 2022-2025 (RIVN, TLRY, QS, ...) were among the
+# BEST picks in the 2025-2026 holdout (+27.8% mean). Per-ticker performance is regime-
+# dependent. The generalizable risk controls are the --liquidity-floor and --combo-floor
+# flags (defaults 0.6 / 0.90), which improved both in-sample and out-of-sample return.
+#
+# Add tickers below as needed:

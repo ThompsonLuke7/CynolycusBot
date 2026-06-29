@@ -311,23 +311,49 @@ def fetch_google_news_rss(
     query_template: str = '"{ticker}" stock',
     min_interval_s: float = 1.0,
     timeout: int = 20,
+    workers: int = 8,
 ) -> pd.DataFrame:
     """Pull headlines per ticker from Google News RSS.
 
     No API key needed. Google News indexes PR Newswire, GlobeNewswire, Reuters,
     Bloomberg, Benzinga, and most major financial press, so this single source
     substitutes for several direct RSS subscriptions.
+
+    Tickers are fetched concurrently across ``workers`` threads behind a single
+    global rate limiter: ``min_interval_s`` is the minimum spacing between request
+    *starts* across all workers (so the request rate is unchanged, ~1/interval),
+    but slow/timeout requests no longer serialize the whole run — which is what
+    made the full-universe nightly pull take hours. At the universe scale, pass a
+    smaller ``min_interval_s`` (e.g. 0.2 → ~5 req/s) to actually shrink wall time.
     """
+    import threading
     import xml.etree.ElementTree as ET
+    from concurrent.futures import ThreadPoolExecutor
 
     start_ts = pd.Timestamp(start, tz="UTC") if start else None
     end_ts = (pd.Timestamp(end, tz="UTC") + pd.Timedelta(days=1)) if end else None
-    rows: list[dict] = []
-    last_request = 0.0
-    for ticker in _clean_tickers(tickers):
-        elapsed = time.monotonic() - last_request
-        if elapsed < min_interval_s:
-            time.sleep(min_interval_s - elapsed)
+
+    clean = _clean_tickers(tickers)
+    if not clean:
+        return records_from_frame(pd.DataFrame([]), source="google_news_rss")
+
+    # Shared global rate limiter: each call reserves the next time slot, so total
+    # request starts are spaced by >= min_interval_s no matter how many workers.
+    _rl_lock = threading.Lock()
+    _next_slot = [0.0]
+
+    def _throttle() -> None:
+        if min_interval_s <= 0:
+            return
+        with _rl_lock:
+            now = time.monotonic()
+            wait = max(0.0, _next_slot[0] - now)
+            _next_slot[0] = max(now, _next_slot[0]) + min_interval_s
+        if wait > 0:
+            time.sleep(wait)
+
+    def _fetch_one(ticker: str) -> list[dict]:
+        _throttle()
         query = urllib.parse.quote(query_template.format(ticker=ticker))
         url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
         try:
@@ -335,16 +361,15 @@ def fetch_google_news_rss(
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 xml_text = resp.read().decode("utf-8", errors="ignore")
         except Exception:
-            xml_text = ""
-        last_request = time.monotonic()
+            return []
         if not xml_text:
-            continue
+            return []
         try:
             root = ET.fromstring(xml_text)
         except ET.ParseError:
-            continue
-        items = root.findall(".//item")[:max_per_ticker]
-        for it in items:
+            return []
+        out: list[dict] = []
+        for it in root.findall(".//item")[:max_per_ticker]:
             title_el = it.find("title")
             link_el = it.find("link")
             pub_el = it.find("pubDate")
@@ -359,7 +384,7 @@ def fetch_google_news_rss(
                 continue
             if end_ts is not None and ts > end_ts:
                 continue
-            rows.append(
+            out.append(
                 {
                     "ticker": ticker,
                     "timestamp": ts,
@@ -371,6 +396,12 @@ def fetch_google_news_rss(
                     "publisher": (src_el.text or "").strip() if src_el is not None else "",
                 }
             )
+        return out
+
+    rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+        for result in pool.map(_fetch_one, clean):
+            rows.extend(result)
     return records_from_frame(pd.DataFrame(rows), source="google_news_rss")
 
 

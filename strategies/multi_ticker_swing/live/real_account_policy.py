@@ -117,8 +117,8 @@ class RealAccountBookkeeper:
     def enabled(self) -> bool:
         return bool(self.config.enabled)
 
-    def snapshot(self) -> dict[str, Any]:
-        state = self._day_state()
+    def snapshot(self, now: datetime | None = None) -> dict[str, Any]:
+        state = self._day_state(now)
         return {
             "enabled": self.enabled,
             "config": {

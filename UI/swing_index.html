@@ -4,19 +4,8 @@
 <meta charset="utf-8" />
 <title>Multi-Ticker Swing Live</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<link rel="stylesheet" href="/static/cynolycus_theme.css">
 <style>
-  :root {
-    --bg: #0d1117;
-    --panel: #161b22;
-    --panel2: #1f2630;
-    --text: #e6edf3;
-    --muted: #8b949e;
-    --green: #3fb950;
-    --red: #f85149;
-    --yellow: #d29922;
-    --blue: #58a6ff;
-    --border: #30363d;
-  }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 0;
@@ -258,18 +247,19 @@
 </style>
 </head>
 <body>
+<!--CYNO_NAV-->
 <header>
   <h1>Multi-Ticker Swing Live</h1>
   <span id="state-pill" class="pill idle">idle</span>
-  <span id="dryrun-pill" class="pill dryrun">dry-run · paper</span>
+  <span id="account-pill" class="pill paper">paper</span>
   <div class="controls">
     <label class="tog">
       max entries / 30m
       <input type="number" id="max-entries" value="5" min="1" max="50" step="1"
              style="width: 60px; padding: 4px 6px;" />
     </label>
-    <label class="tog" title="Uncheck to submit real option orders via Alpaca paper account.">
-      <input type="checkbox" id="dry-run" checked /> dry-run
+    <label class="tog" title="Off: submit real orders on the Alpaca PAPER account (default). On: route to the real-money account.">
+      <input type="checkbox" id="live-toggle" /> Real money account
     </label>
     <button id="btn-start" class="primary">▶ Run</button>
     <button id="btn-stop"  class="danger" disabled>■ Stop</button>
@@ -693,6 +683,19 @@
   // --------------------------------------------------------------
   // Renderers
   // --------------------------------------------------------------
+  function setAccountPill(live) {
+    const pill = $("account-pill");
+    if (pill) {
+      pill.className = "pill " + (live ? "live" : "paper");
+      pill.textContent = live ? "real money" : "paper";
+    }
+    const badge = document.getElementById("cyno-live-badge");
+    if (badge) {
+      badge.textContent = live ? "real money" : "paper";
+      badge.className = "live-badge" + (live ? " live" : "");
+    }
+  }
+
   function renderStatus(status, alive) {
     const pill = $("state-pill");
     pill.className = "pill " + (status.state || "idle");
@@ -952,7 +955,7 @@
         case "startup_scan_skipped":
           detail = `warmup scan skipped · ${p.reason || "unknown"}`; break;
         case "session_started":
-          detail = `session started · max=${p.max_entries} · ${p.dry_run ? "DRY" : "LIVE"}`; break;
+          detail = `session started · max=${p.max_entries} · ${p.real_account_policy ? "real money" : "paper"}`; break;
         case "session_ended":
           detail = `session ended`; break;
         case "stopped":
@@ -1077,6 +1080,13 @@
   // --------------------------------------------------------------
   function applySnapshot(snap) {
     if (!snap) return;
+    const lt = $("live-toggle");
+    if (lt) {
+      lt.disabled = !snap.live_available;
+      lt.title = snap.live_available
+        ? lt.title
+        : "LIVE unavailable — start the combined server with --live-env.";
+    }
     if (snap.status) renderStatus(snap.status, !!snap.session_alive);
     if (snap.positions) renderPositions(snap.positions);
     if (snap.confirming) renderConfirming(snap.confirming);
@@ -1132,14 +1142,8 @@
     }
     if (t === "session_started") {
       currentState.session_alive = true;
-      const pill = $("dryrun-pill");
-      if (evt.payload && evt.payload.dry_run) {
-        pill.textContent = "dry-run · paper";
-        pill.style.color = "";
-      } else {
-        pill.textContent = "live · paper account";
-        pill.style.color = "var(--green)";
-      }
+      const live = !!(evt.payload && evt.payload.real_account_policy);
+      setAccountPill(live);
       addEvent(evt);
       fetchState();
       return;
@@ -1258,15 +1262,19 @@
   }
 
   // Buttons
+  $("live-toggle").addEventListener("change", (e) => setAccountPill(e.target.checked));
   $("btn-start").addEventListener("click", async () => {
     const max_entries = parseInt($("max-entries").value || "5", 10);
-    const dry_run = $("dry-run").checked;
+    const live = $("live-toggle").checked;
+    if (live && !confirm("Submit orders on the REAL-MONEY account?")) {
+      return;
+    }
     $("btn-start").disabled = true;
     try {
       const res = await fetch("/api/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ max_entries, dry_run }),
+        body: JSON.stringify({ max_entries, live }),
       });
       const data = await res.json();
       if (!data.ok) {

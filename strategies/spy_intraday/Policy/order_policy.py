@@ -2570,6 +2570,36 @@ class OptionOrderPolicy:
         if cutoff is None or local_ts.time() < cutoff:
             return None
 
+        # Escalation past the pending-reconcile guard: a sell-to-close that was
+        # submitted but never filled leaves the policy in pending_broker_reconcile
+        # with an optimistically-flat local count, which would otherwise gate this
+        # flatten off entirely (the position then rides into expiry — exactly the
+        # 0DTE leak this cut-off exists to prevent). For an EXPIRING contract only,
+        # cancel the stale order, clear the pending flag, and re-sync to the true
+        # broker position so the loop below flattens what's actually open.
+        pending = self._pending_broker_reconcile
+        if isinstance(pending, dict) and self._symbol_expires_today(
+            pending.get("symbol"), local_ts=local_ts
+        ):
+            stale_oid = str(pending.get("order_id") or "").strip()
+            if stale_oid:
+                try:
+                    self._client.cancel_order(stale_oid)
+                    logger(
+                        "[order_policy] EXPIRING FLATTEN: canceled stale pending close "
+                        f"order_id={stale_oid} symbol={pending.get('symbol')}"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger(
+                        f"[order_policy] EXPIRING FLATTEN: cancel stale order {stale_oid} "
+                        f"failed (continuing): {exc}"
+                    )
+            self._pending_broker_reconcile = None
+            try:
+                self.sync_from_broker(logger=logger)
+            except Exception as exc:  # noqa: BLE001
+                logger(f"[order_policy] EXPIRING FLATTEN: sync_from_broker failed: {exc}")
+
         orders: list[dict[str, Any]] = []
         for side, qty, symbol in (
             ("long", int(self._long_contracts), self._long_symbol),
@@ -2582,6 +2612,7 @@ class OptionOrderPolicy:
                 side="sell",
                 intent="close",
                 qty=qty,
+                urgent=True,
                 logger=logger,
             )
             orders.append(
@@ -2712,6 +2743,7 @@ class OptionOrderPolicy:
         side: str,
         intent: str = "open",
         qty: int | None = None,
+        urgent: bool = False,
         logger: Callable[[str], None] = print,
     ) -> dict[str, Any]:
         intent_key = str(intent).strip().lower()
@@ -2751,6 +2783,34 @@ class OptionOrderPolicy:
                     "filled_qty": str(order_qty),
                     "filled_avg_price": str(round(sim_price, 4)),
                 },
+            }
+        # Urgent close (e.g. flattening an expiring 0DTE at the cut-off): use a
+        # MARKET order so the exit actually fills while quotes exist, instead of a
+        # passive limit chase that can ride into expiry. No quote is required, so
+        # this also can't raise no_quote_for_limit_pricing.
+        if urgent and intent_key == "close":
+            resp = self._client.submit_option_order(
+                symbol=symbol,
+                qty=order_qty,
+                side=side_key,
+                order_type="market",
+                time_in_force=self.cfg.time_in_force,
+            )
+            status = self._status_key(resp.get("status") if isinstance(resp, dict) else None)
+            oid = str(resp.get("id", "")).strip() if isinstance(resp, dict) else ""
+            logger(
+                "[order_policy] URGENT MARKET CLOSE "
+                f"side={side_key} qty={order_qty} symbol={symbol} "
+                f"order_id={oid or 'n/a'} status={status or 'n/a'}"
+            )
+            return {
+                "simulated": False,
+                "intent": intent_key,
+                "response": resp,
+                "side": side_key,
+                "qty": order_qty,
+                "symbol": symbol,
+                "urgent_market": True,
             }
         # Price ladder policy:
         # - opens use the configured entry quote mode and chase slowly
@@ -4039,14 +4099,19 @@ class OptionOrderPolicy:
         self.reconcile_with_broker(logger=logger, local_ts=local_ts, force=False)
         if not math.isfinite(close):
             return {"event": "hold", "mode": "intrabar_meta", "reason": "invalid_close"}
-        if self.has_pending_broker_reconcile():
-            self._meta_side_reason["long"] = "pending_broker_reconcile"
-            self._meta_side_reason["short"] = "pending_broker_reconcile"
-            return {"event": "hold", "mode": "intrabar_meta", "reason": "pending_broker_reconcile"}
+        # Run the expiring-flatten BEFORE the pending-reconcile early-return: past
+        # the cut-off it escalates (cancels the stale pending close + market-flattens
+        # the expiring contract), so a stuck reconcile can no longer let a 0DTE ride
+        # into expiry. Outside the cut-off window it returns None (cheap) and we hold.
+        pending_reconcile = self.has_pending_broker_reconcile()
         forced_flat = self._maybe_force_close_expiring_positions(local_ts=local_ts, logger=logger)
         if forced_flat is not None:
             forced_flat.setdefault("mode", "intrabar_meta")
             return forced_flat
+        if pending_reconcile:
+            self._meta_side_reason["long"] = "pending_broker_reconcile"
+            self._meta_side_reason["short"] = "pending_broker_reconcile"
+            return {"event": "hold", "mode": "intrabar_meta", "reason": "pending_broker_reconcile"}
 
         self._prev_1m_close = self._last_1m_close
         self._last_1m_close = float(close)

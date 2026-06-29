@@ -24,22 +24,82 @@ fall back to creating their own individual AlpacaBarStreamer.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.util
+import gc
 import logging
+import os
 import queue as queue_mod
 import signal
 import sys
 import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _process_rss_mb() -> float | None:
+    """Resident set size of this process in MB, read from /proc (no psutil dep)."""
+    try:
+        with open("/proc/self/status", "r") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0  # kB -> MB
+    except Exception:
+        return None
+    return None
+
+
+def _start_memory_keeper(stop_event: threading.Event, *, interval: int = 300) -> None:
+    """Background thread that fights long-run RSS growth in this pandas-heavy
+    process and logs the footprint so OOM regressions are visible.
+
+    The combined server churns per-scan DataFrames across ~900 tickers all day.
+    glibc's allocator keeps freed arenas mapped (RSS never drops), which is what
+    walked us into the 16GB WSL cap and the OOM-kill. Each tick we run a full GC
+    and ask glibc to return free arenas to the OS via ``malloc_trim(0)``, then log
+    VmRSS. This does not touch any feature/warmup data, so it cannot introduce NaNs.
+    """
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        has_trim = hasattr(libc, "malloc_trim")
+    except Exception:
+        libc, has_trim = None, False
+
+    def _loop() -> None:
+        while not stop_event.wait(interval):
+            try:
+                gc.collect()
+                if has_trim:
+                    libc.malloc_trim(0)
+                rss = _process_rss_mb()
+                if rss is not None:
+                    logger.info("Memory keeper: RSS=%.0f MB (gc+malloc_trim done)", rss)
+            except Exception as exc:  # never let the keeper kill the server
+                logger.warning("Memory keeper tick failed: %s", exc)
+
+    threading.Thread(target=_loop, daemon=True, name="memory-keeper").start()
+    rss0 = _process_rss_mb()
+    logger.info(
+        "Memory keeper started (every %ds, malloc_trim=%s, startup RSS=%s MB)",
+        interval, has_trim, f"{rss0:.0f}" if rss0 is not None else "?",
+    )
 
 # Intraday dashboard needs SPY + these extra symbols beyond the swing universe
 _INTRADAY_EXTRA_SYMBOLS = ["SPY", "VIXY", "QQQ", "IWM", "TLT", "UUP"]
 
 DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT_HUB = 8764
 DEFAULT_PORT_INTRADAY = 8765
 DEFAULT_PORT_SWING = 8766
 DEFAULT_PORT_DEALER = 8768
+DEFAULT_PORT_META = 8769
+DEFAULT_PORT_MOMENTUM = 8770
+DEFAULT_PORT_HTF = 8771
+
+# State book used by the swing real-account (LIVE) policy.
+_SWING_LIVE_BOOK = "Data/inference/multi_ticker_swing/real_account_book_live.json"
 DEFAULT_AUDIT_ROOT = str(Path(__file__).resolve().parent / "swing_audit")
 
 
@@ -91,6 +151,28 @@ def _run_nightly_jobs() -> None:
     logger.info("Nightly jobs: finished (exit=%s)", result.returncode)
 
 
+def _run_data_readiness() -> None:
+    """Refresh the shared bars + HTF features + Meta matrix so HTF Swing,
+    Momentum, and Meta Ranker all wake up caught up to the same state.
+
+    Reuses ``scripts/nightly_data_readiness.sh`` (one source of truth). Run
+    off-hours (pre-open) so it never collides with the live session, the 15:50
+    Meta MOC loop, or the nightly news job.
+    """
+    import shutil
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "nightly_data_readiness.sh"
+    bash = shutil.which("bash")
+    if bash is None:
+        logger.error("Data readiness: 'bash' not found on PATH — cannot run %s.", script)
+        return
+    logger.info("Data readiness: launching %s", script)
+    result = subprocess.run([bash, str(script)], cwd=str(repo_root))
+    logger.info("Data readiness: finished (exit=%s)", result.returncode)
+
+
 def _build_symbol_union(env_file: str) -> list[str]:
     """Union of all symbols needed by both dashboards."""
     from strategies.multi_ticker_swing.config.pipeline_config import CONTEXT_TICKERS
@@ -101,20 +183,101 @@ def _build_symbol_union(env_file: str) -> list[str]:
     return sorted(combined)
 
 
+def _run_meta_ranker_loop(*, mode: str, submit: bool, live: bool) -> None:
+    """Fire one Meta Ranker 4H loop pass (bars -> feeds -> matrix -> runner).
+
+    Runs as a subprocess so a failure can't take down the combined server. Themes
+    are NOT refreshed here (weekly job: `update_feeds.py --weekly`).
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "signals/meta_context/meta_ranker/run_4h_loop.py"
+    argv = [sys.executable, str(script), "--mode", mode]
+    if submit:
+        argv.append("--submit")
+    if live:
+        argv.append("--live")
+    logger.info("Meta Ranker loop: launching %s", " ".join(argv))
+    env = {**os.environ, "PYTHONPATH": str(repo_root)}
+    subprocess.run(argv, cwd=str(repo_root), env=env)
+
+
+def _run_htf_loop(*, mode: str, submit: bool, live: bool) -> None:
+    """Fire one standalone HTF Swing pass (reads htf_score off the shared matrix).
+
+    Runs as a subprocess so a failure can't take down the combined server. The
+    shared matrix is kept fresh by the data-readiness job + the Meta loop, so this
+    just reads it; schedule it a few minutes AFTER the Meta times.
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "strategies/multi_ticker_swing_htf/live/runner.py"
+    argv = [sys.executable, str(script), "--mode", mode]
+    if submit:
+        argv.append("--submit")
+    if live:
+        argv.append("--live")
+    logger.info("HTF Swing loop: launching %s", " ".join(argv))
+    env = {**os.environ, "PYTHONPATH": str(repo_root)}
+    subprocess.run(argv, cwd=str(repo_root), env=env)
+
+
+def _run_momentum_loop(*, submit: bool, live: bool) -> None:
+    """Fire one standalone Momentum Expansion pass (ExpansionRanker -> own policy).
+
+    Subprocess-isolated. Reads 4H/1H bars off disk (kept fresh by data-readiness +
+    the Meta loop's bar catchup), so schedule it a few minutes AFTER the Meta times.
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "strategies/momentum_expansion/live/runner.py"
+    argv = [sys.executable, str(script)]
+    if submit:
+        argv.append("--submit")
+    if live:
+        argv.append("--live")
+    logger.info("Momentum loop: launching %s", " ".join(argv))
+    env = {**os.environ, "PYTHONPATH": str(repo_root)}
+    subprocess.run(argv, cwd=str(repo_root), env=env)
+
+
 def run_combined(
     *,
     host: str = DEFAULT_HOST,
+    port_hub: int = DEFAULT_PORT_HUB,
     port_intraday: int = DEFAULT_PORT_INTRADAY,
     port_swing: int = DEFAULT_PORT_SWING,
-    port_swing_live: int | None = None,
     port_dealer: int = DEFAULT_PORT_DEALER,
     env_file: str = ".env",
     paper_env_file: str | None = None,
     live_env_file: str | None = None,
     audit_root: Path | None = None,
     nightly_time: str | None = "16:30",
+    data_readiness_time: str | None = None,
+    data_readiness_on_start: bool = True,
     catalyst_poll: bool = True,
     catalyst_poll_interval: int = 300,
+    port_meta: int = DEFAULT_PORT_META,
+    port_momentum: int = DEFAULT_PORT_MOMENTUM,
+    port_htf: int = DEFAULT_PORT_HTF,
+    meta_ranker_times: str = "14:20,16:20",
+    meta_ranker_mode: str = "equity",
+    meta_ranker_live: bool = False,
+    htf_times: str = "14:25,16:25",
+    htf_mode: str = "equity",
+    htf_live: bool = False,
+    momentum_times: str = "14:25,16:25",
+    momentum_live: bool = False,
+    start_all: bool = False,
 ) -> None:
     if audit_root is None:
         audit_root = Path(DEFAULT_AUDIT_ROOT)
@@ -138,8 +301,7 @@ def run_combined(
     # Separate queues per dashboard. Subscriber filters keep SPY-only consumers
     # from receiving the full swing universe.
     intraday_queue: queue_mod.Queue = queue_mod.Queue(maxsize=10_000)
-    swing_paper_queue: queue_mod.Queue = queue_mod.Queue(maxsize=50_000)
-    swing_live_queue: queue_mod.Queue | None = queue_mod.Queue(maxsize=50_000) if live_env_file else None
+    swing_queue: queue_mod.Queue = queue_mod.Queue(maxsize=50_000)
     dealer_queue: queue_mod.Queue = queue_mod.Queue(maxsize=10_000)
 
     from UI.shared_stream import get_shared_bar_stream
@@ -149,9 +311,7 @@ def run_combined(
         name="intraday",
         symbols=("SPY", "VIXY", "QQQ", "IWM", "TLT", "UUP"),
     )
-    stream.register(swing_paper_queue, name="swing-paper")
-    if swing_live_queue is not None:
-        stream.register(swing_live_queue, name="swing-live")
+    stream.register(swing_queue, name="swing")
     stream.register(dealer_queue, name="dealer-positioning", symbols=("SPY",))
     stream.start(all_symbols, env_file=env_file)
     logger.info("Shared bar stream started.")
@@ -161,7 +321,7 @@ def run_combined(
     # ------------------------------------------------------------------
     from UI.live_dashboard import DashboardApp, DashboardHandler, DashboardHTTPServer
 
-    intraday_app = DashboardApp(bar_queue=intraday_queue)
+    intraday_app = DashboardApp(bar_queue=intraday_queue, live_env_file=live_env_file)
     intraday_server = DashboardHTTPServer((host, port_intraday), DashboardHandler)
     intraday_server.daemon_threads = True
     intraday_server.app = intraday_app
@@ -184,12 +344,14 @@ def run_combined(
     )
 
     paper_env_file = paper_env_file or env_file
+    # One swing dashboard; orders submit to paper by default and route to the
+    # real-money account only when the page's LIVE toggle is on (needs --live-env).
     swing_app = SwingDashboardApp(
-        audit_root=audit_root / "paper" if live_env_file else audit_root,
-        bar_queue=swing_paper_queue,
+        audit_root=audit_root,
+        bar_queue=swing_queue,
         default_env_file=paper_env_file,
-        default_dry_run=False,
-        default_real_account_policy=False,
+        live_env_file=live_env_file,
+        live_real_account_policy_state_path=_SWING_LIVE_BOOK,
     )
     swing_server = SwingDashboardHTTPServer((host, port_swing), SwingDashboardHandler)
     swing_server.daemon_threads = True
@@ -201,32 +363,8 @@ def run_combined(
         name="swing-http",
     )
     swing_thread.start()
-    logger.info("Swing paper dashboard:   http://%s:%d", host, port_swing)
-
-    swing_live_app = None
-    swing_live_server = None
-    if live_env_file:
-        live_port = int(port_swing_live or (port_swing + 1))
-        swing_live_app = SwingDashboardApp(
-            audit_root=audit_root / "live",
-            bar_queue=swing_live_queue,
-            default_env_file=live_env_file,
-            default_dry_run=False,
-            default_real_account_policy=True,
-            default_real_account_policy_state_path=(
-                "Data/inference/multi_ticker_swing/real_account_book_live.json"
-            ),
-        )
-        swing_live_server = SwingDashboardHTTPServer((host, live_port), SwingDashboardHandler)
-        swing_live_server.daemon_threads = True
-        swing_live_server.app = swing_live_app
-        swing_live_thread = threading.Thread(
-            target=swing_live_server.serve_forever,
-            daemon=True,
-            name="swing-live-http",
-        )
-        swing_live_thread.start()
-        logger.info("Swing real-money dashboard: http://%s:%d", host, live_port)
+    logger.info("Swing dashboard:         http://%s:%d (LIVE toggle %s)",
+                host, port_swing, "available" if live_env_file else "disabled")
 
     # ------------------------------------------------------------------
     # 4. Dealer positioning dashboard (port 8768)
@@ -249,14 +387,54 @@ def run_combined(
     dealer_thread.start()
     logger.info("Dealer positioning:      http://%s:%d", host, port_dealer)
 
+    # ------------------------------------------------------------------
+    # 4a. Momentum Expansion dashboard (port 8770) — read-only scan + manual run
+    # ------------------------------------------------------------------
+    from UI.momentum_dashboard import MomentumDashboardApp, make_server as _make_momentum_server
+
+    momentum_app = MomentumDashboardApp(env_file=paper_env_file or env_file, live_env_file=live_env_file)
+    momentum_server = _make_momentum_server(host, port_momentum, momentum_app)
+    momentum_thread = threading.Thread(target=momentum_server.serve_forever, daemon=True, name="momentum-http")
+    momentum_thread.start()
+    logger.info("Momentum dashboard:      http://%s:%d", host, port_momentum)
+
+    # ------------------------------------------------------------------
+    # 4b. HTF Swing dashboard (port 8771) — read-only scores (no live trading)
+    # ------------------------------------------------------------------
+    from UI.htf_dashboard import HTFDashboardApp, make_server as _make_htf_server
+
+    htf_app = HTFDashboardApp()
+    htf_server = _make_htf_server(host, port_htf, htf_app)
+    htf_thread = threading.Thread(target=htf_server.serve_forever, daemon=True, name="htf-http")
+    htf_thread.start()
+    logger.info("HTF Swing dashboard:     http://%s:%d", host, port_htf)
+
+    # ------------------------------------------------------------------
+    # 4c. Hub / overview dashboard (port 8764) — links + status + start-all
+    # ------------------------------------------------------------------
+    from UI.hub_dashboard import HubDashboardApp, make_server as _make_hub_server
+
+    hub_app = HubDashboardApp(
+        host=host, port_spy=port_intraday, port_swing=port_swing,
+        port_dealer=port_dealer, port_meta=port_meta,
+        port_momentum=port_momentum, port_htf=port_htf,
+    )
+    hub_server = _make_hub_server(host, port_hub, hub_app)
+    hub_thread = threading.Thread(target=hub_server.serve_forever, daemon=True, name="hub-http")
+    hub_thread.start()
+    logger.info("Hub overview:            http://%s:%d", host, port_hub)
+
     print()
     print("=" * 60)
+    print(f"  Hub (overview):          http://{host}:{port_hub}")
     print(f"  Intraday SPY dashboard:  http://{host}:{port_intraday}")
-    print(f"  Swing paper dashboard:   http://{host}:{port_swing}")
-    if live_env_file:
-        print(f"  Swing real-money:        http://{host}:{int(port_swing_live or (port_swing + 1))}")
+    print(f"  Swing dashboard:         http://{host}:{port_swing}  "
+          f"(real money {'available' if live_env_file else 'disabled'})")
+    print(f"  HTF Swing (signals):     http://{host}:{port_htf}")
+    print(f"  Momentum dashboard:      http://{host}:{port_momentum}")
     print(f"  Dealer positioning:      http://{host}:{port_dealer}")
     print(f"  Shared stream:           {len(all_symbols)} symbols")
+    print("  Orders default to the PAPER account; LIVE toggle is OFF by default.")
     print("  Press Ctrl+C to stop.")
     print("=" * 60)
 
@@ -295,6 +473,50 @@ def run_combined(
             print(f"  Nightly jobs:            daily {nightly_time} ET (CBOE/FINRA/discovery)")
 
     # ------------------------------------------------------------------
+    # 5a1. Data-readiness ON STARTUP — refresh shared bars + HTF features + Meta
+    #      matrix as soon as the server boots, so the three shared-universe
+    #      modules (HTF/Momentum/Meta) are caught up the moment you start it each
+    #      morning. This is the reliable trigger: a fixed-time cron never fires if
+    #      the server isn't running yet. Runs in a background thread so dashboards
+    #      come up immediately; the staleness guards hold the line until it lands.
+    # ------------------------------------------------------------------
+    if data_readiness_on_start:
+        threading.Thread(
+            target=_run_data_readiness,
+            daemon=True,
+            name="data-readiness-startup",
+        ).start()
+        logger.info("Data readiness: running once on startup (background)")
+        print("  Data readiness:          on startup (bars+HTF+meta matrix, background)")
+
+    # ------------------------------------------------------------------
+    # 5a2. Optional data-readiness scheduler — only useful if you leave the server
+    #      running across days. Off by default (the startup run covers the common
+    #      "start it each morning" workflow).
+    # ------------------------------------------------------------------
+    data_readiness_scheduler = None
+    if data_readiness_time:
+        from UI.nightly_scheduler import NightlyScheduler, parse_hhmm
+
+        try:
+            dr_hour, dr_minute = parse_hhmm(data_readiness_time)
+        except ValueError as exc:
+            logger.error("Invalid --data-readiness-time %r (%s) — readiness job disabled",
+                         data_readiness_time, exc)
+        else:
+            data_readiness_scheduler = NightlyScheduler(
+                _run_data_readiness,
+                hour=dr_hour,
+                minute=dr_minute,
+                stop_event=stop_evt,
+                name="data-readiness-scheduler",
+            )
+            data_readiness_scheduler.start()
+            logger.info("Data readiness scheduled daily at %s America/New_York (weekdays)",
+                        data_readiness_time)
+            print(f"  Data readiness:          daily {data_readiness_time} ET (bars+HTF+meta matrix)")
+
+    # ------------------------------------------------------------------
     # 5b. Intraday catalyst poller (keeps the live news ledger fresh during RTH
     #     so the swing scanner can react to breaking news in real time)
     # ------------------------------------------------------------------
@@ -309,6 +531,132 @@ def run_combined(
         poller_supervisor.start()
         logger.info("Intraday catalyst poller scheduled 09:30–16:00 America/New_York (weekdays)")
         print(f"  Catalyst poller:         RTH every {catalyst_poll_interval}s ET (live news ledger)")
+
+    # ------------------------------------------------------------------
+    # 5c. Meta Ranker 4H loop (long-only swing; equity or options). The 4H bar
+    #     generates the signal and we act on it, so the loop fires after EACH RTH
+    #     4H bar CLOSES. The shared bars are SIP (~15-min delay), so a bar is only
+    #     fully fetchable ~20 min after it closes — hence "close + 20 min":
+    #       * 1st bar 10:00->14:00 ET (stamp 14:00 UTC) -> score 14:20 ET (same-day entry)
+    #       * 2nd bar 14:00->16:00 ET (stamp 18:00 UTC) -> score 16:20 ET (post-close;
+    #         equity entries fill at the next open — the known small "next-open" cost).
+    #     To trade the 2nd bar AT the close instead, that pass would need the
+    #     real-time IEX feed (the model trained on SIP, so validate first).
+    #     Each pass: catch up the eligible bars -> rebuild matrix -> score + trade.
+    #     Themes are refreshed weekly via `update_feeds.py --weekly` (separate).
+    # ------------------------------------------------------------------
+    # Meta Ranker dashboard (4th dashboard) — display + manual run trigger.
+    # Always submits; account defaults to paper, LIVE toggle (off by default)
+    # routes to the real-money env when one is configured.
+    meta_server = meta_thread = None
+    meta_env = paper_env_file or env_file
+    from UI.meta_ranker_dashboard import MetaRankerDashboardApp, make_server as _make_meta_server
+
+    meta_app = MetaRankerDashboardApp(
+        env_file=meta_env, live_env_file=live_env_file, mode=meta_ranker_mode, submit=True,
+    )
+    meta_server = _make_meta_server(host, port_meta, meta_app)
+    meta_thread = threading.Thread(target=meta_server.serve_forever, daemon=True, name="meta-ranker-http")
+    meta_thread.start()
+    logger.info("Meta Ranker dashboard at http://%s:%d", host, port_meta)
+    print(f"  Meta Ranker dashboard:   http://{host}:{port_meta}/  "
+          f"({meta_ranker_mode}/{'LIVE' if meta_ranker_live else 'paper'}/SUBMIT)")
+
+    meta_schedulers: list = []
+    if meta_ranker_times:
+        from UI.nightly_scheduler import NightlyScheduler, parse_hhmm
+
+        _tag = f"{meta_ranker_mode}/{'LIVE' if meta_ranker_live else 'paper'}/SUBMIT"
+        fired_times: list[str] = []
+        for raw in str(meta_ranker_times).split(","):
+            hhmm = raw.strip()
+            if not hhmm:
+                continue
+            try:
+                mh, mm = parse_hhmm(hhmm)
+            except ValueError as exc:
+                logger.error("Invalid Meta Ranker time %r (%s) — skipped", hhmm, exc)
+                continue
+            sched = NightlyScheduler(
+                lambda: _run_meta_ranker_loop(
+                    mode=meta_ranker_mode, submit=True, live=meta_ranker_live),
+                hour=mh, minute=mm, stop_event=stop_evt,
+                name=f"meta-ranker-scheduler-{hhmm}",
+            )
+            sched.start()
+            meta_schedulers.append(sched)
+            fired_times.append(hhmm)
+        if fired_times:
+            logger.info("Meta Ranker loop scheduled at %s ET (%s)", ", ".join(fired_times), _tag)
+            print(f"  Meta Ranker loop:        {', '.join(fired_times)} ET per 4H bar ({_tag})")
+
+    # ------------------------------------------------------------------
+    # 5d. Standalone base-model harnesses (HTF Swing, Momentum) — each trades
+    #     its own base score (the same one feeding Meta) via its own order policy,
+    #     on the same multi-time 4H cadence. Scheduled a few minutes AFTER Meta so
+    #     they read the bars/matrix Meta just refreshed.
+    # ------------------------------------------------------------------
+    def _schedule_loop(times: str, job, *, label: str, tag: str) -> list:
+        scheds: list = []
+        if not times:
+            return scheds
+        from UI.nightly_scheduler import NightlyScheduler, parse_hhmm
+
+        fired: list[str] = []
+        for raw in str(times).split(","):
+            hhmm = raw.strip()
+            if not hhmm:
+                continue
+            try:
+                hh, mm = parse_hhmm(hhmm)
+            except ValueError as exc:
+                logger.error("Invalid %s time %r (%s) — skipped", label, hhmm, exc)
+                continue
+            sched = NightlyScheduler(job, hour=hh, minute=mm, stop_event=stop_evt,
+                                     name=f"{label}-scheduler-{hhmm}")
+            sched.start()
+            scheds.append(sched)
+            fired.append(hhmm)
+        if fired:
+            logger.info("%s loop scheduled at %s ET (%s)", label, ", ".join(fired), tag)
+            print(f"  {label} loop:{' ' * max(1, 16 - len(label))}{', '.join(fired)} ET per 4H bar ({tag})")
+        return scheds
+
+    htf_tag = f"{htf_mode}/{'LIVE' if htf_live else 'paper'}/SUBMIT"
+    htf_schedulers = _schedule_loop(
+        htf_times,
+        lambda: _run_htf_loop(mode=htf_mode, submit=True, live=htf_live),
+        label="HTF Swing", tag=htf_tag,
+    )
+    mom_tag = f"options/{'LIVE' if momentum_live else 'paper'}/SUBMIT"
+    momentum_schedulers = _schedule_loop(
+        momentum_times,
+        lambda: _run_momentum_loop(submit=True, live=momentum_live),
+        label="Momentum", tag=mom_tag,
+    )
+
+    # Optional boot-time equivalent of clicking Hub -> Start All. Keep this
+    # paper-default so launching the combined server never implies real-money
+    # order routing without the existing explicit per-module LIVE controls.
+    if start_all:
+        def _auto_start_all() -> None:
+            logger.info("Auto Start All requested; launching startable dashboards in paper mode.")
+            results = hub_app.start_all({})
+            failures = [r for r in results.get("results", []) if not r.get("ok")]
+            if failures:
+                logger.warning("Auto Start All completed with issues: %s", failures)
+            else:
+                logger.info("Auto Start All completed successfully.")
+
+        threading.Thread(target=_auto_start_all, daemon=True, name="hub-auto-start-all").start()
+        print("  Auto Start All:          enabled (paper-default, background)")
+
+    # ------------------------------------------------------------------
+    # 5e. Memory keeper — periodic gc + malloc_trim to cap long-run RSS growth
+    #     (this process OOM-killed at the 16GB WSL cap on 2026-06-26). Logs RSS
+    #     each tick so footprint regressions are visible in the server log.
+    # ------------------------------------------------------------------
+    _start_memory_keeper(stop_evt, interval=300)
 
     stop_evt.wait()
 
@@ -325,24 +673,19 @@ def run_combined(
         dealer_app.stop()
     except Exception as exc:
         logger.warning("dealer_app.stop(): %s", exc)
-    if swing_live_app is not None:
-        try:
-            swing_live_app.stop()
-        except Exception as exc:
-            logger.warning("swing_live_app.stop(): %s", exc)
-
     logger.info("Stopping HTTP servers...")
+    hub_server.shutdown()
     intraday_server.shutdown()
     swing_server.shutdown()
     dealer_server.shutdown()
-    if swing_live_server is not None:
-        swing_live_server.shutdown()
+    momentum_server.shutdown()
+    htf_server.shutdown()
+    if meta_server is not None:
+        meta_server.shutdown()
 
     logger.info("Stopping shared bar stream...")
     stream.unregister(intraday_queue)
-    stream.unregister(swing_paper_queue)
-    if swing_live_queue is not None:
-        stream.unregister(swing_live_queue)
+    stream.unregister(swing_queue)
     stream.unregister(dealer_queue)
     stream.stop()
 
@@ -357,9 +700,7 @@ def main() -> None:
     parser.add_argument("--port-intraday", type=int, default=DEFAULT_PORT_INTRADAY,
                         help="Port for intraday SPY dashboard (default 8765).")
     parser.add_argument("--port-swing", type=int, default=DEFAULT_PORT_SWING,
-                        help="Port for paper swing dashboard (default 8766).")
-    parser.add_argument("--port-swing-live", type=int, default=None,
-                        help="Port for live swing dashboard when --live-env is set (default port-swing+1).")
+                        help="Port for the swing dashboard (default 8766).")
     parser.add_argument("--port-dealer", type=int, default=DEFAULT_PORT_DEALER,
                         help="Port for dealer positioning dashboard (default 8768).")
     parser.add_argument("--env", default=".env",
@@ -384,6 +725,19 @@ def main() -> None:
         help="Disable the in-process nightly scheduler (use system cron instead).",
     )
     parser.add_argument(
+        "--no-readiness-on-start",
+        action="store_true",
+        help="Disable the on-startup shared-bars/HTF/Meta-matrix refresh (on by default).",
+    )
+    parser.add_argument(
+        "--data-readiness-time",
+        default="",
+        help="Optional local (America/New_York) HH:MM to ALSO refresh shared bars + HTF "
+             "features + Meta matrix on a daily timer (only useful if the server runs "
+             "across days; the on-startup refresh already covers a daily restart). "
+             "Empty = timer disabled.",
+    )
+    parser.add_argument(
         "--no-catalyst-poll",
         action="store_true",
         help="Disable the in-process intraday catalyst news poller.",
@@ -394,21 +748,75 @@ def main() -> None:
         default=300,
         help="Seconds between intraday catalyst polls during market hours (default 300).",
     )
+    parser.add_argument(
+        "--meta-ranker-times",
+        default="14:20,16:20",
+        help="Comma-separated local ET HH:MM times to fire the Meta Ranker 4H loop — one per "
+             "RTH 4H bar, set to each bar's close + the ~20-min SIP delay (default "
+             "'14:20,16:20'). Each pass catches up bars, rebuilds the matrix, and scores+trades. "
+             "Pass '' to disable.",
+    )
+    parser.add_argument("--meta-ranker-mode", choices=["equity", "options"], default="equity",
+                        help="Meta Ranker order type (default equity).")
+    parser.add_argument("--meta-ranker-live", action="store_true",
+                        help="Run the scheduled Meta Ranker loop against the LIVE account (default paper).")
+    parser.add_argument(
+        "--htf-times", default="14:25,16:25",
+        help="Comma-separated ET HH:MM to fire the standalone HTF Swing loop, a few min after "
+             "the Meta times so it reads the refreshed matrix (default '14:25,16:25'). '' disables.")
+    parser.add_argument("--htf-mode", choices=["equity", "options"], default="equity",
+                        help="HTF Swing order type (default equity).")
+    parser.add_argument("--htf-live", action="store_true",
+                        help="Run the scheduled HTF Swing loop against the LIVE account (default paper).")
+    parser.add_argument(
+        "--momentum-times", default="14:25,16:25",
+        help="Comma-separated ET HH:MM to fire the standalone Momentum loop (default '14:25,16:25'). "
+             "'' disables.")
+    parser.add_argument("--momentum-live", action="store_true",
+                        help="Run the scheduled Momentum loop against the LIVE account (default paper).")
+    parser.add_argument("--port-hub", type=int, default=DEFAULT_PORT_HUB,
+                        help="Port for the hub / overview dashboard (default 8764).")
+    parser.add_argument("--port-meta", type=int, default=DEFAULT_PORT_META,
+                        help="Port for the Meta Ranker dashboard (default 8769).")
+    parser.add_argument("--port-momentum", type=int, default=DEFAULT_PORT_MOMENTUM,
+                        help="Port for the Momentum Expansion dashboard (default 8770).")
+    parser.add_argument("--port-htf", type=int, default=DEFAULT_PORT_HTF,
+                        help="Port for the HTF Swing signals dashboard (default 8771).")
+    parser.add_argument(
+        "--start-all",
+        action="store_true",
+        help="Automatically start every startable dashboard after boot, matching the hub Start All "
+             "button's paper-default account routing.",
+    )
     args = parser.parse_args()
 
     run_combined(
         host=args.host,
+        port_hub=args.port_hub,
         port_intraday=args.port_intraday,
         port_swing=args.port_swing,
-        port_swing_live=args.port_swing_live,
         port_dealer=args.port_dealer,
         env_file=args.env,
         paper_env_file=args.paper_env,
         live_env_file=args.live_env,
         audit_root=Path(args.audit_root),
         nightly_time=None if args.no_nightly_jobs else args.nightly_time,
+        data_readiness_time=(args.data_readiness_time or None),
+        data_readiness_on_start=not args.no_readiness_on_start,
         catalyst_poll=not args.no_catalyst_poll,
         catalyst_poll_interval=args.catalyst_poll_interval,
+        port_meta=args.port_meta,
+        port_momentum=args.port_momentum,
+        port_htf=args.port_htf,
+        meta_ranker_times=args.meta_ranker_times,
+        meta_ranker_mode=args.meta_ranker_mode,
+        meta_ranker_live=args.meta_ranker_live,
+        htf_times=args.htf_times,
+        htf_mode=args.htf_mode,
+        htf_live=args.htf_live,
+        momentum_times=args.momentum_times,
+        momentum_live=args.momentum_live,
+        start_all=args.start_all,
     )
 
 

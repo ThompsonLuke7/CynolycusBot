@@ -83,7 +83,9 @@ UNIVERSE_CONFIG: dict = {
     "rs_lookbacks":         (5, 20, 60),     # daily lookbacks for relative strength
     "atr_expansion_window": 20,              # ATR(14)/ATR(60) used as expansion proxy
     "min_history_days":     200,             # require this many daily bars before scoring
-    "max_universe_size":    500,             # cap weekly universe size
+    "max_universe_size":    100000,          # effectively uncapped (slow-mover filtering
+                                             # now lives in the nightly universe-promotion
+                                             # gate, not here — see core/shared_universe).
     "rebuild_day_of_week":  6,               # 6 = Sunday
     "score_weights": {
         "rs_5":         0.20,

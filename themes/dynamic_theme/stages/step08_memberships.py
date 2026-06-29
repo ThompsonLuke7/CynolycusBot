@@ -71,6 +71,21 @@ def compute_memberships(
     # Map cluster_id → theme_name
     id_to_theme = dict(zip(registry_df["cluster_id"], registry_df["theme_name"]))
 
+    # Inject hand-pinned seed themes (e.g. memory_storage) so they always exist
+    # and any similar ticker maps to them, regardless of what HDBSCAN produced.
+    # Done here (not via clusters_df) so seeds work in both daily and weekly runs.
+    # Skip any seed whose name the emergent taxonomy already produced this run, so
+    # a seed only *fills a gap* — it never duplicates a theme HDBSCAN found itself.
+    from themes.dynamic_theme.seed_themes import seed_centroids
+    seed_cents, seed_names = seed_centroids(tickers, matrix)
+    existing_names = set(id_to_theme.values())
+    for cid, name in seed_names.items():
+        if name in existing_names:
+            logger.info("Seed theme '%s' already emerged this run — not injecting seed", name)
+            continue
+        centroids_by_id[cid] = seed_cents[cid]
+        id_to_theme[cid] = name
+
     # Only keep clusters that appear in the registry
     valid_ids = [cid for cid in centroids_by_id if cid in id_to_theme]
     if not valid_ids:
