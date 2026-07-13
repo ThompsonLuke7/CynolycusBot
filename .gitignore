@@ -259,6 +259,9 @@ core/API/Schwab_API/schwab_tokens.json
 !strategies/multi_ticker_swing/models/*.json
 !strategies/multi_ticker_swing_htf/models/*.json
 
+# Re-include the capstone results lock (regression-tested paper numbers)
+!research/capstone/results_lock.json
+
 # ============================================================
 # Model binaries & research artifacts (regenerable; do not commit)
 # Live path uses the re-included *.json models above, not these bundles.

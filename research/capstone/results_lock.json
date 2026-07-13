@@ -1,0 +1,1057 @@
+{
+ "generated_at_utc": "2026-07-13T03:35:57.611620+00:00",
+ "git_commit": "450c93b75b3271c021f3c6a7f813eac1936a6061",
+ "top_k": 10,
+ "artifacts": {
+  "swing_eval_metrics": {
+   "exists": true,
+   "bytes": 1094,
+   "hash": "5ccf04e42e991edc"
+  },
+  "swing_meta": {
+   "exists": true,
+   "bytes": 7202,
+   "hash": "c075a2db1a7175cc"
+  },
+  "swing_probs": {
+   "exists": true,
+   "bytes": 407969424,
+   "hash": "9fb89d89cb1fe0c5",
+   "rows": 15071418
+  },
+  "swing_matrix": {
+   "exists": true,
+   "bytes": 7730718887,
+   "hash": "037a1407f193fed9",
+   "rows": 14838056
+  },
+  "swing_bt_grouped": {
+   "exists": true,
+   "bytes": 21139,
+   "hash": "56cdafa13488b741"
+  },
+  "swing_bt_summary": {
+   "exists": true,
+   "bytes": 60652,
+   "hash": "631b692b07e5f071"
+  },
+  "swing_paper_closed": {
+   "exists": true,
+   "bytes": 32708,
+   "hash": "5444e1744cbf3b31"
+  },
+  "mom_eval_metrics": {
+   "exists": true,
+   "bytes": 3540,
+   "hash": "b5fecfd614439486"
+  },
+  "mom_seed_results": {
+   "exists": true,
+   "bytes": 5752,
+   "hash": "5bf08a4998bf623c"
+  },
+  "mom_oof": {
+   "exists": true,
+   "bytes": 101862040,
+   "hash": "6a8bac25a0c9bd74",
+   "rows": 1582685
+  },
+  "htf_eval_metrics": {
+   "exists": true,
+   "bytes": 3592,
+   "hash": "91ed9903800097fd"
+  },
+  "htf_seed_results": {
+   "exists": true,
+   "bytes": 5720,
+   "hash": "ee48740c6f1ee8be"
+  },
+  "htf_oof": {
+   "exists": true,
+   "bytes": 34538171,
+   "hash": "25b74f032bb507ce",
+   "rows": 775331
+  },
+  "meta_q_eval": {
+   "exists": true,
+   "bytes": 3064,
+   "hash": "638448442bce8621"
+  },
+  "meta_u_eval": {
+   "exists": true,
+   "bytes": 3186,
+   "hash": "0708202673b8cd83"
+  },
+  "meta_q_oof": {
+   "exists": true,
+   "bytes": 37354235,
+   "hash": "e24bf1b39d30eaab",
+   "rows": 763918
+  },
+  "meta_u_oof": {
+   "exists": true,
+   "bytes": 37389070,
+   "hash": "a9a56cd187dda68b",
+   "rows": 763918
+  },
+  "spy_long_meta": {
+   "exists": true,
+   "bytes": 1116,
+   "hash": "73e19842a3a5541d"
+  },
+  "spy_short_meta": {
+   "exists": true,
+   "bytes": 1118,
+   "hash": "57b1c8cc65e2b2c9"
+  },
+  "spy_long_oos": {
+   "exists": true,
+   "bytes": 813,
+   "hash": "ad06c9d63444231c"
+  },
+  "spy_1d_bars": {
+   "exists": true,
+   "bytes": 85423,
+   "hash": "4a42dfbddbcfd7f7",
+   "rows": 1496
+  }
+ },
+ "metrics": [
+  {
+   "model": "swing",
+   "metric": "val_accuracy",
+   "value": 0.62019,
+   "n": null,
+   "tag": "validation",
+   "source": "models/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "swing",
+   "metric": "val_long_precision",
+   "value": 0.422917,
+   "n": null,
+   "tag": "validation",
+   "source": "models/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "swing",
+   "metric": "val_short_precision",
+   "value": 0.419783,
+   "n": null,
+   "tag": "validation",
+   "source": "models/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "swing",
+   "metric": "test_accuracy",
+   "value": 0.615997,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "models/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "swing",
+   "metric": "test_long_precision",
+   "value": 0.412443,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "models/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "swing",
+   "metric": "test_short_precision",
+   "value": 0.411034,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "models/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "swing",
+   "metric": "test_accuracy_recomputed",
+   "value": 0.616001,
+   "n": 2224877,
+   "tag": "test(frozen)",
+   "source": "recomputed: p_swing_probs.parquet x training_matrix.parquet",
+   "caveat": ""
+  },
+  {
+   "model": "swing",
+   "metric": "test_long_wr_recomputed",
+   "value": 0.412416,
+   "n": 464070,
+   "tag": "test(frozen)",
+   "source": "recomputed: p_swing_probs.parquet x training_matrix.parquet",
+   "caveat": ""
+  },
+  {
+   "model": "swing",
+   "metric": "test_short_wr_recomputed",
+   "value": 0.41108,
+   "n": 426927,
+   "tag": "test(frozen)",
+   "source": "recomputed: p_swing_probs.parquet x training_matrix.parquet",
+   "caveat": ""
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_long_win_rate",
+   "value": 0.626226,
+   "n": 4690,
+   "tag": "artifact",
+   "source": "sweep_v2/best_v2_grouped.json",
+   "caveat": "policy picked on reporting split; stale artifact (trades parquet missing); PnL-based WR, not directional accuracy"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_short_win_rate",
+   "value": 0.599913,
+   "n": 4584,
+   "tag": "artifact",
+   "source": "sweep_v2/best_v2_grouped.json",
+   "caveat": "policy picked on reporting split; stale artifact (trades parquet missing); PnL-based WR, not directional accuracy"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_long_wr_sector_agg",
+   "value": 0.626226,
+   "n": 4690,
+   "tag": "artifact",
+   "source": "best_v2_grouped.json sector groups",
+   "caveat": "policy picked on reporting split; stale artifact (trades parquet missing); PnL-based WR, not directional accuracy"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_short_wr_sector_agg",
+   "value": 0.599913,
+   "n": 4584,
+   "tag": "artifact",
+   "source": "best_v2_grouped.json sector groups",
+   "caveat": "policy picked on reporting split; stale artifact (trades parquet missing); PnL-based WR, not directional accuracy"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_combined_wr_sector_agg",
+   "value": 0.61322,
+   "n": 9274,
+   "tag": "artifact",
+   "source": "best_v2_grouped.json sector groups",
+   "caveat": "policy picked on reporting split; stale artifact (trades parquet missing); PnL-based WR, not directional accuracy; advisor doc said 62.3% \u2014 correct combined value is this"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_current_best_n_trades",
+   "value": 6904,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "sweep_v2_summary.csv best combo e0.7_c6_trail_arm2.5_gb25_sl1.5",
+   "caveat": "best-of-180 combos selected on this same split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_current_best_win_rate",
+   "value": 0.332706,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "sweep_v2_summary.csv best combo e0.7_c6_trail_arm2.5_gb25_sl1.5",
+   "caveat": "best-of-180 combos selected on this same split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_current_best_profit_factor",
+   "value": 1.414,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "sweep_v2_summary.csv best combo e0.7_c6_trail_arm2.5_gb25_sl1.5",
+   "caveat": "best-of-180 combos selected on this same split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_current_best_sharpe",
+   "value": 1.972,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "sweep_v2_summary.csv best combo e0.7_c6_trail_arm2.5_gb25_sl1.5",
+   "caveat": "best-of-180 combos selected on this same split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_current_best_avg_pnl_pct",
+   "value": 0.00331,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "sweep_v2_summary.csv best combo e0.7_c6_trail_arm2.5_gb25_sl1.5",
+   "caveat": "best-of-180 combos selected on this same split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_current_best_max_dd_pct",
+   "value": -40.09,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "sweep_v2_summary.csv best combo e0.7_c6_trail_arm2.5_gb25_sl1.5",
+   "caveat": "best-of-180 combos selected on this same split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_current_best_long_wr",
+   "value": 0.342703,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "sweep_v2_summary.csv best combo e0.7_c6_trail_arm2.5_gb25_sl1.5",
+   "caveat": "best-of-180 combos selected on this same split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_current_best_short_wr",
+   "value": 0.322295,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "sweep_v2_summary.csv best combo e0.7_c6_trail_arm2.5_gb25_sl1.5",
+   "caveat": "best-of-180 combos selected on this same split"
+  },
+  {
+   "model": "swing",
+   "metric": "paper_fresh_call_mean_option_ret_pct",
+   "value": 36.188284,
+   "n": 18,
+   "tag": "paper",
+   "source": "multiticker_20260528_20260529_closed_performance_rebuilt.csv",
+   "caveat": "paper trading, 2 sessions, small n"
+  },
+  {
+   "model": "swing",
+   "metric": "paper_fresh_call_mean_underlying_ret_pct",
+   "value": 1.403349,
+   "n": 18,
+   "tag": "paper",
+   "source": "multiticker_20260528_20260529_closed_performance_rebuilt.csv",
+   "caveat": "paper trading, 2 sessions, small n"
+  },
+  {
+   "model": "swing",
+   "metric": "paper_all_closed_option_pnl_dollars",
+   "value": -6246.5,
+   "n": 123,
+   "tag": "paper",
+   "source": "multiticker_20260528_20260529_closed_performance_rebuilt.csv",
+   "caveat": "paper trading, 2 sessions, small n"
+  },
+  {
+   "model": "swing",
+   "metric": "paper_all_closed_win_rate",
+   "value": 0.341463,
+   "n": 123,
+   "tag": "paper",
+   "source": "multiticker_20260528_20260529_closed_performance_rebuilt.csv",
+   "caveat": "paper trading, 2 sessions, small n"
+  },
+  {
+   "model": "swing",
+   "metric": "paper_hold_minutes_mean",
+   "value": 157.474328,
+   "n": 123,
+   "tag": "paper",
+   "source": "multiticker_20260528_20260529_closed_performance_rebuilt.csv",
+   "caveat": "5/28-5/29 ledger only; advisor doc's 151.2min figure also included 6/1 logs"
+  },
+  {
+   "model": "swing",
+   "metric": "paper_hold_minutes_median",
+   "value": 124.678745,
+   "n": 123,
+   "tag": "paper",
+   "source": "multiticker_20260528_20260529_closed_performance_rebuilt.csv",
+   "caveat": "paper trading, 2 sessions, small n"
+  },
+  {
+   "model": "momentum",
+   "metric": "winner_test_ndcg_at_10",
+   "value": 0.597761,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "expansion_v1/eval_metrics.json",
+   "caveat": "winner picked BY this metric across families x seeds (selection bias, audit \u00a70.2)"
+  },
+  {
+   "model": "momentum",
+   "metric": "winner_test_precision_at_10",
+   "value": 0.352736,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "expansion_v1/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "momentum",
+   "metric": "winner_test_spearman",
+   "value": 0.158635,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "expansion_v1/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "momentum",
+   "metric": "winner_test_positive_precision",
+   "value": 0.57868,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "expansion_v1/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "momentum",
+   "metric": "winner_val_positive_precision",
+   "value": 0.632432,
+   "n": null,
+   "tag": "validation",
+   "source": "expansion_v1/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "momentum",
+   "metric": "winner_test_log_loss",
+   "value": 0.296099,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "expansion_v1/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "momentum",
+   "metric": "winner_family_seed",
+   "value": "xgb_classifier/45",
+   "n": null,
+   "tag": "test(comp)",
+   "source": "expansion_v1/eval_metrics.json",
+   "caveat": "winner picked BY this metric across families x seeds (selection bias, audit \u00a70.2)"
+  },
+  {
+   "model": "momentum",
+   "metric": "candidates_test_ndcg_at_10_min_median_max",
+   "value": "0.5543 / 0.5845 / 0.5983",
+   "n": 20,
+   "tag": "test(comp)",
+   "source": "seed_results.csv",
+   "caveat": "spread over 20 family-seed candidates; winner = max"
+  },
+  {
+   "model": "momentum",
+   "metric": "oof_top10_mean_fwd_close_ret",
+   "value": 0.066875,
+   "n": 29335,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-14..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "momentum",
+   "metric": "oof_top10_median_fwd_close_ret",
+   "value": 0.008,
+   "n": 29335,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-14..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "momentum",
+   "metric": "oof_top10_win_rate",
+   "value": 0.519175,
+   "n": 29335,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-14..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "momentum",
+   "metric": "oof_universe_mean_fwd_close_ret",
+   "value": 0.013733,
+   "n": 1551425,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-14..2026-05-14)",
+   "caveat": "baseline: all non-top-K rows"
+  },
+  {
+   "model": "momentum",
+   "metric": "oof_top10_minus_universe",
+   "value": 0.053143,
+   "n": null,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-14..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "momentum",
+   "metric": "oof_spearman_score_vs_y",
+   "value": 0.107296,
+   "n": 1580760,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-14..2026-05-14)",
+   "caveat": ""
+  },
+  {
+   "model": "momentum",
+   "metric": "oof_top10_mean_fwd_max_return",
+   "value": 0.228665,
+   "n": 29335,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-14..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "momentum",
+   "metric": "oof_top10_mean_fwd_max_drawdown",
+   "value": 0.119593,
+   "n": 29335,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-14..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "winner_test_ndcg_at_10",
+   "value": 0.671921,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "models/eval_metrics.json",
+   "caveat": "winner picked BY this metric across families x seeds (selection bias, audit \u00a70.2)"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "winner_test_precision_at_10",
+   "value": 0.533476,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "models/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "htf_swing",
+   "metric": "winner_test_spearman",
+   "value": 0.004617,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "models/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "htf_swing",
+   "metric": "winner_test_positive_precision",
+   "value": 0.567928,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "models/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "htf_swing",
+   "metric": "winner_val_positive_precision",
+   "value": 0.525838,
+   "n": null,
+   "tag": "validation",
+   "source": "models/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "htf_swing",
+   "metric": "winner_test_log_loss",
+   "value": 0.513119,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "models/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "htf_swing",
+   "metric": "winner_family_seed",
+   "value": "lgbm_classifier/46",
+   "n": null,
+   "tag": "test(comp)",
+   "source": "models/eval_metrics.json",
+   "caveat": "winner picked BY this metric across families x seeds (selection bias, audit \u00a70.2)"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "candidates_test_ndcg_at_10_min_median_max",
+   "value": "0.6302 / 0.6603 / 0.6719",
+   "n": 20,
+   "tag": "test(comp)",
+   "source": "seed_results.csv",
+   "caveat": "spread over 20 family-seed candidates; winner = max"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "oof_top10_mean_fwd_close_ret",
+   "value": 0.089443,
+   "n": 23464,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-22..2026-05-04)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "oof_top10_median_fwd_close_ret",
+   "value": 0.017722,
+   "n": 23464,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-22..2026-05-04)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "oof_top10_win_rate",
+   "value": 0.538058,
+   "n": 23464,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-22..2026-05-04)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "oof_universe_mean_fwd_close_ret",
+   "value": 0.019736,
+   "n": 738154,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-22..2026-05-04)",
+   "caveat": "baseline: all non-top-K rows"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "oof_top10_minus_universe",
+   "value": 0.069707,
+   "n": null,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-22..2026-05-04)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "oof_spearman_score_vs_y",
+   "value": -0.004471,
+   "n": 761618,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-22..2026-05-04)",
+   "caveat": ""
+  },
+  {
+   "model": "htf_swing",
+   "metric": "oof_top10_mean_fwd_best_high_return",
+   "value": 0.238775,
+   "n": 23464,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-22..2026-05-04)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "oof_top10_mean_fwd_worst_low_return",
+   "value": -0.081039,
+   "n": 23464,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2022-11-22..2026-05-04)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_quality",
+   "metric": "winner_test_ndcg_at_20",
+   "value": 0.462909,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "quality/eval_metrics.json",
+   "caveat": "winner picked BY this metric across families x seeds (selection bias, audit \u00a70.2)"
+  },
+  {
+   "model": "meta_quality",
+   "metric": "winner_test_precision_at_20",
+   "value": 0.27598,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "quality/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "meta_quality",
+   "metric": "winner_test_spearman",
+   "value": 0.036552,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "quality/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "meta_quality",
+   "metric": "winner_test_positive_precision",
+   "value": 0.0,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "quality/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "meta_quality",
+   "metric": "winner_val_positive_precision",
+   "value": 0.0,
+   "n": null,
+   "tag": "validation",
+   "source": "quality/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "meta_quality",
+   "metric": "winner_test_log_loss",
+   "value": 0.34471,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "quality/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "meta_quality",
+   "metric": "winner_family_seed",
+   "value": "xgb_classifier/46",
+   "n": null,
+   "tag": "test(comp)",
+   "source": "quality/eval_metrics.json",
+   "caveat": "winner picked BY this metric across families x seeds (selection bias, audit \u00a70.2)"
+  },
+  {
+   "model": "meta_upside",
+   "metric": "winner_test_ndcg_at_20",
+   "value": 0.61228,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "upside/eval_metrics.json",
+   "caveat": "winner picked BY this metric across families x seeds (selection bias, audit \u00a70.2)"
+  },
+  {
+   "model": "meta_upside",
+   "metric": "winner_test_precision_at_20",
+   "value": 0.375036,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "upside/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "meta_upside",
+   "metric": "winner_test_spearman",
+   "value": 0.226333,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "upside/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "meta_upside",
+   "metric": "winner_test_positive_precision",
+   "value": 0.571049,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "upside/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "meta_upside",
+   "metric": "winner_val_positive_precision",
+   "value": 0.521247,
+   "n": null,
+   "tag": "validation",
+   "source": "upside/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "meta_upside",
+   "metric": "winner_test_log_loss",
+   "value": 0.28931,
+   "n": null,
+   "tag": "test(comp)",
+   "source": "upside/eval_metrics.json",
+   "caveat": ""
+  },
+  {
+   "model": "meta_upside",
+   "metric": "winner_family_seed",
+   "value": "xgb_classifier/48",
+   "n": null,
+   "tag": "test(comp)",
+   "source": "upside/eval_metrics.json",
+   "caveat": "winner picked BY this metric across families x seeds (selection bias, audit \u00a70.2)"
+  },
+  {
+   "model": "meta_quality",
+   "metric": "oof_top10_mean_fwd_close_ret",
+   "value": 0.04531,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_quality",
+   "metric": "oof_top10_median_fwd_close_ret",
+   "value": 0.013916,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_quality",
+   "metric": "oof_top10_win_rate",
+   "value": 0.546868,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_quality",
+   "metric": "oof_universe_mean_fwd_close_ret",
+   "value": 0.018582,
+   "n": 751357,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "baseline: all non-top-K rows"
+  },
+  {
+   "model": "meta_quality",
+   "metric": "oof_top10_minus_universe",
+   "value": 0.026728,
+   "n": null,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_quality",
+   "metric": "oof_spearman_score_vs_y",
+   "value": -0.005384,
+   "n": 762932,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": ""
+  },
+  {
+   "model": "meta_quality",
+   "metric": "oof_top10_mean_fwd_max_drawdown",
+   "value": 0.095715,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_upside",
+   "metric": "oof_top10_mean_fwd_close_ret",
+   "value": 0.093265,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_upside",
+   "metric": "oof_top10_median_fwd_close_ret",
+   "value": 0.024098,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_upside",
+   "metric": "oof_top10_win_rate",
+   "value": 0.558963,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_upside",
+   "metric": "oof_universe_mean_fwd_close_ret",
+   "value": 0.017843,
+   "n": 751357,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "baseline: all non-top-K rows"
+  },
+  {
+   "model": "meta_upside",
+   "metric": "oof_top10_minus_universe",
+   "value": 0.075422,
+   "n": null,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_upside",
+   "metric": "oof_spearman_score_vs_y",
+   "value": 0.201802,
+   "n": 762932,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": ""
+  },
+  {
+   "model": "meta_upside",
+   "metric": "oof_top10_mean_fwd_max_return",
+   "value": 0.253463,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_combo",
+   "metric": "oof_top10_mean_fwd_close_ret",
+   "value": 0.074013,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_combo",
+   "metric": "oof_top10_median_fwd_close_ret",
+   "value": 0.023389,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_combo",
+   "metric": "oof_top10_win_rate",
+   "value": 0.56311,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_combo",
+   "metric": "oof_universe_mean_fwd_close_ret",
+   "value": 0.01814,
+   "n": 751357,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "baseline: all non-top-K rows"
+  },
+  {
+   "model": "meta_combo",
+   "metric": "oof_top10_minus_universe",
+   "value": 0.055874,
+   "n": null,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_combo",
+   "metric": "oof_spearman_score_vs_y",
+   "value": 0.043041,
+   "n": 762932,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": ""
+  },
+  {
+   "model": "meta_combo",
+   "metric": "oof_top10_mean_fwd_max_return",
+   "value": 0.207644,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_combo",
+   "metric": "oof_top10_mean_fwd_max_drawdown",
+   "value": 0.109124,
+   "n": 11575,
+   "tag": "wf-oof",
+   "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
+   "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "spy_baseline",
+   "metric": "long_ga_best_score",
+   "value": -0.222924,
+   "n": null,
+   "tag": "validation",
+   "source": "Data/models/ga_xgboost/10min/long/swing/meta.json",
+   "caveat": "GA fitness (neg penalized logloss) on internal train/val split"
+  },
+  {
+   "model": "spy_baseline",
+   "metric": "long_selected_features",
+   "value": "200/1541",
+   "n": null,
+   "tag": "artifact",
+   "source": "Data/models/ga_xgboost/10min/long/swing/meta.json",
+   "caveat": ""
+  },
+  {
+   "model": "spy_baseline",
+   "metric": "short_ga_best_score",
+   "value": -0.277818,
+   "n": null,
+   "tag": "validation",
+   "source": "Data/models/ga_xgboost/10min/short/swing/meta.json",
+   "caveat": "GA fitness (neg penalized logloss) on internal train/val split"
+  },
+  {
+   "model": "spy_baseline",
+   "metric": "short_selected_features",
+   "value": "200/1541",
+   "n": null,
+   "tag": "artifact",
+   "source": "Data/models/ga_xgboost/10min/short/swing/meta.json",
+   "caveat": ""
+  },
+  {
+   "model": "spy_baseline",
+   "metric": "long_test_rows",
+   "value": 5253,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "p_long_oos_manifest.json",
+   "caveat": "fixed on-disk split indices"
+  },
+  {
+   "model": "spy_baseline",
+   "metric": "live_verdict",
+   "value": "directional correctness ~noise live",
+   "n": null,
+   "tag": "live",
+   "source": "research/daily_live_reports/*, advisor doc \u00a7SPY",
+   "caveat": "narrative baseline result; per-session ledgers in daily reports"
+  },
+  {
+   "model": "benchmark",
+   "metric": "spy_fwd_12d_mean_ret",
+   "value": 0.007176,
+   "n": 1484,
+   "tag": "reference",
+   "source": "Data/shared/bars/1d/SPY.parquet",
+   "caveat": "mean 12-trading-day forward return, full bar history"
+  },
+  {
+   "model": "benchmark",
+   "metric": "spy_fwd_25d_mean_ret",
+   "value": 0.014686,
+   "n": 1471,
+   "tag": "reference",
+   "source": "Data/shared/bars/1d/SPY.parquet",
+   "caveat": "mean 25-trading-day forward return, full bar history"
+  }
+ ]
+}
