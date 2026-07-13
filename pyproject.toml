@@ -12,6 +12,7 @@ testpaths = [
     "signals/news/tests",
     "signals/social_attention/tests",
     "UI/tests",
+    "scripts/capstone/tests",
 ]
 python_files = ["test_*.py"]
 markers = [
