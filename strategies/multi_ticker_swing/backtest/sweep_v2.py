@@ -97,11 +97,28 @@ def load_proba(split: str = "test") -> pd.DataFrame:
     return df
 
 
-def load_raw_30m(ticker: str) -> pd.DataFrame:
-    df = pd.read_parquet(RAW_30M_DIR / f"{ticker}.parquet")
+def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize timestamp to a column regardless of on-disk storage.
+
+    Raw 30m/5m caches evolved to store timestamp as a DatetimeIndex (see
+    strategies/multi_ticker_swing/data/load_data.py::_ensure_utc_index); this
+    module's loaders predate that and assumed a "timestamp" column, silently
+    KeyError-ing (caught and skipped) for most tickers written since. Fix
+    applies to both this loader and any parquet round-tripped elsewhere.
+    """
+    df = df.copy()
     df.columns = [c.lower() for c in df.columns]
+    if "timestamp" not in df.columns:
+        df = df.reset_index()
+        if "timestamp" not in df.columns:
+            df = df.rename(columns={df.columns[0]: "timestamp"})
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df.sort_values("timestamp").reset_index(drop=True)
+
+
+def load_raw_30m(ticker: str) -> pd.DataFrame:
+    df = pd.read_parquet(RAW_30M_DIR / f"{ticker}.parquet")
+    return _ensure_timestamp_column(df)
 
 
 def load_raw_5m(ticker: str) -> pd.DataFrame | None:
@@ -109,9 +126,7 @@ def load_raw_5m(ticker: str) -> pd.DataFrame | None:
     if not path.exists():
         return None
     df = pd.read_parquet(path)
-    df.columns = [c.lower() for c in df.columns]
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    return df.sort_values("timestamp").reset_index(drop=True)
+    return _ensure_timestamp_column(df)
 
 
 def compute_atr(df: pd.DataFrame, period: int = 14) -> np.ndarray:
