@@ -1,0 +1,5 @@
+trades,win_rate,profit_factor,avg_trade_pct,median_trade_pct,total_pnl,total_return_pct,max_dd_pct,ret_over_dd,sharpe_seq,tp_rate,sl_rate,time_rate,avg_bars_held,family,seed,selected_on,top_k,tp_atr_mult,sl_atr_mult,max_hold,val_ret_over_dd,val_trades
+3876,0.7474,1.53,2.3869,5.138,92517.24,92.517,-15.298,6.048,10.805,0.738,0.223,0.039,15.52,xgb_classifier,45,val,5,2.0,4.0,75,3.93,4543
+11399,0.6498,2.063,7.9946,15.1515,911301.47,911.301,-25.195,36.17,34.795,0.56,0.222,0.218,38.32,xgb_ranker,45,val,20,5.0,5.0,75,3.053,12677
+3876,0.5743,1.357,1.3167,2.5929,51036.87,51.037,-9.233,5.527,8.066,0.552,0.392,0.056,7.22,lgbm_classifier,43,val,5,2.0,2.0,25,3.29,4543
+8954,0.6569,2.194,8.5238,12.5929,763218.81,763.219,-22.651,33.694,33.172,0.561,0.217,0.222,38.74,lgbm_ranker,46,val,15,5.0,5.0,75,2.596,10142

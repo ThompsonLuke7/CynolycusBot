@@ -262,6 +262,17 @@ core/API/Schwab_API/schwab_tokens.json
 # Re-include the capstone results lock (regression-tested paper numbers)
 !research/capstone/results_lock.json
 
+# Re-include the capstone val-select/test-freeze backtest summaries (small
+# JSON/CSV; the per-trade parquets behind them stay regeneratable/untracked)
+!strategies/momentum_expansion/backtest/results/family_compare_clean/comparison_summary_clean.json
+!strategies/momentum_expansion/backtest/results/family_compare_clean/frozen_test_by_family.csv
+!strategies/multi_ticker_swing_htf/backtest/results/family_compare_clean/comparison_summary_clean.json
+!strategies/multi_ticker_swing_htf/backtest/results/family_compare_clean/frozen_test_by_family.csv
+!strategies/multi_ticker_swing/backtest/results/sweep_v2_clean/best_v2_clean_summary.json
+!strategies/multi_ticker_swing/backtest/results/sweep_v2_clean/best_v2_clean_grouped.json
+!strategies/multi_ticker_swing/backtest/results/sweep_v2_clean/val_sweep_summary.csv
+!signals/meta_context/meta_ranker/results/backtest_exits_oof_clean.txt
+
 # ============================================================
 # Model binaries & research artifacts (regenerable; do not commit)
 # Live path uses the re-included *.json models above, not these bundles.

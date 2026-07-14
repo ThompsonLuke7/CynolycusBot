@@ -1,0 +1,80 @@
+{
+  "method": "combo selected on VAL split by Sharpe, frozen and reported on TEST split",
+  "n_tickers": 93,
+  "combo": {
+    "name": "e0.7_c6_trail_arm2.5_gb25_sl3.0",
+    "entry_threshold": 0.7,
+    "confirm_5m_bars": 6,
+    "exit_strategy": "trail_arm2.5_gb25_sl3.0"
+  },
+  "val_selection_metrics": {
+    "n_trades": "3511",
+    "win_rate": 0.48134434634007406,
+    "sharpe": 2.383,
+    "profit_factor": 1.457,
+    "long_wr": 0.5075187969924813,
+    "short_wr": 0.45178896300788357
+  },
+  "frozen_test_metrics": {
+    "n_trades": 4096,
+    "win_rate": 0.48681640625,
+    "avg_win_pct": 0.03495411748790021,
+    "avg_loss_pct": -0.024371293287382002,
+    "profit_factor": 1.361,
+    "avg_pnl_pct": 0.0045092899855459145,
+    "total_pnl_pct": 18.470051780796066,
+    "sharpe": 1.909,
+    "max_dd_pct": -74.48,
+    "avg_holding_bars": 21.64208984375,
+    "exit_sl_pct": 0.512939453125,
+    "exit_trail_pct": 0.483642578125,
+    "exit_time_pct": 0.00341796875,
+    "exit_opp_pct": 0.0,
+    "long_n": 2126,
+    "short_n": 1970,
+    "long_wr": 0.5009407337723424,
+    "short_wr": 0.4715736040609137
+  },
+  "frozen_test_grouped_direction": {
+    "dir:short": {
+      "n_trades": 1970,
+      "win_rate": 0.4715736040609137,
+      "avg_win_pct": 0.031607585651169084,
+      "avg_loss_pct": -0.02442343436705674,
+      "profit_factor": 1.155,
+      "avg_pnl_pct": 0.001999315682147215,
+      "total_pnl_pct": 3.9386518938300132,
+      "sharpe": 0.991,
+      "max_dd_pct": -118.76,
+      "avg_holding_bars": 21.07055837563452,
+      "exit_sl_pct": 0.5284263959390862,
+      "exit_trail_pct": 0.4700507614213198,
+      "exit_time_pct": 0.0015228426395939086,
+      "exit_opp_pct": 0.0,
+      "long_n": 0,
+      "short_n": 1970,
+      "long_wr": 0.0,
+      "short_wr": 0.4715736040609137
+    },
+    "dir:long": {
+      "n_trades": 2126,
+      "win_rate": 0.5009407337723424,
+      "avg_win_pct": 0.0378732987802225,
+      "avg_loss_pct": -0.02432013507443063,
+      "profit_factor": 1.563,
+      "avg_pnl_pct": 0.006835089316540946,
+      "total_pnl_pct": 14.531399886966051,
+      "sharpe": 2.596,
+      "max_dd_pct": -69.73,
+      "avg_holding_bars": 22.171683913452494,
+      "exit_sl_pct": 0.49858889934148637,
+      "exit_trail_pct": 0.4962370649106303,
+      "exit_time_pct": 0.0051740357478833494,
+      "exit_opp_pct": 0.0,
+      "long_n": 2126,
+      "short_n": 0,
+      "long_wr": 0.5009407337723424,
+      "short_wr": 0.0
+    }
+  }
+}
