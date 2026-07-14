@@ -76,6 +76,10 @@ ARTIFACTS: dict[str, Path] = {
     "spy_long_oos":         REPO / "Data/models/ga_xgboost/10min/long/swing/p_long_oos_manifest.json",
     # benchmark
     "spy_1d_bars":          REPO / "Data/shared/bars/1d/SPY.parquet",
+    # val-selected / test-frozen equity-tier backtests (leakage_audit.md patch)
+    "mom_family_clean":     REPO / "strategies/momentum_expansion/backtest/results/family_compare_clean/comparison_summary_clean.json",
+    "htf_family_clean":     REPO / "strategies/multi_ticker_swing_htf/backtest/results/family_compare_clean/comparison_summary_clean.json",
+    "swing_bt_clean":       REPO / "strategies/multi_ticker_swing/backtest/results/sweep_v2_clean/best_v2_clean_summary.json",
 }
 
 TOP_K = 10  # matches RANKING_CONFIG.top_n / meta live top-K
@@ -250,6 +254,28 @@ def swing_backtest_lock() -> list[dict]:
     return rows
 
 
+def swing_backtest_clean_lock() -> list[dict]:
+    """Lock the val-selected/test-frozen sweep_v2_clean patch
+    (scripts/capstone/family_backtest_clean.py's swing sibling — see
+    strategies/multi_ticker_swing/backtest/sweep_v2_clean.py). Fixes the
+    same-split selection bias in swing_backtest_lock() above."""
+    if not ARTIFACTS["swing_bt_clean"].exists():
+        return []
+    d = json.loads(ARTIFACTS["swing_bt_clean"].read_text())
+    src = "sweep_v2_clean/best_v2_clean_summary.json"
+    cav = f"combo {d['combo']['name']} selected on VAL split, frozen on TEST split"
+    fm = d["frozen_test_metrics"]
+    rows = [row("swing", f"bt_v2_clean_{k}", fm[k], "test(frozen)", src, cav)
+            for k in ("n_trades", "win_rate", "sharpe", "profit_factor", "avg_pnl_pct",
+                      "max_dd_pct", "long_wr", "short_wr") if k in fm]
+    grp = d.get("frozen_test_grouped_direction", {})
+    for key, label in [("dir:long", "long"), ("dir:short", "short")]:
+        if key in grp:
+            rows.append(row("swing", f"bt_v2_clean_{label}_win_rate", grp[key]["win_rate"],
+                            "test(frozen)", src, cav, n=grp[key]["n_trades"]))
+    return rows
+
+
 def swing_paper_trading() -> list[dict]:
     """Reproduce the May 28-29 paper-trading option-return claims from the saved
     per-trade ledger (the advisor doc's +40.6% fresh-call figure)."""
@@ -306,10 +332,30 @@ def _competition_metrics(model: str, eval_key: str, seed_key: str) -> list[dict]
     return rows
 
 
+def _family_compare_clean_lock(model: str, artifact_key: str) -> list[dict]:
+    """Lock the val-selected/test-frozen order-policy equity backtest
+    (scripts/capstone/family_backtest_clean.py). Fixes the same-split
+    selection bias in run_family_compare.py's comparison_summary.json
+    (audit found momentum's test-selected ret/DD=44.6x vs. this clean
+    frozen-test ret/DD — selection alone inflated it ~7x)."""
+    if not ARTIFACTS[artifact_key].exists():
+        return []
+    d = json.loads(ARTIFACTS[artifact_key].read_text())
+    src = f"{ARTIFACTS[artifact_key].parent.name}/comparison_summary_clean.json"
+    dw = d["deployed_winner_frozen_test"]
+    cav = (f"deployed winner ({dw['family']}) policy selected on VAL split "
+          f"(tp={dw['tp_atr_mult']} sl={dw['sl_atr_mult']} topk={dw['top_k']} hold={dw['max_hold']}), "
+          f"frozen on TEST split")
+    rows = [row(model, f"clean_deployed_winner_{k}", dw[k], "test(frozen)", src, cav)
+            for k in ("trades", "win_rate", "total_return_pct", "max_dd_pct", "ret_over_dd", "profit_factor")]
+    return rows
+
+
 def momentum_metrics() -> list[dict]:
     rows = _competition_metrics("momentum", "mom_eval_metrics", "mom_seed_results")
     oof = _read_oof(ARTIFACTS["mom_oof"])
     rows += _topk_oof_stats(oof, "momentum", extra_cols=("fwd_max_return", "fwd_max_drawdown"))
+    rows += _family_compare_clean_lock("momentum", "mom_family_clean")
     return rows
 
 
@@ -317,6 +363,7 @@ def htf_metrics() -> list[dict]:
     rows = _competition_metrics("htf_swing", "htf_eval_metrics", "htf_seed_results")
     oof = _read_oof(ARTIFACTS["htf_oof"])
     rows += _topk_oof_stats(oof, "htf_swing", extra_cols=("fwd_best_high_return", "fwd_worst_low_return"))
+    rows += _family_compare_clean_lock("htf_swing", "htf_family_clean")
     return rows
 
 
@@ -347,6 +394,41 @@ def meta_metrics() -> list[dict]:
     m = m.rename(columns={"s_combo_oof": "score_combo"})
     rows += _topk_oof_stats(m.assign(score=m["score_combo"]), "meta_combo",
                             extra_cols=("fwd_max_return", "fwd_max_drawdown"))
+    rows += meta_exit_policy_lock()
+    return rows
+
+
+def meta_exit_policy_lock() -> list[dict]:
+    """Event-driven exit-policy comparison (leakage_audit.md §4.3 patch): the
+    same top-K-membership simulation as backtest_exits.py, but the top-K
+    membership is built from CLEAN walk-forward OOF s_combo scores instead of
+    /tmp/meta_scored.parquet (which backtest_exits.py normally reads, produced
+    by score.py's DEPLOYED boosters — final-fit models that trained past the
+    2025-07-01 holdout start). Reuses backtest_exits.simulate() unmodified;
+    only the score source changes. See scripts/capstone/build_meta_scored_from_oof.py."""
+    from scripts.capstone.build_meta_scored_from_oof import build_oof_combo_scores
+    from signals.meta_context.meta_ranker import backtest_exits as bx
+
+    scored = build_oof_combo_scores().dropna(subset=["s_combo"])
+    scored["rk"] = scored.groupby("timestamp")["s_combo"].rank(ascending=False, method="first")
+    member = scored[scored["timestamp"] >= bx.HOLDOUT].copy()
+    member["in_top"] = member["rk"] <= bx.TOPK
+    member = member[["timestamp", "ticker", "in_top"]]
+
+    src = f"OOF s_combo (models/{{quality,upside}}/oof_preds.parquet), holdout {bx.HOLDOUT.date()}+"
+    cav = "clean substitute for backtest_exits.py's deployed-booster scoring (audit §4.3)"
+    policies = {
+        "current_live_dropout_g0": dict(grace=0),
+        "target20_full_exit": dict(target=0.20, scale_frac=1.0, grace=None),
+        "scaleout50_at20_horizon25": dict(target=0.20, scale_frac=0.5, horizon=25, grace=None),
+    }
+    rows: list[dict] = []
+    for name, kw in policies.items():
+        s = bx.simulate(member, **kw)
+        if not s:
+            continue
+        for metric in ("mean", "median", "win", "ret_std", "avg_hold", "ret_per_bar"):
+            rows.append(row("meta_exit_policy", f"{name}_{metric}", s[metric], "wf-oof", src, cav, n=s["n"]))
     return rows
 
 
@@ -395,17 +477,27 @@ def benchmark_metrics() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 HEAVY = """\
-Heavy event-driven backtests (multi-minute, run separately; results should be
-committed next to their module):
+Heavy event-driven backtests (multi-minute; results are committed artifacts
+locked into swing/momentum/htf/meta sections above once present). Re-run to
+refresh after a model/data change:
 
-1. Swing exit-policy sweep, selection-clean version (audit §1.4):
-   PYTHONPATH=. .venv/bin/python -m strategies.multi_ticker_swing.backtest.sweep_v2 --split val
-   PYTHONPATH=. .venv/bin/python -m strategies.multi_ticker_swing.backtest.sweep_v2 --split test  # freeze val-selected combo
-2. Momentum / HTF unified test-window equity backtest:
-   PYTHONPATH=. .venv/bin/python -m strategies.momentum_expansion.backtest.family_backtest
-3. Meta exit-policy backtest with CLEAN OOF scores (audit §4.3): build
-   /tmp/meta_scored.parquet from models/*/oof_preds.parquet combo ranks first,
-   then: PYTHONPATH=. .venv/bin/python signals/meta_context/meta_ranker/backtest_exits.py
+1. Swing exit-policy sweep, val-select/test-freeze (audit §1.4 patch):
+   PYTHONPATH=. .venv/bin/python -m strategies.multi_ticker_swing.backtest.sweep_v2_clean --top-n 100
+   -> strategies/multi_ticker_swing/backtest/results/sweep_v2_clean/  (~30 min)
+2. Momentum / HTF order-policy equity backtest, val-select/test-freeze (audit §0.2/§2/§3 patch):
+   PYTHONPATH=. .venv/bin/python scripts/capstone/family_backtest_clean.py --strategy all
+   -> strategies/{momentum_expansion,multi_ticker_swing_htf}/backtest/results/family_compare_clean/  (~10 min)
+3. Meta exit-policy backtest with CLEAN OOF scores (audit §4.3 patch) — locked
+   directly in meta_metrics() via meta_exit_policy_lock(); for the full
+   backtest_exits.py table (all 11 policies) instead of the 3 locked ones:
+   PYTHONPATH=. .venv/bin/python scripts/capstone/build_meta_scored_from_oof.py
+   PYTHONPATH=. .venv/bin/python signals/meta_context/meta_ranker/backtest_exits.py
+
+For reference, the ORIGINAL (test-selected / deployed-booster) versions of 1-2
+remain on disk at .../family_compare/comparison_summary.json and
+.../sweep_v2/best_v2_grouped.json — do not delete; they are the audit's
+worked example of the selection-bias magnitude (e.g. momentum ret/DD 44.6x
+test-selected vs the clean frozen-test number locked above).
 """
 
 
@@ -415,7 +507,7 @@ committed next to their module):
 
 SECTIONS = {
     "swing": lambda skip_probs: swing_model_metrics(recompute_probs=not skip_probs)
-                                + swing_backtest_lock() + swing_paper_trading(),
+                                + swing_backtest_lock() + swing_backtest_clean_lock() + swing_paper_trading(),
     "momentum": lambda _s: momentum_metrics(),
     "htf": lambda _s: htf_metrics(),
     "meta": lambda _s: meta_metrics(),

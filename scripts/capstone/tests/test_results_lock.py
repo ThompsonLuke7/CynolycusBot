@@ -84,7 +84,41 @@ def test_artifacts_unchanged(lock):
 def test_swing_eval_and_backtest_lock_reproduce(lock):
     rows = rr.swing_model_metrics(recompute_probs=False)
     rows += rr.swing_backtest_lock()
+    rows += rr.swing_backtest_clean_lock()
     _assert_rows_match(rows, lock)
+
+
+def test_swing_backtest_clean_beats_stale_selection_bias(lock):
+    """The val-selected/test-frozen swing patch (audit §1.4) must exist and its
+    win rates must be plausible PnL rates, not the double-digit artifacts of a
+    broken loader silently dropping most tickers."""
+    locked = _lock_metrics(lock)
+    key = ("swing", "bt_v2_clean_win_rate")
+    assert key in locked, "sweep_v2_clean artifact missing — run the clean swing backtest and re-lock"
+    assert 0.0 < locked[key]["value"] < 1.0
+
+
+def test_family_compare_clean_reproduces(lock):
+    """Val-selected/test-frozen momentum & HTF order-policy patch (audit §0.2/§2/§3)."""
+    rows = rr._family_compare_clean_lock("momentum", "mom_family_clean")
+    rows += rr._family_compare_clean_lock("htf_swing", "htf_family_clean")
+    assert rows, "family_compare_clean artifacts missing — run scripts/capstone/family_backtest_clean.py --strategy all"
+    _assert_rows_match(rows, lock)
+
+
+def test_family_compare_clean_fixes_selection_bias_magnitude(lock):
+    """Regression guard for the audit's worked example: the ORIGINAL
+    test-selected momentum policy rails to ret_over_dd=44.6x (loosest grid
+    edge, tuned on the same window it reports); the clean val-selected/
+    test-frozen number must be far smaller and plausible."""
+    locked = _lock_metrics(lock)
+    key = ("momentum", "clean_deployed_winner_ret_over_dd")
+    assert key in locked, "momentum family_compare_clean missing from lock"
+    clean_ret_over_dd = locked[key]["value"]
+    assert 0 < clean_ret_over_dd < 15, (
+        f"clean momentum ret_over_dd={clean_ret_over_dd} — expected well below the "
+        "44.6x test-selection artifact; investigate before citing in the paper"
+    )
 
 
 def test_swing_paper_trading_reproduces(lock):

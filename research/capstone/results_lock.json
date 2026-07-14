@@ -1,6 +1,6 @@
 {
- "generated_at_utc": "2026-07-13T03:35:57.611620+00:00",
- "git_commit": "450c93b75b3271c021f3c6a7f813eac1936a6061",
+ "generated_at_utc": "2026-07-14T02:24:16.022008+00:00",
+ "git_commit": "208e2ee9ce4618568dd91f313e3a502eb027ad97",
  "top_k": 10,
  "artifacts": {
   "swing_eval_metrics": {
@@ -114,6 +114,21 @@
    "bytes": 85423,
    "hash": "4a42dfbddbcfd7f7",
    "rows": 1496
+  },
+  "mom_family_clean": {
+   "exists": true,
+   "bytes": 3577,
+   "hash": "4800b3751b931e83"
+  },
+  "htf_family_clean": {
+   "exists": true,
+   "bytes": 3599,
+   "hash": "fc9d4efeb5f4c5d0"
+  },
+  "swing_bt_clean": {
+   "exists": true,
+   "bytes": 2434,
+   "hash": "7dd742affd686463"
   }
  },
  "metrics": [
@@ -317,6 +332,96 @@
   },
   {
    "model": "swing",
+   "metric": "bt_v2_clean_n_trades",
+   "value": 4096,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "sweep_v2_clean/best_v2_clean_summary.json",
+   "caveat": "combo e0.7_c6_trail_arm2.5_gb25_sl3.0 selected on VAL split, frozen on TEST split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_clean_win_rate",
+   "value": 0.486816,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "sweep_v2_clean/best_v2_clean_summary.json",
+   "caveat": "combo e0.7_c6_trail_arm2.5_gb25_sl3.0 selected on VAL split, frozen on TEST split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_clean_sharpe",
+   "value": 1.909,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "sweep_v2_clean/best_v2_clean_summary.json",
+   "caveat": "combo e0.7_c6_trail_arm2.5_gb25_sl3.0 selected on VAL split, frozen on TEST split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_clean_profit_factor",
+   "value": 1.361,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "sweep_v2_clean/best_v2_clean_summary.json",
+   "caveat": "combo e0.7_c6_trail_arm2.5_gb25_sl3.0 selected on VAL split, frozen on TEST split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_clean_avg_pnl_pct",
+   "value": 0.004509,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "sweep_v2_clean/best_v2_clean_summary.json",
+   "caveat": "combo e0.7_c6_trail_arm2.5_gb25_sl3.0 selected on VAL split, frozen on TEST split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_clean_max_dd_pct",
+   "value": -74.48,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "sweep_v2_clean/best_v2_clean_summary.json",
+   "caveat": "combo e0.7_c6_trail_arm2.5_gb25_sl3.0 selected on VAL split, frozen on TEST split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_clean_long_wr",
+   "value": 0.500941,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "sweep_v2_clean/best_v2_clean_summary.json",
+   "caveat": "combo e0.7_c6_trail_arm2.5_gb25_sl3.0 selected on VAL split, frozen on TEST split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_clean_short_wr",
+   "value": 0.471574,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "sweep_v2_clean/best_v2_clean_summary.json",
+   "caveat": "combo e0.7_c6_trail_arm2.5_gb25_sl3.0 selected on VAL split, frozen on TEST split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_clean_long_win_rate",
+   "value": 0.500941,
+   "n": 2126,
+   "tag": "test(frozen)",
+   "source": "sweep_v2_clean/best_v2_clean_summary.json",
+   "caveat": "combo e0.7_c6_trail_arm2.5_gb25_sl3.0 selected on VAL split, frozen on TEST split"
+  },
+  {
+   "model": "swing",
+   "metric": "bt_v2_clean_short_win_rate",
+   "value": 0.471574,
+   "n": 1970,
+   "tag": "test(frozen)",
+   "source": "sweep_v2_clean/best_v2_clean_summary.json",
+   "caveat": "combo e0.7_c6_trail_arm2.5_gb25_sl3.0 selected on VAL split, frozen on TEST split"
+  },
+  {
+   "model": "swing",
    "metric": "paper_fresh_call_mean_option_ret_pct",
    "value": 36.188284,
    "n": 18,
@@ -514,6 +619,60 @@
    "caveat": "fixed-horizon fwd returns, overlapping windows"
   },
   {
+   "model": "momentum",
+   "metric": "clean_deployed_winner_trades",
+   "value": 3876,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (xgb_classifier) policy selected on VAL split (tp=2.0 sl=4.0 topk=5 hold=75), frozen on TEST split"
+  },
+  {
+   "model": "momentum",
+   "metric": "clean_deployed_winner_win_rate",
+   "value": 0.7474,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (xgb_classifier) policy selected on VAL split (tp=2.0 sl=4.0 topk=5 hold=75), frozen on TEST split"
+  },
+  {
+   "model": "momentum",
+   "metric": "clean_deployed_winner_total_return_pct",
+   "value": 92.517,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (xgb_classifier) policy selected on VAL split (tp=2.0 sl=4.0 topk=5 hold=75), frozen on TEST split"
+  },
+  {
+   "model": "momentum",
+   "metric": "clean_deployed_winner_max_dd_pct",
+   "value": -15.298,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (xgb_classifier) policy selected on VAL split (tp=2.0 sl=4.0 topk=5 hold=75), frozen on TEST split"
+  },
+  {
+   "model": "momentum",
+   "metric": "clean_deployed_winner_ret_over_dd",
+   "value": 6.048,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (xgb_classifier) policy selected on VAL split (tp=2.0 sl=4.0 topk=5 hold=75), frozen on TEST split"
+  },
+  {
+   "model": "momentum",
+   "metric": "clean_deployed_winner_profit_factor",
+   "value": 1.53,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (xgb_classifier) policy selected on VAL split (tp=2.0 sl=4.0 topk=5 hold=75), frozen on TEST split"
+  },
+  {
    "model": "htf_swing",
    "metric": "winner_test_ndcg_at_10",
    "value": 0.671921,
@@ -656,6 +815,60 @@
    "tag": "wf-oof",
    "source": "oof_preds.parquet (2022-11-22..2026-05-04)",
    "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "clean_deployed_winner_trades",
+   "value": 23173,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (lgbm_classifier) policy selected on VAL split (tp=5.0 sl=2.0 topk=20 hold=25), frozen on TEST split"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "clean_deployed_winner_win_rate",
+   "value": 0.3899,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (lgbm_classifier) policy selected on VAL split (tp=5.0 sl=2.0 topk=20 hold=25), frozen on TEST split"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "clean_deployed_winner_total_return_pct",
+   "value": 335.962,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (lgbm_classifier) policy selected on VAL split (tp=5.0 sl=2.0 topk=20 hold=25), frozen on TEST split"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "clean_deployed_winner_max_dd_pct",
+   "value": -18.781,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (lgbm_classifier) policy selected on VAL split (tp=5.0 sl=2.0 topk=20 hold=25), frozen on TEST split"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "clean_deployed_winner_ret_over_dd",
+   "value": 17.888,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (lgbm_classifier) policy selected on VAL split (tp=5.0 sl=2.0 topk=20 hold=25), frozen on TEST split"
+  },
+  {
+   "model": "htf_swing",
+   "metric": "clean_deployed_winner_profit_factor",
+   "value": 1.487,
+   "n": null,
+   "tag": "test(frozen)",
+   "source": "family_compare_clean/comparison_summary_clean.json",
+   "caveat": "deployed winner (lgbm_classifier) policy selected on VAL split (tp=5.0 sl=2.0 topk=20 hold=25), frozen on TEST split"
   },
   {
    "model": "meta_quality",
@@ -980,6 +1193,168 @@
    "tag": "wf-oof",
    "source": "oof_preds.parquet (2024-09-16..2026-05-14)",
    "caveat": "fixed-horizon fwd returns, overlapping windows"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "current_live_dropout_g0_mean",
+   "value": 0.005671,
+   "n": 3327,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "current_live_dropout_g0_median",
+   "value": 0.000684,
+   "n": 3327,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "current_live_dropout_g0_win",
+   "value": 0.51037,
+   "n": 3327,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "current_live_dropout_g0_ret_std",
+   "value": 0.082634,
+   "n": 3327,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "current_live_dropout_g0_avg_hold",
+   "value": 1.724076,
+   "n": 3327,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "current_live_dropout_g0_ret_per_bar",
+   "value": 0.002907,
+   "n": 3327,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "target20_full_exit_mean",
+   "value": 0.058652,
+   "n": 1259,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "target20_full_exit_median",
+   "value": 0.157119,
+   "n": 1259,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "target20_full_exit_win",
+   "value": 0.665608,
+   "n": 1259,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "target20_full_exit_ret_std",
+   "value": 0.334589,
+   "n": 1259,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "target20_full_exit_avg_hold",
+   "value": 42.728356,
+   "n": 1259,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "target20_full_exit_ret_per_bar",
+   "value": 0.009166,
+   "n": 1259,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "scaleout50_at20_horizon25_mean",
+   "value": 0.049586,
+   "n": 1430,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "scaleout50_at20_horizon25_median",
+   "value": 0.026357,
+   "n": 1430,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "scaleout50_at20_horizon25_win",
+   "value": 0.58951,
+   "n": 1430,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "scaleout50_at20_horizon25_ret_std",
+   "value": 0.189689,
+   "n": 1430,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "scaleout50_at20_horizon25_avg_hold",
+   "value": 25.0,
+   "n": 1430,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
+  },
+  {
+   "model": "meta_exit_policy",
+   "metric": "scaleout50_at20_horizon25_ret_per_bar",
+   "value": 0.001983,
+   "n": 1430,
+   "tag": "wf-oof",
+   "source": "OOF s_combo (models/{quality,upside}/oof_preds.parquet), holdout 2025-07-01+",
+   "caveat": "clean substitute for backtest_exits.py's deployed-booster scoring (audit \u00a74.3)"
   },
   {
    "model": "spy_baseline",
