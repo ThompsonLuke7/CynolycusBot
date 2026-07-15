@@ -49,6 +49,28 @@ DARK_THEME = PlotTheme(
     warning="#f97316",
 )
 
+LIGHT_THEME = PlotTheme(
+    name="cynolycus_paper_light",
+    figure_bg="#ffffff",
+    axes_bg="#ffffff",
+    text="#0b0b0b",
+    muted_text="#52514e",
+    grid="#e1e0d9",
+    spine="#c3c2b7",
+    wick="#898781",
+    bull="#008300",
+    bear="#d03b3b",
+    long="#2a78d6",
+    short="#e34948",
+    win="#008300",
+    loss="#d03b3b",
+    neutral="#898781",
+    blue="#2a78d6",
+    amber="#eda100",
+    purple="#4a3aa7",
+    warning="#eb6834",
+)
+
 DEFAULT_THEME = DARK_THEME
 
 

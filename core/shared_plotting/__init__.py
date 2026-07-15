@@ -13,7 +13,16 @@ from .candles import (
     plot_candles_from_frame,
 )
 from .figures import make_price_probability_figure, plot_direction_probabilities, save_figure
-from .theme import DARK_THEME, DEFAULT_THEME, PlotTheme, apply_mpl_defaults, get_theme, style_axis, style_figure
+from .theme import (
+    DARK_THEME,
+    DEFAULT_THEME,
+    LIGHT_THEME,
+    PlotTheme,
+    apply_mpl_defaults,
+    get_theme,
+    style_axis,
+    style_figure,
+)
 from .time_axis import (
     apply_time_ticks,
     compute_time_ticks,
@@ -28,6 +37,7 @@ __all__ = [
     "CandlePlot",
     "DARK_THEME",
     "DEFAULT_THEME",
+    "LIGHT_THEME",
     "PlotTheme",
     "apply_mpl_defaults",
     "apply_time_ticks",
