@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import json
 import math
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -23,7 +24,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
-from core.calendar import next_trading_day
+from core.calendar import is_market_open_now, next_trading_day
 from strategies.multi_ticker_swing.live.universe import TickerConfig
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,11 @@ _ORDER_VERIFY_POLL_SECS = 0.5
 _OPTION_TICK = 0.01
 _PENDING_CLOSE_REFRESH_SECS = 30.0
 _PENDING_CLOSE_CHASE_SECS = 60.0
+# When the limit ladder can't get a verified fill, fall back to a MARKET sell so
+# the exit actually happens instead of lingering as an unfilled limit. Gated to
+# RTH (options market orders need a live market) and skipped for worthless
+# one-cent abandons. Env override: SWING_CLOSE_MARKET_FALLBACK=0 to disable.
+_CLOSE_MARKET_FALLBACK = os.getenv("SWING_CLOSE_MARKET_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
 _LIQUIDATION_CLOSE_REASONS = {
     "sl",
     "no_progress",
@@ -50,6 +56,13 @@ _LIQUIDATION_CLOSE_REASONS = {
 }
 _ET = ZoneInfo("America/New_York")
 _DEFER_TRAIL_AFTER_HOUR = 15
+
+
+def _market_is_open(now: datetime | None = None) -> bool:
+    """True during US equity/options RTH. Delegates to the shared trading-calendar
+    helper (single source of truth — also used by options_exec.equity_order_tif)
+    so both correctly treat market holidays as closed, not just weekends."""
+    return is_market_open_now(now)
 _DEFER_TRAIL_AFTER_MINUTE = 55
 _DEFER_RECOVERY_BARS = 3
 _DEFER_RECOVERY_PCT = 0.0025
@@ -1567,13 +1580,144 @@ class SwingPositionManager:
             if can_retry:
                 self._cancel_order_if_needed(verify)
                 continue
+            # Limit ladder is out of retries for this attempt — stop chasing and
+            # let the market fallback below guarantee the exit.
+            break
+
+        # Limit ladder exhausted without a verified fill. Fall back to a MARKET
+        # sell (RTH only) so a genuine exit actually closes instead of lingering
+        # as an unfilled limit. Skip worthless one-cent abandons.
+        if (
+            _CLOSE_MARKET_FALLBACK
+            and not self._dry_run
+            and last_result is not None
+            and not last_result.get("abandoned_worthless")
+            and not last_result.get("verified")
+            and _market_is_open()
+        ):
+            market_result = self._submit_market_close(
+                pos,
+                symbol=symbol,
+                prior_verify=last_result.get("verification") or {},
+                quote_meta=quote_meta,
+                reason=reason,
+            )
+            if market_result is not None:
+                return market_result
+
+        if last_result is not None:
             # Keep the last live close order working. The manager tracks it in
             # _pending_close_orders and reconciles it before any later retry.
             return last_result
-
-        if last_result is not None:
-            return last_result
         raise RuntimeError(f"close_order_submit_failed symbol={symbol}")
+
+    def _submit_market_close(
+        self,
+        pos: SwingPosition,
+        *,
+        symbol: str,
+        prior_verify: dict[str, Any],
+        quote_meta: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """Guarantee an exit by market-selling the currently-held qty.
+
+        Cancels any still-working limit order first (avoid double-sell) and waits
+        for that cancel to resolve to a terminal state before re-reading the
+        position: cancel_order is async, so reading the position immediately
+        after firing it can race a limit that fills anyway, causing the market
+        sell below to close more than is actually held. Once the cancel result
+        is known, re-reads the live position, then sells the exact remaining
+        long qty at market. Returns a close-result dict, or None if there is
+        nothing to do / the market submit failed.
+        """
+        # Cancel the still-working limit and block until it resolves (filled or
+        # canceled) so the position read below reflects the true outcome.
+        cancel_result = self._cancel_order_if_needed(prior_verify)
+        if cancel_result is not None and cancel_result.get("status") == "filled":
+            logger.info(
+                "[%s] market close skipped — canceled limit filled first symbol=%s order_id=%s",
+                pos.ticker, symbol, cancel_result.get("order_id"),
+            )
+            return {
+                "response": cancel_result.get("order") or {},
+                "verification": {
+                    "verified": True,
+                    "status": "filled",
+                    "order_id": str(cancel_result.get("order_id", "")),
+                    "via": "cancel_race_fill",
+                    "order": cancel_result.get("order") or {},
+                },
+                "limit_price": None,
+                "close_quote": quote_meta,
+                "verified": True,
+            }
+        try:
+            held_qty = self._open_long_qty(symbol=symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] market close: position re-check failed symbol=%s: %s", pos.ticker, symbol, exc)
+            held_qty = int(pos.qty)
+        if held_qty <= 0:
+            # The limit already closed the position (verify just timed out).
+            logger.info("[%s] market close skipped — position already flat symbol=%s", pos.ticker, symbol)
+            return {
+                "response": prior_verify.get("order") or {},
+                "verification": {
+                    "verified": True,
+                    "status": "closed",
+                    "order_id": str(prior_verify.get("order_id", "")),
+                    "via": "positions_reconcile_pre_market",
+                },
+                "limit_price": None,
+                "close_quote": quote_meta,
+                "verified": True,
+            }
+        try:
+            resp = self._client.submit_option_order(
+                symbol=symbol,
+                qty=held_qty,
+                side="sell",
+                order_type="market",
+                time_in_force="day",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[%s] market close fallback FAILED symbol=%s error=%s", pos.ticker, symbol, exc)
+            self._emit("close_market_fallback_failed", {
+                "ticker": pos.ticker, "symbol": symbol, "qty": held_qty,
+                "reason": reason, "error": str(exc),
+            })
+            return None
+        verify = self._verify_close_order(submitted_resp=resp if isinstance(resp, dict) else {}, symbol=symbol)
+        logger.info(
+            "[%s] market close fallback submitted symbol=%s order_id=%s status=%s verified=%s qty=%d reason=%s",
+            pos.ticker, symbol,
+            str(resp.get("id", "n/a")) if isinstance(resp, dict) else "n/a",
+            verify.get("status"), verify.get("verified"), held_qty, reason,
+        )
+        self._emit("close_market_fallback", {
+            "ticker": pos.ticker, "symbol": symbol, "qty": held_qty, "reason": reason,
+            "status": verify.get("status"), "verified": bool(verify.get("verified")),
+        })
+        return {
+            "response": resp,
+            "verification": verify,
+            "limit_price": None,
+            "close_quote": quote_meta,
+            "verified": bool(verify.get("verified")),
+            "via_market_fallback": True,
+        }
+
+    def _open_long_qty(self, *, symbol: str) -> int:
+        """Current long contract qty held for `symbol` (0 if flat/short)."""
+        target = str(symbol).strip().upper()
+        resp = self._client.get_positions()
+        for raw in _extract_positions(resp):
+            if str(raw.get("symbol", "")).strip().upper() != target:
+                continue
+            if str(raw.get("side", "")).strip().lower() == "short":
+                return 0
+            return int(abs(_as_float(raw.get("qty")) or 0.0))
+        return 0
 
     def _get_contract_price(self, *, symbol: str, mode: str) -> float:
         try:
@@ -1764,17 +1908,44 @@ class SwingPositionManager:
             "order": last,
         }
 
-    def _cancel_order_if_needed(self, verify_result: dict[str, Any]) -> None:
+    def _cancel_order_if_needed(self, verify_result: dict[str, Any]) -> dict[str, Any] | None:
+        """Cancel a still-working close order and poll it to a terminal state
+        (filled/canceled/rejected/...) before returning.
+
+        cancel_order only requests cancellation — it does not guarantee the
+        order is dead by the time it returns. Callers that immediately re-read
+        the live position after firing a fire-and-forget cancel can race a
+        limit that fills anyway. Polling here (bounded by the same
+        verify timeout/poll cadence used elsewhere in this class) closes that
+        window. Returns {"order_id", "status", "order"}, or None if there was
+        nothing to cancel.
+        """
         if not bool(verify_result.get("cancel_required")):
-            return
+            return None
         order_id = str(verify_result.get("order_id", "")).strip()
         if not order_id:
-            return
+            return None
         try:
             self._client.cancel_order(order_id)
-            logger.info("close order canceled before retry order_id=%s", order_id)
         except Exception as exc:
             logger.warning("close order cancel warning order_id=%s: %s", order_id, exc)
+
+        last: dict[str, Any] = {}
+        status = ""
+        deadline = time.monotonic() + _ORDER_VERIFY_TIMEOUT_SECS
+        while time.monotonic() < deadline:
+            try:
+                current = self._client.get_order(order_id)
+                if isinstance(current, dict):
+                    last = current
+                    status = _status_key(current.get("status"))
+            except Exception as exc:
+                logger.warning("cancel verify poll warning order_id=%s: %s", order_id, exc)
+            if _order_is_success(status) or _order_is_terminal_fail(status):
+                break
+            time.sleep(_ORDER_VERIFY_POLL_SECS)
+        logger.info("close order cancel resolved order_id=%s status=%s", order_id, status or "unknown")
+        return {"order_id": order_id, "status": status or "unknown", "order": last}
 
     def _has_open_long_position(self, *, symbol: str) -> bool:
         target = str(symbol).strip().upper()
