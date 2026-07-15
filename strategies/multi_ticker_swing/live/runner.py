@@ -34,6 +34,11 @@ import pandas as pd
 from core.API.Alpaca_API.market_data.live_stream import AlpacaBarStreamer
 from core.API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+from strategies.dealer_positioning.gate import (
+    SCOPE_NEAREST,
+    evaluate_dealer_gate,
+    gate_enabled as dealer_gate_enabled,
+)
 from strategies.multi_ticker_swing.config.pipeline_config import CONTEXT_TICKERS, MODEL_PATH
 from strategies.multi_ticker_swing.live.feature_builder import (
     LiveSwingFeatureBuilder,
@@ -45,6 +50,7 @@ from strategies.multi_ticker_swing.live.real_account_policy import (
     config_from_env as real_account_policy_from_env,
 )
 from strategies.multi_ticker_swing.live.risk_profile_policy import RiskProfilePolicy, config_from_env as risk_profile_policy_from_env
+from strategies.multi_ticker_swing.live.signal_policy import SignalPolicyDecision, SignalPolicyLayer, config_from_env as signal_policy_from_env
 from strategies.multi_ticker_swing.live.scanner import Signal, SwingScanner  # noqa: F401 (Signal used)
 from strategies.multi_ticker_swing.live.ranker_scanner import RankerSwingScanner
 from strategies.multi_ticker_swing.live.catalyst_signal import LiveCatalystSignal
@@ -502,6 +508,79 @@ def _select_contract(
 
 
 # ---------------------------------------------------------------------------
+# Cross-sectional scan batching
+# ---------------------------------------------------------------------------
+
+class _ScanBatcher:
+    """Coalesce one 30m close wave and scan it off the bar-consumer thread."""
+
+    def __init__(
+        self,
+        callback: Callable[[list[str]], None],
+        *,
+        debounce_seconds: float = 0.35,
+        max_wait_seconds: float = 3.0,
+    ) -> None:
+        self._callback = callback
+        self._debounce = max(0.01, float(debounce_seconds))
+        self._max_wait = max(self._debounce, float(max_wait_seconds))
+        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="swing-scan-batcher")
+        self._thread.start()
+
+    def submit(self, ticker: str) -> None:
+        if ticker and not self._stop.is_set():
+            self._queue.put_nowait(str(ticker).upper())
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            self._queue.put_nowait(None)
+        except Exception:
+            pass
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                first = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if first is None:
+                break
+            batch = {first}
+            started = time.monotonic()
+            deadline = started + self._debounce
+            while not self._stop.is_set():
+                remaining = min(deadline, started + self._max_wait) - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    item = self._queue.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if item is None:
+                    self._stop.set()
+                    break
+                batch.add(item)
+                deadline = time.monotonic() + self._debounce
+            if batch and not self._stop.is_set():
+                try:
+                    self._callback(sorted(batch))
+                except Exception as exc:
+                    logger.error("Batched swing scan failed: %s", exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Main runner
 # ---------------------------------------------------------------------------
 
@@ -548,6 +627,7 @@ class SwingLiveRunner:
             )
         )
         self._risk_policy = RiskProfilePolicy(risk_profile_policy_from_env())
+        self._signal_policy = SignalPolicyLayer(signal_policy_from_env())
         self._pos_mgr = SwingPositionManager(
             self._client,
             dry_run=dry_run,
@@ -567,6 +647,7 @@ class SwingLiveRunner:
 
         # Confirmation watchers: ticker → _ConfirmState
         self._confirming: dict[str, _ConfirmState] = {}
+        self._signal_policy_decisions: dict[str, SignalPolicyDecision] = {}
 
         # If an external queue is provided (e.g. from SharedBarStream) use it directly
         # and skip creating / managing an AlpacaBarStreamer in start().
@@ -595,6 +676,7 @@ class SwingLiveRunner:
         self._last_broker_reconcile_ts: str | None = None
         self._last_broker_reconcile_ok: bool | None = None
         self._last_broker_reconcile_error: str | None = None
+        self._scan_batcher = _ScanBatcher(self._scan_tickers)
 
     # ------------------------------------------------------------------
     # Event emission
@@ -679,6 +761,7 @@ class SwingLiveRunner:
             "last_broker_reconcile_ok": self._last_broker_reconcile_ok,
             "last_broker_reconcile_error": self._last_broker_reconcile_error,
             "real_account_policy": self._real_policy.snapshot(),
+            "signal_policy": self._signal_policy.snapshot(),
         }
 
     # ------------------------------------------------------------------
@@ -751,6 +834,7 @@ class SwingLiveRunner:
             **counts,
         })
         self._emit("risk_profile_policy_config", self._risk_policy.snapshot())
+        self._emit("signal_policy_config", self._signal_policy.snapshot())
 
         if self._stop_event.is_set():
             self._emit("stopped", {"reason": "stop requested during warmup"})
@@ -758,6 +842,7 @@ class SwingLiveRunner:
 
         self._sync_positions_from_broker()
         self._run_startup_scan_from_warmup()
+        self._scan_batcher.start()
 
         if self._external_queue:
             # Bar queue is owned by the caller (e.g. SharedBarStream in combined_server).
@@ -767,6 +852,7 @@ class SwingLiveRunner:
             try:
                 self._process_loop()
             finally:
+                self._scan_batcher.stop()
                 self._emit("stopped", {"reason": "loop_exit"})
         else:
             from alpaca.data.enums import DataFeed
@@ -783,6 +869,7 @@ class SwingLiveRunner:
             try:
                 self._process_loop()
             finally:
+                self._scan_batcher.stop()
                 try:
                     streamer.stop()
                 except Exception as exc:
@@ -797,6 +884,8 @@ class SwingLiveRunner:
     def stop(self) -> None:
         """Signal the runner to stop. Safe to call from any thread."""
         self._stop_event.set()
+        if getattr(self, "_scan_batcher", None) is not None:
+            self._scan_batcher.stop()
         # Best-effort wake the queue.get
         try:
             self._bar_queue.put_nowait({"_sentinel": True})
@@ -895,6 +984,7 @@ class SwingLiveRunner:
     def _process_loop(self) -> None:
         _last_bar_wall: float = time.monotonic()
         _stale_warned: bool = False
+        _rth_anchor_set: bool = False
 
         while not self._stop_event.is_set():
             try:
@@ -904,6 +994,15 @@ class SwingLiveRunner:
                 now_et = datetime.now(_ET)
                 self._maybe_reconcile_broker(reason="idle")
                 if _RTH_START <= now_et.time() < _RTH_END:
+                    if not _rth_anchor_set:
+                        # Anchor the stale timer to the RTH open so the expected
+                        # overnight/pre-open gap (no bars until 09:30) doesn't fire
+                        # a false "stream may be stale" warning. Re-armed each day
+                        # once the clock leaves RTH (else branch below).
+                        _rth_anchor_set = True
+                        _last_bar_wall = time.monotonic()
+                        _stale_warned = False
+                        continue
                     elapsed = time.monotonic() - _last_bar_wall
                     if elapsed >= _STREAM_STALE_SECS and not _stale_warned:
                         _stale_warned = True
@@ -916,6 +1015,8 @@ class SwingLiveRunner:
                             "elapsed_secs": round(elapsed),
                             "hint": "No bars received during market hours. Stream may have dropped. Restart to reconnect.",
                         })
+                else:
+                    _rth_anchor_set = False
                 continue
             if bar.get("_sentinel"):
                 err = bar.get("_error")
@@ -1219,6 +1320,25 @@ class SwingLiveRunner:
         spy_p_long, spy_p_short = None, None
         filtered_signals = []
         for sig in signals:
+            signal_decision = self._signal_policy.evaluate_signal(sig)
+            self._signal_policy_decisions[sig.ticker] = signal_decision
+            self._emit("signal_policy_decision", {
+                "ticker": sig.ticker,
+                "direction": int(sig.direction),
+                "p_dir": float(sig.p_dir),
+                "ev_score": float(sig.ev_score),
+                "decision": signal_decision.to_dict(),
+                "enforced": bool(self._signal_policy.config.enforce),
+            })
+            if self._signal_policy.config.enforce and signal_decision.action == "BLOCK":
+                logger.info("[%s] VETOED by signal policy: %s", sig.ticker, signal_decision.reason)
+                self._emit("entry_skipped", {
+                    "ticker": sig.ticker,
+                    "direction": int(sig.direction),
+                    "reason": signal_decision.reason,
+                    "signal_policy": signal_decision.to_dict(),
+                })
+                continue
             if _challenger_policy_enabled() and sig.direction < 0 and not _CHALLENGER_ALLOW_SHORT_ENTRIES:
                 logger.info("[%s] VETOED by live option policy (short/put entries disabled)", sig.ticker)
                 self._emit("entry_skipped", {
@@ -1295,6 +1415,9 @@ class SwingLiveRunner:
                 "ref_low": float(sig.ref_low),
                 "atr": float(sig.atr),
                 "risk_profile_policy": self._risk_policy.evaluate(sig).details,
+                "signal_policy": self._signal_policy_decisions.get(sig.ticker).to_dict()
+                if self._signal_policy_decisions.get(sig.ticker) is not None
+                else None,
             })
 
     # ------------------------------------------------------------------
@@ -1355,20 +1478,27 @@ class SwingLiveRunner:
         if not should_scan_after_30m_close(ts30):
             return
 
-        # Run scanner once per 30m close for this ticker only.
-        #
+        # Queue the ticker for one vectorized cross-sectional scan after this
+        # 30m wave settles.  Previously the bar thread ran ~925 separate model
+        # scans here, blocking one-minute bar consumption for 6-8 minutes at
+        # every boundary and eventually dropping stale bars.
+        self._scan_batcher.submit(ticker)
+
+    def _scan_tickers(self, tickers: list[str]) -> None:
+        """Run one cross-sectional scan without blocking the bar-consumer loop."""
+        if self._stop_event.is_set() or not tickers:
+            return
         # Important: never call the dashboard event sink while holding
         # self._lock. The sink refreshes runner snapshots, which also acquire
-        # this lock. Emitting from inside the lock deadlocks the live loop on
-        # the first scan event.
+        # this lock.
         with self._lock:
             busy = set(self._confirming.keys()) | self._pos_mgr.open_tickers
-
-        signals = self._scanner.scan([ticker], skip_tickers=busy)
-        self._scan_count_total += 1
+        active = sorted(set(tickers))
+        signals = self._scanner.scan(active, skip_tickers=busy)
+        self._scan_count_total += len(active)
         self._emit("scan", {
-            "ticker": ticker,
-            "ts": _utc_iso(bar30.get("timestamp")) if isinstance(bar30.get("timestamp"), datetime) else None,
+            "tickers": active,
+            "ticker_count": len(active),
             "signals": [
                 {
                     "ticker": s.ticker,
@@ -1472,6 +1602,26 @@ class SwingLiveRunner:
             })
             return
 
+        # Dealer-positioning structural gate. Nearest-expiry swing -> daily_week
+        # scope, proximity recomputed against the LIVE entry price (absolute
+        # strikes). Fails open on missing/stale data. The swing has no share
+        # lifecycle, so an enforced veto SKIPS the entry (vs the 4H modules,
+        # which fall back to shares). Observe-only unless DEALER_GATE_ENABLED.
+        dealer_verdict = evaluate_dealer_gate(
+            ticker, int(sig.direction), entry_price, SCOPE_NEAREST
+        )
+        if dealer_verdict.vetoed and dealer_gate_enabled():
+            logger.info("[%s] entry skipped by dealer gate: %s", ticker, dealer_verdict.reason)
+            self._emit("entry_skipped", {
+                "ticker": ticker,
+                "direction": int(sig.direction),
+                "reason": f"dealer_veto:{dealer_verdict.reason}",
+                "entry_price": entry_price,
+                "option_symbol": option_symbol,
+                "dealer_gate": dealer_verdict.to_dict(),
+            })
+            return
+
         qty = DEFAULT_QTY
         order_resp: Any = None
         order_error: str | None = None
@@ -1488,7 +1638,37 @@ class SwingLiveRunner:
             "entry_quote": quote_meta,
             "entry_limit_prices": limit_prices,
             "risk_profile_policy": self._risk_policy.evaluate(sig).details,
+            "dealer_gate": dealer_verdict.to_dict(),
         }
+        signal_policy_decision = self._signal_policy_decisions.get(ticker) or self._signal_policy.evaluate_signal(sig)
+        entry_policy_decision = self._signal_policy.with_entry_context(
+            signal_policy_decision,
+            signal=sig,
+            option_meta=option_selection_meta or {},
+            quote_meta=quote_meta or {},
+        )
+        self._signal_policy_decisions[ticker] = entry_policy_decision
+        option_entry_meta["signal_policy"] = entry_policy_decision.to_dict()
+        self._emit("signal_policy_entry_decision", {
+            "ticker": ticker,
+            "direction": int(sig.direction),
+            "option_symbol": option_symbol,
+            "decision": entry_policy_decision.to_dict(),
+            "enforced": bool(self._signal_policy.config.enforce),
+            "apply_sizing": bool(self._signal_policy.config.apply_sizing),
+        })
+        if self._signal_policy.config.enforce and entry_policy_decision.action == "BLOCK":
+            logger.info("[%s] entry skipped by signal policy: %s", ticker, entry_policy_decision.reason)
+            self._emit("entry_skipped", {
+                "ticker": ticker,
+                "direction": int(sig.direction),
+                "reason": entry_policy_decision.reason,
+                "entry_price": entry_price,
+                "option_symbol": option_symbol,
+                "option_entry_meta": option_entry_meta,
+                "signal_policy": entry_policy_decision.to_dict(),
+            })
+            return
         if not limit_prices:
             logger.warning("[%s] no quote for buy limit price; skipping entry symbol=%s", ticker, option_symbol)
             self._emit("entry_skipped", {
@@ -1570,6 +1750,20 @@ class SwingLiveRunner:
             return
         if self._real_policy.enabled:
             qty = int(real_decision.qty)
+        elif self._signal_policy.config.apply_sizing:
+            qty = int(entry_policy_decision.recommended_qty)
+            if qty < 1:
+                logger.info("[%s] entry skipped by signal policy sizing qty=0", ticker)
+                self._emit("entry_skipped", {
+                    "ticker": ticker,
+                    "direction": int(sig.direction),
+                    "reason": "signal_policy_size_zero",
+                    "entry_price": entry_price,
+                    "option_symbol": option_symbol,
+                    "option_entry_meta": option_entry_meta,
+                    "signal_policy": entry_policy_decision.to_dict(),
+                })
+                return
         if not self._dry_run:
             for attempt, limit_price in enumerate(limit_prices, start=1):
                 try:
