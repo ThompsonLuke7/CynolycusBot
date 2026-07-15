@@ -301,3 +301,6 @@ themes/dynamic_theme/outputs/
 
 # Plots/charts are all generated research output (none are UI assets)
 *.png
+# Exception: capstone paper figures are a committed deliverable (regenerate via
+# scripts/capstone/make_figures.py; see research/capstone/figures/README.md)
+!research/capstone/figures/*.png
