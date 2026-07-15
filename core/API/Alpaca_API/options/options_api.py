@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -102,11 +103,49 @@ class AlpacaOptionsClient:
             headers["Content-Type"] = "application/json"
 
         req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
-        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-            raw = resp.read().decode("utf-8")
-            if not raw:
-                return None
-            return json.loads(raw)
+        # Retry transient rate-limit (429) / server (5xx) errors with backoff.
+        # These were causing ~100 hard skips/day (no_quote, delta->ATM fallback).
+        # On persistent failure we re-raise so callers keep their existing
+        # skip-and-move-on behavior.
+        # POST is not idempotent here (no client_order_id dedupe on
+        # /v2/orders), so a 5xx — which may mean the order was actually
+        # accepted and only the response delivery failed — must NOT be
+        # retried or it can double-submit a live order. 429 means the
+        # request was rejected before any processing, so it is always safe
+        # to retry regardless of method.
+        is_post = method.upper() == "POST"
+        backoffs = (0.5, 1.0, 2.0)
+        for attempt in range(len(backoffs) + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                    raw = resp.read().decode("utf-8")
+                    if not raw:
+                        return None
+                    return json.loads(raw)
+            except urllib.error.HTTPError as exc:
+                transient = exc.code == 429 or (500 <= exc.code < 600 and not is_post)
+                if not transient or attempt >= len(backoffs):
+                    # Surface Alpaca's actual rejection reason (the body) — otherwise
+                    # a 403/422 stringifies to a bare "Forbidden"/"Unprocessable
+                    # Entity" and we can't tell buying-power vs after-hours-OPG vs
+                    # no-position. The body is only readable once, so fold it into
+                    # the re-raised error's message while preserving .code.
+                    body = ""
+                    try:
+                        body = (exc.read() or b"").decode("utf-8", "replace")[:400].strip()
+                    except Exception:
+                        body = ""
+                    if body:
+                        raise urllib.error.HTTPError(
+                            exc.url, exc.code, f"{exc.reason}: {body}", exc.headers, None
+                        ) from exc
+                    raise
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                try:
+                    delay = float(retry_after) if retry_after else backoffs[attempt]
+                except (TypeError, ValueError):
+                    delay = backoffs[attempt]
+                time.sleep(min(delay, 5.0))
 
     def get_option_contracts(self, **params: Any) -> Any:
         """

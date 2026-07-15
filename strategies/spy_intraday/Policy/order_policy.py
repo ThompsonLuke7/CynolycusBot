@@ -11,6 +11,7 @@ import re
 import time as time_mod
 from zoneinfo import ZoneInfo
 
+from core.live_signal_audit import build_option_order_audit
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 
 
@@ -4201,6 +4202,7 @@ class OptionOrderPolicy:
           hold | enter | rebalance | flip | flat | error
         """
         try:
+            signal_audit = closed_bar.get("signal_audit") if isinstance(closed_bar, dict) else None
             local_ts = self._to_local_ts(closed_bar.get("timestamp"))
             self.reconcile_with_broker(logger=logger, local_ts=local_ts, force=False)
             if self.has_pending_broker_reconcile():
@@ -4260,6 +4262,7 @@ class OptionOrderPolicy:
                     )
                     if isinstance(result, dict):
                         result.setdefault("mode", "independent_meta")
+                        result.setdefault("signal_audit", signal_audit)
                         if str(result.get("event", "")).strip().lower() in {"hold", "no_change"}:
                             result["event"] = "intent_update"
                     return result
@@ -4275,10 +4278,12 @@ class OptionOrderPolicy:
                     )
                     if isinstance(result, dict):
                         result.setdefault("mode", "independent_meta")
+                        result.setdefault("signal_audit", signal_audit)
                     return result
                 return {
                     "event": "intent_update",
                     "mode": "independent_meta",
+                    "signal_audit": signal_audit,
                     "close": close,
                     "atr": atr if math.isfinite(atr) else None,
             "long_contracts": int(self._long_contracts),
@@ -4445,6 +4450,7 @@ class OptionOrderPolicy:
             if step_target == current_signed:
                 return {
                     "event": "hold",
+                    "signal_audit": signal_audit,
                     "pos": current_pos,
                     "signed_contracts": current_signed,
                     "target_signed_contracts": target_signed,
@@ -4502,6 +4508,15 @@ class OptionOrderPolicy:
                             "type": "close",
                             "symbol": self._open_symbol,
                             "qty": close_qty,
+                            "signal_audit": signal_audit,
+                            "order_audit": build_option_order_audit(
+                                signal_audit=signal_audit,
+                                option_symbol=self._open_symbol,
+                                route="spy_day_trader_option",
+                                side="sell",
+                                qty=close_qty,
+                                underlying_price=close,
+                            ),
                             "response": close_resp,
                         }
                     )
@@ -4552,6 +4567,26 @@ class OptionOrderPolicy:
                     return {"event": "error", "reason": "missing_open_symbol_for_open"}
 
                 if open_qty > 0:
+                    try:
+                        dte = (
+                            max(0, int((expiration - local_ts.date()).days))
+                            if isinstance(expiration, date)
+                            else None
+                        )
+                    except Exception:
+                        dte = None
+                    order_audit = build_option_order_audit(
+                        signal_audit=signal_audit,
+                        option_symbol=open_symbol,
+                        route="spy_day_trader_option",
+                        side="buy",
+                        qty=open_qty,
+                        underlying_price=close,
+                        strike=picked_strike,
+                        premium=contract_price if math.isfinite(contract_price) else None,
+                        expiration=expiration,
+                        dte=dte,
+                    )
                     open_resp = self._submit_order(
                         symbol=open_symbol,
                         side="buy",
@@ -4564,6 +4599,8 @@ class OptionOrderPolicy:
                             "type": "open",
                             "symbol": open_symbol,
                             "qty": open_qty,
+                            "signal_audit": signal_audit,
+                            "order_audit": order_audit,
                             "response": open_resp,
                         }
                     )
@@ -4599,6 +4636,7 @@ class OptionOrderPolicy:
 
             return {
                 "event": event,
+                "signal_audit": signal_audit,
                 "pos": self._pos,
                 "signed_contracts": self._signed_contracts,
                 "prev_signed_contracts": current_signed,

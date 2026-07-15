@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from alpaca.data.enums import DataFeed
 
+from core.live_signal_audit import append_jsonl, build_signal_audit
 from ..market_data.bar_aggregator import OhlcvAggregator
 from ..market_data.bar_buffer import BarRingBuffer
 from ..market_data.fetch_intraday import fetch_intraday
@@ -34,6 +35,25 @@ from strategies.spy_intraday.Policy.order_policy import (
 from strategies.spy_intraday.Policy.regime_probability_filter import RegimeProbabilityCalibrator
 
 META_CONTEXT_SYMBOLS: tuple[str, ...] = ("QQQ", "IWM", "TLT", "UUP")
+
+
+def _spy_signal_score(probs: dict, raw_pos: int) -> float | None:
+    keys = (
+        ("p_enter_long", "p_long", "p_up") if raw_pos > 0
+        else ("p_enter_short", "p_short", "p_down") if raw_pos < 0
+        else ("p_enter_long", "p_enter_short", "p_long", "p_short", "p_up", "p_down")
+    )
+    vals: list[float] = []
+    for key in keys:
+        try:
+            val = float(probs.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(val):
+            vals.append(val)
+    if not vals:
+        return None
+    return max(vals) if raw_pos == 0 else vals[0]
 
 
 def _load_swing_setup_probs_frame(
@@ -695,6 +715,7 @@ def _make_15m_handler(
     print_tz: str,
     execution_latches: dict[str, DirectionExecutionLatch],
     order_policies: dict[str, OptionOrderPolicy] | None = None,
+    signal_audit_log: Path | None = None,
 ) -> Callable[[str, dict, BarRingBuffer], None]:
     def _handler(symbol: str, bar15: dict, buffer: BarRingBuffer) -> None:
         if print_15m:
@@ -727,6 +748,37 @@ def _make_15m_handler(
                 f"{symbol} inference raw={raw_action:+.4f} raw_pos={raw_pos:+d} "
                 f"exec={exec_pos:+d} gate={gate_status}"
             )
+            signal_audit = build_signal_audit(
+                module="spy_day_trader",
+                ticker=symbol,
+                score=_spy_signal_score(probs, raw_pos),
+                side="long" if raw_pos > 0 else "short" if raw_pos < 0 else "flat",
+                signal_ts=bar15.get("timestamp"),
+                extra={
+                    "raw_action": raw_action,
+                    "raw_pos": raw_pos,
+                    "exec_pos": exec_pos,
+                    "gate_status": gate_status,
+                    "interval_minutes": int(interval_minutes),
+                    "probs": probs,
+                    "thresholds": thresholds,
+                    "close": bar15.get("close"),
+                },
+            )
+            print(
+                f"{symbol} signal_audit bucket={signal_audit.get('score_bucket')} "
+                f"side={signal_audit.get('side')} exec={exec_pos:+d}"
+            )
+            append_jsonl(
+                signal_audit_log,
+                {
+                    "event": "signal_decision",
+                    "module": "spy_day_trader",
+                    "symbol": symbol,
+                    "bar": bar15,
+                    "signal_audit": signal_audit,
+                },
+            )
             if order_policies is not None and symbol in order_policies:
                 policy_bar = dict(bar15)
                 policy_bar.update({k: v for k, v in probs.items() if v is not None})
@@ -738,11 +790,23 @@ def _make_15m_handler(
                         "thr_exit_short": thresholds.get("exit_short"),
                     }
                 )
+                policy_bar["signal_audit"] = signal_audit
                 result = order_policies[symbol].on_decision(
                     action=float(raw_action if _use_meta_direct_execution(inference) else exec_pos),
                     closed_bar=policy_bar,
                     update_bar_state=False,
                 )
+                if isinstance(result, dict):
+                    result.setdefault("signal_audit", signal_audit)
+                    append_jsonl(
+                        signal_audit_log,
+                        {
+                            "event": "order_policy_decision",
+                            "module": "spy_day_trader",
+                            "symbol": symbol,
+                            "result": result,
+                        },
+                    )
                 event = str(result.get("event", "unknown"))
                 if event not in {"hold", "no_change", "intent_update"}:
                     print(f"{symbol} order_policy event={event} details={result}")
@@ -2159,6 +2223,11 @@ def _parse_args() -> argparse.Namespace:
         help="Do not submit to Alpaca; print intended order payloads only.",
     )
     parser.add_argument(
+        "--signal-audit-log",
+        default="Data/inference/spy/live_signal_audit.jsonl",
+        help="Append-only JSONL path for SPY signal/order audit events; set empty to disable.",
+    )
+    parser.add_argument(
         "--option-no-close-on-flat",
         action="store_true",
         help="Do not auto close open option when agent action goes flat.",
@@ -2447,6 +2516,7 @@ def main() -> None:
         print_tz=args.tz or "America/New_York",
         execution_latches=execution_latches,
         order_policies=order_policies,
+        signal_audit_log=Path(args.signal_audit_log) if str(args.signal_audit_log or "").strip() else None,
     )
 
     processor = LiveBarProcessor(
