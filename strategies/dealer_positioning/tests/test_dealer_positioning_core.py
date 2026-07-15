@@ -13,24 +13,24 @@ def _chain_fixture() -> dict:
         "underlyingPrice": 500.0,
         "callExpDateMap": {
             "2026-06-12:0": {
-                "505.0": [{"putCall": "CALL", "strikePrice": 505, "openInterest": 1000, "totalVolume": 50, "gamma": 0.08, "delta": 0.40, "volatility": 18}],
-                "510.0": [{"putCall": "CALL", "strikePrice": 510, "openInterest": 5000, "totalVolume": 200, "gamma": 0.10, "delta": 0.30, "volatility": 19}],
-                "515.0": [{"putCall": "CALL", "strikePrice": 515, "openInterest": 1200, "totalVolume": 30, "gamma": 0.03, "delta": 0.20, "volatility": 20}],
+                "505.0": [{"putCall": "CALL", "strikePrice": 505, "openInterest": 1000, "totalVolume": 50, "gamma": 0.08, "delta": 0.40, "vega": 0.11, "volatility": 18}],
+                "510.0": [{"putCall": "CALL", "strikePrice": 510, "openInterest": 5000, "totalVolume": 200, "gamma": 0.10, "delta": 0.30, "vega": 0.24, "volatility": 19}],
+                "515.0": [{"putCall": "CALL", "strikePrice": 515, "openInterest": 1200, "totalVolume": 30, "gamma": 0.03, "delta": 0.20, "vega": 0.13, "volatility": 20}],
             },
             "2026-06-13:1": {
-                "506.0": [{"putCall": "CALL", "strikePrice": 506, "openInterest": 800, "totalVolume": 60, "gamma": 0.07, "delta": 0.38, "volatility": 17}],
-                "511.0": [{"putCall": "CALL", "strikePrice": 511, "openInterest": 4000, "totalVolume": 180, "gamma": 0.09, "delta": 0.28, "volatility": 18}],
+                "506.0": [{"putCall": "CALL", "strikePrice": 506, "openInterest": 800, "totalVolume": 60, "gamma": 0.07, "delta": 0.38, "vega": 0.10, "volatility": 17}],
+                "511.0": [{"putCall": "CALL", "strikePrice": 511, "openInterest": 4000, "totalVolume": 180, "gamma": 0.09, "delta": 0.28, "vega": 0.21, "volatility": 18}],
             }
         },
         "putExpDateMap": {
             "2026-06-12:0": {
-                "495.0": [{"putCall": "PUT", "strikePrice": 495, "openInterest": 1000, "totalVolume": 40, "gamma": 0.06, "delta": -0.35, "volatility": 19}],
-                "490.0": [{"putCall": "PUT", "strikePrice": 490, "openInterest": 7000, "totalVolume": 300, "gamma": 0.09, "delta": -0.25, "volatility": 20}],
-                "485.0": [{"putCall": "PUT", "strikePrice": 485, "openInterest": 1300, "totalVolume": 20, "gamma": 0.02, "delta": -0.15, "volatility": 21}],
+                "495.0": [{"putCall": "PUT", "strikePrice": 495, "openInterest": 1000, "totalVolume": 40, "gamma": 0.06, "delta": -0.35, "vega": 0.12, "volatility": 19}],
+                "490.0": [{"putCall": "PUT", "strikePrice": 490, "openInterest": 7000, "totalVolume": 300, "gamma": 0.09, "delta": -0.25, "vega": 0.22, "volatility": 20}],
+                "485.0": [{"putCall": "PUT", "strikePrice": 485, "openInterest": 1300, "totalVolume": 20, "gamma": 0.02, "delta": -0.15, "vega": 0.09, "volatility": 21}],
             },
             "2026-06-13:1": {
-                "496.0": [{"putCall": "PUT", "strikePrice": 496, "openInterest": 900, "totalVolume": 30, "gamma": 0.05, "delta": -0.33, "volatility": 18}],
-                "491.0": [{"putCall": "PUT", "strikePrice": 491, "openInterest": 4500, "totalVolume": 210, "gamma": 0.08, "delta": -0.24, "volatility": 19}],
+                "496.0": [{"putCall": "PUT", "strikePrice": 496, "openInterest": 900, "totalVolume": 30, "gamma": 0.05, "delta": -0.33, "vega": 0.10, "volatility": 18}],
+                "491.0": [{"putCall": "PUT", "strikePrice": 491, "openInterest": 4500, "totalVolume": 210, "gamma": 0.08, "delta": -0.24, "vega": 0.19, "volatility": 19}],
             }
         },
     }
@@ -51,12 +51,37 @@ def test_parse_schwab_chain_filters_dte_and_computes_levels() -> None:
     assert levels.call_wall == 510.0
     assert levels.put_wall == 490.0
     assert levels.nearest_magnet in {490.0, 510.0}
+    assert levels.vega_wall in {490.0, 510.0, 511.0}
+    assert "total_vex" in ladder.columns
+    assert ladder["total_vex"].max() > 0
     assert levels.gamma_flip is not None
     assert levels.total_gex < 0
     assert "D0" in levels.per_dte_levels
     assert "D1" in levels.per_dte_levels
     assert levels.per_dte_levels["D0"]["call_wall"] == 510.0
     assert levels.per_dte_levels["D1"]["call_wall"] == 511.0
+
+
+def test_parse_schwab_chain_uses_strike_map_key_when_contract_omits_strike() -> None:
+    chain = {
+        "underlyingPrice": 100.0,
+        "callExpDateMap": {
+            "2026-06-12:0": {
+                "105.0": [{"putCall": "CALL", "openInterest": 100, "gamma": 0.05}],
+                "0.0": [{"putCall": "CALL", "openInterest": 9999, "gamma": 1.0}],
+            },
+        },
+        "putExpDateMap": {
+            "2026-06-12:0": {
+                "95.0": [{"putCall": "PUT", "openInterest": 200, "gamma": 0.04}],
+            },
+        },
+    }
+
+    _, rows = parse_schwab_option_chain(chain, symbol="XYZ", dte_offsets={0})
+    strikes = sorted(row.strike for row in rows)
+
+    assert strikes == [95.0, 105.0]
 
 
 def test_trading_expiration_buckets_skip_weekends() -> None:

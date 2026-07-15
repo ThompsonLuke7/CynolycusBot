@@ -12,7 +12,12 @@ class DealerPositioningConfig:
     # gamma window and only logged "no rows inside configured strike window"
     # every poll — dropped. Re-add via DEALER_POSITIONING_SYMBOLS if it ever
     # lists dailies/weeklies.
-    symbols: tuple[str, ...] = ("SPY", "SPX", "QQQ", "SLV", "IWM", "GLD")
+    #
+    # SPX/SPXW index options are NOT served by the Schwab chains endpoint on this
+    # account — every poll tried SPX, SPXW, $SPX, ^SPX and got HTTP 400, spamming
+    # ~750 Bad Request responses/day for zero data. Dropped. Re-add via
+    # DEALER_POSITIONING_SYMBOLS only if a working SPX chain source is wired.
+    symbols: tuple[str, ...] = ("SPY", "QQQ", "SLV", "IWM", "GLD")
     dte_offsets: tuple[int, ...] = (0, 1, 2)
     poll_seconds: int = 60
     output_root: Path = Path("Data/dealer_positioning")

@@ -22,13 +22,18 @@ LADDER_COLUMNS = [
     "put_gamma",
     "call_delta",
     "put_delta",
+    "call_vega",
+    "put_vega",
     "call_iv",
     "put_iv",
     "call_gex",
     "put_gex",
+    "call_vex",
+    "put_vex",
     "net_gex",
     "abs_net_gex",
     "total_abs_gex",
+    "total_vex",
 ]
 
 
@@ -48,6 +53,7 @@ def rows_to_frame(rows: Iterable[OptionContractRow]) -> pd.DataFrame:
                 "volume": float(row.volume),
                 "gamma": float(row.gamma),
                 "delta": row.delta,
+                "vega": row.vega,
                 "iv": row.iv,
             }
         )
@@ -60,37 +66,48 @@ def build_gamma_ladder(rows: Iterable[OptionContractRow] | pd.DataFrame, *, spot
         return pd.DataFrame(columns=LADDER_COLUMNS)
 
     df["option_type"] = df["option_type"].astype(str).str.upper().str[0]
-    numeric_cols = ["strike", "open_interest", "volume", "gamma", "delta", "iv"]
+    numeric_cols = ["strike", "open_interest", "volume", "gamma", "delta", "vega", "iv"]
     for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["strike"])
+    df = df[df["strike"] > 0.0]
+    if df.empty:
+        return pd.DataFrame(columns=LADDER_COLUMNS)
     calls = df[df["option_type"] == "C"].copy()
     puts = df[df["option_type"] == "P"].copy()
     calls["call_gex"] = calls["open_interest"].fillna(0.0) * calls["gamma"].fillna(0.0) * 100.0 * float(spot)
     puts["put_gex"] = -1.0 * puts["open_interest"].fillna(0.0) * puts["gamma"].fillna(0.0) * 100.0 * float(spot)
+    calls["call_vex"] = calls["open_interest"].fillna(0.0) * calls["vega"].fillna(0.0) * 100.0
+    puts["put_vex"] = puts["open_interest"].fillna(0.0) * puts["vega"].fillna(0.0) * 100.0
 
     call_group = calls.groupby("strike", as_index=False).agg(
         call_oi=("open_interest", "sum"),
         call_volume=("volume", "sum"),
         call_gamma=("gamma", "mean"),
         call_delta=("delta", "mean"),
+        call_vega=("vega", "mean"),
         call_iv=("iv", "mean"),
         call_gex=("call_gex", "sum"),
+        call_vex=("call_vex", "sum"),
     )
     put_group = puts.groupby("strike", as_index=False).agg(
         put_oi=("open_interest", "sum"),
         put_volume=("volume", "sum"),
         put_gamma=("gamma", "mean"),
         put_delta=("delta", "mean"),
+        put_vega=("vega", "mean"),
         put_iv=("iv", "mean"),
         put_gex=("put_gex", "sum"),
+        put_vex=("put_vex", "sum"),
     )
     ladder = pd.merge(call_group, put_group, on="strike", how="outer").fillna(0.0)
     ladder["spot"] = float(spot)
     ladder["net_gex"] = ladder["call_gex"] + ladder["put_gex"]
     ladder["abs_net_gex"] = ladder["net_gex"].abs()
     ladder["total_abs_gex"] = ladder["call_gex"].abs() + ladder["put_gex"].abs()
+    ladder["total_vex"] = ladder["call_vex"].fillna(0.0) + ladder["put_vex"].fillna(0.0)
     ladder["timestamp"] = _latest_timestamp(df)
     ladder["symbol"] = str(df["symbol"].dropna().iloc[0]).upper() if "symbol" in df and not df["symbol"].dropna().empty else ""
     return ladder.reindex(columns=LADDER_COLUMNS).sort_values("strike").reset_index(drop=True)
@@ -115,10 +132,14 @@ def compute_gamma_levels(
             nearest_magnet=None,
             next_magnet_above=None,
             next_magnet_below=None,
+            vega_wall=None,
+            next_vega_wall_above=None,
+            next_vega_wall_below=None,
             gamma_flip=None,
             air_gap_above_score=0.0,
             air_gap_below_score=0.0,
             magnet_threshold_abs_net_gex=0.0,
+            vega_threshold_total_vex=0.0,
             expirations=[],
             per_dte_levels={},
         )
@@ -139,10 +160,14 @@ def compute_gamma_levels(
         nearest_magnet=core["nearest_magnet"],
         next_magnet_above=core["next_magnet_above"],
         next_magnet_below=core["next_magnet_below"],
+        vega_wall=core["vega_wall"],
+        next_vega_wall_above=core["next_vega_wall_above"],
+        next_vega_wall_below=core["next_vega_wall_below"],
         gamma_flip=core["gamma_flip"],
         air_gap_above_score=core["air_gap_above_score"],
         air_gap_below_score=core["air_gap_below_score"],
         magnet_threshold_abs_net_gex=core["magnet_threshold_abs_net_gex"],
+        vega_threshold_total_vex=core["vega_threshold_total_vex"],
         expirations=sorted(set(str(x) for x in _expirations_from_rows(rows))),
         per_dte_levels=per_dte_levels,
     )
@@ -162,6 +187,8 @@ def _core_levels_from_ladder(ladder: pd.DataFrame, spot: float, magnet_quantile:
     nearest_magnet = _nearest_strike(magnets, spot)
     next_above = _next_strike(magnets, spot, "above")
     next_below = _next_strike(magnets, spot, "below")
+    vega_threshold = _positive_quantile(ladder.get("total_vex"), magnet_quantile)
+    vega_walls = ladder[ladder["total_vex"] >= vega_threshold].copy() if vega_threshold > 0.0 else ladder.iloc[0:0].copy()
     return {
         "total_gex": float(ladder["net_gex"].sum()),
         "call_wall": call_wall,
@@ -169,10 +196,14 @@ def _core_levels_from_ladder(ladder: pd.DataFrame, spot: float, magnet_quantile:
         "nearest_magnet": nearest_magnet,
         "next_magnet_above": next_above,
         "next_magnet_below": next_below,
+        "vega_wall": _nearest_strike(vega_walls, spot),
+        "next_vega_wall_above": _next_strike(vega_walls, spot, "above"),
+        "next_vega_wall_below": _next_strike(vega_walls, spot, "below"),
         "gamma_flip": _gamma_flip(ladder, spot),
         "air_gap_above_score": _air_gap_score(ladder, spot, next_above, threshold, "above"),
         "air_gap_below_score": _air_gap_score(ladder, spot, next_below, threshold, "below"),
         "magnet_threshold_abs_net_gex": threshold,
+        "vega_threshold_total_vex": vega_threshold,
     }
 
 
@@ -204,13 +235,29 @@ def _per_dte_levels(
             "nearest_magnet": core["nearest_magnet"],
             "next_magnet_above": core["next_magnet_above"],
             "next_magnet_below": core["next_magnet_below"],
+            "vega_wall": core["vega_wall"],
+            "next_vega_wall_above": core["next_vega_wall_above"],
+            "next_vega_wall_below": core["next_vega_wall_below"],
             "gamma_flip": core["gamma_flip"],
             "air_gap_above_score": core["air_gap_above_score"],
             "air_gap_below_score": core["air_gap_below_score"],
             "magnet_threshold_abs_net_gex": core["magnet_threshold_abs_net_gex"],
+            "vega_threshold_total_vex": core["vega_threshold_total_vex"],
             "expirations": sorted(set(str(x) for x in sliced["expiration"].dropna().unique())),
         }
     return out
+
+
+def _positive_quantile(series: pd.Series | None, quantile: float) -> float:
+    if series is None:
+        return 0.0
+    clean = pd.to_numeric(series, errors="coerce").fillna(0.0)
+    if clean.empty or float(clean.max()) <= 0.0:
+        return 0.0
+    threshold = float(clean.quantile(float(quantile)))
+    if threshold <= 0.0:
+        threshold = float(clean.max())
+    return threshold
 
 
 def _latest_timestamp(df: pd.DataFrame) -> str:

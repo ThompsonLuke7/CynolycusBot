@@ -45,19 +45,20 @@ def _parse_expiration_key(key: str) -> tuple[str, int | None]:
     return exp, dte
 
 
-def _iter_contracts_from_side_map(side_map: dict[str, Any], fallback_type: str) -> Iterable[tuple[str, int | None, dict]]:
+def _iter_contracts_from_side_map(side_map: dict[str, Any], fallback_type: str) -> Iterable[tuple[str, int | None, float, dict]]:
     for exp_key, strikes in (side_map or {}).items():
         expiration, dte = _parse_expiration_key(exp_key)
         if not isinstance(strikes, dict):
             continue
-        for contracts in strikes.values():
+        for strike_key, contracts in strikes.items():
+            strike = _as_float(strike_key, default=0.0)
             if isinstance(contracts, dict):
                 contracts = [contracts]
             if not isinstance(contracts, list):
                 continue
             for contract in contracts:
                 if isinstance(contract, dict):
-                    yield expiration, dte, contract
+                    yield expiration, dte, strike, contract
 
 
 def parse_schwab_option_chain(
@@ -93,17 +94,30 @@ def parse_schwab_option_chain(
                 continue
             if expiration_buckets is None and dte_offsets is not None and dte not in dte_offsets:
                 continue
-            rows.append(_row_from_contract(ts, symbol, item, expiration, dte, expiry_bucket=expiry_bucket))
+            row = _row_from_contract(ts, symbol, item, expiration, dte, expiry_bucket=expiry_bucket)
+            if row.strike > 0.0:
+                rows.append(row)
         return (spot or None), rows
 
     for side_key, fallback_type in (("callExpDateMap", "C"), ("putExpDateMap", "P")):
-        for expiration, dte, contract in _iter_contracts_from_side_map(chain.get(side_key) or {}, fallback_type):
+        for expiration, dte, strike, contract in _iter_contracts_from_side_map(chain.get(side_key) or {}, fallback_type):
             expiry_bucket = expiration_buckets.get(expiration) if expiration_buckets else None
             if expiration_buckets is not None and expiration not in expiration_buckets:
                 continue
             if expiration_buckets is None and dte_offsets is not None and dte not in dte_offsets:
                 continue
-            rows.append(_row_from_contract(ts, symbol, contract, expiration, dte, fallback_type=fallback_type, expiry_bucket=expiry_bucket))
+            row = _row_from_contract(
+                ts,
+                symbol,
+                contract,
+                expiration,
+                dte,
+                fallback_type=fallback_type,
+                fallback_strike=strike,
+                expiry_bucket=expiry_bucket,
+            )
+            if row.strike > 0.0:
+                rows.append(row)
 
     return (spot or None), rows
 
@@ -116,10 +130,12 @@ def _row_from_contract(
     dte: int | None,
     *,
     fallback_type: str = "C",
+    fallback_strike: float | None = None,
     expiry_bucket: int | None = None,
 ) -> OptionContractRow:
     gamma = _as_float(contract.get("gamma") or (contract.get("greeks") or {}).get("gamma"))
     delta_raw = contract.get("delta") or (contract.get("greeks") or {}).get("delta")
+    vega_raw = contract.get("vega") or (contract.get("greeks") or {}).get("vega")
     iv_raw = (
         contract.get("volatility")
         or contract.get("impliedVolatility")
@@ -131,12 +147,13 @@ def _row_from_contract(
         symbol=symbol.strip().upper(),
         expiration=str(expiration or contract.get("expirationDate") or ""),
         dte=dte,
-        strike=_as_float(contract.get("strikePrice") or contract.get("strike")),
+        strike=_as_float(contract.get("strikePrice") or contract.get("strike"), default=_as_float(fallback_strike)),
         option_type=_normalize_option_type(contract.get("putCall") or contract.get("optionType"), fallback_type),
         open_interest=_as_float(contract.get("openInterest") or contract.get("open_interest")),
         volume=_as_float(contract.get("totalVolume") or contract.get("volume")),
         gamma=gamma,
         delta=_as_float(delta_raw, default=math.nan) if delta_raw is not None else None,
+        vega=_as_float(vega_raw, default=math.nan) if vega_raw is not None else None,
         iv=_as_float(iv_raw, default=math.nan) if iv_raw is not None else None,
         expiry_bucket=expiry_bucket,
     )

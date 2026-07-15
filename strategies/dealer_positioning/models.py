@@ -17,6 +17,7 @@ class OptionContractRow:
     volume: float
     gamma: float
     delta: float | None = None
+    vega: float | None = None
     iv: float | None = None
     expiry_bucket: int | None = None
 
@@ -32,10 +33,14 @@ class GammaLevels:
     nearest_magnet: float | None
     next_magnet_above: float | None
     next_magnet_below: float | None
+    vega_wall: float | None
+    next_vega_wall_above: float | None
+    next_vega_wall_below: float | None
     gamma_flip: float | None
     air_gap_above_score: float
     air_gap_below_score: float
     magnet_threshold_abs_net_gex: float
+    vega_threshold_total_vex: float
     expirations: list[str] = field(default_factory=list)
     per_dte_levels: dict[str, dict[str, Any]] = field(default_factory=dict)
 

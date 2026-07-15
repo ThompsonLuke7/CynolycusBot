@@ -2,22 +2,32 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import logging
 import math
 import queue as queue_mod
 import threading
+import time
 import traceback
-from collections import deque
-from datetime import datetime, timezone
+from collections import OrderedDict, deque
+from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from strategies.dealer_positioning.config import DealerPositioningConfig
 
 logger = logging.getLogger(__name__)
+_ET = ZoneInfo("America/New_York")
+# chain_grid cache: bounded (LRU-evicted) + time-boxed so a long-running
+# dashboard session doesn't serve the first-of-day chain forever, and a
+# multi-symbol batch (capture_historical_snapshots) doesn't pin every chain
+# fetched that run in RAM.
+_CHAIN_CACHE_TTL_SECONDS = 120.0
+_CHAIN_CACHE_MAX_ENTRIES = 8
 
 
 def _utc_iso() -> str:
@@ -119,6 +129,8 @@ class DealerDashboardApp:
         self.store = DealerDashboardStore()
         self.broker = EventBroker()
         self._bar_queue = bar_queue
+        # value: (fetched_at monotonic ts, chain payload)
+        self._chain_cache: "OrderedDict[tuple[str, str], tuple[float, dict[str, Any]]]" = OrderedDict()
         self._runner = None
         self._thread: threading.Thread | None = None
         self._meta_thread: threading.Thread | None = None
@@ -198,6 +210,105 @@ class DealerDashboardApp:
         self.store.set_state("stopped")
         return self.snapshot()
 
+    def chain_grid(
+        self,
+        *,
+        symbol: str,
+        dte_offsets: tuple[int, ...] | None = None,
+        strike_window_pct: float | None = None,
+        expiration_scope: str | None = None,
+        ref_date: date | None = None,
+    ) -> dict:
+        """Fetch a one-off read-only option-chain grid for an arbitrary ticker."""
+        from strategies.dealer_positioning.chain import parse_schwab_option_chain, trading_expiration_buckets
+        from strategies.dealer_positioning.levels import compute_gamma_levels
+        from strategies.dealer_positioning.schwab_adapter import SchwabDealerDataClient
+
+        clean_symbol = "".join(ch for ch in str(symbol or "").upper().strip() if ch.isalnum() or ch in {".", "-"})
+        if not clean_symbol:
+            raise ValueError("symbol is required")
+        config = DealerPositioningConfig.from_env()
+        updates: dict[str, Any] = {"symbols": (clean_symbol,)}
+        if dte_offsets is not None:
+            updates["dte_offsets"] = tuple(int(x) for x in dte_offsets)
+        if strike_window_pct is not None:
+            updates["strike_window_pct"] = float(strike_window_pct)
+        config = DealerPositioningConfig(**{**config.__dict__, **updates})
+
+        now = datetime.now(timezone.utc)
+        today_et = now.astimezone(_ET).date()
+        ref_date = ref_date or today_et
+        query_ref_date = max(ref_date, today_et)
+        client = SchwabDealerDataClient(config)
+        scope = _clean_expiration_scope(expiration_scope)
+        if scope:
+            chain_key = (clean_symbol, query_ref_date.isoformat())
+            cached = self._chain_cache.get(chain_key)
+            now_mono = time.monotonic()
+            if cached is not None and (now_mono - cached[0]) <= _CHAIN_CACHE_TTL_SECONDS:
+                chain = cached[1]
+                self._chain_cache.move_to_end(chain_key)
+            else:
+                chain = client.get_option_chain(
+                    clean_symbol,
+                    query_ref_date,
+                    from_date=query_ref_date,
+                    to_date=query_ref_date + timedelta(days=120),
+                )
+                self._chain_cache[chain_key] = (now_mono, chain)
+                self._chain_cache.move_to_end(chain_key)
+                while len(self._chain_cache) > _CHAIN_CACHE_MAX_ENTRIES:
+                    self._chain_cache.popitem(last=False)
+            available_expirations = _available_expirations_from_chain(chain)
+            expirations = _select_expirations_for_scope(available_expirations, scope, ref_date=ref_date)
+            if not expirations:
+                raise RuntimeError(f"option chain had no expirations for scope {scope}")
+            expiration_buckets = {expiration: idx for idx, expiration in enumerate(expirations)}
+        else:
+            expiration_buckets = trading_expiration_buckets(ref_date, config.dte_offsets)
+            expirations = tuple(sorted(expiration_buckets))
+            chain = client.get_option_chain(clean_symbol, ref_date)
+            available_expirations = _available_expirations_from_chain(chain) or expirations
+        spot, rows = parse_schwab_option_chain(
+            chain,
+            symbol=clean_symbol,
+            timestamp=now,
+            expiration_buckets=expiration_buckets,
+        )
+        if spot is None:
+            spot = client.get_quote_price(clean_symbol)
+        if spot is None:
+            raise RuntimeError("missing spot price from option chain and quote")
+        rows = [
+            row for row in rows
+            if abs(float(row.strike) - float(spot)) <= float(spot) * float(config.strike_window_pct)
+        ]
+        if not rows:
+            raise RuntimeError("option chain had no rows inside configured strike window")
+
+        ladder, levels = compute_gamma_levels(
+            rows,
+            symbol=clean_symbol,
+            spot=float(spot),
+            magnet_quantile=config.magnet_quantile,
+        )
+        grid_rows = _ladder_grid_rows(ladder, levels.to_dict())
+        return {
+            "symbol": clean_symbol,
+            "ref_date_et": ref_date.isoformat(),
+            "chain_query_date_et": query_ref_date.isoformat(),
+            "fetched_at": now.isoformat(),
+            "spot": float(spot),
+            "dte_offsets": list(config.dte_offsets),
+            "strike_window_pct": float(config.strike_window_pct),
+            "expiration_scope": scope or "dte",
+            "expiration_scope_label": _expiration_scope_label(scope),
+            "available_expirations": list(available_expirations),
+            "expirations": list(expirations),
+            "levels": levels.to_dict(),
+            "rows": grid_rows,
+        }
+
     def _meta_loop(self) -> None:
         while not self._meta_stop.wait(2.0):
             runner = self._runner
@@ -219,6 +330,212 @@ class DealerDashboardApp:
 
     def _publish(self, event: dict) -> None:
         self.broker.publish(event)
+
+
+def _ladder_grid_rows(ladder, levels: dict[str, Any]) -> list[dict[str, Any]]:
+    if ladder.empty:
+        return []
+    frame = ladder.sort_values("strike").reset_index(drop=True).copy()
+    strikes = [float(x) for x in frame["strike"].tolist()]
+    gamma_flip_row = _nearest_level_strike(strikes, levels.get("gamma_flip"))
+    rows: list[dict[str, Any]] = []
+    for raw in frame.to_dict(orient="records"):
+        strike = float(raw.get("strike"))
+        tags = _strike_tags(strike, levels, gamma_flip_row)
+        raw["tags"] = tags
+        raw["zone"] = _strike_zone(tags)
+        rows.append(raw)
+    return rows
+
+
+def _clean_expiration_scope(scope: str | None) -> str | None:
+    clean = str(scope or "").strip().lower().replace("-", "_")
+    if not clean or clean in {"dte", "dtes"}:
+        return None
+    aliases = {
+        "next": "next_expiration",
+        "next_expiration": "next_expiration",
+        "expiration": "next_expiration",
+        "weekly": "next_expiration",
+        "next_weekly": "next_expiration",
+        "daily": "daily_week",
+        "daily_week": "daily_week",
+        "through_week": "daily_week",
+        "week": "daily_week",
+        "through_month": "through_month",
+        "month": "through_month",
+        "monthly": "through_month",
+        "next_monthly": "through_month",
+        "two_months": "two_months",
+        "next_two_months": "two_months",
+        "2_months": "two_months",
+        "two": "two_months",
+        "three_months": "two_months",
+        "next_three_months": "two_months",
+        "3_months": "two_months",
+        "three": "two_months",
+        "three_exp": "two_months",
+        "three_expirations": "two_months",
+    }
+    if clean not in aliases:
+        raise ValueError(f"unsupported expiration scope: {scope}")
+    return aliases[clean]
+
+
+def _expiration_scope_label(scope: str | None) -> str:
+    return {
+        None: "Trading-day DTE",
+        "next_expiration": "Next expiration",
+        "daily_week": "Through next weekly expiration",
+        "through_month": "Through next monthly expiration",
+        "two_months": "Through next two months",
+    }.get(scope, str(scope))
+
+
+def _available_expirations_from_chain(chain: dict[str, Any]) -> tuple[str, ...]:
+    expirations: set[str] = set()
+    if isinstance(chain.get("options"), list):
+        for item in chain["options"]:
+            if isinstance(item, dict):
+                raw = item.get("expirationDate") or item.get("expiration")
+                if _parse_date(raw):
+                    expirations.add(str(raw)[:10])
+    for side_key in ("callExpDateMap", "putExpDateMap"):
+        side_map = chain.get(side_key) or {}
+        if not isinstance(side_map, dict):
+            continue
+        for raw_key in side_map:
+            raw_date = str(raw_key).split(":")[0]
+            if _parse_date(raw_date):
+                expirations.add(raw_date)
+    return tuple(sorted(expirations))
+
+
+def _select_expirations_for_scope(
+    expiration_dates: list[str] | tuple[str, ...],
+    scope: str,
+    *,
+    ref_date: date,
+) -> tuple[str, ...]:
+    dates = sorted(d for d in (_parse_date(x) for x in expiration_dates) if d is not None and d >= ref_date)
+    if not dates:
+        return ()
+    scope = _clean_expiration_scope(scope) or "next_expiration"
+    if scope == "next_expiration":
+        return (dates[0].isoformat(),)
+    if scope == "two_months":
+        cutoff = _add_months(ref_date, 2)
+        selected = [d for d in dates if d <= cutoff]
+        if not selected:
+            selected = [dates[0]]
+        return tuple(d.isoformat() for d in selected)
+
+    if scope == "daily_week":
+        target = _next_weekly_expiration(dates)
+        if target is None:
+            target = dates[0]
+        selected = [d for d in dates if d <= target]
+        return tuple(d.isoformat() for d in selected)
+
+    if scope == "through_month":
+        target = _next_monthly_expiration(dates)
+        if target is None:
+            target = dates[min(2, len(dates) - 1)]
+        return tuple(d.isoformat() for d in dates if d <= target)
+
+    raise ValueError(f"unsupported expiration scope: {scope}")
+
+
+def _next_weekly_expiration(expiration_dates: list[date]) -> date | None:
+    friday_non_monthly = [d for d in expiration_dates if d.weekday() == 4 and not _is_monthly_expiration(d)]
+    if friday_non_monthly:
+        return friday_non_monthly[0]
+    fridays = [d for d in expiration_dates if d.weekday() == 4]
+    return fridays[0] if fridays else None
+
+
+def _next_monthly_expiration(expiration_dates: list[date]) -> date | None:
+    monthlies = [d for d in expiration_dates if _is_monthly_expiration(d)]
+    return monthlies[0] if monthlies else None
+
+
+def _is_monthly_expiration(value: date) -> bool:
+    if value.weekday() != 4:
+        return False
+    return 15 <= value.day <= 21
+
+
+def _parse_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _add_months(value: date, months: int) -> date:
+    month_index = value.month - 1 + int(months)
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _nearest_level_strike(strikes: list[float], level: Any) -> float | None:
+    try:
+        target = float(level)
+    except (TypeError, ValueError):
+        return None
+    if not strikes:
+        return None
+    return min(strikes, key=lambda s: abs(s - target))
+
+
+def _same_level(strike: float, level: Any) -> bool:
+    try:
+        return abs(float(strike) - float(level)) < 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
+def _strike_tags(strike: float, levels: dict[str, Any], gamma_flip_row: float | None) -> list[str]:
+    tags: list[str] = []
+    if _same_level(strike, levels.get("put_wall")):
+        tags.append("floor")
+        tags.append("put wall")
+    if _same_level(strike, levels.get("call_wall")):
+        tags.append("ceiling")
+        tags.append("call wall")
+    if _same_level(strike, levels.get("nearest_magnet")):
+        tags.append("magnet")
+    if _same_level(strike, levels.get("next_magnet_above")):
+        tags.append("magnet above")
+    if _same_level(strike, levels.get("next_magnet_below")):
+        tags.append("magnet below")
+    if _same_level(strike, levels.get("vega_wall")):
+        tags.append("vega wall")
+    if _same_level(strike, levels.get("next_vega_wall_above")):
+        tags.append("vega above")
+    if _same_level(strike, levels.get("next_vega_wall_below")):
+        tags.append("vega below")
+    if gamma_flip_row is not None and _same_level(strike, gamma_flip_row):
+        tags.append("gamma flip")
+    return list(dict.fromkeys(tags))
+
+
+def _strike_zone(tags: list[str]) -> str:
+    if "floor" in tags:
+        return "floor"
+    if "ceiling" in tags:
+        return "ceiling"
+    if "magnet" in tags or "magnet above" in tags or "magnet below" in tags:
+        return "magnet"
+    if "vega wall" in tags or "vega above" in tags or "vega below" in tags:
+        return "vega"
+    if "gamma flip" in tags:
+        return "flip"
+    return ""
 
 
 class DealerDashboardHTTPServer(ThreadingHTTPServer):
@@ -288,6 +605,30 @@ class DealerDashboardHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/state":
             self._write_json(app.snapshot())
+            return
+        if parsed.path == "/api/chain-grid":
+            from urllib.parse import parse_qs
+
+            params = parse_qs(parsed.query)
+            symbol = (params.get("symbol") or [""])[0]
+            dte_raw = (params.get("dtes") or [""])[0]
+            dtes = None
+            if dte_raw.strip():
+                dtes = tuple(int(x.strip()) for x in dte_raw.split(",") if x.strip())
+            window_raw = (params.get("window_pct") or [""])[0]
+            window_pct = float(window_raw) if window_raw.strip() else None
+            scope = (params.get("scope") or [""])[0] or None
+            try:
+                self._write_json(
+                    app.chain_grid(
+                        symbol=symbol,
+                        dte_offsets=dtes,
+                        strike_window_pct=window_pct,
+                        expiration_scope=scope,
+                    )
+                )
+            except Exception as exc:
+                self._write_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         if parsed.path == "/api/events":
             self.send_response(HTTPStatus.OK)

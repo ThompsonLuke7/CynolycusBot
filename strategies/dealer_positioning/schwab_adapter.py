@@ -35,18 +35,35 @@ class SchwabDealerDataClient:
                     continue
         return None
 
-    def get_option_chain(self, symbol: str, ref_date: date) -> dict[str, Any]:
-        start, end = target_expiration_dates(ref_date, self._config.dte_offsets)
+    def get_option_chain(
+        self,
+        symbol: str,
+        ref_date: date,
+        *,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> dict[str, Any]:
+        if from_date is None or to_date is None:
+            start, end = target_expiration_dates(ref_date, self._config.dte_offsets)
+        else:
+            start, end = from_date, to_date
         raw_client = getattr(self._client, "client", None)
         if raw_client is None or not hasattr(raw_client, "get_option_chain"):
             raise RuntimeError("Schwab client does not expose get_option_chain; install/update schwab-py.")
+
+        candidates = _chain_symbol_candidates(symbol)
+        if not candidates:
+            raise RuntimeError(
+                f"{symbol.upper()} is not queryable on the Schwab chains endpoint "
+                f"(cash-settled index root); skipping without an HTTP request."
+            )
 
         options = getattr(raw_client, "Options", None)
         contract_type = getattr(getattr(options, "ContractType", None), "ALL", "ALL")
         strategy = getattr(getattr(options, "Strategy", None), "SINGLE", "SINGLE")
         tried: list[str] = []
         last_error: str | None = None
-        for chain_symbol in _chain_symbol_candidates(symbol):
+        for chain_symbol in candidates:
             tried.append(chain_symbol)
             resp = raw_client.get_option_chain(
                 symbol=chain_symbol,
@@ -75,8 +92,14 @@ class SchwabDealerDataClient:
         )
 
 
+# Cash-settled index roots the Schwab chains endpoint does not serve on this
+# account (every alias — SPX, SPXW, $SPX, ^SPX — returns HTTP 400). Requesting
+# them only spams Bad Request responses, so short-circuit with no HTTP call.
+_UNSUPPORTED_CHAIN_ROOTS = frozenset({"SPX", "SPXW", "$SPX", "^SPX", "NDX", "RUT", "VIX"})
+
+
 def _chain_symbol_candidates(symbol: str) -> list[str]:
     upper = symbol.strip().upper()
-    if upper == "SPX":
-        return ["SPX", "SPXW", "$SPX", "^SPX"]
+    if upper in _UNSUPPORTED_CHAIN_ROOTS:
+        return []
     return [upper]

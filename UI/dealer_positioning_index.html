@@ -40,6 +40,18 @@
   .dte-stat { background: var(--panel2); border: 1px solid #2b333d; border-radius: 5px; padding: 7px 8px; }
   .dte-stat .label { font-size: 9px; }
   .dte-stat .value { font-size: 14px; }
+  .lookup { padding: 12px; display: grid; gap: 12px; }
+  .lookup-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .lookup-controls input { width: 90px; }
+  .lookup-summary { display: grid; grid-template-columns: repeat(10, minmax(84px, 1fr)); gap: 8px; }
+  .lookup-table { max-height: 520px; overflow: auto; border-top: 1px solid var(--border); }
+  .tag { display: inline-block; padding: 1px 6px; margin: 1px 3px 1px 0; border-radius: 9px; background: #263241; color: var(--muted); font-size: 10px; text-transform: uppercase; font-weight: 700; }
+  tr.floor td { background: rgba(63,185,80,0.08); }
+  tr.ceiling td { background: rgba(248,81,73,0.08); }
+  tr.magnet td { background: rgba(88,166,255,0.08); }
+  tr.vega td { background: rgba(210,153,34,0.08); }
+  tr.flip td { background: rgba(139,148,158,0.09); }
+  .num { text-align: right; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
   th { text-align: left; padding: 7px 10px; color: var(--muted); border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
   td { padding: 7px 10px; border-bottom: 1px solid #1c232c; }
@@ -72,6 +84,31 @@
   <section class="card full">
     <div class="card-head">Live Levels</div>
     <div id="levels"></div>
+  </section>
+  <section class="card full">
+    <div class="card-head">Strike Grid Lookup</div>
+    <div class="lookup">
+      <div class="lookup-controls">
+        <input id="grid-symbol" value="SPY" />
+        <input id="grid-dtes" value="0,1,2" title="Trading-day DTE buckets" />
+        <input id="grid-window" type="number" min="0.01" max="0.30" step="0.01" value="0.08" title="Strike window percentage around spot" />
+        <button id="grid-load" class="primary">Load Grid</button>
+        <span id="grid-status" class="muted">read-only chain lookup</span>
+      </div>
+      <div id="grid-summary" class="lookup-summary"></div>
+      <div class="lookup-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Strike</th><th>Tags</th><th>Call OI</th><th>Put OI</th>
+              <th>Call Vol</th><th>Put Vol</th><th>Net GEX</th><th>Total VEX</th>
+              <th>Call Δ</th><th>Put Δ</th><th>Call IV</th><th>Put IV</th>
+            </tr>
+          </thead>
+          <tbody id="grid-rows"><tr><td colspan="12" class="muted">Enter a ticker and load the grid.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
   </section>
   <section class="card">
     <div class="card-head">Open Trades</div>
@@ -110,6 +147,7 @@ document.getElementById("start").onclick = () => {
   }).then(render);
 };
 document.getElementById("stop").onclick = () => post("/api/stop", {}).then(render);
+document.getElementById("grid-load").onclick = () => loadGrid();
 
 function render(state) {
   const data = state.runner ? state : (state.state || state.ok ? state.state : state);
@@ -176,11 +214,77 @@ function renderDteCard(x) {
       ${dteStat("Call Wall", fmt(x.call_wall), "")}
       ${dteStat("Put Wall", fmt(x.put_wall), "")}
       ${dteStat("Magnet", fmt(x.nearest_magnet), "")}
+      ${dteStat("Vega Wall", fmt(x.vega_wall), "")}
       ${dteStat("Gamma Flip", fmt(x.gamma_flip), "")}
       ${dteStat("Next Above", fmt(x.next_magnet_above), "")}
       ${dteStat("Next Below", fmt(x.next_magnet_below), "")}
     </div>
   </div>`;
+}
+
+function smallStat(label, value, sub) {
+  return `<div class="dte-stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub || ""}</div></div>`;
+}
+
+async function loadGrid() {
+  const status = document.getElementById("grid-status");
+  const symbol = document.getElementById("grid-symbol").value.trim().toUpperCase();
+  const dtes = document.getElementById("grid-dtes").value.trim();
+  const windowPct = Number(document.getElementById("grid-window").value || 0.08);
+  status.textContent = `loading ${symbol || "ticker"}...`;
+  document.getElementById("grid-load").disabled = true;
+  try {
+    const qs = new URLSearchParams({symbol, dtes, window_pct: String(windowPct)});
+    const res = await fetch(`/api/chain-grid?${qs.toString()}`, {cache:"no-store"});
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    renderGrid(data);
+    status.textContent = `${data.symbol} fetched ${timeOnly(data.fetched_at)} | ${data.rows.length} strikes`;
+  } catch (err) {
+    document.getElementById("grid-summary").innerHTML = "";
+    document.getElementById("grid-rows").innerHTML = `<tr><td colspan="12" class="neg">${String(err.message || err)}</td></tr>`;
+    status.textContent = "lookup failed";
+  } finally {
+    document.getElementById("grid-load").disabled = false;
+  }
+}
+
+function renderGrid(data) {
+  const x = data.levels || {};
+  document.getElementById("grid-summary").innerHTML = [
+    smallStat("Spot", fmt(data.spot), `${data.symbol} ${data.ref_date_et}`),
+    smallStat("Floor", fmt(x.put_wall), "put wall"),
+    smallStat("Ceiling", fmt(x.call_wall), "call wall"),
+    smallStat("Magnet", fmt(x.nearest_magnet), "nearest GEX"),
+    smallStat("Above", fmt(x.next_magnet_above), "magnet"),
+    smallStat("Below", fmt(x.next_magnet_below), "magnet"),
+    smallStat("Vega Wall", fmt(x.vega_wall), "nearest VEX"),
+    smallStat("Vega Above", fmt(x.next_vega_wall_above), "VEX"),
+    smallStat("Vega Below", fmt(x.next_vega_wall_below), "VEX"),
+    smallStat("Gamma Flip", fmt(x.gamma_flip), x.total_gex >= 0 ? "positive net" : "negative net")
+  ].join("");
+  const rows = data.rows || [];
+  if (!rows.length) {
+    document.getElementById("grid-rows").innerHTML = '<tr><td colspan="12" class="muted">No strikes in configured window.</td></tr>';
+    return;
+  }
+  document.getElementById("grid-rows").innerHTML = rows.map(r => {
+    const tags = (r.tags || []).map(t => `<span class="tag">${t}</span>`).join("");
+    return `<tr class="${r.zone || ""}">
+      <td class="num">${fmt(r.strike)}</td>
+      <td>${tags || '<span class="muted">-</span>'}</td>
+      <td class="num">${fmt(r.call_oi,0)}</td>
+      <td class="num">${fmt(r.put_oi,0)}</td>
+      <td class="num">${fmt(r.call_volume,0)}</td>
+      <td class="num">${fmt(r.put_volume,0)}</td>
+      <td class="num ${Number(r.net_gex || 0) >= 0 ? "pos" : "neg"}">${fmt(r.net_gex,0)}</td>
+      <td class="num">${fmt(r.total_vex,0)}</td>
+      <td class="num">${fmt(r.call_delta,2)}</td>
+      <td class="num">${fmt(r.put_delta,2)}</td>
+      <td class="num">${fmt(r.call_iv,1)}</td>
+      <td class="num">${fmt(r.put_iv,1)}</td>
+    </tr>`;
+  }).join("");
 }
 
 function renderTrades(id, rows, open) {
