@@ -17,9 +17,11 @@
 #      written during RTH (catches a hung-but-alive process the restart can't).
 #
 # Usage:
-#   scripts/run_live_server.sh                 # paper, all modules, auto-start
+#   scripts/run_live_server.sh                 # paper, trading sessions auto-start
 #   LIVE=1 scripts/run_live_server.sh          # route swing/meta/htf/mom to LIVE
 #   scripts/run_live_server.sh --no-start-all  # serve pages but don't auto-run
+#   scripts/run_live_server.sh --readiness-on-start  # explicitly run guarded cache readiness
+#   DEALER_RANKER_TIME=15:40 scripts/run_live_server.sh  # override near-close dealer run
 #   (any extra args are passed straight through to combined_server)
 #
 # Stop: Ctrl-C (stops the watchdog and the server together), or kill this script.
@@ -52,12 +54,27 @@ for arg in "$@"; do
 done
 
 SERVER_ARGS=()
-# Auto-arm every dashboard on boot so a restart resumes trading, not just serving.
+# Auto-arm continuous dashboards on boot so a restart resumes trading sessions,
+# not just serving. The hub intentionally skips one-shot Meta/Momentum manual
+# loops; their scheduled 4H passes fire later from combined_server.
 if [ "$START_ALL" = "1" ]; then SERVER_ARGS+=("--start-all"); fi
+# Run the dealer-ranked ATM options experiment automatically near the close.
+# Defaults stay paper; caller passthrough args later in SERVER_ARGS can override.
+SERVER_ARGS+=(
+  "--dealer-ranker-time" "${DEALER_RANKER_TIME:-15:45}"
+  "--dealer-ranker-workers" "${DEALER_RANKER_WORKERS:-8}"
+  "--dealer-ranker-top-k" "${DEALER_RANKER_TOP_K:-10}"
+  "--dealer-ranker-contracts" "${DEALER_RANKER_CONTRACTS:-1}"
+)
 # LIVE=1 flips the scheduled loops onto the real-money account.
 if [ "${LIVE:-0}" = "1" ]; then
   SERVER_ARGS+=("--meta-ranker-live" "--htf-live" "--momentum-live")
   if [ -n "${LIVE_ENV:-}" ]; then SERVER_ARGS+=("--live-env" "$LIVE_ENV"); fi
+fi
+# Dealer Ranker live routing is intentionally separate because it is a new
+# experiment with option orders. Set only after an explicit live-trading decision.
+if [ "${DEALER_RANKER_LIVE:-0}" = "1" ]; then
+  SERVER_ARGS+=("--dealer-ranker-live")
 fi
 # Pass through anything else the caller added (e.g. --env, ports).
 SERVER_ARGS+=("${PASSTHRU[@]}")
@@ -72,11 +89,24 @@ if [ -f "$REPO_ROOT/scripts/heartbeat_watchdog.py" ]; then
   log "heartbeat watchdog started (PID $WATCHDOG_PID, log $WATCHDOG_LOG)"
 fi
 
+# --- WSL crash forensics logger (streams guest dmesg + memory to NTFS) ---------
+# The recurring death is a WSL2 *VM* crash that leaves no host-side trace and
+# wipes the guest dmesg on restart. This persists the kernel log to /mnt/c so the
+# NEXT crash's cause (OOM? panic?) survives. Best-effort; never blocks the server.
+CRASHLOG_PID=""
+if [ -f "$REPO_ROOT/scripts/wsl_crash_logger.sh" ]; then
+  nohup bash scripts/wsl_crash_logger.sh >/dev/null 2>&1 &
+  CRASHLOG_PID=$!
+  log "WSL crash logger started (PID $CRASHLOG_PID -> C:\\Users\\<you>\\wsl_crashlog)"
+fi
+
 cleanup() {
   log "shutdown requested — stopping server and watchdog"
   [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null
   [ -n "${TAIL_PID:-}" ] && kill "$TAIL_PID" 2>/dev/null
   [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null
+  [ -n "$CRASHLOG_PID" ] && kill "$CRASHLOG_PID" 2>/dev/null
+  pkill -f 'dmesg.*--follow' 2>/dev/null
   exit 0
 }
 trap cleanup INT TERM

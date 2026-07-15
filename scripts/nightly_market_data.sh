@@ -41,6 +41,44 @@ ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
   cboe_exit=$?
   echo "[$(ts)] CBOE snapshot exit=$cboe_exit"
 
+  # 1b) Dealer-positioning option snapshots (forward collection). This stores
+  #     the Amethyst-ready floors/ceilings/magnets/vega walls plus strike rows.
+  #     It is intentionally configurable because the Schwab chain API can rate
+  #     limit on a very broad universe.
+  if [ "${DEALER_SNAPSHOT_ENABLED:-1}" != "0" ]; then
+    echo "[$(ts)] Dealer snapshots — floors/ceilings/magnets/strike ladders"
+    dealer_args=(
+      --sleep-seconds "${DEALER_SNAPSHOT_SLEEP_SECONDS:-0.25}"
+      --strike-window-pct "${DEALER_SNAPSHOT_STRIKE_WINDOW_PCT:-0.50}"
+      --min-total-oi "${DEALER_SNAPSHOT_MIN_TOTAL_OI:-5000}"
+      --min-option-volume "${DEALER_SNAPSHOT_MIN_OPTION_VOLUME:-2000}"
+      --min-adv "${DEALER_SNAPSHOT_MIN_ADV:-50000000}"
+      --min-market-cap "${DEALER_SNAPSHOT_MIN_MARKET_CAP:-2000000000}"
+    )
+    if [ "${DEALER_SNAPSHOT_LIQUIDITY_PREFILTER:-1}" = "0" ]; then
+      dealer_args+=(--no-liquidity-prefilter)
+    fi
+    if [ -n "${DEALER_SNAPSHOT_LIMIT:-}" ]; then
+      dealer_args+=(--limit "$DEALER_SNAPSHOT_LIMIT")
+    fi
+    if [ -n "${DEALER_SNAPSHOT_SCOPES:-}" ]; then
+      # shellcheck disable=SC2206
+      dealer_scopes=(${DEALER_SNAPSHOT_SCOPES})
+      dealer_args+=(--scopes "${dealer_scopes[@]}")
+    fi
+    "$PYTHON" -u -m strategies.dealer_positioning.scripts.capture_historical_snapshots "${dealer_args[@]}"
+    dealer_snapshot_exit=$?
+    echo "[$(ts)] Dealer snapshots exit=$dealer_snapshot_exit"
+    if [ "$dealer_snapshot_exit" -eq 0 ]; then
+      echo "[$(ts)] Dealer rankings — swing-potential research ranks"
+      "$PYTHON" -u -m strategies.dealer_positioning.scripts.build_dealer_rankings
+      dealer_ranking_exit=$?
+      echo "[$(ts)] Dealer rankings exit=$dealer_ranking_exit"
+    fi
+  else
+    echo "[$(ts)] Dealer snapshots disabled by DEALER_SNAPSHOT_ENABLED=0"
+  fi
+
   # 2) FINRA prior-trading-day short volume (appends a single day's parquet)
   echo "[$(ts)] FINRA — pulling yesterday's CSV"
   "$PYTHON" -u <<'PYEOF'
