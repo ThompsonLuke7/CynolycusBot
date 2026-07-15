@@ -210,7 +210,8 @@ class MetaRankerDashboardApp:
 
         def _go():
             argv = [sys.executable, str(LOOP), "--mode", self.mode,
-                    "--top-k", str(self.top_k), "--submit"]
+                    "--top-k", str(self.top_k), "--submit",
+                    "--skip-bars", "--skip-feeds", "--skip-matrix"]
             if self._live:
                 argv.append("--live")
             try:

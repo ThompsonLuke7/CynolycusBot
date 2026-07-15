@@ -24,6 +24,8 @@ import sys
 import time
 from pathlib import Path
 
+from core.live_job_guard import heavy_job_guard
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 PY = sys.executable
@@ -51,23 +53,43 @@ def main():
     ap.add_argument("--weekly-due", action="store_true", help="Also refresh dynamic themes (Claude $).")
     ap.add_argument("--skip-bars", action="store_true")
     ap.add_argument("--skip-feeds", action="store_true")
+    ap.add_argument("--skip-matrix", action="store_true",
+                    help="Skip the matrix rebuild. With --skip-bars --skip-feeds this makes the "
+                         "pass runner-only (~seconds) — use it when a background refresher keeps "
+                         "the shared bars + matrix fresh out-of-band.")
+    ap.add_argument("--no-1d", action="store_true",
+                    help="Skip the per-ticker daily-bar fetch in the catch-up (halves REST calls; "
+                         "daily bars only matter at EOD, refreshed by the nightly readiness job).")
     args = ap.parse_args()
 
     base = HERE
     t0 = time.time()
     print(f"=== Meta Ranker 4H loop pass | mode={args.mode} submit={args.submit} live={args.live} ===")
 
-    if not args.skip_bars:
-        # Same-day pre-close refresh: scope to the tradeable (is_eligible) set so it
-        # finishes before the MOC entry instead of crawling the full 3k universe and
-        # colliding with the live session. The nightly readiness job backfills the rest.
-        _step("1/4 bars",
-              [PY, "scripts/catchup_shared_bars.py", "--workers", "6", "--eligible-only"],
-              timeout=2400)
-    if not args.skip_feeds:
-        feed_argv = [PY, str(base / "update_feeds.py")] + (["--weekly"] if args.weekly_due else [])
-        _step("2/4 feeds", feed_argv, timeout=3600)
-    _step("3/4 matrix", [PY, str(base / "update_meta_matrix.py")], timeout=2400)
+    needs_heavy = not (args.skip_bars and args.skip_feeds and args.skip_matrix)
+    if needs_heavy:
+        with heavy_job_guard(
+            "meta-ranker-4h-loop",
+            block_live_window=True,
+            min_available_mb=4096,
+            min_swap_free_mb=4096,
+        ) as guard:
+            if not guard.ok:
+                print(f"  ! heavy refresh skipped: {guard.reason}", flush=True)
+            else:
+                if not args.skip_bars:
+                    # Same-day pre-close refresh: scope to the tradeable (is_eligible) set so it
+                    # finishes before the MOC entry instead of crawling the full 3k universe and
+                    # colliding with the live session. The nightly readiness job backfills the rest.
+                    bars_argv = [PY, "scripts/catchup_shared_bars.py", "--workers", "6", "--eligible-only"]
+                    if args.no_1d:
+                        bars_argv.append("--no-1d")
+                    _step("1/4 bars", bars_argv, timeout=2400)
+                if not args.skip_feeds:
+                    feed_argv = [PY, str(base / "update_feeds.py")] + (["--weekly"] if args.weekly_due else [])
+                    _step("2/4 feeds", feed_argv, timeout=3600)
+                if not args.skip_matrix:
+                    _step("3/4 matrix", [PY, str(base / "update_meta_matrix.py")], timeout=2400)
 
     run_argv = [PY, str(base / "live_runner.py"), "--mode", args.mode, "--top-k", str(args.top_k)]
     if args.submit:

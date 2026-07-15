@@ -2,11 +2,12 @@
 Refresh the upstream feeds the Meta Ranker matrix consumes (step 3 of the live loop).
 
 Each feed is an existing pipeline; this just sequences them and continues on error so
-one flaky source doesn't block the rest. Network/credentials required (Alpaca/news/FRED).
+one flaky source doesn't block the rest. Network/credentials required (Alpaca/news).
 
 Cadence:
-  * per-4H bar (default): news incremental, earnings/economic calendars, news-catalyst
-    signal, forward-guidance signal, treasury rates.
+  * per-4H bar (default): news incremental, economic calendar, forward-guidance signal.
+  * daily (--daily): earnings-calendar, news-catalyst rescore.
+  * optional treasury (--include-treasury): FRED rates, non-required by default.
   * weekly (--weekly): ALSO the dynamic-theme pipeline (recluster + Claude labeling).
     This uses the Claude API ($), so it is OFF unless --weekly is passed.
 
@@ -25,14 +26,23 @@ REPO = Path(__file__).resolve().parents[3]
 PY = sys.executable
 
 # (label, argv) — run with cwd=REPO, PYTHONPATH=REPO
+#
+# PER_BAR: light feeds safe to refresh every 4H bar (~10 min total). These keep
+#   the matrix's fast-moving columns current intraday.
+# DAILY:   heavy feeds that re-process the whole corpus (~25-27 min EACH) but only
+#   change on a daily cadence — earnings-calendar dates and the news-catalyst
+#   rescore. Running them per-bar is what blew the 60-min feeds budget and starved
+#   the early 4H passes, so they move to the nightly readiness job (--daily).
 PER_BAR = [
     ("news: incremental",      [PY, "-m", "signals.news.main", "--stage", "incremental"]),
-    ("news: earnings-calendar", [PY, "-m", "signals.news.main", "--stage", "earnings-calendar"]),
     ("news: economic-calendar", [PY, "-m", "signals.news.main", "--stage", "economic-calendar"]),
-    ("news-catalyst signal",   [PY, "signals/meta_context/build_news_signal.py"]),
     ("forward-guidance signal", [PY, "signals/meta_context/build_forward_guidance_signal.py"]),
-    ("treasury rates (FRED)",  [PY, "scripts/fetch_treasury_rates.py"]),
 ]
+DAILY = [
+    ("news: earnings-calendar", [PY, "-m", "signals.news.main", "--stage", "earnings-calendar"]),
+    ("news-catalyst signal",   [PY, "signals/meta_context/build_news_signal.py"]),
+]
+OPTIONAL_TREASURY = ("treasury rates (FRED, optional)", [PY, "scripts/fetch_treasury_rates.py"])
 WEEKLY = [
     ("dynamic theme (weekly, Claude $)", [PY, "themes/dynamic_theme/pipeline.py", "--mode", "weekly"]),
 ]
@@ -57,16 +67,28 @@ def _run(label: str, argv: list[str], timeout: int) -> bool:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--weekly", action="store_true", help="Also run the dynamic-theme pipeline (Claude $).")
+    ap.add_argument("--daily", action="store_true",
+                    help="Run the heavy daily feeds (earnings-calendar, news-catalyst rescore) "
+                         "INSTEAD of the per-bar set. Use from the nightly readiness job.")
+    ap.add_argument("--include-treasury", action="store_true",
+                    help="Also try FRED treasury rates. Optional; not part of live-readiness.")
     ap.add_argument("--timeout", type=int, default=1800, help="Per-feed timeout (s).")
     args = ap.parse_args()
 
-    jobs = PER_BAR + (WEEKLY if args.weekly else [])
+    if args.daily:
+        jobs = DAILY + (WEEKLY if args.weekly else [])
+    else:
+        jobs = PER_BAR + (WEEKLY if args.weekly else [])
+    if args.include_treasury:
+        jobs = jobs + [OPTIONAL_TREASURY]
     results = {label: _run(label, argv, args.timeout) for label, argv in jobs}
     print("\n==== feed refresh summary ====")
     for label, ok in results.items():
         print(f"  {'✓' if ok else '✗'} {label}")
     n_ok = sum(results.values())
     print(f"{n_ok}/{len(results)} feeds refreshed")
+    if n_ok != len(results):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

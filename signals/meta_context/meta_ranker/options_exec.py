@@ -20,6 +20,12 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+from core.calendar import is_market_open_now
+from strategies.dealer_positioning.gate import (
+    SCOPE_MONTHLY,
+    evaluate_dealer_gate,
+    gate_enabled,
+)
 from strategies.multi_ticker_swing.live.runner import (
     _DELTA_HI,
     _DELTA_LO,
@@ -30,6 +36,22 @@ from strategies.multi_ticker_swing.live.runner import (
 )
 
 _ET = ZoneInfo("America/New_York")
+
+
+def equity_order_tif(now: datetime | None = None) -> str:
+    """Time-in-force for EQUITY market orders.
+
+    Returns 'opg' (market-on-open) when the US equity market is CLOSED at
+    submission time, else 'day' (fill now). This makes the post-close 2nd-4H-bar
+    entries fill deterministically at the official opening auction — the next-open
+    fill that backtest_exits.py --entry next_open validated (edge intact, ~0.17%
+    mean/trade erosion). During RTH the 1st-bar pass stays 'day' and fills at once.
+
+    NOTE: options orders do NOT support 'opg' on Alpaca (day only); a day options
+    order placed after hours already queues to the next open, so the options path
+    keeps 'day' and does not call this.
+    """
+    return "day" if is_market_open_now(now) else "opg"
 
 
 def _third_friday(year: int, month: int) -> date:
@@ -79,7 +101,6 @@ def select_option(
     current_price: float,
     per_name_usd: float,
     *,
-    max_spread_pct: float = 0.15,
     roll_trading_days: int = 5,
     now_et: datetime | None = None,
 ) -> tuple[dict | None, str]:
@@ -123,16 +144,25 @@ def select_option(
     in_range = [c for c in cands if _DELTA_LO <= c[1] <= _DELTA_HI]
     if not in_range:
         return None, "delta_filter_failed(out_of_range)"
-    occ, dlt, _ = min(in_range, key=lambda x: abs(x[1] - _DELTA_TGT))
+    occ, dlt, sel_snap = min(in_range, key=lambda x: abs(x[1] - _DELTA_TGT))
 
-    quote = _latest_quote(client, occ)
-    if quote is None:
-        return None, "no_quote"
-    bid, ask = quote
+    # Prefer the snapshot's own quote (saves a second API call / 429s); fall back
+    # to a fresh quote fetch only if the snapshot lacks a two-sided quote.
+    lq = sel_snap.get("latestQuote") or {}
+    bid = _as_float(lq.get("bp", lq.get("bid_price")))
+    ask = _as_float(lq.get("ap", lq.get("ask_price")))
+    if not (bid > 0 and ask > 0):
+        quote = _latest_quote(client, occ)
+        if quote is None:
+            return None, "no_quote"
+        bid, ask = quote
     mid = (bid + ask) / 2.0
+    # Spread is reported for the audit only — it is NOT a gate. Liquidity is
+    # judged by open interest + volume (see route_option_or_shares); a wide %%
+    # spread on a cheap contract (e.g. 0.50/1.00) is normal and not disqualifying.
     spread = (ask - bid) / mid if mid > 0 else 1.0
-    if spread > max_spread_pct:
-        return None, f"wide_spread({spread:.0%})"
+    oi = int(_as_float(sel_snap.get("openInterest")) or 0)
+    vol = int(_as_float(sel_snap.get("dailyVolume")) or 0)
     contracts_n = int(math.floor(per_name_usd / (mid * 100.0)))
     if contracts_n < 1:
         return None, "budget_lt_1_contract"
@@ -141,6 +171,67 @@ def select_option(
             "ticker": ticker, "occ": occ, "contracts": contracts_n, "mid": mid,
             "limit": round(ask, 2), "delta": dlt, "expiry": exp_str,
             "strike": _contract_strike(by_symbol[occ]), "notional": contracts_n * mid * 100.0,
+            "open_interest": oi, "volume": vol, "spread": spread,
         },
         "ok",
     )
+
+
+def _as_float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# Optionability gate: names that aren't good option candidates trade shares
+# instead. Liquidity is judged by open interest + volume only (no spread gate).
+ROUTE_PRICE_FLOOR = 10.0      # underlying < $10 -> shares
+ROUTE_MIN_OPEN_INTEREST = 500  # selected contract OI < 500 -> shares
+ROUTE_MIN_VOLUME = 100         # selected contract daily volume < 100 -> shares
+
+
+def route_option_or_shares(
+    client: AlpacaOptionsClient,
+    ticker: str,
+    current_price: float,
+    *,
+    roll_trading_days: int = 5,
+    price_floor: float = ROUTE_PRICE_FLOOR,
+    min_open_interest: int = ROUTE_MIN_OPEN_INTEREST,
+    min_volume: int = ROUTE_MIN_VOLUME,
+    now_et: datetime | None = None,
+    dealer_scope: str = SCOPE_MONTHLY,
+) -> tuple[str, dict | None, str]:
+    """Decide whether to trade a name as OPTIONS or SHARES.
+
+    Returns (route, order, reason) where route is 'option' or 'equity'.
+      * 'option' -> `order` is the select_option dict (10 contracts by caller).
+      * 'equity' -> trade shares (100 by caller); `order` may be None or the
+        rejected contract (for audit). Reasons: underlying_lt_price_floor,
+        no_option(<select reason>), illiquid_option(oi=..,vol=..),
+        dealer_veto(<reason>).
+
+    The 4H modules are long/calls-only, so the dealer gate is evaluated on the
+    call side against the monthly (`through_month`) scope. A veto falls back to
+    SHARES (keeps directional exposure, drops leveraged premium into a wall).
+    The verdict is always attached to `order['dealer_gate']` for audit; it only
+    changes routing when DEALER_GATE_ENABLED is set (observe-first).
+    """
+    if current_price is not None and current_price < price_floor:
+        return "equity", None, f"underlying_lt_{price_floor:.0f}"
+    order, reason = select_option(
+        client, ticker, current_price, 1e12,
+        roll_trading_days=roll_trading_days, now_et=now_et,
+    )
+    if order is None:
+        return "equity", None, f"no_option({reason})"
+    if order.get("open_interest", 0) < min_open_interest or order.get("volume", 0) < min_volume:
+        return "equity", order, (
+            f"illiquid_option(oi={order.get('open_interest', 0)},vol={order.get('volume', 0)})"
+        )
+    verdict = evaluate_dealer_gate(ticker, "call", current_price, dealer_scope)
+    order["dealer_gate"] = verdict.to_dict()
+    if verdict.vetoed and gate_enabled():
+        return "equity", order, f"dealer_veto({verdict.reason})"
+    return "option", order, "ok"

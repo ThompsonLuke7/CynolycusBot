@@ -38,6 +38,16 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 BARS_4H = REPO / "Data/shared/bars/4h"
 BARS_1D = REPO / "Data/shared/bars/1d"
+
+
+def _atomic_to_parquet(df: pd.DataFrame, out_path, **kwargs) -> None:
+    """Write via temp file + atomic rename so a concurrent reader (the 4H loops)
+    or a second writer (SharedDataRefresher / nightly job overlap) never sees a
+    torn/partial parquet file."""
+    out_path = Path(out_path)
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    df.to_parquet(tmp, **kwargs)
+    tmp.replace(out_path)
 MATRIX = HERE / "meta_ranker_matrix.parquet"
 UNIVERSE = REPO / "Data/shared/universe/shared_universe.csv"
 ROLL_DAYS = 400  # rolling window kept in the matrix (long-lookback features need ~1yr)
@@ -175,7 +185,7 @@ def main():
     cutoff = combined["timestamp"].max() - pd.Timedelta(days=args.roll_days)
     combined = combined[combined["timestamp"] >= cutoff].sort_values(["timestamp", "ticker"])
     combined = combined.set_index(["timestamp", "ticker"])
-    combined.to_parquet(args.matrix)
+    _atomic_to_parquet(combined, args.matrix)
     print(f"\nwrote {len(combined):,} rows (rolling {args.roll_days}d) -> {args.matrix}")
     print(f"  new max ts: {combined.index.get_level_values('timestamp').max()}")
 
