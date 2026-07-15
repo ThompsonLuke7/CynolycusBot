@@ -40,6 +40,8 @@ from strategies.momentum_expansion.config.momentum_config import (
 
 logger = logging.getLogger(__name__)
 
+_DAILY_REFRESH_OVERLAP = pd.Timedelta(days=5)
+
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -63,6 +65,32 @@ def _load_cached(path: Path) -> pd.DataFrame | None:
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
     return df
+
+
+def _atomic_to_parquet(df: pd.DataFrame, out_path: Path, **kwargs) -> None:
+    """Write via temp file + atomic rename so a concurrent reader (SharedDataRefresher,
+    startup readiness, nightly job — all can overlap) never sees a torn/partial cache."""
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    df.to_parquet(tmp, **kwargs)
+    tmp.replace(out_path)
+
+
+def _as_utc_timestamp(value: str | pd.Timestamp) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
+def _next_fetch_start(*, kind: str, start: str, last_ts: pd.Timestamp) -> str:
+    """Return the incremental fetch start, overlapping daily bars for revision."""
+    last = _as_utc_timestamp(last_ts)
+    start_bound = _as_utc_timestamp(start)
+    if kind == "1d":
+        fetch_ts = max(start_bound, last - _DAILY_REFRESH_OVERLAP)
+    else:
+        fetch_ts = last + pd.Timedelta(minutes=1)
+    return fetch_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +125,7 @@ def fetch_one(
     if cached is not None and "timestamp" in cached.columns and len(cached):
         last_ts = cached["timestamp"].max()
         if pd.notna(last_ts):
-            fetch_start = (last_ts + pd.Timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            fetch_start = _next_fetch_start(kind=kind, start=start, last_ts=last_ts)
             if pd.Timestamp(fetch_start) >= pd.Timestamp(end, tz="UTC"):
                 logger.info("[%s/%s] cache fresh (last=%s) — skip", ticker, kind, last_ts)
                 return cached
@@ -149,7 +177,7 @@ def fetch_one(
               .sort_values("timestamp")
               .reset_index(drop=True)
     )
-    merged.to_parquet(out_path, index=False)
+    _atomic_to_parquet(merged, out_path, index=False)
     logger.info("[%s/%s] cached %d bars -> %s", ticker, kind, len(merged), out_path)
     return merged
 
@@ -192,7 +220,10 @@ def resample_1h_to_4h(df_1h: pd.DataFrame) -> pd.DataFrame:
     session_date = pd.Series(idx_ny.date, index=df.index).astype("string")
 
     bucket = session_date + "_" + pd.Series(slot, index=df.index).astype(str)
-    df = df.assign(_bucket=bucket.values)
+    # Carry the bar-start timestamp as a column so it can be aggregated with a
+    # vectorized "first" instead of a per-group Python apply (the latter cost
+    # ~140ms/ticker = ~7 min serialized across the whole universe per catch-up).
+    df = df.assign(_bucket=bucket.values, _ts=df.index)
 
     grouped = df.groupby("_bucket", sort=True)
     agg = grouped.agg(
@@ -201,17 +232,23 @@ def resample_1h_to_4h(df_1h: pd.DataFrame) -> pd.DataFrame:
         low=("low", "min"),
         close=("close", "last"),
         volume=("volume", "sum"),
+        _ts=("_ts", "first"),  # df is sorted ascending, so first = bar start
     )
-    # First timestamp per bucket = bar start
-    first_ts = grouped.apply(lambda g: g.index[0], include_groups=False)
-    agg.index = pd.DatetimeIndex(first_ts.values, tz="UTC")
+    agg.index = pd.DatetimeIndex(agg.pop("_ts").values, tz="UTC")
     agg = agg.sort_index()
     agg.index.name = "timestamp"
     return agg
 
 
 def build_4h_for(ticker: str, *, force: bool = False) -> pd.DataFrame | None:
-    """Resample cached 1H bars to 4H and persist."""
+    """Resample cached 1H bars to 4H and persist.
+
+    Incremental: when a 4H cache already exists, only the tail of the 1H series
+    (from the start of the last cached 4H bar onward) is re-resampled and merged
+    back, instead of re-resampling the whole multi-year history every catch-up.
+    Re-resampling from the last bar's start correctly refreshes that bar if it
+    was still partial when last built.
+    """
     out_path = _path_for(ticker, "4h")
     src = _path_for(ticker, "1h")
     if out_path.exists() and not force:
@@ -221,12 +258,29 @@ def build_4h_for(ticker: str, *, force: bool = False) -> pd.DataFrame | None:
                 return cached_4h
             df_1h_head = pd.read_parquet(src, columns=["timestamp"])
             last_1h = pd.to_datetime(df_1h_head["timestamp"], utc=True, errors="coerce").max()
-            last_4h = pd.to_datetime(cached_4h["timestamp"], utc=True, errors="coerce").max()
+            cached_4h["timestamp"] = pd.to_datetime(cached_4h["timestamp"], utc=True, errors="coerce")
+            last_4h = cached_4h["timestamp"].max()
             if pd.notna(last_1h) and pd.notna(last_4h) and last_4h >= last_1h - pd.Timedelta(hours=4):
                 return cached_4h
-            logger.info("[%s] rebuilding stale 4h cache (last_4h=%s, last_1h=%s)", ticker, last_4h, last_1h)
+            # Incremental rebuild: resample only 1H bars at/after the last 4H bar's
+            # start, then splice over the (possibly partial) tail of the cache.
+            df_1h = pd.read_parquet(src)
+            df_1h["timestamp"] = pd.to_datetime(df_1h["timestamp"], utc=True, errors="coerce")
+            tail_1h = df_1h[df_1h["timestamp"] >= last_4h]
+            tail_4h = resample_1h_to_4h(tail_1h)
+            if tail_4h.empty:
+                return cached_4h
+            kept = cached_4h[cached_4h["timestamp"] < last_4h]
+            merged_4h = (
+                pd.concat([kept, tail_4h.reset_index()], axis=0, ignore_index=True)
+                  .drop_duplicates(subset=["timestamp"], keep="last")
+                  .sort_values("timestamp")
+                  .reset_index(drop=True)
+            )
+            _atomic_to_parquet(merged_4h, out_path, index=False)
+            return merged_4h.set_index("timestamp")
         except Exception as exc:
-            logger.warning("[%s] existing 4h cache unreadable, rebuilding: %s", ticker, exc)
+            logger.warning("[%s] incremental 4h rebuild failed, full rebuild: %s", ticker, exc)
 
     if not src.exists():
         logger.warning("[%s] no 1h cache to resample to 4h", ticker)
@@ -236,7 +290,7 @@ def build_4h_for(ticker: str, *, force: bool = False) -> pd.DataFrame | None:
     if df_4h.empty:
         logger.warning("[%s] 1h->4h yielded 0 bars", ticker)
         return None
-    df_4h.reset_index().to_parquet(out_path, index=False)
+    _atomic_to_parquet(df_4h.reset_index(), out_path, index=False)
     return df_4h
 
 
@@ -283,11 +337,22 @@ def fetch_context_bars(
     *,
     tickers: Iterable[str] = tuple(CONTEXT_TICKERS) + tuple(SECTOR_ETFS),
     force: bool = False,
+    end: str | None = None,
 ) -> dict:
-    """Pull 1H bars for context tickers (regime + sector ETFs)."""
+    """Pull current 1H bars for context tickers (regime + sector ETFs).
+
+    ``fetch_one`` defaults to the fixed historical ``TRAIN_END`` so training
+    datasets remain reproducible.  Context caches serve live regime features,
+    though, and must instead extend through the latest completed interval.
+    """
+    if end is None:
+        # Match the shared-universe catch-up's SIP safety buffer.  The latest
+        # 20 minutes may be unavailable on the subscription, while the last
+        # completed 1H bar is sufficient for 4H feature construction.
+        end = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=20)).isoformat()
     out: dict[str, int] = {}
     for t in tickers:
-        df = fetch_one(ticker=t, kind="context", force=force)
+        df = fetch_one(ticker=t, kind="context", force=force, end=end)
         out[t] = 0 if df is None else len(df)
         # Also build 4H for context tickers so feature builder can use them at the
         # same cadence as the names being scored.
@@ -295,7 +360,7 @@ def fetch_context_bars(
             df_1h = pd.read_parquet(_path_for(t, "context"))
             df_4h = resample_1h_to_4h(df_1h)
             if not df_4h.empty:
-                df_4h.reset_index().to_parquet(_path_for(t, "4h"), index=False)
+                _atomic_to_parquet(df_4h.reset_index(), _path_for(t, "4h"), index=False)
         except Exception as exc:
             logger.warning("[%s] context 4h build failed: %s", t, exc)
     logger.info("context bars cached: %s", out)

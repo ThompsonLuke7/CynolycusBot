@@ -179,13 +179,18 @@ WALK_FORWARD_CONFIG: dict = {
 # Ranking
 # ---------------------------------------------------------------------------
 RANKING_CONFIG: dict = {
-    "top_n":         20,
+    "top_n":         10,      # per-bar top-N selection (matches meta_ranker top_k)
     "top_pct":       0.10,    # use min(top_n, top_pct * universe_size)
-    # Live default from the May 24, 2026 entry-timing replay:
-    # enter the first chronological 1H confirmation after the 4H score clears
-    # this floor. This avoids waiting for the hindsight-best bar inside a
-    # momentum campaign while keeping lower-quality early campaigns out.
-    "min_score":     0.85,    # absolute floor — name is rejected even if in top-N
+    # This model is a per-bar RANKER, not a calibrated classifier. The 2026-07-03
+    # calibration (scripts/calibrate_momentum_threshold.py) showed an ABSOLUTE
+    # min_score floor is NOT robust: on validation a higher score -> better outcome,
+    # but on the 2025-02..2026-05 test period the score->outcome relationship
+    # INVERTS (lift < 1, negative expectancy above ~0.30). The stable edge lives in
+    # the per-bar RANKING (top-5/10 lift ~1.06-1.12 OOS, positive expectancy). So
+    # select by top_n and keep the absolute floor at 0 (rank-based, like meta).
+    # NOTE: the old 0.85 floor sat above the model's max score (~0.60) so the module
+    # never traded. Edge is thin -> treat as paper/experimental and monitor.
+    "min_score":     0.0,     # rank-based: no absolute floor (see note above)
     "tie_break":     "expansion_score",
     "use_momentum_candidate_filter": True,
 }
@@ -272,7 +277,6 @@ OPTION_POLICY_CONFIG: dict = {
     # Liquidity gate (chain rejection — name is dropped if it fails)
     "min_open_interest":   500,
     "min_chain_volume":    100,
-    "max_bid_ask_spread_pct": 0.10,
     # Pricing / sizing
     "price_mode":          "mid",       # ask|mid|bid|last|mark
     "max_contracts_cap":   25,

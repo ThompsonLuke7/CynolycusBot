@@ -432,10 +432,21 @@ def build_ticker_features_4h(
                             index=d.index)
 
         def _map_to_4h(daily_series: pd.Series) -> pd.Series:
-            mapping = pd.Series(daily_series.values, index=d_dates.values)
-            mapping = mapping[~mapping.index.duplicated(keep="last")]
-            return pd.Series([mapping.get(dt, np.nan) for dt in date_index.values],
-                             index=df.index, dtype=float)
+            mapping = pd.Series(
+                daily_series.values,
+                index=pd.to_datetime(pd.Index(d_dates.values)),
+            )
+            mapping = mapping[~mapping.index.duplicated(keep="last")].sort_index()
+            target = pd.to_datetime(pd.Index(date_index.values))
+            # Backward as-of: a 4H bar whose calendar date has no daily row yet
+            # (the live edge, where today's daily bar isn't cached) carries the most
+            # recent completed daily value instead of NaN. Identical to exact-date
+            # match whenever the daily series covers the bar's date (all historical
+            # dates), so backtest/training features are unchanged. Daily inputs are
+            # already .shift(1)-lagged above, so this stays leak-free.
+            pos = mapping.index.searchsorted(target, side="right") - 1
+            vals = np.where(pos >= 0, mapping.to_numpy()[pos.clip(min=0)], np.nan)
+            return pd.Series(vals, index=df.index, dtype=float)
 
         df["daily_ret_1"] = _map_to_4h(d_ret_1.shift(1))
         df["daily_ret_5"] = _map_to_4h(d_ret_5.shift(1))

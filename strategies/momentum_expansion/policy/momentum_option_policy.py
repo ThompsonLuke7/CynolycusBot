@@ -36,6 +36,8 @@ from typing import Any
 
 import pandas as pd
 
+from core.live_signal_audit import build_option_order_audit
+
 # Durable record of the option contracts this strategy has opened, so the
 # Momentum dashboard can show only its own book (the Alpaca account is shared
 # across every module). Keyed by OCC symbol; reconciled against the live broker
@@ -78,7 +80,6 @@ class MomentumOptionConfig:
 
     min_open_interest: int = OPTION_POLICY_CONFIG["min_open_interest"]
     min_chain_volume: int = OPTION_POLICY_CONFIG["min_chain_volume"]
-    max_bid_ask_spread_pct: float = OPTION_POLICY_CONFIG["max_bid_ask_spread_pct"]
 
     price_mode: str = OPTION_POLICY_CONFIG["price_mode"]
     max_contracts_cap: int = OPTION_POLICY_CONFIG["max_contracts_cap"]
@@ -229,8 +230,9 @@ def _select_contract(
             continue
         if c.volume < cfg.min_chain_volume:
             continue
-        if c.spread_pct > cfg.max_bid_ask_spread_pct:
-            continue
+        # No spread gate: open interest + volume are the liquidity gauge. A wide %%
+        # spread on a cheap contract (e.g. 0.50/1.00) is normal and not a reason to
+        # skip. (Share-routing for non-optionable names is handled at the runner.)
         if abs(c.delta - target_delta) > cfg.delta_tolerance + 0.05:
             continue
         pool.append(c)
@@ -292,6 +294,8 @@ class MomentumOptionPolicy:
                 "direction": int(position.direction),
                 "entry_underlying": float(position.entry_underlying),
                 "entry_time": str(position.entry_time),
+                "signal_audit": position.extra.get("signal_audit"),
+                "order_audit": position.extra.get("order_audit"),
             }
             self._book_path.parent.mkdir(parents=True, exist_ok=True)
             self._book_path.write_text(json.dumps(book, indent=2))
@@ -427,6 +431,7 @@ class MomentumOptionPolicy:
         suggested_stop_atr: float,
         as_of: pd.Timestamp,
         history_iv: list[float] | None = None,
+        audit_context: dict | None = None,
     ) -> MomentumOptionPosition | None:
         if len(self.positions) >= self.cfg.max_concurrent:
             logger.info("[%s] max_concurrent reached — skip", ticker)
@@ -490,6 +495,25 @@ class MomentumOptionPolicy:
         initial_stop = (
             underlying_price - direction * atr_stop_distance
         )
+        try:
+            dte = max(0, int((pd.Timestamp(contract.expiration).date() - pd.Timestamp(as_of).date()).days))
+        except Exception:
+            dte = None
+        order_audit = build_option_order_audit(
+            signal_audit=audit_context,
+            option_symbol=contract.occ_symbol,
+            route="call_option" if direction > 0 else "put_option",
+            side="buy",
+            qty=qty,
+            underlying_price=underlying_price,
+            strike=contract.strike,
+            premium=contract.mid,
+            mid_price=contract.mid,
+            delta=contract.delta,
+            dte=dte,
+            spread_pct=contract.spread_pct,
+            expiration=contract.expiration,
+        )
 
         position = MomentumOptionPosition(
             underlying=ticker,
@@ -506,6 +530,8 @@ class MomentumOptionPolicy:
                 "campaign_reason": campaign_reason,
                 "campaign_cumulative_return_before": float(campaign_state.cumulative_return),
                 "target_delta_abs": float(target_delta_abs),
+                "signal_audit": audit_context,
+                "order_audit": order_audit,
             },
         )
         self.positions[ticker] = position

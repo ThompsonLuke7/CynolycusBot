@@ -107,6 +107,8 @@ class BTPosition:
     trail_armed:   bool = False
     trail_high:    float = 0.0
     bars_held:     int = 0
+    bars_out:      int = 0      # consecutive bars out of the top-N (simple_hold grace)
+    trimmed:       bool = False # already scaled out half at take-profit (simple_hold)
     contracts:     int = 0
     entry_iv:      float = 0.30
     strike:        float = 0.0
@@ -119,6 +121,12 @@ class BTPosition:
 # ---------------------------------------------------------------------------
 
 class MomentumBacktester:
+    # simple_hold (shared live 4H engine) exit parameters.
+    SIMPLE_TAKE_PROFIT = 0.20   # trim at +20% on the OPTION mark
+    SIMPLE_SCALE_FRAC = 0.50    # sell this fraction at take-profit, ride the rest
+    SIMPLE_HORIZON_BARS = 25    # full exit of the remainder after this many 4H bars
+    SIMPLE_GRACE_BARS = 3       # full exit after this many bars out of the top-N
+
     def __init__(
         self,
         *,
@@ -126,6 +134,7 @@ class MomentumBacktester:
         cfg: dict | None = None,
         ranking_cfg: dict | None = None,
         unconstrained: bool = False,
+        exit_mode: str = "momentum",
     ):
         """
         unconstrained=True: signal-evaluation mode — no capital cap, no concurrent limit,
@@ -139,6 +148,9 @@ class MomentumBacktester:
         self.option_cfg = OPTION_POLICY_CONFIG
         self.capital_cfg = CAPITAL_CONFIG
         self.unconstrained = unconstrained
+        if exit_mode not in ("momentum", "simple_hold"):
+            raise ValueError(f"exit_mode must be 'momentum' or 'simple_hold', got {exit_mode!r}")
+        self.exit_mode = exit_mode
 
         self.positions: dict[str, BTPosition] = {}
         self.trades: list[BacktestTrade] = []
@@ -309,6 +321,34 @@ class MomentumBacktester:
             return "time_stop"
         return None
 
+    def _current_option_price(self, pos, underlying, bar_ts, vix_close) -> float | None:
+        try:
+            bars_to_expiry = max(1, int((pos.expiration_ts - bar_ts).total_seconds() / (4 * 3600)))
+            iv = self._entry_iv(vix_close, beta=1.0)
+            price, _ = self._option_price(
+                spot=underlying, strike=pos.strike, bars_to_expiry=bars_to_expiry,
+                iv=iv, is_call=(pos.direction > 0),
+            )
+            return price
+        except Exception:
+            return None
+
+    def _check_exit_simple(self, *, pos, underlying, bar_ts, vix_close, in_topk) -> str | None:
+        """Shared live 4H engine exit: TP +20% option -> trim half -> ride the rest
+        to a 25-bar horizon / 3-bar drop-out grace. No trailing / stop / trend exits."""
+        pos.bars_held += 1
+        pos.bars_out = 0 if in_topk else pos.bars_out + 1
+        if pos.bars_held >= self.SIMPLE_HORIZON_BARS:
+            return "horizon"
+        if pos.bars_out > self.SIMPLE_GRACE_BARS:
+            return "grace"
+        if not pos.trimmed:
+            opt = self._current_option_price(pos, underlying, bar_ts, vix_close)
+            if opt is not None and pos.entry_option_price > 0 \
+                    and (opt / pos.entry_option_price - 1.0) >= self.SIMPLE_TAKE_PROFIT:
+                return "trim"
+        return None
+
     def _close_position(
         self,
         *,
@@ -317,14 +357,16 @@ class MomentumBacktester:
         bar_ts: pd.Timestamp,
         reason: str,
         vix_close: float | None,
+        notional_frac: float = 1.0,
     ) -> BacktestTrade:
         # Underlying P&L — in unconstrained mode, use a fixed $1,000 notional per trade
-        # so equity-curve is a meaningful signal-quality measure rather than a sizing artifact.
+        # so equity-curve is a meaningful signal-quality measure rather than a sizing
+        # artifact. `notional_frac` < 1 closes only part of the position (scale-out).
         if self.unconstrained:
-            notional_dollars = 1_000.0
+            notional_dollars = 1_000.0 * notional_frac
             shares_eq = notional_dollars / max(pos.entry_price, 0.01)
         else:
-            shares_eq = pos.contracts * 100.0
+            shares_eq = pos.contracts * 100.0 * notional_frac
         pnl_underlying = (underlying - pos.entry_price) * pos.direction * shares_eq
 
         # Synthetic option P&L
@@ -335,10 +377,11 @@ class MomentumBacktester:
             bars_to_expiry=bars_to_expiry, iv=exit_iv,
             is_call=(pos.direction > 0),
         )
-        pnl_option = (exit_option_price - pos.entry_option_price) * pos.contracts * 100.0
+        contracts_frac = pos.contracts * notional_frac
+        pnl_option = (exit_option_price - pos.entry_option_price) * contracts_frac * 100.0
         # Apply commissions on entry+exit
-        notional_opt = pos.entry_option_price * pos.contracts * 100.0
-        commission = self.cfg["commission_pct"] * (notional_opt + exit_option_price * pos.contracts * 100.0)
+        notional_opt = pos.entry_option_price * contracts_frac * 100.0
+        commission = self.cfg["commission_pct"] * (notional_opt + exit_option_price * contracts_frac * 100.0)
         pnl_option -= commission
 
         trade = BacktestTrade(
@@ -385,6 +428,13 @@ class MomentumBacktester:
                 if 0 <= idx < len(vix_4h):
                     vix_close = float(vix_4h["close"].iloc[idx])
 
+            # Rank once per bar: used for entries and (simple_hold) drop-out grace.
+            ranked = top_n_at(
+                bar_ts=bar_ts, features=features,
+                ranker=self.ranker, cfg=self.ranking_cfg,
+            )
+            topk_set = set(ranked["ticker"]) if not ranked.empty else set()
+
             # ---- exit checks first (so freed slots can be re-entered)
             for ticker in list(self.positions.keys()):
                 df_4h = self._get_4h(ticker)
@@ -411,6 +461,32 @@ class MomentumBacktester:
                 else:
                     score = self.positions[ticker].entry_score
 
+                if self.exit_mode == "simple_hold":
+                    pos = self.positions[ticker]
+                    reason = self._check_exit_simple(
+                        pos=pos, underlying=close, bar_ts=bar_ts,
+                        vix_close=vix_close, in_topk=(ticker in topk_set),
+                    )
+                    if reason == "trim":
+                        # Sell half at +20% option; keep riding the remainder.
+                        trade = self._close_position(
+                            pos=pos, underlying=close, bar_ts=bar_ts, reason="tp_trim",
+                            vix_close=vix_close, notional_frac=self.SIMPLE_SCALE_FRAC,
+                        )
+                        pos.trimmed = True
+                        self.trades.append(trade)
+                        self.equity += trade.pnl_underlying if self.unconstrained else trade.pnl_option
+                    elif reason is not None:  # horizon / grace -> close the remainder
+                        pos = self.positions.pop(ticker)
+                        frac = (1.0 - self.SIMPLE_SCALE_FRAC) if pos.trimmed else 1.0
+                        trade = self._close_position(
+                            pos=pos, underlying=close, bar_ts=bar_ts, reason=reason,
+                            vix_close=vix_close, notional_frac=frac,
+                        )
+                        self.trades.append(trade)
+                        self.equity += trade.pnl_underlying if self.unconstrained else trade.pnl_option
+                    continue
+
                 reason = self._check_exit(
                     pos=self.positions[ticker],
                     underlying=close, atr=atr, ema_slow=ema_slow, score=score,
@@ -425,11 +501,7 @@ class MomentumBacktester:
                     # In unconstrained mode equity tracks signal quality via underlying P&L
                     self.equity += trade.pnl_underlying if self.unconstrained else trade.pnl_option
 
-            # ---- entry path
-            ranked = top_n_at(
-                bar_ts=bar_ts, features=features,
-                ranker=self.ranker, cfg=self.ranking_cfg,
-            )
+            # ---- entry path (ranked computed at top of bar)
             for _, row in ranked.iterrows():
                 ticker = row["ticker"]
                 if ticker in self.positions:

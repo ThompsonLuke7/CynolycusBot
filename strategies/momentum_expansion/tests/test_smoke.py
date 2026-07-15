@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from strategies.momentum_expansion.config import momentum_config as cfg
-from strategies.momentum_expansion.data.bars import resample_1h_to_4h
+from strategies.momentum_expansion.data.bars import _next_fetch_start, resample_1h_to_4h
 from strategies.momentum_expansion.data.universe import (
     get_candidate_pool,
     load_snapshot_for,
@@ -77,6 +77,12 @@ def test_resample_1h_to_4h_shape():
     # Each session contributes <= 2 bars
     assert len(df_4h) <= 20
     assert {"open", "high", "low", "close", "volume"}.issubset(df_4h.columns)
+
+
+def test_daily_incremental_fetch_overlaps_last_cached_bar():
+    last_ts = pd.Timestamp("2026-07-02T04:00:00Z")
+    assert _next_fetch_start(kind="1d", start="2020-01-01", last_ts=last_ts) == "2026-06-27T04:00:00Z"
+    assert _next_fetch_start(kind="1h", start="2020-01-01", last_ts=last_ts) == "2026-07-02T04:01:00Z"
 
 
 def test_entry_rules_no_trigger_on_flat_data():

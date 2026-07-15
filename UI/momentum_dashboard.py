@@ -165,20 +165,12 @@ class MomentumDashboardApp:
         def _go():
             try:
                 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient as _C
-                from strategies.momentum_expansion.config.momentum_config import MomentumOptionConfig
                 from strategies.momentum_expansion.live.runner import MomentumLiveRunner
-                from strategies.momentum_expansion.policy.momentum_option_policy import (
-                    MomentumOptionPolicy,
-                )
 
                 os.environ["PYTHONPATH"] = str(REPO)
-                policy = MomentumOptionPolicy(
-                    cfg=MomentumOptionConfig(submit_orders=True),
-                    client=_C(env_file=self.env_file),
-                )
-                runner = MomentumLiveRunner(policy=policy, auto_trade=True)
-                runner.evaluate_now()
-                runner.manage_open_positions()
+                # Shared 4H engine (option/share routing + hold-based exits), same as Meta/HTF.
+                runner = MomentumLiveRunner(auto_trade=True)
+                runner.run_pass(_C(env_file=self.env_file), submit=True)
             except Exception as exc:  # noqa: BLE001
                 logger.error("momentum loop failed: %s", exc)
             finally:
