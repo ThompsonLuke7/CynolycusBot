@@ -15,8 +15,13 @@ is intentionally dependency-free so the live runner can't break on a missing imp
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from functools import lru_cache
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
+_RTH_OPEN = time(9, 30)
+_RTH_CLOSE = time(16, 0)
 
 
 def _nearest_weekday(d: date) -> date:
@@ -102,3 +107,19 @@ def prev_trading_day(d: date) -> date:
     while not is_trading_day(prev):
         prev -= timedelta(days=1)
     return prev
+
+
+def is_market_open_now(now: datetime | None = None) -> bool:
+    """True during US equity/options regular trading hours (09:30-16:00 ET) on a
+    real trading day (weekday, minus full-day NYSE holidays).
+
+    Single source of truth for "is RTH open right now" — previously hand-rolled
+    independently in a couple of live-trading modules, both of which checked
+    only weekday + time-of-day and so reported the market open on a holiday
+    weekday. Half-days (1pm early closes) are still not modeled (see module
+    docstring); on those days this can report open past the actual 1pm close.
+    """
+    et = (now or datetime.now(_ET)).astimezone(_ET)
+    if not is_trading_day(et.date()):
+        return False
+    return _RTH_OPEN <= et.time() < _RTH_CLOSE
