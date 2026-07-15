@@ -41,7 +41,7 @@ def _ticker_path(ticker: str) -> pd.DataFrame | None:
     p = BARS_4H / f"{ticker}.parquet"
     if not p.exists():
         return None
-    b = pd.read_parquet(p, columns=["timestamp", "close", "high", "low"])
+    b = pd.read_parquet(p, columns=["timestamp", "open", "close", "high", "low"])
     b["timestamp"] = pd.to_datetime(b["timestamp"], utc=True)
     return b.drop_duplicates("timestamp").set_index("timestamp").sort_index()
 
@@ -52,10 +52,18 @@ def _load_paths(member: pd.DataFrame) -> dict:
 
 
 def simulate(member: pd.DataFrame, paths: dict, *, stop=None, target=None, scale_frac=1.0,
-             trail=None, grace=0, horizon=None) -> dict:
+             trail=None, grace=0, horizon=None, entry_mode: str = "close") -> dict:
     """Aggregate stats for one exit policy across all tickers' top-K entries
     (no-overlap: the next scan resumes after each exit). Returns are exact stock
-    returns; the options harness is a leverage model on top (see report notes)."""
+    returns; the options harness is a leverage model on top (see report notes).
+
+    entry_mode:
+      "close"     — fill at the signal bar's close (research idealization; only
+                    achievable live for the 1st RTH 4H bar, ~14:00 ET).
+      "next_open" — fill at the NEXT bar's open, i.e. the live reality for the
+                    2nd RTH 4H bar (16:00 close -> next-day 09:30/10:00 open),
+                    so this captures the overnight gap the queued order eats.
+    """
     rets, holds = [], []
     for ticker, g in member.groupby("ticker"):
         g = g.sort_values("timestamp")
@@ -63,14 +71,14 @@ def simulate(member: pd.DataFrame, paths: dict, *, stop=None, target=None, scale
         if bars is None:
             continue
         m = g.set_index("timestamp")["in_top"].reindex(bars.index).fillna(False).astype(bool).values
-        close, high, low = bars["close"].values, bars["high"].values, bars["low"].values
+        open_, close, high, low = bars["open"].values, bars["close"].values, bars["high"].values, bars["low"].values
         n = len(bars)
         i = 0
         while i < n - 1:
             if not m[i]:
                 i += 1
                 continue
-            entry = close[i]
+            entry = open_[i + 1] if entry_mode == "next_open" else close[i]
             if entry <= 0:
                 i += 1
                 continue
@@ -129,8 +137,12 @@ def main() -> None:
     ap.add_argument("--since", default="2025-07-01")
     ap.add_argument("--topks", type=int, nargs="*", default=[5, 10, 15, 20])
     ap.add_argument("--matrix", default=str(MATRIX))
+    ap.add_argument("--entry", choices=["close", "next_open", "both"], default="both",
+                    help="Entry fill: 'close' (research ideal), 'next_open' (live 2nd-bar "
+                         "reality), or 'both' (side-by-side parity check).")
     args = ap.parse_args()
     since = pd.Timestamp(args.since, tz="UTC")
+    modes = ["close", "next_open"] if args.entry == "both" else [args.entry]
 
     best = []
     for k in args.topks:
@@ -138,21 +150,36 @@ def main() -> None:
         paths = _load_paths(member)
         print(f"\n===== top-{k} by htf_score  |  holdout {since.date()}+  "
               f"ticker-bars={len(member):,}  tickers={member.ticker.nunique()} =====")
-        print(f"{'exit policy':36} {'n':>5} {'mean':>7} {'med':>6} {'win':>5} {'ret/std':>7} {'hold':>5} {'ret/bar':>8}")
+        hdr = f"{'exit policy':36} {'n':>5}"
+        for md in modes:
+            hdr += f" | {md:>9} mean  win"
+        print(hdr)
         for name, kw in _POLICIES.items():
-            s = simulate(member, paths, **kw)
-            if not s:
-                continue
-            print(f"{name:36} {s['n']:5} {s['mean']:7.4f} {s['median']:6.3f} {s['win']:5.2f} "
-                  f"{s['ret_std']:7.3f} {s['avg_hold']:5.1f} {s['ret_per_bar']:8.4f}")
-            best.append({"top_k": k, "policy": name, **s})
+            row = f"{name:36}"
+            n_shown = None
+            for mi, md in enumerate(modes):
+                s = simulate(member, paths, entry_mode=md, **kw)
+                if not s:
+                    row += " | " + " " * 18
+                    continue
+                n_shown = s["n"]
+                row += f" | {s['mean']:9.4f} {s['win']:4.2f}"
+                best.append({"top_k": k, "policy": name, "entry": md, **s})
+            if n_shown is not None:
+                print(f"{name:36} {n_shown:5}" + row[36:])
 
     bdf = pd.DataFrame(best)
     if not bdf.empty:
         print("\n##### best configs #####")
-        print("by mean/trade:   ", bdf.loc[bdf['mean'].idxmax(), ['top_k', 'policy', 'mean', 'win', 'avg_hold']].to_dict())
-        print("by ret/std:      ", bdf.loc[bdf['ret_std'].idxmax(), ['top_k', 'policy', 'mean', 'ret_std', 'avg_hold']].to_dict())
-        print("by ret/bar:      ", bdf.loc[bdf['ret_per_bar'].idxmax(), ['top_k', 'policy', 'mean', 'ret_per_bar', 'avg_hold']].to_dict())
+        print("by mean/trade:   ", bdf.loc[bdf['mean'].idxmax(), ['top_k', 'policy', 'entry', 'mean', 'win', 'avg_hold']].to_dict())
+        print("by ret/std:      ", bdf.loc[bdf['ret_std'].idxmax(), ['top_k', 'policy', 'entry', 'mean', 'ret_std', 'avg_hold']].to_dict())
+        print("by ret/bar:      ", bdf.loc[bdf['ret_per_bar'].idxmax(), ['top_k', 'policy', 'entry', 'mean', 'ret_per_bar', 'avg_hold']].to_dict())
+        # Parity summary: how much each policy's mean/trade erodes close -> next_open.
+        if {"close", "next_open"}.issubset(set(bdf["entry"])):
+            piv = bdf.pivot_table(index=["top_k", "policy"], columns="entry", values=["mean", "win"])
+            piv[("mean", "erosion")] = piv[("mean", "close")] - piv[("mean", "next_open")]
+            print("\n##### close -> next_open erosion (mean/trade, avg across policies) #####")
+            print(piv[("mean", "erosion")].groupby("top_k").mean().to_string())
     print("\n# OPTIONS = leverage model on the stock return per trade (~4-7x + theta);")
     print("#   ordering of policies is identical, magnitudes amplified — scale-out matters more.")
 
