@@ -139,8 +139,21 @@ def load_earnings_calendar(path: Path = OUT_PATH) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=["ticker", "date", "eps_estimate", "reported_eps", "surprise_pct"])
     df = pd.read_parquet(path)
-    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None).dt.normalize()
-    return df
+    if "date" not in df.columns:
+        df["date"] = pd.NaT
+    date = pd.to_datetime(df["date"], utc=True, errors="coerce").dt.tz_convert(None).dt.normalize()
+    if "next_earnings_date" in df.columns:
+        next_date = (
+            pd.to_datetime(df["next_earnings_date"], utc=True, errors="coerce")
+            .dt.tz_convert(None)
+            .dt.normalize()
+        )
+        date = date.fillna(next_date)
+    df["date"] = date
+    if "ticker" in df.columns:
+        df["ticker"] = df["ticker"].astype(str).str.upper().str.strip()
+    df = df.dropna(subset=["ticker", "date"]).drop_duplicates(["ticker", "date"])
+    return df.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 
 def add_earnings_features(
