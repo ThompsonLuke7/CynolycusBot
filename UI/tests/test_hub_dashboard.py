@@ -59,3 +59,28 @@ def test_snapshot_with_nonfinite_account_values_remains_valid_json(monkeypatch):
     assert decoded["dashboards"][0]["state"] == "ready"
     assert decoded["totals"]["equity"] is None
     assert decoded["totals"]["unrealized_pl"] == 0.0
+
+
+def test_default_hub_includes_amethyst_dashboard():
+    app = HubDashboardApp()
+
+    keys = {dash.key for dash in app.dashboards}
+
+    assert "amethyst" in keys
+
+
+def test_start_all_skips_one_shot_4h_loops(monkeypatch):
+    app = HubDashboardApp()
+    started: list[str] = []
+    monkeypatch.setattr(app, "start_one", lambda key, live: started.append(key) or {"key": key, "ok": True})
+
+    result = app.start_all({})
+
+    assert "spy" in started
+    assert "swing" in started
+    assert "dealer" in started
+    assert "meta" not in started
+    assert "momentum" not in started
+    skipped = {r["key"]: r for r in result["results"] if r.get("skipped")}
+    assert skipped["meta"]["reason"] == "scheduled_4h_loop"
+    assert skipped["momentum"]["reason"] == "scheduled_4h_loop"

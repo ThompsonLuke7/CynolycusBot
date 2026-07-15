@@ -8,6 +8,7 @@ exceeds the IEX free-tier limit of one concurrent stream.
   Intraday SPY dashboard:  http://localhost:8765  (same URL as before)
   Swing dashboard:         http://localhost:8766  (same URL as before)
   Dealer positioning:      http://localhost:8768
+  Dealer Ranker:           http://localhost:8773
 
 Usage:
   python -m UI.combined_server [--host 127.0.0.1] [--port-intraday 8765] [--port-swing 8766] [--env .env]
@@ -97,6 +98,8 @@ DEFAULT_PORT_DEALER = 8768
 DEFAULT_PORT_META = 8769
 DEFAULT_PORT_MOMENTUM = 8770
 DEFAULT_PORT_HTF = 8771
+DEFAULT_PORT_AMETHYST = 8772
+DEFAULT_PORT_DEALER_RANKER = 8773
 
 # State book used by the swing real-account (LIVE) policy.
 _SWING_LIVE_BOOK = "Data/inference/multi_ticker_swing/real_account_book_live.json"
@@ -147,7 +150,14 @@ def _run_nightly_jobs() -> None:
         )
         return
     logger.info("Nightly jobs: launching %s", script)
-    result = subprocess.run([bash, str(script)], cwd=str(repo_root))
+    # Isolate the long-running child from the supervisor's terminal process
+    # group.  A Ctrl-C/server shutdown should stop trading and dashboards, but
+    # must not interrupt an already-running data pipeline halfway through.
+    result = subprocess.run(
+        [bash, str(script)],
+        cwd=str(repo_root),
+        start_new_session=True,
+    )
     logger.info("Nightly jobs: finished (exit=%s)", result.returncode)
 
 
@@ -161,6 +171,7 @@ def _run_data_readiness() -> None:
     """
     import shutil
     import subprocess
+    from core.live_job_guard import heavy_job_guard
 
     repo_root = Path(__file__).resolve().parents[1]
     script = repo_root / "scripts" / "nightly_data_readiness.sh"
@@ -168,9 +179,33 @@ def _run_data_readiness() -> None:
     if bash is None:
         logger.error("Data readiness: 'bash' not found on PATH — cannot run %s.", script)
         return
-    logger.info("Data readiness: launching %s", script)
-    result = subprocess.run([bash, str(script)], cwd=str(repo_root))
-    logger.info("Data readiness: finished (exit=%s)", result.returncode)
+    with heavy_job_guard(
+        "combined-server-data-readiness",
+        block_live_window=True,
+        min_available_mb=6144,
+        min_swap_free_mb=6144,
+    ) as guard:
+        if not guard.ok:
+            logger.warning("Data readiness: skipped (%s)", guard.reason)
+            return
+        logger.info("Data readiness: launching %s", script)
+        result = subprocess.run([bash, str(script)], cwd=str(repo_root))
+        logger.info("Data readiness: finished (exit=%s)", result.returncode)
+
+
+def _run_broker_equity_snapshot(*, env_file: str, account_label: str) -> None:
+    """Capture read-only broker marks used by the daily briefing attribution."""
+    from core.broker_equity_snapshot import capture_from_env
+
+    try:
+        result = capture_from_env(env_file=env_file, account_label=account_label)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Broker equity snapshot (%s) failed: %s", account_label, exc, exc_info=True)
+        return
+    logger.info(
+        "Broker equity snapshot (%s): positions=%d -> %s",
+        account_label, result["position_count"], result["path"],
+    )
 
 
 def _build_symbol_union(env_file: str) -> list[str]:
@@ -183,34 +218,46 @@ def _build_symbol_union(env_file: str) -> list[str]:
     return sorted(combined)
 
 
-def _run_meta_ranker_loop(*, mode: str, submit: bool, live: bool) -> None:
-    """Fire one Meta Ranker 4H loop pass (bars -> feeds -> matrix -> runner).
+def _run_meta_ranker_loop(*, mode: str, submit: bool, live: bool, flush: bool = False) -> None:
+    """Fire one Meta Ranker 4H pass — RUNNER ONLY (read matrix -> score -> trade).
 
-    Runs as a subprocess so a failure can't take down the combined server. Themes
-    are NOT refreshed here (weekly job: `update_feeds.py --weekly`).
+    The shared bars + Meta matrix are kept fresh out-of-band by nightly/pre-open
+    readiness plus the guarded afternoon SharedDataRefresher, so this pass skips
+    bars/feeds/matrix and just runs the runner (~seconds). Runs as a
+    subprocess so a failure can't take down the combined server.
+
+    flush=True is the pre-open pass: it re-ranks and submits the entries that were
+    queued after yesterday's close (the pm-bar signal is the latest bar, so
+    --allow-stale is expected), then exits — it manages no positions.
     """
     import os
     import subprocess
     import sys
 
     repo_root = Path(__file__).resolve().parents[1]
-    script = repo_root / "signals/meta_context/meta_ranker/run_4h_loop.py"
-    argv = [sys.executable, str(script), "--mode", mode]
+    if flush:
+        script = repo_root / "signals/meta_context/meta_ranker/live_runner.py"
+        argv = [sys.executable, str(script), "--mode", mode, "--flush-pending-open", "--allow-stale"]
+    else:
+        script = repo_root / "signals/meta_context/meta_ranker/run_4h_loop.py"
+        argv = [sys.executable, str(script), "--mode", mode,
+                "--skip-bars", "--skip-feeds", "--skip-matrix"]
     if submit:
         argv.append("--submit")
     if live:
         argv.append("--live")
-    logger.info("Meta Ranker loop: launching %s", " ".join(argv))
+    logger.info("Meta Ranker %s: launching %s", "pre-open flush" if flush else "loop", " ".join(argv))
     env = {**os.environ, "PYTHONPATH": str(repo_root)}
     subprocess.run(argv, cwd=str(repo_root), env=env)
 
 
-def _run_htf_loop(*, mode: str, submit: bool, live: bool) -> None:
+def _run_htf_loop(*, mode: str, submit: bool, live: bool, flush: bool = False) -> None:
     """Fire one standalone HTF Swing pass (reads htf_score off the shared matrix).
 
     Runs as a subprocess so a failure can't take down the combined server. The
     shared matrix is kept fresh by the data-readiness job + the Meta loop, so this
-    just reads it; schedule it a few minutes AFTER the Meta times.
+    just reads it; schedule it a few minutes AFTER the Meta times. flush=True is the
+    pre-open pass that submits yesterday's after-close-queued entries (re-ranked).
     """
     import os
     import subprocess
@@ -219,20 +266,25 @@ def _run_htf_loop(*, mode: str, submit: bool, live: bool) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     script = repo_root / "strategies/multi_ticker_swing_htf/live/runner.py"
     argv = [sys.executable, str(script), "--mode", mode]
+    if flush:
+        argv += ["--flush-pending-open", "--allow-stale"]
     if submit:
         argv.append("--submit")
     if live:
         argv.append("--live")
-    logger.info("HTF Swing loop: launching %s", " ".join(argv))
+    logger.info("HTF Swing %s: launching %s", "pre-open flush" if flush else "loop", " ".join(argv))
     env = {**os.environ, "PYTHONPATH": str(repo_root)}
     subprocess.run(argv, cwd=str(repo_root), env=env)
 
 
-def _run_momentum_loop(*, submit: bool, live: bool) -> None:
+def _run_momentum_loop(*, submit: bool, live: bool, flush: bool = False) -> None:
     """Fire one standalone Momentum Expansion pass (ExpansionRanker -> own policy).
 
     Subprocess-isolated. Reads 4H/1H bars off disk (kept fresh by data-readiness +
     the Meta loop's bar catchup), so schedule it a few minutes AFTER the Meta times.
+    flush=True is the pre-open pass that submits yesterday's after-close-queued
+    entries (re-ranked); the pm bar is the latest so we relax the signal-staleness
+    guard (read at import via MOMENTUM_MAX_SIGNAL_STALENESS_DAYS) for that pass only.
     """
     import os
     import subprocess
@@ -241,13 +293,84 @@ def _run_momentum_loop(*, submit: bool, live: bool) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     script = repo_root / "strategies/momentum_expansion/live/runner.py"
     argv = [sys.executable, str(script)]
+    if flush:
+        argv.append("--flush-pending-open")
     if submit:
         argv.append("--submit")
     if live:
         argv.append("--live")
-    logger.info("Momentum loop: launching %s", " ".join(argv))
+    logger.info("Momentum %s: launching %s", "pre-open flush" if flush else "loop", " ".join(argv))
+    env = {**os.environ, "PYTHONPATH": str(repo_root)}
+    if flush:
+        env["MOMENTUM_MAX_SIGNAL_STALENESS_DAYS"] = "5"  # pm bar is the latest; not "stale"
+    subprocess.run(argv, cwd=str(repo_root), env=env)
+
+
+def _run_dealer_ranker_loop(*, submit: bool, live: bool, top_k: int, workers: int, contracts: int) -> None:
+    """Fire one near-close dealer-rank options pass.
+
+    It refreshes option-chain snapshots, rebuilds dealer rankings, buys nearest
+    ATM non-0DTE contracts for the top ranks, and then lets the shared execution
+    policy manage exits. Subprocess-isolated so a Schwab/Alpaca hiccup cannot
+    take down the combined server.
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "strategies" / "dealer_positioning" / "live_ranked_options.py"
+    argv = [
+        sys.executable,
+        str(script),
+        "--refresh-chain",
+        "--top-k",
+        str(int(top_k)),
+        "--workers",
+        str(int(workers)),
+        "--contracts",
+        str(int(contracts)),
+    ]
+    if submit:
+        argv.append("--submit")
+    if live:
+        argv.append("--live")
+    logger.info("Dealer Ranker loop: launching %s", " ".join(argv))
     env = {**os.environ, "PYTHONPATH": str(repo_root)}
     subprocess.run(argv, cwd=str(repo_root), env=env)
+
+
+def _assert_ports_free(host: str, ports: dict[str, int]) -> None:
+    """Fail fast if any dashboard port is already bound.
+
+    The HTTP servers are bound one-by-one *after* the 900+ symbol universe is
+    built and the Alpaca WebSocket is opened, so without this check a second
+    launch wastes that startup work and then dies with an opaque server_bind()
+    traceback on the first conflicting port. Worse, a prior combined_server that
+    is *stopped/frozen* (SIGSTOP -> state T) still holds its sockets in LISTEN,
+    so it reads as "in use" and a fresh launch crash-loops forever against it.
+    Probe every port up front and refuse with a clear, actionable message.
+    """
+    import socket
+
+    busy: list[str] = []
+    for name, port in ports.items():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            # Mirror ThreadingHTTPServer.allow_reuse_address so the probe sees
+            # exactly what the real bind will (SO_REUSEADDR clears TIME_WAIT but
+            # NOT an active LISTEN, so a live/frozen owner still trips this).
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((host, port))
+            except OSError:
+                busy.append(f"{name}={port}")
+    if busy:
+        raise SystemExit(
+            "[combined_server] refusing to start: dashboard port(s) already in "
+            f"use: {', '.join(busy)}. Another combined_server is already running "
+            "(possibly stopped/frozen but still holding the sockets). Find the "
+            r"owner with:  ss -ltnp | grep -E ':(876[4-9]|877[0-3])'"
+        )
 
 
 def run_combined(
@@ -263,20 +386,30 @@ def run_combined(
     audit_root: Path | None = None,
     nightly_time: str | None = "16:30",
     data_readiness_time: str | None = None,
-    data_readiness_on_start: bool = True,
+    data_readiness_on_start: bool = False,
+    data_refresher: bool = True,
+    data_refresher_interval: int = 300,
+    data_refresher_feeds: bool = False,
     catalyst_poll: bool = True,
     catalyst_poll_interval: int = 300,
     port_meta: int = DEFAULT_PORT_META,
     port_momentum: int = DEFAULT_PORT_MOMENTUM,
     port_htf: int = DEFAULT_PORT_HTF,
+    port_amethyst: int = DEFAULT_PORT_AMETHYST,
+    port_dealer_ranker: int = DEFAULT_PORT_DEALER_RANKER,
     meta_ranker_times: str = "14:20,16:20",
-    meta_ranker_mode: str = "equity",
+    meta_ranker_mode: str = "options",
     meta_ranker_live: bool = False,
     htf_times: str = "14:25,16:25",
-    htf_mode: str = "equity",
+    htf_mode: str = "options",
     htf_live: bool = False,
     momentum_times: str = "14:25,16:25",
     momentum_live: bool = False,
+    dealer_ranker_time: str = "",
+    dealer_ranker_live: bool = False,
+    dealer_ranker_workers: int = 8,
+    dealer_ranker_top_k: int = 10,
+    dealer_ranker_contracts: int = 1,
     start_all: bool = False,
 ) -> None:
     if audit_root is None:
@@ -290,6 +423,21 @@ def run_combined(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
+
+    # Pre-flight: refuse to start (before the expensive universe build + Alpaca
+    # WebSocket connect) if any dashboard port is already held by another — or a
+    # stopped/frozen — combined_server instance.
+    _assert_ports_free(host, {
+        "hub": port_hub,
+        "intraday": port_intraday,
+        "swing": port_swing,
+        "dealer": port_dealer,
+        "meta": port_meta,
+        "momentum": port_momentum,
+        "htf": port_htf,
+        "amethyst": port_amethyst,
+        "dealer_ranker": port_dealer_ranker,
+    })
 
     # ------------------------------------------------------------------
     # 1. Build shared symbol universe and start the single WebSocket stream
@@ -410,7 +558,39 @@ def run_combined(
     logger.info("HTF Swing dashboard:     http://%s:%d", host, port_htf)
 
     # ------------------------------------------------------------------
-    # 4c. Hub / overview dashboard (port 8764) — links + status + start-all
+    # 4c. Amethyst dealer-vision dashboard (port 8772) — read-only chart/grid
+    # ------------------------------------------------------------------
+    from UI.amethyst_dashboard import AmethystDashboardApp, make_server as _make_amethyst_server
+
+    amethyst_app = AmethystDashboardApp()
+    amethyst_server = _make_amethyst_server(host, port_amethyst, amethyst_app)
+    amethyst_thread = threading.Thread(target=amethyst_server.serve_forever, daemon=True, name="amethyst-http")
+    amethyst_thread.start()
+    logger.info("Amethyst dashboard:      http://%s:%d", host, port_amethyst)
+
+    # ------------------------------------------------------------------
+    # 4d. Dealer Ranker dashboard (port 8773) — near-close rank scan + options
+    # ------------------------------------------------------------------
+    from UI.dealer_ranker_dashboard import DealerRankerDashboardApp, make_server as _make_dealer_ranker_server
+
+    dealer_ranker_app = DealerRankerDashboardApp(
+        env_file=paper_env_file or env_file,
+        live_env_file=live_env_file,
+        top_k=dealer_ranker_top_k,
+        workers=dealer_ranker_workers,
+        contracts=dealer_ranker_contracts,
+    )
+    dealer_ranker_server = _make_dealer_ranker_server(host, port_dealer_ranker, dealer_ranker_app)
+    dealer_ranker_thread = threading.Thread(
+        target=dealer_ranker_server.serve_forever,
+        daemon=True,
+        name="dealer-ranker-http",
+    )
+    dealer_ranker_thread.start()
+    logger.info("Dealer Ranker dashboard: http://%s:%d", host, port_dealer_ranker)
+
+    # ------------------------------------------------------------------
+    # 4e. Hub / overview dashboard (port 8764) — links + status + start-all
     # ------------------------------------------------------------------
     from UI.hub_dashboard import HubDashboardApp, make_server as _make_hub_server
 
@@ -418,6 +598,8 @@ def run_combined(
         host=host, port_spy=port_intraday, port_swing=port_swing,
         port_dealer=port_dealer, port_meta=port_meta,
         port_momentum=port_momentum, port_htf=port_htf,
+        port_amethyst=port_amethyst,
+        port_dealer_ranker=port_dealer_ranker,
     )
     hub_server = _make_hub_server(host, port_hub, hub_app)
     hub_thread = threading.Thread(target=hub_server.serve_forever, daemon=True, name="hub-http")
@@ -432,7 +614,9 @@ def run_combined(
           f"(real money {'available' if live_env_file else 'disabled'})")
     print(f"  HTF Swing (signals):     http://{host}:{port_htf}")
     print(f"  Momentum dashboard:      http://{host}:{port_momentum}")
+    print(f"  Amethyst dashboard:      http://{host}:{port_amethyst}")
     print(f"  Dealer positioning:      http://{host}:{port_dealer}")
+    print(f"  Dealer Ranker:           http://{host}:{port_dealer_ranker}")
     print(f"  Shared stream:           {len(all_symbols)} symbols")
     print("  Orders default to the PAPER account; LIVE toggle is OFF by default.")
     print("  Press Ctrl+C to stop.")
@@ -473,12 +657,9 @@ def run_combined(
             print(f"  Nightly jobs:            daily {nightly_time} ET (CBOE/FINRA/discovery)")
 
     # ------------------------------------------------------------------
-    # 5a1. Data-readiness ON STARTUP — refresh shared bars + HTF features + Meta
-    #      matrix as soon as the server boots, so the three shared-universe
-    #      modules (HTF/Momentum/Meta) are caught up the moment you start it each
-    #      morning. This is the reliable trigger: a fixed-time cron never fires if
-    #      the server isn't running yet. Runs in a background thread so dashboards
-    #      come up immediately; the staleness guards hold the line until it lands.
+    # 5a1. Optional data-readiness on startup. Default is OFF: live startup should
+    #      load the nightly/pre-open caches and start trading sessions, not launch
+    #      a full-universe catchup/rebuild during the fragile morning window.
     # ------------------------------------------------------------------
     if data_readiness_on_start:
         threading.Thread(
@@ -487,7 +668,27 @@ def run_combined(
             name="data-readiness-startup",
         ).start()
         logger.info("Data readiness: running once on startup (background)")
-        print("  Data readiness:          on startup (bars+HTF+meta matrix, background)")
+        print("  Data readiness:          on startup (guarded, background)")
+
+    # ------------------------------------------------------------------
+    # 5a0. Continuous background data refresher — keeps shared bars + Meta matrix
+    #      fresh OUT-OF-BAND near the 4H decision windows, so startup/the open
+    #      remain trading-only. Heavy daily feeds stay in the nightly readiness job.
+    # ------------------------------------------------------------------
+    if data_refresher:
+        from UI.shared_data_refresher import SharedDataRefresher
+
+        refresher = SharedDataRefresher(
+            interval=data_refresher_interval, feeds_enabled=data_refresher_feeds,
+            stop_event=stop_evt,
+        )
+        refresher.start()
+        logger.info(
+            "Shared data refresher: started (every %ds during 13:45-16:40 ET, feeds=%s)",
+            data_refresher_interval, data_refresher_feeds,
+        )
+        print(f"  Data refresher:          every {data_refresher_interval}s ET "
+              f"(bars+matrix, guarded)")
 
     # ------------------------------------------------------------------
     # 5a2. Optional data-readiness scheduler — only useful if you leave the server
@@ -634,6 +835,63 @@ def run_combined(
         lambda: _run_momentum_loop(submit=True, live=momentum_live),
         label="Momentum", tag=mom_tag,
     )
+    dealer_ranker_tag = f"options/{'LIVE' if dealer_ranker_live else 'paper'}/SUBMIT"
+    dealer_ranker_schedulers = _schedule_loop(
+        dealer_ranker_time,
+        lambda: _run_dealer_ranker_loop(
+            submit=True,
+            live=dealer_ranker_live,
+            top_k=dealer_ranker_top_k,
+            workers=dealer_ranker_workers,
+            contracts=dealer_ranker_contracts,
+        ),
+        label="Dealer Ranker",
+        tag=dealer_ranker_tag,
+    )
+
+    # Capture exact broker marks shortly after the regular and extended-session
+    # closes.  This is read-only and deliberately independent of signal/order
+    # paths, so reporting remains available even when entry readiness is stale.
+    snapshot_schedulers: list = []
+    snapshot_accounts = [("paper", meta_env)]
+    if live_env_file:
+        snapshot_accounts.append(("live", live_env_file))
+    for account_label, snapshot_env in snapshot_accounts:
+        snapshot_schedulers += _schedule_loop(
+            "16:05,20:05",
+            lambda env=snapshot_env, label=account_label: _run_broker_equity_snapshot(
+                env_file=env, account_label=label,
+            ),
+            label=f"Broker snapshot {account_label}", tag="READ-ONLY",
+        )
+
+    # ------------------------------------------------------------------
+    # 5e. Pre-open flush (~09:35 ET). The pm 4H bar (18:00 UTC = 2-6pm ET) only
+    #     finishes AFTER the 16:00 equity close, so its entries can't fill same-day
+    #     and are queued (see defer_entries_if_market_closed). Just after the 09:30
+    #     open we re-rank each queue against today's fresh top-K and submit the
+    #     survivors as normal day orders, then exit — matching the "next_open" fill
+    #     that backtest_exits.py validated. Staggered so Meta re-scores first.
+    # ------------------------------------------------------------------
+    flush_schedulers: list = []
+    if meta_ranker_times:
+        flush_schedulers += _schedule_loop(
+            "09:35",
+            lambda: _run_meta_ranker_loop(mode=meta_ranker_mode, submit=True, live=meta_ranker_live, flush=True),
+            label="Meta pre-open flush", tag=_tag,
+        )
+    if htf_times:
+        flush_schedulers += _schedule_loop(
+            "09:37",
+            lambda: _run_htf_loop(mode=htf_mode, submit=True, live=htf_live, flush=True),
+            label="HTF pre-open flush", tag=htf_tag,
+        )
+    if momentum_times:
+        flush_schedulers += _schedule_loop(
+            "09:37",
+            lambda: _run_momentum_loop(submit=True, live=momentum_live, flush=True),
+            label="Momentum pre-open flush", tag=mom_tag,
+        )
 
     # Optional boot-time equivalent of clicking Hub -> Start All. Keep this
     # paper-default so launching the combined server never implies real-money
@@ -680,6 +938,8 @@ def run_combined(
     dealer_server.shutdown()
     momentum_server.shutdown()
     htf_server.shutdown()
+    amethyst_server.shutdown()
+    dealer_ranker_server.shutdown()
     if meta_server is not None:
         meta_server.shutdown()
 
@@ -725,9 +985,15 @@ def main() -> None:
         help="Disable the in-process nightly scheduler (use system cron instead).",
     )
     parser.add_argument(
+        "--readiness-on-start",
+        action="store_true",
+        help="Run the guarded shared-bars/HTF/Meta-matrix readiness job at server startup. "
+             "Default is off so live boot stays trading-only.",
+    )
+    parser.add_argument(
         "--no-readiness-on-start",
         action="store_true",
-        help="Disable the on-startup shared-bars/HTF/Meta-matrix refresh (on by default).",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--data-readiness-time",
@@ -736,6 +1002,25 @@ def main() -> None:
              "features + Meta matrix on a daily timer (only useful if the server runs "
              "across days; the on-startup refresh already covers a daily restart). "
              "Empty = timer disabled.",
+    )
+    parser.add_argument(
+        "--no-data-refresher",
+        action="store_true",
+        help="Disable the continuous background shared-bars + Meta-matrix refresher. With it "
+             "off, the matrix only refreshes on startup/nightly and the runner-only 4H loops "
+             "will abort on staleness during a multi-day run.",
+    )
+    parser.add_argument(
+        "--data-refresher-interval",
+        type=int,
+        default=300,
+        help="Seconds to sleep between background refresh cycles during the session (default 300).",
+    )
+    parser.add_argument(
+        "--data-refresher-feeds",
+        action="store_true",
+        help="Also run light feed refreshes from the afternoon data refresher. Default is off; "
+             "nightly readiness owns daily/heavy feeds.",
     )
     parser.add_argument(
         "--no-catalyst-poll",
@@ -756,16 +1041,16 @@ def main() -> None:
              "'14:20,16:20'). Each pass catches up bars, rebuilds the matrix, and scores+trades. "
              "Pass '' to disable.",
     )
-    parser.add_argument("--meta-ranker-mode", choices=["equity", "options"], default="equity",
-                        help="Meta Ranker order type (default equity).")
+    parser.add_argument("--meta-ranker-mode", choices=["equity", "options"], default="options",
+                        help="Meta Ranker order type (default options).")
     parser.add_argument("--meta-ranker-live", action="store_true",
                         help="Run the scheduled Meta Ranker loop against the LIVE account (default paper).")
     parser.add_argument(
         "--htf-times", default="14:25,16:25",
         help="Comma-separated ET HH:MM to fire the standalone HTF Swing loop, a few min after "
              "the Meta times so it reads the refreshed matrix (default '14:25,16:25'). '' disables.")
-    parser.add_argument("--htf-mode", choices=["equity", "options"], default="equity",
-                        help="HTF Swing order type (default equity).")
+    parser.add_argument("--htf-mode", choices=["equity", "options"], default="options",
+                        help="HTF Swing order type (default options).")
     parser.add_argument("--htf-live", action="store_true",
                         help="Run the scheduled HTF Swing loop against the LIVE account (default paper).")
     parser.add_argument(
@@ -782,6 +1067,24 @@ def main() -> None:
                         help="Port for the Momentum Expansion dashboard (default 8770).")
     parser.add_argument("--port-htf", type=int, default=DEFAULT_PORT_HTF,
                         help="Port for the HTF Swing signals dashboard (default 8771).")
+    parser.add_argument("--port-amethyst", type=int, default=DEFAULT_PORT_AMETHYST,
+                        help="Port for the Amethyst dealer-vision dashboard (default 8772).")
+    parser.add_argument("--port-dealer-ranker", type=int, default=DEFAULT_PORT_DEALER_RANKER,
+                        help="Port for the Dealer Ranker dashboard (default 8773).")
+    parser.add_argument(
+        "--dealer-ranker-time",
+        default="",
+        help="Optional ET HH:MM to run the near-close Dealer Ranker scan+options pass. "
+             "Empty = disabled; manual dashboard runs remain available.",
+    )
+    parser.add_argument("--dealer-ranker-live", action="store_true",
+                        help="Run the scheduled Dealer Ranker pass against the LIVE account (default paper).")
+    parser.add_argument("--dealer-ranker-workers", type=int, default=8,
+                        help="Parallel dealer-chain workers for the Dealer Ranker pass (default 8).")
+    parser.add_argument("--dealer-ranker-top-k", type=int, default=10,
+                        help="Number of dealer-ranked names to target (default 10).")
+    parser.add_argument("--dealer-ranker-contracts", type=int, default=1,
+                        help="Contracts per Dealer Ranker entry (default 1).")
     parser.add_argument(
         "--start-all",
         action="store_true",
@@ -802,12 +1105,17 @@ def main() -> None:
         audit_root=Path(args.audit_root),
         nightly_time=None if args.no_nightly_jobs else args.nightly_time,
         data_readiness_time=(args.data_readiness_time or None),
-        data_readiness_on_start=not args.no_readiness_on_start,
+        data_readiness_on_start=bool(args.readiness_on_start),
+        data_refresher=not args.no_data_refresher,
+        data_refresher_interval=args.data_refresher_interval,
+        data_refresher_feeds=bool(args.data_refresher_feeds),
         catalyst_poll=not args.no_catalyst_poll,
         catalyst_poll_interval=args.catalyst_poll_interval,
         port_meta=args.port_meta,
         port_momentum=args.port_momentum,
         port_htf=args.port_htf,
+        port_amethyst=args.port_amethyst,
+        port_dealer_ranker=args.port_dealer_ranker,
         meta_ranker_times=args.meta_ranker_times,
         meta_ranker_mode=args.meta_ranker_mode,
         meta_ranker_live=args.meta_ranker_live,
@@ -816,6 +1124,11 @@ def main() -> None:
         htf_live=args.htf_live,
         momentum_times=args.momentum_times,
         momentum_live=args.momentum_live,
+        dealer_ranker_time=args.dealer_ranker_time,
+        dealer_ranker_live=args.dealer_ranker_live,
+        dealer_ranker_workers=args.dealer_ranker_workers,
+        dealer_ranker_top_k=args.dealer_ranker_top_k,
+        dealer_ranker_contracts=args.dealer_ranker_contracts,
         start_all=args.start_all,
     )
 

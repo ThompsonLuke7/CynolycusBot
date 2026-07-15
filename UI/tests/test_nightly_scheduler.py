@@ -5,6 +5,7 @@ import datetime as dt
 import threading
 
 import pytest
+from unittest.mock import Mock
 
 from UI.nightly_scheduler import NightlyScheduler, next_run_at, parse_hhmm
 
@@ -75,3 +76,17 @@ def test_scheduler_fires_when_time_reached(monkeypatch):
 
     assert calls, "scheduler should have fired once the target time was reached"
     assert len(calls) == 1, "same-day guard must prevent repeated firing"
+
+
+def test_nightly_market_data_isolated_from_supervisor_signal_group(monkeypatch):
+    import subprocess
+    import UI.combined_server as combined
+
+    run = Mock(return_value=Mock(returncode=0))
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/bash")
+
+    combined._run_nightly_jobs()
+
+    assert run.call_count == 1
+    assert run.call_args.kwargs["start_new_session"] is True

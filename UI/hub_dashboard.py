@@ -32,7 +32,13 @@ from typing import Any, Callable
 from UI.ui_chrome import NAV_HTML, PICKER_HTML, THEME_LINK, serve_theme_asset, serve_theme_css
 
 logger = logging.getLogger(__name__)
+# Snapshot reads must stay snappy — a slow module should not stall the hub page.
 _TIMEOUT = 2.5
+# Control POSTs (start/stop) can legitimately block for a while: the swing
+# session, for one, warms up ~900 tickers synchronously before /api/start
+# returns. Using the read timeout here reported those slow-but-successful starts
+# as "timed out" and dropped the socket mid-response (BrokenPipe on the module).
+_CONTROL_TIMEOUT = 120.0
 
 
 class _Dash:
@@ -129,6 +135,33 @@ def _adapt_dealer(s: dict) -> dict:
     return {"state": str(state), "detail": "analytics"}
 
 
+def _adapt_dealer_ranker(s: dict) -> dict:
+    cfg = s.get("config") or {}
+    acct = s.get("account") or {}
+    scan = s.get("scan") or {}
+    state = "running" if _truthy(s.get("loop_running")) else "ready"
+    out = {"state": state, "detail": f"{len(scan.get('picks', []))} ranks · {cfg.get('workers', '-')} workers",
+           "live_available": bool(cfg.get("live_available")),
+           "account_type": "real money" if cfg.get("live") else "paper"}
+    if not acct.get("error"):
+        out["acct"] = {"equity": _f(acct.get("equity")),
+                       "n_positions": acct.get("n_positions"),
+                       "upl": _positions_upl(acct.get("positions") or []),
+                       "account_n_positions": acct.get("account_n_positions"),
+                       "account_upl": _f(acct.get("account_upl"))}
+    return out
+
+
+def _adapt_amethyst(s: dict) -> dict:
+    state = s.get("state") or "ready"
+    last = s.get("last_symbol") or "-"
+    err = s.get("last_error")
+    detail = f"night vision · last {last}"
+    if err:
+        detail = f"{detail} · {err}"
+    return {"state": str(state), "detail": detail}
+
+
 def _adapt_meta(s: dict) -> dict:
     cfg = s.get("config") or {}
     acct = s.get("account") or {}
@@ -174,7 +207,8 @@ class HubDashboardApp:
     def __init__(self, *, host: str = "127.0.0.1", port_spy: int = 8765,
                  port_swing: int = 8766, port_dealer: int = 8768,
                  port_meta: int = 8769, port_momentum: int = 8770,
-                 port_htf: int = 8771) -> None:
+                 port_htf: int = 8771, port_amethyst: int = 8772,
+                 port_dealer_ranker: int = 8773) -> None:
         self.host = host
         self.dashboards: list[_Dash] = [
             _Dash("spy", "SPY Intraday", port_spy, startable=True, stoppable=True, tradeable=True,
@@ -190,8 +224,13 @@ class HubDashboardApp:
                   start_path=None, start_body=lambda live: {}, adapt=_adapt_htf),
             _Dash("momentum", "Momentum", port_momentum, startable=True, stoppable=False, tradeable=True,
                   start_path="/api/run-loop", start_body=lambda live: {}, adapt=_adapt_momentum),
+            _Dash("amethyst", "Amethyst", port_amethyst, startable=False, stoppable=False,
+                  tradeable=False, start_path=None, start_body=lambda live: {}, adapt=_adapt_amethyst),
             _Dash("dealer", "Dealer Positioning", port_dealer, startable=True, stoppable=True,
                   tradeable=False, start_path="/api/start", start_body=lambda live: {}, adapt=_adapt_dealer),
+            _Dash("dealer_ranker", "Dealer Ranker", port_dealer_ranker, startable=True, stoppable=False,
+                  tradeable=True, start_path="/api/run-loop", start_body=lambda live: {},
+                  adapt=_adapt_dealer_ranker),
             _Dash("meta", "Meta Ranker", port_meta, startable=True, stoppable=False, tradeable=True,
                   start_path="/api/run-loop", start_body=lambda live: {}, adapt=_adapt_meta),
         ]
@@ -203,13 +242,13 @@ class HubDashboardApp:
         raise KeyError(f"unknown dashboard: {key}")
 
     def _request(self, port: int, path: str, *, method: str = "GET",
-                 body: dict | None = None) -> dict:
+                 body: dict | None = None, timeout: float = _TIMEOUT) -> dict:
         url = f"http://{self.host}:{port}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
         return json.loads(raw or b"{}")
 
@@ -275,13 +314,15 @@ class HubDashboardApp:
         d = self._by_key(key)
         if not d.startable or d.start_path is None:
             return {"key": key, "ok": False, "error": "not_startable"}
-        if d.key in ("meta", "momentum"):  # set the account before firing the loop
+        if d.key in ("meta", "momentum", "dealer_ranker"):  # set the account before firing the loop
             try:
-                self._request(d.port, "/api/set-live", method="POST", body={"live": live})
+                self._request(d.port, "/api/set-live", method="POST", body={"live": live},
+                              timeout=_CONTROL_TIMEOUT)
             except Exception as exc:  # noqa: BLE001
                 return {"key": key, "ok": False, "error": f"set-live: {exc}"}
         try:
-            res = self._request(d.port, d.start_path, method="POST", body=d.start_body(bool(live)))
+            res = self._request(d.port, d.start_path, method="POST", body=d.start_body(bool(live)),
+                                timeout=_CONTROL_TIMEOUT)
             return {"key": key, "ok": True, "result": res}
         except Exception as exc:  # noqa: BLE001
             return {"key": key, "ok": False, "error": str(exc)}
@@ -291,15 +332,23 @@ class HubDashboardApp:
         if not d.stoppable:
             return {"key": key, "ok": False, "error": "not_stoppable"}
         try:
-            res = self._request(d.port, "/api/stop", method="POST", body={})
+            res = self._request(d.port, "/api/stop", method="POST", body={}, timeout=_CONTROL_TIMEOUT)
             return {"key": key, "ok": True, "result": res}
         except Exception as exc:  # noqa: BLE001
             return {"key": key, "ok": False, "error": str(exc)}
 
     def start_all(self, live_map: dict) -> dict:
         live_map = live_map or {}
-        return {"results": [self.start_one(d.key, bool(live_map.get(d.key)))
-                            for d in self.dashboards if d.startable]}
+        # Start All is for continuous live sessions only. Meta/Momentum /api/run-loop
+        # is a one-shot 4H order pass, so launching it at boot/open can trade stale
+        # cached signals and kick off expensive work. Scheduled passes handle those.
+        startable = [d for d in self.dashboards if d.startable and d.key not in ("meta", "momentum", "dealer_ranker")]
+        skipped = [
+            {"key": d.key, "ok": True, "skipped": True, "reason": "scheduled_4h_loop"}
+            for d in self.dashboards
+            if d.startable and d.key in ("meta", "momentum", "dealer_ranker")
+        ]
+        return {"results": [self.start_one(d.key, bool(live_map.get(d.key))) for d in startable] + skipped}
 
 
 _PAGE = """<!doctype html><html><head><meta charset=utf-8><title>Cynolycus Hub</title>
@@ -337,7 +386,9 @@ var staticDashboards=[
   {key:'swing',name:'Swing',url:'http://'+location.hostname+':8766/',startable:true,stoppable:true,tradeable:true,up:false,state:'down',detail:'waiting for state'},
   {key:'htf',name:'HTF Swing',url:'http://'+location.hostname+':8771/',startable:false,stoppable:false,tradeable:false,up:false,state:'down',detail:'waiting for state'},
   {key:'momentum',name:'Momentum',url:'http://'+location.hostname+':8770/',startable:true,stoppable:false,tradeable:true,up:false,state:'down',detail:'waiting for state'},
+  {key:'amethyst',name:'Amethyst',url:'http://'+location.hostname+':8772/',startable:false,stoppable:false,tradeable:false,up:false,state:'down',detail:'waiting for state'},
   {key:'dealer',name:'Dealer Positioning',url:'http://'+location.hostname+':8768/',startable:true,stoppable:true,tradeable:false,up:false,state:'down',detail:'waiting for state'},
+  {key:'dealer_ranker',name:'Dealer Ranker',url:'http://'+location.hostname+':8773/',startable:true,stoppable:false,tradeable:true,up:false,state:'down',detail:'waiting for state'},
   {key:'meta',name:'Meta Ranker',url:'http://'+location.hostname+':8769/',startable:true,stoppable:false,tradeable:true,up:false,state:'down',detail:'waiting for state'}
 ];
 function setLive(key,v){liveState[key]=v;localStorage.setItem('cyno-hub-live',JSON.stringify(liveState));tick();}
@@ -360,7 +411,7 @@ function render(s){
        ' onchange="setLive(\\''+d.key+'\\',this.checked)"> real money</label>'+
        (intend&&!d.live_available?'<div class=warn>real money not configured — runs paper</div>':''):'';
     var startBtn=d.startable?('<button class=primary onclick="ctl(\\''+d.key+'\\',\\'start\\')">'+
-       (d.key==='meta'||d.key==='momentum'?'Run':'Start')+'</button>'):'';
+       (d.key==='meta'||d.key==='momentum'||d.key==='dealer_ranker'?'Run':'Start')+'</button>'):'';
     var stopBtn=d.stoppable?('<button class=danger onclick="ctl(\\''+d.key+'\\',\\'stop\\')">Stop</button>'):'';
     return '<div class=card><div class=card-head>'+d.name+'</div><div class=body>'+
       '<div class=row><span class="pill '+pillState+'">'+(d.up?(d.state||'idle'):'down')+'</span>'+
