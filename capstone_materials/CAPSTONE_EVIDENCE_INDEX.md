@@ -1,0 +1,61 @@
+# Capstone Evidence Index
+
+Verification labels: **reproduced** = recomputed/asserted during this audit; **artifact-verified** = primary code/artifact inspected; **documented** = supported by a contemporaneous summary/log but not rerun; **inference** = reasoned from multiple artifacts; **contradicted** = evidence conflicts.
+
+Primary artifact shortcuts: [root README](../README.md), [project status](../docs/PROJECT_STATUS.md), [living summary](../LIVING_SUMMARY.md), [leakage audit](../research/capstone/leakage_audit.md), [results lock](../research/capstone/results_lock.json), [figure claim map](../research/capstone/figures/README.md), [4H optimization](../research/capstone/ev_optimization_4h.md), [confluence null-result report](../research/confluence_discovery_2026-07-07.md), [repository cleanup/security runbook](../docs/REPO_CLEANUP.md), [combined server](../UI/combined_server.py), [shared execution](../core/live_4h_exec.py), and [catalyst pipeline](../signals/catalysts/pipeline.py).
+
+| Claim or conclusion | Evidence file/artifact | Relevant section/function/commit | Verification status | Caveats |
+|---|---|---|---|---|
+| Project began with broker/data integration | `core/API/Schwab_API/`; Git history | `8a26d82`, `9ab2cf3`, `fe66d5c` | Artifact-verified | Commit date is recording date. |
+| Early daily ML included MABiLSTM and GA-XGBoost | `strategies/spy_intraday/Models/`; Git history | `6f7c6d8`, `b72e01c` | Artifact-verified | Later superseded. |
+| Leakage was explicitly identified/corrected in Dec 2025 | historical `Features/test_leakage.py`; Git history | `47d9132`, `5c374d1` | Artifact-verified | Does not prove all later pipelines are clean. |
+| Regular-hours bug invalidated earlier plots/training | Git history; `LIVING_SUMMARY.md` | `93b63df` | Documented | Old artifacts may remain. |
+| PPO/RL execution was a substantial but superseded experiment | `strategies/spy_intraday/Policy/Agent/` | `0ca20a2` onward | Artifact-verified | Not current primary policy. |
+| First end-to-end SPY live stack combined Alpaca stream, guardrails and UI | `core/API/Alpaca_API/`, `UI/`, `strategies/spy_intraday/Policy/` | `3cab745`, `ec7b0d3`, `cbd5c5e`, `2528b32` | Artifact-verified | Capability does not prove profitable operation. |
+| Durable SPY design is 10m setup model + 1m rule confirmation | `README.md`; `docs/ResearchPaperSummarySoFar.md`; `strategies/spy_intraday/` | system overview/order-policy sections | Artifact-verified | May-dated docs lag July architecture. |
+| SPY triple-barrier/meta-entry approaches were weak | `docs/ResearchPaperSummarySoFar.md`; `research/capstone/leakage_audit.md` | negative-results sections / §5 | Artifact-verified/documented | Historical evaluation conventions differ. |
+| Project pivoted to cross-sectional swing/momentum | `strategies/multi_ticker_swing/`; `strategies/momentum_expansion/` | `2088503`, `27baf7e`, `f2bfd3c` | Artifact-verified | — |
+| Platform expanded to themes/news/events/social/meta | `themes/`; `signals/` | `821f193`, `2364756`, `3038f34`, `4073699`, `6217f9c` | Artifact-verified | Maturity varies substantially. |
+| June repo reorganization created core/signals/themes/strategies boundaries | `README.md`; `docs/REPO_CLEANUP.md`; `scripts/migrate_layout_2026_06.sh` | `8dbd648` | Artifact-verified | Legacy path references remain in some docs/artifacts. |
+| Current operational hub shares one Alpaca stream | `UI/combined_server.py`; `UI/shared_stream.py` | module docstrings, `_build_symbol_union` | Artifact-verified | Bounded queues may drop stale bars under load. |
+| Momentum, HTF and meta share execution/exit logic | `core/live_4h_exec.py`; module live runners | `ExecPolicy`, `build_mixed_plan`; `729273b`, `c6cffe3`, `cc3c395` | Artifact-verified | Ranking and gates remain module-specific. |
+| System fails closed on stale readiness and low-resource heavy jobs | `core/live_readiness.py`; `core/live_job_guard.py` | `readiness_status`, `heavy_job_guard` | Reproduced by unit tests | Mitigations followed real OOM incidents; no soak proof. |
+| Supervisor restarts crashed server and runs watchdog/crash logger | `scripts/run_live_server.sh` | restart/backoff loop | Artifact-verified | Local/WSL deployment, not HA orchestration. |
+| Data persistence is mostly parquet/CSV/JSON/JSONL, not a DB | repo inventory; live runners | state/audit paths | Artifact-verified | Some writes are not atomic/locked. |
+| Current dependency/deployment reproducibility is limited | `requirements.txt`; `pyproject.toml` | package list/test config | Artifact-verified | No lockfile/container/CI found; many versions unpinned. |
+| Historical OAuth credentials were committed | `docs/REPO_CLEANUP.md`; Git path history | “URGENT — Schwab OAuth tokens” | Artifact-verified | Rotation/history purge not proven; secret contents excluded. |
+| Multi-ticker swing trained on 14,838,056 rows/1,133 tickers | `strategies/multi_ticker_swing/models/eval_metrics.json` | manifest fields | Artifact-verified | Evaluation date bounds absent. |
+| Swing frozen-test accuracy is ~61.60% | `research/capstone/results_lock.json`; model metrics | `test_accuracy_recomputed` | Reproduced by non-slow lock tests previously/current lock except benchmark drift | Accuracy is class-imbalance sensitive. |
+| Swing clean policy has 4,096 trades, 48.68% WR, PF 1.361 | `strategies/multi_ticker_swing/backtest/results/sweep_v2_clean/best_v2_clean_summary.json`; lock | clean metrics | Reproduced | Fixed-notional, no realistic portfolio constraints/costs. |
+| Old swing 61.3% combined WR is stale/test-selected | `research/capstone/leakage_audit.md`; lock | §0.6/§1.4 | Reproduced from stale JSON | Advisor doc's 62.3% was arithmetically wrong. |
+| Raw-bar loader silently skipped tickers | `strategies/multi_ticker_swing/backtest/sweep_v2.py`; tests | `3815e1b`; `test_sweep_v2_loader.py` | Artifact-verified | Changed counts/results. |
+| Momentum winner is XGB classifier seed 45 selected by test NDCG | `strategies/momentum_expansion/models/expansion_v1/eval_metrics.json` | `primary_metric`, `winner_*` | Artifact-verified | Systemic non-nested selection bias. |
+| Momentum OOF top-10 mean close return 6.69% vs 1.37% | `research/capstone/results_lock.json`; `oof_preds.parquet` | OOF metrics | Locked/reproduced historically; slow rerun not run now | 21d embargo but globally selected model; overlapping outcomes. |
+| Momentum non-overlap assessment: alpha 3.18%, t=1.87, Sharpe 1.06 | `signals/meta_context/skill_assessment/skill_summary.json` | momentum section | Artifact-verified | Only 78 windows; no costs/capacity. |
+| Momentum frozen policy: 3,876 trades, WR 74.74%, PF 1.53 | `strategies/momentum_expansion/backtest/results/family_compare_clean/comparison_summary_clean.json` | deployed-winner test row | Reproduced | “Return” is additive fixed-notional bookkeeping. |
+| Momentum same-split ret/DD was inflated about 7.4× | `research/capstone/leakage_audit.md`; figure 04 | §0.6 | Artifact-verified | Measures policy-selection bias, not model-family bias. |
+| HTF winner is LightGBM seed 46 selected by test NDCG | `strategies/multi_ticker_swing_htf/models/eval_metrics.json` | `primary_metric`, `winner_*` | Artifact-verified | Balanced accuracy only 0.515. |
+| HTF OOF top-10 close return 8.94% vs 1.97% | lock and HTF OOF artifact | OOF metrics | Locked; slow rerun not run now | Global Spearman ≈0; overlapping outcomes. |
+| HTF non-overlap top-alpha 2.82%, t=2.35, Sharpe 1.38 | `signals/meta_context/skill_assessment/skill_summary.json` | HTF section | Artifact-verified | 49 windows; long-short not significant. |
+| HTF policy selection inflated ret/DD ~2.3× | `research/capstone/leakage_audit.md` | §0.6 | Artifact-verified | Fixed-notional metric. |
+| Meta upside ranks better than meta quality | `signals/meta_context/meta_ranker/models/{upside,quality}/eval_metrics.json`; lock | test/OOF metrics | Artifact-verified | Both winners selected on test; quality predicts zero positives at default threshold. |
+| Meta-upside OOF top-10 mean close return 9.33% vs 1.78% | `research/capstone/results_lock.json` | meta-upside OOF metrics | Locked; slow rerun not run now | Overlapping windows; ranking, not calibrated probability. |
+| Rank-dropout exit destroyed much of fixed-horizon edge | `signals/meta_context/meta_ranker/results/backtest_exits_oof_clean.txt`; lock | exit-policy rows | Reproduced | Underlying-return proxy, not option execution. |
+| Theme ML is marginal | `signals/meta_context/model_eval_report_20260606.md`; `oof_eval_summary.json` | theme verdict | Artifact-verified | IC 0.021, monotonicity 0.19, only 9 trees. |
+| Rule-based theme rotation is regime-dependent/in-sample | `themes/theme_expansion_legacy/outputs/benchmark_comparison/`; `regime_v3_validation/` | benchmark/period CSVs | Artifact-verified | Repeated iteration over 2018–2026; current taxonomy risk. |
+| News pipeline uses embeddings, tone, source quality, buzz and trajectory | `signals/news/`; `signals/meta_context/build_catalyst_training_matrix.py` | feature builders/trainers | Artifact-verified | Current evaluation has serious availability risks. |
+| Catalyst matrix has same-day availability leakage | `signals/meta_context/build_catalyst_training_matrix.py` | same-day mention, close-price, FINRA joins | Artifact-verified | Weakens catalyst and downstream meta claims. |
+| Current v3 catalyst JSON conflicts with historical headline | `signals/meta_context/data/processed/news_catalyst_eval_target_expansion_10pct_v3.json`; `LIVING_SUMMARY.md` | 2026-06-08 entries | Contradicted | Test forward windows largely immature; rebuild required. |
+| Catalyst builder contaminates injected fixture inputs | `signals/catalysts/pipeline.py`; catalyst tests | `build_catalyst_records`, lines 98–111 | Reproduced failure | Unconditional default earnings-result load injected 550 rows. |
+| Forward-guidance standalone model is near random | `signals/events/forward_guidance/models/eval_metrics.json` | test AUC 0.5093 | Artifact-verified | Only 83 test events; high dimensionality. |
+| Social attention is implemented but lacks result evidence/history | `signals/social_attention/`; confluence report | module code / excluded sources | Artifact-verified | Do not claim predictive edge. |
+| Dynamic theme uses LLM for taxonomy, not trade decisions | `themes/dynamic_theme/stages/`; `client/claude_client.py` | stages 03–09 | Artifact-verified | Historical taxonomy stability remains a caveat. |
+| Confluence search found no certified interaction | `research/confluence_discovery_2026-07-07.md`; `research/confluence/RUNLOG.md` | executive verdict | Artifact-verified | Test set consumed; candidate pairs remain uncertified. |
+| Confluence certification floor is ~+7–10 pp | same | power check | Artifact-verified | Dataset-specific estimate. |
+| Paper swing options lost $6,246.50 over 123 closures | `Data/analysis/multi_ticker_swing_live/experiments/multiticker_20260528_20260529_closed_performance_rebuilt.csv`; lock | paper metrics | Reproduced | Two sessions only; paper, not live realized PnL. |
+| Fresh calls averaged +36.19% option return | same | fresh-call subset | Reproduced | `n=18`, selection-biased/small. |
+| July reproducibility lock drifted only on mutable SPY benchmark in bounded tests | `research/capstone/results_lock.json`; audit test output | `test_artifacts_unchanged`, `test_spy_and_benchmark_reproduce` | Reproduced failure | 1,496→1,498 rows; lock intentionally not rewritten. |
+| Non-slow capstone/shared-core test result was 31 pass/2 fail | `scripts/capstone/tests/`; `core/tests/` | audit command in dossier | Reproduced | 4 slow tests deselected. |
+| Advertised safe smoke result was 110 pass/2 fail | `scripts/run_safe_smoke_tests.py` | audit command | Reproduced | Harness omits several test directories. |
+| Test discovery is incomplete | `pyproject.toml`; `scripts/run_safe_smoke_tests.py` | `testpaths`, `SAFE_TEST_SUITES` | Artifact-verified | Core, dynamic-theme, SPY, nested meta tests omitted from defaults. |
+| No evidence supports production-ready/profitable claim | all above, especially paper ledger and limitations | synthesis | Inference from primary evidence | Capability and research edge must be stated precisely. |
