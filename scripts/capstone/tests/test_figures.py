@@ -30,6 +30,7 @@ EXPECTED_FIGS = [
     "fig10_feature_importance.png",
     "fig11_meta_exit_policy.png",
     "fig12_paper_sessions.png",
+    "fig13_scaleout_grid.png",
 ]
 
 
@@ -52,6 +53,80 @@ def test_readme_references_only_existing_figures():
     referenced = set(re.findall(r"fig\d+[a-z0-9_]*\.png", text))
     ghosts = [f for f in sorted(referenced) if not (FIG_DIR / f).exists()]
     assert not ghosts, f"README references figures that do not exist: {ghosts}"
+
+
+def test_trainers_ask_lightgbm_for_gain_not_split():
+    """LGBM's feature_importances_ is split count, not gain.
+
+    The trainers must consult booster_ (gain) BEFORE feature_importances_,
+    otherwise LightGBM winners silently report split counts and calendar
+    features like week_of_year dominate for the wrong reason.
+    """
+    trainers = [
+        REPO / "strategies/multi_ticker_swing_htf/data/training_export/colab_competition.py",
+        REPO / "strategies/momentum_expansion/data/training_export/colab_competition.py",
+        REPO / "signals/meta_context/meta_ranker/colab_competition.py",
+    ]
+    for t in trainers:
+        src = t.read_text()
+        block = src.split("def feature_importance(")[1].split("\ndef ")[0]
+        # compare the hasattr GUARDS (code), not prose mentions in comments
+        i_boost = block.find('hasattr(model, "booster_")')
+        i_sk = block.find('hasattr(model, "feature_importances_")')
+        assert 'importance_type="gain"' in block, f"{t.name}: no explicit gain call"
+        assert i_boost != -1 and i_sk != -1, f"{t.name}: expected both hasattr guards"
+        assert i_boost < i_sk, (
+            f"{t.name}: feature_importances_ is checked before booster_ — "
+            "LightGBM will report split counts again"
+        )
+
+
+def test_htf_panel_recomputes_gain_from_booster():
+    """fig10's HTF panel must not read the stale split-count CSV."""
+    from scripts.capstone import make_figures as mf
+
+    csv = REPO / "strategies/multi_ticker_swing_htf/models/feature_importance_lgbm_classifier_seed46.csv"
+    model = REPO / "strategies/multi_ticker_swing_htf/models/model_lgbm_classifier_seed46.joblib"
+    if not model.exists():
+        import pytest
+
+        pytest.skip("HTF lgbm model artifact not present")
+    gain = mf._gain_importance(csv, model)
+    top = gain.nlargest(1, "share").iloc[0]
+    # by gain the HTF winner is an ATR/volatility model, not a seasonality model
+    assert top.feature == "daily_atr_pct", f"expected daily_atr_pct to lead by gain, got {top.feature}"
+    assert top.share > 20, f"daily_atr_pct gain share collapsed to {top.share:.1f}% (split counts leaking back?)"
+    wk = gain[gain.feature == "week_of_year"]["share"].iloc[0]
+    assert wk < 6, f"week_of_year at {wk:.1f}% of gain — looks like split counts, not gain"
+
+
+def test_exit_policy_grid_matches_results_lock():
+    """The committed grid must still reproduce the locked meta_exit_policy numbers."""
+    import json
+
+    grid_path = REPO / "research" / "capstone" / "exit_policy_grid.csv"
+    if not grid_path.exists():
+        import pytest
+
+        pytest.skip("exit_policy_grid.csv not generated")
+    import csv as _csv
+
+    with open(grid_path) as fh:
+        grid = {r["policy"]: r for r in _csv.DictReader(fh)}
+    lock = json.loads((REPO / "research" / "capstone" / "results_lock.json").read_text())
+    locked = {m["metric"]: m for m in lock["metrics"] if m["model"] == "meta_exit_policy"}
+    pairs = [
+        ("rank drop-out g=0 (old live)", "current_live_dropout_g0"),
+        ("target +20% full exit", "target20_full_exit"),
+        ("scale 50%@+20% + horizon25", "scaleout50_at20_horizon25"),
+    ]
+    for policy, prefix in pairs:
+        assert policy in grid, f"{policy} missing from exit_policy_grid.csv"
+        for metric in ("mean", "win"):
+            got = float(grid[policy][metric])
+            want = locked[f"{prefix}_{metric}"]["value"]
+            assert abs(got - want) < 5e-4, f"{policy} {metric}: grid {got:.5f} vs lock {want:.5f}"
+        assert int(grid[policy]["n"]) == locked[f"{prefix}_mean"]["n"]
 
 
 def test_generator_uses_validated_entity_palette():

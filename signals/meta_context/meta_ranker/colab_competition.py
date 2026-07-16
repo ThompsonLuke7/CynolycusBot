@@ -446,10 +446,15 @@ def spearman_metric(scores: np.ndarray, frame: pd.DataFrame, cfg: CompetitionCon
 
 
 def feature_importance(model: Any, features: list[str]) -> pd.DataFrame:
-    if hasattr(model, "feature_importances_"):
-        values = np.asarray(model.feature_importances_, dtype=float)
-    elif hasattr(model, "booster_"):
+    # LightGBM's sklearn wrapper defaults feature_importances_ to importance_type="split"
+    # (raw count of times a feature was used), which inflates high-cardinality features
+    # (week_of_year got 8.9% of split share vs 3.9% of gain). Ask the booster for gain
+    # explicitly so every family reports the SAME quantity. XGBoost's
+    # feature_importances_ is already gain-based, so it keeps that path.
+    if hasattr(model, "booster_"):
         values = np.asarray(model.booster_.feature_importance(importance_type="gain"), dtype=float)
+    elif hasattr(model, "feature_importances_"):
+        values = np.asarray(model.feature_importances_, dtype=float)
     else:
         values = np.zeros(len(features), dtype=float)
     return (

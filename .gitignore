@@ -304,3 +304,7 @@ themes/dynamic_theme/outputs/
 # Exception: capstone paper figures are a committed deliverable (regenerate via
 # scripts/capstone/make_figures.py; see research/capstone/figures/README.md)
 !research/capstone/figures/*.png
+# Exception: the meta exit-policy grid is a small committed results table that
+# figs 11/13 read (its upstream input lives in /tmp and does not survive a
+# reboot). Regenerate via scripts/capstone/exit_policy_grid.py.
+!research/capstone/exit_policy_grid.csv

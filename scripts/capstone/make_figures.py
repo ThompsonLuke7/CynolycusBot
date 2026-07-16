@@ -17,8 +17,9 @@ Figure inventory (research/capstone/figures/):
   fig08  walk-forward OOF score-decile lift (mom / HTF / meta q / u / combo)
   fig09  meta ranker OOF calibration (quality & upside)
   fig10  feature importance — the five deployed winners
-  fig11  meta exit-policy comparison (OOF-scored holdout, results_lock)
+  fig11  meta exit-policy comparison incl. the deployed live policy (OOF holdout)
   fig12  swing paper-trading sessions 2026-05-28/29 (options ledger)
+  fig13  scale-out fraction x trigger grid (win-rate vs expectancy tradeoff)
 
 Conventions (stated on the figures):
   * Event-driven backtests book $1,000 notional per trade on a $100k base, NOT
@@ -576,71 +577,172 @@ def fig09_meta_calibration():
     return save_figure(fig, FIG_DIR / "fig09_meta_calibration.png", dpi=200, close=True)
 
 
+def _gain_importance(csv_path: Path, lgbm_model: Path | None = None) -> pd.DataFrame:
+    """Normalized GAIN importance.
+
+    The trainers' feature_importance() used `model.feature_importances_` when
+    available, which for LightGBM's sklearn wrapper is importance_type="split"
+    (raw split counts), NOT gain — high-cardinality features like week_of_year
+    win on split count while contributing little gain. XGBoost's
+    feature_importances_ is already gain, so those CSVs are fine.
+
+    For an LGBM winner we therefore recompute gain from the saved booster and
+    leave the (stale) training CSV on disk untouched. The trainer bug itself is
+    fixed in */colab_competition.py, so future exports write gain directly.
+    """
+    if lgbm_model is not None:
+        import joblib
+
+        mdl = joblib.load(lgbm_model)
+        booster = mdl.booster_
+        fi = pd.DataFrame({
+            "feature": list(booster.feature_name()),
+            "importance": booster.feature_importance(importance_type="gain").astype(float),
+        })
+    else:
+        fi = pd.read_csv(csv_path)
+    fi["share"] = fi["importance"] / fi["importance"].sum() * 100
+    return fi
+
+
 def fig10_feature_importance():
     winners = [
         ("Swing 30m — xgb (live model)", "swing",
-         REPO / "strategies/multi_ticker_swing/models/feature_importance.csv"),
+         REPO / "strategies/multi_ticker_swing/models/feature_importance.csv", None),
         ("Momentum 4H — xgb_classifier s45", "momentum",
-         REPO / "strategies/momentum_expansion/models/expansion_v1/feature_importance_xgb_classifier_seed45.csv"),
-        ("HTF Swing 4H — lgbm_classifier s46", "htf_swing",
-         REPO / "strategies/multi_ticker_swing_htf/models/feature_importance_lgbm_classifier_seed46.csv"),
+         REPO / "strategies/momentum_expansion/models/expansion_v1/feature_importance_xgb_classifier_seed45.csv", None),
+        ("HTF Swing 4H — lgbm_classifier s46\n(gain recomputed from booster)", "htf_swing",
+         REPO / "strategies/multi_ticker_swing_htf/models/feature_importance_lgbm_classifier_seed46.csv",
+         REPO / "strategies/multi_ticker_swing_htf/models/model_lgbm_classifier_seed46.joblib"),
         ("Meta quality — xgb_classifier s46", "meta",
-         REPO / "signals/meta_context/meta_ranker/models/quality/feature_importance_xgb_classifier_seed46.csv"),
+         REPO / "signals/meta_context/meta_ranker/models/quality/feature_importance_xgb_classifier_seed46.csv", None),
         ("Meta upside — xgb_classifier s48", "meta",
-         REPO / "signals/meta_context/meta_ranker/models/upside/feature_importance_xgb_classifier_seed48.csv"),
+         REPO / "signals/meta_context/meta_ranker/models/upside/feature_importance_xgb_classifier_seed48.csv", None),
     ]
-    fig, axes = plt.subplots(1, 5, figsize=(16, 5.6))
+    fig, axes = plt.subplots(1, 5, figsize=(16, 5.8))
     style_figure(fig, axes, THEME)
-    for ax, (name, ckey, path) in zip(axes, winners):
-        fi = pd.read_csv(path)
-        fi["share"] = fi["importance"] / fi["importance"].sum() * 100
+    for ax, (name, ckey, path, lgbm) in zip(axes, winners):
+        fi = _gain_importance(path, lgbm)
         top = fi.nlargest(15, "share").iloc[::-1]
         ax.barh(top.feature, top.share, color=COLORS[ckey], alpha=0.9)
         ax.set_title(name, fontsize=9)
-        ax.set_xlabel("Importance share (%)")
+        ax.set_xlabel("Gain share (%)")
         ax.tick_params(axis="y", labelsize=7)
-    fig.suptitle("Top-15 feature importance — the five deployed winner models (normalized per model)", fontsize=12, y=1.02)
+        top3 = fi["share"].nlargest(3).sum()
+        ax.annotate(f"top-3 = {top3:.0f}% of gain", xy=(0.97, 0.03), xycoords="axes fraction",
+                    ha="right", fontsize=7.5, color=THEME.muted_text)
+    fig.suptitle("Top-15 feature importance by GAIN — the five deployed winner models (normalized per model)",
+                 fontsize=12, y=1.02)
     footer(fig,
            window="training artifacts (see run_ids in each model's meta.json)",
            universe="per-model training universe",
            split="artifact (train-time importance — not an OOS effect size)",
-           source="feature_importance*.csv beside each locked model",
-           note="Winner families/seeds match results_lock.json winner_family_seed. Importance = model gain share; treat as descriptive, not causal.")
+           source="feature_importance*.csv beside each locked model; HTF recomputed from model_lgbm_classifier_seed46.joblib",
+           note="All five panels are GAIN share. The HTF panel is recomputed from the booster because the trainer wrote LightGBM's "
+                "split counts (week_of_year: 8.9% of splits but only 3.9% of gain) — see figures/README.md.")
     return save_figure(fig, FIG_DIR / "fig10_feature_importance.png", dpi=200, close=True)
 
 
-def fig11_meta_exit_policy(lock):
+def _grid() -> pd.DataFrame:
+    p = REPO / "research" / "capstone" / "exit_policy_grid.csv"
+    if not p.exists():
+        raise SystemExit("run scripts/capstone/exit_policy_grid.py first (writes research/capstone/exit_policy_grid.csv)")
+    return pd.read_csv(p)
+
+
+def fig11_meta_exit_policy():
+    # "scale 50%@+20% + horizon25" appears in both the baseline and scaleout_grid
+    # groups (identical kwargs, so identical stats) — keep one row per policy.
+    g = _grid().drop_duplicates(subset="policy", keep="first").set_index("policy")
     policies = [
-        ("current_live_dropout_g0", "Rank drop-out\n(live default pre-2026-07-12)"),
-        ("target20_full_exit", "Target +20%\nfull exit"),
-        ("scaleout50_at20_horizon25", "Scale-out 50% @ +20%\n+ ride to horizon 25"),
+        ("rank drop-out g=0 (old live)", "Rank drop-out\nOLD live", COLORS["biased"]),
+        ("target +20% full exit", "Target +20%\nfull exit", COLORS["meta"] + "99"),
+        ("scale 50%@+20% + horizon25", "Scale 50%@+20%\n+ hz25", COLORS["meta"] + "99"),
+        ("LIVE: stop50 + trail35 + scale50@+20 + hz25", "Scale 50%@+20%\n+ hz25 + stop50/trail35\nDEPLOYED LIVE", COLORS["meta"]),
     ]
-    metrics = [("mean", "Mean return / trade (%)", 100), ("win", "Win rate (%)", 100),
-               ("ret_per_bar", "Return per bar held (%)", 100)]
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4.6))
+    metrics = [("mean", "Mean return / trade (%)"), ("median", "Median return / trade (%)"),
+               ("win", "Win rate (%)")]
+    fig, axes = plt.subplots(1, 3, figsize=(14.5, 5.2))
     style_figure(fig, axes, THEME)
-    for ax, (mkey, ylab, scale) in zip(axes, metrics):
-        vals = [lock[("meta_exit_policy", f"{p}_{mkey}")]["value"] * scale for p, _ in policies]
-        ns = [lock[("meta_exit_policy", f"{p}_{mkey}")]["n"] for p, _ in policies]
-        ax.bar(range(3), vals, 0.62,
-               color=[COLORS["biased"], COLORS["meta"] + "99", COLORS["meta"]])
-        for i, (v, n) in enumerate(zip(vals, ns)):
-            ax.text(i, v + max(vals) * 0.02, f"{v:.2f}", ha="center", fontsize=9.5, fontweight="bold",
-                    color=THEME.text)
-        ax.set_xticks(range(3), [f"{lbl}\nn={ns[i]:,}" for i, (_, lbl) in enumerate(policies)], fontsize=8)
+    for ax, (mkey, ylab) in zip(axes, metrics):
+        vals = [g.loc[p, mkey] * 100 for p, _, _ in policies]
+        ns = [int(g.loc[p, "n"]) for p, _, _ in policies]
+        ax.bar(range(len(policies)), vals, 0.62, color=[c for _, _, c in policies])
+        for i, v in enumerate(vals):
+            ax.text(i, v + max(vals) * 0.02, f"{v:.2f}", ha="center", fontsize=9.5,
+                    fontweight="bold", color=THEME.text)
+        ax.set_xticks(range(len(policies)),
+                      [f"{lbl}\nn={ns[i]:,}" for i, (_, lbl, _) in enumerate(policies)], fontsize=7)
         ax.axhline(0, color=THEME.spine, lw=0.8)
         if mkey == "win":
             ax.axhline(50, color=THEME.spine, lw=1.0, ls=":")
+        ax.set_ylim(0, max(vals) * 1.16)
         ax.set_ylabel(ylab)
-    fig.suptitle("Meta ranker: selection has edge, the old exit destroyed it — exit policies on the same entries "
-                 "(OOF-scored holdout 2025-07-01+)", fontsize=11.5, y=1.02)
+    fig.suptitle("Meta ranker: selection has edge, the old rank-drop-out exit destroyed it — "
+                 "exit policies on the same entries (OOF-scored holdout 2025-07-01+)", fontsize=11.5, y=1.03)
     footer(fig,
            window="holdout 2025-07-01 → 2026-05 (entries), 4H bars",
            universe="meta feed pool, top-10 s_combo entries per bar",
            split="wf-oof",
-           source="results_lock.json meta_exit_policy rows (OOF s_combo rescore of backtest_exits, audit §4.3)",
-           note="Trade counts differ because the exit rule changes which entries coexist. Stock-price paths — option premium paths (the live 7/9 losses) are strictly worse under slow exits.")
+           source="research/capstone/exit_policy_grid.csv (OOF s_combo rescore of backtest_exits, audit §4.3)",
+           note="SHARES ONLY — 4H stock OHLC paths; this harness has NO option-premium path. The deployed 50% stop binds on just 1 of "
+                "1,430 stock trades (trail 35% on 11), so it looks inert here; on decaying OTM option premium (the live 7/9 losses) it "
+                "binds constantly. Trade counts differ because the exit rule changes which entries coexist.")
     return save_figure(fig, FIG_DIR / "fig11_meta_exit_policy.png", dpi=200, close=True)
+
+
+# Ordinal ramp (one blue hue, light→dark) for scale-out fraction — an ORDERED
+# quantity, so a sequential ramp, not categorical hues. Validated: monotone L,
+# adjacent ΔL ≥ 0.093, light end 2.11:1 on white, hue spread 3°.
+FRAC_RAMP = {0.25: "#86b6ef", 0.50: "#5598e7", 0.75: "#2a78d6", 1.00: "#184f95"}
+
+
+def fig13_scaleout_grid():
+    g = _grid()
+    gs = g[g.group == "scaleout_grid"].copy()
+    gs["tgt"] = (gs.target * 100).round().astype(int)
+    gs["frac"] = gs.scale_frac.round(2)
+    targets = sorted(gs.tgt.unique())
+    fracs = sorted(gs.frac.unique())
+    x = np.arange(len(targets))
+    w = 0.2
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.0))
+    style_figure(fig, (ax1, ax2), THEME)
+    for ax, (mkey, ylab, title) in zip(
+        (ax1, ax2),
+        (("mean", "Mean return / trade (%)", "(a) Expectancy — best when you scale out LESS and LATER"),
+         ("win", "Win rate (%)", "(b) Win rate — best when you scale out MORE and EARLIER")),
+    ):
+        for k, frac in enumerate(fracs):
+            sub = gs[gs.frac == frac].set_index("tgt").reindex(targets)
+            vals = sub[mkey] * 100
+            ax.bar(x + (k - (len(fracs) - 1) / 2) * w, vals, w * 0.92,
+                   color=FRAC_RAMP[frac], label=f"scale out {int(frac*100)}%")
+        ax.set_xticks(x, [f"+{t}%" for t in targets])
+        ax.set_xlabel("Scale-out trigger (gain at which the trim fires)")
+        ax.set_ylabel(ylab)
+        ax.set_title(title, fontsize=10)
+        if mkey == "win":
+            ax.axhline(50, color=THEME.spine, lw=1.0, ls=":")
+        ax.set_ylim(0, (gs[mkey].max() * 100) * 1.30)
+        ax.legend(frameon=False, fontsize=8, ncols=4, loc="upper center")
+    cur = gs[(gs.frac == 0.50) & (gs.tgt == 20)].iloc[0]
+    ax1.annotate("current live setting\n(50% @ +20%)",
+                 xy=(targets.index(20) + (1 - 1.5) * w, cur["mean"] * 100),
+                 xytext=(-6, 34), textcoords="offset points", fontsize=7.5, ha="center",
+                 color=THEME.text,
+                 arrowprops=dict(arrowstyle="->", color=THEME.muted_text, lw=0.9))
+    fig.suptitle("Scale-out fraction × trigger: the trim is a win-rate ⇄ expectancy dial, not a free lunch",
+                 fontsize=12, y=1.02)
+    footer(fig,
+           window="holdout 2025-07-01 → 2026-05 (entries), 4H bars",
+           universe="meta feed pool, top-10 s_combo entries per bar; remainder rides to horizon 25, no stop",
+           split="wf-oof",
+           source="research/capstone/exit_policy_grid.csv",
+           note="SHARES ONLY (4H stock OHLC). Every partial (25/50/75%) holds n=1,430 with avg_hold pinned at exactly 25 bars — trimming "
+                "does not end the trade — so their return-per-bar is just mean/25 and is NOT comparable to the 100% full-exit row, which "
+                "exits early (n and hold both vary).")
+    return save_figure(fig, FIG_DIR / "fig13_scaleout_grid.png", dpi=200, close=True)
 
 
 def fig12_paper_sessions():
@@ -716,8 +818,9 @@ def main() -> None:
         ("fig08", fig08_oof_lift),
         ("fig09", fig09_meta_calibration),
         ("fig10", fig10_feature_importance),
-        ("fig11", lambda: fig11_meta_exit_policy(lock)),
+        ("fig11", fig11_meta_exit_policy),
         ("fig12", fig12_paper_sessions),
+        ("fig13", fig13_scaleout_grid),
     ]
     for name, fn in jobs:
         if only and name not in only:
