@@ -1,0 +1,101 @@
+{
+  "generated": "2026-07-17 03:08 UTC",
+  "git_sha": "c57c286",
+  "base_capital": 100000.0,
+  "largest_stock_pick": "NVDA",
+  "largest_stock_rule": "max avg_dollar_volume_20d among cap_tier=='mega' stocks in shared_universe.csv",
+  "sector_etfs": [
+    "XLB",
+    "XLC",
+    "XLE",
+    "XLF",
+    "XLI",
+    "XLK",
+    "XLP",
+    "XLRE",
+    "XLU",
+    "XLV",
+    "XLY"
+  ],
+  "random_seeds": [
+    123,
+    124,
+    125,
+    126,
+    127,
+    128,
+    129,
+    130,
+    131,
+    132
+  ],
+  "windows": {
+    "momentum_expansion": {
+      "window": [
+        "2025-05-20",
+        "2026-07-06"
+      ],
+      "trading_days": 282,
+      "pool_tickers": 1070,
+      "equal_weight_coverage": {
+        "n_requested": 1070,
+        "n_used": 1070,
+        "n_missing_bars": 0,
+        "avg_names_per_day": 1060.6,
+        "extreme_daily_moves_gt50pct": 51
+      },
+      "tbill": {
+        "yield_start": 4.38,
+        "yield_end": 3.87,
+        "days_beyond_last_fred_obs": 0
+      },
+      "deployed_policy": {
+        "family": "xgb_classifier",
+        "seed": 45,
+        "top_k": 5,
+        "tp_atr_mult": 2.0,
+        "sl_atr_mult": 4.0,
+        "max_hold": 75
+      }
+    },
+    "multi_ticker_swing_htf": {
+      "window": [
+        "2025-05-30",
+        "2026-06-18"
+      ],
+      "trading_days": 265,
+      "pool_tickers": 1076,
+      "equal_weight_coverage": {
+        "n_requested": 1076,
+        "n_used": 1076,
+        "n_missing_bars": 0,
+        "avg_names_per_day": 1066.3,
+        "extreme_daily_moves_gt50pct": 47
+      },
+      "tbill": {
+        "yield_start": 4.36,
+        "yield_end": 3.83,
+        "days_beyond_last_fred_obs": 0
+      },
+      "deployed_policy": {
+        "family": "lgbm_classifier",
+        "seed": 46,
+        "top_k": 20,
+        "tp_atr_mult": 5.0,
+        "sl_atr_mult": 2.0,
+        "max_hold": 25
+      }
+    }
+  },
+  "caveats": [
+    "Price returns only: shared 1d bars are split-adjusted but dividend-excluded (same convention as the module backtests and fig01's SPY benchmark). tbill_3m and sector/SPY ETF rows therefore understate total return by their yields.",
+    "equal_weight_universe uses today's survivor universe (leakage_audit.md): delisted names are absent, so this baseline is upward-biased (a hard bar).",
+    "Daily rebalancing is frictionless \u2014 no costs/slippage \u2014 matching the cost-free module simulations.",
+    "Convention flag: 'portfolio_daily' rows are 100% invested; 'trade_booked_daily' rows (modules, random_top_k) book $1k-notional trade P&L on a $100k base and are never fully invested. Compare Sharpe/DD across conventions with care.",
+    "sector_neutral_etf uses the 11 SPDR sector ETFs because the repo has no usable per-ticker sector metadata (shared_universe.csv sector column is Unknown/NaN)."
+  ],
+  "artifacts": {
+    "momentum": "strategies/momentum_expansion/backtest/results/family_compare_clean/comparison_summary_clean.json",
+    "htf": "strategies/multi_ticker_swing_htf/backtest/results/family_compare_clean/comparison_summary_clean.json"
+  }
+}

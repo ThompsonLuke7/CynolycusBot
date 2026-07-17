@@ -308,3 +308,7 @@ themes/dynamic_theme/outputs/
 # figs 11/13 read (its upstream input lives in /tmp and does not survive a
 # reboot). Regenerate via scripts/capstone/exit_policy_grid.py.
 !research/capstone/exit_policy_grid.csv
+# Exception: capstone baseline-strategy comparison tables (small, paper-cited).
+# Regenerate via scripts/capstone/baseline_strategies.py.
+!research/capstone/baselines/*.csv
+!research/capstone/baselines/*.json
