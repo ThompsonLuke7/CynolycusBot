@@ -1,6 +1,6 @@
 {
-  "generated": "2026-07-17 03:08 UTC",
-  "git_sha": "c57c286",
+  "generated": "2026-07-17 03:21 UTC",
+  "git_sha": "61ddea4",
   "base_capital": 100000.0,
   "largest_stock_pick": "NVDA",
   "largest_stock_rule": "max avg_dollar_volume_20d among cap_tier=='mega' stocks in shared_universe.csv",
@@ -92,7 +92,8 @@
     "equal_weight_universe uses today's survivor universe (leakage_audit.md): delisted names are absent, so this baseline is upward-biased (a hard bar).",
     "Daily rebalancing is frictionless \u2014 no costs/slippage \u2014 matching the cost-free module simulations.",
     "Convention flag: 'portfolio_daily' rows are 100% invested; 'trade_booked_daily' rows (modules, random_top_k) book $1k-notional trade P&L on a $100k base and are never fully invested. Compare Sharpe/DD across conventions with care.",
-    "sector_neutral_etf uses the 11 SPDR sector ETFs because the repo has no usable per-ticker sector metadata (shared_universe.csv sector column is Unknown/NaN)."
+    "sector_neutral_etf uses the 11 SPDR sector ETFs because the repo has no usable per-ticker sector metadata (shared_universe.csv sector column is Unknown/NaN).",
+    "best_hindsight_pool_stock is an ORACLE upper bound, not a tradeable strategy: it is chosen by its own realized return over the window (perfect foresight, look-ahead by construction). Report it as 'best case if you'd picked right', never as a baseline a model could have matched."
   ],
   "artifacts": {
     "momentum": "strategies/momentum_expansion/backtest/results/family_compare_clean/comparison_summary_clean.json",

@@ -1,5 +1,5 @@
 """
-Five baseline comparison strategies for the 4H modules (capstone paper).
+Baseline comparison strategies for the 4H modules (capstone paper).
 
 The paper's frozen-test module results (family_compare_clean) need reference
 points beyond SPY buy-and-hold. This script computes, over EACH 4H module's
@@ -21,9 +21,16 @@ frozen-test window (momentum_expansion, multi_ticker_swing_htf):
     5. largest_stock_buy_hold — all-in buy-and-hold of the single largest universe
                                 name (highest avg_dollar_volume_20d among
                                 cap_tier == "mega" in shared_universe.csv).
+    6. best_hindsight_pool_stock — ORACLE, not a strategy: all-in buy-and-hold of
+                                whichever pool ticker actually had the highest
+                                window-start-to-end return. Answers "what if I'd
+                                picked the single best-performing name in advance"
+                                as an explicit upper bound — computed with perfect
+                                foresight (look-ahead by construction; label it as
+                                such wherever cited in the paper).
 
   Trade-convention baseline (same execution engine as the modules):
-    6. random_top_k           — random scores pushed through the IDENTICAL
+    7. random_top_k           — random scores pushed through the IDENTICAL
                                 family_backtest select/simulate path with the module's
                                 deployed val-frozen exit policy, N seeds. Isolates the
                                 ranking model's contribution from policy + universe.
@@ -205,6 +212,24 @@ def pick_largest_stock() -> str:
     return str(mega.loc[mega["avg_dollar_volume_20d"].idxmax(), "ticker"])
 
 
+def pick_best_hindsight_stock(pool: list[str], days: pd.DatetimeIndex) -> tuple[str | None, float]:
+    """Oracle baseline: whichever pool ticker had the highest window-start-to-end
+    return. NOT a tradeable strategy (requires perfect foresight) — reported as
+    an upper bound so 'what if I'd just picked the winner' has a real number."""
+    best_ticker, best_ret = None, -np.inf
+    for t in pool:
+        s = load_close(t)
+        if s is None:
+            continue
+        sub = s.reindex(days).dropna()
+        if len(sub) < 2:
+            continue
+        ret = float(sub.iloc[-1] / sub.iloc[0] - 1.0)
+        if ret > best_ret:
+            best_ticker, best_ret = t, ret
+    return best_ticker, best_ret
+
+
 def module_daily_returns(trades: pd.DataFrame, days: pd.DatetimeIndex) -> pd.Series:
     """Module frozen-test result on the portfolio convention: $1k-notional P&L
     booked at exit date on a $100k base (same as make_figures fig03)."""
@@ -288,6 +313,8 @@ def run(modules: list[str], n_seeds: int, skip_random: bool) -> None:
         ew_ret, ew_stats = equal_weight_returns(ctx["pool"], days)
         sect_ret, _ = equal_weight_returns(SECTOR_ETFS, days)
         tb_ret, tb_stats = tbill_returns(days)
+        best_ticker, best_ret_pct = pick_best_hindsight_stock(ctx["pool"], days)
+        print(f"[{wname}] best-hindsight pool ticker: {best_ticker} ({best_ret_pct * 100:+.1f}%)")
         rows = {
             "spy_buy_hold": single_asset_returns("SPY", days),
             "equal_weight_universe": ew_ret,
@@ -296,6 +323,8 @@ def run(modules: list[str], n_seeds: int, skip_random: bool) -> None:
             f"largest_stock_{largest}": single_asset_returns(largest, days),
             f"module_{module}_deployed": module_daily_returns(ctx["trades"], days),
         }
+        if best_ticker is not None:
+            rows[f"best_hindsight_pool_stock_{best_ticker}"] = single_asset_returns(best_ticker, days)
         conventions = {k: ("trade_booked_daily" if k.startswith("module_") else "portfolio_daily")
                        for k in rows}
 
@@ -351,6 +380,10 @@ def run(modules: list[str], n_seeds: int, skip_random: bool) -> None:
             "never fully invested. Compare Sharpe/DD across conventions with care.",
             "sector_neutral_etf uses the 11 SPDR sector ETFs because the repo has no usable "
             "per-ticker sector metadata (shared_universe.csv sector column is Unknown/NaN).",
+            "best_hindsight_pool_stock is an ORACLE upper bound, not a tradeable strategy: "
+            "it is chosen by its own realized return over the window (perfect foresight, "
+            "look-ahead by construction). Report it as 'best case if you'd picked right', "
+            "never as a baseline a model could have matched.",
         ],
         artifacts={m: str(MODULES[m]["clean_summary"].relative_to(REPO)) for m in modules},
     )

@@ -53,6 +53,20 @@ def test_all_strategies_present_per_window(metrics):
         assert any(s.startswith("largest_stock_") for s in strats), f"{w}: missing largest_stock_*"
         assert any(s.startswith("module_") for s in strats), f"{w}: missing module row"
         assert any(s.startswith("random_top") for s in strats), f"{w}: missing random_top_k row"
+        assert any(s.startswith("best_hindsight_pool_stock_") for s in strats), \
+            f"{w}: missing best_hindsight_pool_stock_* oracle row"
+
+
+def test_hindsight_oracle_beats_every_other_row(metrics):
+    """The oracle pick is chosen BY its own window return, so by construction it
+    must be >= every other strategy's return in that window (a broken selection
+    or windowing bug would show up as the oracle losing to something)."""
+    for w in WINDOWS:
+        sub = metrics[metrics.window == w]
+        oracle = sub[sub.strategy.str.startswith("best_hindsight_pool_stock_")].iloc[0]
+        others = sub[~sub.strategy.str.startswith("best_hindsight_pool_stock_")]
+        assert oracle.total_return_pct >= others.total_return_pct.max(), \
+            f"{w}: oracle {oracle.total_return_pct}% did not beat max other row {others.total_return_pct.max()}%"
 
 
 def test_tbill_behaves_like_cash(metrics):
