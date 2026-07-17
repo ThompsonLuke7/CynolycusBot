@@ -1,6 +1,6 @@
 {
- "generated_at_utc": "2026-07-14T02:24:16.022008+00:00",
- "git_commit": "208e2ee9ce4618568dd91f313e3a502eb027ad97",
+ "generated_at_utc": "2026-07-17T03:35:11.864768+00:00",
+ "git_commit": "ebc33c922b026cbb465a7ec1a7bbdae09805a192",
  "top_k": 10,
  "artifacts": {
   "swing_eval_metrics": {
@@ -111,9 +111,9 @@
   },
   "spy_1d_bars": {
    "exists": true,
-   "bytes": 85423,
-   "hash": "4a42dfbddbcfd7f7",
-   "rows": 1496
+   "rows": 1497,
+   "hash": "440bbb5f67cc2fde",
+   "frozen_through": "2026-07-14"
   },
   "mom_family_clean": {
    "exists": true,
@@ -1413,20 +1413,20 @@
   {
    "model": "benchmark",
    "metric": "spy_fwd_12d_mean_ret",
-   "value": 0.007176,
-   "n": 1484,
+   "value": 0.007186,
+   "n": 1485,
    "tag": "reference",
    "source": "Data/shared/bars/1d/SPY.parquet",
-   "caveat": "mean 12-trading-day forward return, full bar history"
+   "caveat": "mean 12-trading-day forward return, bar history through 2026-07-14 (frozen cutoff, pinned for reproducibility)"
   },
   {
    "model": "benchmark",
    "metric": "spy_fwd_25d_mean_ret",
-   "value": 0.014686,
-   "n": 1471,
+   "value": 0.014669,
+   "n": 1472,
    "tag": "reference",
    "source": "Data/shared/bars/1d/SPY.parquet",
-   "caveat": "mean 25-trading-day forward return, full bar history"
+   "caveat": "mean 25-trading-day forward return, bar history through 2026-07-14 (frozen cutoff, pinned for reproducibility)"
   }
  ]
 }

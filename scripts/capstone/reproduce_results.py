@@ -84,6 +84,14 @@ ARTIFACTS: dict[str, Path] = {
 
 TOP_K = 10  # matches RANKING_CONFIG.top_n / meta live top-K
 
+# Data/shared/bars/1d/SPY.parquet is a LIVE file the nightly pipeline appends
+# to every night (unlike every other artifact here, it is not frozen). The SPY
+# forward-return benchmark is pinned to bar history through this date so it
+# reproduces indefinitely instead of drifting by a few 4th/5th-decimal points
+# each time new bars land. Bump intentionally (with --write-lock) if the
+# benchmark window should move; do not let it silently track "today".
+SPY_BENCHMARK_CUTOFF = pd.Timestamp("2026-07-14", tz="UTC")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -104,6 +112,19 @@ def quick_hash(path: Path, chunk_mb: int = 4) -> str:
     return h.hexdigest()[:16]
 
 
+def _spy_frozen_fingerprint(path: Path) -> dict:
+    """spy_1d_bars grows every night; fingerprint only the bars through the
+    pinned SPY_BENCHMARK_CUTOFF so the check tracks "did history get revised
+    retroactively" rather than "did new bars get appended" (which is expected
+    and not a drift bug)."""
+    b = pd.read_parquet(path, columns=["timestamp", "close"])
+    b["timestamp"] = pd.to_datetime(b["timestamp"], utc=True)
+    b = b[b["timestamp"] <= SPY_BENCHMARK_CUTOFF].sort_values("timestamp")
+    h = hashlib.sha256(b["close"].to_numpy().tobytes()).hexdigest()[:16]
+    return {"exists": True, "rows": int(len(b)), "hash": h,
+            "frozen_through": str(SPY_BENCHMARK_CUTOFF.date())}
+
+
 def fingerprint(keys: list[str] | None = None) -> dict[str, dict]:
     out = {}
     for name, path in ARTIFACTS.items():
@@ -111,6 +132,9 @@ def fingerprint(keys: list[str] | None = None) -> dict[str, dict]:
             continue
         if not path.exists():
             out[name] = {"exists": False}
+            continue
+        if name == "spy_1d_bars":
+            out[name] = _spy_frozen_fingerprint(path)
             continue
         entry: dict = {"exists": True, "bytes": path.stat().st_size, "hash": quick_hash(path)}
         if path.suffix == ".parquet":
@@ -461,14 +485,19 @@ def spy_metrics() -> list[dict]:
 def benchmark_metrics() -> list[dict]:
     b = pd.read_parquet(ARTIFACTS["spy_1d_bars"])
     b["timestamp"] = pd.to_datetime(b["timestamp"], utc=True)
-    b = b.sort_values("timestamp")
+    b = b[b["timestamp"] <= SPY_BENCHMARK_CUTOFF].sort_values("timestamp")
     rows: list[dict] = []
-    # SPY 25-4H-bar-equivalent (~12.5 trading day) forward return baseline over the OOF window
+    # SPY 25-4H-bar-equivalent (~12.5 trading day) forward return baseline,
+    # unconditional over history through SPY_BENCHMARK_CUTOFF (NOT scoped to any
+    # single model's OOF/test window — see scripts/capstone/baseline_strategies.py
+    # for the per-module, window-matched SPY comparison used in the equity figures).
     for name, days in [("spy_fwd_12d_mean_ret", 12), ("spy_fwd_25d_mean_ret", 25)]:
         fwd = b["close"].shift(-days) / b["close"] - 1.0
         rows.append(row("benchmark", name, fwd.mean(), "reference",
                         "Data/shared/bars/1d/SPY.parquet",
-                        f"mean {days}-trading-day forward return, full bar history", n=int(fwd.notna().sum())))
+                        f"mean {days}-trading-day forward return, bar history through "
+                        f"{SPY_BENCHMARK_CUTOFF:%Y-%m-%d} (frozen cutoff, pinned for reproducibility)",
+                        n=int(fwd.notna().sum())))
     return rows
 
 
