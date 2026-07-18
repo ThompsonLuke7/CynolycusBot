@@ -84,3 +84,29 @@ Financial metrics are not interchangeable. “Frozen test” means policy chosen
 - Any confluence pair as discovered edge.
 - Dealer/CBOE/social predictive performance before sufficient history exists.
 - Coursework attribution not supplied by the author.
+- The `best_hindsight_pool_stock` oracle baseline (Table G) as an achievable comparison — it is chosen by its own realized return, i.e. look-ahead by construction.
+
+## G. Non-model baseline comparisons (added 2026-07-16/17)
+
+Computed once per module's frozen-test window through one shared metrics function so every row is directly comparable (`scripts/capstone/baseline_strategies.py`; artifacts in `research/capstone/baselines/`). "Convention" flags whether a row is 100%-invested daily (`portfolio-daily`) or books $1k-notional trade P&L on a $100k base like the modules do (`trade-booked-daily`) — do not compare Sharpe/DD across the two without noting this.
+
+| Status | Baseline | Momentum window (2025-05-20→2026-07-06, 282 days) | HTF window (2025-05-30→2026-06-18, 265 days) | Convention | Caveats |
+|---|---|---|---|---|---|
+| R/L | Module deployed policy, restated daily | +92.517%, Sharpe 3.625, DD −15.298% | +335.962%, Sharpe 4.942, DD −18.702% | trade-booked-daily | Same trades as Table B, restated on the shared daily convention for apples-to-apples baseline comparison. |
+| R/L | SPY buy & hold | +26.717%, Sharpe 1.760, DD −9.131% | +26.716%, Sharpe 1.899, DD −9.131% | portfolio-daily | Price return only (split-adjusted, dividend-excluded); computed independently of the `spy_fwd_*` reference metric in Tables A/E. |
+| R/L | Equal-weight universe (module's own low-price-gated pool) | +64.734%, Sharpe 2.277, DD −11.155% (1,070 tickers) | +64.330%, Sharpe 2.379, DD −11.331% (1,076 tickers) | portfolio-daily | Pool is today's survivor universe, not a point-in-time one — this baseline is upward-biased by construction; treat as a hard bar. |
+| R/L | Sector-neutral (11 SPDR sector ETFs, equal weight) | +18.268%, Sharpe 1.625, DD −6.676% | +17.677%, Sharpe 1.692, DD −6.676% | portfolio-daily | Proxy only: `shared_universe.csv`'s `sector` column is Unknown/NaN for all 3,092 rows, so a real per-ticker sector-neutral sleeve is not buildable from current metadata. |
+| R/L | 3-month T-bill accrual (FRED DGS3MO) | +4.511%, ann. vol 0.018%, DD 0.000% | +4.226%, ann. vol 0.018%, DD 0.000% | portfolio-daily | Mean ~3.9% annualized yield over the window; behaves like cash as expected (sanity-checked). |
+| R/L | Largest single stock, all-in buy & hold | NVDA +45.488%, Sharpe 1.140, DD −20.216% | NVDA +56.194%, Sharpe 1.395, DD −20.216% | portfolio-daily | "Largest" = highest 20-day dollar volume among mega-cap stocks in `shared_universe.csv` — a size proxy, not the best performer. |
+| R/L | Random top-k through the identical execution engine + deployed exit policy (10 seeds, seeds 123–132) | +28.458% ± 3.9pp (top-5, win rate 72.27% ± 0.55pp, avg trade 0.7329% ± 0.106pp) | +31.464% ± 11.0pp (top-20, win rate 34.98% ± 0.31pp, avg trade 0.1358% ± 0.050pp) | trade-booked-daily | Same `family_backtest` engine, same val-frozen exit policy, same trade count as the deployed model — isolates the ranking model's own contribution from policy/universe design. Win rate is close to (momentum) or below (HTF) the deployed model's (74.74% / 38.99%); the model's larger edge is per-trade magnitude (avg trade 2.3869% vs random's 0.7329% for momentum; 1.4498% vs 0.1358% for HTF) — the exit policy alone explains most of the win rate, the ranking model mostly adds magnitude. |
+| R/L (oracle, not an achievable strategy) | Best-hindsight single stock in pool | AXTI +4,357.544% | SNDK +5,685.885% | portfolio-daily | Perfect-foresight upper bound — the ticker is chosen BY its own realized return over the window; look-ahead by construction. Never cite as an achievable comparison. SNDK's spike independently corroborates the 7/15 live Meta Ranker concentration incident already logged in `LIVING_SUMMARY.md`. |
+
+Source: `scripts/capstone/baseline_strategies.py`; `research/capstone/baselines/{baseline_metrics.csv,baseline_equity_curves.csv,random_k_seeds.csv,baseline_summary.json}`; 7 regression tests in `scripts/capstone/tests/test_baselines.py` (commits `61ddea4`, `ebc33c9`).
+
+## H. SPY-benchmark reproducibility fix (added 2026-07-17)
+
+| Status | Finding | Exact result | Source | Meaning |
+|---|---|---|---|---|
+| R | SPY forward-return benchmark drift, root cause | `spy_fwd_12d/25d_mean_ret` was computed over spy_1d_bars.parquet's entire history — a file the nightly pipeline appends to — so the "locked" mean shifted by a few decimal points every time new bars landed (1,496→1,498 rows this week; see Table E's earlier drift row). | `research/capstone/reproduce_results.py:benchmark_metrics()` (pre-fix) | The metric's definition was never a fixed quantity, not a code bug. |
+| R/L | Fix: pinned cutoff | Added `SPY_BENCHMARK_CUTOFF = 2026-07-14` (last available bar); `benchmark_metrics()` and the `spy_1d_bars` artifact fingerprint now filter/hash only bars through that date. Rewrote `results_lock.json` once — diff is exactly the 2 benchmark rows + 1 fingerprint entry, nothing else moved. `spy_fwd_12d_mean_ret` 0.007176→0.007186; `spy_fwd_25d_mean_ret` 0.014686→0.014669. | `reproduce_results.py` (`SPY_BENCHMARK_CUTOFF`, `_spy_frozen_fingerprint`); commit `b3bb090` | Fingerprint check now tracks "was pre-cutoff history revised" instead of "did new bars append" (expected, not a bug); the number reproduces indefinitely going forward. |
+| R | Rerun of Table E's validation command, post-fix | 43 passed, 0 failed, 4 deselected (was 31 passed, 2 failed, 4 deselected) | same command as Table E, rerun 2026-07-17 | Confirms both previously-failing tests (`test_artifacts_unchanged`, `test_spy_and_benchmark_reproduce`) now pass; count also includes 7 new baseline-strategy tests (Table G). |

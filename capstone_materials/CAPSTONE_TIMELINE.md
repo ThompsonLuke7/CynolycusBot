@@ -89,6 +89,11 @@ Dates are Git commit dates or dated artifacts; they are approximate development 
 - Advertised safe smoke suite: 110 pass, 2 fail; unconditional default earnings-result loading contaminated catalyst fixture inputs with 550 records.
 - No broker, network, live-order, retraining, or destructive data command was run.
 
+## July 16–17: baseline comparisons and reproducibility fix
+
+- **Jul 16 — Five non-model baselines added.** `61ddea4`/`ebc33c9` built `scripts/capstone/baseline_strategies.py`: SPY buy-and-hold, equal-weight universe pool, 11-SPDR sector-neutral proxy, 3-month T-bill accrual, largest-stock all-in, a random-top-k-through-the-same-engine control, and a best-hindsight-stock oracle upper bound — all computed once per module's frozen-test window.
+- **Jul 17 — SPY benchmark drift fixed.** `b3bb090` pinned `spy_fwd_12d/25d_mean_ret` and the `spy_1d_bars` artifact fingerprint to a frozen cutoff date (`SPY_BENCHMARK_CUTOFF = 2026-07-14`) instead of "full bar history," and rewrote `results_lock.json` once. Full capstone + shared-core validation went from 31 pass/2 fail to 43 pass/0 fail.
+
 ## Chronological interpretation
 
 The evidence supports a repeated cycle: practical hypothesis → model/pipeline implementation → richer metrics → causal or operational failure → narrower claims and redesigned infrastructure. The most meaningful evolution is not “a model became more accurate”; it is movement from unstable single-asset prediction toward cross-sectional ranking, point-in-time/OOS auditing, shared execution, and explicit operational safety.
