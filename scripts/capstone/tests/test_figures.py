@@ -31,6 +31,7 @@ EXPECTED_FIGS = [
     "fig11_meta_exit_policy.png",
     "fig12_paper_sessions.png",
     "fig13_scaleout_grid.png",
+    "fig14_baseline_comparison.png",
 ]
 
 
@@ -136,5 +137,11 @@ def test_generator_uses_validated_entity_palette():
     assert mf.COLORS["htf_swing"] == "#199e70"
     assert mf.COLORS["swing"] == "#4a3aa7"
     assert mf.COLORS["meta"] == "#008300"
+    assert mf.COLORS["baseline_ew"] == "#c1440e"
+    assert mf.COLORS["baseline_random"] == "#7a3aa0"
+    assert mf.COLORS["baseline_oracle"] == "#a8720a"
     # benchmark/neutral chrome must stay out of the categorical slots
-    assert mf.COLORS["spy"] not in {mf.COLORS[k] for k in ("momentum", "htf_swing", "swing", "meta")}
+    categorical = {mf.COLORS[k] for k in
+                  ("momentum", "htf_swing", "swing", "meta", "baseline_ew", "baseline_random", "baseline_oracle")}
+    assert mf.COLORS["spy"] not in categorical
+    assert len(categorical) == 7, "categorical slot collision — two entities share a hex"

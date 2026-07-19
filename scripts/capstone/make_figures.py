@@ -20,6 +20,7 @@ Figure inventory (research/capstone/figures/):
   fig11  meta exit-policy comparison incl. the deployed live policy (OOF holdout)
   fig12  swing paper-trading sessions 2026-05-28/29 (options ledger)
   fig13  scale-out fraction x trigger grid (win-rate vs expectancy tradeoff)
+  fig14  frozen-test module performance vs 6 non-model baselines (log-scale equity)
 
 Conventions (stated on the figures):
   * Event-driven backtests book $1,000 notional per trade on a $100k base, NOT
@@ -71,6 +72,11 @@ COLORS = {
     "meta": "#008300",       # green
     "spy": "#898781",        # neutral benchmark gray
     "biased": "#c3c2b7",     # pre-audit (selection-biased) values
+    # fig14 baseline-comparison headline hues (validated together with momentum/
+    # htf_swing above: python validate_palette.py "<mom|htf>,<3 below>" --mode light)
+    "baseline_ew": "#c1440e",      # equal-weight universe — burnt orange
+    "baseline_random": "#7a3aa0",  # random top-k, same engine — purple
+    "baseline_oracle": "#a8720a",  # best-hindsight oracle — amber/gold
 }
 LABELS = {
     "momentum": "Momentum 4H",
@@ -786,6 +792,82 @@ def fig12_paper_sessions():
     return save_figure(fig, FIG_DIR / "fig12_paper_sessions.png", dpi=200, close=True)
 
 
+BASELINE_WINDOWS = [
+    ("momentum_expansion", "momentum", "module_momentum_deployed", "random_top5_median_seed", "best_hindsight_pool_stock_AXTI"),
+    ("multi_ticker_swing_htf", "htf_swing", "module_htf_deployed", "random_top20_median_seed", "best_hindsight_pool_stock_SNDK"),
+]
+# Non-headline reference basket: SPY, sector-ETFs, T-bills, largest-stock all
+# share one muted neutral gray (matching spy's existing treatment across figs
+# 01-03) and are distinguished by linestyle + direct end-of-line labels rather
+# than by hue — a 9th categorical color is not the fix (dataviz anti-patterns).
+BASELINE_REFERENCE = [
+    ("spy_buy_hold", "SPY buy & hold", "--"),
+    ("sector_neutral_etf", "Sector-neutral (11 SPDR ETFs)", ":"),
+    ("tbill_3m", "3M T-bills", "-."),
+    ("largest_stock_NVDA", "Largest stock (NVDA)", (0, (1, 1, 4, 1))),
+]
+
+
+def fig14_baseline_comparison():
+    import matplotlib.dates as mdates
+
+    curves = pd.read_csv(REPO / "research/capstone/baselines/baseline_equity_curves.csv")
+    summ = json.loads((REPO / "research/capstone/baselines/baseline_summary.json").read_text())
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.6))
+    style_figure(fig, axes, THEME)
+    for ax, (window, model_key, model_col, random_col, oracle_col) in zip(axes, BASELINE_WINDOWS):
+        w = curves[curves.window == window].copy()
+        w["date"] = pd.to_datetime(w["date"])
+        win_info = summ["windows"][window]
+
+        def series(col):
+            s = w[w.strategy == col].sort_values("date")
+            return s["date"], s["equity"] / 1000.0  # $ -> $k, matches BASE_K convention
+
+        # Secondary series (6): identified via legend only — too close in value
+        # to separate with direct end-of-line labels (dataviz "selective direct
+        # labels" rule: legend covers identity, direct labels stay <=4 per axis).
+        for col, label, ls in BASELINE_REFERENCE:
+            x, y = series(col)
+            ax.plot(x, y, color=COLORS["spy"], lw=1.1, ls=ls, alpha=0.85, label=label)
+        x, y = series("equal_weight_universe")
+        ax.plot(x, y, color=COLORS["baseline_ew"], lw=1.6, label="Equal-weight universe")
+        x, y = series(random_col)
+        ax.plot(x, y, color=COLORS["baseline_random"], lw=1.6, label="Random top-k (median seed)")
+
+        # Headline series (2): the deployed model and its own perfect-foresight
+        # ceiling — direct-labeled since they are the figure's point.
+        x, y = series(model_col)
+        ax.plot(x, y, color=COLORS[model_key], lw=2.2)
+        _direct_label(ax, x.iloc[-1], y.iloc[-1], f"{LABELS[model_key]} (deployed) {y.iloc[-1] - BASE_K:+.0f}k", COLORS[model_key])
+
+        x, y = series(oracle_col)
+        ax.plot(x, y, color=COLORS["baseline_oracle"], lw=1.6, ls="--")
+        _direct_label(ax, x.iloc[-1], y.iloc[-1], f"Best-hindsight oracle {y.iloc[-1] - BASE_K:+.0f}k", COLORS["baseline_oracle"])
+
+        ax.set_yscale("log")
+        ax.set_ylabel(r"Equity (\$k, log scale, \$100k base)")
+        ax.set_title(f"({'a' if window == 'momentum_expansion' else 'b'}) {LABELS[model_key]} window "
+                     f"({win_info['window'][0]} → {win_info['window'][1]}, {win_info['pool_tickers']} pool tickers)",
+                     fontsize=10)
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=6))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+        ax.legend(frameon=False, fontsize=7.8, loc="upper left")
+    fig.suptitle("Frozen-test module performance vs six non-model baselines (log-scale equity)",
+                 fontsize=12, y=1.03)
+    footer(fig,
+           window="momentum 2025-05-20→2026-07-06; HTF 2025-05-30→2026-06-18 (each module's own frozen-test window)",
+           universe="module deployed = same trades as fig01; equal-weight/random-top-k = module's own low-price-gated pool",
+           split="test(frozen) + reference",
+           benchmark="SPY, equal-weight universe, 11-SPDR sector-neutral proxy, 3M T-bills (FRED DGS3MO), largest-stock (NVDA), "
+                     "random top-k through the identical execution engine",
+           source="research/capstone/baselines/{baseline_equity_curves.csv,baseline_summary.json} (scripts/capstone/baseline_strategies.py)",
+           note="Log scale is required by the oracle's range (AXTI +4,358%, SNDK +5,686%) — it is a perfect-foresight upper bound, "
+                r"NOT an achievable comparison (dashed, see results catalog Table G). Model/random-top-k book \$1k-notional trade P&L "
+                r"on this \$100k base; all other lines are 100%-invested daily — do not compare Sharpe/DD across the two conventions.")
+    return save_figure(fig, FIG_DIR / "fig14_baseline_comparison.png", dpi=200, close=True)
+
+
 # ---------------------------------------------------------------------------
 
 def main() -> None:
@@ -821,6 +903,7 @@ def main() -> None:
         ("fig11", fig11_meta_exit_policy),
         ("fig12", fig12_paper_sessions),
         ("fig13", fig13_scaleout_grid),
+        ("fig14", fig14_baseline_comparison),
     ]
     for name, fn in jobs:
         if only and name not in only:

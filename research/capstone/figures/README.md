@@ -51,6 +51,7 @@ that bar and aborts below 99% consistency (current run: **100.00%**).
 | `fig11_meta_exit_policy.png` | Meta selection has edge but the pre-2026-07-12 rank-drop-out exit destroyed it: +0.57% mean/trade vs +5.87% (target+20), +4.96% (scale-out), +4.40% (deployed live) on the same entries. Motivates the July 2026 exit-policy change. | wf-oof | `research/capstone/exit_policy_grid.csv` (OOF `s_combo` rescore, audit §4.3) |
 | `fig12_paper_sessions.png` | Paper trading reported unfiltered: the 2-session options ledger lost $6,246 (win 34%, n=123) even though fresh-entry calls averaged +36% — execution/staleness, not selection, drove losses. Small n; anecdotal. | paper | `multiticker_20260528_20260529_closed_performance_rebuilt.csv` |
 | `fig13_scaleout_grid.png` | The scale-out trim is a **win-rate ⇄ expectancy dial, not a free lunch**: trimming less and later maximizes mean (25%@+50% → +6.23%); trimming more and earlier maximizes win rate and median (75%@+10% → 65.1% win, median +5.58%). The live 50%@+20% sits mid-curve. | wf-oof | `research/capstone/exit_policy_grid.csv` |
+| `fig14_baseline_comparison.png` | Both modules beat five non-model baselines (SPY, equal-weight universe pool, sector-neutral ETF proxy, T-bills, largest-stock) on their own frozen-test windows; the random-top-k control (same engine, same deployed policy) shows the model's edge is mostly **per-trade magnitude**, not win rate. The best-hindsight oracle (log-scale ceiling, dashed) is a perfect-foresight upper bound, not an achievable comparison. | test(frozen) + reference | `research/capstone/baselines/{baseline_equity_curves.csv,baseline_summary.json}` (`scripts/capstone/baseline_strategies.py`) |
 
 ## Reconciliation & caveats (read before citing)
 
@@ -123,3 +124,11 @@ that bar and aborts below 99% consistency (current run: **100.00%**).
 * **fig05 regime split** uses only two regimes because the frozen test window
   contains a single sustained risk-off episode; finer regime grids on one year
   of test data would be fitting noise.
+* **fig14 mixes two P&L conventions on one axis.** The model and random-top-k
+  lines book $1k-notional trade P&L on a $100k base (same as figs 01–03); every
+  other line (SPY, equal-weight universe, sector-neutral ETFs, T-bills,
+  largest-stock, the oracle) is 100%-invested daily. Compare *shape and log
+  scale*, not Sharpe/DD, across the two conventions. The equal-weight-universe
+  baseline uses today's survivor pool (upward-biased); the oracle is chosen BY
+  its own realized return (look-ahead by construction) and must never be cited
+  as achievable.
