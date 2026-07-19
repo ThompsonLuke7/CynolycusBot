@@ -1,3 +1,7 @@
+# LEGACY MANUAL HELPER ONLY.
+# Production scheduling and the complete bounded pipeline are owned by
+# scripts/run_live_server.sh -> UI.combined_server -> nightly_market_data.sh.
+# Do not install this file as a Windows Scheduled Task.
 param(
     [string]$Python = "python",
     [string]$LogPath = "news\data\processed\nightly_cron.log"

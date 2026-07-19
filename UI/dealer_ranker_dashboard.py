@@ -28,7 +28,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
-from UI.ui_chrome import NAV_HTML, THEME_LINK, serve_theme_asset, serve_theme_css
+from UI.ui_chrome import NAV_HTML, THEME_LINK, serve_theme_css
 
 logger = logging.getLogger(__name__)
 RANKING_ROOT = REPO / "Data/dealer_positioning/rankings"
@@ -603,8 +603,6 @@ class DealerRankerHandler(BaseHTTPRequestHandler):
             self._send(_PAGE.encode("utf-8"), ctype="text/html; charset=utf-8")
         elif self.path == "/static/cynolycus_theme.css":
             serve_theme_css(self)
-        elif self.path.startswith("/static/themes/"):
-            serve_theme_asset(self, self.path)
         elif self.path.startswith("/api/state"):
             self._send(json.dumps(_json_safe(self._app().snapshot())).encode("utf-8"))
         elif self.path.startswith("/api/rankings"):

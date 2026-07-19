@@ -22,6 +22,7 @@
 #   scripts/run_live_server.sh --no-start-all  # serve pages but don't auto-run
 #   scripts/run_live_server.sh --readiness-on-start  # explicitly run guarded cache readiness
 #   DATA_READINESS_TIME=05:30 scripts/run_live_server.sh  # pre-open full shared-data refresh
+#   NIGHTLY_TIME=16:45 scripts/run_live_server.sh  # post-refresher collection/enrichment
 #   DEALER_RANKER_TIME=15:40 scripts/run_live_server.sh  # override near-close dealer run
 #   (any extra args are passed straight through to combined_server)
 #
@@ -64,9 +65,10 @@ if [ "$START_ALL" = "1" ]; then SERVER_ARGS+=("--start-all"); fi
 SERVER_ARGS+=(
   # A persistent supervised server supplies the pre-open producer.  The
   # readiness workflow itself is guarded and only writes a stamp after every
-  # required cache/feed/matrix stage succeeds; stale data therefore remains
+  # required bars/context/features/matrix stage succeeds; stale data therefore remains
   # fail-closed instead of being papered over by the scheduler.
   "--data-readiness-time" "${DATA_READINESS_TIME:-05:30}"
+  "--nightly-time" "${NIGHTLY_TIME:-16:45}"
   "--dealer-ranker-time" "${DEALER_RANKER_TIME:-15:45}"
   "--dealer-ranker-workers" "${DEALER_RANKER_WORKERS:-8}"
   "--dealer-ranker-top-k" "${DEALER_RANKER_TOP_K:-10}"

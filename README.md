@@ -30,6 +30,7 @@ The repo is organized into four top-level groups plus shared data/UI/scripts:
 | `strategies/multi_ticker_swing_htf/` | Higher-time-frame (4h) swing research track. |
 | `strategies/momentum_expansion/` | Momentum expansion universe, features, labels, matrices, alerts, and backtest work. |
 | `strategies/momentum_scalper/` | Momentum scalper MVP research track. |
+| `strategies/intraday_structure/` | Paper-only, event-driven 1-minute confirmation engine that turns existing ranker candidates into persistent intraday setup states, targets, and replay labels. |
 | `signals/news/` | Unscheduled catalyst news ingestion, deduplication, BGE embeddings, FinBERT tone, clustering, labels, and features. |
 | `signals/events/` | Scheduled macro/earnings event context features; `signals/events/forward_guidance/` is the post-earnings guidance module. |
 | `signals/catalysts/` | Catalyst record building, scoring, and features. |
@@ -173,6 +174,16 @@ The momentum expansion project scores a broader universe for continuation setups
 ```
 
 Other stages include `--refresh-universe`, `--fetch`, `--fetch-context`, `--build-features`, `--build-labels`, `--build-matrix`, and `--export-colab`.
+
+## Intraday Structure Engine
+
+The Intraday Structure Engine is an opt-in, deterministic confirmation and trade-management research layer. It reuses the combined server's 1-minute stream and existing ranker/dealer outputs; v1 has no broker-order interface and remains paper-only.
+
+```bash
+./.venv/bin/python -m UI.combined_server --intraday-structure
+```
+
+The dashboard is served on port 8774. Chronological replay is available through `python -m strategies.intraday_structure.main replay`; it requires true 1-minute data and candidates with explicit availability timestamps. See `docs/intraday_structure/REPO_AUDIT_AND_DESIGN.md`.
 
 ## Training And Long-Running Work
 

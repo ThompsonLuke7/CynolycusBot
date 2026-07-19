@@ -89,6 +89,12 @@ def main() -> int:
     parser.add_argument("--no-embeddings", action="store_true")
     parser.add_argument("--no-finbert", action="store_true")
     parser.add_argument("--output", default=None)
+    parser.add_argument(
+        "--ticker-timeout",
+        type=float,
+        default=20.0,
+        help="Hard per-ticker timeout in seconds for isolated network stages such as earnings-calendar.",
+    )
     args = parser.parse_args()
 
     if args.stage in {"collect", "collect-sec-history"}:
@@ -291,10 +297,16 @@ def main() -> int:
             tickers = list(args.tickers)
         else:
             universe = _load_context_universe(args.limit)
+            # Yahoo returns expected quote-summary 404s for ETFs and funds.
+            # Keep unknown types because most discovered equities have no type
+            # metadata yet; exclude only rows explicitly identified as non-stock.
+            if "type" in universe.columns:
+                known_type = universe["type"].fillna("").astype(str).str.casefold()
+                universe = universe[~known_type.isin({"etf", "fund"})].copy()
             tickers = universe["ticker"].astype(str).tolist()
         out_path = Path(args.output) if args.output else EARNINGS_CALENDAR_PATH
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        df = fetch_earnings_calendar(tickers)
+        df = fetch_earnings_calendar(tickers, request_timeout_s=args.ticker_timeout)
         if out_path.exists():
             try:
                 prior = pd.read_parquet(out_path)

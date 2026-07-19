@@ -17,6 +17,7 @@ This repo is an active trading-research workspace, not a single production packa
 - `strategies/momentum_expansion/`: promising ranker/playbook research, especially broad training plus filtered execution.
 - `signals/events/forward_guidance/`: read-only post-earnings guidance module.
 - `signals/social_attention/`: Reddit/social attention pipeline MVP.
+- `strategies/intraday_structure/`: deterministic, paper-only v1 confirmation engine with persistent setup state, structural levels, replay labels, tests, and opt-in combined-server monitoring. Thresholds are not yet empirically calibrated; broad candidate-level 1-minute history and live OPRA flow remain data gaps.
 
 ## Legacy / Experimental
 

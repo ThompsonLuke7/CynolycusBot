@@ -4493,10 +4493,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             from UI.ui_chrome import serve_theme_css
             serve_theme_css(self)
             return
-        if parsed.path.startswith("/static/themes/"):
-            from UI.ui_chrome import serve_theme_asset
-            serve_theme_asset(self, parsed.path)
-            return
         if parsed.path == "/api/state":
             self._write_json(app.snapshot())
             return

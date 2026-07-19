@@ -31,7 +31,8 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
-from UI.ui_chrome import NAV_HTML, THEME_LINK, serve_theme_asset, serve_theme_css
+from UI.ui_chrome import NAV_HTML, THEME_LINK, serve_theme_css
+from UI.performance import module_performance
 
 logger = logging.getLogger(__name__)
 SCAN_TTL = 120.0  # evaluate_now is expensive; cache the scan
@@ -140,13 +141,16 @@ class MomentumDashboardApp:
             return {"error": f"account_failed: {exc}", "positions": []}
 
     def snapshot(self) -> dict:
+        account = self._account()
         return {
             "ts": datetime.now(timezone.utc).isoformat(),
             "config": {"env": self.env_file, "mode": "momentum", "submit": True,
                        "top_k": self.top_k, "live": self._live,
                        "live_available": bool(self.live_env_file)},
             "scan": self._scan(),
-            "account": self._account(),
+            "account": account,
+            "performance": module_performance(
+                "momentum", open_upl=sum(float(p.get("upl", 0) or 0) for p in account.get("positions", []))),
             "loop_running": self._loop_running,
         }
 
@@ -256,8 +260,6 @@ class MomentumHandler(BaseHTTPRequestHandler):
             self._send(_PAGE.encode("utf-8"), ctype="text/html; charset=utf-8")
         elif self.path == "/static/cynolycus_theme.css":
             serve_theme_css(self)
-        elif self.path.startswith("/static/themes/"):
-            serve_theme_asset(self, self.path)
         elif self.path.startswith("/api/state"):
             self._send(json.dumps(_json_safe(self._app().snapshot())).encode("utf-8"))
         else:

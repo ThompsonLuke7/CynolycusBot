@@ -6,7 +6,6 @@ real-money toggle (the account choice is per-module — there is no confusing
 single global switch). The header shows aggregated account stats.
 
   GET  /                 → HTML overview (auto-refreshing cards + Start All)
-  GET  /themes           → theme picker page
   GET  /api/state        → fan-out: each dashboard's status + account, fetched
                            server-side (avoids cross-port CORS in the browser)
   POST /api/start        → start one dashboard ({"key": "swing", "live": false})
@@ -29,7 +28,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
-from UI.ui_chrome import NAV_HTML, PICKER_HTML, THEME_LINK, serve_theme_asset, serve_theme_css
+from UI.ui_chrome import NAV_HTML, THEME_LINK, serve_theme_css
+from UI.performance import module_performance
 
 logger = logging.getLogger(__name__)
 # Snapshot reads must stay snappy — a slow module should not stall the hub page.
@@ -203,12 +203,22 @@ def _adapt_htf(s: dict) -> dict:
             else f"{len(scan.get('picks', []))} scored"}
 
 
+def _adapt_intraday_structure(s: dict) -> dict:
+    active = len(s.get("active_signals") or [])
+    candidates = int(s.get("candidate_count") or 0)
+    return {
+        "state": "running" if s.get("running") else "idle",
+        "detail": f"{active} active setups · {candidates} candidates · paper-only",
+    }
+
+
 class HubDashboardApp:
     def __init__(self, *, host: str = "127.0.0.1", port_spy: int = 8765,
                  port_swing: int = 8766, port_dealer: int = 8768,
                  port_meta: int = 8769, port_momentum: int = 8770,
                  port_htf: int = 8771, port_amethyst: int = 8772,
-                 port_dealer_ranker: int = 8773) -> None:
+                 port_dealer_ranker: int = 8773,
+                 port_intraday_structure: int | None = None) -> None:
         self.host = host
         self.dashboards: list[_Dash] = [
             _Dash("spy", "SPY Intraday", port_spy, startable=True, stoppable=True, tradeable=True,
@@ -234,6 +244,12 @@ class HubDashboardApp:
             _Dash("meta", "Meta Ranker", port_meta, startable=True, stoppable=False, tradeable=True,
                   start_path="/api/run-loop", start_body=lambda live: {}, adapt=_adapt_meta),
         ]
+        if port_intraday_structure is not None:
+            self.dashboards.append(
+                _Dash("intraday_structure", "Intraday Structure", port_intraday_structure,
+                      startable=False, stoppable=False, tradeable=False,
+                      start_path=None, start_body=lambda live: {}, adapt=_adapt_intraday_structure)
+            )
 
     def _by_key(self, key: str) -> _Dash:
         for d in self.dashboards:
@@ -286,6 +302,11 @@ class HubDashboardApp:
             else:
                 try:
                     entry.update(d.adapt(s))
+                    acct = entry.get("acct") or {}
+                    entry["performance"] = module_performance(
+                        d.key if d.key != "htf" else "multi_ticker_swing_htf",
+                        open_upl=_f(acct.get("upl")),
+                    )
                     entry["up"] = True
                     acct = entry.pop("acct", None)
                     if acct:
@@ -366,6 +387,9 @@ h1{font-size:18px;margin:0 0 4px}
 .tog{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}
 .warn{color:var(--yellow);font-size:12px}
 .acct{font-size:12px}
+.perf{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11px}
+.perf span{background:var(--panel2);padding:6px;border-radius:5px;text-align:center;color:var(--muted)}
+.perf b{display:block;font-size:13px;color:var(--text)}
 </style></head><body>
 __NAV_HTML__
 <div class=wrap>
@@ -413,10 +437,16 @@ function render(s){
     var startBtn=d.startable?('<button class=primary onclick="ctl(\\''+d.key+'\\',\\'start\\')">'+
        (d.key==='meta'||d.key==='momentum'||d.key==='dealer_ranker'?'Run':'Start')+'</button>'):'';
     var stopBtn=d.stoppable?('<button class=danger onclick="ctl(\\''+d.key+'\\',\\'stop\\')">Stop</button>'):'';
+    var p=d.performance||{};
+    var tracked=p.closed_trades>0;
+    var perf='<div class=perf><span><b class="'+((p.tracked_pnl||0)>=0?'pos':'neg')+'">'+(tracked?'$'+f(p.tracked_pnl):'—')+'</b>tracked P/L</span>'+
+      '<span><b>'+f(p.win_rate,1)+(p.win_rate==null?'':'%')+'</b>win rate</span>'+
+      '<span><b>'+f(p.closed_trades,0)+'</b>closed</span></div>';
     return '<div class=card><div class=card-head>'+d.name+'</div><div class=body>'+
       '<div class=row><span class="pill '+pillState+'">'+(d.up?(d.state||'idle'):'down')+'</span>'+
       indicator+'<a href="'+d.url+'" target=_blank>open ↗</a></div>'+
       '<div class=detail>'+(d.up?(d.detail||''):(d.error||'unreachable'))+'</div>'+
+      perf+
       toggle+
       '<div class=row>'+startBtn+stopBtn+'</div>'+
       '</div></div>';
@@ -489,12 +519,8 @@ class HubHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         if self.path == "/" or self.path.startswith("/index"):
             self._send(_PAGE.encode("utf-8"), ctype="text/html; charset=utf-8")
-        elif self.path.startswith("/themes"):
-            self._send(PICKER_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
         elif self.path == "/static/cynolycus_theme.css":
             serve_theme_css(self)
-        elif self.path.startswith("/static/themes/"):
-            serve_theme_asset(self, self.path)
         elif self.path.startswith("/api/state"):
             self._send_json(self._app().snapshot())
         else:

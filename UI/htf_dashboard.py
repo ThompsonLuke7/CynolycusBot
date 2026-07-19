@@ -27,7 +27,8 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from UI.ui_chrome import NAV_HTML, THEME_LINK, serve_theme_asset, serve_theme_css
+from UI.ui_chrome import NAV_HTML, THEME_LINK, serve_theme_css
+from UI.performance import module_performance
 
 logger = logging.getLogger(__name__)
 # Read htf_score straight off the shared Meta matrix — the SAME per-(timestamp,
@@ -151,6 +152,7 @@ class HTFDashboardApp:
     def snapshot(self) -> dict:
         return {"ts": datetime.now(timezone.utc).isoformat(),
                 "config": {"mode": "htf_swing", "top_k": self.top_k, "tradeable": False},
+                "performance": module_performance("multi_ticker_swing_htf"),
                 "scan": self._scan()}
 
 
@@ -207,8 +209,6 @@ class HTFHandler(BaseHTTPRequestHandler):
             self._send(_PAGE.encode("utf-8"), ctype="text/html; charset=utf-8")
         elif self.path == "/static/cynolycus_theme.css":
             serve_theme_css(self)
-        elif self.path.startswith("/static/themes/"):
-            serve_theme_asset(self, self.path)
         elif self.path.startswith("/api/state"):
             self._send(json.dumps(_json_safe(self._app().snapshot())).encode("utf-8"))
         else:

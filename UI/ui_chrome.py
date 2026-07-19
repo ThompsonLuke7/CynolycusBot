@@ -1,17 +1,8 @@
 """Shared UI chrome for the Cynolycus dashboards.
 
 Single source of truth for the look-and-feel that every combined-server
-dashboard shares: the palette(s), base typography, the common component
-classes (.pill / button variants / .card / .controls), the top navigation
-bar, and the swappable theme system.
-
-Themes are pure CSS-variable sets keyed off ``:root[data-theme="…"]``. The
-selected theme name is stored in ``localStorage['cyno-theme']`` and applied on
-every page by the nav bootstrap script, so the choice follows you across all
-dashboards. The "anime" theme additionally pulls imagery the user drops into
-``UI/static/themes/anime/`` (``bg.jpg`` page background, ``corner.png`` corner
-art) — the app never sources or ships those images, it just displays whatever
-files are present.
+dashboard shares: the palette, base typography, the common component classes
+(.pill / button variants / .card / .controls), and the top navigation bar.
 
 Usage:
   * Static HTML pages: add ``THEME_LINK`` in ``<head>`` (after removing the
@@ -19,13 +10,9 @@ Usage:
     ``<body>`` (handlers replace it with ``NAV_HTML``).
   * Python-rendered pages: embed ``THEME_LINK`` / ``NAV_HTML`` in the markup.
   * Every handler answers ``GET /static/cynolycus_theme.css`` via
-    ``serve_theme_css(handler)`` and ``GET /static/themes/<t>/<f>`` via
-    ``serve_theme_asset(handler, path)``.
+    ``serve_theme_css(handler)``.
 """
 from __future__ import annotations
-
-import mimetypes
-from pathlib import Path
 
 # Port map shared by the nav + hub fan-out.
 NAV_PORTS: list[tuple[str, int]] = [
@@ -40,14 +27,6 @@ NAV_PORTS: list[tuple[str, int]] = [
     ("Meta Ranker", 8769),
 ]
 
-# Selectable themes: (key, display name). "default" is the base palette.
-THEMES: list[tuple[str, str]] = [
-    ("default", "Cynolycus Dark"),
-    ("anime", "Anime"),
-]
-
-_THEMES_DIR = Path(__file__).resolve().parent / "static" / "themes"
-
 THEME_CSS = """:root{
   color-scheme: dark;
   --bg:#0d1117; --panel:#161b22; --panel2:#1f2630; --panel-2:#1f2630;
@@ -59,33 +38,6 @@ THEME_CSS = """:root{
   --border:#30363d; --line:#30363d;
   --radius:6px;
 }
-
-/* ---- Anime theme: dark sakura palette + user-supplied imagery ---- */
-:root[data-theme="anime"]{
-  --bg:#14101a; --panel:#211a2e; --panel2:#2e2440; --panel-2:#2e2440;
-  --text:#fbe9f5; --muted:#c4a7d4;
-  --green:#6ee7a8; --good:#6ee7a8;
-  --red:#ff7aa8;   --bad:#ff7aa8;
-  --yellow:#ffcf6e; --warn:#ffcf6e; --gold:#ffcf6e;
-  --blue:#ff8fc8;  --accent:#ff8fc8;
-  --border:#4a3a63; --line:#4a3a63;
-  --radius:14px;
-}
-/* background image is set at runtime from whatever the user dropped in
-   UI/static/themes/anime/ (see the nav bootstrap script) */
-[data-theme="anime"] body{
-  background-size:cover; background-position:center; background-attachment:fixed;
-}
-[data-theme="anime"] .card,[data-theme="anime"] .cyno-nav{
-  backdrop-filter:blur(3px);
-  background:color-mix(in srgb, var(--panel) 82%, transparent);
-}
-[data-theme="anime"] button.primary{background:#d6478f;border-color:#d6478f}
-/* corner art (shown only when the user dropped UI/static/themes/anime/corner.png) */
-#cyno-pinup{display:none;position:fixed;right:8px;bottom:8px;max-height:38vh;
-  max-width:30vw;z-index:5;pointer-events:none;opacity:.92;
-  filter:drop-shadow(0 6px 18px rgba(0,0,0,.5));border-radius:12px}
-[data-theme="anime"] #cyno-pinup[src]{display:block}
 
 *{box-sizing:border-box}
 body{
@@ -116,6 +68,7 @@ a:hover{text-decoration:underline}
   background:#0f3a1f; color:var(--green); border:1px solid #1f5a33;
 }
 .cyno-nav .live-badge.live{background:#3a1010; color:var(--red); border-color:#5a1f1f}
+.cyno-nav .performance-badge{color:var(--muted);font-variant-numeric:tabular-nums;font-size:11px}
 
 /* shared components (already the swing/dealer vocabulary) */
 .pill{padding:2px 8px;border-radius:10px;background:#30363d;color:var(--muted);
@@ -147,38 +100,12 @@ button:disabled{opacity:.45;cursor:not-allowed}
 
 THEME_LINK = '<link rel="stylesheet" href="/static/cynolycus_theme.css">'
 
-# JS-driven nav + theme bootstrap. Applies the stored theme as early as
-# possible, builds the nav links from a fixed port map, and (anime theme) wires
-# the optional corner image. Works identically in static + server-rendered pages.
+# JS-driven nav. Builds the nav links from a fixed port map. Works
+# identically in static + server-rendered pages.
 _PORTS_JS = ",".join(f'["{n}",{p}]' for n, p in NAV_PORTS)
-NAV_HTML = """<img id="cyno-pinup" alt="">
-<nav class="cyno-nav" id="cyno-nav"></nav>
+NAV_HTML = """<nav class="cyno-nav" id="cyno-nav"></nav>
 <script>
 (function(){
-  // apply stored theme everywhere; anime pulls whatever images the user
-  // dropped into UI/static/themes/anime/ (first = background, last = corner art)
-  function applyTheme(t){
-    t=t||'default';
-    document.documentElement.dataset.theme=t;
-    var img=document.getElementById('cyno-pinup');
-    if(t!=='anime'){
-      if(document.body) document.body.style.backgroundImage='';
-      if(img) img.removeAttribute('src');
-      return;
-    }
-    fetch('/static/themes/anime/__list__').then(function(r){return r.json();}).then(function(files){
-      files=(files||[]).filter(function(f){return /\\.(jpe?g|png|webp|gif|avif|bmp)$/i.test(f);});
-      if(!files.length) return;
-      var base='/static/themes/anime/';
-      if(document.body) document.body.style.backgroundImage=
-        "linear-gradient(rgba(20,16,26,.86),rgba(20,16,26,.93)), url('"+base+encodeURIComponent(files[0])+"')";
-      if(img) img.src=base+encodeURIComponent(files[files.length>1?files.length-1:0]);
-    }).catch(function(){});
-  }
-  window.cynoApplyTheme=applyTheme;
-  applyTheme(localStorage.getItem('cyno-theme'));
-  window.addEventListener('storage',function(e){ if(e.key==='cyno-theme') applyTheme(e.newValue); });
-
   var PORTS=[__PORTS__];
   var here=location.port||"80", host=location.hostname;
   var html='<span class="brand">CYNOLYCUS</span>';
@@ -186,61 +113,26 @@ NAV_HTML = """<img id="cyno-pinup" alt="">
     var active=(String(p[1])===String(here))?' class="active"':'';
     html+='<a'+active+' href="http://'+host+':'+p[1]+'/">'+p[0]+'</a>';
   });
-  html+='<a href="http://'+host+':8764/themes">Themes</a>'
-      +'<span class="spacer"></span>'
+  html+='<span class="spacer"></span>'
+      +'<span class="performance-badge" id="cyno-performance">performance: loading</span>'
       +'<span class="live-badge" id="cyno-live-badge">paper</span>';
   var el=document.getElementById('cyno-nav');
   if(el){el.innerHTML=html;}
+  // Every dashboard already exposes /api/state. Use only its module-scoped
+  // account book here; never show a shared account's P/L as this module's P/L.
+  function setPerformance(s){
+    var out=(s&&s.performance)||{}, a=(s&&s.account)||{};
+    var upl=out.open_unrealized_pnl;
+    if(upl==null && Array.isArray(a.positions)) upl=a.positions.reduce(function(n,p){return n+(Number(p.upl)||Number(p.unrealized_pl)||0);},0);
+    var el=document.getElementById('cyno-performance'); if(!el) return;
+    if(out.closed_trades){ el.textContent='tracked: $'+Number(out.tracked_pnl||0).toLocaleString(undefined,{maximumFractionDigits:0})+' · '+out.closed_trades+' closed'; }
+    else if(upl!=null){ el.textContent='open P/L: $'+Number(upl).toLocaleString(undefined,{maximumFractionDigits:0})+' · exits not yet ledgered'; }
+    else { el.textContent='performance: no module ledger'; }
+  }
+  function refreshPerformance(){fetch('/api/state',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(setPerformance).catch(function(){});}
+  refreshPerformance(); setInterval(refreshPerformance,10000);
 })();
 </script>""".replace("__PORTS__", _PORTS_JS)
-
-
-def _picker_page() -> str:
-    cards = "".join(
-        f'<div class="card theme-card" data-theme-key="{key}">'
-        f'<div class="card-head">{name}</div>'
-        f'<div class="preview prev-{key}"><span class="swatch s1"></span>'
-        f'<span class="swatch s2"></span><span class="swatch s3"></span>'
-        f'<span class="swatch s4"></span></div>'
-        f'<div class="pick"><button class="primary" onclick="pick(\'{key}\')">Use this theme</button>'
-        f'<span class="cur" id="cur-{key}"></span></div></div>'
-        for key, name in THEMES
-    )
-    extra = """
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;margin:14px 18px}
-.preview{height:90px;display:flex}
-.swatch{flex:1}
-.prev-default .s1{background:#0d1117}.prev-default .s2{background:#1f2630}
-.prev-default .s3{background:#58a6ff}.prev-default .s4{background:#3fb950}
-.prev-anime .s1{background:#14101a}.prev-anime .s2{background:#2e2440}
-.prev-anime .s3{background:#ff8fc8}.prev-anime .s4{background:#6ee7a8}
-.pick{padding:12px;display:flex;align-items:center;gap:10px}
-.cur{color:var(--green);font-weight:700;font-size:12px}
-.note{margin:8px 18px;color:var(--muted);max-width:760px}
-"""
-    return (
-        "<!doctype html><html><head><meta charset=utf-8><title>Themes</title>"
-        + THEME_LINK
-        + f"<style>{extra}</style></head><body>"
-        + NAV_HTML
-        + "<div class=grid>" + cards + "</div>"
-        + "<p class=note>The <b>Anime</b> theme displays images you place in "
-          "<code>UI/static/themes/anime/</code>: <code>bg.jpg</code> (page background) "
-          "and <code>corner.png</code> (corner art). Drop your own files there; "
-          "nothing ships by default.</p>"
-        + """<script>
-function pick(t){localStorage.setItem('cyno-theme',t);
-  if(window.cynoApplyTheme)window.cynoApplyTheme(t);else document.documentElement.dataset.theme=t;
-  mark();}
-function mark(){var c=localStorage.getItem('cyno-theme')||'default';
-  document.querySelectorAll('.cur').forEach(function(e){e.textContent='';});
-  var el=document.getElementById('cur-'+c);if(el)el.textContent='✓ active';}
-mark();
-</script></body></html>"""
-    )
-
-
-PICKER_HTML = _picker_page()
 
 
 def serve_theme_css(handler) -> None:
@@ -252,52 +144,3 @@ def serve_theme_css(handler) -> None:
     handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
     handler.wfile.write(body)
-
-
-_IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp"}
-
-
-def serve_theme_asset(handler, path: str) -> None:
-    """Serve a user-supplied theme image from ``UI/static/themes/<theme>/<file>``.
-
-    Special case: ``.../<theme>/__list__`` returns a JSON array of the image
-    filenames present in that theme folder, so the UI auto-discovers whatever
-    the user dropped in (no fixed filenames required).
-
-    Path-traversal safe; 404 when the file is absent (so a theme with no images
-    simply shows no imagery).
-    """
-    import json as _json
-
-    rel = path[len("/static/themes/"):]
-    if rel.endswith("/__list__"):
-        theme = rel[: -len("/__list__")]
-        tdir = (_THEMES_DIR / theme).resolve()
-        files: list[str] = []
-        if _THEMES_DIR.resolve() in tdir.parents or tdir == (_THEMES_DIR / theme).resolve():
-            if tdir.is_dir():
-                files = sorted(p.name for p in tdir.iterdir()
-                               if p.is_file() and p.suffix.lower() in _IMG_EXTS)
-        body = _json.dumps(files).encode("utf-8")
-        handler.send_response(200)
-        handler.send_header("Content-Type", "application/json; charset=utf-8")
-        handler.send_header("Content-Length", str(len(body)))
-        handler.send_header("Cache-Control", "no-store")
-        handler.end_headers()
-        handler.wfile.write(body)
-        return
-
-    target = (_THEMES_DIR / rel).resolve()
-    if _THEMES_DIR.resolve() not in target.parents or not target.is_file():
-        handler.send_response(404)
-        handler.send_header("Content-Length", "0")
-        handler.end_headers()
-        return
-    ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-    data = target.read_bytes()
-    handler.send_response(200)
-    handler.send_header("Content-Type", ctype)
-    handler.send_header("Content-Length", str(len(data)))
-    handler.send_header("Cache-Control", "no-store")
-    handler.end_headers()
-    handler.wfile.write(data)

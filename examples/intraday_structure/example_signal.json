@@ -1,0 +1,30 @@
+{
+  "ticker": "MU",
+  "timestamp": "2026-07-17T15:42:00+00:00",
+  "setup_type": "breakout_continuation",
+  "state": "RUNNING",
+  "direction": "long",
+  "candidate_source": ["meta_ranker", "4h_momentum"],
+  "confidence": 0.68,
+  "edge_score": 68,
+  "pivot": 160.0,
+  "spot": 161.25,
+  "invalidation": 159.4,
+  "target_1": 162.5,
+  "target_2": 165.0,
+  "active_target": 165.0,
+  "runway_score": 0.83,
+  "expected_reward_risk": 2.1,
+  "market_alignment_score": 0.74,
+  "options_context": {
+    "source": "dealer_positioning_static",
+    "gamma_regime": "negative",
+    "gamma_flip": 158.0,
+    "call_wall": 165.0,
+    "put_wall": 155.0,
+    "warnings": ["dealer_inventory_not_observable"]
+  },
+  "evidence": ["pivot_broken", "retest_held", "vwap_aligned", "clear_runway"],
+  "warnings": [],
+  "version": "intraday_structure_v1"
+}

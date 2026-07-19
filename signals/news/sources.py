@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import time
 import urllib.parse
 import urllib.request
-from typing import Iterable
+from typing import Callable, Iterable
 
 import pandas as pd
 
@@ -1413,54 +1414,139 @@ def fetch_earnings_calendar(
     tickers: Iterable[str],
     *,
     min_interval_s: float = 0.4,
+    request_timeout_s: float = 20.0,
+    progress_every: int = 100,
+    _fetch_one: Callable[[str], object] | None = None,
 ) -> pd.DataFrame:
     """Pull upcoming earnings dates from yfinance.
 
     Schema: ticker | next_earnings_date | days_to_earnings | is_earnings_week | snapshot_date
     is_earnings_week=True when the date falls within [-3, +7] calendar days of today.
+
+    Yahoo requests run in a disposable worker process.  ``yfinance`` normally
+    supplies an HTTP timeout, but a curl request can still wedge below Python's
+    timeout handling.  The parent therefore enforces a hard per-ticker deadline
+    and replaces the worker after a timeout, so one symbol can never pin the
+    full-universe sweep indefinitely.
     """
     _empty = pd.DataFrame(columns=["ticker", "next_earnings_date", "days_to_earnings", "is_earnings_week", "snapshot_date"])
-    try:
-        import yfinance as yf
-    except ImportError:
-        return _empty
-
     today = pd.Timestamp.now().normalize()
     rows: list[dict] = []
     last_req = 0.0
 
-    for ticker in _clean_tickers(tickers):
-        elapsed = time.monotonic() - last_req
-        if elapsed < min_interval_s:
-            time.sleep(min_interval_s - elapsed)
-        try:
-            cal = yf.Ticker(ticker).calendar or {}
-        except Exception:
-            cal = {}
-        last_req = time.monotonic()
+    import multiprocessing as mp
 
-        earn_raw = cal.get("Earnings Date") or cal.get("earningsDate")
-        if earn_raw is None:
-            continue
-        if isinstance(earn_raw, (list, tuple)):
-            earn_raw = earn_raw[0] if earn_raw else None
-        if earn_raw is None:
-            continue
-        try:
-            next_date = pd.Timestamp(earn_raw).normalize()
-        except Exception:
-            continue
+    cleaned = _clean_tickers(tickers)
+    if not cleaned:
+        return _empty
+    timeout_count = 0
+    worker = _fetch_one or _fetch_one_earnings_calendar
+    # Spawn avoids inheriting pandas/curl/BLAS thread state into the network
+    # worker. The modest startup cost is paid only once per 250 tickers.
+    ctx = mp.get_context("spawn")
+    request_q, response_q, worker_proc = _start_earnings_worker(ctx, worker)
+    try:
+        for i, ticker in enumerate(cleaned, 1):
+            elapsed = time.monotonic() - last_req
+            if elapsed < min_interval_s:
+                time.sleep(min_interval_s - elapsed)
+            request_q.put(ticker)
+            try:
+                earn_raw = response_q.get(timeout=max(1.0, float(request_timeout_s)))
+            except queue.Empty:
+                timeout_count += 1
+                print(
+                    f"  earnings calendar: {ticker} timed out after {request_timeout_s:g}s; "
+                    "restarting worker",
+                    flush=True,
+                )
+                _stop_earnings_worker(worker_proc, request_q, response_q)
+                request_q, response_q, worker_proc = _start_earnings_worker(ctx, worker)
+                earn_raw = None
+            last_req = time.monotonic()
 
-        days = int((next_date - today).days)
-        rows.append({
-            "ticker": ticker,
-            "next_earnings_date": next_date,
-            "days_to_earnings": days,
-            "is_earnings_week": -3 <= days <= 7,
-            "snapshot_date": today,
-        })
+            if earn_raw is not None:
+                try:
+                    next_date = pd.Timestamp(earn_raw).normalize()
+                except Exception:
+                    next_date = None
+                if next_date is not None:
+                    days = int((next_date - today).days)
+                    rows.append({
+                        "ticker": ticker,
+                        "next_earnings_date": next_date,
+                        "days_to_earnings": days,
+                        "is_earnings_week": -3 <= days <= 7,
+                        "snapshot_date": today,
+                    })
+            if progress_every and i % int(progress_every) == 0:
+                print(
+                    f"  earnings calendar: {i}/{len(cleaned)} tickers, "
+                    f"{len(rows)} dates, {timeout_count} timeouts",
+                    flush=True,
+                )
+            if i % 250 == 0 and i < len(cleaned):
+                _stop_earnings_worker(worker_proc, request_q, response_q, graceful=True)
+                request_q, response_q, worker_proc = _start_earnings_worker(ctx, worker)
+    finally:
+        _stop_earnings_worker(worker_proc, request_q, response_q, graceful=True)
 
     return pd.DataFrame(rows) if rows else _empty
+
+
+def _fetch_one_earnings_calendar(ticker: str):
+    """Return one raw earnings date; isolated by the parent for hard timeout."""
+    try:
+        import yfinance as yf
+
+        cal = yf.Ticker(ticker).calendar or {}
+    except Exception:
+        return None
+    earn_raw = cal.get("Earnings Date") or cal.get("earningsDate")
+    if isinstance(earn_raw, (list, tuple)):
+        earn_raw = earn_raw[0] if earn_raw else None
+    return earn_raw
+
+
+def _earnings_worker_loop(request_q, response_q, fetch_one: Callable[[str], object]) -> None:
+    while True:
+        ticker = request_q.get()
+        if ticker is None:
+            return
+        response_q.put(fetch_one(str(ticker)))
+
+
+def _start_earnings_worker(ctx, fetch_one: Callable[[str], object]):
+    request_q = ctx.Queue(maxsize=1)
+    response_q = ctx.Queue(maxsize=1)
+    proc = ctx.Process(
+        target=_earnings_worker_loop,
+        args=(request_q, response_q, fetch_one),
+        daemon=True,
+    )
+    proc.start()
+    return request_q, response_q, proc
+
+
+def _stop_earnings_worker(proc, request_q, response_q, *, graceful: bool = False) -> None:
+    if graceful and proc.is_alive():
+        try:
+            request_q.put_nowait(None)
+        except queue.Full:
+            pass
+        proc.join(timeout=2)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=2)
+    if proc.is_alive() and hasattr(proc, "kill"):
+        proc.kill()
+        proc.join(timeout=2)
+    for work_q in (request_q, response_q):
+        try:
+            work_q.close()
+            work_q.join_thread()
+        except Exception:
+            pass
 
 
 # ── Economic calendar (TradingView public endpoint) ───────────────────────────

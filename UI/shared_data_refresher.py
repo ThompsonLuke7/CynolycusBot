@@ -10,8 +10,9 @@ Each cycle (during the RTH-ish window) runs, as subprocesses:
   2. light per-bar feeds, throttled to ``feeds_interval``  (news/econ/guidance)
   3. rebuild the Meta Ranker matrix  (incremental append)
 
-The heavy daily feeds (earnings-calendar, news-catalyst rescore) are NOT run
-here — they live in the nightly readiness job. Steps are isolated subprocesses so
+Daily enrichment (earnings calendar, news collection/rescore, dealer snapshots)
+is NOT run here — it lives in ``nightly_market_data.sh`` and is deliberately
+outside entry readiness. Steps are isolated subprocesses so
 one failure can't take the server down, and the loop sleeps in small
 interruptible chunks for immediate shutdown.
 """

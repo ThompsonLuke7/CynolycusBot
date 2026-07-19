@@ -8,6 +8,7 @@ testpaths = [
     "signals/meta_context/tests",
     "strategies/momentum_expansion/tests",
     "strategies/dealer_positioning/tests",
+    "strategies/intraday_structure/tests",
     "strategies/multi_ticker_swing/tests",
     "signals/news/tests",
     "signals/social_attention/tests",

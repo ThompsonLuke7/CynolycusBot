@@ -100,6 +100,7 @@ DEFAULT_PORT_MOMENTUM = 8770
 DEFAULT_PORT_HTF = 8771
 DEFAULT_PORT_AMETHYST = 8772
 DEFAULT_PORT_DEALER_RANKER = 8773
+DEFAULT_PORT_INTRADAY_STRUCTURE = 8774
 
 # State book used by the swing real-account (LIVE) policy.
 _SWING_LIVE_BOOK = "Data/inference/multi_ticker_swing/real_account_book_live.json"
@@ -132,9 +133,9 @@ def _default_profile_env(env_file: str, profile: str) -> str:
 def _run_nightly_jobs() -> None:
     """Invoke the nightly market-data + discovery pipeline (one source of truth).
 
-    Reuses ``scripts/nightly_market_data.sh`` so the in-process scheduler and a
-    system cron run exactly the same steps (CBOE snapshot, FINRA short volume,
-    ticker discovery + promotion gate). The script logs to its own cron log.
+    Reuses ``scripts/nightly_market_data.sh`` as the single post-close owner for
+    bounded collection/enrichment (options, dealer, FINRA, discovery, priority
+    news, themes, and earnings). The script logs to its historical cron log.
     """
     import shutil
     import subprocess
@@ -145,7 +146,7 @@ def _run_nightly_jobs() -> None:
     if bash is None:
         logger.error(
             "Nightly jobs: 'bash' not found on PATH — cannot run %s. "
-            "Use system cron instead, or run the script manually.",
+            "Run the script manually after the close instead.",
             script,
         )
         return
@@ -384,7 +385,7 @@ def run_combined(
     paper_env_file: str | None = None,
     live_env_file: str | None = None,
     audit_root: Path | None = None,
-    nightly_time: str | None = "16:30",
+    nightly_time: str | None = "16:45",
     data_readiness_time: str | None = None,
     data_readiness_on_start: bool = False,
     data_refresher: bool = True,
@@ -397,6 +398,9 @@ def run_combined(
     port_htf: int = DEFAULT_PORT_HTF,
     port_amethyst: int = DEFAULT_PORT_AMETHYST,
     port_dealer_ranker: int = DEFAULT_PORT_DEALER_RANKER,
+    port_intraday_structure: int = DEFAULT_PORT_INTRADAY_STRUCTURE,
+    intraday_structure_enabled: bool = False,
+    intraday_structure_config: str = "strategies/intraday_structure/config/intraday_structure_v1.json",
     meta_ranker_times: str = "14:20,16:20",
     meta_ranker_mode: str = "options",
     meta_ranker_live: bool = False,
@@ -427,7 +431,7 @@ def run_combined(
     # Pre-flight: refuse to start (before the expensive universe build + Alpaca
     # WebSocket connect) if any dashboard port is already held by another — or a
     # stopped/frozen — combined_server instance.
-    _assert_ports_free(host, {
+    dashboard_ports = {
         "hub": port_hub,
         "intraday": port_intraday,
         "swing": port_swing,
@@ -437,13 +441,22 @@ def run_combined(
         "htf": port_htf,
         "amethyst": port_amethyst,
         "dealer_ranker": port_dealer_ranker,
-    })
+    }
+    if intraday_structure_enabled:
+        dashboard_ports["intraday_structure"] = port_intraday_structure
+    _assert_ports_free(host, dashboard_ports)
 
     # ------------------------------------------------------------------
     # 1. Build shared symbol universe and start the single WebSocket stream
     # ------------------------------------------------------------------
     logger.info("Building symbol universe...")
     all_symbols = _build_symbol_union(env_file)
+    structure_config = None
+    if intraday_structure_enabled:
+        from strategies.intraday_structure.config import load_config as load_intraday_structure_config
+
+        structure_config = load_intraday_structure_config(intraday_structure_config)
+        all_symbols = sorted(set(all_symbols) | set(structure_config.manual_watchlist) | set(structure_config.context_symbols))
     logger.info("Symbol universe: %d symbols", len(all_symbols))
 
     # Separate queues per dashboard. Subscriber filters keep SPY-only consumers
@@ -451,6 +464,7 @@ def run_combined(
     intraday_queue: queue_mod.Queue = queue_mod.Queue(maxsize=10_000)
     swing_queue: queue_mod.Queue = queue_mod.Queue(maxsize=50_000)
     dealer_queue: queue_mod.Queue = queue_mod.Queue(maxsize=10_000)
+    structure_queue: queue_mod.Queue | None = queue_mod.Queue(maxsize=50_000) if intraday_structure_enabled else None
 
     from UI.shared_stream import get_shared_bar_stream
     stream = get_shared_bar_stream()
@@ -461,6 +475,8 @@ def run_combined(
     )
     stream.register(swing_queue, name="swing")
     stream.register(dealer_queue, name="dealer-positioning", symbols=("SPY",))
+    if structure_queue is not None:
+        stream.register(structure_queue, name="intraday-structure")
     stream.start(all_symbols, env_file=env_file)
     logger.info("Shared bar stream started.")
 
@@ -590,7 +606,26 @@ def run_combined(
     logger.info("Dealer Ranker dashboard: http://%s:%d", host, port_dealer_ranker)
 
     # ------------------------------------------------------------------
-    # 4e. Hub / overview dashboard (port 8764) — links + status + start-all
+    # 4e. Intraday Structure Engine — opt-in, deterministic, paper-only.
+    # ------------------------------------------------------------------
+    structure_app = structure_server = None
+    if structure_queue is not None and structure_config is not None:
+        from UI.intraday_structure_dashboard import (
+            IntradayStructureDashboardApp,
+            make_server as _make_intraday_structure_server,
+        )
+
+        structure_app = IntradayStructureDashboardApp(structure_config, structure_queue)
+        structure_server = _make_intraday_structure_server(host, port_intraday_structure, structure_app)
+        threading.Thread(
+            target=structure_server.serve_forever,
+            daemon=True,
+            name="intraday-structure-http",
+        ).start()
+        logger.info("Intraday Structure:      http://%s:%d (paper-only)", host, port_intraday_structure)
+
+    # ------------------------------------------------------------------
+    # 4f. Hub / overview dashboard (port 8764) — links + status + start-all
     # ------------------------------------------------------------------
     from UI.hub_dashboard import HubDashboardApp, make_server as _make_hub_server
 
@@ -600,6 +635,7 @@ def run_combined(
         port_momentum=port_momentum, port_htf=port_htf,
         port_amethyst=port_amethyst,
         port_dealer_ranker=port_dealer_ranker,
+        port_intraday_structure=port_intraday_structure if intraday_structure_enabled else None,
     )
     hub_server = _make_hub_server(host, port_hub, hub_app)
     hub_thread = threading.Thread(target=hub_server.serve_forever, daemon=True, name="hub-http")
@@ -617,6 +653,8 @@ def run_combined(
     print(f"  Amethyst dashboard:      http://{host}:{port_amethyst}")
     print(f"  Dealer positioning:      http://{host}:{port_dealer}")
     print(f"  Dealer Ranker:           http://{host}:{port_dealer_ranker}")
+    if intraday_structure_enabled:
+        print(f"  Intraday Structure:      http://{host}:{port_intraday_structure}  (paper-only)")
     print(f"  Shared stream:           {len(all_symbols)} symbols")
     print("  Orders default to the PAPER account; LIVE toggle is OFF by default.")
     print("  Press Ctrl+C to stop.")
@@ -635,7 +673,7 @@ def run_combined(
     signal.signal(signal.SIGTERM, _shutdown)
 
     # ------------------------------------------------------------------
-    # 5a. Nightly jobs scheduler (CBOE/FINRA/ticker discovery after close)
+    # 5a. Nightly jobs scheduler (collection/enrichment after the live refresher closes)
     # ------------------------------------------------------------------
     nightly_scheduler = None
     if nightly_time:
@@ -654,7 +692,7 @@ def run_combined(
             )
             nightly_scheduler.start()
             logger.info("Nightly jobs scheduled daily at %s America/New_York (weekdays)", nightly_time)
-            print(f"  Nightly jobs:            daily {nightly_time} ET (CBOE/FINRA/discovery)")
+            print(f"  Nightly jobs:            daily {nightly_time} ET (bounded collection/enrichment)")
 
     # ------------------------------------------------------------------
     # 5a1. Optional data-readiness on startup. Default is OFF: live startup should
@@ -673,7 +711,7 @@ def run_combined(
     # ------------------------------------------------------------------
     # 5a0. Continuous background data refresher — keeps shared bars + Meta matrix
     #      fresh OUT-OF-BAND near the 4H decision windows, so startup/the open
-    #      remain trading-only. Heavy daily feeds stay in the nightly readiness job.
+    #      remain trading-only. Daily enrichment stays in nightly_market_data.sh.
     # ------------------------------------------------------------------
     if data_refresher:
         from UI.shared_data_refresher import SharedDataRefresher
@@ -931,6 +969,11 @@ def run_combined(
         dealer_app.stop()
     except Exception as exc:
         logger.warning("dealer_app.stop(): %s", exc)
+    if structure_app is not None:
+        try:
+            structure_app.stop()
+        except Exception as exc:
+            logger.warning("structure_app.stop(): %s", exc)
     logger.info("Stopping HTTP servers...")
     hub_server.shutdown()
     intraday_server.shutdown()
@@ -940,6 +983,8 @@ def run_combined(
     htf_server.shutdown()
     amethyst_server.shutdown()
     dealer_ranker_server.shutdown()
+    if structure_server is not None:
+        structure_server.shutdown()
     if meta_server is not None:
         meta_server.shutdown()
 
@@ -947,6 +992,8 @@ def run_combined(
     stream.unregister(intraday_queue)
     stream.unregister(swing_queue)
     stream.unregister(dealer_queue)
+    if structure_queue is not None:
+        stream.unregister(structure_queue)
     stream.stop()
 
     logger.info("Combined server stopped.")
@@ -976,13 +1023,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--nightly-time",
-        default="16:30",
-        help="Local (America/New_York) HH:MM to run nightly CBOE/FINRA/discovery jobs (default 16:30).",
+        default="16:45",
+        help="Local (America/New_York) HH:MM to run the bounded nightly collection/enrichment job "
+             "after the 16:40 shared-data refresher close (default 16:45).",
     )
     parser.add_argument(
         "--no-nightly-jobs",
         action="store_true",
-        help="Disable the in-process nightly scheduler (use system cron instead).",
+        help="Disable the canonical in-process nightly scheduler (manual execution only).",
     )
     parser.add_argument(
         "--readiness-on-start",
@@ -1020,7 +1068,7 @@ def main() -> None:
         "--data-refresher-feeds",
         action="store_true",
         help="Also run light feed refreshes from the afternoon data refresher. Default is off; "
-             "nightly readiness owns daily/heavy feeds.",
+             "post-close nightly collection owns daily enrichment.",
     )
     parser.add_argument(
         "--no-catalyst-poll",
@@ -1071,6 +1119,18 @@ def main() -> None:
                         help="Port for the Amethyst dealer-vision dashboard (default 8772).")
     parser.add_argument("--port-dealer-ranker", type=int, default=DEFAULT_PORT_DEALER_RANKER,
                         help="Port for the Dealer Ranker dashboard (default 8773).")
+    parser.add_argument("--port-intraday-structure", type=int, default=DEFAULT_PORT_INTRADAY_STRUCTURE,
+                        help="Port for the opt-in Intraday Structure dashboard (default 8774).")
+    parser.add_argument(
+        "--intraday-structure",
+        action="store_true",
+        help="Enable the deterministic, paper-only Intraday Structure confirmation engine.",
+    )
+    parser.add_argument(
+        "--intraday-structure-config",
+        default="strategies/intraday_structure/config/intraday_structure_v1.json",
+        help="Versioned Intraday Structure config JSON path.",
+    )
     parser.add_argument(
         "--dealer-ranker-time",
         default="",
@@ -1116,6 +1176,9 @@ def main() -> None:
         port_htf=args.port_htf,
         port_amethyst=args.port_amethyst,
         port_dealer_ranker=args.port_dealer_ranker,
+        port_intraday_structure=args.port_intraday_structure,
+        intraday_structure_enabled=bool(args.intraday_structure),
+        intraday_structure_config=args.intraday_structure_config,
         meta_ranker_times=args.meta_ranker_times,
         meta_ranker_mode=args.meta_ranker_mode,
         meta_ranker_live=args.meta_ranker_live,

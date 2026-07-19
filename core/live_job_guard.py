@@ -120,6 +120,15 @@ def heavy_job_guard(
         yield GuardResult(True, mem.reason)
     finally:
         try:
+            # Clear normal-completion metadata while this process still owns
+            # the lock. A crash may leave stale text, but flock remains the
+            # authority and the next owner will overwrite it.
+            fh.seek(0)
+            fh.truncate()
+            fh.flush()
+        except Exception:
+            logger.debug("failed to clear heavy-job owner metadata", exc_info=True)
+        try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         except Exception:
             logger.debug("failed to unlock heavy-job guard", exc_info=True)

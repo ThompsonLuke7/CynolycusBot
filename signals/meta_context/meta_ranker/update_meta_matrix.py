@@ -51,6 +51,7 @@ def _atomic_to_parquet(df: pd.DataFrame, out_path, **kwargs) -> None:
 MATRIX = HERE / "meta_ranker_matrix.parquet"
 UNIVERSE = REPO / "Data/shared/universe/shared_universe.csv"
 ROLL_DAYS = 400  # rolling window kept in the matrix (long-lookback features need ~1yr)
+REFERENCE_BAR_TICKERS = ("SPY", "QQQ")
 
 
 def _read_bars(path: Path) -> pd.DataFrame | None:
@@ -68,6 +69,15 @@ def _load_context() -> dict[str, pd.DataFrame]:
         if b is not None:
             ctx[sym] = b.set_index("timestamp")
     return ctx
+
+
+def _latest_reference_bar_timestamp() -> pd.Timestamp | None:
+    latest: list[pd.Timestamp] = []
+    for ticker in REFERENCE_BAR_TICKERS:
+        bars = _read_bars(BARS_4H / f"{ticker}.parquet")
+        if bars is not None and not bars.empty:
+            latest.append(pd.to_datetime(bars["timestamp"], utc=True).max())
+    return max(latest) if latest else None
 
 
 def _build_live_features(tickers: list[str], ctx_4h: dict, since: pd.Timestamp) -> pd.DataFrame:
@@ -111,6 +121,14 @@ def main():
     existing["timestamp"] = pd.to_datetime(existing["timestamp"], utc=True)
     max_ts = existing["timestamp"].max()
     print(f"existing matrix: {len(existing):,} rows, max ts {max_ts}")
+
+    latest_reference_ts = _latest_reference_bar_timestamp()
+    if latest_reference_ts is not None and max_ts >= latest_reference_ts:
+        print(
+            "no new reference-market 4H bar to add "
+            f"(matrix={max_ts}, latest reference={latest_reference_ts})."
+        )
+        return
 
     if args.tickers:
         tickers = [t.upper() for t in args.tickers]

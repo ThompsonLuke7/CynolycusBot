@@ -1,22 +1,23 @@
 """Intraday catalyst polling + scoring (live mode).
 
 Runs as a long-lived process during market hours. Every ``--interval`` seconds:
-  1. Pulls fresh records from light sources (Google News RSS, yfinance,
-     Fed RSS, Finnhub, ClinicalTrials.gov).
+  1. Pulls fresh records from bounded light sources (Google News RSS + Fed RSS
+     by default) for the curated swing universe.
   2. Drops anything already in the live ledger (by content_hash).
   3. Runs the catalyst classifier on each new record (~20-100 ms each
      including BGE+FinBERT inference).
-  4. Appends to news/data/processed/live_catalyst_records.parquet with
+  4. Atomically appends to signals/news/data/processed/live_catalyst_records.parquet with
      fields: ticker, timestamp, source, headline, catalyst_family,
      catalyst_subtype, catalyst_score, scored_at.
   5. Optionally emits a Webhook / shared-stream event for live trade
      entries (left as a hook).
 
-Designed for cron-style invocation in addition to long-running daemon mode:
+The supervised combined server is the canonical owner. Single-shot mode remains
+available for diagnostics:
   # daemon (run during market hours):
   python scripts/intraday_catalyst_poll.py --interval 300 --universe-from Data/shared/universe/shared_universe.csv
 
-  # single shot (for cron):
+  # single shot:
   python scripts/intraday_catalyst_poll.py --once --universe-from Data/shared/universe/shared_universe.csv
 
 This is intentionally lightweight and CPU-only for the inference step.
@@ -27,6 +28,7 @@ Per-record latency on the test box: ~80 ms (BGE) + ~30 ms (FinBERT) + ~3 ms
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -51,12 +53,18 @@ from signals.news.sources import (
 
 
 LIVE_LEDGER_PATH = Path("signals/news/data/processed/live_catalyst_records.parquet")
+DEFAULT_LIVE_UNIVERSE = Path("strategies/multi_ticker_swing/config/trading_universe.json")
 
 
 def load_universe(path: Path | None) -> list[str]:
     if path is None or not path.exists():
-        from signals.meta_context.config import CONTEXT_BACKTEST_UNIVERSE_PATH
-        path = CONTEXT_BACKTEST_UNIVERSE_PATH
+        path = DEFAULT_LIVE_UNIVERSE
+    if path.suffix.lower() == ".json":
+        import json
+
+        payload = json.loads(path.read_text())
+        values = payload.keys() if isinstance(payload, dict) else payload
+        return sorted({str(t).upper() for t in values if str(t).strip()})
     df = pd.read_csv(path)
     if "ticker" not in df.columns:
         raise SystemExit(f"universe file {path} missing 'ticker' column")
@@ -157,7 +165,9 @@ def poll_once(
     else:
         merged = new
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_parquet(ledger_path, index=False)
+    tmp_path = ledger_path.with_suffix(ledger_path.suffix + f".{os.getpid()}.tmp")
+    merged.to_parquet(tmp_path, index=False)
+    tmp_path.replace(ledger_path)
 
     top = new.sort_values("catalyst_score", ascending=False).head(5)
     print(f"  appended {len(new)} records (ledger now {len(merged):,})")
@@ -170,11 +180,21 @@ def poll_once(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Intraday catalyst poll + score")
-    parser.add_argument("--universe-from", type=Path, default=Path("Data/shared/universe/shared_universe.csv"))
+    parser.add_argument(
+        "--universe-from",
+        type=Path,
+        default=DEFAULT_LIVE_UNIVERSE,
+        help="Live alert universe (default: curated swing trading universe, not the 2.9k research universe).",
+    )
     parser.add_argument("--interval", type=int, default=300, help="seconds between polls")
     parser.add_argument("--lookback-minutes", type=int, default=15)
     parser.add_argument("--once", action="store_true", help="single poll then exit")
-    parser.add_argument("--sources", nargs="*", default=["google_news", "yfinance", "fed_rss"])
+    parser.add_argument(
+        "--sources",
+        nargs="*",
+        default=["google_news", "fed_rss"],
+        help="Intraday sources. Slow serial Yahoo collection is owned by the post-close job.",
+    )
     parser.add_argument("--ledger", type=Path, default=LIVE_LEDGER_PATH)
     args = parser.parse_args()
 

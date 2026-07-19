@@ -8,12 +8,14 @@
 # runs ticker discovery, then collects + processes the day's catalyst news and
 # rebuilds the per-(ticker, day) news_catalyst_signal the meta-ranker consumes.
 #
-# Designed to be invoked from cron. Safe to re-run multiple times per day
+# Canonical owner: the supervised combined server, after the live refresher and
+# 4H loops finish. Safe to re-run manually; the shared heavy-job lock prevents
+# overlap with readiness, another nightly run, or the weekly refresh.
 # — the CBOE collector de-dupes by (ticker, snapshot_date), and the FINRA
 # fetch is idempotent per (date, ticker).
 #
 # Usage (manual): bash scripts/nightly_market_data.sh
-# Usage (cron):   30 23 * * 1-5 bash /home/luket/repos/CynolycusBot/scripts/nightly_market_data.sh
+# Schedule:       scripts/run_live_server.sh -> combined server at 16:45 ET
 #
 # Logs go to signals/news/data/processed/nightly_cron.log
 #
@@ -25,21 +27,46 @@ cd "$REPO_ROOT"
 PYTHON="$REPO_ROOT/.venv/bin/python"
 LOG_DIR="$REPO_ROOT/signals/news/data/processed"
 LOG_FILE="$LOG_DIR/nightly_cron.log"
-mkdir -p "$LOG_DIR/finra_daily"
+LOCK_FILE="$REPO_ROOT/Data/runtime/live_data_jobs.lock"
+mkdir -p "$LOG_DIR/finra_daily" "$REPO_ROOT/Data/runtime"
 
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
+
+OWNS_LOCK=0
+clear_owned_lock() {
+  if [ "$OWNS_LOCK" = "1" ]; then
+    : > "$LOCK_FILE"
+  fi
+}
+trap clear_owned_lock EXIT
+
+if command -v flock >/dev/null 2>&1; then
+  exec 9>>"$LOCK_FILE"
+  if ! flock -w "${NIGHTLY_LOCK_WAIT_SECONDS:-1200}" 9; then
+    {
+      echo ""
+      echo "[$(ts)] nightly_market_data.sh skipped: heavy-job lock unavailable after ${NIGHTLY_LOCK_WAIT_SECONDS:-1200}s"
+    } >> "$LOG_FILE" 2>&1
+    exit 75
+  fi
+  OWNS_LOCK=1
+  printf 'nightly_market_data pid=%s started=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_FILE"
+fi
 
 {
   echo ""
   echo "================================================================"
   echo "[$(ts)] nightly_market_data.sh starting"
   echo "================================================================"
+  STATUS=0
 
   # 1) CBOE per-ticker options snapshot (full universe, ~30 min)
   echo "[$(ts)] CBOE snapshot — full universe"
-  "$PYTHON" -u -m signals.news.main --stage cboe-snapshot
+  timeout --signal=TERM --kill-after=60s "${NIGHTLY_CBOE_TIMEOUT_SECONDS:-7200}s" \
+    "$PYTHON" -u -m signals.news.main --stage cboe-snapshot
   cboe_exit=$?
   echo "[$(ts)] CBOE snapshot exit=$cboe_exit"
+  [ "$cboe_exit" -ne 0 ] && STATUS="$cboe_exit"
 
   # 1b) Dealer-positioning option snapshots (forward collection). This stores
   #     the Amethyst-ready floors/ceilings/magnets/vega walls plus strike rows.
@@ -66,12 +93,14 @@ ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
       dealer_scopes=(${DEALER_SNAPSHOT_SCOPES})
       dealer_args+=(--scopes "${dealer_scopes[@]}")
     fi
-    "$PYTHON" -u -m strategies.dealer_positioning.scripts.capture_historical_snapshots "${dealer_args[@]}"
+    timeout --signal=TERM --kill-after=60s "${NIGHTLY_DEALER_TIMEOUT_SECONDS:-14400}s" \
+      "$PYTHON" -u -m strategies.dealer_positioning.scripts.capture_historical_snapshots "${dealer_args[@]}"
     dealer_snapshot_exit=$?
     echo "[$(ts)] Dealer snapshots exit=$dealer_snapshot_exit"
     if [ "$dealer_snapshot_exit" -eq 0 ]; then
       echo "[$(ts)] Dealer rankings — swing-potential research ranks"
-      "$PYTHON" -u -m strategies.dealer_positioning.scripts.build_dealer_rankings
+      timeout --signal=TERM --kill-after=60s "${NIGHTLY_DEALER_RANK_TIMEOUT_SECONDS:-1800}s" \
+        "$PYTHON" -u -m strategies.dealer_positioning.scripts.build_dealer_rankings
       dealer_ranking_exit=$?
       echo "[$(ts)] Dealer rankings exit=$dealer_ranking_exit"
     fi
@@ -81,7 +110,7 @@ ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 
   # 2) FINRA prior-trading-day short volume (appends a single day's parquet)
   echo "[$(ts)] FINRA — pulling yesterday's CSV"
-  "$PYTHON" -u <<'PYEOF'
+  timeout --signal=TERM --kill-after=30s "${NIGHTLY_FINRA_TIMEOUT_SECONDS:-900}s" "$PYTHON" -u <<'PYEOF'
 from pathlib import Path
 import pandas as pd
 import sys
@@ -107,10 +136,11 @@ print(f"  wrote {len(df):,} rows to {out_path}")
 PYEOF
   finra_exit=$?
   echo "[$(ts)] FINRA fetch exit=$finra_exit"
+  [ "$finra_exit" -ne 0 ] && STATUS="$finra_exit"
 
   # 3) Compact: merge any new finra_daily/*.parquet into the consolidated parquet
   echo "[$(ts)] FINRA — compacting daily files into consolidated parquet"
-  "$PYTHON" -u <<'PYEOF'
+  timeout --signal=TERM --kill-after=30s "${NIGHTLY_COMPACT_TIMEOUT_SECONDS:-1800}s" "$PYTHON" -u <<'PYEOF'
 from pathlib import Path
 import pandas as pd
 
@@ -131,54 +161,78 @@ all_df = pd.concat(frames, ignore_index=True).drop_duplicates(["date", "ticker"]
 all_df.to_parquet(consolidated, index=False)
 print(f"  consolidated: {len(all_df):,} rows -> {consolidated}")
 PYEOF
+  finra_compact_exit=$?
+  echo "[$(ts)] FINRA compact exit=$finra_compact_exit"
+  [ "$finra_compact_exit" -ne 0 ] && STATUS="$finra_compact_exit"
 
   # 4) Dynamic ticker discovery + promotion gate
   #    Broad Alpaca market screen + catalyst-ledger discovery -> pending queue;
   #    releases names meeting the price/ADV/market-cap/history minimums and
   #    folds promoted tickers into shared_universe.csv.
   echo "[$(ts)] ticker discovery — broad screen + catalyst, promotion gate"
-  "$PYTHON" -u -m scripts.nightly_ticker_discovery --rebuild-universe
+  timeout --signal=TERM --kill-after=60s "${NIGHTLY_DISCOVERY_TIMEOUT_SECONDS:-3600}s" \
+    "$PYTHON" -u -m scripts.nightly_ticker_discovery --rebuild-universe
   discovery_exit=$?
   echo "[$(ts)] ticker discovery exit=$discovery_exit"
+  [ "$discovery_exit" -ne 0 ] && STATUS="$discovery_exit"
 
   # 5) Catalyst news — collect headlines for the PRIORITY scope only (the names
-  #    the live system actually trades/ranks: swing universe ∪ momentum snapshot).
+  #    the live system actually trades/ranks: swing universe ∪ top-300 momentum).
   #    The broad full-universe sweep is the weekly job's responsibility — that's
   #    the ~3h tail we moved off the nightly path. Breaking news on tradeable
   #    names still flows through the same incremental embed/cluster + signal below.
-  echo "[$(ts)] news — collecting headlines (PRIORITY scope: swing ∪ momentum)"
-  "$PYTHON" -u -m scripts.collect_news_scope --scope priority
+  echo "[$(ts)] news — collecting headlines (PRIORITY scope: swing ∪ top-300 momentum)"
+  timeout --signal=TERM --kill-after=60s "${NIGHTLY_NEWS_COLLECT_TIMEOUT_SECONDS:-14400}s" \
+    "$PYTHON" -u -m scripts.collect_news_scope --scope priority
   news_collect_exit=$?
   echo "[$(ts)] news collect exit=$news_collect_exit"
+  [ "$news_collect_exit" -ne 0 ] && STATUS="$news_collect_exit"
 
   # 6) Catalyst news — incremental embed/cluster/refine/label of only-new records
   #    (~minutes; chains embed-new -> cluster-predict -> refine -> label-mature).
   echo "[$(ts)] news — incremental processing (new records only)"
-  "$PYTHON" -u -m signals.news.main --stage incremental
+  timeout --signal=TERM --kill-after=60s "${NIGHTLY_NEWS_PROCESS_TIMEOUT_SECONDS:-7200}s" \
+    "$PYTHON" -u -m signals.news.main --stage incremental
   news_incr_exit=$?
   echo "[$(ts)] news incremental exit=$news_incr_exit"
+  [ "$news_incr_exit" -ne 0 ] && STATUS="$news_incr_exit"
 
   # 7) Catalyst news — refresh per-record predictions only for new/stale records,
   #    then aggregate to the per-(ticker, day) signal the meta-ranker reads.
   echo "[$(ts)] news — rebuilding news_catalyst_signal.parquet"
-  "$PYTHON" -u -m signals.meta_context.build_news_signal --incremental-cache
+  timeout --signal=TERM --kill-after=60s "${NIGHTLY_NEWS_SIGNAL_TIMEOUT_SECONDS:-3600}s" \
+    "$PYTHON" -u -m signals.meta_context.build_news_signal --incremental-cache
   news_signal_exit=$?
   echo "[$(ts)] news signal rebuild exit=$news_signal_exit"
+  [ "$news_signal_exit" -ne 0 ] && STATUS="$news_signal_exit"
 
   # 8) Emerging themes — enrich a bounded pending-ticker shortlist, map strong
   #    matches into established themes, cluster novel residuals, and regenerate
   #    the standalone visualizers. Production theme features remain untouched.
   echo "[$(ts)] themes — pending ticker enrichment + provisional discovery"
-  "$PYTHON" -u -m themes.dynamic_theme.emerging --limit 300
+  timeout --signal=TERM --kill-after=60s "${NIGHTLY_THEME_TIMEOUT_SECONDS:-3600}s" \
+    "$PYTHON" -u -m themes.dynamic_theme.emerging --limit 300
   emerging_theme_exit=$?
   echo "[$(ts)] emerging themes exit=$emerging_theme_exit"
 
   if [ "$emerging_theme_exit" -eq 0 ]; then
     echo "[$(ts)] themes — rebuilding explorer variants and dreamscapes"
-    "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_explorer
-    "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_variants
-    "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_dreamscapes
+    timeout --signal=TERM --kill-after=30s 1200s "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_explorer
+    timeout --signal=TERM --kill-after=30s 1200s "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_variants
+    timeout --signal=TERM --kill-after=30s 1200s "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_dreamscapes
   fi
 
-  echo "[$(ts)] nightly_market_data.sh complete"
+  # 9) Earnings enrichment is useful context, but it is deliberately outside
+  #    the entry-readiness critical path.  Each Yahoo ticker request is isolated
+  #    and hard-bounded; this outer deadline caps the whole sweep as well.
+  echo "[$(ts)] earnings — bounded equity calendar enrichment (best effort; known ETFs excluded)"
+  timeout --signal=TERM --kill-after=60s "${NIGHTLY_EARNINGS_TIMEOUT_SECONDS:-3600}s" \
+    "$PYTHON" -u -m signals.news.main --stage earnings-calendar \
+      --ticker-timeout "${EARNINGS_TICKER_TIMEOUT_SECONDS:-20}"
+  earnings_exit=$?
+  echo "[$(ts)] earnings calendar exit=$earnings_exit (non-critical to entry readiness)"
+
+  echo "[$(ts)] nightly_market_data.sh complete status=$STATUS"
 } >> "$LOG_FILE" 2>&1
+
+exit "$STATUS"

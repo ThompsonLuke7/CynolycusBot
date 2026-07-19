@@ -6,7 +6,8 @@ while the broad corpus still gets refreshed weekly:
 
   --scope priority  (nightly)  the names the live system actually trades/ranks
                                tightly: swing trading_universe (all tiers) UNION
-                               the latest Momentum Expansion universe snapshot.
+                               the top 300 names in the latest Momentum Expansion
+                               universe snapshot (configurable).
                                This is the "urgent, act-on-it" set; it feeds the
                                same incremental embed/cluster + news_catalyst
                                signal so breaking news on tradeable names is fresh
@@ -41,7 +42,7 @@ def _eligible_universe() -> list[str]:
     return sorted(uni["ticker"].astype(str).str.upper().unique().tolist())
 
 
-def _priority_universe() -> list[str]:
+def _priority_universe(*, momentum_limit: int = 300) -> list[str]:
     names: set[str] = set()
     # Swing tradeable universe (all tiers — these are the curated names).
     if SWING_UNIVERSE.exists():
@@ -52,6 +53,10 @@ def _priority_universe() -> list[str]:
         msnap = pd.read_csv(snaps[-1])
         tcol = next((c for c in msnap.columns if c.lower() in ("ticker", "symbol")), None)
         if tcol:
+            if "composite" in msnap.columns:
+                msnap = msnap.sort_values("composite", ascending=False, na_position="last")
+            if momentum_limit > 0:
+                msnap = msnap.head(int(momentum_limit))
             names |= {str(t).upper() for t in msnap[tcol].dropna().unique()}
     return sorted(names)
 
@@ -61,12 +66,22 @@ def main() -> int:
     ap.add_argument("--scope", choices=["priority", "full"], required=True)
     ap.add_argument("--lookback-days", type=int, default=3,
                     help="Look-back window (overlap is de-duped on merge).")
+    ap.add_argument(
+        "--momentum-priority-limit",
+        type=int,
+        default=300,
+        help="Momentum snapshot names added to priority scope (default 300; <=0 means all).",
+    )
     args = ap.parse_args()
 
     from signals.news.pipeline import collect_company_news
     from signals.news.config import NEWS_RECORDS_PATH
 
-    tickers = _priority_universe() if args.scope == "priority" else _eligible_universe()
+    tickers = (
+        _priority_universe(momentum_limit=args.momentum_priority_limit)
+        if args.scope == "priority"
+        else _eligible_universe()
+    )
     if not tickers:
         print(f"  no tickers for scope={args.scope} — nothing to collect")
         return 0

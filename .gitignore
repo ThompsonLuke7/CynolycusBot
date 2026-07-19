@@ -250,6 +250,7 @@ core/API/Schwab_API/schwab_tokens.json
 !.vscode/settings.json
 !**/config/*.json
 !**/config/*.csv
+!examples/intraday_structure/*.json
 
 # Re-include live pipeline dependencies (read by shared_universe / dynamic_theme)
 !themes/theme_expansion_legacy/data/*.csv

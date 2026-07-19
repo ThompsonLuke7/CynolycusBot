@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-from UI.ui_chrome import NAV_HTML, THEME_LINK, serve_theme_asset, serve_theme_css
+from UI.ui_chrome import NAV_HTML, THEME_LINK, serve_theme_css
 
 logger = logging.getLogger(__name__)
 REPO = Path(__file__).resolve().parents[1]
@@ -532,9 +532,6 @@ class AmethystHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/static/cynolycus_theme.css":
             serve_theme_css(self)
-            return
-        if parsed.path.startswith("/static/themes/"):
-            serve_theme_asset(self, parsed.path)
             return
         if parsed.path == "/api/state":
             self._send_json(self._app().state())
