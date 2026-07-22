@@ -52,8 +52,7 @@ class ExecPolicy:
     grace_bars: int | None = None     # None = ride to horizon (rank drop-out OFF); int N = exit after N bars out of top-K
     stop_loss: float | None = 0.39    # full exit if gain <= -this from ENTRY (premium for options); None disables
     trail_stop: float | None = None   # full exit if value falls this fraction from its PEAK (ratchet); None disables. "Tail-rider" (id4) config: 2026-07-18 val-selected/test-frozen search across Momentum/HTF/Meta's own OOF top-10 streams (research/capstone/exit_policy_cross_module.csv) found this shape (stop 39%, no trail, take-profit 30%/scale 16%, horizon 53) beats the prior stop50/trail35/tp20/scale50/hz25 default on mean return per trade (2-2.5x, ~10-12% vs ~4-5%) with comparable-or-better win rate in every module, at the cost of ~2x hold time (~52 vs ~25 bars). Prior config's own backtest note (mean +7.04%/61% win/ret-per-bar 0.0088 @ trail 0.35) is superseded by that search; kept here for history. Shares-only backtest — no option-premium path modeled, so real option stop/trail behavior may differ; not yet paper-validated live.
-    contracts: int = 10               # option contracts per new entry
-    shares: int = 100                 # shares per new entry (share-routed names)
+    target_notional: float = 5000.0   # target $ per new entry; shares/contracts sized from this
     roll_trading_days: int = 5        # option monthly-roll buffer
 
 
@@ -107,6 +106,31 @@ def exit_action(gain, runs_held, bars_out, trimmed, policy: ExecPolicy,
     if policy.grace_bars is not None and bars_out > policy.grace_bars:
         return "exit", "dropped_out"
     return "hold", ""
+
+
+def shares_for_notional(px: float | None, target_notional: float) -> int:
+    """Whole shares nearest ``target_notional`` dollars at price ``px``, floored at 1.
+
+    Fixed 100-share entries meant wildly different risk per name (a $5 stock
+    was $500 of exposure, a $200 stock was $20,000) and made %/$ gain figures
+    incomparable across the book. Sizing off a fixed dollar target instead
+    keeps exposure -- and therefore %/$ gain -- consistent name to name.
+    """
+    if not px or px <= 0:
+        return 1
+    return max(1, round(target_notional / px))
+
+
+def contracts_for_notional(premium: float | None, target_notional: float) -> int:
+    """Whole option contracts nearest ``target_notional`` dollars, floored at 1.
+
+    One contract controls 100 shares, so notional per contract = premium*100
+    (e.g. a $50 premium = $5,000/contract). Mirrors ``shares_for_notional`` so
+    equity and option entries carry comparable dollar exposure.
+    """
+    if not premium or premium <= 0:
+        return 1
+    return max(1, round(target_notional / (premium * 100.0)))
 
 
 def _option_dte(expiry: str | None, bar) -> int | None:
@@ -220,49 +244,53 @@ def build_mixed_plan(
                 out.contract_selection[t] = {"action": "skip", "reason": "already_held", "occ": occ,
                                              "signal_audit": sa.get(t)}
                 continue
+            premium = order.get("limit") or order.get("mid")
+            contracts = contracts_for_notional(premium, policy.target_notional)
             out.contract_selection[t] = {
                 "action": "option", "occ": occ, "ref_price": px,
                 "delta": order.get("delta"), "mid": order.get("mid"), "limit": order.get("limit"),
                 "strike": order.get("strike"), "expiry": order.get("expiry"),
                 "open_interest": order.get("open_interest"), "volume": order.get("volume"),
                 "spread": order.get("spread"), "dealer_gate": order.get("dealer_gate"),
+                "contracts": contracts,
                 "signal_audit": sa.get(t),
             }
-            out.plan.append((occ, "buy", policy.contracts, "entry", "option"))
+            out.plan.append((occ, "buy", contracts, "entry", "option"))
             out.limits[occ] = order["limit"]
             out.order_audits[occ] = build_option_order_audit(
                 signal_audit=sa.get(t), option_symbol=occ, route="call_option", side="buy",
-                qty=policy.contracts, underlying_price=px, strike=order.get("strike"),
+                qty=contracts, underlying_price=px, strike=order.get("strike"),
                 premium=order.get("limit") or order.get("mid"), limit_price=order.get("limit"),
                 mid_price=order.get("mid"), delta=order.get("delta"),
                 dte=_option_dte(order.get("expiry"), bar), expiration=order.get("expiry"),
             )
-            out.new_managed[t] = {"route": "option", "occ": occ, "contracts": policy.contracts,
+            out.new_managed[t] = {"route": "option", "occ": occ, "contracts": contracts,
                                   "runs_held": 0, "bars_out": 0, "trimmed": False, "entry_bar": str(bar),
                                   "expiry": order.get("expiry"), "signal_audit": sa.get(t),
                                   "order_audit": out.order_audits[occ]}
             if verbose:
-                print(f"  + {t:<6} {occ:<20} x{policy.contracts} exp={order.get('expiry')} "
+                print(f"  + {t:<6} {occ:<20} x{contracts} exp={order.get('expiry')} "
                       f"delta={order.get('delta'):.2f} mid={order['mid']:.2f}  oi={order.get('open_interest')}")
         else:  # equity — not a good options candidate, trade shares
             if pos_info.get(t, {}).get("qty", 0) > 0:
                 out.contract_selection[t] = {"action": "skip", "reason": "already_held_equity",
                                              "signal_audit": sa.get(t)}
                 continue
+            shares = shares_for_notional(px, policy.target_notional)
             out.contract_selection[t] = {"action": "equity", "reason": reason, "ref_price": px,
-                                         "shares": policy.shares,
+                                         "shares": shares,
                                          "dealer_gate": (order or {}).get("dealer_gate"),
                                          "signal_audit": sa.get(t)}
-            out.plan.append((t, "buy", policy.shares, "entry", "equity"))
+            out.plan.append((t, "buy", shares, "entry", "equity"))
             out.order_audits[t] = build_equity_order_audit(
-                signal_audit=sa.get(t), symbol=t, side="buy", qty=policy.shares,
+                signal_audit=sa.get(t), symbol=t, side="buy", qty=shares,
                 reason="entry", reference_price=px,
             )
-            out.new_managed[t] = {"route": "equity", "symbol": t, "shares": policy.shares,
+            out.new_managed[t] = {"route": "equity", "symbol": t, "shares": shares,
                                   "runs_held": 0, "bars_out": 0, "trimmed": False, "entry_bar": str(bar),
                                   "signal_audit": sa.get(t), "order_audit": out.order_audits[t]}
             if verbose:
-                print(f"  ~ {t:<6} {policy.shares} shares  [{reason}]")
+                print(f"  ~ {t:<6} {shares} shares  [{reason}]")
 
     if verbose:
         print(f"\n--- order plan ({len(out.plan)} orders) ---")

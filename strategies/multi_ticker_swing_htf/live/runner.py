@@ -51,6 +51,7 @@ from core.live_4h_exec import (
     drop_failed_entry,
     exit_action as _shared_exit_action,
     record_exit_realized_pnl,
+    shares_for_notional,
     submit_pending_open_entries,
 )
 from core.live_readiness import filter_entry_orders_for_readiness
@@ -163,9 +164,10 @@ def main():
                     help="Min dollar_vol_pctile_252 to be eligible.")
     ap.add_argument("--htf-rank-floor", type=float, default=0.85,
                     help="Min within-bar htf_xs_rank to be eligible (confidence gate).")
-    # --- fixed sizing ---
-    ap.add_argument("--shares", type=int, default=100, help="Equity: shares per new position.")
-    ap.add_argument("--contracts", type=int, default=10, help="Options: contracts per new position.")
+    # --- sizing ---
+    ap.add_argument("--target-notional", type=float, default=5000.0,
+                    help="Dollar size per new entry; shares/contracts are computed from the "
+                         "current price/premium so exposure is comparable across tickers.")
     # --- exit policy (mirrors Meta; validated in backtest_exits.py) ---
     ap.add_argument("--take-profit", type=float, default=0.30, help="Scale out scale_frac at this gain, then ride the rest.")
     ap.add_argument("--scale-frac", type=float, default=0.16, help="Fraction to sell at take-profit.")
@@ -249,7 +251,7 @@ def main():
     }
     state = _load_state()
     managed = state.get("managed", {})
-    print(f"equity=${equity:,.0f}  shares/name={args.shares}  TP +{int(args.take_profit*100)}% "
+    print(f"equity=${equity:,.0f}  target_notional/name=${args.target_notional:,.0f}  TP +{int(args.take_profit*100)}% "
           f"(sell {int(args.scale_frac*100)}%)  horizon {args.horizon_bars}b  grace {args.grace_bars}b")
     print(f"managed held: {sorted(managed)}")
 
@@ -319,16 +321,17 @@ def main():
     for t in targets:
         if t in new_managed or pos_info.get(t, {}).get("qty", 0) > 0:
             continue
-        plan.append((t, "buy", args.shares, "entry"))
+        qty = shares_for_notional(_ref_price(t), args.target_notional)
+        plan.append((t, "buy", qty, "entry"))
         order_audits[t] = build_equity_order_audit(
             signal_audit=signal_audits.get(t),
             symbol=t,
             side="buy",
-            qty=args.shares,
+            qty=qty,
             reason="entry",
             reference_price=_ref_price(t),
         )
-        new_managed[t] = {"qty": args.shares, "runs_held": 0, "bars_out": 0, "trimmed": False, "entry_bar": str(bar)}
+        new_managed[t] = {"qty": qty, "runs_held": 0, "bars_out": 0, "trimmed": False, "entry_bar": str(bar)}
 
     print(f"\n--- order plan ({len(plan)} orders) ---")
     for sym, side, qty, reason in plan:
@@ -350,7 +353,7 @@ def _run_options(args, client, targets, state, managed, pos_info, bar, signal_au
     policy = ExecPolicy(take_profit=args.take_profit, scale_frac=args.scale_frac,
                         horizon_bars=args.horizon_bars, grace_bars=args.grace_bars,
                         stop_loss=args.stop_loss, trail_stop=args.trail_stop,
-                        contracts=args.contracts, shares=args.shares,
+                        target_notional=args.target_notional,
                         roll_trading_days=args.roll_trading_days)
     res = build_mixed_plan(
         client, targets=targets, managed=managed, pos_info=pos_info, bar=bar,

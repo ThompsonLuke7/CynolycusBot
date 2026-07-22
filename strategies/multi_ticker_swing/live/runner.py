@@ -34,6 +34,7 @@ import pandas as pd
 from core.API.Alpaca_API.market_data.live_stream import AlpacaBarStreamer
 from core.API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+from core.live_4h_exec import contracts_for_notional
 from strategies.dealer_positioning.gate import (
     SCOPE_NEAREST,
     evaluate_dealer_gate,
@@ -73,7 +74,8 @@ logger = logging.getLogger(__name__)
 BARS_PER_5M  = 5    # aggregate 5 × 1m bars into one 5m bar
 BARS_PER_30M = 6    # aggregate 6 × 5m bars into one 30m bar
 CONFIRM_MAX_5M = 6  # confirmation window (matches backtest)
-DEFAULT_QTY  = 1
+DEFAULT_QTY  = 1        # fallback only if TARGET_NOTIONAL_USD sizing can't price the contract
+TARGET_NOTIONAL_USD = 5000.0  # dollar size per new entry when neither real- nor signal-policy sizing is active
 
 _ET = ZoneInfo("America/New_York")
 
@@ -1622,7 +1624,6 @@ class SwingLiveRunner:
             })
             return
 
-        qty = DEFAULT_QTY
         order_resp: Any = None
         order_error: str | None = None
         verification: dict[str, Any] | None = None
@@ -1631,6 +1632,7 @@ class SwingLiveRunner:
             symbol=option_symbol,
             attempts=_ENTRY_ORDER_ATTEMPTS,
         )
+        qty = _entry_contracts_for_quote(quote_meta)
         option_entry_meta = {
             **(option_selection_meta or {}),
             "confirmation_bar": _bar_to_event(conf_bar),
@@ -2131,6 +2133,19 @@ def _entry_quote_spread_ok(quote_meta: dict[str, Any] | None) -> tuple[bool, str
     if spread_pct >= _MAX_ENTRY_SPREAD_PCT_MID:
         return False, "entry_spread_too_wide", spread_pct
     return True, "entry_spread_ok", spread_pct
+
+
+def _entry_contracts_for_quote(quote_meta: dict[str, Any] | None) -> int:
+    """Contracts sized to ``TARGET_NOTIONAL_USD`` off the entry quote's premium.
+
+    Falls back to ``DEFAULT_QTY`` when the quote didn't carry a usable mid/ask
+    (this is only the fallback path taken when neither the real-account nor
+    signal-policy sizing overrides it downstream).
+    """
+    premium = (quote_meta or {}).get("mid") or (quote_meta or {}).get("ask")
+    if not premium:
+        return DEFAULT_QTY
+    return contracts_for_notional(premium, TARGET_NOTIONAL_USD)
 
 
 def _option_quote_price(quote: dict[str, Any], *, mode: str) -> float:

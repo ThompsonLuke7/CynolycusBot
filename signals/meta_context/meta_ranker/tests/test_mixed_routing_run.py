@@ -15,7 +15,7 @@ NEW_OPT_OCC = "BBB260717C00050000"
 def _args():
     return SimpleNamespace(
         scale_frac=0.5, take_profit=0.2, horizon_bars=25, grace_bars=3, stop_loss=0.50, trail_stop=0.50,
-        submit=False, mode="options", shares=100, contracts=10,
+        submit=False, mode="options", target_notional=5000.0,
         signal_audit_log="", roll_trading_days=5,
     )
 
@@ -63,8 +63,9 @@ def test_mixed_manage_and_entry(monkeypatch):
     assert "take_profit" in plan[OPT_HELD][3]
     assert plan["EQOLD"][1:] == ("sell", 100, plan["EQOLD"][3], "equity")
 
-    # new names: one option (10 contracts), one shares (100)
-    assert plan[NEW_OPT_OCC] == (NEW_OPT_OCC, "buy", 10, "entry", "option")
+    # new names, sized off $5,000 target notional: option premium 1.6 -> round(5000/160) = 31
+    # contracts; shares at ref price 50.0 -> round(5000/50) = 100 shares.
+    assert plan[NEW_OPT_OCC] == (NEW_OPT_OCC, "buy", 31, "entry", "option")
     assert plan["NEWEQ"] == ("NEWEQ", "buy", 100, "entry", "equity")
 
     # managed state carries route + instrument key; exited name dropped

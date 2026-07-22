@@ -426,7 +426,8 @@ def main() -> int:
     ap.add_argument("--refresh-chain", action="store_true", help="Capture chains and rebuild rankings before trading.")
     ap.add_argument("--ranking-path", default=None)
     ap.add_argument("--top-k", type=int, default=10)
-    ap.add_argument("--contracts", type=int, default=1)
+    ap.add_argument("--target-notional", type=float, default=5000.0,
+                    help="Dollar size per new option entry; contracts = round(target/(premium*100)).")
     ap.add_argument("--min-dte", type=int, default=1, help="Minimum calendar DTE; 1 avoids 0DTE.")
     ap.add_argument("--max-dte", type=int, default=21)
     ap.add_argument("--side-mode", choices=["call", "dealer_direction"], default="call")
@@ -499,8 +500,7 @@ def main() -> int:
         # exit-policy search (Momentum/HTF/Meta only), so it keeps its own prior
         # behavior rather than silently inheriting ExecPolicy's new default.
         trail_stop=0.35,
-        contracts=int(args.contracts),
-        shares=0,
+        target_notional=float(args.target_notional),
     )
     plan = build_mixed_plan(
         client,

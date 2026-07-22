@@ -59,12 +59,14 @@ def test_run_pass_routes_and_persists(monkeypatch, tmp_path):
     client = _FakeClient()
     res = runner.run_pass(client, submit=True)
 
-    # OPTNAME -> 10 contracts, SHARENAME -> 100 shares, NOTRIG -> gated out (no trigger)
+    # $5,000 target notional (ExecPolicy default): OPTNAME @ limit 1.6 -> round(5000/160) = 31
+    # contracts; SHARENAME @ ref price 50.0 -> round(5000/50) = 100 shares. NOTRIG gated out
+    # (no trigger).
     assert res["orders"] == 2
     assert sorted(o[0] for o in client.orders) == ["equity", "option"]
     opt = next(k for r, k in client.orders if r == "option")
     eq = next(k for r, k in client.orders if r == "equity")
-    assert opt["qty"] == 10 and eq["qty"] == 100
+    assert opt["qty"] == 31 and eq["qty"] == 100
 
     state = json.loads((tmp_path / "state.json").read_text())
     assert state["managed"]["OPTNAME"]["route"] == "option"

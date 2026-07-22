@@ -510,8 +510,9 @@ def main() -> None:
     ap.add_argument("--grace-bars", type=int, default=None, help="Rank drop-out backstop: exit after N bars out of top-K. Default None = ride to horizon (backtest-preferred).")
     ap.add_argument("--stop-loss", type=float, default=0.39, help="Hard stop: full exit if gain <= -this (premium for options). 0 disables.")
     ap.add_argument("--trail-stop", type=float, default=None, help="Trailing stop: full exit if value gives back this fraction from its peak. Default None = disabled (2026-07-18 cross-module search: no-trail beat trail on mean return per trade).")
-    ap.add_argument("--contracts", type=int, default=10, help="Options: contracts per new position.")
-    ap.add_argument("--shares", type=int, default=100, help="Equity: shares per new position.")
+    ap.add_argument("--target-notional", type=float, default=5000.0,
+                    help="Dollar size per new entry; shares/contracts are computed from the "
+                         "current price/premium so exposure is comparable across tickers.")
     ap.add_argument("--roll-trading-days", type=int, default=5,
                     help="Options: roll to next monthly when nearest is within this many trading days.")
     args = ap.parse_args()
@@ -525,7 +526,7 @@ def main() -> None:
     exec_policy = ExecPolicy(take_profit=args.take_profit, scale_frac=args.scale_frac,
                              horizon_bars=args.horizon_bars, grace_bars=args.grace_bars,
                              stop_loss=args.stop_loss, trail_stop=args.trail_stop,
-                             contracts=args.contracts, shares=args.shares,
+                             target_notional=args.target_notional,
                              roll_trading_days=args.roll_trading_days)
     runner = MomentumLiveRunner(auto_trade=bool(args.submit), exec_policy=exec_policy)
     result = runner.run_pass(client, submit=bool(args.submit),

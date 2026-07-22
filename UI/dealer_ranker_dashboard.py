@@ -189,13 +189,13 @@ class DealerRankerDashboardApp:
         live_env_file: str | None = None,
         top_k: int = 10,
         workers: int = 8,
-        contracts: int = 1,
+        target_notional: float = 5000.0,
     ) -> None:
         self.paper_env_file = env_file
         self.live_env_file = live_env_file
         self.top_k = int(top_k)
         self.workers = int(workers)
-        self.contracts = int(contracts)
+        self.target_notional = float(target_notional)
         self._live = False
         self._client = AlpacaOptionsClient(env_file=self.env_file)
         self._scan_cache: tuple[float, dict, float | None] | None = None
@@ -413,7 +413,7 @@ class DealerRankerDashboardApp:
                 "env": self.env_file,
                 "top_k": self.top_k,
                 "workers": self.workers,
-                "contracts": self.contracts,
+                "target_notional": self.target_notional,
                 "live": self._live,
                 "live_available": bool(self.live_env_file),
             },
@@ -429,7 +429,7 @@ class DealerRankerDashboardApp:
         payload = payload or {}
         top_k = int(payload.get("top_k") or self.top_k)
         workers = int(payload.get("workers") or self.workers)
-        contracts = int(payload.get("contracts") or self.contracts)
+        target_notional = float(payload.get("target_notional") or self.target_notional)
         refresh_chain = bool(payload.get("refresh_chain", True))
         with self._lock:
             if self._running:
@@ -442,8 +442,8 @@ class DealerRankerDashboardApp:
                 str(RUNNER),
                 "--top-k",
                 str(top_k),
-                "--contracts",
-                str(contracts),
+                "--target-notional",
+                str(target_notional),
                 "--workers",
                 str(workers),
                 "--submit",
@@ -467,7 +467,7 @@ class DealerRankerDashboardApp:
             "live": self._live,
             "top_k": top_k,
             "workers": workers,
-            "contracts": contracts,
+            "target_notional": target_notional,
             "refresh_chain": refresh_chain,
         }
 
@@ -493,7 +493,7 @@ __NAV_HTML__
   <button class=primary onclick=runLoop()>Run scan + SUBMIT</button>
   <label>Top <input id=topk type=number min=1 max=25 value=10 style="width:64px"></label>
   <label>Workers <input id=workers type=number min=1 max=24 value=8 style="width:64px"></label>
-  <label>Contracts <input id=contracts type=number min=1 max=50 value=1 style="width:64px"></label>
+  <label>Target $ <input id=target_notional type=number min=100 max=50000 step=100 value=5000 style="width:80px"></label>
   <label class=tog><input type=checkbox id=refresh checked> refresh chains</label>
   <label class=tog title="Off: submit on PAPER. On: real-money account.">
     <input type=checkbox id=live-toggle onchange=setLive(this.checked)> Real money account</label>
@@ -550,7 +550,7 @@ renderMovers(r.cross_day_movers);
 }
 async function tick(){let s=await(await fetch('/api/state')).json();
 let live=!!s.config.live;
-document.getElementById('cfg').textContent=(live?'real money':'paper')+' · '+s.config.contracts+'x';
+document.getElementById('cfg').textContent=(live?'real money':'paper')+' · $'+f(s.config.target_notional,0);
 document.getElementById('cfg').className='pill '+(live?'live':'paper');
 let lt=document.getElementById('live-toggle');lt.checked=live;lt.disabled=!s.config.live_available;
 let badge=document.getElementById('cyno-live-badge');
@@ -565,7 +565,7 @@ document.getElementById('pos').innerHTML='<tr><th class=t>symbol</th><th>qty</th
 document.getElementById('hist').innerHTML=(s.history||[]).map(h=>h.ts+' — '+(h.profile||'paper')+' — '+(h.orders||0)+' orders').join('<br>')||'none yet';}
 async function setLive(v){await fetch('/api/set-live',{method:'POST',body:JSON.stringify({live:v})});tick();}
 async function runLoop(){document.getElementById('msg').textContent='launching...';
-let body={top_k:Number(document.getElementById('topk').value||10),workers:Number(document.getElementById('workers').value||8),contracts:Number(document.getElementById('contracts').value||1),refresh_chain:document.getElementById('refresh').checked};
+let body={top_k:Number(document.getElementById('topk').value||10),workers:Number(document.getElementById('workers').value||8),target_notional:Number(document.getElementById('target_notional').value||5000),refresh_chain:document.getElementById('refresh').checked};
 let r=await(await fetch('/api/run-loop',{method:'POST',body:JSON.stringify(body)})).json();
 document.getElementById('msg').textContent=r.started?('running ('+(r.live?'real money':'paper')+')'):('skipped: '+r.reason);}
 tick();loadRankings();setInterval(tick,5000);

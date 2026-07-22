@@ -209,6 +209,27 @@ def _run_broker_equity_snapshot(*, env_file: str, account_label: str) -> None:
     )
 
 
+def _run_shadow_tracker() -> None:
+    """Two-sleeve (id4 tail-rider / g284 harvester) exit-policy shadow tracker for
+    Momentum/HTF/Meta — paper-only observation, no submit_order path (see
+    scripts/shadow/two_sleeve_shadow_tracker.py docstring). Subprocess-isolated
+    like the other loops so a failure here can't take down the combined server;
+    its own file-reads are already memory-bounded against the multi-GB feature
+    matrices (see that script's 2026-07-21 WSL-crash postmortem in its header).
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts/shadow/two_sleeve_shadow_tracker.py"
+    argv = [sys.executable, str(script)]
+    logger.info("Shadow tracker: launching %s", " ".join(argv))
+    env = {**os.environ, "PYTHONPATH": str(repo_root)}
+    result = subprocess.run(argv, cwd=str(repo_root), env=env)
+    logger.info("Shadow tracker: finished (exit=%s)", result.returncode)
+
+
 def _build_symbol_union(env_file: str) -> list[str]:
     """Union of all symbols needed by both dashboards."""
     from strategies.multi_ticker_swing.config.pipeline_config import CONTEXT_TICKERS
@@ -307,7 +328,7 @@ def _run_momentum_loop(*, submit: bool, live: bool, flush: bool = False) -> None
     subprocess.run(argv, cwd=str(repo_root), env=env)
 
 
-def _run_dealer_ranker_loop(*, submit: bool, live: bool, top_k: int, workers: int, contracts: int) -> None:
+def _run_dealer_ranker_loop(*, submit: bool, live: bool, top_k: int, workers: int, target_notional: float) -> None:
     """Fire one near-close dealer-rank options pass.
 
     It refreshes option-chain snapshots, rebuilds dealer rankings, buys nearest
@@ -329,8 +350,8 @@ def _run_dealer_ranker_loop(*, submit: bool, live: bool, top_k: int, workers: in
         str(int(top_k)),
         "--workers",
         str(int(workers)),
-        "--contracts",
-        str(int(contracts)),
+        "--target-notional",
+        str(float(target_notional)),
     ]
     if submit:
         argv.append("--submit")
@@ -413,7 +434,7 @@ def run_combined(
     dealer_ranker_live: bool = False,
     dealer_ranker_workers: int = 8,
     dealer_ranker_top_k: int = 10,
-    dealer_ranker_contracts: int = 1,
+    dealer_ranker_target_notional: float = 5000.0,
     start_all: bool = False,
 ) -> None:
     if audit_root is None:
@@ -604,7 +625,7 @@ def run_combined(
         live_env_file=live_env_file,
         top_k=dealer_ranker_top_k,
         workers=dealer_ranker_workers,
-        contracts=dealer_ranker_contracts,
+        target_notional=dealer_ranker_target_notional,
     )
     dealer_ranker_server = _make_dealer_ranker_server(host, port_dealer_ranker, dealer_ranker_app)
     dealer_ranker_thread = threading.Thread(
@@ -891,7 +912,7 @@ def run_combined(
             live=dealer_ranker_live,
             top_k=dealer_ranker_top_k,
             workers=dealer_ranker_workers,
-            contracts=dealer_ranker_contracts,
+            target_notional=dealer_ranker_target_notional,
         ),
         label="Dealer Ranker",
         tag=dealer_ranker_tag,
@@ -912,6 +933,15 @@ def run_combined(
             ),
             label=f"Broker snapshot {account_label}", tag="READ-ONLY",
         )
+
+    # Shadow tracker: 10 min after each Momentum/HTF/Meta cycle (14:20/16:20 and
+    # 14:25/16:25) so it reads live_state.json after that cycle's entries/exits
+    # have landed. Read-only against those state files; never calls a broker.
+    shadow_tracker_schedulers = _schedule_loop(
+        "14:35,16:35",
+        _run_shadow_tracker,
+        label="Shadow tracker (2-sleeve)", tag="READ-ONLY",
+    )
 
     # ------------------------------------------------------------------
     # 5e. Pre-open flush (~09:35 ET). The pm 4H bar (18:00 UTC = 2-6pm ET) only
@@ -1154,8 +1184,8 @@ def main() -> None:
                         help="Parallel dealer-chain workers for the Dealer Ranker pass (default 8).")
     parser.add_argument("--dealer-ranker-top-k", type=int, default=10,
                         help="Number of dealer-ranked names to target (default 10).")
-    parser.add_argument("--dealer-ranker-contracts", type=int, default=1,
-                        help="Contracts per Dealer Ranker entry (default 1).")
+    parser.add_argument("--dealer-ranker-target-notional", type=float, default=5000.0,
+                        help="Dollar size per Dealer Ranker entry; contracts computed from premium (default 5000).")
     parser.add_argument(
         "--start-all",
         action="store_true",
@@ -1202,7 +1232,7 @@ def main() -> None:
         dealer_ranker_live=args.dealer_ranker_live,
         dealer_ranker_workers=args.dealer_ranker_workers,
         dealer_ranker_top_k=args.dealer_ranker_top_k,
-        dealer_ranker_contracts=args.dealer_ranker_contracts,
+        dealer_ranker_target_notional=args.dealer_ranker_target_notional,
         start_all=args.start_all,
     )
 
