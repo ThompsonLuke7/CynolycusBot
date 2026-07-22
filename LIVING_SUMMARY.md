@@ -1,5 +1,8 @@
 # Living Summary
 
+{2026-07-21 23:42 EDT} {agent: Codex} {architecture visualization planning}
+Clarified navigation depth is branch-specific, not a forced four-level hierarchy: breadcrumbs show the current semantic path, expandable nodes zoom, and leaves open details. Iterated the mockup toward a cinematic high-tech “System Atlas” with real domains and a simulated strategy zoom.
+
 {2026-07-21 23:33 EDT} {agent: Codex} {architecture visualization planning}
 Selected one static app with Public and Local Full datasets for side-by-side evaluation. Public suppresses exact operational/routing details; Local adds source paths, runtime ownership, state/recovery and broker boundaries, while both exclude secrets.
 
