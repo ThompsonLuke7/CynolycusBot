@@ -29,6 +29,11 @@ Analyze this cluster of tickers and generate a theme label.
 Cluster:
 {cluster_json}
 
+EXISTING THEMES (already in use — reuse one of these exact names if this
+cluster is substantially the same theme; only mint a new name if this
+cluster is genuinely distinct from all of them):
+{existing_names_json}
+
 Return JSON only — no prose, no markdown fences.
 
 {{
@@ -41,13 +46,17 @@ Return JSON only — no prose, no markdown fences.
 
 Rules:
 - theme_name must be snake_case, 1-4 words (e.g. nuclear_energy, ai_infrastructure)
+- If an existing theme above already covers this cluster's sector/segment, return
+  that EXACT existing theme_name verbatim — do not invent a near-duplicate name
+  for the same thing (e.g. "regional_bank_holding_companies" vs
+  "community_regional_banks" should be ONE theme, not two)
 - parent_theme must be a broader snake_case category
 - related_themes is a list of snake_case theme names that are economically related
 - confidence is 0.0-1.0 reflecting how clearly defined this cluster is
 """
 
 
-def _label_cluster(summary: dict[str, Any]) -> dict[str, Any]:
+def _label_cluster(summary: dict[str, Any], existing_names: list[str]) -> dict[str, Any]:
     cluster_json = json.dumps(
         {
             "cluster_id": summary["cluster_id"],
@@ -57,7 +66,10 @@ def _label_cluster(summary: dict[str, Any]) -> dict[str, Any]:
         },
         indent=2,
     )
-    prompt = _LABEL_PROMPT_TEMPLATE.format(cluster_json=cluster_json)
+    prompt = _LABEL_PROMPT_TEMPLATE.format(
+        cluster_json=cluster_json,
+        existing_names_json=json.dumps(sorted(existing_names)),
+    )
     try:
         result = call_claude_json(prompt)
         result["cluster_id"] = summary["cluster_id"]
@@ -103,6 +115,11 @@ def label_clusters(
 
     n = len(cluster_summaries)
     logger.info("Labeling %d clusters (stable carry-forward + Claude for new only)...", n)
+    # Running set of names already in use this run — seeded from last week's
+    # active themes, grown as each cluster is carried forward or freshly
+    # labeled, so Claude can reuse an existing name instead of minting a
+    # near-duplicate for gray-zone clusters (see _LABEL_PROMPT_TEMPLATE).
+    known_names = set(prior_meta.keys())
     rows, reused, relabeled = [], 0, 0
     for summary in cluster_summaries:
         cid = int(summary["cluster_id"])
@@ -120,16 +137,18 @@ def label_clusters(
             })
             reused += 1
         else:
-            label = _label_cluster(summary)
+            label = _label_cluster(summary, sorted(known_names))
+            theme_name = str(label.get("theme_name", f"cluster_{cid}"))
             rows.append({
                 "cluster_id": cid,
-                "theme_name": str(label.get("theme_name", f"cluster_{cid}")),
+                "theme_name": theme_name,
                 "parent_theme": str(label.get("parent_theme", "unknown")),
                 "description": str(label.get("description", "")),
                 "related_themes": json.dumps(label.get("related_themes") or []),
                 "confidence": float(label.get("confidence", 0.0)),
                 "date": as_of,
             })
+            known_names.add(theme_name)
             relabeled += 1
             logger.info("  cluster %3d → %-30s (NEW/relabeled, conf %.2f)",
                         cid, label.get("theme_name", "?"), label.get("confidence", 0.0))

@@ -242,6 +242,89 @@ def _latest_quote(client: AlpacaOptionsClient, occ: str) -> tuple[float | None, 
     return _as_float(q.get("bp", q.get("bid_price"))), _as_float(q.get("ap", q.get("ask_price")))
 
 
+def _has_tradable_contracts(
+    client: AlpacaOptionsClient,
+    ticker: str,
+    *,
+    option_type: str,
+    min_dte: int,
+    max_dte: int,
+    now_et: datetime | None = None,
+) -> bool:
+    """Cheap existence check: does this underlying list ANY standard 100-share,
+    non-0DTE contract of ``option_type`` in [min_dte, max_dte]?
+
+    No strike bound (unlike ``_select_atm_option``) — this only answers whether
+    a name is worth a priced ATM lookup at all, so it can pre-filter ranking
+    candidates before they consume a top-K slot. Some names (illiquid ADRs,
+    small caps) simply have no Alpaca-listed chain in the window; when several
+    of them land in the same day's top-K together the module can otherwise
+    place zero orders for the whole session.
+    """
+    now_et = now_et or datetime.now(_ET)
+    start = now_et.date() + timedelta(days=max(1, int(min_dte)))
+    end = now_et.date() + timedelta(days=max(int(min_dte), int(max_dte)))
+    cp = "call" if option_type == "call" else "put"
+    try:
+        resp = client.get_option_contracts(
+            underlying_symbol=ticker.upper(),
+            expiration_date_gte=start.isoformat(),
+            expiration_date_lte=end.isoformat(),
+            type=cp,
+            status="active",
+        )
+    except Exception:
+        return False
+    page = resp.get("option_contracts") if isinstance(resp, dict) else resp
+    for c in (page or []):
+        if not isinstance(c, dict) or not c.get("tradable", True):
+            continue
+        if not _is_standard_100_contract(c, ticker):
+            continue
+        exp = _contract_expiry(c)
+        if exp is not None and start <= exp <= end:
+            return True
+    return False
+
+
+def _select_optionable_targets(
+    client: AlpacaOptionsClient,
+    rankings: pd.DataFrame,
+    *,
+    top_k: int,
+    side_mode: str,
+    min_dte: int,
+    max_dte: int,
+    scan_multiple: int = 5,
+    now_et: datetime | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Walk the rank-sorted table and keep the best ``top_k`` names that
+    actually have a listed non-0DTE chain, instead of freezing on a fixed
+    top-K slice that can be entirely non-optionable (observed 7/17: 6/10
+    skipped; 7/20: 10/10 skipped -> zero orders placed for the whole day).
+    Rank priority is preserved; the scan is capped at ``top_k * scan_multiple``
+    candidates so a systemically non-optionable universe can't turn one pass
+    into an unbounded number of API calls. Skipped tickers are returned so the
+    caller can record them in the signal-decision audit instead of the module
+    going silently idle.
+    """
+    top_k = max(1, int(top_k))
+    scan_cap = top_k * max(1, int(scan_multiple))
+    keep_idx: list[int] = []
+    skipped: list[str] = []
+    for scanned, (idx, row) in enumerate(rankings.iterrows()):
+        if len(keep_idx) >= top_k or scanned >= scan_cap:
+            break
+        ticker = str(row["symbol"]).upper()
+        opt_type = _side_for_ticker(ticker, side_mode=side_mode, top=rankings)
+        if _has_tradable_contracts(client, ticker, option_type=opt_type, min_dte=min_dte, max_dte=max_dte,
+                                   now_et=now_et):
+            keep_idx.append(idx)
+        else:
+            skipped.append(ticker)
+    return rankings.loc[keep_idx], skipped
+
+
 def _select_atm_option(
     client: AlpacaOptionsClient,
     ticker: str,
@@ -374,15 +457,18 @@ def main() -> int:
         ranking_path = Path(args.ranking_path) if args.ranking_path else None
 
     rankings = _load_rankings(ranking_path)
-    top = rankings.head(max(1, int(args.top_k))).copy()
+    profile = "LIVE" if args.live else "PAPER"
+    client = AlpacaOptionsClient(env_file=f".env#{profile}")
+    top, skipped_not_optionable = _select_optionable_targets(
+        client, rankings, top_k=args.top_k, side_mode=args.side_mode,
+        min_dte=args.min_dte, max_dte=args.max_dte,
+    )
     targets = top["symbol"].astype(str).str.upper().tolist()
     bar = now_utc_iso()
     signal_audits = _signal_audits(top, bar=bar, side_mode=args.side_mode)
     append_jsonl(AUDIT_LOG, {"event": "signal_decision", "module": MODULE, "bar": bar,
-                             "targets": targets, "signal_audits": signal_audits})
-
-    profile = "LIVE" if args.live else "PAPER"
-    client = AlpacaOptionsClient(env_file=f".env#{profile}")
+                             "targets": targets, "signal_audits": signal_audits,
+                             "skipped_not_optionable": skipped_not_optionable})
     pos_info = _build_pos_info(client)
     state = _load_state()
     managed = state.get("managed", {})
@@ -409,6 +495,10 @@ def main() -> int:
         horizon_bars=int(args.horizon_bars),
         grace_bars=args.grace_bars,
         stop_loss=float(args.stop_loss) if args.stop_loss else None,
+        # Pinned explicitly: this module wasn't part of the 2026-07-18 cross-module
+        # exit-policy search (Momentum/HTF/Meta only), so it keeps its own prior
+        # behavior rather than silently inheriting ExecPolicy's new default.
+        trail_stop=0.35,
         contracts=int(args.contracts),
         shares=0,
     )

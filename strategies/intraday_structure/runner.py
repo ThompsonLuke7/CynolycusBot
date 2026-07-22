@@ -5,11 +5,20 @@ import queue
 import threading
 from datetime import datetime, timezone
 
-from strategies.intraday_structure.candidate_sources import AuditCandidateFeed, manual_candidates
+from strategies.intraday_structure.candidate_sources import (
+    AuditCandidateFeed,
+    DealerRankingCandidateFeed,
+    LiquidityCandidateFeed,
+    manual_candidates,
+)
 from strategies.intraday_structure.config import IntradayStructureConfig
 from strategies.intraday_structure.engine import IntradayStructureEngine, transition_log_sink
 from strategies.intraday_structure.models import Bar
-from strategies.intraday_structure.options import DealerSnapshotOptionsProvider
+from strategies.intraday_structure.options import (
+    CompositeOptionsProvider,
+    DealerLevelSummaryOptionsProvider,
+    DealerSnapshotOptionsProvider,
+)
 from strategies.intraday_structure.state_store import JsonStateStore
 
 
@@ -23,9 +32,25 @@ class IntradayStructureRunner:
         self.config = config
         self.bar_queue = bar_queue
         self.feed = AuditCandidateFeed()
+        self.dealer_feed = DealerRankingCandidateFeed(
+            config.dealer_plate.ranking_path,
+            top_structural=config.dealer_plate.candidate_top_structural,
+            top_change=config.dealer_plate.candidate_top_change,
+            max_age_hours=config.dealer_plate.candidate_max_age_hours,
+        ) if config.dealer_plate.enabled else None
+        self.liquidity_feed = LiquidityCandidateFeed(
+            config.liquidity_universe.universe_path,
+            top_n=config.liquidity_universe.top_n,
+        ) if config.liquidity_universe.enabled else None
         self.engine = IntradayStructureEngine(
             config,
-            options_provider=DealerSnapshotOptionsProvider(max_age_minutes=config.levels.options_max_age_minutes),
+            options_provider=CompositeOptionsProvider(
+                DealerLevelSummaryOptionsProvider(
+                    config.dealer_plate.snapshot_root,
+                    max_age_minutes=config.levels.options_max_age_minutes,
+                ),
+                DealerSnapshotOptionsProvider(max_age_minutes=config.levels.options_max_age_minutes),
+            ),
             state_store=JsonStateStore(config.state_path),
             transition_sink=transition_log_sink(config.transition_log_path),
         )
@@ -55,12 +80,16 @@ class IntradayStructureRunner:
         self.engine.write_active_signals()
 
     def snapshot(self) -> dict:
+        active = [signal.to_dict() for signal in self.engine.active_signals()]
         return {
             "running": bool(self._thread and self._thread.is_alive()),
             "paper_only": True,
             "candidate_count": len(self.engine.candidates),
             "setup_count": len(self.engine.setups),
-            "active_signals": [signal.to_dict() for signal in self.engine.active_signals()],
+            "active_signals": active,
+            "qualified_dealer_plate_signals": [
+                signal for signal in active if bool((signal.get("dealer_plate") or {}).get("qualified"))
+            ],
             "recent_transitions": [transition.to_dict() for transition in self.engine.transitions[-100:]],
         }
 
@@ -69,6 +98,12 @@ class IntradayStructureRunner:
             try:
                 for candidate in self.feed.poll():
                     self.engine.register_candidate(candidate)
+                if self.dealer_feed is not None:
+                    for candidate in self.dealer_feed.poll():
+                        self.engine.register_candidate(candidate)
+                if self.liquidity_feed is not None:
+                    for candidate in self.liquidity_feed.poll():
+                        self.engine.register_candidate(candidate)
                 if not self._manual_registered:
                     for candidate in manual_candidates(self.config.manual_watchlist, timestamp=datetime.now(timezone.utc)):
                         self.engine.register_candidate(candidate)

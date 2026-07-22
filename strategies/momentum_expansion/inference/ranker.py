@@ -12,6 +12,7 @@ Live path: `score_at(timestamp)` returns the active top-N for a given bar.
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,12 +22,13 @@ import numpy as np
 import pandas as pd
 
 from strategies.momentum_expansion.config.momentum_config import (
+    EVAL_METRICS_PATH,
+    FEATURE_MANIFEST,
     FEATURES_COMBINED,
     MODEL_PATH,
     RANKING_CONFIG,
 )
 from strategies.momentum_expansion.data.universe import load_snapshot_for
-from strategies.momentum_expansion.features.feature_matrix_4h import FEATURE_COLUMNS_4H
 from strategies.momentum_expansion.inference.candidate_filter import filter_momentum_candidates
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,25 @@ logger = logging.getLogger(__name__)
 # Booster loader
 # ---------------------------------------------------------------------------
 
+def _load_feature_columns() -> list[str]:
+    """Source of truth for the INSTALLED booster's expected features: its own
+    feature_manifest.json (falls back to eval_metrics.json). Mirrors
+    strategies.multi_ticker_swing_htf.inference.scorer._load_feature_columns —
+    do NOT default to the feature_matrix_4h.FEATURE_COLUMNS_4H superset, which
+    drifts from whatever subset a given training run's GA feature selection
+    actually kept (see feature_manifest.json vs feature_matrix_4h.py history)."""
+    for p in (FEATURE_MANIFEST, EVAL_METRICS_PATH):
+        if p.exists():
+            obj = json.loads(p.read_text())
+            cols = obj.get("feature_columns")
+            if cols:
+                return list(cols)
+    raise FileNotFoundError(
+        f"No feature_columns in {FEATURE_MANIFEST} or {EVAL_METRICS_PATH}. "
+        "Run Colab training + import_from_colab first."
+    )
+
+
 class ExpansionRanker:
     def __init__(
         self,
@@ -44,7 +65,7 @@ class ExpansionRanker:
         feature_columns: list[str] | None = None,
     ):
         self.booster_path = Path(booster_path)
-        self.feature_columns = feature_columns or FEATURE_COLUMNS_4H
+        self.feature_columns = feature_columns or _load_feature_columns()
         self._model = None
 
     @property
@@ -67,6 +88,12 @@ class ExpansionRanker:
     def score(self, X: pd.DataFrame) -> pd.Series:
         import xgboost as xgb
         cols = [c for c in self.feature_columns if c in X.columns]
+        missing = [c for c in self.feature_columns if c not in X.columns]
+        if missing:
+            logger.warning(
+                "ExpansionRanker: %d/%d manifest columns missing (scoring on %d): %s",
+                len(missing), len(self.feature_columns), len(cols), missing[:10],
+            )
         Xv = X[cols].astype(float).values
         dmat = xgb.DMatrix(Xv, feature_names=cols)
         preds = self.model.predict(dmat)

@@ -79,21 +79,31 @@ class MomentumDashboardApp:
         now = time.time()
         if self._scan_cache and now - self._scan_cache[0] < SCAN_TTL:
             return self._scan_cache[1]
-        try:
-            from strategies.momentum_expansion.live.runner import MomentumLiveRunner
-            runner = MomentumLiveRunner(auto_trade=False)  # display only — never trades
-            triggers = runner.evaluate_now() or []
-            picks = [
-                {"rank": int(t.get("rank", i + 1)), "ticker": t.get("ticker"),
-                 "expansion": round(float(t.get("expansion_score", 0) or 0), 3),
-                 "trigger": t.get("trigger_rule"), "close": t.get("bar_close")}
-                for i, t in enumerate(triggers[: self.top_k])
-            ]
-            out = {"picks": picks, "ts": datetime.now(timezone.utc).isoformat()}
-        except Exception as exc:  # noqa: BLE001
-            out = {"error": f"scan_failed: {exc}", "picks": []}
-        self._scan_cache = (now, out)
-        return out
+        # evaluate_now() walks the full ~2.7k-ticker universe and can take minutes.
+        # Without this lock, every poll that lands during a build (Hub fan-out +
+        # each dashboard's own 5s tick) sees a cache miss and starts its OWN
+        # evaluate_now(), so N overlapping builds thrash CPU/IO and none ever
+        # finish -- symptoms: "live feature panel: 200/2768" resetting forever
+        # instead of progressing, and BrokenPipe once the caller's timeout fires.
+        with self._lock:
+            now = time.time()
+            if self._scan_cache and now - self._scan_cache[0] < SCAN_TTL:
+                return self._scan_cache[1]
+            try:
+                from strategies.momentum_expansion.live.runner import MomentumLiveRunner
+                runner = MomentumLiveRunner(auto_trade=False)  # display only — never trades
+                triggers = runner.evaluate_now() or []
+                picks = [
+                    {"rank": int(t.get("rank", i + 1)), "ticker": t.get("ticker"),
+                     "expansion": round(float(t.get("expansion_score", 0) or 0), 3),
+                     "trigger": t.get("trigger_rule"), "close": t.get("bar_close")}
+                    for i, t in enumerate(triggers[: self.top_k])
+                ]
+                out = {"picks": picks, "ts": datetime.now(timezone.utc).isoformat()}
+            except Exception as exc:  # noqa: BLE001
+                out = {"error": f"scan_failed: {exc}", "picks": []}
+            self._scan_cache = (now, out)
+            return out
 
     def _own_book_symbols(self) -> set[str]:
         """OCC symbols the momentum option policy has opened (durable book)."""

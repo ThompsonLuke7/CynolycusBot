@@ -13,7 +13,7 @@ The repository already contained most upstream data and several reusable calcula
 | Causal session VWAP, prior-day levels, swing distances | `strategies/multi_ticker_swing/features/build_features.py` | Definitions mirrored at 1-minute cadence; no future fractal pivots |
 | Causal support/resistance zones | `signals/location_features.add_liquidity_zone_features` | Called directly by unified level provider |
 | SPY/QQQ/sector/VIX context | 30m swing and 4h Momentum features; shared caches; live stream includes SPY/QQQ/VIXY | Synchronized causal 1-minute context, with partial-context warnings |
-| Static options positioning | `strategies/dealer_positioning`: Schwab chain parser, GEX ladder, walls, magnets, gamma flip, DTE buckets | Read-only JSON adapter with as-of/future-snapshot guard |
+| Static options positioning | `strategies/dealer_positioning`: Schwab chain parser, GEX ladder, walls, magnets, gamma flip, DTE buckets | Read-only JSON adapter plus broad captured-summary adapter with as-of/future-snapshot guard and normalized, auditable level importance |
 | Stored broad options activity | `signals/news/data/processed/cboe_options_summary.parquet` and `cboe_unusual_strikes.parquet` | Typed static snapshot adapter; explicitly not OPRA flow/dealer inventory |
 | Existing candidate outputs | JSONL signal audits for Meta, Momentum, HTF, Dealer Ranker; swing session `signal` records | Audit candidate feed; source scores/evidence preserved |
 | Alert schemas | `core/live_signal_audit.py` plus module-specific JSONL | New typed signal schema and transition-only JSONL |
@@ -120,7 +120,7 @@ Modified:
 - Thresholds are interpretable starting hypotheses, not calibrated production policy.
 - Relative volume currently uses a rolling intraday baseline; a point-in-time same-minute-of-day baseline should replace it after broad history exists.
 - Candidate audit feeds expose the latest decision, not a transactional message bus. `available_at` prevents early replay use, but a future unified publisher would be cleaner.
-- Static dealer snapshots may be stale or absent for most equities. Missing options data is neutral and warned, never imputed.
+- The broad captured dealer summaries now seed a bounded watchlist from both structural-potential and map-change ranks. They are static as-of context only: missing/stale data is neutral and warned, never imputed; level importance is a within-snapshot priority score, not observed dealer inventory or causal proof.
 - Price bars cannot reproduce quote spread, queue priority, halts, or exact intrabar ordering.
 - The v1 dashboard is monitoring-only. Execution integration is intentionally deferred until replay and paper evidence exists.
 

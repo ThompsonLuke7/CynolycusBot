@@ -1,8 +1,8 @@
 {
   "version": "intraday_structure_v1",
-  "enabled": false,
+  "enabled": true,
   "paper_only": true,
-  "candidate_limit": 25,
+  "candidate_limit": 130,
   "candidate_ttl_minutes": 1440,
   "min_price": 1.0,
   "min_average_dollar_volume": 2000000.0,
@@ -65,5 +65,22 @@
     "min_bar_dollar_volume": 25000.0,
     "label_forward_bars": 60,
     "overlap_cooldown_bars": 15
+  },
+  "dealer_plate": {
+    "enabled": true,
+    "snapshot_root": "Data/dealer_positioning/historical_snapshots",
+    "ranking_path": "Data/dealer_positioning/rankings/dealer_swing_rankings_latest.parquet",
+    "candidate_top_structural": 40,
+    "candidate_top_change": 40,
+    "candidate_max_age_hours": 30.0,
+    "min_score": 0.70,
+    "min_target_strength": 0.60,
+    "min_target_distance_atr": 0.75,
+    "max_target_distance_atr": 8.0
+  },
+  "liquidity_universe": {
+    "enabled": true,
+    "universe_path": "Data/shared/universe/shared_universe.csv",
+    "top_n": 50
   }
 }

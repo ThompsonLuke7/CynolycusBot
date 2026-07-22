@@ -242,9 +242,9 @@ def build_ticker_features_4h(
     df["ema_dist_20"] = ((c - ema20) / atr14).clip(-10, 10)
     df["ema_dist_50"] = ((c - ema50) / atr14).clip(-10, 10)
     df["ema_dist_100"] = ((c - ema100) / atr14).clip(-15, 15)
-    df["ema_slope_10"] = ema10.pct_change(1)
-    df["ema_slope_20"] = ema20.pct_change(1)
-    df["ema_slope_50"] = ema50.pct_change(1)
+    df["ema_slope_10"] = ema10.pct_change(1, fill_method=None)
+    df["ema_slope_20"] = ema20.pct_change(1, fill_method=None)
+    df["ema_slope_50"] = ema50.pct_change(1, fill_method=None)
     df["adx_14"] = _adx(df, 14)
     # Stack: bit0 ema10>ema20, bit1 ema20>ema50, bit2 ema50>ema100
     b0 = (ema10 > ema20).astype(int)
@@ -254,7 +254,7 @@ def build_ticker_features_4h(
 
     # --- MOMENTUM ---
     for n in (1, 3, 5, 10, 20):
-        df[f"ret_{n}"] = c.pct_change(n)
+        df[f"ret_{n}"] = c.pct_change(n, fill_method=None)
     df["rsi_14"] = _rsi(c, 14)
     df["macd_hist_norm"] = (_macd_hist(c) / atr14).clip(-5, 5)
 
@@ -348,9 +348,9 @@ def build_ticker_features_4h(
     sec_c = _ctx_close(sector_etf)
 
     for n in (1, 5, 20):
-        spy_ret = spy_c.pct_change(n)
-        qqq_ret = qqq_c.pct_change(n)
-        sec_ret = sec_c.pct_change(n)
+        spy_ret = spy_c.pct_change(n, fill_method=None)
+        qqq_ret = qqq_c.pct_change(n, fill_method=None)
+        sec_ret = sec_c.pct_change(n, fill_method=None)
         df[f"rs_spy_{n}"] = (df[f"ret_{n}"] - spy_ret).clip(-1, 1) if f"ret_{n}" in df.columns else np.nan
         if n in (1, 5, 20):
             df[f"rs_qqq_{n}"] = (df[f"ret_{n}"] - qqq_ret).clip(-1, 1)
@@ -373,7 +373,7 @@ def build_ticker_features_4h(
     # --- REGIME ---
     spy_trend = np.sign(_ema(spy_c, 20) - _ema(spy_c, 50))
     df["regime_spy_trend"] = spy_trend
-    spy_ret_20 = spy_c.pct_change(20)
+    spy_ret_20 = spy_c.pct_change(20, fill_method=None)
     df["regime_spy_ret_20"] = spy_ret_20.fillna(0)
 
     vixy_c = _ctx_close("VIXY")
@@ -390,8 +390,8 @@ def build_ticker_features_4h(
         d = df_1d.copy()
         d.columns = [x.lower() for x in d.columns]
         dc = d["close"]
-        d_ret_1 = dc.pct_change(1)
-        d_ret_5 = dc.pct_change(5)
+        d_ret_1 = dc.pct_change(1, fill_method=None)
+        d_ret_5 = dc.pct_change(5, fill_method=None)
         d_atr = _atr(d, 14)
         d_atr_pct = (d_atr / dc).shift(1)
         d_rsi = _rsi(dc, 14).shift(1)
@@ -418,8 +418,8 @@ def build_ticker_features_4h(
         weekly_ema10 = _ema(weekly_close, 10)
         weekly_ema30 = _ema(weekly_close, 30)
         weekly = pd.DataFrame({
-            "weekly_ret_1": weekly_close.pct_change(1).shift(1),
-            "weekly_ret_4": weekly_close.pct_change(4).shift(1),
+            "weekly_ret_1": weekly_close.pct_change(1, fill_method=None).shift(1),
+            "weekly_ret_4": weekly_close.pct_change(4, fill_method=None).shift(1),
             "weekly_trend_state": np.sign(weekly_ema10 - weekly_ema30).shift(1),
         })
         weekly_daily = weekly.reindex(d.index, method="ffill")

@@ -167,12 +167,12 @@ def main():
     ap.add_argument("--shares", type=int, default=100, help="Equity: shares per new position.")
     ap.add_argument("--contracts", type=int, default=10, help="Options: contracts per new position.")
     # --- exit policy (mirrors Meta; validated in backtest_exits.py) ---
-    ap.add_argument("--take-profit", type=float, default=0.20, help="Scale out scale_frac at this gain, then ride the rest.")
-    ap.add_argument("--scale-frac", type=float, default=0.5, help="Fraction to sell at take-profit.")
-    ap.add_argument("--horizon-bars", type=int, default=25, help="Full exit after this many managed bars (~10d).")
+    ap.add_argument("--take-profit", type=float, default=0.30, help="Scale out scale_frac at this gain, then ride the rest.")
+    ap.add_argument("--scale-frac", type=float, default=0.16, help="Fraction to sell at take-profit.")
+    ap.add_argument("--horizon-bars", type=int, default=53, help="Full exit after this many managed bars (~21d).")
     ap.add_argument("--grace-bars", type=int, default=None, help="Rank drop-out backstop: exit after N bars out of top-K. Default None = ride to horizon (backtest-preferred).")
-    ap.add_argument("--stop-loss", type=float, default=0.50, help="Hard stop: full exit if gain <= -this (premium for options). 0 disables.")
-    ap.add_argument("--trail-stop", type=float, default=0.35, help="Trailing stop: full exit if value gives back this fraction from its peak. 0.35 = backtest sweet spot; 0 disables.")
+    ap.add_argument("--stop-loss", type=float, default=0.39, help="Hard stop: full exit if gain <= -this (premium for options). 0 disables.")
+    ap.add_argument("--trail-stop", type=float, default=None, help="Trailing stop: full exit if value gives back this fraction from its peak. Default None = disabled (2026-07-18 cross-module search: no-trail beat trail on mean return per trade).")
     ap.add_argument("--max-staleness-days", type=float, default=0.5)
     ap.add_argument("--allow-stale", action="store_true")
     ap.add_argument("--signal-audit-log", default=str(DEFAULT_AUDIT_LOG),

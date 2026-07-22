@@ -68,6 +68,41 @@ class ReplayPolicy:
 
 
 @dataclass(frozen=True)
+class DealerPlatePolicy:
+    """Paper-only policy for broad dealer-map candidates and qualified alerts.
+
+    The score is an interpretable hypothesis, not a statement that option OI
+    reveals dealer inventory or causes a move.  It is kept separate from the
+    price detectors so replay can ablate it cleanly.
+    """
+
+    enabled: bool = True
+    snapshot_root: str = "Data/dealer_positioning/historical_snapshots"
+    ranking_path: str = "Data/dealer_positioning/rankings/dealer_swing_rankings_latest.parquet"
+    candidate_top_structural: int = 40
+    candidate_top_change: int = 40
+    candidate_max_age_hours: float = 30.0
+    min_score: float = 0.70
+    min_target_strength: float = 0.60
+    min_target_distance_atr: float = 0.75
+    max_target_distance_atr: float = 8.0
+
+
+@dataclass(frozen=True)
+class LiquidityUniversePolicy:
+    """Bounded broad-universe seed for price-structure discovery.
+
+    This selects liquid names from the locally maintained shared universe.  It
+    is a watchlist source only: price confirmation and, for a qualified plate,
+    an as-of dealer-map destination remain mandatory.
+    """
+
+    enabled: bool = True
+    universe_path: str = "Data/shared/universe/shared_universe.csv"
+    top_n: int = 50
+
+
+@dataclass(frozen=True)
 class IntradayStructureConfig:
     version: str = "intraday_structure_v1"
     enabled: bool = False
@@ -100,6 +135,8 @@ class IntradayStructureConfig:
     levels: LevelPolicy = field(default_factory=LevelPolicy)
     target: TargetPolicy = field(default_factory=TargetPolicy)
     replay: ReplayPolicy = field(default_factory=ReplayPolicy)
+    dealer_plate: DealerPlatePolicy = field(default_factory=DealerPlatePolicy)
+    liquidity_universe: LiquidityUniversePolicy = field(default_factory=LiquidityUniversePolicy)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -114,6 +151,8 @@ class IntradayStructureConfig:
         known["levels"] = LevelPolicy(**levels)
         known["target"] = TargetPolicy(**known.get("target", {}))
         known["replay"] = ReplayPolicy(**known.get("replay", {}))
+        known["dealer_plate"] = DealerPlatePolicy(**known.get("dealer_plate", {}))
+        known["liquidity_universe"] = LiquidityUniversePolicy(**known.get("liquidity_universe", {}))
         for key in ("alert_states", "context_symbols", "manual_watchlist", "supported_tickers"):
             if key in known:
                 known[key] = tuple(known[key])

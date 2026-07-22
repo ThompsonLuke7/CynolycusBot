@@ -152,7 +152,13 @@ CLAUDE_LABEL_MAX_TOKENS = 512
 # tokens the response truncated mid-object and the whole graph was discarded,
 # leaving stale edges that no longer matched the relabeled registry. Sonnet
 # supports far larger outputs, so give it ample room.
-CLAUDE_RELATIONSHIP_MAX_TOKENS = 32000
+CLAUDE_RELATIONSHIP_MAX_TOKENS = 64000
+# Relationship graph carry-forward: if the fraction of themes that are new
+# since last week is at or below this, only ask Claude to place the new
+# themes and carry forward last week's edges for everything else. Above it,
+# rebuild the full graph in one call (incremental placement stops saving
+# much once most of the taxonomy changed).
+RELATIONSHIP_FULL_REBUILD_NEW_FRACTION = 0.5
 CLAUDE_MAX_TOKENS = 512  # default fallback
 
 

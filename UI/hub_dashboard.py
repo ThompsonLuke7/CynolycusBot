@@ -390,6 +390,8 @@ h1{font-size:18px;margin:0 0 4px}
 .perf{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11px}
 .perf span{background:var(--panel2);padding:6px;border-radius:5px;text-align:center;color:var(--muted)}
 .perf b{display:block;font-size:13px;color:var(--text)}
+.thumb{width:100%;height:170px;overflow:hidden;position:relative;background:var(--panel2)}
+.thumb iframe{width:400%;height:400%;transform:scale(.25);transform-origin:0 0;border:0;position:absolute;top:0;left:0;pointer-events:none}
 </style></head><body>
 __NAV_HTML__
 <div class=wrap>
@@ -398,6 +400,7 @@ __NAV_HTML__
 <div class=totals id=totals></div>
 <div class=bar>
   <button class=primary onclick=startAll()>▶ Start All</button>
+  <label class=tog><input type=checkbox id=previewsToggle checked onchange=togglePreviews()> show live previews</label>
   <span id=msg class=muted></span>
 </div>
 <div class=grid id=grid></div>
@@ -417,6 +420,15 @@ var staticDashboards=[
 ];
 function setLive(key,v){liveState[key]=v;localStorage.setItem('cyno-hub-live',JSON.stringify(liveState));tick();}
 function f(n,d){if(n==null)return '-';return Number(n).toLocaleString(undefined,{maximumFractionDigits:(d==null?2:d)});}
+var showPreviews=localStorage.getItem('cyno-hub-previews')!=='off';
+document.addEventListener('DOMContentLoaded',function(){document.getElementById('previewsToggle').checked=showPreviews;});
+function togglePreviews(){
+  showPreviews=document.getElementById('previewsToggle').checked;
+  localStorage.setItem('cyno-hub-previews',showPreviews?'on':'off');
+  document.querySelectorAll('.thumb').forEach(function(el){el.style.display=showPreviews?'':'none';});
+}
+var builtKeys=null;  // skeleton (incl. preview iframes) only rebuilt when the module list changes,
+                     // so the 5s poll never forces every embedded dashboard to reload its own page.
 function render(s){
   let t=s.totals||{};
   var acctPos=(t.account_positions==null)?'':' <span class=muted>/ '+f(t.account_positions,0)+' in account</span>';
@@ -424,8 +436,20 @@ function render(s){
     '<div>Account equity (shared) <b>$'+f(t.equity,0)+'</b></div>'+
     '<div>Open positions (attributed) <b>'+f(t.open_positions,0)+'</b>'+acctPos+'</div>'+
     '<div>Unrealized P/L (attributed) <b class="'+((t.unrealized_pl||0)>=0?'pos':'neg')+'">$'+f(t.unrealized_pl)+'</b></div>';
+  let list=s.dashboards||[];
+  let keys=list.map(function(d){return d.key;}).join(',');
   let g=document.getElementById('grid');
-  g.innerHTML=(s.dashboards||[]).map(function(d){
+  if(keys!==builtKeys){
+    g.innerHTML=list.map(function(d){
+      return '<div class=card><div class=card-head>'+d.name+'</div>'+
+        '<div class=thumb style="display:'+(showPreviews?'':'none')+'"><iframe src="'+d.url+'" loading=lazy scrolling=no></iframe></div>'+
+        '<div class=body id="body-'+d.key+'"></div></div>';
+    }).join('');
+    builtKeys=keys;
+  }
+  list.forEach(function(d){
+    var body=document.getElementById('body-'+d.key);
+    if(!body)return;
     var intend=!!liveState[d.key];
     var acctType=d.tradeable?(d.account_type||(intend?'real money':'paper')):null;
     var indicator=acctType?('<span class="pill '+(acctType==='real money'?'live':'paper')+'">'+acctType+'</span>'):'';
@@ -433,7 +457,7 @@ function render(s){
     var toggle=d.tradeable?('<label class=tog title="Off: paper. On: real-money account.">'+
        '<input type=checkbox '+(intend?'checked':'')+' '+(d.live_available?'':'disabled')+
        ' onchange="setLive(\\''+d.key+'\\',this.checked)"> real money</label>'+
-       (intend&&!d.live_available?'<div class=warn>real money not configured — runs paper</div>':''):'';
+       (intend&&!d.live_available?'<div class=warn>real money not configured — runs paper</div>':'')):'';
     var startBtn=d.startable?('<button class=primary onclick="ctl(\\''+d.key+'\\',\\'start\\')">'+
        (d.key==='meta'||d.key==='momentum'||d.key==='dealer_ranker'?'Run':'Start')+'</button>'):'';
     var stopBtn=d.stoppable?('<button class=danger onclick="ctl(\\''+d.key+'\\',\\'stop\\')">Stop</button>'):'';
@@ -442,15 +466,14 @@ function render(s){
     var perf='<div class=perf><span><b class="'+((p.tracked_pnl||0)>=0?'pos':'neg')+'">'+(tracked?'$'+f(p.tracked_pnl):'—')+'</b>tracked P/L</span>'+
       '<span><b>'+f(p.win_rate,1)+(p.win_rate==null?'':'%')+'</b>win rate</span>'+
       '<span><b>'+f(p.closed_trades,0)+'</b>closed</span></div>';
-    return '<div class=card><div class=card-head>'+d.name+'</div><div class=body>'+
+    body.innerHTML=
       '<div class=row><span class="pill '+pillState+'">'+(d.up?(d.state||'idle'):'down')+'</span>'+
       indicator+'<a href="'+d.url+'" target=_blank>open ↗</a></div>'+
       '<div class=detail>'+(d.up?(d.detail||''):(d.error||'unreachable'))+'</div>'+
       perf+
       toggle+
-      '<div class=row>'+startBtn+stopBtn+'</div>'+
-      '</div></div>';
-  }).join('');
+      '<div class=row>'+startBtn+stopBtn+'</div>';
+  });
 }
 async function tick(){
   let s;

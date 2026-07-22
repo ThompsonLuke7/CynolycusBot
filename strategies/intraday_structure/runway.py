@@ -49,7 +49,13 @@ def score_runway(
     congestion_penalty = min(1.0, sum(level.strength for level in obstacles) / 2.5)
     distance_component = float(np.clip(distance_atr / 2.0, 0.0, 1.0))
     congestion_component = 1.0 - congestion_penalty
-    strength_component = 1.0 - float(np.clip(target.strength, 0.0, 1.0)) * 0.45
+    target_strength = float(np.clip(target.strength, 0.0, 1.0))
+    if _is_dealer_destination(target):
+        # A quantified dealer magnet/wall is a destination, not an obstacle;
+        # intervening levels still contribute to the congestion penalty above.
+        strength_component = 0.55 + 0.45 * target_strength
+    else:
+        strength_component = 1.0 - target_strength * 0.45
     trend_component = _trend_component(direction, trend_strength)
     market_component = market.market_alignment_score if direction == "long" else 1.0 - market.market_alignment_score
     options_component = _options_component(direction, spot, target.price, options)
@@ -64,6 +70,8 @@ def score_runway(
     weights = {"distance": 0.25, "congestion": 0.22, "level_strength": 0.13, "trend": 0.18, "market": 0.14, "options": 0.08}
     score = float(np.clip(sum(components[k] * weights[k] for k in weights), 0.0, 1.0))
     explanation = [f"target_{target.level_type}", f"distance_{distance_atr:.2f}_atr"]
+    if _is_dealer_destination(target):
+        explanation.append("dealer_destination_strength")
     explanation.append("clear_runway" if congestion_component >= 0.7 else "structural_congestion")
     if options.source == "none":
         explanation.append("options_unavailable_neutral_weight")
@@ -90,3 +98,9 @@ def _options_component(direction: str, spot: float, target: float, options: Opti
         return 0.15
     room = abs(wall - spot) / max(abs(target - spot), spot * 1e-6)
     return float(np.clip(0.45 + 0.15 * room, 0.0, 1.0))
+
+
+def _is_dealer_destination(level: StructuralLevel) -> bool:
+    return "options_dealer" in level.level_type and any(
+        token in level.level_type for token in ("magnet", "call_wall", "put_wall", "ceiling", "floor")
+    )

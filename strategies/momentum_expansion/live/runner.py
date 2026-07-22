@@ -48,9 +48,10 @@ from strategies.momentum_expansion.data.universe import (
     load_snapshot_for,
     write_weekly_snapshot,
 )
-from strategies.momentum_expansion.features.feature_matrix_4h import (
-    FEATURE_COLUMNS_4H,
-    build_ticker_features_4h,
+from strategies.momentum_expansion.features.feature_matrix_4h import build_ticker_features_4h
+from strategies.momentum_expansion.features.live_feature_panel_4h import (
+    assert_manifest_coverage,
+    build_live_feature_panel_4h,
 )
 from strategies.momentum_expansion.inference.entry_rules import evaluate_entry
 from strategies.momentum_expansion.inference.ranker import ExpansionRanker, top_n_at
@@ -203,30 +204,25 @@ class MomentumLiveRunner:
             return []
         tickers = snapshot["ticker"].astype(str).tolist()
 
-        # Build live features for each ticker on the latest 4H bars
+        # Build live features for the candidate universe on the latest 4H bars.
+        # build_live_feature_panel_4h bundles both batch-only post-processing
+        # steps (xsec_* cross-sectional ranks + earnings-proximity columns)
+        # unconditionally -- previously skipped live entirely at this exact
+        # call site, silently starving the booster of manifest columns (see
+        # 2026-07-19 audit in LIVING_SUMMARY.md). assert_manifest_coverage is
+        # the structural check that would have caught it immediately.
         ctx_4h = _load_context_4h()
-
-        feature_rows: list[pd.DataFrame] = []
-        for t in tickers:
-            try:
-                df_4h = load_4h(t)
-            except FileNotFoundError:
-                continue
-            feats = build_ticker_features_4h(
-                ticker=t, df_4h=df_4h, df_1d=_load_daily(t), ctx_4h=ctx_4h
-            )
-            if feats is None:
-                continue
-            feats = feats.tail(1).copy()
-            feats["ticker"] = t
-            feature_rows.append(feats)
-
-        if not feature_rows:
+        result = build_live_feature_panel_4h(
+            tickers=tickers, load_4h_bars=load_4h, load_1d_bars=_load_daily,
+            ctx_4h=ctx_4h, tail=1,
+        )
+        if result.panel.empty:
             logger.warning("Momentum: no feature rows built (bar cache empty?)")
             return []
-        live_features = pd.concat(feature_rows, axis=0)
-        live_features = live_features.reset_index().rename(columns={"index": "timestamp"})
-        live_features = live_features.set_index(["timestamp", "ticker"])
+        logger.info("Momentum: panel built %d/%d tickers in %.1fs",
+                    result.tickers_built, result.tickers_requested, result.build_seconds)
+        live_features = result.panel
+        assert_manifest_coverage(scorer=self.ranker, panel=live_features, label="momentum/evaluate_now")
 
         # Rank on the MODAL latest bar (the timestamp shared by the bulk of the
         # universe), not the global max: a single ticker with a stray newer/partial
@@ -358,6 +354,21 @@ class MomentumLiveRunner:
         return emitted
 
     # ---- exit management ----
+    # KNOWN ISSUE (flagged, not fixed -- out of scope for the 2026-07-19 shared
+    # feature-panel refactor; see LIVING_SUMMARY.md): this loop scores ONE
+    # ticker at a time via a direct build_ticker_features_4h call, with no
+    # _add_cross_sectional_features/_add_earnings_features_4h step, so
+    # `score` below is missing the same manifest columns the two live scoring
+    # paths were before this session's fix. It is also structurally unable to
+    # get xsec_* right even if post-processed: those ranks need the whole
+    # scored universe at one timestamp, and this method only ever builds one
+    # ticker. Do NOT route this through build_live_feature_panel_4h as-is --
+    # a single-ticker panel would produce well-formed-looking but meaningless
+    # xsec_* values (every rank = 1.0). Currently DEAD CODE on the scheduled
+    # path: run_pass() never calls this; the only caller in the repo is the
+    # manual "Run now" button in UI/momentum_dashboard.py. Needs its own
+    # design (e.g. score off the last full panel/matrix row for this ticker
+    # instead of rebuilding) before it's reachable again.
     def manage_open_positions(self, *, bar_ts: pd.Timestamp | None = None) -> list[dict]:
         bar_ts = bar_ts or pd.Timestamp.now(tz="UTC")
         out: list[dict] = []
@@ -379,6 +390,10 @@ class MomentumLiveRunner:
             )
             if feats is None:
                 continue
+            logger.warning(
+                "manage_open_positions: single-ticker score for %s lacks xsec_*/earnings "
+                "manifest columns (known issue, unfixed -- see comment above method)", ticker,
+            )
             score_row = feats.tail(1)
             score = float(self.ranker.score(score_row).iloc[0]) if not score_row.empty else 0.0
             should_exit, reason = self.policy.update_and_check_exit(
@@ -480,6 +495,8 @@ def main() -> None:
     Dry-run/paper by default; --submit places orders, --live targets real money."""
     import argparse
 
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+
     from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 
     ap = argparse.ArgumentParser(description="Standalone Momentum Expansion harness — one pass.")
@@ -487,12 +504,12 @@ def main() -> None:
     ap.add_argument("--flush-pending-open", action="store_true", help="Pre-open: submit after-close queued entries still in the top-K (re-rank), then exit.")
     ap.add_argument("--live", action="store_true", help="Target the LIVE account (default: paper).")
     # --- exit policy + sizing (mirrors Meta/HTF runners; same shared engine) ---
-    ap.add_argument("--take-profit", type=float, default=0.20, help="Scale out scale_frac at this gain, then ride the rest.")
-    ap.add_argument("--scale-frac", type=float, default=0.5, help="Fraction to sell at take-profit.")
-    ap.add_argument("--horizon-bars", type=int, default=25, help="Full exit after this many managed bars (~10d).")
+    ap.add_argument("--take-profit", type=float, default=0.30, help="Scale out scale_frac at this gain, then ride the rest.")
+    ap.add_argument("--scale-frac", type=float, default=0.16, help="Fraction to sell at take-profit.")
+    ap.add_argument("--horizon-bars", type=int, default=53, help="Full exit after this many managed bars (~21d).")
     ap.add_argument("--grace-bars", type=int, default=None, help="Rank drop-out backstop: exit after N bars out of top-K. Default None = ride to horizon (backtest-preferred).")
-    ap.add_argument("--stop-loss", type=float, default=0.50, help="Hard stop: full exit if gain <= -this (premium for options). 0 disables.")
-    ap.add_argument("--trail-stop", type=float, default=0.35, help="Trailing stop: full exit if value gives back this fraction from its peak. 0.35 = backtest sweet spot; 0 disables.")
+    ap.add_argument("--stop-loss", type=float, default=0.39, help="Hard stop: full exit if gain <= -this (premium for options). 0 disables.")
+    ap.add_argument("--trail-stop", type=float, default=None, help="Trailing stop: full exit if value gives back this fraction from its peak. Default None = disabled (2026-07-18 cross-module search: no-trail beat trail on mean return per trade).")
     ap.add_argument("--contracts", type=int, default=10, help="Options: contracts per new position.")
     ap.add_argument("--shares", type=int, default=100, help="Equity: shares per new position.")
     ap.add_argument("--roll-trading-days", type=int, default=5,

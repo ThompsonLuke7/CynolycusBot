@@ -4,6 +4,8 @@ This module is a deterministic, event-driven confirmation layer between broad ca
 
 It monitors candidates from the existing 30-minute swing audit, 4-hour Momentum/HTF/Meta/Dealer Ranker audits, and a manual watchlist. One-minute bars drive five entry detectors; a sixth exhaustion detector manages confirmed/running structures. State, recent bar history, transitions, targets, evidence, and warnings persist across restarts.
 
+When available, it also reads the captured broad dealer-level summaries (walls, gamma flip, magnets, floor/ceiling, GEX estimates) strictly as-of the bar being evaluated. The default live watchlist combines the 50 highest-ADV eligible shared-universe names with high structural-potential and high dealer-map-change names, then price must still confirm. Confirmed signals carry an auditable `dealer_plate` field; it is qualified only when a strong, fresh, reachable dealer destination supports the structure. This is a paper-only hypothesis label, not observed dealer inventory, an options order, or a profitability claim.
+
 The public `on_price_update(PriceUpdate(...))` hook can manage stops/targets faster when a future trade/quote fanout is available. It cannot run detectors or confirm entries.
 
 Lifecycle:
@@ -37,5 +39,7 @@ Each candidate should distinguish the source signal time from availability:
 ```
 
 The replay outputs transitions, causal event labels, modeled trades with configurable spread/slippage/commission, and metrics. It makes no profitability claim; thresholds are hypotheses until tested on collected candidate-level 1-minute history.
+
+The current July dealer summaries can seed the next session's watchlist, but they cannot recreate a same-day pre-pivot decision if their `captured_at` time was later than the pivot. Broad 1-minute bar collection is therefore still required for a valid baseline-versus-price-only-versus-dealer-plate alpha comparison.
 
 See [the audit and architecture](../../docs/intraday_structure/REPO_AUDIT_AND_DESIGN.md), [feature definitions](../../docs/intraday_structure/FEATURES.md), and [replay protocol](../../docs/intraday_structure/BACKTEST.md).

@@ -76,6 +76,172 @@ class DealerSnapshotOptionsProvider:
         )
 
 
+class DealerLevelSummaryOptionsProvider:
+    """Causal adapter for the broad dealer-level summary snapshots.
+
+    The summaries contain per-symbol walls, magnets, GEX estimates, and their
+    capture timestamps.  This provider never reads a later snapshot for an
+    earlier decision.  Level strength is a within-snapshot normalization of
+    available positioning fields; it is an auditable priority score, not a
+    claim that dealer inventory or institutional intent is observed.
+    """
+
+    _SCOPE_ORDER = ("daily_week", "through_month", "two_months")
+    _NUMERIC_COLUMNS = (
+        "spot", "total_gex", "total_abs_gex", "call_wall", "put_wall", "gamma_flip",
+        "nearest_magnet", "next_magnet_above", "next_magnet_below", "ceiling", "floor",
+        "magnet_strength", "call_gex_total", "put_gex_total", "wall_dominance",
+        "gamma_density", "gex_concentration_index", "dealer_imbalance",
+    )
+
+    def __init__(self, root: str | Path = "Data/dealer_positioning/historical_snapshots", max_age_minutes: int = 1440) -> None:
+        self.root = Path(root)
+        self.max_age = timedelta(minutes=max_age_minutes)
+        self.frame = pd.DataFrame()
+        self._signature: tuple[tuple[str, int, int], ...] = ()
+        self._in_memory = False
+        self._refresh()
+
+    @classmethod
+    def from_frame(cls, frame: pd.DataFrame, *, max_age_minutes: int = 1440) -> "DealerLevelSummaryOptionsProvider":
+        provider = cls.__new__(cls)
+        provider.root = Path(".")
+        provider.max_age = timedelta(minutes=max_age_minutes)
+        provider._signature = ()
+        provider._in_memory = True
+        provider.frame = provider._prepare(frame)
+        return provider
+
+    def context(self, symbol: str, timestamp: datetime, spot: float) -> OptionsContext:
+        self._refresh_if_changed()
+        decision = pd.Timestamp(utc_datetime(timestamp))
+        if self.frame.empty:
+            return OptionsContext(timestamp=decision.to_pydatetime(), source="none", warnings=("dealer_summary_missing",))
+        rows = self.frame[(self.frame["symbol"] == symbol.upper()) & (self.frame["captured_at"] <= decision)]
+        if rows.empty:
+            future = self.frame[(self.frame["symbol"] == symbol.upper()) & (self.frame["captured_at"] > decision)]
+            warning = "future_dealer_summary_rejected" if not future.empty else "dealer_summary_unavailable_asof"
+            return OptionsContext(timestamp=decision.to_pydatetime(), source="none", warnings=(warning,))
+        snapshot_ts = rows["captured_at"].max()
+        snapshot = rows[rows["captured_at"] == snapshot_ts].copy()
+        warnings = ["dealer_inventory_estimated"]
+        if decision - snapshot_ts > self.max_age:
+            warnings.append("dealer_summary_stale")
+        primary = self._primary_row(snapshot)
+        levels = tuple(level for _, row in snapshot.iterrows() for level in self._levels_for_row(row))
+        total_gex = _optional_float(primary.get("total_gex"))
+        gamma_regime = "positive" if total_gex is not None and total_gex >= 0 else "negative" if total_gex is not None else "unknown"
+        strength = float(np.mean([level.strength for level in levels])) if levels else 0.0
+        concentration = _optional_float(primary.get("gex_concentration_index"))
+        return OptionsContext(
+            timestamp=snapshot_ts.to_pydatetime(), source="dealer_level_summary_static",
+            gamma_regime=gamma_regime,
+            gamma_flip=_optional_float(primary.get("gamma_flip")),
+            call_wall=_optional_float(primary.get("call_wall")),
+            put_wall=_optional_float(primary.get("put_wall")),
+            local_gamma_exposure=total_gex,
+            dealer_imbalance=_optional_float(primary.get("dealer_imbalance")),
+            dealer_strength_score=float(np.clip(strength, 0.0, 1.0)),
+            strike_congestion_score=float(np.clip(concentration if concentration is not None else 0.0, 0.0, 1.0)),
+            levels=levels, warnings=tuple(warnings),
+        )
+
+    def _refresh_if_changed(self) -> None:
+        if self._in_memory:
+            return
+        paths = self._paths()
+        signature = _path_signature(paths)
+        if signature != self._signature:
+            self._refresh(paths, signature)
+
+    def _refresh(self, paths: list[Path] | None = None, signature: tuple[tuple[str, int, int], ...] | None = None) -> None:
+        paths = self._paths() if paths is None else paths
+        self._signature = _path_signature(paths) if signature is None else signature
+        frames: list[pd.DataFrame] = []
+        for path in paths:
+            try:
+                frame = pd.read_parquet(path)
+                if not frame.empty:
+                    frames.append(frame.dropna(axis=1, how="all"))
+            except (OSError, ValueError, ImportError):
+                continue
+        self.frame = self._prepare(pd.concat(frames, ignore_index=True) if frames else pd.DataFrame())
+
+    def _paths(self) -> list[Path]:
+        return sorted(self.root.glob("*/dealer_level_summary.parquet")) if self.root.exists() else []
+
+    def _prepare(self, frame: pd.DataFrame) -> pd.DataFrame:
+        required = {"captured_at", "symbol", "scope"}
+        if frame.empty or not required.issubset(frame.columns):
+            return pd.DataFrame(columns=["captured_at", "symbol", "scope"])
+        out = frame.copy()
+        out["captured_at"] = pd.to_datetime(out["captured_at"], utc=True, errors="coerce")
+        out["symbol"] = out["symbol"].astype(str).str.upper()
+        out["scope"] = out["scope"].astype(str)
+        out = out.dropna(subset=["captured_at", "symbol"])
+        for column in self._NUMERIC_COLUMNS:
+            if column not in out:
+                out[column] = np.nan
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+        out = out[out["scope"].isin(self._SCOPE_ORDER)].copy()
+        out = out.drop_duplicates(["captured_at", "symbol", "scope"], keep="last")
+        if out.empty:
+            return out
+        group_keys = ["captured_at", "scope"]
+        total_abs = out["total_abs_gex"].abs().replace(0.0, np.nan)
+        out["_magnet_share"] = out["magnet_strength"].abs() / total_abs
+        out["_call_share"] = out["call_gex_total"].abs() / total_abs
+        out["_put_share"] = out["put_gex_total"].abs() / total_abs
+        out["_base_positioning_strength"] = _cross_section_strength(
+            out, group_keys, ("total_abs_gex", "gamma_density", "wall_dominance")
+        )
+        out["_call_level_strength"] = _mean_strength(out, "_base_positioning_strength", "_call_share")
+        out["_put_level_strength"] = _mean_strength(out, "_base_positioning_strength", "_put_share")
+        out["_magnet_level_strength"] = _mean_strength(out, "_base_positioning_strength", "_magnet_share")
+        out["_flip_level_strength"] = _mean_strength(out, "_base_positioning_strength", "gex_concentration_index")
+        return out.reset_index(drop=True)
+
+    def _primary_row(self, frame: pd.DataFrame) -> pd.Series:
+        for scope in self._SCOPE_ORDER:
+            rows = frame[frame["scope"] == scope]
+            if not rows.empty:
+                return rows.iloc[-1]
+        return frame.iloc[-1]
+
+    def _levels_for_row(self, row: pd.Series) -> list[StructuralLevel]:
+        timestamp = pd.Timestamp(row["captured_at"]).isoformat()
+        common = {"snapshot_timestamp": timestamp, "scope": str(row["scope"]), "estimated_positioning": True}
+        specs = (
+            ("put_wall", "options_dealer_put_wall", "support", "_put_level_strength"),
+            ("call_wall", "options_dealer_call_wall", "resistance", "_call_level_strength"),
+            ("gamma_flip", "options_dealer_gamma_flip", "both", "_flip_level_strength"),
+            ("nearest_magnet", "options_dealer_gamma_magnet", "both", "_magnet_level_strength"),
+            ("next_magnet_above", "options_dealer_gamma_magnet_above", "resistance", "_magnet_level_strength"),
+            ("next_magnet_below", "options_dealer_gamma_magnet_below", "support", "_magnet_level_strength"),
+            ("ceiling", "options_dealer_ceiling", "resistance", "_call_level_strength"),
+            ("floor", "options_dealer_floor", "support", "_put_level_strength"),
+        )
+        levels = []
+        for key, level_type, directionality, strength_key in specs:
+            price = _optional_float(row.get(key))
+            if price is None or price <= 0:
+                continue
+            strength = _optional_float(row.get(strength_key))
+            metadata = {
+                **common,
+                "normalized_level_strength": float(np.clip(strength if strength is not None else 0.5, 0.05, 0.98)),
+                "total_abs_gex": _optional_float(row.get("total_abs_gex")),
+                "magnet_strength": _optional_float(row.get("magnet_strength")),
+                "wall_dominance": _optional_float(row.get("wall_dominance")),
+                "dealer_imbalance": _optional_float(row.get("dealer_imbalance")),
+            }
+            levels.append(StructuralLevel(
+                price=price, level_type=level_type, strength=metadata["normalized_level_strength"],
+                directionality=directionality, metadata=metadata,
+            ))
+        return levels
+
+
 class CboeStrikeSnapshotOptionsProvider:
     """Causal adapter for stored CBOE strike snapshots (OI/volume/IV/delta).
 
@@ -209,6 +375,7 @@ class CompositeOptionsProvider:
             source="+".join(ctx.source for ctx in available), gamma_regime=static.gamma_regime,
             gamma_flip=static.gamma_flip, call_wall=static.call_wall, put_wall=static.put_wall,
             local_gamma_exposure=(flow.local_gamma_exposure if flow and flow.local_gamma_exposure is not None else static.local_gamma_exposure),
+            dealer_imbalance=static.dealer_imbalance, dealer_strength_score=static.dealer_strength_score,
             strike_congestion_score=static.strike_congestion_score,
             live_call_flow_acceleration=flow.live_call_flow_acceleration if flow else 0.0,
             live_put_flow_acceleration=flow.live_put_flow_acceleration if flow else 0.0,
@@ -251,3 +418,30 @@ def _optional_float(value) -> float | None:
         return result if math.isfinite(result) else None
     except (TypeError, ValueError):
         return None
+
+
+def _path_signature(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
+    signature = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
+    return tuple(signature)
+
+
+def _cross_section_strength(frame: pd.DataFrame, group_keys: list[str], columns: tuple[str, ...]) -> pd.Series:
+    parts = []
+    for column in columns:
+        values = pd.to_numeric(frame[column], errors="coerce")
+        ranks = values.groupby([frame[key] for key in group_keys]).rank(pct=True)
+        parts.append(ranks.fillna(0.5))
+    return pd.concat(parts, axis=1).mean(axis=1).clip(0.05, 0.98)
+
+
+def _mean_strength(frame: pd.DataFrame, base_column: str, relative_column: str) -> pd.Series:
+    relative = pd.to_numeric(frame[relative_column], errors="coerce")
+    ranks = relative.groupby([frame["captured_at"], frame["scope"]]).rank(pct=True).fillna(0.5)
+    base = pd.to_numeric(frame[base_column], errors="coerce").fillna(0.5)
+    return (0.60 * base + 0.40 * ranks).clip(0.05, 0.98)

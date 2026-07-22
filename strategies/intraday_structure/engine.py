@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from strategies.intraday_structure.config import IntradayStructureConfig
+from strategies.intraday_structure.dealer_plate import evaluate_dealer_plate
 from strategies.intraday_structure.detectors import (
     BreakoutContinuationDetector,
     ExhaustionDetector,
@@ -87,8 +88,8 @@ class IntradayStructureEngine:
         key = (candidate.ticker, candidate.direction)
         current = self.candidates.get(key)
         if current and candidate.timestamp < current.timestamp:
-            return False
-        if current and candidate.timestamp == current.timestamp:
+            # Older dealer/audit context can still enrich a newer broad-universe
+            # seed; never let it roll the candidate's availability time back.
             merged = replace(
                 current, sources=tuple(sorted(set(current.sources) | set(candidate.sources))),
                 score=max(current.score, candidate.score),
@@ -98,6 +99,22 @@ class IntradayStructureEngine:
             )
             changed = merged != current
             self.candidates[key] = merged
+            return changed
+        if current:
+            merged = replace(
+                candidate, sources=tuple(sorted(set(current.sources) | set(candidate.sources))),
+                score=max(current.score, candidate.score),
+                pivot=candidate.pivot if candidate.pivot is not None else current.pivot,
+                sector_etf=candidate.sector_etf or current.sector_etf,
+                metadata={**current.metadata, **candidate.metadata},
+            )
+            changed = merged != current
+            self.candidates[key] = merged
+            if changed:
+                for setup in self._candidate_setups(merged):
+                    if setup.state != SetupState.CLOSED:
+                        setup.candidate = merged
+                self.persist()
             return changed
         self.candidates[key] = candidate
         self._enforce_candidate_limit()
@@ -312,6 +329,13 @@ class IntradayStructureEngine:
             setup.metadata["runway_components"] = plan.runway.components
             setup.metadata["intermediate_obstacles"] = list(plan.runway.intermediate_obstacles)
             setup.evidence = list(dict.fromkeys([*setup.evidence, *plan.runway.explanation]))[-20:]
+            plate = evaluate_dealer_plate(
+                direction=setup.direction, spot=ctx.bar.close, atr=ctx.features.get("atr"),
+                options=ctx.options, policy=self.config.dealer_plate,
+            )
+            setup.metadata["dealer_plate"] = plate.to_dict()
+            setup.evidence = list(dict.fromkeys([*setup.evidence, *plate.evidence]))[-20:]
+            setup.warnings = list(dict.fromkeys([*setup.warnings, *plate.warnings]))[-20:]
             if plan.runway.runway_score < self.config.target.min_runway_score:
                 setup.warnings = list(dict.fromkeys([*setup.warnings, "runway_below_threshold"]))
                 return

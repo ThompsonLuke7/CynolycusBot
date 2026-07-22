@@ -184,6 +184,8 @@ class OptionsContext:
     call_wall: float | None = None
     put_wall: float | None = None
     local_gamma_exposure: float | None = None
+    dealer_imbalance: float | None = None
+    dealer_strength_score: float = 0.0
     strike_congestion_score: float = 0.0
     live_call_flow_acceleration: float = 0.0
     live_put_flow_acceleration: float = 0.0
@@ -322,6 +324,7 @@ class StructureSignal:
     expected_reward_risk: float | None
     market_alignment_score: float
     options_context: dict[str, Any]
+    dealer_plate: dict[str, Any]
     evidence: tuple[str, ...]
     warnings: tuple[str, ...]
     version: str = "intraday_structure_v1"
@@ -339,7 +342,8 @@ class StructureSignal:
             active_target=setup.active_target, runway_score=round(setup.runway_score, 4),
             expected_reward_risk=setup.expected_reward_risk,
             market_alignment_score=round(setup.market_alignment_score, 4),
-            options_context=dict(setup.options_context), evidence=tuple(setup.evidence),
+            options_context=dict(setup.options_context), dealer_plate=dict(setup.metadata.get("dealer_plate") or {}),
+            evidence=tuple(setup.evidence),
             warnings=tuple(setup.warnings), version=version,
         )
 

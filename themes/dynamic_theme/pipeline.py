@@ -13,6 +13,7 @@ Weekly run (Sunday, after the Sunday universe refresh):
   Step 4  - Build cluster summaries
   Step 5  - Claude theme labeling
   Step 6  - Discover new themes
+  Step 6b - Dedupe near-duplicate themes
   Step 7  - Update theme relationship graph
   Step 8  - Recompute memberships
   Step 9  - Generate meta features
@@ -32,13 +33,19 @@ try:
 except ImportError:
     pass
 
-from themes.dynamic_theme.config import ensure_outputs
+from themes.dynamic_theme.config import THEME_REGISTRY_PATH, ensure_outputs
 from themes.dynamic_theme.stages.step01_build_documents import build_ticker_documents
 from themes.dynamic_theme.stages.step02_embed import generate_embeddings
 from themes.dynamic_theme.stages.step03_cluster import cluster_tickers
 from themes.dynamic_theme.stages.step04_cluster_summary import build_cluster_summaries
 from themes.dynamic_theme.stages.step05_claude_labeling import label_clusters
 from themes.dynamic_theme.stages.step06_discovery import discover_new_themes
+from themes.dynamic_theme.stages.step06b_theme_dedup import (
+    build_canonical_map,
+    compute_active_theme_centroids,
+    dedupe_registry,
+    find_duplicate_groups,
+)
 from themes.dynamic_theme.stages.step07_relationships import build_relationship_graph
 from themes.dynamic_theme.stages.step08_memberships import compute_memberships
 from themes.dynamic_theme.stages.step09_meta_features import build_meta_features
@@ -129,6 +136,18 @@ def weekly_run(
         cluster_summaries=summaries,
         as_of=as_of,
     )
+
+    # Step 6b: dedupe near-duplicate themes (e.g. HDBSCAN splitting one sector
+    # into several small clusters that each get a slightly different name).
+    # Persisted to disk so next week's stability matching (step05) sees the
+    # canonical names, not the ones it's collapsing away.
+    theme_to_centroid, theme_to_size = compute_active_theme_centroids(registry, embeddings, clusters)
+    groups = find_duplicate_groups(theme_to_centroid)
+    canonical_map = build_canonical_map(groups, theme_to_size)
+    if canonical_map:
+        registry = dedupe_registry(registry, canonical_map)
+        registry.to_parquet(THEME_REGISTRY_PATH, index=False)
+        logger.info("Deduped %d theme(s) into %d canonical group(s)", len(canonical_map), len(groups))
 
     # Step 7: relationship graph
     build_relationship_graph(registry_df=registry, as_of=as_of)

@@ -1,8 +1,9 @@
 """Shared 4H execution + exit engine for the technical option/share modules.
 
-Meta Ranker, HTF Swing, and Momentum Expansion are siblings: same 4H cadence,
-same option-or-share routing, same hold-based exit/scale-out. They differ only
-in how they SCORE names (their models/labels) and, optionally, entry gating.
+Meta Ranker, HTF Swing, Momentum Expansion, and Dealer Ranker are siblings:
+same 4H (or near-close, for Dealer Ranker) cadence, same option-or-share
+routing, same hold-based exit/scale-out. They differ only in how they SCORE
+names (their models/labels) and, optionally, entry gating.
 
 This module is the single source of truth for what those three do AFTER they
 have a ranked target list: route each name to options or shares, manage held
@@ -30,24 +31,27 @@ logger = logging.getLogger(__name__)
 class ExecPolicy:
     """Hold-based exit + scale-out parameters (identical across the three modules).
 
-    Exit backtest (meta_ranker/backtest_exits.py, holdout 2025-07-01+, 3,077 names,
-    top-10 by s_combo) ranked the variants: the old "sell as soon as it drops out of
-    the top-K" (rank rebalance, grace<=3) was the WEAKEST (~+1% mean/trade, ~2-bar
-    hold) — it dumped winners early and, because it is rank- not price-based, it also
-    rode price losers that STAYED top-ranked all the way down (the BE/COHR options).
-    Best realistic policy = scale out half at +20% and let the remainder ride to the
-    horizon (+6.72% mean, 61% win); a +20% full take-profit had the best risk-adjusted
-    return (median +17.4%, 68% win). So the defaults now: scale-out at +take_profit,
-    ride the rest to horizon (grace drop-out OFF by default), and a hard stop_loss to
-    cap the downside the horizon-ride exposes — critical for leveraged option premium,
-    where gain is measured on the premium itself.
+    Rank rebalance-only exits (the pre-2026-07 baseline, grace<=3) were the
+    WEAKEST across every module's OWN top-10 stream (~+1% mean/trade, ~2-bar
+    hold) — dumped winners early and rode price losers that stayed top-ranked
+    all the way down. A 2026-07-14 backtest (meta_ranker/backtest_exits.py)
+    picked stop50/trail35/tp20-scale50/hz25 over that baseline. A follow-up
+    2026-07-18 val-selected/test-frozen search (research/capstone/
+    exit_policy_cross_module.csv), run independently against Momentum's, HTF
+    Swing's, and Meta's own OOF top-10 streams, found a "tail-rider" shape —
+    small early trim, no trail, longer horizon — beats that config's mean
+    return per trade by 2-2.5x with comparable-or-better win rate in all three
+    modules, at the cost of ~2x hold time. That's the current default; the
+    trade-off is real (a "harvester" shape — full exit at a small target, no
+    trim — wins on win-rate and capital efficiency instead, see the same CSV)
+    and this hasn't been paper-validated live yet.
     """
-    take_profit: float = 0.20         # scale out scale_frac at +this% gain, then ride the rest
-    scale_frac: float = 0.50          # fraction sold at take-profit
-    horizon_bars: int = 25            # full exit after this many managed bars (~10d)
+    take_profit: float = 0.30         # scale out scale_frac at +this% gain, then ride the rest
+    scale_frac: float = 0.16          # fraction sold at take-profit
+    horizon_bars: int = 53            # full exit after this many managed bars (~21d)
     grace_bars: int | None = None     # None = ride to horizon (rank drop-out OFF); int N = exit after N bars out of top-K
-    stop_loss: float | None = 0.50    # full exit if gain <= -this from ENTRY (premium for options); None disables
-    trail_stop: float | None = 0.35   # full exit if value falls this fraction from its PEAK (ratchet; secures gains on the ride). 0.35 = backtest sweet spot (mean +7.04%/61% win/ret-per-bar 0.0088, beats 0.50; 0.25 is where win rate starts to drop). NB: on OPTION positions this rides the premium (leveraged), so it's tighter than on the underlying — appropriate for a decaying asset. None disables
+    stop_loss: float | None = 0.39    # full exit if gain <= -this from ENTRY (premium for options); None disables
+    trail_stop: float | None = None   # full exit if value falls this fraction from its PEAK (ratchet); None disables. "Tail-rider" (id4) config: 2026-07-18 val-selected/test-frozen search across Momentum/HTF/Meta's own OOF top-10 streams (research/capstone/exit_policy_cross_module.csv) found this shape (stop 39%, no trail, take-profit 30%/scale 16%, horizon 53) beats the prior stop50/trail35/tp20/scale50/hz25 default on mean return per trade (2-2.5x, ~10-12% vs ~4-5%) with comparable-or-better win rate in every module, at the cost of ~2x hold time (~52 vs ~25 bars). Prior config's own backtest note (mean +7.04%/61% win/ret-per-bar 0.0088 @ trail 0.35) is superseded by that search; kept here for history. Shares-only backtest — no option-premium path modeled, so real option stop/trail behavior may differ; not yet paper-validated live.
     contracts: int = 10               # option contracts per new entry
     shares: int = 100                 # shares per new entry (share-routed names)
     roll_trading_days: int = 5        # option monthly-roll buffer
@@ -271,6 +275,47 @@ def build_mixed_plan(
     return out
 
 
+def _reverify_buys_not_held(client, plan: list, new_managed: dict | None) -> list:
+    """Drop BUY orders for symbols the broker now shows as already held.
+
+    Two independently-scheduled 4H-family modules (e.g. Dealer Ranker and the
+    Swing runner) can rank the same underlying and select the same
+    nearest-ATM contract on the same day; each module's own ``pos_info``
+    snapshot is taken once near the top of its run, so an entry the OTHER
+    module places moments later isn't visible in it yet (observed
+    2026-07-17: both modules bought AUR260724C00006000 within ~20s of each
+    other, each believing it owned the position outright). Re-checking live
+    positions immediately before submit shrinks that race window from the
+    length of a full run down to a single API round-trip. Best-effort: any
+    failure to fetch positions falls through to the normal submit path
+    unchanged rather than blocking real entries on a transient API hiccup.
+    """
+    if not any(str(item[1]).strip().lower() == "buy" for item in plan):
+        return plan
+    try:
+        held: set[str] = set()
+        for p in client.get_positions() or []:
+            try:
+                if float(p.get("qty", 0) or 0) > 0:
+                    held.add(str(p["symbol"]).upper())
+            except (TypeError, ValueError, KeyError):
+                continue
+    except Exception:
+        return plan
+    out = []
+    for item in plan:
+        sym, side = item[0], item[1]
+        if str(side).strip().lower() == "buy" and str(sym).upper() in held:
+            logger.warning(
+                "execute_plan: skipping buy %s — already held (cross-module race guard)", sym,
+            )
+            if new_managed is not None:
+                drop_failed_entry(new_managed, sym)
+            continue
+        out.append(item)
+    return out
+
+
 def execute_plan(
     client, *, plan, limits, submit: bool, equity_tif_fn: Callable[[], str],
     new_managed: dict[str, dict] | None = None,
@@ -300,6 +345,9 @@ def execute_plan(
         failed.update(skipped)
     # After the close, queue entries for the next open instead of erroring on them.
     plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
+    if not plan:
+        return failed
+    plan = _reverify_buys_not_held(client, plan, new_managed)
     if not plan:
         return failed
     print("\nsubmitting...")

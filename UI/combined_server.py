@@ -370,7 +370,7 @@ def _assert_ports_free(host: str, ports: dict[str, int]) -> None:
             "[combined_server] refusing to start: dashboard port(s) already in "
             f"use: {', '.join(busy)}. Another combined_server is already running "
             "(possibly stopped/frozen but still holding the sockets). Find the "
-            r"owner with:  ss -ltnp | grep -E ':(876[4-9]|877[0-3])'"
+            r"owner with:  ss -ltnp | grep -E ':(876[4-9]|877[0-4])'"
         )
 
 
@@ -399,7 +399,7 @@ def run_combined(
     port_amethyst: int = DEFAULT_PORT_AMETHYST,
     port_dealer_ranker: int = DEFAULT_PORT_DEALER_RANKER,
     port_intraday_structure: int = DEFAULT_PORT_INTRADAY_STRUCTURE,
-    intraday_structure_enabled: bool = False,
+    intraday_structure_enabled: bool = True,
     intraday_structure_config: str = "strategies/intraday_structure/config/intraday_structure_v1.json",
     meta_ranker_times: str = "14:20,16:20",
     meta_ranker_mode: str = "options",
@@ -409,7 +409,7 @@ def run_combined(
     htf_live: bool = False,
     momentum_times: str = "14:25,16:25",
     momentum_live: bool = False,
-    dealer_ranker_time: str = "",
+    dealer_ranker_time: str = "15:45",
     dealer_ranker_live: bool = False,
     dealer_ranker_workers: int = 8,
     dealer_ranker_top_k: int = 10,
@@ -454,9 +454,19 @@ def run_combined(
     structure_config = None
     if intraday_structure_enabled:
         from strategies.intraday_structure.config import load_config as load_intraday_structure_config
+        from strategies.intraday_structure.candidate_sources import LiquidityCandidateFeed
 
         structure_config = load_intraday_structure_config(intraday_structure_config)
-        all_symbols = sorted(set(all_symbols) | set(structure_config.manual_watchlist) | set(structure_config.context_symbols))
+        liquidity_symbols = LiquidityCandidateFeed(
+            structure_config.liquidity_universe.universe_path,
+            top_n=structure_config.liquidity_universe.top_n,
+        ).symbols() if structure_config.liquidity_universe.enabled else []
+        all_symbols = sorted(
+            set(all_symbols)
+            | set(structure_config.manual_watchlist)
+            | set(structure_config.context_symbols)
+            | set(liquidity_symbols)
+        )
     logger.info("Symbol universe: %d symbols", len(all_symbols))
 
     # Separate queues per dashboard. Subscriber filters keep SPY-only consumers
@@ -606,7 +616,7 @@ def run_combined(
     logger.info("Dealer Ranker dashboard: http://%s:%d", host, port_dealer_ranker)
 
     # ------------------------------------------------------------------
-    # 4e. Intraday Structure Engine — opt-in, deterministic, paper-only.
+    # 4e. Intraday Structure Engine — deterministic, paper-only.
     # ------------------------------------------------------------------
     structure_app = structure_server = None
     if structure_queue is not None and structure_config is not None:
@@ -1120,11 +1130,12 @@ def main() -> None:
     parser.add_argument("--port-dealer-ranker", type=int, default=DEFAULT_PORT_DEALER_RANKER,
                         help="Port for the Dealer Ranker dashboard (default 8773).")
     parser.add_argument("--port-intraday-structure", type=int, default=DEFAULT_PORT_INTRADAY_STRUCTURE,
-                        help="Port for the opt-in Intraday Structure dashboard (default 8774).")
+                        help="Port for the Intraday Structure dashboard (default 8774).")
     parser.add_argument(
         "--intraday-structure",
-        action="store_true",
-        help="Enable the deterministic, paper-only Intraday Structure confirmation engine.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run the deterministic, paper-only Intraday Structure engine (default; use --no-intraday-structure to disable).",
     )
     parser.add_argument(
         "--intraday-structure-config",
@@ -1133,9 +1144,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--dealer-ranker-time",
-        default="",
-        help="Optional ET HH:MM to run the near-close Dealer Ranker scan+options pass. "
-             "Empty = disabled; manual dashboard runs remain available.",
+        default="15:45",
+        help="ET HH:MM to run the near-close Dealer Ranker scan+options refresh pass (default 15:45). "
+             "Pass '' to disable; manual dashboard runs remain available.",
     )
     parser.add_argument("--dealer-ranker-live", action="store_true",
                         help="Run the scheduled Dealer Ranker pass against the LIVE account (default paper).")

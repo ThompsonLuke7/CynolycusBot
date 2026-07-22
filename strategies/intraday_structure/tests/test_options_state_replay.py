@@ -8,9 +8,12 @@ import pandas as pd
 import pytest
 
 from strategies.intraday_structure.config import IntradayStructureConfig
+from strategies.intraday_structure.candidate_sources import DealerRankingCandidateFeed, LiquidityCandidateFeed
+from strategies.intraday_structure.dealer_plate import evaluate_dealer_plate
 from strategies.intraday_structure.engine import IntradayStructureEngine
-from strategies.intraday_structure.models import Bar, Candidate, Direction, PriceUpdate, SetupState
+from strategies.intraday_structure.models import Bar, Candidate, Direction, OptionsContext, PriceUpdate, SetupState, StructuralLevel
 from strategies.intraday_structure.options import (
+    DealerLevelSummaryOptionsProvider,
     DealerSnapshotOptionsProvider,
     LiveOptionsFlowProvider,
     OptionFlowPrint,
@@ -33,6 +36,111 @@ def test_static_options_provider_rejects_future_snapshot(tmp_path) -> None:
     assert "future_dealer_snapshot_rejected" in rejected.warnings
     assert accepted.call_wall == 105
     assert accepted.gamma_regime == "negative"
+
+
+def test_broad_dealer_summary_is_asof_and_strength_weighted() -> None:
+    captured = "2026-07-16T19:45:00+00:00"
+    frame = pd.DataFrame([
+        {
+            "captured_at": captured, "symbol": "XYZ", "scope": "daily_week", "spot": 100,
+            "total_gex": -2_000_000, "total_abs_gex": 1_000_000_000, "call_wall": 103,
+            "put_wall": 96, "gamma_flip": 99, "next_magnet_above": 102, "next_magnet_below": 97,
+            "magnet_strength": 500_000_000, "call_gex_total": 600_000_000, "put_gex_total": -300_000_000,
+            "wall_dominance": 0.9, "gamma_density": 900_000_000, "gex_concentration_index": 0.8,
+            "dealer_imbalance": 0.4,
+        },
+        {
+            "captured_at": captured, "symbol": "WEAK", "scope": "daily_week", "spot": 100,
+            "total_gex": 2_000, "total_abs_gex": 10_000, "call_wall": 103,
+            "put_wall": 96, "gamma_flip": 99, "next_magnet_above": 102, "next_magnet_below": 97,
+            "magnet_strength": 50, "call_gex_total": 100, "put_gex_total": -100,
+            "wall_dominance": 0.1, "gamma_density": 100, "gex_concentration_index": 0.1,
+            "dealer_imbalance": 0.0,
+        },
+    ])
+    provider = DealerLevelSummaryOptionsProvider.from_frame(frame)
+    future = provider.context("XYZ", datetime(2026, 7, 16, 19, tzinfo=timezone.utc), 100)
+    accepted = provider.context("XYZ", datetime(2026, 7, 17, 14, tzinfo=timezone.utc), 100)
+    weak = provider.context("WEAK", datetime(2026, 7, 17, 14, tzinfo=timezone.utc), 100)
+    assert future.source == "none"
+    assert "future_dealer_summary_rejected" in future.warnings
+    assert accepted.source == "dealer_level_summary_static"
+    assert accepted.call_wall == 103
+    assert accepted.dealer_strength_score > weak.dealer_strength_score
+    assert any("magnet_above" in level.level_type for level in accepted.levels)
+
+
+def test_dealer_plate_requires_strong_reachable_asof_target() -> None:
+    options = OptionsContext(
+        source="dealer_level_summary_static", dealer_imbalance=0.5, dealer_strength_score=0.9,
+        levels=(StructuralLevel(102, "options_dealer_call_wall", 0.9, directionality="resistance"),),
+    )
+    result = evaluate_dealer_plate(
+        direction=Direction.LONG, spot=100, atr=1, options=options,
+        policy=IntradayStructureConfig().dealer_plate,
+    )
+    assert result.qualified
+    assert result.target == 102
+    assert "favorable_dealer_swing_plate" in result.evidence
+    weak = evaluate_dealer_plate(
+        direction=Direction.LONG, spot=100, atr=1,
+        options=OptionsContext(source="dealer_level_summary_static", levels=(StructuralLevel(100.2, "options_dealer_call_wall", 0.2, directionality="resistance"),)),
+        policy=IntradayStructureConfig().dealer_plate,
+    )
+    assert not weak.qualified
+
+
+def test_dealer_ranking_feed_keeps_structural_and_change_candidates(tmp_path) -> None:
+    captured = datetime(2026, 7, 16, 19, 45, tzinfo=timezone.utc)
+    path = tmp_path / "rankings.parquet"
+    pd.DataFrame([
+        {"symbol": "TOP", "captured_at": captured, "dealer_swing_rank": 2, "dealer_change_intensity_rank": 90},
+        {"symbol": "CHANGER", "captured_at": captured, "dealer_swing_rank": 500, "dealer_change_intensity_rank": 3, "dealer_change_direction": "neutral"},
+        {"symbol": "SKIP", "captured_at": captured, "dealer_swing_rank": 500, "dealer_change_intensity_rank": 90},
+    ]).to_parquet(path, index=False)
+    feed = DealerRankingCandidateFeed(path, top_structural=5, top_change=5, max_age_hours=30)
+    candidates = feed.poll(now=captured + timedelta(hours=10))
+    assert {candidate.ticker for candidate in candidates} == {"TOP", "CHANGER"}
+    changer = next(candidate for candidate in candidates if candidate.ticker == "CHANGER")
+    assert changer.available_at == captured
+    assert not feed.poll(now=captured + timedelta(hours=10))
+
+
+def test_liquidity_feed_is_bounded_eligible_and_reseeds_next_session(tmp_path) -> None:
+    path = tmp_path / "shared_universe.csv"
+    pd.DataFrame([
+        {"ticker": "LOW", "is_eligible": True, "avg_dollar_volume_20d": 10_000_000},
+        {"ticker": "HIGH", "is_eligible": True, "avg_dollar_volume_20d": 30_000_000},
+        {"ticker": "MID", "is_eligible": True, "avg_dollar_volume_20d": 20_000_000},
+        {"ticker": "INELIGIBLE", "is_eligible": False, "avg_dollar_volume_20d": 99_000_000},
+    ]).to_csv(path, index=False)
+    feed = LiquidityCandidateFeed(path, top_n=2)
+    now = datetime(2026, 7, 17, 14, tzinfo=timezone.utc)
+    candidates = feed.poll(now=now)
+    assert [candidate.ticker for candidate in candidates] == ["HIGH", "MID"]
+    assert all(candidate.average_dollar_volume >= 20_000_000 for candidate in candidates)
+    assert not feed.poll(now=now + timedelta(hours=1))
+    assert {candidate.ticker for candidate in feed.poll(now=now + timedelta(days=1))} == {"HIGH", "MID"}
+
+
+def test_newer_liquidity_seed_preserves_dealer_context(tmp_path) -> None:
+    config = replace(IntradayStructureConfig(), state_path=str(tmp_path / "state.json"))
+    engine = IntradayStructureEngine(config)
+    dealer_time = datetime(2026, 7, 16, 20, tzinfo=timezone.utc)
+    liquidity_time = dealer_time + timedelta(hours=17)
+    assert engine.register_candidate(Candidate(
+        "MU", dealer_time, Direction.LONG, ("dealer_level_map",), score=0.9,
+        metadata={"dealer_swing_rank": 1},
+    ))
+    assert engine.register_candidate(Candidate(
+        "MU", liquidity_time, Direction.LONG, ("high_liquidity_universe",), score=0.5,
+        average_dollar_volume=100_000_000,
+    ))
+    merged = engine.candidates[("MU", Direction.LONG)]
+    assert merged.timestamp == liquidity_time
+    assert merged.score == 0.9
+    assert set(merged.sources) == {"dealer_level_map", "high_liquidity_universe"}
+    assert merged.metadata["dealer_swing_rank"] == 1
 
 
 def test_live_flow_provider_aggregates_only_asof_prints() -> None:

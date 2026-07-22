@@ -53,3 +53,13 @@ def test_runway_score_is_transparent_and_congestion_lowers_score() -> None:
     assert clear_score.runway_score > congested_score.runway_score
     assert set(clear_score.components) == {"distance", "congestion", "level_strength", "trend", "market", "options"}
     assert clear_score.next_target == 103.0
+
+
+def test_strong_dealer_destination_is_not_penalized_like_resistance() -> None:
+    market = MarketContext(datetime.now(timezone.utc), market_alignment_score=0.75)
+    generic = [StructuralLevel(103.0, "generic_resistance", 0.9, directionality="resistance")]
+    dealer = [StructuralLevel(103.0, "options_dealer_gamma_magnet_above", 0.9, directionality="resistance")]
+    generic_score = score_runway(spot=100, direction="long", atr=1, levels=generic, trend_strength=0.8, market=market, options=OptionsContext())
+    dealer_score = score_runway(spot=100, direction="long", atr=1, levels=dealer, trend_strength=0.8, market=market, options=OptionsContext(source="dealer_level_summary_static"))
+    assert dealer_score.runway_score > generic_score.runway_score
+    assert "dealer_destination_strength" in dealer_score.explanation

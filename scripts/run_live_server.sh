@@ -60,6 +60,11 @@ SERVER_ARGS=()
 # not just serving. The hub intentionally skips one-shot Meta/Momentum manual
 # loops; their scheduled 4H passes fire later from combined_server.
 if [ "$START_ALL" = "1" ]; then SERVER_ARGS+=("--start-all"); fi
+# The structure engine is paper-only and part of the normal supervised live
+# stack. Keep the explicit flag here as a belt-and-suspenders guard even though
+# combined_server also defaults it on; a caller can still pass
+# --no-intraday-structure to opt out.
+SERVER_ARGS+=("--intraday-structure")
 # Run the dealer-ranked ATM options experiment automatically near the close.
 # Defaults stay paper; caller passthrough args later in SERVER_ARGS can override.
 SERVER_ARGS+=(

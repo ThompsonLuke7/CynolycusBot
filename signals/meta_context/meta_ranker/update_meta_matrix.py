@@ -17,6 +17,7 @@ Output: overwrites meta_ranker_matrix.parquet (rolling window) with new bars app
 from __future__ import annotations
 
 import argparse
+import logging
 import warnings
 from pathlib import Path
 
@@ -26,13 +27,15 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 
 from strategies.momentum_expansion.config.momentum_config import CONTEXT_TICKERS, SECTOR_ETFS
-from strategies.momentum_expansion.features.feature_matrix_4h import (
-    FEATURE_COLUMNS_4H,
-    build_ticker_features_4h,
+from strategies.momentum_expansion.features.live_feature_panel_4h import (
+    assert_manifest_coverage,
+    build_live_feature_panel_4h,
 )
 from strategies.momentum_expansion.inference.ranker import ExpansionRanker
 from strategies.multi_ticker_swing_htf.inference.scorer import HTFSwingScorer
 from signals.meta_context import build_meta_ranker_matrix as B
+
+logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
@@ -80,37 +83,20 @@ def _latest_reference_bar_timestamp() -> pd.Timestamp | None:
     return max(latest) if latest else None
 
 
-def _build_live_features(tickers: list[str], ctx_4h: dict, since: pd.Timestamp) -> pd.DataFrame:
-    """Per-ticker feature build (skew-free); keep bars strictly after `since`."""
-    rows = []
-    for i, t in enumerate(tickers, 1):
-        df_4h = _read_bars(BARS_4H / f"{t}.parquet")
-        if df_4h is None or df_4h.empty:
-            continue
-        df_1d = _read_bars(BARS_1D / f"{t}.parquet")
-        try:
-            feats = build_ticker_features_4h(ticker=t, df_4h=df_4h.set_index("timestamp"),
-                                             df_1d=None if df_1d is None else df_1d.set_index("timestamp"),
-                                             ctx_4h=ctx_4h)
-        except Exception:
-            continue
-        if feats is None or feats.empty:
-            continue
-        feats = feats.reset_index().rename(columns={"index": "timestamp"})
-        feats["timestamp"] = pd.to_datetime(feats["timestamp"], utc=True)
-        feats = feats[feats["timestamp"] > since]
-        if feats.empty:
-            continue
-        feats["ticker"] = t
-        rows.append(feats)
-        if i % 200 == 0:
-            print(f"  features {i}/{len(tickers)}")
-    if not rows:
-        return pd.DataFrame()
-    return pd.concat(rows, ignore_index=True)
+def _load_4h_for_panel(ticker: str) -> pd.DataFrame:
+    b = _read_bars(BARS_4H / f"{ticker}.parquet")
+    if b is None or b.empty:
+        raise FileNotFoundError(ticker)
+    return b.set_index("timestamp")
+
+
+def _load_1d_for_panel(ticker: str) -> pd.DataFrame | None:
+    b = _read_bars(BARS_1D / f"{ticker}.parquet")
+    return None if b is None else b.set_index("timestamp")
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("--tickers", nargs="*", default=None)
     ap.add_argument("--matrix", default=str(MATRIX))
@@ -135,18 +121,30 @@ def main():
     else:
         tickers = sorted(pd.read_csv(UNIVERSE)["ticker"].dropna().astype(str).str.upper().unique())
     ctx_4h = _load_context()
-    print(f"building live features for {len(tickers)} tickers since {max_ts} ...")
-    feats = _build_live_features(tickers, ctx_4h, since=max_ts)
-    if feats.empty:
+    logger.info("building live features for %d tickers since %s ...", len(tickers), max_ts)
+    result = build_live_feature_panel_4h(
+        tickers=tickers, load_4h_bars=_load_4h_for_panel,
+        load_1d_bars=_load_1d_for_panel, ctx_4h=ctx_4h, since=max_ts,
+    )
+    if result.panel.empty:
         print("no new bars to add — matrix already current.")
         return
+    feat_idx = result.panel
+    feats = feat_idx.reset_index()
     print(f"new feature rows: {len(feats):,}  bars: {feats['timestamp'].nunique()}  "
           f"range {feats['timestamp'].min()} -> {feats['timestamp'].max()}")
 
     # ---- base scores from DEPLOYED models (not OOF) ----
-    feat_idx = feats.set_index(["timestamp", "ticker"])
-    mom = ExpansionRanker().score(feat_idx[[c for c in FEATURE_COLUMNS_4H if c in feat_idx.columns]])
-    htf = HTFSwingScorer().score(feat_idx)
+    # feat_idx already carries every xsec_*/earnings column (build_live_feature_panel_4h
+    # bundles both post-processing steps unconditionally -- see its docstring and
+    # LIVING_SUMMARY.md 2026-07-19 for the audit that found both were previously
+    # missing live, silently, at this exact call site).
+    mom_ranker = ExpansionRanker()
+    htf_scorer = HTFSwingScorer()
+    assert_manifest_coverage(scorer=mom_ranker, panel=feat_idx, label="update_meta_matrix/momentum")
+    assert_manifest_coverage(scorer=htf_scorer, panel=feat_idx, label="update_meta_matrix/htf")
+    mom = mom_ranker.score(feat_idx)
+    htf = htf_scorer.score(feat_idx)
     spine = pd.DataFrame({"mom_score": mom.values, "htf_score": htf.values}, index=feat_idx.index).reset_index()
     spine["date"] = B._norm_date(spine["timestamp"])
     # forward-label columns are unknown for live bars

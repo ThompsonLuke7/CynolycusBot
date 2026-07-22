@@ -9,20 +9,20 @@ from core.live_4h_exec import ExecPolicy, exit_action
 
 
 def test_stoploss_takes_priority_and_catches_ride_to_zero():
-    p = ExecPolicy()  # stop_loss=0.50 default
+    p = ExecPolicy(stop_loss=0.50)  # explicit: independent of the live default
     # a -55% option-premium loser exits at the stop even while still top-ranked
     assert exit_action(-0.55, runs_held=5, bars_out=0, trimmed=False, policy=p) == ("exit", "stop_-50%")
 
 
 def test_takeprofit_scaleout_before_horizon():
-    p = ExecPolicy()
+    p = ExecPolicy(take_profit=0.20, horizon_bars=25)  # explicit: independent of the live default
     assert exit_action(0.25, runs_held=3, bars_out=0, trimmed=False, policy=p) == ("trim", "take_profit_+20%")
     # already trimmed winner keeps riding
     assert exit_action(0.25, runs_held=3, bars_out=0, trimmed=True, policy=p) == ("hold", "")
 
 
 def test_dropout_disabled_by_default_rides_to_horizon():
-    p = ExecPolicy()  # grace_bars=None
+    p = ExecPolicy(horizon_bars=25)  # grace_bars=None default; horizon explicit for this test's threshold
     # flat name out of top-K for 10 bars is HELD (old code would have dropped it)
     assert exit_action(0.01, runs_held=8, bars_out=10, trimmed=False, policy=p) == ("hold", "")
     # ...until the horizon hard cap
