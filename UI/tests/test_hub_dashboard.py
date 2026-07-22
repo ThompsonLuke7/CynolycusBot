@@ -6,8 +6,13 @@ import json
 import pytest
 
 from UI.hub_dashboard import HubDashboardApp, _Dash, _json_safe
+from UI.ui_chrome import NAV_HTML
 
 pytestmark = pytest.mark.safe
+
+
+def test_shared_navigation_includes_intraday_structure_dashboard():
+    assert '"Intraday Structure",8774' in NAV_HTML
 
 
 def test_json_safe_replaces_nonfinite_values():

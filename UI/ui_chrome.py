@@ -24,6 +24,7 @@ NAV_PORTS: list[tuple[str, int]] = [
     ("Amethyst", 8772),
     ("Dealer", 8768),
     ("Dealer Ranker", 8773),
+    ("Intraday Structure", 8774),
     ("Meta Ranker", 8769),
 ]
 

@@ -216,10 +216,8 @@ PYEOF
   echo "[$(ts)] emerging themes exit=$emerging_theme_exit"
 
   if [ "$emerging_theme_exit" -eq 0 ]; then
-    echo "[$(ts)] themes — rebuilding explorer variants and dreamscapes"
+    echo "[$(ts)] themes — rebuilding explorer"
     timeout --signal=TERM --kill-after=30s 1200s "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_explorer
-    timeout --signal=TERM --kill-after=30s 1200s "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_variants
-    timeout --signal=TERM --kill-after=30s 1200s "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_dreamscapes
   fi
 
   # 9) Earnings enrichment is useful context, but it is deliberately outside
