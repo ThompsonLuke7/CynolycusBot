@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Publish the locally generated Theme Explorer to a dedicated public GitHub Pages repository after each successful refresh and expose it through a normal new-tab website link.
+**Goal:** Publish the locally generated Theme Explorer into the existing public GitHub Pages website repository after each successful refresh and expose it through a normal new-tab website link.
 
-**Architecture:** CynolycusBot remains the sole generator and sends only the allowlisted `theme_explorer.html` artifact to `ThompsonLuke7/theme-explorer` as `index.html`. A tested Python publisher uses a repository-scoped SSH deploy key and a temporary clone; the public repository deploys on pushes to `main` through GitHub Actions.
+**Architecture:** CynolycusBot remains the sole generator and sends only the allowlisted `theme_explorer.html` artifact to `ThompsonLuke7/thompsonluke7.github.io` as `theme-explorer/index.html`. A tested Python publisher uses a repository-scoped SSH deploy key and a temporary clone; the repository's existing GitHub Pages configuration serves the nested page.
 
-**Tech Stack:** Python 3.11+, pytest, Git CLI, SSH deploy keys, Bash, GitHub CLI, GitHub Actions, GitHub Pages, static HTML/JavaScript
+**Tech Stack:** Python 3.11+, pytest, Git CLI, SSH deploy keys, Bash, GitHub CLI, GitHub Pages, static HTML/JavaScript
 
 ## Global Constraints
 
@@ -14,7 +14,7 @@
 - Never publish datasets, credentials, logs, Python code, model artifacts, broker state, or private configuration.
 - The publisher must not use `git add -A`, force-push, rewrite public history, print credentials, or modify the CynolycusBot worktree.
 - Publication is disabled by default and requires complete local configuration before any clone or push.
-- Theme generation remains local; GitHub Actions deploys the already-generated static artifact and does not reconstruct theme data.
+- Theme generation remains local; GitHub Pages serves the already-generated static artifact and does not reconstruct theme data.
 - Publication failures are explicit and nonzero but remain non-trading-critical to the nightly data workflow.
 - Public runtime behavior continues to use the existing pinned Three.js and 3d-force-graph unpkg dependencies.
 - Automated tests use temporary local Git repositories and never contact the real public repository.
@@ -25,18 +25,16 @@
 
 ### CynolycusBot
 
-- Create `scripts/publish_theme_explorer.py`: validate one generated artifact, clone the configured public repository into a temporary directory, update only `index.html`, commit when changed, and push normally.
+- Create `scripts/publish_theme_explorer.py`: validate one generated artifact, clone the configured public repository into a temporary directory, update only `theme-explorer/index.html`, commit when changed, and push normally.
 - Create `themes/dynamic_theme/tests/test_publish_theme_explorer.py`: unit and local-Git integration coverage for configuration, validation, publishing, and no-op behavior.
 - Modify `scripts/nightly_market_data.sh`: capture the explorer build result and invoke the publisher only after a successful build.
 - Create `UI/tests/test_nightly_theme_explorer_publish_hook.py`: regression coverage for the shell orchestration boundary.
 - Modify `LIVING_SUMMARY.md`: record implementation and verification without secrets.
 
-### `ThompsonLuke7/theme-explorer`
+### `ThompsonLuke7/thompsonluke7.github.io`
 
-- Create `index.html`: exact generated Theme Explorer artifact.
-- Create `.nojekyll`: disable Jekyll processing.
-- Create `README.md`: identify the repository as an automatically generated public deployment.
-- Create `.github/workflows/deploy-pages.yml`: deploy the static repository through GitHub Pages.
+- Create `theme-explorer/index.html`: exact generated Theme Explorer artifact.
+- Preserve `README.md`, the root site, Pages configuration, workflows, assets, and every other repository path.
 
 ---
 
@@ -50,7 +48,7 @@
 **Interfaces:**
 
 - Consumes: `themes/dynamic_theme/viz/theme_explorer.html` and environment keys `THEME_EXPLORER_PUBLISH_ENABLED`, `THEME_EXPLORER_PUBLISH_REPO`, `THEME_EXPLORER_DEPLOY_KEY_PATH`, `THEME_EXPLORER_GIT_NAME`, and `THEME_EXPLORER_GIT_EMAIL`.
-- Produces: `PublishConfig`, `PublishError`, `config_from_env(environ)`, `validate_artifact(path)`, `publish(config, artifact_path, now=None) -> Literal["disabled", "unchanged", "published"]`, and a CLI returning zero for disabled/unchanged/published or one for a safe publication error.
+- Produces: `PublishConfig`, `PublishError`, `config_from_env(environ)`, `validate_artifact(path)`, `publish(config, artifact_path, now=None) -> Literal["disabled", "unchanged", "published"]`, and a CLI returning zero for disabled/unchanged/published or one for a safe publication error. The only remote path it owns is `theme-explorer/index.html`.
 
 - [ ] **Step 1: Write the failing publisher tests**
 
@@ -103,11 +101,13 @@ def _init_remote(tmp_path: Path, index: bytes | None) -> Path:
     _git(work, "config", "user.name", "Publisher Test")
     _git(work, "config", "user.email", "publisher-test@example.invalid")
     (work / "README.md").write_text("# Theme Explorer\n", encoding="utf-8")
+    (work / "index.html").write_text("<html>root site</html>\n", encoding="utf-8")
     if index is not None:
-        (work / "index.html").write_bytes(index)
-    _git(work, "add", "README.md")
+        (work / "theme-explorer").mkdir()
+        (work / "theme-explorer/index.html").write_bytes(index)
+    _git(work, "add", "README.md", "index.html")
     if index is not None:
-        _git(work, "add", "index.html")
+        _git(work, "add", "theme-explorer/index.html")
     _git(work, "commit", "-m", "initial")
     _git(tmp_path, "init", "--bare", str(remote))
     _git(work, "remote", "add", "origin", str(remote))
@@ -145,7 +145,7 @@ def test_config_enabled_requires_every_field(tmp_path: Path) -> None:
         config_from_env(
             {
                 "THEME_EXPLORER_PUBLISH_ENABLED": "1",
-                "THEME_EXPLORER_PUBLISH_REPO": "git@github.com:ThompsonLuke7/theme-explorer.git",
+                "THEME_EXPLORER_PUBLISH_REPO": "git@github.com:ThompsonLuke7/thompsonluke7.github.io.git",
                 "THEME_EXPLORER_DEPLOY_KEY_PATH": str(key),
                 "THEME_EXPLORER_GIT_NAME": "Theme Explorer Publisher",
             }
@@ -196,10 +196,11 @@ def test_publish_updates_only_index_html(tmp_path: Path) -> None:
     assert result == "published"
     checkout = tmp_path / "verify"
     _git(tmp_path, "clone", "--branch", "main", str(remote), str(checkout))
-    assert (checkout / "index.html").read_bytes() == expected
+    assert (checkout / "theme-explorer/index.html").read_bytes() == expected
+    assert (checkout / "index.html").read_text(encoding="utf-8") == "<html>root site</html>\n"
     assert (checkout / "README.md").read_text(encoding="utf-8") == "# Theme Explorer\n"
     changed = _git(checkout, "show", "--pretty=", "--name-only", "HEAD").stdout.splitlines()
-    assert changed == ["index.html"]
+    assert changed == ["theme-explorer/index.html"]
     message = _git(checkout, "log", "-1", "--pretty=%s").stdout.strip()
     assert message == "chore: refresh theme explorer 2026-07-22T23:30:00Z"
 
@@ -415,9 +416,10 @@ def publish(
             operation="clone",
         )
 
-        destination = checkout / "index.html"
+        destination = checkout / "theme-explorer/index.html"
         if destination.exists() and destination.read_bytes() == artifact:
             return "unchanged"
+        destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(artifact)
 
         _run_git(
@@ -433,7 +435,7 @@ def publish(
             operation="identity configuration",
         )
         _run_git(
-            ["add", "--", "index.html"],
+            ["add", "--", "theme-explorer/index.html"],
             cwd=checkout,
             env=git_env,
             operation="staging",
@@ -621,217 +623,36 @@ Expected: the commit contains only the nightly hook and its regression test.
 
 ---
 
-### Task 3: Bootstrap the Public Repository and GitHub Pages
-
-**Files in `ThompsonLuke7/theme-explorer`:**
-
-- Create: `index.html`
-- Create: `.nojekyll`
-- Replace: `README.md`
-- Create: `.github/workflows/deploy-pages.yml`
-
-**Interfaces:**
-
-- Consumes: current validated `themes/dynamic_theme/viz/theme_explorer.html`.
-- Produces: public repository `ThompsonLuke7/theme-explorer`, default branch `main`, Pages URL `https://thompsonluke7.github.io/theme-explorer/`, and a push-triggered Pages deployment.
-
-- [ ] **Step 1: Confirm the authenticated GitHub owner and absence of the target repository**
-
-Run:
-
-```bash
-gh auth status
-gh api user --jq .login
-gh repo view ThompsonLuke7/theme-explorer
-```
-
-Expected: GitHub authentication succeeds, the login is `ThompsonLuke7`, and the final command reports that the repository does not exist. If it already exists, stop before mutation and inspect its visibility, default branch, files, Pages configuration, and deploy keys against this plan.
-
-- [ ] **Step 2: Validate the exact artifact before creating the public repository**
-
-Run:
-
-```bash
-./.venv/bin/python -c "from pathlib import Path; from scripts.publish_theme_explorer import validate_artifact; p=Path('themes/dynamic_theme/viz/theme_explorer.html'); data=validate_artifact(p); print(p, len(data))"
-```
-
-Expected: the command prints the allowlisted path and a nonzero byte count near 1.23 MB.
-
-- [ ] **Step 3: Create the public repository with a real `main` branch**
-
-Run:
-
-```bash
-gh repo create ThompsonLuke7/theme-explorer --public --add-readme --disable-issues --disable-wiki --description "Interactive public explorer for dynamic equity-market themes and ticker relationships"
-```
-
-Expected: GitHub reports that `https://github.com/ThompsonLuke7/theme-explorer` was created publicly.
-
-- [ ] **Step 4: Enable GitHub Pages in workflow mode**
-
-Run:
-
-```bash
-gh api --method POST repos/ThompsonLuke7/theme-explorer/pages -f build_type=workflow
-```
-
-Expected: HTTP success with a Pages record whose `build_type` is `workflow`.
-
-- [ ] **Step 5: Clone the target repository into a bounded temporary directory**
-
-Run:
-
-```bash
-theme_bootstrap_dir="$(mktemp -d /tmp/theme-explorer-bootstrap.XXXXXX)"
-gh repo clone ThompsonLuke7/theme-explorer "$theme_bootstrap_dir"
-git -C "$theme_bootstrap_dir" branch --show-current
-```
-
-Expected: the printed branch is `main`. Preserve the exact generated directory in `theme_bootstrap_dir`; do not substitute a broad directory.
-
-- [ ] **Step 6: Create the static repository files**
-
-Copy the generated artifact exactly:
-
-```bash
-cp themes/dynamic_theme/viz/theme_explorer.html "$theme_bootstrap_dir/index.html"
-```
-
-Using `apply_patch` against the exact temporary path printed in Step 5, create
-`$theme_bootstrap_dir/.nojekyll` with this harmless marker content:
-
-```text
-Static site deployed by the GitHub Pages workflow.
-```
-
-Replace `$theme_bootstrap_dir/README.md` with:
-
-```markdown
-# Theme Explorer
-
-Interactive public visualization of dynamic equity-market themes, relationships,
-emerging groups, and ticker memberships.
-
-[Open the live Theme Explorer](https://thompsonluke7.github.io/theme-explorer/)
-
-`index.html` is generated by the CynolycusBot theme pipeline and published
-automatically. Do not edit it directly; the next successful refresh will replace
-it.
-```
-
-Create `$theme_bootstrap_dir/.github/workflows/deploy-pages.yml` with:
-
-```yaml
-name: Deploy GitHub Pages
-
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: true
-
-jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-      - name: Upload static site
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: .
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v4
-```
-
-- [ ] **Step 7: Inspect and commit only the intended public files**
-
-Run:
-
-```bash
-git -C "$theme_bootstrap_dir" status --short
-git -C "$theme_bootstrap_dir" add README.md .nojekyll index.html .github/workflows/deploy-pages.yml
-git -C "$theme_bootstrap_dir" diff --cached --name-only
-git -C "$theme_bootstrap_dir" diff --cached --check
-git -C "$theme_bootstrap_dir" commit -m "feat: publish Theme Explorer"
-git -C "$theme_bootstrap_dir" push origin main
-```
-
-Expected staged paths:
-
-```text
-.github/workflows/deploy-pages.yml
-.nojekyll
-README.md
-index.html
-```
-
-Expected: the commit and normal push succeed without unrelated files.
-
-- [ ] **Step 8: Verify the initial Pages deployment**
-
-Run:
-
-```bash
-gh run list --repo ThompsonLuke7/theme-explorer --workflow deploy-pages.yml --limit 1
-pages_run_id="$(gh run list --repo ThompsonLuke7/theme-explorer --workflow deploy-pages.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
-gh run watch "$pages_run_id" --repo ThompsonLuke7/theme-explorer --exit-status
-curl -sS --retry 6 --retry-delay 10 https://thompsonluke7.github.io/theme-explorer/ | rg -m1 "<title>Theme Explorer"
-```
-
-Expected: the workflow concludes successfully and the public URL returns the Theme Explorer title.
-
-- [ ] **Step 9: Remove only the validated temporary bootstrap clone**
-
-First print and validate the path:
-
-```bash
-printf '%s\n' "$theme_bootstrap_dir"
-test -n "$theme_bootstrap_dir"
-test "$theme_bootstrap_dir" != "/tmp"
-test -d "$theme_bootstrap_dir/.git"
-```
-
-Expected: the path matches `/tmp/theme-explorer-bootstrap.*` and contains the cloned repository. Then remove that exact temporary directory:
-
-```bash
-rm -rf "$theme_bootstrap_dir"
-```
-
-Expected: only the temporary clone is removed; the GitHub repository remains intact.
-
----
-
-### Task 4: Install the Repository-Scoped Credential and Prove End-to-End Refresh
+### Task 3: Configure the Existing Pages Repository and Prove End-to-End Refresh
 
 **Files:**
 
 - Create outside repositories: `/home/luket/.ssh/cynolycus_theme_explorer_ed25519`
 - Modify ignored local file: `.env`
 - Modify: `LIVING_SUMMARY.md`
-- Update remotely: `ThompsonLuke7/theme-explorer/index.html`
+- Create remotely: `ThompsonLuke7/thompsonluke7.github.io/theme-explorer/index.html`
 
 **Interfaces:**
 
-- Consumes: Tasks 1–3, authenticated GitHub CLI, and the existing local theme inputs.
+- Consumes: Tasks 1–2, authenticated GitHub access, the existing public
+  `ThompsonLuke7/thompsonluke7.github.io` repository, and local theme inputs.
 - Produces: unattended local write access limited to the public repository, a successful publisher-created refresh commit, a successful Pages deployment, and the website link handoff.
 
-- [ ] **Step 1: Generate a dedicated passwordless Ed25519 deploy key**
+- [ ] **Step 1: Confirm the existing repository boundary before mutation**
+
+Use the GitHub connector or authenticated GitHub CLI to verify:
+
+```bash
+gh repo view ThompsonLuke7/thompsonluke7.github.io --json nameWithOwner,visibility,defaultBranchRef
+gh api repos/ThompsonLuke7/thompsonluke7.github.io/contents/README.md --jq .path
+```
+
+Expected: the repository is `PUBLIC`, its default branch is `main`, and
+`README.md` exists. Confirm that `theme-explorer/index.html` does not yet exist.
+Do not replace or delete `README.md`, root `index.html`, workflows, Pages
+configuration, assets, or any other existing path.
+
+- [ ] **Step 2: Generate a dedicated passwordless Ed25519 deploy key**
 
 Confirm the exact key paths do not already exist:
 
@@ -850,13 +671,13 @@ chmod 644 /home/luket/.ssh/cynolycus_theme_explorer_ed25519.pub
 
 Expected: exactly one private/public key pair is created at the specified paths. Never print the private key.
 
-- [ ] **Step 2: Register only the public key with write access to the destination repository**
+- [ ] **Step 3: Register only the public key with write access to the destination repository**
 
 Run:
 
 ```bash
-gh repo deploy-key add /home/luket/.ssh/cynolycus_theme_explorer_ed25519.pub --allow-write --title "CynolycusBot Theme Explorer publisher" --repo ThompsonLuke7/theme-explorer
-gh repo deploy-key list --repo ThompsonLuke7/theme-explorer --json title,readOnly --jq '.[] | select(.title == "CynolycusBot Theme Explorer publisher")'
+gh repo deploy-key add /home/luket/.ssh/cynolycus_theme_explorer_ed25519.pub --allow-write --title "CynolycusBot Theme Explorer publisher" --repo ThompsonLuke7/thompsonluke7.github.io
+gh repo deploy-key list --repo ThompsonLuke7/thompsonluke7.github.io --json title,readOnly --jq '.[] | select(.title == "CynolycusBot Theme Explorer publisher")'
 ```
 
 Expected:
@@ -865,12 +686,12 @@ Expected:
 {"readOnly":false,"title":"CynolycusBot Theme Explorer publisher"}
 ```
 
-- [ ] **Step 3: Write only the publisher settings into the ignored `.env`**
+- [ ] **Step 4: Write only the publisher settings into the ignored `.env`**
 
 Use the installed `python-dotenv` CLI so existing secret values are neither printed nor rewritten manually:
 
 ```bash
-./.venv/bin/dotenv -f .env set THEME_EXPLORER_PUBLISH_REPO git@github.com:ThompsonLuke7/theme-explorer.git
+./.venv/bin/dotenv -f .env set THEME_EXPLORER_PUBLISH_REPO git@github.com:ThompsonLuke7/thompsonluke7.github.io.git
 ./.venv/bin/dotenv -f .env set THEME_EXPLORER_DEPLOY_KEY_PATH /home/luket/.ssh/cynolycus_theme_explorer_ed25519
 ./.venv/bin/dotenv -f .env set THEME_EXPLORER_GIT_NAME "CynolycusBot Theme Explorer Publisher"
 ./.venv/bin/dotenv -f .env set THEME_EXPLORER_GIT_EMAIL ThompsonLuke7@users.noreply.github.com
@@ -887,7 +708,7 @@ Verify only the key names, not the complete `.env`:
 
 Expected: `1`, the destination SSH URL, and the dedicated key path.
 
-- [ ] **Step 4: Rebuild the explorer and publish through the deploy key**
+- [ ] **Step 5: Rebuild the explorer and publish through the deploy key**
 
 Run:
 
@@ -898,35 +719,32 @@ Run:
 
 Expected: the builder reports current theme/link/ticker counts and the publisher prints `Theme Explorer publication: published`.
 
-- [ ] **Step 5: Confirm the remote commit changed only `index.html`**
+- [ ] **Step 6: Confirm the remote commit changed only the nested explorer file**
 
 Run:
 
 ```bash
-gh api repos/ThompsonLuke7/theme-explorer/commits/main --jq '.commit.message'
-gh api repos/ThompsonLuke7/theme-explorer/commits/main --jq '.files[].filename'
+gh api repos/ThompsonLuke7/thompsonluke7.github.io/commits/main --jq '.commit.message'
+gh api repos/ThompsonLuke7/thompsonluke7.github.io/commits/main --jq '.files[].filename'
 ```
 
 Expected: a message beginning with `chore: refresh theme explorer` and exactly:
 
 ```text
-index.html
+theme-explorer/index.html
 ```
 
-- [ ] **Step 6: Verify Pages deployed the publisher commit**
+- [ ] **Step 7: Verify Pages serves the publisher commit**
 
 Run:
 
 ```bash
-gh run list --repo ThompsonLuke7/theme-explorer --workflow deploy-pages.yml --limit 1
-pages_run_id="$(gh run list --repo ThompsonLuke7/theme-explorer --workflow deploy-pages.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
-gh run watch "$pages_run_id" --repo ThompsonLuke7/theme-explorer --exit-status
 curl -sS --retry 6 --retry-delay 10 https://thompsonluke7.github.io/theme-explorer/ | rg -m1 '"generated_at":"'
 ```
 
-Expected: the latest Pages workflow succeeds and the public response contains the new embedded generation timestamp.
+Expected: the public response contains the newly embedded generation timestamp.
 
-- [ ] **Step 7: Verify the unchanged-artifact no-op path**
+- [ ] **Step 8: Verify the unchanged-artifact no-op path**
 
 Run without rebuilding:
 
@@ -936,7 +754,7 @@ Run without rebuilding:
 
 Expected: `Theme Explorer publication: unchanged` and no new public commit or Pages run.
 
-- [ ] **Step 8: Run the complete focused verification**
+- [ ] **Step 9: Run the complete focused verification**
 
 Run:
 
@@ -949,7 +767,7 @@ git diff --check
 
 Expected: `13 passed`; compilation, shell syntax, and whitespace checks all succeed.
 
-- [ ] **Step 9: Append the durable handoff and commit only that update if it is not already part of another active session**
+- [ ] **Step 10: Append the durable handoff and commit only that update if it is not already part of another active session**
 
 Capture the real timestamp first:
 
@@ -963,7 +781,7 @@ the exact timestamp returned above inside braces, followed by
 narrative lines:
 
 ```text
-Created the public Theme Explorer Pages repository and repository-scoped deploy-key publisher; nightly publication now runs only after a successful local explorer build.
+Published Theme Explorer under the existing GitHub Pages website with a repository-scoped deploy-key publisher; nightly publication now runs only after a successful local explorer build.
 Focused publisher/nightly tests, shell syntax, first deploy, public URL, and unchanged no-op verified; website link target is https://thompsonluke7.github.io/theme-explorer/.
 ```
 
@@ -971,7 +789,7 @@ Preserve unrelated working-tree changes and stage only `LIVING_SUMMARY.md` if
 it contains no concurrent uncommitted entries; otherwise leave the appended
 handoff uncommitted and report that fact.
 
-- [ ] **Step 10: Provide the website button**
+- [ ] **Step 11: Provide the website button**
 
 Return this exact integration snippet:
 
@@ -995,10 +813,13 @@ State that no website JavaScript, iframe, CORS configuration, or data synchroniz
 Before claiming completion, verify all of the following:
 
 - The public repository visibility is `PUBLIC`.
-- Its committed application surface is limited to `index.html`, `.nojekyll`, `README.md`, and `.github/workflows/deploy-pages.yml`.
-- The deploy key is write-enabled only on `ThompsonLuke7/theme-explorer`.
+- The publisher-created application surface is limited to
+  `theme-explorer/index.html`; existing website files remain unchanged.
+- The deploy key is write-enabled only on
+  `ThompsonLuke7/thompsonluke7.github.io`.
 - No private key, token, `.env`, dataset, log, model, or Python file appears in the public repository.
-- A successful local rebuild produces a publisher commit changing only `index.html`.
+- A successful local rebuild produces a publisher commit changing only
+  `theme-explorer/index.html`.
 - A failed or disabled publisher does not modify the destination.
 - GitHub Pages serves the latest embedded `generated_at`.
 - The second unchanged publish creates no commit.

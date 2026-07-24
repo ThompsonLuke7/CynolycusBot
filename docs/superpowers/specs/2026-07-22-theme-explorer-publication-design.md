@@ -2,10 +2,10 @@
 
 ## Goal
 
-Publish the generated Theme Explorer as a standalone public website from a
-dedicated GitHub repository, keep it synchronized with successful local
-refreshes, and let another website open it in a new browser tab through a normal
-link.
+Publish the generated Theme Explorer as a standalone public page inside the
+existing GitHub Pages website repository, keep it synchronized with successful
+local refreshes, and let another website page open it in a new browser tab
+through a normal link.
 
 The publication path must expose only the intentionally public browser artifact.
 It must not copy source datasets, credentials, logs, Python pipeline code, model
@@ -45,9 +45,9 @@ theme_explorer.html
     |
     | repository-scoped authenticated push
     v
-ThompsonLuke7/theme-explorer (public)
+ThompsonLuke7/thompsonluke7.github.io (public)
     |
-    | push-triggered GitHub Pages workflow
+    | existing GitHub Pages publication
     v
 https://thompsonluke7.github.io/theme-explorer/
     ^
@@ -60,26 +60,18 @@ the theme pipeline. CynolycusBot remains the single owner of explorer generation
 
 ## Public Repository
 
-Create a public repository named `ThompsonLuke7/theme-explorer` with `main` as
-its default branch. Its committed contents are limited to:
+Use the existing public repository `ThompsonLuke7/thompsonluke7.github.io` with
+`main` as its default branch. The repository is already connected to GitHub
+Pages. Preserve all existing and future website files; the publisher owns only:
 
 ```text
-index.html
-.nojekyll
-README.md
-.github/workflows/deploy-pages.yml
+theme-explorer/index.html
 ```
 
-`index.html` is the published copy of
-`themes/dynamic_theme/viz/theme_explorer.html`. `.nojekyll` prevents unnecessary
-Jekyll processing. `README.md` identifies the file as generated, names
-CynolycusBot as its source, and tells contributors not to edit `index.html`
-directly.
-
-The Pages workflow runs on pushes to `main`, uploads the static repository
-contents as a Pages artifact, and deploys through the `github-pages` environment.
-It receives only the GitHub-provided `contents: read`, `pages: write`, and
-`id-token: write` permissions required for deployment.
+`theme-explorer/index.html` is the published copy of
+`themes/dynamic_theme/viz/theme_explorer.html`. The publisher does not create,
+replace, stage, or delete the repository's root `index.html`, README, Pages
+configuration, workflows, assets, or other website paths.
 
 The default public URL is
 `https://thompsonluke7.github.io/theme-explorer/`. A custom domain can be added
@@ -100,11 +92,12 @@ stack. The publisher performs the following steps:
    closing HTML element.
 4. Clone the public repository into a temporary directory using its dedicated
    write credential.
-5. Copy the allowlisted source file to `index.html`.
+5. Copy the allowlisted source file to `theme-explorer/index.html`, creating
+   only the `theme-explorer` directory when it does not yet exist.
 6. Exit successfully without a commit when the destination is byte-for-byte
    unchanged.
-7. Stage only `index.html`, create a timestamped refresh commit, and push normally
-   to `main`.
+7. Stage only `theme-explorer/index.html`, create a timestamped refresh commit,
+   and push normally to `main`.
 8. Remove the temporary clone automatically.
 
 The publisher must never recursively copy a CynolycusBot directory, run
@@ -115,7 +108,7 @@ repositories unchanged and returns a nonzero status.
 ## Authentication and Configuration
 
 Use a dedicated GitHub deploy key with write access to only
-`ThompsonLuke7/theme-explorer`. Store its private key outside both repositories.
+`ThompsonLuke7/thompsonluke7.github.io`. Store its private key outside both repositories.
 The matching public key is registered only on the destination repository.
 
 Local, ignored configuration supplies:
@@ -151,7 +144,7 @@ The normal weekday sequence becomes:
 emerging-theme refresh
     -> rebuild explorer
         -> validate generated artifact
-            -> publish public index.html
+            -> publish public theme-explorer/index.html
                 -> GitHub Pages deploy
 ```
 
@@ -200,8 +193,8 @@ application JavaScript, or awareness of the explorer's data format.
 - If validation fails, refuse publication.
 - If authentication, clone, commit, or push fails, leave the existing Pages
   deployment untouched and return a nonzero publisher status.
-- If GitHub Pages deployment fails after the source push, GitHub retains workflow
-  logs and the committed artifact for diagnosis.
+- If GitHub Pages publication fails after the source push, the committed artifact
+  remains available for diagnosis and a normal retry.
 - If a bad but valid artifact is published, revert the corresponding commit in
   the public repository. Normal Git history is the rollback mechanism.
 - The next successful nightly or manual run retries from a fresh clone, so no
@@ -212,9 +205,9 @@ application JavaScript, or awareness of the explorer's data format.
 Add focused automated coverage in CynolycusBot for:
 
 - missing and structurally invalid source artifacts;
-- exact mapping from the allowlisted source to `index.html`;
+- exact mapping from the allowlisted source to `theme-explorer/index.html`;
 - unchanged-content no-op behavior;
-- staging only `index.html`;
+- staging only `theme-explorer/index.html`;
 - subprocess failure propagation without credential output;
 - nightly publication occurring only after a successful build;
 - publication being skipped when disabled or when upstream generation fails.
@@ -228,8 +221,7 @@ Before enabling unattended publication:
    theme count, link count, ticker count, search, graph navigation, and external
    library loading.
 2. Run the publisher once manually and inspect the exact public commit.
-3. Verify the Pages workflow succeeds and the public URL serves the expected
-   explorer.
+3. Verify the existing Pages publication serves the expected explorer URL.
 4. Open the Pages URL from the website button and confirm it opens in a new tab.
 5. Run a second unchanged-artifact publication test and confirm it creates no
    commit.
@@ -249,5 +241,5 @@ This work does not:
 - change theme-generation logic or trading behavior;
 - vendor the two existing CDN JavaScript dependencies.
 
-The public repository is intentionally a small, replaceable static deployment
-surface whose only changing application artifact is `index.html`.
+The publication surface is intentionally limited to one replaceable artifact,
+`theme-explorer/index.html`, inside the existing website repository.
