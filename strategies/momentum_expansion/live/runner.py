@@ -239,12 +239,18 @@ class MomentumLiveRunner:
             ts_utc = ts_utc.tz_convert("UTC")
         staleness_days = (pd.Timestamp.now(tz="UTC") - ts_utc).total_seconds() / 86400.0
         if staleness_days > SIGNAL_MAX_STALENESS_DAYS:
+            # Routine, not exceptional: the read-only dashboard's preview scan
+            # (auto_trade=False, polled on its own cache-refresh cadence) hits
+            # this every time it runs between the market close and the next
+            # fresh 4H bar landing -- ~80/day in the 2026-07-21 audit, all
+            # correct staleness-guard behavior, not a problem. Still recorded
+            # in the signal-decision audit trail below; DEBUG keeps it out of
+            # the live server log's default INFO-level noise.
             msg = (
                 f"Momentum: ABORT stale signal bar {ts_utc} "
                 f"({staleness_days:.1f}d > {SIGNAL_MAX_STALENESS_DAYS:.1f}d)"
             )
-            logger.warning(msg)
-            print(msg)
+            logger.debug(msg)
             append_jsonl(DEFAULT_SIGNAL_AUDIT_LOG, {
                 "event": "signal_decision",
                 "module": "momentum_expansion",
@@ -465,10 +471,19 @@ class MomentumLiveRunner:
             route_fn=route_option_or_shares, ref_price_fn=_ref_price_4h,
             entry_ok=entry_ok, gate_reason="no_entry_trigger",
         )
+        def _persist_managed() -> None:
+            # Save after every fill, not just at the end of the plan, so a
+            # sibling module's broker reconcile never finds a fresh position
+            # missing from this module's on-disk managed state (see
+            # core.live_4h_exec.execute_plan's persist_managed docstring).
+            state["managed"] = res.new_managed
+            _save_state(state)
+
         execute_plan(client, plan=res.plan, limits=res.limits, submit=submit,
                      equity_tif_fn=equity_order_tif,
                      new_managed=res.new_managed, exit_context=res.exit_context,
-                     module="momentum_expansion", pos_lookup=pos_info, bar=bar)
+                     module="momentum_expansion", pos_lookup=pos_info, bar=bar,
+                     persist_managed=_persist_managed)
         audit = order_plan_audit_record(
             module="momentum_expansion", bar=bar, mode="options", submit=submit,
             targets=targets, plan=res.plan, signal_audits=signal_audits,

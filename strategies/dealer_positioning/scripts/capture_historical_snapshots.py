@@ -612,7 +612,11 @@ def _load_prior_summary(*, output_root: Path, before_date: str) -> pd.DataFrame:
             frames.append(pd.read_parquet(path))
         except Exception:
             continue
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    # Drop empty/all-NA frames before concat: pandas deprecated including them
+    # in dtype resolution, and an early trading day can have thin/empty prior
+    # snapshots for some scopes.
+    non_empty = [f for f in frames if not f.empty]
+    return pd.concat(non_empty, ignore_index=True) if non_empty else pd.DataFrame()
 
 
 def _latest_prior_by_symbol_scope(frame: pd.DataFrame, col: str) -> dict[tuple[str, str], float | None]:

@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+import time
 from datetime import date
 from typing import Any
 
 from strategies.dealer_positioning.chain import target_expiration_dates
 from strategies.dealer_positioning.config import DealerPositioningConfig
+
+_MAX_RATE_LIMIT_RETRIES = 2
+_DEFAULT_RETRY_AFTER_SECONDS = 2.0
+
+
+def _retry_after_seconds(resp: Any) -> float:
+    headers = getattr(resp, "headers", None)
+    raw = headers.get("Retry-After") if headers else None
+    if raw is None:
+        return _DEFAULT_RETRY_AFTER_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_RETRY_AFTER_SECONDS
 
 
 class SchwabDealerDataClient:
@@ -65,15 +80,24 @@ class SchwabDealerDataClient:
         last_error: str | None = None
         for chain_symbol in candidates:
             tried.append(chain_symbol)
-            resp = raw_client.get_option_chain(
-                symbol=chain_symbol,
-                contract_type=contract_type,
-                strike_count=self._config.chain_strike_count,
-                include_underlying_quote=True,
-                strategy=strategy,
-                from_date=start,
-                to_date=end,
-            )
+            resp = None
+            for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+                resp = raw_client.get_option_chain(
+                    symbol=chain_symbol,
+                    contract_type=contract_type,
+                    strike_count=self._config.chain_strike_count,
+                    include_underlying_quote=True,
+                    strategy=strategy,
+                    from_date=start,
+                    to_date=end,
+                )
+                if int(resp.status_code) != 429 or attempt == _MAX_RATE_LIMIT_RETRIES:
+                    break
+                # Schwab's chain endpoint rate-limits under load (observed live:
+                # SPY/IWM/SLV/QQQ 429s during the RTH poll window); a couple of
+                # short backoff-and-retry attempts recover most of these instead
+                # of dropping the whole poll cycle for that symbol.
+                time.sleep(_retry_after_seconds(resp))
             if 200 <= int(resp.status_code) < 300:
                 payload = resp.json()
                 if isinstance(payload, dict):

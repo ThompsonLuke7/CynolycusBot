@@ -77,7 +77,7 @@ SERVER_ARGS+=(
   "--dealer-ranker-time" "${DEALER_RANKER_TIME:-15:45}"
   "--dealer-ranker-workers" "${DEALER_RANKER_WORKERS:-8}"
   "--dealer-ranker-top-k" "${DEALER_RANKER_TOP_K:-10}"
-  "--dealer-ranker-contracts" "${DEALER_RANKER_CONTRACTS:-1}"
+  "--dealer-ranker-target-notional" "${DEALER_RANKER_TARGET_NOTIONAL:-5000}"
 )
 # LIVE=1 flips the scheduled loops onto the real-money account.
 if [ "${LIVE:-0}" = "1" ]; then

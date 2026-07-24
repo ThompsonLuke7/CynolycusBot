@@ -130,6 +130,8 @@ class HTFDashboardApp:
         if not bar or bar == self._last_persisted_bar:
             return
         try:
+            import os
+
             import pandas as pd
 
             rows = [
@@ -144,7 +146,17 @@ class HTFDashboardApp:
                 combined = pd.concat([old[old["bar"] != bar], new], ignore_index=True)
             else:
                 combined = new
-            combined.to_parquet(SIGNALS_LOG, index=False)
+            # Write-then-rename: a direct to_parquet(SIGNALS_LOG) can be caught
+            # mid-write by a concurrent request thread's read_parquet() above
+            # (ThreadingHTTPServer -- every request runs on its own thread),
+            # surfacing as "Parquet magic bytes not found in footer" on the
+            # reader's side. The temp name is unique per (pid, thread) so two
+            # overlapping persists never clobber the same temp file either.
+            tmp = SIGNALS_LOG.with_suffix(
+                SIGNALS_LOG.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp"
+            )
+            combined.to_parquet(tmp, index=False)
+            tmp.replace(SIGNALS_LOG)
             self._last_persisted_bar = bar
         except Exception as exc:  # noqa: BLE001
             logger.warning("HTF signal persist failed: %s", exc)

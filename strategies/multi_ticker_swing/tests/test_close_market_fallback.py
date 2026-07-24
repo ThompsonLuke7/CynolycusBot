@@ -29,7 +29,8 @@ class _FakeClient:
         return {"quotes": {SYMBOL: {"bp": 5.00, "ap": 5.40}}}
 
     def submit_option_order(self, *, symbol, qty, side, order_type="market",
-                            time_in_force="day", limit_price=None, stop_price=None):
+                            time_in_force="day", limit_price=None, stop_price=None,
+                            position_intent=None):
         if order_type == "market":
             self.market_orders.append({"symbol": symbol, "qty": qty})
             self.held_qty = 0  # market fill flattens the position

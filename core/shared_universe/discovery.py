@@ -529,17 +529,36 @@ def fetch_daily_metrics(
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["ticker", "last_price", "avg_dollar_volume_20d", "history_days"])
 
 
-def fetch_market_caps(tickers: Sequence[str], *, request_delay: float = 0.4) -> pd.DataFrame:
-    """Market cap per ticker via yfinance fast_info (rate-limit friendly)."""
+def fetch_market_caps(
+    tickers: Sequence[str], *, request_delay: float = 0.4, request_timeout: float = 10.0
+) -> pd.DataFrame:
+    """Market cap per ticker via yfinance fast_info (rate-limit friendly).
+
+    ``request_timeout`` bounds each underlying HTTP call. yfinance's default
+    session has no timeout, so a broken connection to Yahoo (observed
+    2026-07-22: "Connection refused" on one ticker) can hang for tens of
+    minutes on a single name -- the per-ticker try/except below only guards
+    against *errors*, not a stall -- burning the whole nightly discovery
+    step's time budget until the wrapper's hard `timeout` kills it and
+    every ticker after the stuck one is silently never attempted. A shared
+    session with a real timeout turns that into a fast per-ticker failure so
+    the loop keeps moving.
+    """
     import time
 
     import yfinance as yf
+    from curl_cffi import requests as curl_requests
+
+    # Match yfinance's own default session construction (browser
+    # impersonation avoids Yahoo blocking non-browser-like clients) but with
+    # an explicit timeout instead of none.
+    session = curl_requests.Session(impersonate="chrome", timeout=request_timeout)
 
     rows = []
     for ticker in [clean_ticker(t) for t in tickers if clean_ticker(t)]:
         mcap = None
         try:
-            yt = yf.Ticker(ticker)
+            yt = yf.Ticker(ticker, session=session)
             mcap = yt.fast_info.get("market_cap")
             if mcap is None:
                 mcap = yt.info.get("marketCap")

@@ -80,6 +80,46 @@ _OPTION_PROFIT_TRAIL_GIVEBACK_PCT = 0.25
 _OPTION_TAKE_PROFIT_PCT = 3.00
 _RESTORED_UNKNOWN_MAX_LOSS_PCT = -0.35
 
+# The broker account is shared across every live module. Each one persists its
+# OWN managed-position state precisely so a sibling never has to guess at
+# another module's book -- so broker reconciliation must exclude anything a
+# sibling currently claims before adopting an untracked position or flattening
+# an "assigned equity" lot. Without this, Swing's reconcile can silently take
+# over (or auto-sell) a position another module is actively managing: on
+# 2026-07-21 Swing force-sold HTF Swing's legitimate 100-share FIG position as
+# a false-positive option-exercise assignment, because Swing's universe
+# happened to also include FIG and nothing checked HTF's own managed state.
+_SIBLING_MODULE_STATE_PATHS = (
+    Path("strategies/momentum_expansion/live/momentum_live_state.json"),
+    Path("strategies/multi_ticker_swing_htf/live/htf_live_state.json"),
+    Path("signals/meta_context/meta_ranker/live_state.json"),
+    Path("Data/inference/dealer_ranker/live_state.json"),
+)
+
+
+def _sibling_module_owned_symbols() -> set[str]:
+    """Equity tickers and option OCC symbols the 4H-family modules and Dealer
+    Ranker currently claim in their own persisted ``managed`` state. Best-effort:
+    a missing/unreadable state file just contributes nothing, it never blocks
+    Swing's own reconciliation."""
+    owned: set[str] = set()
+    for path in _SIBLING_MODULE_STATE_PATHS:
+        try:
+            state = json.loads(path.read_text())
+        except Exception:
+            continue
+        for entry in (state.get("managed") or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            symbol = entry.get("symbol")
+            if symbol:
+                owned.add(str(symbol).strip().upper())
+            occ = entry.get("occ")
+            if occ:
+                owned.add(str(occ).strip().upper())
+    return owned
+
+
 EventSink = Callable[[str, dict], None]
 
 
@@ -568,12 +608,16 @@ class SwingPositionManager:
 
         broker_positions, ignored = self._broker_swing_positions(universe)
         restored: list[dict[str, Any]] = []
+        sibling_owned = _sibling_module_owned_symbols()
 
         for broker_pos in broker_positions:
             ticker = broker_pos["ticker"]
             symbol = broker_pos["option_symbol"]
             if ticker in self._positions:
                 ignored.append({"symbol": symbol, "ticker": ticker, "reason": "already_tracked"})
+                continue
+            if symbol in sibling_owned or ticker in sibling_owned:
+                ignored.append({"symbol": symbol, "ticker": ticker, "reason": "owned_by_other_module"})
                 continue
 
             pos = self._restore_broker_position(
@@ -615,7 +659,8 @@ class SwingPositionManager:
         # prior session (an assignment can land while we were offline). This is
         # what keeps the flattener from selling another module's equity.
         owned_tickers = set(self._positions.keys()) | set(self._position_state_cache.keys())
-        assigned_equities = self._broker_assigned_equity_positions(universe, owned_tickers)
+        sibling_owned = _sibling_module_owned_symbols()
+        assigned_equities = self._broker_assigned_equity_positions(universe, owned_tickers, sibling_owned)
         broker_by_ticker: dict[str, dict[str, Any]] = {}
         duplicates: list[dict[str, Any]] = []
         for broker_pos in broker_positions:
@@ -686,6 +731,10 @@ class SwingPositionManager:
 
         for ticker, broker_pos in broker_by_ticker.items():
             if ticker in self._positions:
+                continue
+            broker_symbol = str(broker_pos.get("option_symbol", "")).upper()
+            if broker_symbol in sibling_owned or ticker in sibling_owned:
+                ignored.append({"symbol": broker_symbol, "ticker": ticker, "reason": "owned_by_other_module"})
                 continue
             pos = self._restore_broker_position(
                 broker_pos,
@@ -773,6 +822,7 @@ class SwingPositionManager:
         self,
         universe: dict[str, TickerConfig],
         owned_tickers: set[str],
+        sibling_owned: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Detect possible exercised/assigned option lots now held as shares.
 
@@ -782,8 +832,14 @@ class SwingPositionManager:
         membership alone is NOT enough to claim a lot. We only flag a lot when
         the swing book actually has option-ownership history for that ticker
         (currently tracked, or persisted before a restart). Anything else is
-        another module's position and must be left untouched.
+        another module's position and must be left untouched. ``sibling_owned``
+        is an absolute veto on top of that: even if Swing's own history looks
+        like a match, a symbol a sibling module's OWN managed state currently
+        claims is never flattened (2026-07-21: this is exactly how a legitimate
+        HTF Swing equity position got force-sold as a false-positive
+        assignment).
         """
+        sibling_owned = sibling_owned or set()
         resp = self._client.get_positions()
         raw_positions = _extract_positions(resp)
         positions: list[dict[str, Any]] = []
@@ -791,6 +847,8 @@ class SwingPositionManager:
         for raw in raw_positions:
             symbol = str(raw.get("symbol", "")).strip().upper()
             if symbol not in universe:
+                continue
+            if symbol in sibling_owned:
                 continue
             if symbol not in owned_tickers:
                 # Equity lot owned by another module (or never an assignment of
@@ -1502,6 +1560,7 @@ class SwingPositionManager:
                     order_type="limit",
                     time_in_force="day",
                     limit_price=limit_price,
+                    position_intent="sell_to_close",
                 )
             except Exception as exc:
                 if _is_option_tick(limit_price):
@@ -1679,6 +1738,7 @@ class SwingPositionManager:
                 side="sell",
                 order_type="market",
                 time_in_force="day",
+                position_intent="sell_to_close",
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[%s] market close fallback FAILED symbol=%s error=%s", pos.ticker, symbol, exc)

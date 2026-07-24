@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -25,38 +26,63 @@ def _backup_existing_token() -> Path | None:
     return backup_path
 
 
+# Schwab's refresh tokens are single-use/rotating: loading the token file can
+# silently refresh-and-rewrite it. The dealer-positioning capture runs up to
+# 8 threads in this same process, each historically building its own
+# SchwabClient() per symbol/scope task (thousands of times a night). Without
+# a shared, locked client, concurrent loads race on the same refresh token —
+# one thread's refresh invalidates the token the others already have in
+# memory, and all of them fall through to schwab-py's interactive manual
+# login flow at once (observed 2026-07-22: 8 simultaneous "Redirect URL>"
+# prompts, nothing able to answer any of them, blocking every Schwab-backed
+# job for the rest of the day). Caching one client per process for the
+# common (non-force_manual) path removes the race entirely.
+_client_lock = threading.Lock()
+_cached_client = None
+
+
 def _create_or_load_client(force_manual: bool = False):
     """
     Uses schwab-py's helpers to either:
     - Create a new token via a manual browser flow (first run), or
     - Load & refresh an existing token from disk (later runs).
     """
-    if force_manual:
-        backup_path = _backup_existing_token()
-        if backup_path is not None:
-            print(f"Backed up existing token file to: {backup_path}")
-        client = client_from_manual_flow(
-            api_key=API_KEY,
-            app_secret=APP_SECRET,
-            callback_url=CALLBACK_URL,
-            token_path=str(TOKEN_PATH)
-        )
-    elif TOKEN_PATH.exists():
-        # Reuse existing token file; schwab-py will refresh as needed
-        client = client_from_token_file(
-            token_path=str(TOKEN_PATH),
-            api_key=API_KEY,
-            app_secret=APP_SECRET
-        )
-    else:
-        # First-time login: walks you through copy-paste OAuth flow in terminal
-        client = client_from_manual_flow(
-            api_key=API_KEY,
-            app_secret=APP_SECRET,
-            callback_url=CALLBACK_URL,
-            token_path=str(TOKEN_PATH)
-        )
+    global _cached_client
+    if not force_manual:
+        with _client_lock:
+            if _cached_client is not None:
+                return _cached_client
+            if TOKEN_PATH.exists():
+                _cached_client = client_from_token_file(
+                    token_path=str(TOKEN_PATH),
+                    api_key=API_KEY,
+                    app_secret=APP_SECRET
+                )
+            else:
+                # First-time login: walks you through copy-paste OAuth flow in terminal
+                _cached_client = client_from_manual_flow(
+                    api_key=API_KEY,
+                    app_secret=APP_SECRET,
+                    callback_url=CALLBACK_URL,
+                    token_path=str(TOKEN_PATH)
+                )
+            return _cached_client
 
+    # force_manual: an explicit, deliberate reauth request (e.g. `--reauth`).
+    # Back up whatever's on disk and always do a fresh interactive login,
+    # then update the cache so any later non-forced call in this same
+    # process reuses this new client instead of re-reading the file.
+    backup_path = _backup_existing_token()
+    if backup_path is not None:
+        print(f"Backed up existing token file to: {backup_path}")
+    client = client_from_manual_flow(
+        api_key=API_KEY,
+        app_secret=APP_SECRET,
+        callback_url=CALLBACK_URL,
+        token_path=str(TOKEN_PATH)
+    )
+    with _client_lock:
+        _cached_client = client
     return client
 
 

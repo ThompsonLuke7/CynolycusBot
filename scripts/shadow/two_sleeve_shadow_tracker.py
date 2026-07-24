@@ -166,9 +166,17 @@ def price_hypothetical_spreads(ticker: str, entry_price: float) -> dict:
     ladder_path = snap_dir / "dealer_strike_ladder.parquet"
     if not ladder_path.exists():
         return {"available": False, "reason": "no_ladder_file", "snapshot_date": snap_dir.name}
-    df = pd.read_parquet(ladder_path, columns=[
-        "symbol", "scope", "spot", "strike", "call_delta", "call_iv",
-        "put_delta", "put_iv"])
+    needed_cols = ["symbol", "scope", "spot", "strike", "call_delta", "call_iv", "put_delta", "put_iv"]
+    # A day where the dealer capture itself failed (e.g. a Schwab auth outage,
+    # as on 2026-07-22: 0/2790 requests succeeded) still writes a ladder file,
+    # but an empty one — none of these columns exist on it, only capture
+    # bookkeeping. Check the on-disk schema before the typed column read
+    # instead of letting pyarrow raise, so a bad capture day degrades to
+    # "unavailable" like every other gap here rather than crashing the run.
+    existing_cols = set(pq.ParquetFile(ladder_path).schema_arrow.names)
+    if not set(needed_cols).issubset(existing_cols):
+        return {"available": False, "reason": "ladder_file_missing_columns", "snapshot_date": snap_dir.name}
+    df = pd.read_parquet(ladder_path, columns=needed_cols)
     sub = df[(df["symbol"] == ticker) & (df["scope"] == "daily_week")]
     if sub.empty:
         sub = df[(df["symbol"] == ticker) & (df["scope"] == "two_months")]
@@ -317,9 +325,23 @@ def run_module(module: str, cfg: dict) -> None:
                 print(f"  [{ticker}] no {cfg['split_feature']} value yet "
                       f"(no shared bars / insufficient history) — will retry next run")
                 continue
+            # A position opened THIS cycle by the real runner doesn't get
+            # `entry_avg_price` until its next management pass (that field is
+            # only backfilled from the broker's avg_entry on already-held
+            # positions — see core/live_4h_exec.py's build_mixed_plan). Fall
+            # back to the order-time reference price, else skip and retry once
+            # the runner's next cycle fills it in — never crash the whole
+            # module's shadow run over one freshly-opened ticker.
+            raw_entry_price = pos.get("entry_avg_price")
+            if raw_entry_price is None:
+                raw_entry_price = (pos.get("order_audit") or {}).get("reference_price")
+            if raw_entry_price is None:
+                print(f"  [{ticker}] no entry_avg_price yet (position opened this cycle, "
+                      f"not yet priced) — will retry next run")
+                continue
             is_tail = (fval >= cfg["split_thresh"]) == cfg["split_positive"]
             policy = TAIL_POLICY if is_tail else HARVEST_POLICY
-            entry_price = float(pos["entry_avg_price"])
+            entry_price = float(raw_entry_price)
             record = {
                 "ticker": ticker, "entry_bar": pos["entry_bar"], "entry_price": entry_price,
                 "sleeve": "tail" if is_tail else "harvest", "policy": policy["name"],

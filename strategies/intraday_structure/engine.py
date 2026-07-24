@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import threading
 from collections import defaultdict
 from dataclasses import replace
 from datetime import timedelta
@@ -153,7 +152,15 @@ class IntradayStructureEngine:
             if (candidate.ticker, candidate.direction) not in self.candidates:
                 continue
             self._evaluate_candidate(candidate, bar)
-        self.persist()
+        # persist() serializes the WHOLE engine state (candidates/setups/histories),
+        # which grows all session; calling it on every bar (not just when
+        # something actually changed) made the per-bar cost scale with total
+        # accumulated state instead of O(1), and was the real driver behind the
+        # shared bar queue backing up in the last ~40min of RTH (2026-07-20/21).
+        # on_price_update() below already only persists on a real transition --
+        # this matches that existing pattern.
+        if len(self.transitions) > emitted_before:
+            self.persist()
         return self.transitions[emitted_before:]
 
     def on_price_update(self, update: PriceUpdate) -> list[StateTransition]:

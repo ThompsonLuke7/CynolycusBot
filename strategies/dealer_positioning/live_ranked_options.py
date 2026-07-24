@@ -532,6 +532,14 @@ def main() -> int:
             plan.new_managed,
             plan.limits,
         )
+        def _persist_managed() -> None:
+            # Save after every fill, not just at the end of the plan, so a
+            # sibling module's broker reconcile never finds a fresh position
+            # missing from this module's on-disk managed state (see
+            # core.live_4h_exec.execute_plan's persist_managed docstring).
+            state["managed"] = plan.new_managed
+            _save_state(state)
+
         execute_plan(
             client,
             plan=active_plan,
@@ -543,6 +551,7 @@ def main() -> int:
             module=MODULE,
             pos_lookup=pos_info,
             bar=bar,
+            persist_managed=_persist_managed,
         )
         state["managed"] = plan.new_managed
         state.setdefault("history", []).append(

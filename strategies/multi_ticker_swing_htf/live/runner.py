@@ -420,6 +420,15 @@ def _execute(
                         )
                     else:
                         drop_failed_entry(new_managed, sym)
+                finally:
+                    # Save after every fill, not just at the end of the plan, so a
+                    # sibling module's broker reconcile never finds a fresh
+                    # position missing from this module's on-disk managed state
+                    # (the 2026-07-23 IOT incident: Dealer Ranker's fresh buy was
+                    # adopted and defensively liquidated by Swing because it
+                    # wasn't yet persisted here).
+                    state["managed"] = new_managed
+                    _save_state(state)
         state["managed"] = new_managed
         _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits, contract_selection, dropped)
         if plan:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -8,6 +9,7 @@ import pandas as pd
 import pytest
 
 from strategies.dealer_positioning.scripts.capture_historical_snapshots import (
+    _load_prior_summary,
     _matrix_features,
     _summary_row,
     count_candidate_symbols,
@@ -84,3 +86,32 @@ def test_snapshot_summary_persists_requested_level_and_matrix_features():
     assert summary["wall_dominance"] == pytest.approx(2.0)
     assert summary["snapshot_date"] == "2026-07-02"
     assert json.loads(summary["expirations"]) == ["2026-07-10"]
+
+
+def test_load_prior_summary_no_future_warning_with_an_empty_day(tmp_path):
+    # 2026-07-13's summary has rows; 2026-07-14's is present but empty (e.g. a
+    # capture that ran with zero eligible candidates) -- pandas warns on
+    # concat unless empty/all-NA frames are excluded first.
+    day1 = tmp_path / "20260713"
+    day1.mkdir()
+    pd.DataFrame({"symbol": ["AAA"], "scope": ["daily_week"], "captured_at": ["2026-07-13T20:00:00Z"]}).to_parquet(
+        day1 / "dealer_level_summary.parquet", index=False
+    )
+    day2 = tmp_path / "20260714"
+    day2.mkdir()
+    pd.DataFrame(columns=["symbol", "scope", "captured_at"]).to_parquet(
+        day2 / "dealer_level_summary.parquet", index=False
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = _load_prior_summary(output_root=tmp_path, before_date="2026-07-15")
+
+    concat_warnings = [w for w in caught if issubclass(w.category, FutureWarning) and "concat" in str(w.message)]
+    assert concat_warnings == []
+    assert list(out["symbol"]) == ["AAA"]
+
+
+def test_load_prior_summary_missing_root_returns_empty_frame(tmp_path):
+    out = _load_prior_summary(output_root=tmp_path / "missing", before_date="2026-07-15")
+    assert out.empty

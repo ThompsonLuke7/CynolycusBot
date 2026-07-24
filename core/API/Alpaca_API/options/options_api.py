@@ -289,6 +289,7 @@ class AlpacaOptionsClient:
         time_in_force: str = "day",
         limit_price: float | None = None,
         stop_price: float | None = None,
+        position_intent: str | None = None,
     ) -> Any:
         """
         POST /v2/orders.
@@ -305,6 +306,8 @@ class AlpacaOptionsClient:
             payload["limit_price"] = float(limit_price)
         if stop_price is not None:
             payload["stop_price"] = float(stop_price)
+        if position_intent is not None:
+            payload["position_intent"] = position_intent
         return self._request("POST", url, json_body=payload)
 
     def submit_option_order(
@@ -317,9 +320,15 @@ class AlpacaOptionsClient:
         time_in_force: str = "day",
         limit_price: float | None = None,
         stop_price: float | None = None,
+        position_intent: str | None = None,
     ) -> Any:
         """
         POST /v2/orders with an option symbol.
+
+        ``position_intent`` (e.g. "sell_to_close", "buy_to_open") disambiguates
+        options orders explicitly instead of relying on Alpaca to infer intent
+        from current position state. Optional and omitted from the payload
+        unless a caller passes it, so existing call sites are unaffected.
         """
         return self.submit_order(
             symbol=symbol,
@@ -329,4 +338,5 @@ class AlpacaOptionsClient:
             time_in_force=time_in_force,
             limit_price=limit_price,
             stop_price=stop_price,
+            position_intent=position_intent,
         )

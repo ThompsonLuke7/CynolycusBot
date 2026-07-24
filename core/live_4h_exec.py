@@ -351,6 +351,7 @@ def execute_plan(
     module: str | None = None,
     pos_lookup: dict | None = None,
     bar: Any = None,
+    persist_managed: Callable[[], None] | None = None,
 ) -> set[str]:
     """Submit a mixed plan (paper/live). Each order routes per its 5th tuple element.
 
@@ -362,6 +363,17 @@ def execute_plan(
     broker refused (e.g. after-hours 403) never becomes a phantom position.
     Filled exits are written to the realized-PnL ledger when `module`/`pos_lookup`
     are supplied. Returns the set of order symbols whose submission failed.
+
+    `persist_managed`, when supplied, is called right after each order fills so
+    the on-disk managed-state file reflects the new position immediately rather
+    than only after the whole (possibly multi-symbol) plan finishes. Without
+    this, a sibling module's broker reconciliation can poll Alpaca directly in
+    the gap between "order filled" and "plan-wide state save", see the freshly
+    opened position with no owner on disk, and adopt + defensively liquidate it
+    as an "unknown restored" position — this is exactly what happened to Dealer
+    Ranker's IOT260724C00031500 buy on 2026-07-23, force-sold by Swing 2 minutes
+    later for -$4,945 because Swing's reconcile ran before this module's
+    end-of-plan `_save_state` had written the fill.
     """
     limits = limits or {}
     failed: set[str] = set()
@@ -408,6 +420,12 @@ def execute_plan(
                 )
             elif new_managed is not None:
                 drop_failed_entry(new_managed, sym)
+        finally:
+            if persist_managed is not None:
+                try:
+                    persist_managed()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("execute_plan: persist_managed callback failed after %s %s: %s", side, sym, exc)
     return failed
 
 

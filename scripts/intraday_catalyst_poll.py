@@ -98,7 +98,11 @@ def collect_recent_records(
     if "clinicaltrials" in sources:
         frames.append(fetch_clinicaltrials_updates(tickers, start=start_str, end=end_str, max_pages=2))
 
-    raw = pd.concat(frames, ignore_index=True) if frames else empty_news_frame()
+    # Drop empty/all-NA frames before concat: pandas deprecated including them
+    # in dtype resolution, and most polls have at least one source come back
+    # with zero rows for the lookback window.
+    non_empty = [f for f in frames if not f.empty]
+    raw = pd.concat(non_empty, ignore_index=True) if non_empty else empty_news_frame()
     if raw.empty:
         return raw
     raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True, errors="coerce")

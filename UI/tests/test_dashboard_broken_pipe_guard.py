@@ -8,7 +8,10 @@ ConnectionResetError tracebacks were logged in one session (dealer_ranker_dashbo
 amethyst_dashboard 9, dealer_positioning_dashboard 2) -- all from a browser tab
 closing or polling past its timeout mid-response, which is normal HTTP server
 behavior, not an application bug. `dealer_ranker_dashboard.py`'s `_send` already
-caught this; the same guard is now applied consistently to the other five.
+caught this; the same guard was applied to the other five, and (2026-07-21,
+after the fix landed) momentum_dashboard.py turned out to be the ONE dashboard
+missed -- with the cache-stampede that had been masking its own write failures
+fixed, it became 96% of the next day's BrokenPipe count. Now covered too.
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ from UI.dealer_ranker_dashboard import DealerRankerHandler
 from UI.htf_dashboard import HTFHandler
 from UI.live_dashboard import DashboardHandler
 from UI.meta_ranker_dashboard import MetaRankerHandler
+from UI.momentum_dashboard import MomentumHandler
 
 
 class _FakeWfile:
@@ -55,6 +59,7 @@ def _bare_handler(cls):
         (MetaRankerHandler, "_send", lambda h: h._send(b"{}")),
         (HTFHandler, "_send", lambda h: h._send(b"{}")),
         (AmethystHandler, "_send", lambda h: h._send(b"{}")),
+        (MomentumHandler, "_send", lambda h: h._send(b"{}")),
         (DashboardHandler, "_write_json", lambda h: h._write_json({})),
         (DashboardHandler, "_write_text", lambda h: h._write_text("hi")),
         (DealerDashboardHandler, "_write_json", lambda h: h._write_json({})),
@@ -67,7 +72,7 @@ def test_write_path_swallows_broken_pipe(cls, method, call):
     assert h.close_connection is True
 
 
-@pytest.mark.parametrize("cls", [DealerRankerHandler, MetaRankerHandler, HTFHandler, AmethystHandler])
+@pytest.mark.parametrize("cls", [DealerRankerHandler, MetaRankerHandler, HTFHandler, AmethystHandler, MomentumHandler])
 def test_send_still_sets_headers_on_success(cls):
     class _OkWfile:
         def __init__(self):
