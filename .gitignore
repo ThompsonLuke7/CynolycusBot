@@ -316,3 +316,6 @@ themes/dynamic_theme/outputs/
 
 # Isolated feature worktrees created by Codex/Superpowers workflows.
 .worktrees/
+
+# Durable local progress ledgers for subagent-driven development.
+.superpowers/
