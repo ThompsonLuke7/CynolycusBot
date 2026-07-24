@@ -217,7 +217,20 @@ PYEOF
 
   if [ "$emerging_theme_exit" -eq 0 ]; then
     echo "[$(ts)] themes — rebuilding explorer"
-    timeout --signal=TERM --kill-after=30s 1200s "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_explorer
+    timeout --signal=TERM --kill-after=30s 1200s \
+      "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_explorer
+    explorer_build_exit=$?
+    echo "[$(ts)] theme explorer build exit=$explorer_build_exit"
+
+    if [ "$explorer_build_exit" -eq 0 ]; then
+      echo "[$(ts)] themes — publishing explorer"
+      timeout --signal=TERM --kill-after=30s 300s \
+        "$PYTHON" -u scripts/publish_theme_explorer.py
+      explorer_publish_exit=$?
+      echo "[$(ts)] theme explorer publication exit=$explorer_publish_exit"
+    else
+      echo "[$(ts)] theme explorer publication skipped: build failed"
+    fi
   fi
 
   # 9) Earnings enrichment is useful context, but it is deliberately outside
