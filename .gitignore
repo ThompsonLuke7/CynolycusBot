@@ -313,3 +313,6 @@ themes/dynamic_theme/outputs/
 # Regenerate via scripts/capstone/baseline_strategies.py.
 !research/capstone/baselines/*.csv
 !research/capstone/baselines/*.json
+
+# Isolated feature worktrees created by Codex/Superpowers workflows.
+.worktrees/
