@@ -147,7 +147,7 @@ def _destination_in_checkout(checkout: Path, temporary_root: Path) -> Path:
     if checkout.is_symlink() or not _is_within(resolved_checkout, resolved_temporary_root):
         raise PublishError("Temporary Theme Explorer checkout escapes its temporary directory")
 
-    theme_directory = checkout / "theme-explorer"
+    theme_directory = checkout / "docs"
     destination = theme_directory / "index.html"
     for path in (theme_directory, destination):
         if path.is_symlink():

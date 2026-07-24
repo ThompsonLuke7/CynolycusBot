@@ -72,6 +72,15 @@ STATE_PATH = REPO / "Data/inference/dealer_ranker/live_state.json"
 AUDIT_LOG = REPO / "Data/inference/dealer_ranker/live_signal_audit.jsonl"
 MODULE = "dealer_ranker"
 _ET = ZoneInfo("America/New_York")
+# Matches meta_ranker.options_exec.route_option_or_shares's ROUTE_MIN_OPEN_INTEREST /
+# ROUTE_MIN_VOLUME -- Dealer Ranker previously had no liquidity floor at all, so
+# nearest-ATM selection could (and on 2026-07-23 did) pick a contract with zero
+# open interest and a ~195%-of-mid bid/ask spread (IOT260724C00031500, bid=0.03/
+# ask=2.16). The fill crossed near the ask; the position was down ~98% against
+# the bid before the underlying moved at all. Skip candidates this thin instead
+# of buying them.
+_MIN_OPEN_INTEREST = 500
+_MIN_VOLUME = 100
 
 
 def _load_state() -> dict:
@@ -390,6 +399,10 @@ def _select_atm_option(
         bid, ask = _latest_quote(client, occ)
     if not (bid and ask and bid > 0 and ask > 0):
         return None, "no_two_sided_quote"
+    open_interest = int(_as_float(snap.get("openInterest")) or 0)
+    volume = int(_as_float(snap.get("dailyVolume")) or 0)
+    if open_interest < _MIN_OPEN_INTEREST or volume < _MIN_VOLUME:
+        return None, f"illiquid_option(oi={open_interest},vol={volume})"
     mid = (bid + ask) / 2.0
     greeks = (snap or {}).get("greeks") or {}
     dte = max(0, (expiry - now_et.date()).days) if isinstance(expiry, date) else None
@@ -402,8 +415,8 @@ def _select_atm_option(
             "delta": _as_float(greeks.get("delta")),
             "expiry": exp_str,
             "strike": strike,
-            "open_interest": int(_as_float(snap.get("openInterest")) or 0),
-            "volume": int(_as_float(snap.get("dailyVolume")) or 0),
+            "open_interest": open_interest,
+            "volume": volume,
             "spread": ((ask - bid) / mid) if mid > 0 else None,
             "option_type": cp,
             "selection_method": "nearest_atm_non_0dte",
