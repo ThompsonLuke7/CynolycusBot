@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACT = REPO_ROOT / "themes/dynamic_theme/viz/theme_explorer.html"
+PUBLISH_REPO_URL = "git@github.com:ThompsonLuke7/thompsonluke7.github.io.git"
+PUBLISH_BRANCH = "main"
 
 PublishResult = Literal["disabled", "unchanged", "published"]
 
@@ -31,7 +33,7 @@ class PublishConfig:
     deploy_key_path: Path | None
     git_name: str
     git_email: str
-    branch: str = "main"
+    branch: str = PUBLISH_BRANCH
 
 
 def _enabled(value: str | None) -> bool:
@@ -60,6 +62,15 @@ def config_from_env(environ: Mapping[str, str]) -> PublishConfig:
     key_path = Path(values["THEME_EXPLORER_DEPLOY_KEY_PATH"]).expanduser()
     if not key_path.is_file() or not os.access(key_path, os.R_OK):
         raise PublishError("THEME_EXPLORER_DEPLOY_KEY_PATH is not a readable file")
+    if values["THEME_EXPLORER_PUBLISH_REPO"] != PUBLISH_REPO_URL:
+        raise PublishError(
+            "THEME_EXPLORER_PUBLISH_REPO must be "
+            "git@github.com:ThompsonLuke7/thompsonluke7.github.io.git"
+        )
+
+    branch = environ.get("THEME_EXPLORER_PUBLISH_BRANCH", PUBLISH_BRANCH).strip()
+    if branch != PUBLISH_BRANCH:
+        raise PublishError("THEME_EXPLORER_PUBLISH_BRANCH must be main")
 
     return PublishConfig(
         enabled=True,
@@ -67,6 +78,7 @@ def config_from_env(environ: Mapping[str, str]) -> PublishConfig:
         deploy_key_path=key_path,
         git_name=values["THEME_EXPLORER_GIT_NAME"],
         git_email=values["THEME_EXPLORER_GIT_EMAIL"],
+        branch=PUBLISH_BRANCH,
     )
 
 
@@ -117,6 +129,49 @@ def _run_git(
     return result
 
 
+def _is_within(path: Path, directory: Path) -> bool:
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
+def _destination_in_checkout(checkout: Path, temporary_root: Path) -> Path:
+    """Return the only permitted destination after rejecting symlink escapes."""
+    try:
+        resolved_temporary_root = temporary_root.resolve(strict=True)
+        resolved_checkout = checkout.resolve(strict=True)
+    except OSError as exc:
+        raise PublishError("Temporary Theme Explorer checkout is unavailable") from exc
+    if checkout.is_symlink() or not _is_within(resolved_checkout, resolved_temporary_root):
+        raise PublishError("Temporary Theme Explorer checkout escapes its temporary directory")
+
+    theme_directory = checkout / "theme-explorer"
+    destination = theme_directory / "index.html"
+    for path in (theme_directory, destination):
+        if path.is_symlink():
+            raise PublishError(f"Theme Explorer destination contains a symlink: {path.name}")
+
+    try:
+        resolved_destination = destination.resolve(strict=False)
+    except OSError as exc:
+        raise PublishError("Theme Explorer destination cannot be resolved safely") from exc
+    if not _is_within(resolved_destination, resolved_checkout):
+        raise PublishError("Theme Explorer destination escapes the temporary checkout")
+    return destination
+
+
+def _validate_publish_config(config: PublishConfig) -> None:
+    if config.branch != PUBLISH_BRANCH:
+        raise PublishError("Theme Explorer publication branch must be main")
+    if config.repo_url != PUBLISH_REPO_URL:
+        raise PublishError(
+            "Theme Explorer publication repository must be "
+            "git@github.com:ThompsonLuke7/thompsonluke7.github.io.git"
+        )
+
+
 def publish(
     config: PublishConfig,
     artifact_path: Path = DEFAULT_ARTIFACT,
@@ -127,6 +182,7 @@ def publish(
         return "disabled"
     if config.deploy_key_path is None:
         raise PublishError("Enabled publication has no deploy key")
+    _validate_publish_config(config)
 
     artifact = validate_artifact(artifact_path)
     git_env = _git_env(config.deploy_key_path)
@@ -150,10 +206,11 @@ def publish(
             operation="clone",
         )
 
-        destination = checkout / "theme-explorer/index.html"
+        destination = _destination_in_checkout(checkout, tmp_path)
         if destination.exists() and destination.read_bytes() == artifact:
             return "unchanged"
         destination.parent.mkdir(parents=True, exist_ok=True)
+        destination = _destination_in_checkout(checkout, tmp_path)
         destination.write_bytes(artifact)
 
         _run_git(
