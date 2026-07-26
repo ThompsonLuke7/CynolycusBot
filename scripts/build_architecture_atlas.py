@@ -448,6 +448,9 @@ def _write_artifact(static_dir: Path, target: Path, payload: dict[str, Any]) -> 
     if not index.is_file():
         _fail("static directory must contain index.html")
     _inline_data(index, payload)
+    html = index.read_text(encoding="utf-8")
+    asset_revision = payload["metadata"]["source_manifest_sha256"][:12]
+    index.write_text(html.replace("__ATLAS_ASSET_REV__", asset_revision), encoding="utf-8")
 
 
 def _replace_output(temp_output: Path, output_dir: Path) -> None:

@@ -87,8 +87,9 @@ def atlas_repo(tmp_path: Path) -> Path:
     static = tmp_path / "UI" / "architecture_atlas" / "static"
     static.mkdir(parents=True)
     (static / "index.html").write_text(
-        "<!doctype html><html><head>/*__ATLAS_DATA__*/</head>"
-        "<body><script src='atlas.js'></script></body></html>",
+        "<!doctype html><html><head>/*__ATLAS_DATA__*/"
+        "<link rel='stylesheet' href='atlas.css?v=__ATLAS_ASSET_REV__'></head>"
+        "<body><script src='atlas.js?v=__ATLAS_ASSET_REV__'></script></body></html>",
         encoding="utf-8",
     )
     (static / "atlas.js").write_text("window.started = true;", encoding="utf-8")
@@ -135,6 +136,11 @@ def test_valid_build_is_deterministic_and_embeds_the_right_datasets(atlas_repo: 
     }
     assert all("local" not in node for node in public["datasets"]["public"]["nodes"])
     assert (atlas_repo / "UI/architecture_atlas/dist/public/atlas.js").is_file()
+    public_html = (atlas_repo / "UI/architecture_atlas/dist/public/index.html").read_text(encoding="utf-8")
+    asset_revision = first["source_manifest_sha256"][:12]
+    assert "__ATLAS_ASSET_REV__" not in public_html
+    assert f"atlas.css?v={asset_revision}" in public_html
+    assert f"atlas.js?v={asset_revision}" in public_html
 
     second = build_atlas(
         repo_root=atlas_repo,
