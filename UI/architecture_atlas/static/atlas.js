@@ -339,9 +339,9 @@
           "text-halign": "center",
           "overlay-opacity": 0,
           "underlay-color": function (ele) { return COLORS[ele.data("role")] || "#46f3ff"; },
-          "underlay-opacity": 0.055,
-          "underlay-padding": 8 * edgeScale,
-          "underlay-shape": "roundrectangle",
+          "underlay-opacity": 0.045,
+          "underlay-padding": 6 * edgeScale,
+          "underlay-shape": "cutrectangle",
           "shadow-blur": 22 * edgeScale,
           "shadow-color": "#000",
           "shadow-opacity": 0.38,
@@ -352,19 +352,31 @@
       },
       {
         selector: "node[role = 'data']",
-        style: {"shape": "barrel"}
+        style: {
+          "shape": "barrel",
+          "underlay-shape": "barrel"
+        }
       },
       {
         selector: "node[role = 'signal']",
-        style: {"shape": "hexagon"}
+        style: {
+          "shape": "hexagon",
+          "underlay-shape": "hexagon"
+        }
       },
       {
         selector: "node[role = 'policy']",
-        style: {"shape": "tag"}
+        style: {
+          "shape": "tag",
+          "underlay-shape": "tag"
+        }
       },
       {
         selector: "node[role = 'execution']",
-        style: {"shape": "roundrectangle"}
+        style: {
+          "shape": "roundrectangle",
+          "underlay-shape": "roundrectangle"
+        }
       },
       {
         selector: "node[focus = 'yes']",
