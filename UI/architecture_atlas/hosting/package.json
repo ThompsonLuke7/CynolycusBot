@@ -1,0 +1,20 @@
+{
+  "name": "cynolycus-system-atlas",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vinext build"
+  },
+  "dependencies": {
+    "@cloudflare/vite-plugin": "latest",
+    "@vinext/cloudflare": "latest",
+    "@vitejs/plugin-react": "latest",
+    "@vitejs/plugin-rsc": "latest",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "react-server-dom-webpack": "^19.2.6",
+    "vinext": "latest",
+    "vite": "^8.0.0",
+    "wrangler": "latest"
+  }
+}

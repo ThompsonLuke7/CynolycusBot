@@ -248,6 +248,9 @@ core/API/Schwab_API/schwab_tokens.json
 
 # Re-include editor settings and code/config caught by blanket rules
 !.vscode/settings.json
+!.openai/hosting.json
+!UI/architecture_atlas/source/architecture.json
+!UI/architecture_atlas/hosting/package.json
 !**/config/*.json
 !**/config/*.csv
 !examples/intraday_structure/*.json

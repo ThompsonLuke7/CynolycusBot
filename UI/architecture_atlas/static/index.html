@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#030711">
+  <meta name="description" content="Interactive architecture atlas for the CynolycusBot research and trading system.">
+  <title>Cynolycus // System Atlas</title>
+  <link rel="stylesheet" href="atlas.css">
+</head>
+<body>
+  <div class="ambient-grid" aria-hidden="true"></div>
+  <div class="ambient-noise" aria-hidden="true"></div>
+
+  <header class="command-header">
+    <a class="brand" href="#/system" aria-label="Cynolycus System Atlas home">
+      <span class="brand-sigil" aria-hidden="true">C</span>
+      <span>
+        <strong><i>CYNO</i>LYCUS</strong>
+        <small>INTERACTIVE SYSTEM ATLAS</small>
+      </span>
+    </a>
+
+    <nav id="breadcrumbs" class="breadcrumbs" aria-label="Current architecture path"></nav>
+
+    <div class="header-actions">
+      <button id="search-open" class="header-button search-button" type="button" aria-haspopup="dialog">
+        <span aria-hidden="true">⌕</span>
+        <span>Search</span>
+        <kbd>/</kbd>
+      </button>
+      <div id="dataset-switch" class="dataset-switch" role="group" aria-label="Architecture dataset">
+        <button type="button" data-dataset="public" aria-pressed="true">Public</button>
+        <button type="button" data-dataset="local" aria-pressed="false">Local full</button>
+      </div>
+      <button id="help-open" class="icon-button" type="button" aria-label="Open atlas guide">?</button>
+    </div>
+  </header>
+
+  <main class="atlas-shell">
+    <nav class="tool-rail" aria-label="Atlas tools">
+      <button id="home-button" class="rail-button active" type="button" aria-label="Return to system overview" title="System overview">
+        <span aria-hidden="true">⌘</span>
+      </button>
+      <button id="search-rail" class="rail-button" type="button" aria-label="Search architecture" title="Search">
+        <span aria-hidden="true">⌕</span>
+      </button>
+      <button id="filters-open" class="rail-button" type="button" aria-label="Filter relationships" title="Filters">
+        <span aria-hidden="true">≡</span>
+      </button>
+      <button id="outline-open" class="rail-button" type="button" aria-label="Open architecture outline" title="Outline">
+        <span aria-hidden="true">☷</span>
+      </button>
+      <button id="fit-button" class="rail-button" type="button" aria-label="Fit current graph in view" title="Fit graph">
+        <span aria-hidden="true">◎</span>
+      </button>
+    </nav>
+
+    <section class="graph-stage" aria-label="Interactive architecture graph">
+      <div id="scope-label" class="scope-label">SYSTEM OVERVIEW</div>
+      <button id="back-button" class="back-button" type="button" hidden>
+        <span aria-hidden="true">←</span>
+        <span>Back</span>
+      </button>
+      <div id="cy" role="application" aria-label="Zoomable Cynolycus architecture graph"></div>
+      <div id="graph-fallback" class="graph-fallback" hidden>
+        <strong>Graph view unavailable</strong>
+        <p>The complete architecture remains available in Outline.</p>
+        <button type="button" data-open-outline>Open outline</button>
+      </div>
+      <div class="graph-instruction">
+        Select to inspect · Enter or double-click to expand · Escape to go back
+      </div>
+    </section>
+
+    <aside id="inspector" class="inspector" aria-labelledby="inspector-title" aria-hidden="true">
+      <button id="inspector-close" class="panel-close" type="button" aria-label="Close details">×</button>
+      <div id="inspector-kicker" class="panel-kicker">SELECTED NODE</div>
+      <h1 id="inspector-title">CynolycusBot</h1>
+      <p id="inspector-summary" class="inspector-summary"></p>
+
+      <div class="telemetry-grid">
+        <div><small>Kind</small><strong id="inspector-kind">System</strong></div>
+        <div><small>Maturity</small><strong id="inspector-maturity">Mixed</strong></div>
+        <div><small>Mode</small><strong id="inspector-mode">Shared</strong></div>
+        <div><small>Navigation</small><strong id="inspector-navigation">Expandable</strong></div>
+      </div>
+
+      <section id="local-detail-block" class="inspector-section" hidden>
+        <h2>Local context</h2>
+        <p id="inspector-details"></p>
+        <dl class="local-facts">
+          <div><dt>Runtime owner</dt><dd id="inspector-owner"></dd></div>
+        </dl>
+      </section>
+
+      <section class="inspector-section">
+        <h2>Repository evidence</h2>
+        <ul id="inspector-paths" class="path-list"></ul>
+      </section>
+
+      <section class="inspector-section">
+        <h2>Connected flow</h2>
+        <ul id="inspector-connections" class="connection-list"></ul>
+      </section>
+
+      <div class="inspector-actions">
+        <button id="enter-domain" class="primary-action" type="button">Enter domain <span aria-hidden="true">→</span></button>
+        <button id="copy-link" class="secondary-action" type="button">Copy link</button>
+      </div>
+    </aside>
+
+    <aside id="filters-panel" class="floating-panel filters-panel" aria-labelledby="filters-title" hidden>
+      <button class="panel-close" type="button" data-close-panel="filters-panel" aria-label="Close filters">×</button>
+      <div class="panel-kicker">VISIBLE RELATIONSHIPS</div>
+      <h2 id="filters-title">Flow filters</h2>
+      <div id="edge-filters" class="filter-list"></div>
+      <label class="toggle-row">
+        <input id="show-research" type="checkbox" checked>
+        <span>Research and evidence nodes</span>
+      </label>
+      <button id="filters-reset" class="secondary-action full-width" type="button">Reset filters</button>
+    </aside>
+
+    <aside id="search-panel" class="floating-panel search-panel" role="dialog" aria-modal="false" aria-labelledby="search-title" hidden>
+      <button class="panel-close" type="button" data-close-panel="search-panel" aria-label="Close search">×</button>
+      <div class="panel-kicker">GLOBAL ARCHITECTURE SEARCH</div>
+      <h2 id="search-title">Jump to any component</h2>
+      <input id="search-input" type="search" autocomplete="off" placeholder="Models, features, policies, modules…">
+      <ol id="search-results" class="search-results"></ol>
+    </aside>
+
+    <aside id="outline-panel" class="outline-panel" aria-labelledby="outline-title" aria-hidden="true">
+      <button class="panel-close" type="button" data-close-panel="outline-panel" aria-label="Close outline">×</button>
+      <div class="panel-kicker">ACCESSIBLE SYSTEM MAP</div>
+      <h2 id="outline-title">Architecture outline</h2>
+      <div id="outline-tree" class="outline-tree"></div>
+    </aside>
+
+    <aside id="help-panel" class="floating-panel help-panel" aria-labelledby="help-title" hidden>
+      <button class="panel-close" type="button" data-close-panel="help-panel" aria-label="Close guide">×</button>
+      <div class="panel-kicker">ATLAS GUIDE</div>
+      <h2 id="help-title">How to explore</h2>
+      <ul>
+        <li>Select a node to inspect its purpose and evidence.</li>
+        <li>Press Enter or double-click an expandable node to focus its children.</li>
+        <li>Use breadcrumbs, Back, or Escape to return upward.</li>
+        <li>Public is presentation-safe. Local Full adds internal technical context.</li>
+        <li>The atlas is read-only and never connects to market or brokerage APIs.</li>
+      </ul>
+    </aside>
+
+    <div class="validation-readout" role="status" aria-live="polite">
+      <strong id="validation-state"><span aria-hidden="true">●</span> MANIFEST LOADING</strong>
+      <span id="validation-detail">Validating embedded architecture…</span>
+    </div>
+
+    <div id="minimap" class="minimap" aria-hidden="true">
+      <strong>ATLAS / MAP</strong>
+      <div id="minimap-nodes"></div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </main>
+
+  <script>/*__ATLAS_DATA__*/</script>
+  <script src="vendor/cytoscape.min.js"></script>
+  <script src="atlas.js"></script>
+</body>
+</html>
