@@ -45,6 +45,7 @@ from core.live_4h_exec import (
     submit_pending_open_entries,
 )
 from core.live_signal_audit import append_jsonl, build_signal_audit
+from core.option_liquidity import contract_liquidity
 from signals.meta_context.meta_ranker.options_exec import equity_order_tif
 from strategies.dealer_positioning.scripts.build_dealer_rankings import (
     RANKING_ROOT,
@@ -399,8 +400,12 @@ def _select_atm_option(
         bid, ask = _latest_quote(client, occ)
     if not (bid and ask and bid > 0 and ask > 0):
         return None, "no_two_sided_quote"
-    open_interest = int(_as_float(snap.get("openInterest")) or 0)
-    volume = int(_as_float(snap.get("dailyVolume")) or 0)
+    # Alpaca's snapshot has neither field (see core.option_liquidity); Schwab's
+    # chain does. `None` means unknown and must not read as zero.
+    liq = contract_liquidity(ticker, expiry=exp_str, strike=strike, option_type=cp)
+    if liq is None:
+        return None, "liquidity_unavailable(src=unavailable)"
+    open_interest, volume = liq.open_interest, liq.volume
     if open_interest < _MIN_OPEN_INTEREST or volume < _MIN_VOLUME:
         return None, f"illiquid_option(oi={open_interest},vol={volume})"
     mid = (bid + ask) / 2.0

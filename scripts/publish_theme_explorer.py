@@ -18,6 +18,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACT = REPO_ROOT / "themes/dynamic_theme/viz/theme_explorer.html"
 PUBLISH_REPO_URL = "git@github.com:ThompsonLuke7/thompsonluke7.github.io.git"
 PUBLISH_BRANCH = "main"
+# Single source of truth for the published location. GitHub Pages is configured
+# to serve this repository's docs directory, so docs/index.html is the live
+# Theme Explorer page. Both the write target and the `git add` pathspec derive
+# from it to prevent a silent mismatch between the generated artifact and the
+# deployed page.
+PUBLISH_DIRECTORY = "docs"
+PUBLISH_PATHSPEC = f"{PUBLISH_DIRECTORY}/index.html"
 
 PublishResult = Literal["disabled", "unchanged", "published"]
 
@@ -125,7 +132,14 @@ def _run_git(
         check=False,
     )
     if result.returncode != 0:
-        raise PublishError(f"Git {operation} failed with exit code {result.returncode}")
+        # Without git's own message a pathspec typo and an auth failure look
+        # identical in the nightly log, which is how the docs/ vs theme-explorer/
+        # mismatch went unnoticed. Truncated so a long remote error stays readable.
+        detail = (result.stderr or result.stdout or "").strip().replace("\n", " ")[:300]
+        raise PublishError(
+            f"Git {operation} failed with exit code {result.returncode}"
+            + (f": {detail}" if detail else "")
+        )
     return result
 
 
@@ -147,7 +161,7 @@ def _destination_in_checkout(checkout: Path, temporary_root: Path) -> Path:
     if checkout.is_symlink() or not _is_within(resolved_checkout, resolved_temporary_root):
         raise PublishError("Temporary Theme Explorer checkout escapes its temporary directory")
 
-    theme_directory = checkout / "docs"
+    theme_directory = checkout / PUBLISH_DIRECTORY
     destination = theme_directory / "index.html"
     for path in (theme_directory, destination):
         if path.is_symlink():
@@ -226,7 +240,7 @@ def publish(
             operation="identity configuration",
         )
         _run_git(
-            ["add", "--", "theme-explorer/index.html"],
+            ["add", "--", PUBLISH_PATHSPEC],
             cwd=checkout,
             env=git_env,
             operation="staging",

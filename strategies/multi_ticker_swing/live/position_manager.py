@@ -1174,6 +1174,7 @@ class SwingPositionManager:
                     exit_price=exit_price,
                     pnl_pct=pnl_pct,
                     order_error=None,
+                    fill=self._resolve_close_fill(state),
                 )
                 return
             if state.get("still_pending"):
@@ -1211,10 +1212,13 @@ class SwingPositionManager:
         )
         order_resp = None
         order_error: str | None = None
+        fill: dict[str, Any] | None = None
         if not self._dry_run:
             try:
                 close_result = self._submit_close_order(pos, reason=reason)
                 order_resp = close_result.get("response")
+                fill = self._resolve_close_fill(close_result)
+                close_result.update(fill)
                 self._last_close_failure_wall.pop(pos.ticker, None)
                 self._emit("order_submitted", {
                     "ticker": pos.ticker,
@@ -1226,6 +1230,7 @@ class SwingPositionManager:
                     "close_quote": close_result.get("close_quote"),
                     "response": _safe_response(order_resp),
                     "verification": close_result.get("verification"),
+                    **fill,
                 })
                 if close_result.get("abandoned_worthless"):
                     self._abandon_worthless_close(
@@ -1295,6 +1300,7 @@ class SwingPositionManager:
             exit_price=exit_price,
             pnl_pct=pnl_pct,
             order_error=order_error,
+            fill=fill,
         )
 
     def _emit_position_closed(
@@ -1305,14 +1311,31 @@ class SwingPositionManager:
         exit_price: float,
         pnl_pct: float,
         order_error: str | None,
+        fill: dict[str, Any] | None = None,
     ) -> None:
-        self._emit("position_closed", {
+        fill = fill or {}
+        fill_price = _positive_or_none(fill.get("fill_price"))
+        entry_premium = _positive_or_none(pos.option_entry_price)
+        payload = {
             **pos.to_dict(),
             "exit_price": exit_price,
             "exit_pnl_pct": float(pnl_pct),
             "exit_reason": reason,
             "order_error": order_error,
-        })
+            # Realized option economics from the actual fill. `exit_pnl_pct`
+            # above is the UNDERLYING move, which is not the trade's P&L.
+            "option_exit_price": fill_price,
+            "option_exit_filled_qty": fill.get("filled_qty"),
+            "option_exit_fill_source": fill.get("fill_source", "unavailable"),
+        }
+        if fill_price is not None and entry_premium is not None:
+            payload["option_realized_pnl"] = round(
+                (fill_price - entry_premium) * int(pos.qty) * 100.0, 2)
+            payload["option_realized_pct"] = round(fill_price / entry_premium - 1.0, 6)
+        else:
+            payload["option_realized_pnl"] = None
+            payload["option_realized_pct"] = None
+        self._emit("position_closed", payload)
         self._last_close_failure_wall.pop(pos.ticker, None)
         self._pending_close_orders.pop(pos.ticker, None)
         self._remove_deferred_trail_cache(pos)
@@ -1801,6 +1824,38 @@ class SwingPositionManager:
             logger.warning("quote context fetch failed symbol=%s: %s", symbol, exc)
             return {"quote_error": str(exc)}
 
+    def _resolve_close_fill(self, close_result: dict[str, Any]) -> dict[str, Any]:
+        """Resolve the actual exit fill for a close order.
+
+        The submit response is captured at ``pending_new`` with a null
+        ``filled_avg_price``, so the audit previously recorded no exit price at
+        all and realized P&L had to be proxied from the submitted limit. The
+        verification poll already holds the terminal order; when it does not
+        (verified via submit_response or positions_reconcile) one extra
+        ``get_order`` call fetches it.
+        """
+        verification = close_result.get("verification") or {}
+        order = verification.get("order") if isinstance(verification.get("order"), dict) else {}
+        fill_price = _positive_or_none(order.get("filled_avg_price"))
+        filled_qty = _finite_or_none(order.get("filled_qty"))
+        source = "verification_order"
+
+        order_id = str(verification.get("order_id") or "").strip()
+        if fill_price is None and order_id and verification.get("verified"):
+            try:
+                current = self._client.get_order(order_id)
+            except Exception as exc:
+                logger.warning("close fill lookup warning order_id=%s: %s", order_id, exc)
+            else:
+                if isinstance(current, dict):
+                    fill_price = _positive_or_none(current.get("filled_avg_price"))
+                    filled_qty = _finite_or_none(current.get("filled_qty"))
+                    source = "order_refetch"
+
+        if fill_price is None:
+            source = "unavailable"
+        return {"fill_price": fill_price, "filled_qty": filled_qty, "fill_source": source}
+
     def _verify_close_order(self, *, submitted_resp: dict[str, Any], symbol: str) -> dict[str, Any]:
         order_id = str(submitted_resp.get("id", "")).strip()
         last = submitted_resp
@@ -2034,6 +2089,13 @@ def _as_float(value: Any) -> float:
 def _finite_or_none(value: Any) -> float | None:
     out = _as_float(value)
     return float(out) if math.isfinite(out) else None
+
+
+def _positive_or_none(value: Any) -> float | None:
+    """Finite and strictly positive, so an unfilled order's 0/None price never
+    reads as a real fill."""
+    out = _finite_or_none(value)
+    return out if out is not None and out > 0.0 else None
 
 
 def _parse_dt(value: Any) -> datetime | None:

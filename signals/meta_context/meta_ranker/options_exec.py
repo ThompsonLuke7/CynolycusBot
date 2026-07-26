@@ -21,6 +21,7 @@ import numpy as np
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 from core.calendar import is_market_open_now
+from core.option_liquidity import contract_liquidity
 from strategies.dealer_positioning.gate import (
     SCOPE_MONTHLY,
     evaluate_dealer_gate,
@@ -161,8 +162,14 @@ def select_option(
     # judged by open interest + volume (see route_option_or_shares); a wide %%
     # spread on a cheap contract (e.g. 0.50/1.00) is normal and not disqualifying.
     spread = (ask - bid) / mid if mid > 0 else 1.0
-    oi = int(_as_float(sel_snap.get("openInterest")) or 0)
-    vol = int(_as_float(sel_snap.get("dailyVolume")) or 0)
+    # Alpaca's option snapshot carries no open interest or daily volume, so
+    # reading them off `sel_snap` always yielded 0 and force-routed every name to
+    # shares. Schwab's chain has both. `None` here means UNKNOWN, not zero — the
+    # routing gate must be able to tell those apart.
+    strike_value = _contract_strike(by_symbol[occ])
+    liq = contract_liquidity(ticker, expiry=exp_str, strike=strike_value, option_type="C")
+    oi = liq.open_interest if liq is not None else None
+    vol = liq.volume if liq is not None else None
     contracts_n = int(math.floor(per_name_usd / (mid * 100.0)))
     if contracts_n < 1:
         return None, "budget_lt_1_contract"
@@ -170,8 +177,9 @@ def select_option(
         {
             "ticker": ticker, "occ": occ, "contracts": contracts_n, "mid": mid,
             "limit": round(ask, 2), "delta": dlt, "expiry": exp_str,
-            "strike": _contract_strike(by_symbol[occ]), "notional": contracts_n * mid * 100.0,
+            "strike": strike_value, "notional": contracts_n * mid * 100.0,
             "open_interest": oi, "volume": vol, "spread": spread,
+            "liquidity_source": liq.source if liq is not None else "unavailable",
         },
         "ok",
     )
@@ -226,10 +234,17 @@ def route_option_or_shares(
     )
     if order is None:
         return "equity", None, f"no_option({reason})"
-    if order.get("open_interest", 0) < min_open_interest or order.get("volume", 0) < min_volume:
+    oi, vol = order.get("open_interest"), order.get("volume")
+    if oi is None or vol is None:
+        # Unverifiable liquidity is not the same as thin liquidity. Still route
+        # shares (the gate exists precisely to avoid trading a contract we cannot
+        # vet) but say so distinctly, so a broken data path is never mistaken for
+        # a market with no open interest.
         return "equity", order, (
-            f"illiquid_option(oi={order.get('open_interest', 0)},vol={order.get('volume', 0)})"
+            f"liquidity_unavailable(src={order.get('liquidity_source', 'unknown')})"
         )
+    if oi < min_open_interest or vol < min_volume:
+        return "equity", order, f"illiquid_option(oi={oi},vol={vol})"
     verdict = evaluate_dealer_gate(ticker, "call", current_price, dealer_scope)
     order["dealer_gate"] = verdict.to_dict()
     if verdict.vetoed and gate_enabled():

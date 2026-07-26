@@ -98,11 +98,25 @@ class RankerSwingScanner:
         We rank by these RAW probabilities, NOT the directional ratio P_long/(P_long+P_short):
         on neutral bars both raw probs are ~0 so junk never makes the top-K, whereas the ratio
         flips to extremes on noise (that ratio cost ~12pp of win rate in backtest)."""
-        missing = [c for c in self._feats if c not in feat_df.columns]
-        if missing and not self._warned_missing:
-            logger.warning("RankerScanner: %d/%d features absent from live builder (NaN-served): %s",
-                           len(missing), len(self._feats), missing[:8])
-            self._warned_missing = True
+        if not self._warned_missing:
+            # Two different conditions, previously reported as one. A column the
+            # builder never produces is a real gap vs the training matrix; a
+            # column present but all-NaN just means insufficient history for
+            # this scan (e.g. gap_fill_rate_60d needs 5 gap days in 60 sessions).
+            missing = [c for c in self._feats if c not in feat_df.columns]
+            all_nan = [c for c in self._feats
+                       if c in feat_df.columns and feat_df[c].isna().all()]
+            if missing:
+                logger.warning(
+                    "RankerScanner: %d/%d features absent from live builder (NaN-served): %s",
+                    len(missing), len(self._feats), missing[:8])
+            if all_nan:
+                logger.info(
+                    "RankerScanner: %d/%d features present but all-NaN this scan "
+                    "(insufficient history, not a builder gap): %s",
+                    len(all_nan), len(self._feats), all_nan[:8])
+            if missing or all_nan:
+                self._warned_missing = True
         X = feat_df.reindex(columns=self._feats).to_numpy(dtype=np.float32)
         p_long  = np.clip(self._calib_long.predict(self._long.predict(X)),   1e-9, 1.0)
         p_short = np.clip(self._calib_short.predict(self._short.predict(X)), 1e-9, 1.0)

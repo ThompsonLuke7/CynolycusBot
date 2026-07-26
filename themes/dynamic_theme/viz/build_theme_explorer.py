@@ -360,7 +360,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="side">
   <header>
     <div class="hrow"><h1>Theme Explorer</h1>
-      <div class="hbtns"><button id="emergingbtn" class="btn">Emerging: on</button><button id="themebtn" class="btn">☀ Light</button><button id="reset" class="btn" title="Clear highlights">⟲ Reset</button></div>
+      <div class="hbtns"><button id="emergingbtn" class="btn">Emerging: on</button><button id="themebtn" class="btn">☀ Light</button><button id="reset" class="btn" title="Clear selections and reset camera">⌂ Reset view</button></div>
     </div>
     <div class="meta" id="meta"></div>
     <input id="search" placeholder="Search a theme or a ticker (e.g. AAPL)…" autocomplete="off" spellcheck="false" />
@@ -522,7 +522,7 @@ function unpin(id){ enabled.delete(id); const i = pins.indexOf(id); if (i>=0) pi
   refresh(); renderPins(); markList(); }
 function resetAll(){ pins.length = 0; enabled.clear(); tickerSet = null; previewSet = null;
   selected = null; hovered = null; document.getElementById('search').value = ''; filter = '';
-  clearTickerCard(); refresh(); renderPins(); renderDetail(null); renderList(); }
+  resetView(); clearTickerCard(); refresh(); renderPins(); renderDetail(null); renderList(); }
 
 // jump to a ticker: deselect everything, highlight the themes it belongs to
 function selectTicker(tk){
@@ -689,7 +689,12 @@ const ctrls = Graph.controls(); ctrls.enabled = false; ctrls.update = function()
 const dom = Graph.renderer().domElement;
 let yaw = 0, pitch = 0, roll = 0, speed = 6, fly = null, interacted = false;
 const keys = {};
-cam.position.set(0, 0, 460);
+function defaultCameraDistance(){ return Math.max(420, DATA.n_themes * 7); }
+function resetView(){
+  fly = null; yaw = 0; pitch = 0; roll = 0;
+  cam.position.set(0, 0, defaultCameraDistance());
+}
+resetView();
 function setLookAt(target){
   const d = new THREE.Vector3(target.x-cam.position.x, target.y-cam.position.y, target.z-cam.position.z).normalize();
   yaw = Math.atan2(-d.x, -d.z); pitch = Math.asin(Math.max(-1,Math.min(1,d.y))); }
@@ -731,7 +736,7 @@ renderList(); renderPins(); elGraph.style.cursor = 'grab';
 window.addEventListener('resize', () => Graph.width(elGraph.clientWidth).height(elGraph.clientHeight));
 let framed = false;
 Graph.onEngineStop(() => { if(!framed && !interacted && !fly && !selected){
-  cam.position.set(0,0,Math.max(420, DATA.n_themes*7)); yaw=0; pitch=0; } framed = true; });
+  resetView(); } framed = true; });
 </script>
 </body>
 </html>

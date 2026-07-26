@@ -76,7 +76,11 @@ if command -v flock >/dev/null 2>&1; then
   # owner's metadata.  The combined-server wrapper already owns this same lock;
   # detect that exact parent and rely on its lock instead of self-deadlocking.
   exec 9>>"$LOCK_FILE"
-  if ! flock -n 9; then
+  # Wait rather than bail: this job now runs in the evening, right behind
+  # nightly_market_data.sh, whose runtime varies by an hour or more. Failing
+  # instantly on a still-held lock would silently leave the stamp stale, which
+  # blocks every 4H entry the following session.
+  if ! flock -w "${READINESS_LOCK_WAIT_SECONDS:-5400}" 9; then
     if grep -q "^combined-server-data-readiness pid=${PPID} " "$LOCK_FILE" 2>/dev/null; then
       PARENT_OWNS_LOCK=1
     else

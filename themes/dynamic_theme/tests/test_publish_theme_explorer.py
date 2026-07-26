@@ -18,6 +18,10 @@ from scripts.publish_theme_explorer import (
 pytestmark = pytest.mark.safe
 
 
+def test_publish_path_is_the_live_pages_document() -> None:
+    assert publisher.PUBLISH_PATHSPEC == "docs/index.html"
+
+
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
@@ -47,11 +51,12 @@ def _init_remote(tmp_path: Path, index: bytes | None) -> Path:
     (work / "README.md").write_text("# Theme Explorer\n", encoding="utf-8")
     (work / "index.html").write_text("<html>root site</html>\n", encoding="utf-8")
     if index is not None:
-        (work / "theme-explorer").mkdir()
-        (work / "theme-explorer/index.html").write_bytes(index)
+        destination = work / publisher.PUBLISH_PATHSPEC
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(index)
     _git(work, "add", "README.md", "index.html")
     if index is not None:
-        _git(work, "add", "theme-explorer/index.html")
+        _git(work, "add", publisher.PUBLISH_PATHSPEC)
     _git(work, "commit", "-m", "initial")
     _git(tmp_path, "init", "--bare", str(remote))
     _git(work, "remote", "add", "origin", str(remote))
@@ -182,7 +187,7 @@ def test_validate_artifact_rejects_missing_file(tmp_path: Path) -> None:
         validate_artifact(tmp_path / "missing.html")
 
 
-def test_publish_updates_only_index_html(
+def test_publish_updates_only_pages_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     remote = _init_remote(tmp_path, _valid_html("2026-07-21T20:57:33"))
@@ -199,11 +204,11 @@ def test_publish_updates_only_index_html(
     assert result == "published"
     checkout = tmp_path / "verify"
     _git(tmp_path, "clone", "--branch", "main", str(remote), str(checkout))
-    assert (checkout / "theme-explorer/index.html").read_bytes() == expected
+    assert (checkout / publisher.PUBLISH_PATHSPEC).read_bytes() == expected
     assert (checkout / "index.html").read_text(encoding="utf-8") == "<html>root site</html>\n"
     assert (checkout / "README.md").read_text(encoding="utf-8") == "# Theme Explorer\n"
     changed = _git(checkout, "show", "--pretty=", "--name-only", "HEAD").stdout.splitlines()
-    assert changed == ["theme-explorer/index.html"]
+    assert changed == [publisher.PUBLISH_PATHSPEC]
     message = _git(checkout, "log", "-1", "--pretty=%s").stdout.strip()
     assert message == "chore: refresh theme explorer 2026-07-22T23:30:00Z"
 
@@ -234,14 +239,14 @@ def test_publish_rejects_symlinked_destination_without_touching_external_sentine
     original = b"must not be overwritten"
     sentinel.write_bytes(original)
 
-    theme_dir = seed / "theme-explorer"
+    theme_dir = seed / publisher.PUBLISH_DIRECTORY
     if link_target == "directory":
         theme_dir.symlink_to(tmp_path, target_is_directory=True)
-        staged_path = "theme-explorer"
+        staged_path = publisher.PUBLISH_DIRECTORY
     else:
         theme_dir.mkdir()
         (theme_dir / "index.html").symlink_to(sentinel)
-        staged_path = "theme-explorer/index.html"
+        staged_path = publisher.PUBLISH_PATHSPEC
     _git(seed, "add", staged_path)
     _git(seed, "commit", "-m", f"add symlinked {link_target} destination")
     _git(seed, "push", "origin", "main")

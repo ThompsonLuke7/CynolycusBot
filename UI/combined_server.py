@@ -162,14 +162,21 @@ def _run_nightly_jobs() -> None:
     logger.info("Nightly jobs: finished (exit=%s)", result.returncode)
 
 
-def _run_data_readiness() -> None:
+def _run_data_readiness(*, catch_up: bool = False) -> None:
     """Refresh the shared bars + HTF features + Meta matrix so HTF Swing,
     Momentum, and Meta Ranker all wake up caught up to the same state.
 
-    Reuses ``scripts/nightly_data_readiness.sh`` (one source of truth). Run
-    off-hours (pre-open) so it never collides with the live session, the 15:50
-    Meta MOC loop, or the nightly news job.
+    Reuses ``scripts/nightly_data_readiness.sh`` (one source of truth). The
+    scheduled run is in the evening, after the nightly job, so it never collides
+    with the live session or the 15:50 Meta MOC loop.
+
+    ``catch_up=True`` is the startup repair path taken only when the stamp is
+    already stale. It deliberately overrides the live-window block: with a stale
+    stamp the readiness gate rejects every entry order, so the modules trade
+    nothing at all, and a heavy job during the session is strictly better than
+    another dark day. The memory guard still applies.
     """
+    import os
     import shutil
     import subprocess
     from core.live_job_guard import heavy_job_guard
@@ -182,16 +189,71 @@ def _run_data_readiness() -> None:
         return
     with heavy_job_guard(
         "combined-server-data-readiness",
-        block_live_window=True,
+        block_live_window=not catch_up,
         min_available_mb=6144,
         min_swap_free_mb=6144,
     ) as guard:
         if not guard.ok:
             logger.warning("Data readiness: skipped (%s)", guard.reason)
             return
-        logger.info("Data readiness: launching %s", script)
-        result = subprocess.run([bash, str(script)], cwd=str(repo_root))
+        env = dict(os.environ)
+        if catch_up:
+            # The script has the same live-window guard; lift it for the repair.
+            env["ALLOW_LIVE_READINESS"] = "1"
+        logger.info("Data readiness: launching %s%s", script, " (stale-stamp catch-up)" if catch_up else "")
+        result = subprocess.run([bash, str(script)], cwd=str(repo_root), env=env)
         logger.info("Data readiness: finished (exit=%s)", result.returncode)
+
+
+def _run_startup_queue(*, env_file: str, account_label: str) -> None:
+    """Drain actions queued for "next time the server is up".
+
+    Runs after the readiness check so a queued readiness rebuild is a no-op when
+    the startup check already handled it. Order entries stay pending while the
+    market is closed and are retried at the next boot.
+    """
+    try:
+        from core import startup_queue
+        from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+
+        queued = startup_queue.pending()
+        if not queued:
+            return
+        logger.info("Startup queue: %d pending entr%s", len(queued), "y" if len(queued) == 1 else "ies")
+        summary = startup_queue.run_pending(
+            # This process talks to exactly one account — the one it was started
+            # with — so entries never pick their own credentials.
+            client_factory=lambda _account: AlpacaOptionsClient(env_file=env_file),
+            readiness_runner=lambda: _run_data_readiness(catch_up=True),
+            # Live orders require an explicit opt-in inside run_pending; this
+            # server process only ever drains the account it was started with.
+            allow_live=(str(account_label).strip().lower() == "live"),
+        )
+        logger.info("Startup queue: %s", summary)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Startup queue: drain failed (%s)", exc)
+
+
+def _data_readiness_startup_check() -> None:
+    """Run readiness at boot only when the stamp will not authorize entries.
+
+    Without this, a server that starts after its scheduled readiness slot has
+    passed (a crash-and-restart, exactly what happened on 2026-07-24) runs the
+    whole session with a stale stamp and silently places no entry orders at all.
+    """
+    try:
+        from core.live_readiness import readiness_status
+
+        ok, reason, _payload = readiness_status()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Data readiness: startup check failed (%s) — running catch-up", exc)
+        ok, reason = False, str(exc)
+
+    if ok:
+        logger.info("Data readiness: stamp is current at startup — no catch-up needed")
+        return
+    logger.warning("Data readiness: stamp will NOT authorize entries (%s) — running catch-up now", reason)
+    _run_data_readiness(catch_up=True)
 
 
 def _run_broker_equity_snapshot(*, env_file: str, account_label: str) -> None:
@@ -409,6 +471,9 @@ def run_combined(
     nightly_time: str | None = "16:45",
     data_readiness_time: str | None = None,
     data_readiness_on_start: bool = False,
+    data_readiness_startup_check: bool = True,
+    startup_queue_enabled: bool = True,
+    startup_queue_account: str = "paper",
     data_refresher: bool = True,
     data_refresher_interval: int = 300,
     data_refresher_feeds: bool = False,
@@ -738,6 +803,27 @@ def run_combined(
         ).start()
         logger.info("Data readiness: running once on startup (background)")
         print("  Data readiness:          on startup (guarded, background)")
+    elif data_readiness_startup_check:
+        # Cheap stamp read; only launches the heavy job when entries would
+        # otherwise be blocked all session.
+        threading.Thread(
+            target=_data_readiness_startup_check,
+            daemon=True,
+            name="data-readiness-startup-check",
+        ).start()
+        print("  Data readiness:          startup check (catch-up only if stamp is stale)")
+
+    # ------------------------------------------------------------------
+    # 5a1b. Actions queued for the next startup (see core/startup_queue.py).
+    # ------------------------------------------------------------------
+    if startup_queue_enabled:
+        threading.Thread(
+            target=_run_startup_queue,
+            kwargs={"env_file": env_file, "account_label": startup_queue_account},
+            daemon=True,
+            name="startup-queue",
+        ).start()
+        print(f"  Startup queue:           draining ({startup_queue_account})")
 
     # ------------------------------------------------------------------
     # 5a0. Continuous background data refresher — keeps shared bars + Meta matrix
@@ -1084,6 +1170,28 @@ def main() -> None:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--no-startup-queue",
+        action="store_true",
+        help="Do not drain Data/runtime/startup_queue.json at boot. By default queued "
+             "actions (position closes, forced readiness rebuilds) run once at startup; "
+             "order entries stay pending while the market is closed.",
+    )
+    parser.add_argument(
+        "--startup-queue-account",
+        default="paper",
+        choices=("paper", "live"),
+        help="Account the startup queue may act on (default paper). Entries marked "
+             "account=live are skipped unless this is 'live'.",
+    )
+    parser.add_argument(
+        "--no-readiness-startup-check",
+        action="store_true",
+        help="Disable the boot-time readiness-stamp check. By default the server reads the "
+             "stamp at startup and, ONLY if it would not authorize entries, runs the "
+             "readiness job immediately (overriding the live-window guard, since a stale "
+             "stamp means the 4H modules place no entry orders at all).",
+    )
+    parser.add_argument(
         "--data-readiness-time",
         default="",
         help="Optional local (America/New_York) HH:MM to ALSO refresh shared bars + HTF "
@@ -1207,6 +1315,9 @@ def main() -> None:
         nightly_time=None if args.no_nightly_jobs else args.nightly_time,
         data_readiness_time=(args.data_readiness_time or None),
         data_readiness_on_start=bool(args.readiness_on_start),
+        data_readiness_startup_check=not bool(args.no_readiness_startup_check),
+        startup_queue_enabled=not bool(args.no_startup_queue),
+        startup_queue_account=str(args.startup_queue_account),
         data_refresher=not args.no_data_refresher,
         data_refresher_interval=args.data_refresher_interval,
         data_refresher_feeds=bool(args.data_refresher_feeds),

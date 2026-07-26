@@ -41,6 +41,7 @@ import argparse
 import gc
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -53,6 +54,24 @@ from core.live_signal_audit import append_jsonl, json_safe  # noqa: E402
 OUT_DIR = REPO / "Data/inference/shadow_two_sleeve"
 SHARED_BARS = REPO / "Data/shared/bars/4h"
 SNAPSHOT_ROOT = REPO / "Data/dealer_positioning/historical_snapshots"
+
+def _is_replayed(shadow_opened_at: str | None, exit_ts) -> bool:
+    """True when the exit bar had already printed before the shadow book opened
+    the position, i.e. the result was read out of history rather than tracked
+    forward. Unknown open times are treated as replayed (conservative)."""
+    if not shadow_opened_at:
+        return True
+    try:
+        opened = pd.Timestamp(shadow_opened_at)
+        exited = pd.Timestamp(exit_ts)
+        if opened.tzinfo is None:
+            opened = opened.tz_localize("UTC")
+        if exited.tzinfo is None:
+            exited = exited.tz_localize("UTC")
+    except Exception:
+        return True
+    return bool(exited <= opened)
+
 
 TAIL_POLICY = dict(name="tail_rider_id4", stop=0.39, trail=None, target=0.30, scale_frac=0.16, horizon=53)
 HARVEST_POLICY = dict(name="harvester_g284", stop=0.59, trail=None, target=0.07, scale_frac=1.0, horizon=60)
@@ -293,18 +312,25 @@ def run_module(module: str, cfg: dict) -> None:
     state_path = OUT_DIR / f"{module}_shadow_state.json"
     audit_path = OUT_DIR / f"{module}_shadow_audit.jsonl"
     live_state = _load_json(cfg["live_state"], {"managed": {}})
-    shadow_state = _load_json(state_path, {"managed": {}})
+    shadow_state = _load_json(state_path, {"managed": {}, "closed": []})
 
     real_managed = live_state.get("managed", {})
     shadow_managed = shadow_state.get("managed", {})
+    # A shadow key that already exited must never be re-entered. The real module
+    # keeps holding the position long after the shadow policy would have exited
+    # it, so without this registry the same (ticker, entry_bar) was shadow-entered
+    # and shadow-exited on EVERY run — booking one trade dozens of times and
+    # making the closed-trade statistics meaningless.
+    closed_keys = set(shadow_state.get("closed") or [])
 
     # ---- 1) new shadow entries: real positions not yet shadow-tracked ----
     new_keys = []
     for ticker, pos in real_managed.items():
         shadow_key = f"{ticker}:{pos.get('entry_bar')}"
-        if shadow_key not in shadow_managed:
-            entry_ts = pd.Timestamp(pos["entry_bar"])
-            new_keys.append((shadow_key, ticker, entry_ts, pos))
+        if shadow_key in closed_keys or shadow_key in shadow_managed:
+            continue
+        entry_ts = pd.Timestamp(pos["entry_bar"])
+        new_keys.append((shadow_key, ticker, entry_ts, pos))
 
     if new_keys:
         if cfg["source"] == "matrix":
@@ -348,6 +374,11 @@ def run_module(module: str, cfg: dict) -> None:
                 "split_feature": cfg["split_feature"], "split_value": fval,
                 "split_thresh": cfg["split_thresh"], "real_route": pos.get("route"),
                 "real_signal_audit": pos.get("signal_audit"),
+                # When the shadow book first saw this position. `entry_bar` can be
+                # days older, in which case the exit below is resolved over bars
+                # that had already printed — a replay, not a forward-tracked
+                # result. Recorded so research can filter those out.
+                "shadow_opened_at": datetime.now(timezone.utc).isoformat(),
             }
             spread_note = ""
             if not is_tail:
@@ -384,6 +415,8 @@ def run_module(module: str, cfg: dict) -> None:
             "policy": pos["policy"], "exit_ts": str(result["exit_ts"]),
             "bars_held": result["bars_held"], "exit_reason": result["reason"],
             "underlying_ret": underlying_ret,
+            "shadow_opened_at": pos.get("shadow_opened_at"),
+            "replayed": _is_replayed(pos.get("shadow_opened_at"), result["exit_ts"]),
         }
         if pos["sleeve"] == "harvest" and pos.get("hypothetical_spreads", {}).get("available"):
             sp = pos["hypothetical_spreads"]
@@ -396,10 +429,13 @@ def run_module(module: str, cfg: dict) -> None:
                 exit_record["put_credit_spread_ret"] = bull_put_credit_spread_realized(
                     underlying_ret, ps, entry_price)
         append_jsonl(audit_path, exit_record)
+        closed_keys.add(shadow_key)
         print(f"  [{ticker}] shadow EXIT ({pos['sleeve']}, {result['reason']}) "
-              f"underlying_ret={underlying_ret*100:+.2f}%")
+              f"underlying_ret={underlying_ret*100:+.2f}%"
+              f"{' [replayed]' if exit_record['replayed'] else ''}")
 
     shadow_state["managed"] = still_open
+    shadow_state["closed"] = sorted(closed_keys)
     _save_json(state_path, shadow_state)
     print(f"  shadow book: {len(still_open)} open, {len(shadow_managed) - len(still_open)} closed this run")
 

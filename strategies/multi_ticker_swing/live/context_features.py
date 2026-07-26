@@ -56,8 +56,18 @@ def compute_bar_location(price: pd.DataFrame, spy: pd.DataFrame | None) -> dict[
     if price is None or price.empty:
         return {}
     frame = _add_location(price.copy())
-    out: dict[str, float] = {c: float(frame[c].iloc[-1]) for c in BAR_LOCATION_COLS
-                             if c in frame.columns and pd.notna(frame[c].iloc[-1])}
+    # Emit EVERY column, using NaN when the last bar has no value. Dropping the
+    # key instead made a legitimately-unavailable value (e.g. gap_fill_rate_60d
+    # needs 5 gap days in the trailing 60 sessions) indistinguishable from a
+    # builder that never computes the feature at all, so the scanner reported it
+    # as "absent from live builder". The model path is unchanged: the scanner
+    # reindexes onto its feature list, which NaN-fills either way.
+    out: dict[str, float] = {}
+    for c in BAR_LOCATION_COLS:
+        if c not in frame.columns:
+            continue
+        value = frame[c].iloc[-1]
+        out[c] = float(value) if pd.notna(value) else float("nan")
 
     if spy is not None and not spy.empty:
         s = _add_location(spy.copy(), prefix="spy_")

@@ -35,10 +35,53 @@ def _json_scalar(value: Any) -> Any:
     return str(value)
 
 
+def _as_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out else None  # reject NaN
+
+
+def session_phase(now: datetime) -> str:
+    """Which trading phase the marks in this snapshot came from.
+
+    Without it a consumer cannot tell a live regular-session mark from a stale
+    post-close one, and the 20:05 ET capture looks identical to the 16:05 ET
+    capture even when nothing has re-priced.
+    """
+    et = now.astimezone(_ET)
+    if et.weekday() >= 5:
+        return "closed"
+    minutes = et.hour * 60 + et.minute
+    if 4 * 60 <= minutes < 9 * 60 + 30:
+        return "premarket"
+    if 9 * 60 + 30 <= minutes < 16 * 60:
+        return "regular"
+    if 16 * 60 <= minutes < 20 * 60:
+        return "extended"
+    return "closed"
+
+
 def snapshot_path(*, account_label: str, root: Path, now: datetime) -> Path:
     session = now.astimezone(_ET).strftime("%Y%m%d")
     safe_label = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in account_label)
     return root / f"broker_equity_{session}_{safe_label}.jsonl"
+
+
+def _position_record(position: dict[str, Any]) -> dict[str, Any]:
+    out = {field: _json_scalar(position.get(field)) for field in _POSITION_FIELDS}
+    market_value = _as_float(position.get("market_value"))
+    cost_basis = _as_float(position.get("cost_basis"))
+    if market_value is not None and cost_basis is not None:
+        # Independent of the broker's own field, so a disagreement is visible
+        # instead of silently propagating into the daily attribution. No side
+        # adjustment: shorts already carry a negative qty, market_value and
+        # cost_basis, so the subtraction gets the sign right for both.
+        out["unrealized_pl_derived"] = round(market_value - cost_basis, 2)
+    else:
+        out["unrealized_pl_derived"] = None
+    return out
 
 
 def capture_snapshot(
@@ -52,16 +95,27 @@ def capture_snapshot(
     captured = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     account = client.get_account() or {}
     positions = client.get_positions() or []
+    account_fields = {field: _json_scalar(account.get(field)) for field in _ACCOUNT_FIELDS}
+    equity = _as_float(account.get("equity"))
+    last_equity = _as_float(account.get("last_equity"))
     record = {
-        "schema_version": 1,
+        "schema_version": 2,
         "captured_at_utc": captured.isoformat(),
+        "captured_at_et": captured.astimezone(_ET).isoformat(),
         "session_date_et": captured.astimezone(_ET).date().isoformat(),
+        "session_phase": session_phase(captured),
         "account_label": account_label,
-        "account": {field: _json_scalar(account.get(field)) for field in _ACCOUNT_FIELDS},
-        "positions": [
-            {field: _json_scalar(position.get(field)) for field in _POSITION_FIELDS}
-            for position in positions
-        ],
+        "account": account_fields,
+        # The account-level delta is the one number that is always right; per
+        # position `unrealized_intraday_pl` is computed against a previous close
+        # that does not exist for anything opened today, so it is kept as the
+        # broker reported it and cross-checked by `unrealized_pl_derived`.
+        "day_pl": (
+            round(equity - last_equity, 2)
+            if equity is not None and last_equity is not None and last_equity != 0.0
+            else None
+        ),
+        "positions": [_position_record(position) for position in positions],
     }
     out = snapshot_path(account_label=account_label, root=root, now=captured)
     out.parent.mkdir(parents=True, exist_ok=True)

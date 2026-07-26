@@ -396,7 +396,12 @@ def execute_plan(
         route = item[4] if len(item) > 4 else "option"
         lim = limits.get(sym)
         try:
-            if route == "option":
+            if route == "option" and str(side).strip().lower() == "sell" and not lim:
+                # Exits must actually get out. A bare market sell is rejected
+                # when the contract has no quote, which stranded IOT's -50% stop
+                # on 2026-07-24 until the contract expired.
+                resp = submit_option_exit_with_ladder(client, symbol=sym, qty=qty)
+            elif route == "option":
                 resp = client.submit_option_order(symbol=sym, qty=qty, side=side,
                                                   order_type="limit" if lim else "market",
                                                   time_in_force="day", limit_price=lim)
@@ -427,6 +432,90 @@ def execute_plan(
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("execute_plan: persist_managed callback failed after %s %s: %s", side, sym, exc)
     return failed
+
+
+_EXIT_TICK = 0.01
+_EXIT_LADDER_PAUSE_S = 1.5
+
+
+def _option_bid(client, symbol: str) -> float | None:
+    """Current bid for one contract, or None when the book is empty."""
+    if not hasattr(client, "get_option_quotes"):
+        return None
+    try:
+        resp = client.get_option_quotes(symbols=symbol)
+    except Exception:  # noqa: BLE001
+        return None
+    quotes = resp.get("quotes", resp) if isinstance(resp, dict) else None
+    if not isinstance(quotes, dict):
+        return None
+    quote = quotes.get(symbol) or (next(iter(quotes.values())) if quotes else None)
+    if not isinstance(quote, dict):
+        return None
+    try:
+        bid = float(quote.get("bp", quote.get("bid_price")))
+    except (TypeError, ValueError):
+        return None
+    return bid if bid > 0 else None
+
+
+def _exit_limit_ladder(bid: float | None) -> list[float]:
+    """Descending sell limits, ending at the minimum tick.
+
+    A market exit is rejected outright when the contract has no quote (Alpaca:
+    "order has been rejected due to no available quote for symbol, please
+    reenter with a limit"). That is exactly the state an expiring contract is in,
+    so the exit has to be priced. Walking down to one cent still gets the
+    position closed when the book is empty.
+    """
+    if bid is None or bid <= _EXIT_TICK:
+        return [_EXIT_TICK]
+    rungs = [bid, round(bid * 0.7, 2), round(bid * 0.4, 2), _EXIT_TICK]
+    out: list[float] = []
+    for rung in rungs:
+        rung = max(round(float(rung), 2), _EXIT_TICK)
+        if rung not in out:
+            out.append(rung)
+    return out
+
+
+def submit_option_exit_with_ladder(client, *, symbol: str, qty, sleep_fn=None):
+    """Sell-to-close one option, falling back to a priced ladder.
+
+    Tries the plain market exit first (fills best when there IS a book), then
+    walks a descending limit ladder with a short pause between rungs. Raises the
+    last error only if every rung fails, so a genuinely stuck position still
+    surfaces instead of being silently dropped.
+    """
+    import time as _time
+
+    sleep_fn = sleep_fn or _time.sleep
+    try:
+        return client.submit_option_order(
+            symbol=symbol, qty=qty, side="sell",
+            order_type="market", time_in_force="day")
+    except Exception as market_exc:  # noqa: BLE001
+        logger.warning("exit ladder: market sell rejected for %s (%s) — repricing as limit",
+                       symbol, market_exc)
+        last_exc: Exception = market_exc
+
+    ladder = _exit_limit_ladder(_option_bid(client, symbol))
+    for attempt, limit_price in enumerate(ladder, start=1):
+        try:
+            resp = client.submit_option_order(
+                symbol=symbol, qty=qty, side="sell",
+                order_type="limit", time_in_force="day", limit_price=limit_price)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning("exit ladder: %s limit %.2f rejected (%d/%d): %s",
+                           symbol, limit_price, attempt, len(ladder), exc)
+            if attempt < len(ladder):
+                sleep_fn(_EXIT_LADDER_PAUSE_S)
+            continue
+        logger.info("exit ladder: %s accepted at limit %.2f (%d/%d)",
+                    symbol, limit_price, attempt, len(ladder))
+        return resp
+    raise last_exc
 
 
 def _resp_fill_price(resp) -> float | None:

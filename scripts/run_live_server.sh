@@ -21,7 +21,7 @@
 #   LIVE=1 scripts/run_live_server.sh          # route swing/meta/htf/mom to LIVE
 #   scripts/run_live_server.sh --no-start-all  # serve pages but don't auto-run
 #   scripts/run_live_server.sh --readiness-on-start  # explicitly run guarded cache readiness
-#   DATA_READINESS_TIME=05:30 scripts/run_live_server.sh  # pre-open full shared-data refresh
+#   DATA_READINESS_TIME=22:15 scripts/run_live_server.sh  # evening full shared-data refresh
 #   NIGHTLY_TIME=16:45 scripts/run_live_server.sh  # post-refresher collection/enrichment
 #   DEALER_RANKER_TIME=15:40 scripts/run_live_server.sh  # override near-close dealer run
 #   (any extra args are passed straight through to combined_server)
@@ -68,11 +68,17 @@ SERVER_ARGS+=("--intraday-structure")
 # Run the dealer-ranked ATM options experiment automatically near the close.
 # Defaults stay paper; caller passthrough args later in SERVER_ARGS can override.
 SERVER_ARGS+=(
-  # A persistent supervised server supplies the pre-open producer.  The
-  # readiness workflow itself is guarded and only writes a stamp after every
-  # required bars/context/features/matrix stage succeeds; stale data therefore remains
-  # fail-closed instead of being papered over by the scheduler.
-  "--data-readiness-time" "${DATA_READINESS_TIME:-05:30}"
+  # Readiness runs in the EVENING, after nightly_market_data.sh has released the
+  # shared heavy-job lock (nightly starts 16:45 ET and has been finishing ~21:45).
+  # It was at 05:30 ET, which put the one job that authorizes every 4H entry into
+  # the few hours where a crash cannot be recovered from: on 2026-07-24 a WSL2
+  # crash at 06:07 killed it mid-run, the server came back at 08:18 with the
+  # 05:30 slot already past, and the stale stamp blocked all nine planned entries
+  # for the whole session. An evening stamp is generated after the session it
+  # needs to cover, and the startup catch-up below is the second line of defence.
+  # The workflow itself is still guarded and only stamps after every required
+  # bars/context/features/matrix stage succeeds, so stale data stays fail-closed.
+  "--data-readiness-time" "${DATA_READINESS_TIME:-22:15}"
   "--nightly-time" "${NIGHTLY_TIME:-16:45}"
   "--dealer-ranker-time" "${DEALER_RANKER_TIME:-15:45}"
   "--dealer-ranker-workers" "${DEALER_RANKER_WORKERS:-8}"
