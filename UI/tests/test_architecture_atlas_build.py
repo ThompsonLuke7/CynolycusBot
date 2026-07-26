@@ -167,6 +167,10 @@ def test_static_app_includes_large_display_mode() -> None:
     assert '"shape": "cutrectangle"' in javascript
     assert '"shape": "hexagon"' in javascript
     assert "edge.active-flow" in javascript
+    assert "formatGraphLabel" in javascript
+    assert '"text-overflow-wrap": "whitespace"' in javascript
+    assert '"background-image": NODE_TEXTURE' in javascript
+    assert '"background-fill": "linear-gradient"' in javascript
 
 
 def test_check_validates_without_writing_dist(atlas_repo: Path) -> None:

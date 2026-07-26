@@ -26,6 +26,17 @@
     research: "#102525",
     control: "#0d1d2b"
   };
+  const NODE_GRADIENTS = {
+    data: "#0a1d32 #0d2b48",
+    feature: "#0b2524 #103b32",
+    signal: "#1c1730 #30204c",
+    policy: "#2a2112 #403016",
+    execution: "#281522 #461c34",
+    audit: "#09252a #0d3a40",
+    research: "#102525 #173936",
+    control: "#0d1d2b #142f43"
+  };
+  const NODE_TEXTURE = "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 96'%3E%3Cg fill='none' stroke='%23fff' stroke-width='1'%3E%3Cpath opacity='.08' d='M-8 20h46l12-12h38l10 10h70M-8 70h32l14-14h55l12 12h64'/%3E%3Cpath opacity='.045' d='M18-8v34l10 10v68M132-8v28l-12 12v72'/%3E%3C/g%3E%3Cg fill='%23fff'%3E%3Ccircle opacity='.18' cx='38' cy='20' r='1.8'/%3E%3Ccircle opacity='.14' cx='98' cy='18' r='1.5'/%3E%3Ccircle opacity='.18' cx='38' cy='56' r='1.8'/%3E%3Ccircle opacity='.14' cx='105' cy='68' r='1.5'/%3E%3C/g%3E%3C/svg%3E";
 
   const els = {
     cy: document.getElementById("cy"),
@@ -109,7 +120,7 @@
   }
 
   function graphTextScale() {
-    return document.body.classList.contains("large-display") ? 1.38 : 1;
+    return document.body.classList.contains("large-display") ? 1.18 : 1;
   }
 
   function graphSpacingScale() {
@@ -117,7 +128,24 @@
   }
 
   function graphFitPadding() {
-    return document.body.classList.contains("large-display") ? 96 : 72;
+    return document.body.classList.contains("large-display") ? 150 : 86;
+  }
+
+  function formatGraphLabel(label, maxCharacters) {
+    const words = String(label || "").trim().split(/\s+/).filter(Boolean);
+    const lines = [];
+    let line = "";
+    words.forEach(function (word) {
+      const candidate = line ? line + " " + word : word;
+      if (line && candidate.length > maxCharacters) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = candidate;
+      }
+    });
+    if (line) lines.push(line);
+    return lines.join("\n");
   }
 
   function graphPosition(node) {
@@ -281,7 +309,7 @@
         group: "nodes",
         data: {
           id: node.id,
-          label: nodeLabel(node),
+          label: formatGraphLabel(nodeLabel(node), 18),
           kind: node.kind,
           role: node.edge_color_role || node.kind,
           maturity: nodePublic(node).maturity || "",
@@ -324,19 +352,32 @@
           "background-color": function (ele) {
             return NODE_BACKGROUNDS[ele.data("role")] || NODE_BACKGROUNDS.control;
           },
+          "background-fill": "linear-gradient",
+          "background-gradient-stop-colors": function (ele) {
+            return NODE_GRADIENTS[ele.data("role")] || NODE_GRADIENTS.control;
+          },
+          "background-gradient-direction": "to-bottom-right",
+          "background-image": NODE_TEXTURE,
+          "background-fit": "cover",
+          "background-clip": "node",
+          "background-image-opacity": 0.42,
           "background-opacity": 0.94,
           "border-width": 1.5 * edgeScale,
           "border-color": function (ele) { return COLORS[ele.data("role")] || "#46f3ff"; },
           "label": "data(label)",
           "color": "#eaf8ff",
           "font-family": "Space Grotesk",
-          "font-size": 12 * textScale,
+          "font-size": 12.5 * textScale,
           "font-weight": 700,
           "text-wrap": "wrap",
-          "text-overflow-wrap": "anywhere",
-          "text-max-width": 142 * nodeScale,
+          "text-overflow-wrap": "whitespace",
+          "text-max-width": 132 * nodeScale,
+          "line-height": 1.2,
           "text-valign": "center",
           "text-halign": "center",
+          "text-outline-color": "#06101b",
+          "text-outline-opacity": 0.72,
+          "text-outline-width": 1.1 * edgeScale,
           "overlay-opacity": 0,
           "underlay-color": function (ele) { return COLORS[ele.data("role")] || "#46f3ff"; },
           "underlay-opacity": 0,
@@ -374,8 +415,8 @@
           "background-color": "#0b2838",
           "border-color": "#46f3ff",
           "border-width": 2.2 * edgeScale,
-          "font-size": 14 * textScale,
-          "text-max-width": 124 * nodeScale,
+          "font-size": 13 * textScale,
+          "text-max-width": 136 * nodeScale,
           "underlay-opacity": 0,
           "shadow-blur": 30 * edgeScale,
           "shadow-color": "#000",

@@ -97,3 +97,27 @@ def test_large_display_positions_are_collision_free_for_every_scope() -> None:
                 if overlap_x > 0 and overlap_y > 0:
                     collisions.append((left[0], right[0]))
         assert not collisions, f"{scope_id} has large-display collisions: {collisions}"
+
+
+def test_every_graph_label_wraps_on_word_boundaries() -> None:
+    data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+    def wrap(label: str, limit: int) -> list[str]:
+        lines: list[str] = []
+        line = ""
+        for word in label.split():
+            candidate = f"{line} {word}".strip()
+            if line and len(candidate) > limit:
+                lines.append(line)
+                line = word
+            else:
+                line = candidate
+        if line:
+            lines.append(line)
+        return lines
+
+    for node in data["nodes"]:
+        lines = wrap(node["public"]["label"], 18)
+        assert all(line.strip() == line and line for line in lines)
+        assert " ".join(lines) == node["public"]["label"]
+        assert all(len(line) <= 18 or " " not in line for line in lines)
