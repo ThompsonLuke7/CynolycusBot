@@ -144,6 +144,18 @@ def test_valid_build_is_deterministic_and_embeds_the_right_datasets(atlas_repo: 
     assert first == second
 
 
+def test_static_app_includes_large_display_mode() -> None:
+    static_dir = Path(__file__).resolve().parents[1] / "architecture_atlas" / "static"
+    html = (static_dir / "index.html").read_text(encoding="utf-8")
+    css = (static_dir / "atlas.css").read_text(encoding="utf-8")
+    javascript = (static_dir / "atlas.js").read_text(encoding="utf-8")
+
+    assert 'id="large-text-toggle"' in html
+    assert "body.large-display" in css
+    assert "min-width: 2560px" in javascript
+    assert "cynolycus-atlas-large-display" in javascript
+
+
 def test_check_validates_without_writing_dist(atlas_repo: Path) -> None:
     metadata = check_atlas(
         repo_root=atlas_repo,

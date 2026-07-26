@@ -49,6 +49,7 @@
     outlinePanel: document.getElementById("outline-panel"),
     outlineTree: document.getElementById("outline-tree"),
     helpPanel: document.getElementById("help-panel"),
+    largeTextToggle: document.getElementById("large-text-toggle"),
     validationState: document.getElementById("validation-state"),
     validationDetail: document.getElementById("validation-detail"),
     validationReadout: document.querySelector(".validation-readout"),
@@ -72,6 +73,55 @@
     visibleIds: [],
     routeAnimation: null
   };
+
+  const LARGE_DISPLAY_QUERY = "(min-width: 2560px) and (min-height: 1080px)";
+  const LARGE_DISPLAY_STORAGE_KEY = "cynolycus-atlas-large-display";
+
+  function defaultLargeDisplay() {
+    return window.matchMedia(LARGE_DISPLAY_QUERY).matches;
+  }
+
+  function readLargeDisplayPreference() {
+    try {
+      const preference = window.localStorage.getItem(LARGE_DISPLAY_STORAGE_KEY);
+      if (preference === "on") return true;
+      if (preference === "off") return false;
+    } catch (_) {
+      // file:// and privacy-restricted browsers may not expose localStorage.
+    }
+    return defaultLargeDisplay();
+  }
+
+  function graphScale() {
+    return document.body.classList.contains("large-display") ? 1.55 : 1;
+  }
+
+  function graphFitPadding() {
+    return document.body.classList.contains("large-display") ? 108 : 72;
+  }
+
+  function applyLargeDisplay(enabled, persist) {
+    document.body.classList.toggle("large-display", enabled);
+    els.largeTextToggle.setAttribute("aria-pressed", String(enabled));
+    els.largeTextToggle.setAttribute(
+      "aria-label",
+      enabled ? "Use standard display text" : "Use large display text"
+    );
+    els.largeTextToggle.title = enabled ? "Use standard display text" : "Use large display text";
+    if (persist) {
+      try {
+        window.localStorage.setItem(LARGE_DISPLAY_STORAGE_KEY, enabled ? "on" : "off");
+      } catch (_) {
+        // The visual change still applies for the current page.
+      }
+    }
+    if (state.cy) {
+      state.cy.style(cyStyle());
+      state.cy.maxZoom(enabled ? 2.5 : 1.7);
+      state.cy.resize();
+      state.cy.fit(state.cy.elements(), graphFitPadding());
+    }
+  }
 
   function fail(message) {
     els.fallback.hidden = false;
@@ -230,45 +280,46 @@
   }
 
   function cyStyle() {
+    const scale = graphScale();
     return [
       {
         selector: "node",
         style: {
-          "width": 170,
-          "height": 86,
+          "width": 170 * scale,
+          "height": 86 * scale,
           "shape": "roundrectangle",
           "background-color": "#091625",
           "background-opacity": 0.97,
-          "border-width": 1.4,
+          "border-width": 1.4 * scale,
           "border-color": function (ele) { return COLORS[ele.data("role")] || "#46f3ff"; },
           "label": "data(label)",
           "color": "#eaf8ff",
           "font-family": "Space Grotesk",
-          "font-size": 12,
+          "font-size": 12 * scale,
           "font-weight": 700,
           "text-wrap": "wrap",
-          "text-max-width": 138,
+          "text-max-width": 138 * scale,
           "text-valign": "center",
           "text-halign": "center",
           "overlay-opacity": 0,
-          "shadow-blur": 20,
+          "shadow-blur": 20 * scale,
           "shadow-color": "#000",
           "shadow-opacity": 0.38,
-          "shadow-offset-y": 10
+          "shadow-offset-y": 10 * scale
         }
       },
       {
         selector: "node[focus = 'yes']",
         style: {
-          "width": 154,
-          "height": 154,
+          "width": 154 * scale,
+          "height": 154 * scale,
           "shape": "ellipse",
           "background-color": "#0b2838",
           "border-color": "#46f3ff",
-          "border-width": 1.8,
-          "font-size": 14,
-          "text-max-width": 116,
-          "shadow-blur": 35,
+          "border-width": 1.8 * scale,
+          "font-size": 14 * scale,
+          "text-max-width": 116 * scale,
+          "shadow-blur": 35 * scale,
           "shadow-color": "#46f3ff",
           "shadow-opacity": 0.2,
           "shadow-offset-y": 0
@@ -277,26 +328,26 @@
       {
         selector: "node[portal = 'yes']",
         style: {
-          "width": 132,
-          "height": 52,
+          "width": 132 * scale,
+          "height": 52 * scale,
           "border-style": "dashed",
           "background-opacity": 0.72,
-          "font-size": 9,
+          "font-size": 9 * scale,
           "color": "#89a7ba"
         }
       },
       {
         selector: "node[expandable = 'yes'][focus != 'yes']",
         style: {
-          "border-width": 2.1
+          "border-width": 2.1 * scale
         }
       },
       {
         selector: "node:selected",
         style: {
           "border-color": "#46f3ff",
-          "border-width": 3,
-          "shadow-blur": 25,
+          "border-width": 3 * scale,
+          "shadow-blur": 25 * scale,
           "shadow-color": "#46f3ff",
           "shadow-opacity": 0.25
         }
@@ -304,24 +355,24 @@
       {
         selector: "edge",
         style: {
-          "width": 1.6,
+          "width": 1.6 * scale,
           "curve-style": "bezier",
           "line-color": function (ele) { return COLORS[ele.data("type")] || "#2b5572"; },
           "target-arrow-color": function (ele) { return COLORS[ele.data("type")] || "#2b5572"; },
           "target-arrow-shape": "triangle",
-          "arrow-scale": 0.7,
+          "arrow-scale": 0.7 * scale,
           "line-style": "dashed",
-          "line-dash-pattern": [6, 10],
+          "line-dash-pattern": [6 * scale, 10 * scale],
           "opacity": 0.65,
           "label": "data(label)",
           "font-family": "JetBrains Mono",
-          "font-size": 7,
+          "font-size": 7 * scale,
           "color": "#68889f",
           "text-background-color": "#030711",
           "text-background-opacity": 0.86,
-          "text-background-padding": 3,
+          "text-background-padding": 3 * scale,
           "text-rotation": "autorotate",
-          "text-margin-y": -8,
+          "text-margin-y": -8 * scale,
           "overlay-opacity": 0
         }
       },
@@ -366,7 +417,7 @@
       style: cyStyle(),
       layout: {name: "preset"},
       minZoom: 0.48,
-      maxZoom: 1.7,
+      maxZoom: graphScale() > 1 ? 2.5 : 1.7,
       wheelSensitivity: 0.2,
       boxSelectionEnabled: false,
       autoungrabify: true
@@ -412,7 +463,10 @@
     state.cy.add(graphElements(scope));
     state.cy.layout({name: "preset", fit: false}).run();
     const duration = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 500;
-    state.cy.animate({fit: {eles: state.cy.elements(), padding: 72}}, {duration: duration, easing: "ease-in-out-cubic"});
+    state.cy.animate(
+      {fit: {eles: state.cy.elements(), padding: graphFitPadding()}},
+      {duration: duration, easing: "ease-in-out-cubic"}
+    );
     startRouteAnimation();
     renderOutline();
   }
@@ -742,13 +796,18 @@
   function bindEvents() {
     document.getElementById("home-button").addEventListener("click", function () { navigateToScope("system"); });
     document.getElementById("fit-button").addEventListener("click", function () {
-      if (state.cy) state.cy.fit(state.cy.elements(), 72);
+      if (state.cy) state.cy.fit(state.cy.elements(), graphFitPadding());
     });
     document.getElementById("search-open").addEventListener("click", function () { showPanel(els.searchPanel); });
     document.getElementById("search-rail").addEventListener("click", function () { showPanel(els.searchPanel); });
     document.getElementById("filters-open").addEventListener("click", function () { showPanel(els.filtersPanel); });
     document.getElementById("outline-open").addEventListener("click", openOutline);
     document.getElementById("help-open").addEventListener("click", function () { showPanel(els.helpPanel); });
+    els.largeTextToggle.addEventListener("click", function () {
+      const enabled = !document.body.classList.contains("large-display");
+      applyLargeDisplay(enabled, true);
+      toast(enabled ? "Large display text enabled" : "Standard display text enabled");
+    });
     els.back.addEventListener("click", goBack);
     els.inspectorClose.addEventListener("click", closeInspector);
     els.enterDomain.addEventListener("click", function () { enterNode(els.enterDomain.dataset.nodeId); });
@@ -820,6 +879,7 @@
       return;
     }
     state.dataset = state.bundle.datasets.public;
+    applyLargeDisplay(readLargeDisplayPreference(), false);
     buildIndexes();
     if (!state.bundle.datasets.local) {
       els.datasetSwitch.hidden = true;

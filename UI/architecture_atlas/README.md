@@ -45,6 +45,9 @@ private local review.
 - Search jumps to any component, including deeply nested nodes.
 - Filters isolate data, feature, signal, policy, execution, audit, research,
   and control relationships.
+- At viewport widths of 2560 px or greater, the atlas automatically uses its
+  large-display presentation scale. The `Aa` header control overrides the
+  automatic choice and remembers that choice in the browser.
 - Narrow screens use the complete outline view instead of hiding content.
 
 Depth is variable. A branch only has as many levels as the architecture needs;
