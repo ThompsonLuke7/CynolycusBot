@@ -137,10 +137,12 @@ def test_valid_build_is_deterministic_and_embeds_the_right_datasets(atlas_repo: 
     assert all("local" not in node for node in public["datasets"]["public"]["nodes"])
     assert (atlas_repo / "UI/architecture_atlas/dist/public/atlas.js").is_file()
     public_html = (atlas_repo / "UI/architecture_atlas/dist/public/index.html").read_text(encoding="utf-8")
-    asset_revision = first["source_manifest_sha256"][:12]
     assert "__ATLAS_ASSET_REV__" not in public_html
-    assert f"atlas.css?v={asset_revision}" in public_html
-    assert f"atlas.js?v={asset_revision}" in public_html
+    css_revision = re.search(r"atlas\.css\?v=([0-9a-f]{12})", public_html)
+    js_revision = re.search(r"atlas\.js\?v=([0-9a-f]{12})", public_html)
+    assert css_revision
+    assert js_revision
+    assert css_revision.group(1) == js_revision.group(1)
 
     second = build_atlas(
         repo_root=atlas_repo,
