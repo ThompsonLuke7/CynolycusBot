@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vinext build"
+    "build": "vinext build",
+    "postbuild": "node scripts/copy-hosting-config.mjs"
   },
   "dependencies": {
     "@cloudflare/vite-plugin": "latest",
