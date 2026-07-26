@@ -339,9 +339,8 @@
           "text-halign": "center",
           "overlay-opacity": 0,
           "underlay-color": function (ele) { return COLORS[ele.data("role")] || "#46f3ff"; },
-          "underlay-opacity": 0.045,
-          "underlay-padding": 6 * edgeScale,
-          "underlay-shape": "cutrectangle",
+          "underlay-opacity": 0,
+          "underlay-padding": 0,
           "shadow-blur": 22 * edgeScale,
           "shadow-color": "#000",
           "shadow-opacity": 0.38,
@@ -352,31 +351,19 @@
       },
       {
         selector: "node[role = 'data']",
-        style: {
-          "shape": "barrel",
-          "underlay-shape": "barrel"
-        }
+        style: {"shape": "barrel"}
       },
       {
         selector: "node[role = 'signal']",
-        style: {
-          "shape": "hexagon",
-          "underlay-shape": "hexagon"
-        }
+        style: {"shape": "hexagon"}
       },
       {
         selector: "node[role = 'policy']",
-        style: {
-          "shape": "tag",
-          "underlay-shape": "tag"
-        }
+        style: {"shape": "tag"}
       },
       {
         selector: "node[role = 'execution']",
-        style: {
-          "shape": "roundrectangle",
-          "underlay-shape": "roundrectangle"
-        }
+        style: {"shape": "roundrectangle"}
       },
       {
         selector: "node[focus = 'yes']",
@@ -389,28 +376,23 @@
           "border-width": 2.2 * edgeScale,
           "font-size": 14 * textScale,
           "text-max-width": 124 * nodeScale,
-          "underlay-color": "#46f3ff",
-          "underlay-opacity": 0.1,
-          "underlay-padding": 14 * edgeScale,
-          "underlay-shape": "hexagon",
-          "shadow-blur": 38 * edgeScale,
-          "shadow-color": "#46f3ff",
-          "shadow-opacity": 0.18,
-          "shadow-offset-y": 0
+          "underlay-opacity": 0,
+          "shadow-blur": 30 * edgeScale,
+          "shadow-color": "#000",
+          "shadow-opacity": 0.42,
+          "shadow-offset-y": 12 * edgeScale
         }
       },
       {
         selector: "node[expandable = 'yes'][focus != 'yes']",
         style: {
-          "border-width": 2.3 * edgeScale,
-          "underlay-opacity": 0.085
+          "border-width": 2.3 * edgeScale
         }
       },
       {
         selector: "node.hovered",
         style: {
-          "background-blacken": -0.13,
-          "underlay-opacity": 0.16
+          "background-blacken": -0.13
         }
       },
       {
@@ -418,9 +400,7 @@
         style: {
           "border-color": "#46f3ff",
           "border-width": 3.2 * edgeScale,
-          "underlay-color": "#46f3ff",
-          "underlay-opacity": 0.2,
-          "underlay-padding": 11 * edgeScale,
+          "underlay-opacity": 0,
           "shadow-blur": 28 * edgeScale,
           "shadow-color": "#46f3ff",
           "shadow-opacity": 0.25
