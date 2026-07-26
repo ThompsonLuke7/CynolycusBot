@@ -154,6 +154,11 @@ def test_static_app_includes_large_display_mode() -> None:
     assert "body.large-display" in css
     assert "min-width: 2560px" in javascript
     assert "cynolycus-atlas-large-display" in javascript
+    assert 'id="context-dock"' in html
+    assert "text-overflow-wrap" in javascript
+    assert '"shape": "cutrectangle"' in javascript
+    assert '"shape": "hexagon"' in javascript
+    assert "edge.active-flow" in javascript
 
 
 def test_check_validates_without_writing_dist(atlas_repo: Path) -> None:

@@ -45,6 +45,9 @@ private local review.
 - Search jumps to any component, including deeply nested nodes.
 - Filters isolate data, feature, signal, policy, execution, audit, research,
   and control relationships.
+- Selecting a node reveals only its connected flow labels and fades unrelated
+  components. Cross-domain links live in the Connected Systems dock instead
+  of competing with the active diagram.
 - At viewport widths of 2560 px or greater, the atlas automatically uses its
   large-display presentation scale. The `Aa` header control overrides the
   automatic choice and remembers that choice in the browser.

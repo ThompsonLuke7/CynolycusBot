@@ -388,7 +388,7 @@
       "kind": "model",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 500, "y": 430},
+      "position": {"x": 500, "y": 550},
       "public": {
         "label": "Meta Context Matrix",
         "summary": "Combines specialist scores with liquidity, regime, themes, news, macro, Treasury, and guidance context.",

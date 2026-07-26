@@ -50,3 +50,50 @@ def test_momentum_and_swing_have_complete_variable_depth_paths() -> None:
             return 1 + max((max_depth(child) for child in children.get(node_id, [])), default=0)
 
         assert max_depth(strategy) >= 3
+
+
+def test_large_display_positions_are_collision_free_for_every_scope() -> None:
+    data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    children: dict[str, list[dict]] = {}
+    for node in data["nodes"]:
+        if node.get("parent_id"):
+            children.setdefault(node["parent_id"], []).append(node)
+
+    # These are deliberately conservative rectangular bounds for the largest
+    # graph mode, matching graphScale() and graphSpacingScale() in atlas.js.
+    spacing = 1.18
+    child_width, child_height = 176 * 1.24, 96 * 1.24
+    focus_width = focus_height = 170 * 1.24
+
+    for scope_id, scope_children in children.items():
+        boxes = [
+            (
+                scope_id,
+                500 - focus_width / 2,
+                330 - focus_height / 2,
+                500 + focus_width / 2,
+                330 + focus_height / 2,
+            )
+        ]
+        for node in scope_children:
+            position = node["position"]
+            x = 500 + (position["x"] - 500) * spacing
+            y = 330 + (position["y"] - 330) * spacing
+            boxes.append(
+                (
+                    node["id"],
+                    x - child_width / 2,
+                    y - child_height / 2,
+                    x + child_width / 2,
+                    y + child_height / 2,
+                )
+            )
+
+        collisions = []
+        for index, left in enumerate(boxes):
+            for right in boxes[index + 1 :]:
+                overlap_x = min(left[3], right[3]) - max(left[1], right[1])
+                overlap_y = min(left[4], right[4]) - max(left[2], right[2])
+                if overlap_x > 0 and overlap_y > 0:
+                    collisions.append((left[0], right[0]))
+        assert not collisions, f"{scope_id} has large-display collisions: {collisions}"

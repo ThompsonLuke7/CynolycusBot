@@ -292,6 +292,23 @@ kbd {
   inset: 0;
 }
 
+body.context-dock-open #cy {
+  bottom: 96px;
+}
+
+body.context-dock-open .graph-instruction {
+  display: none;
+}
+
+body.side-panel-open #cy {
+  right: 400px;
+}
+
+body.side-panel-open .context-dock {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .scope-label {
   position: absolute;
   z-index: 8;
@@ -368,6 +385,98 @@ kbd {
   font-family: var(--font-mono);
   font-size: 8px;
   white-space: nowrap;
+}
+
+.context-dock {
+  position: absolute;
+  z-index: 9;
+  right: 190px;
+  bottom: 16px;
+  left: 290px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  border: 1px solid rgba(69, 125, 164, 0.36);
+  border-radius: 14px;
+  background:
+    linear-gradient(90deg, rgba(8, 27, 42, 0.95), rgba(6, 15, 26, 0.88)),
+    rgba(4, 11, 20, 0.94);
+  backdrop-filter: blur(18px);
+  padding: 8px 10px 8px 14px;
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.3);
+  transition: opacity 160ms ease;
+}
+
+.context-dock > strong {
+  color: #65849a;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+#context-dock-items {
+  min-width: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.context-dock-button {
+  position: relative;
+  min-width: 0;
+  max-width: 180px;
+  flex: 1 1 120px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--dock-accent) 45%, #17334b);
+  border-radius: 9px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--dock-accent) 10%, transparent), transparent 58%),
+    #07121e;
+  color: #b9d0dc;
+  padding: 8px 10px 8px 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-dock-button::before {
+  position: absolute;
+  top: 7px;
+  bottom: 7px;
+  left: 5px;
+  width: 2px;
+  background: var(--dock-accent);
+  content: "";
+  box-shadow: 0 0 10px var(--dock-accent);
+}
+
+.context-dock-button:hover {
+  border-color: var(--dock-accent);
+  background-color: #0b1d2b;
+}
+
+.context-dock-button span,
+.context-dock-button small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-dock-button span {
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.context-dock-button small {
+  margin-top: 1px;
+  color: #58758a;
+  font-family: var(--font-mono);
+  font-size: 7px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .graph-fallback {
@@ -917,6 +1026,45 @@ body.large-display .graph-instruction {
   font-size: 13px;
 }
 
+body.large-display.context-dock-open #cy {
+  bottom: 142px;
+}
+
+body.large-display.side-panel-open #cy {
+  right: 600px;
+}
+
+body.large-display .context-dock {
+  right: 285px;
+  bottom: 24px;
+  left: 450px;
+  gap: 20px;
+  border-radius: 20px;
+  padding: 12px 15px 12px 21px;
+}
+
+body.large-display .context-dock > strong {
+  font-size: 12px;
+}
+
+body.large-display #context-dock-items {
+  gap: 10px;
+}
+
+body.large-display .context-dock-button {
+  max-width: 260px;
+  border-radius: 13px;
+  padding: 12px 15px 12px 20px;
+}
+
+body.large-display .context-dock-button span {
+  font-size: 15px;
+}
+
+body.large-display .context-dock-button small {
+  font-size: 11px;
+}
+
 body.large-display .inspector,
 body.large-display .outline-panel {
   top: 24px;
@@ -1133,6 +1281,7 @@ body.large-display .toast {
   .large-text-toggle,
   .tool-rail,
   .graph-instruction,
+  .context-dock,
   .minimap {
     display: none;
   }

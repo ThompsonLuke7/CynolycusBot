@@ -16,6 +16,16 @@
     system: "#46f3ff",
     ui: "#46f3ff"
   };
+  const NODE_BACKGROUNDS = {
+    data: "#0a1d32",
+    feature: "#0b2524",
+    signal: "#1c1730",
+    policy: "#2a2112",
+    execution: "#281522",
+    audit: "#09252a",
+    research: "#102525",
+    control: "#0d1d2b"
+  };
 
   const els = {
     cy: document.getElementById("cy"),
@@ -55,6 +65,8 @@
     validationReadout: document.querySelector(".validation-readout"),
     minimap: document.getElementById("minimap"),
     minimapNodes: document.getElementById("minimap-nodes"),
+    contextDock: document.getElementById("context-dock"),
+    contextDockItems: document.getElementById("context-dock-items"),
     toast: document.getElementById("toast")
   };
 
@@ -93,11 +105,37 @@
   }
 
   function graphScale() {
-    return document.body.classList.contains("large-display") ? 1.55 : 1;
+    return document.body.classList.contains("large-display") ? 1.24 : 1;
+  }
+
+  function graphTextScale() {
+    return document.body.classList.contains("large-display") ? 1.38 : 1;
+  }
+
+  function graphSpacingScale() {
+    return document.body.classList.contains("large-display") ? 1.18 : 1;
   }
 
   function graphFitPadding() {
-    return document.body.classList.contains("large-display") ? 108 : 72;
+    return document.body.classList.contains("large-display") ? 96 : 72;
+  }
+
+  function graphPosition(node) {
+    if (node.id === state.scopeId) return {x: 500, y: 330};
+    const position = node.position || {x: 500, y: 330};
+    const spacing = graphSpacingScale();
+    return {
+      x: 500 + (Number(position.x) - 500) * spacing,
+      y: 330 + (Number(position.y) - 330) * spacing
+    };
+  }
+
+  function refreshGraphViewport() {
+    if (!state.cy) return;
+    window.requestAnimationFrame(function () {
+      state.cy.resize();
+      state.cy.fit(state.cy.elements(), graphFitPadding());
+    });
   }
 
   function applyLargeDisplay(enabled, persist) {
@@ -117,9 +155,12 @@
     }
     if (state.cy) {
       state.cy.style(cyStyle());
-      state.cy.maxZoom(enabled ? 2.5 : 1.7);
-      state.cy.resize();
-      state.cy.fit(state.cy.elements(), graphFitPadding());
+      state.cy.maxZoom(enabled ? 2.2 : 1.7);
+      state.cy.nodes().forEach(function (cyNode) {
+        const node = state.nodesById.get(cyNode.id());
+        if (node) cyNode.position(graphPosition(node));
+      });
+      refreshGraphViewport();
     }
   }
 
@@ -210,8 +251,8 @@
     const children = (state.childrenByParent.get(state.scopeId) || []).filter(function (node) {
       return state.showResearch || !["research", "audit"].includes(node.kind);
     });
-    const base = [focus].concat(children).filter(Boolean);
-    const ids = new Set(base.map(function (node) { return node.id; }));
+    const nodes = [focus].concat(children).filter(Boolean);
+    const ids = new Set(nodes.map(function (node) { return node.id; }));
     const portals = [];
 
     state.edges.forEach(function (edge) {
@@ -221,30 +262,21 @@
       if (sourceInside === targetInside) return;
       const outsideId = sourceInside ? edge.target : edge.source;
       const outsideNode = state.nodesById.get(outsideId);
-      if (!outsideNode || ids.has(outsideId) || portals.length >= 5) return;
+      if (!outsideNode || ids.has(outsideId) || portals.some(function (node) { return node.id === outsideId; })) return;
       if (!state.showResearch && ["research", "audit"].includes(outsideNode.kind)) return;
       portals.push(outsideNode);
-      ids.add(outsideId);
     });
 
-    const portalIds = new Set(portals.map(function (node) { return node.id; }));
-    const nodes = base.concat(portals);
     const edges = state.edges.filter(function (edge) {
       return state.edgeTypes.has(edge.type) && ids.has(edge.source) && ids.has(edge.target);
     });
-    return {nodes: nodes, edges: edges, portalIds: portalIds};
+    return {nodes: nodes, edges: edges, portals: portals.slice(0, 5)};
   }
 
   function graphElements(scope) {
     const children = new Set((state.childrenByParent.get(state.scopeId) || []).map(function (n) { return n.id; }));
-    const portalArray = Array.from(scope.portalIds);
     const nodeElements = scope.nodes.map(function (node) {
-      let position = node.position || {x: 500, y: 330};
-      if (node.id === state.scopeId) position = {x: 500, y: 330};
-      if (scope.portalIds.has(node.id)) {
-        const i = portalArray.indexOf(node.id);
-        position = {x: 90 + i * 190, y: 635};
-      }
+      const position = graphPosition(node);
       return {
         group: "nodes",
         data: {
@@ -256,7 +288,6 @@
           mode: nodePublic(node).mode || "",
           focus: node.id === state.scopeId ? "yes" : "no",
           expandable: hasChildren(node.id) ? "yes" : "no",
-          portal: scope.portalIds.has(node.id) ? "yes" : "no",
           child: children.has(node.id) ? "yes" : "no"
         },
         position: {x: Number(position.x), y: Number(position.y)}
@@ -280,105 +311,165 @@
   }
 
   function cyStyle() {
-    const scale = graphScale();
+    const nodeScale = graphScale();
+    const textScale = graphTextScale();
+    const edgeScale = document.body.classList.contains("large-display") ? 1.18 : 1;
     return [
       {
         selector: "node",
         style: {
-          "width": 170 * scale,
-          "height": 86 * scale,
-          "shape": "roundrectangle",
-          "background-color": "#091625",
-          "background-opacity": 0.97,
-          "border-width": 1.4 * scale,
+          "width": 176 * nodeScale,
+          "height": 96 * nodeScale,
+          "shape": "cutrectangle",
+          "background-color": function (ele) {
+            return NODE_BACKGROUNDS[ele.data("role")] || NODE_BACKGROUNDS.control;
+          },
+          "background-opacity": 0.94,
+          "border-width": 1.5 * edgeScale,
           "border-color": function (ele) { return COLORS[ele.data("role")] || "#46f3ff"; },
           "label": "data(label)",
           "color": "#eaf8ff",
           "font-family": "Space Grotesk",
-          "font-size": 12 * scale,
+          "font-size": 12 * textScale,
           "font-weight": 700,
           "text-wrap": "wrap",
-          "text-max-width": 138 * scale,
+          "text-overflow-wrap": "anywhere",
+          "text-max-width": 142 * nodeScale,
           "text-valign": "center",
           "text-halign": "center",
           "overlay-opacity": 0,
-          "shadow-blur": 20 * scale,
+          "underlay-color": function (ele) { return COLORS[ele.data("role")] || "#46f3ff"; },
+          "underlay-opacity": 0.055,
+          "underlay-padding": 8 * edgeScale,
+          "underlay-shape": "roundrectangle",
+          "shadow-blur": 22 * edgeScale,
           "shadow-color": "#000",
           "shadow-opacity": 0.38,
-          "shadow-offset-y": 10 * scale
+          "shadow-offset-y": 10 * edgeScale,
+          "transition-property": "background-blacken, border-width, opacity, underlay-opacity",
+          "transition-duration": "150ms"
         }
+      },
+      {
+        selector: "node[role = 'data']",
+        style: {"shape": "barrel"}
+      },
+      {
+        selector: "node[role = 'signal']",
+        style: {"shape": "hexagon"}
+      },
+      {
+        selector: "node[role = 'policy']",
+        style: {"shape": "tag"}
+      },
+      {
+        selector: "node[role = 'execution']",
+        style: {"shape": "roundrectangle"}
       },
       {
         selector: "node[focus = 'yes']",
         style: {
-          "width": 154 * scale,
-          "height": 154 * scale,
-          "shape": "ellipse",
+          "width": 170 * nodeScale,
+          "height": 170 * nodeScale,
+          "shape": "hexagon",
           "background-color": "#0b2838",
           "border-color": "#46f3ff",
-          "border-width": 1.8 * scale,
-          "font-size": 14 * scale,
-          "text-max-width": 116 * scale,
-          "shadow-blur": 35 * scale,
+          "border-width": 2.2 * edgeScale,
+          "font-size": 14 * textScale,
+          "text-max-width": 124 * nodeScale,
+          "underlay-color": "#46f3ff",
+          "underlay-opacity": 0.1,
+          "underlay-padding": 14 * edgeScale,
+          "underlay-shape": "hexagon",
+          "shadow-blur": 38 * edgeScale,
           "shadow-color": "#46f3ff",
-          "shadow-opacity": 0.2,
+          "shadow-opacity": 0.18,
           "shadow-offset-y": 0
-        }
-      },
-      {
-        selector: "node[portal = 'yes']",
-        style: {
-          "width": 132 * scale,
-          "height": 52 * scale,
-          "border-style": "dashed",
-          "background-opacity": 0.72,
-          "font-size": 9 * scale,
-          "color": "#89a7ba"
         }
       },
       {
         selector: "node[expandable = 'yes'][focus != 'yes']",
         style: {
-          "border-width": 2.1 * scale
+          "border-width": 2.3 * edgeScale,
+          "underlay-opacity": 0.085
+        }
+      },
+      {
+        selector: "node.hovered",
+        style: {
+          "background-blacken": -0.13,
+          "underlay-opacity": 0.16
         }
       },
       {
         selector: "node:selected",
         style: {
           "border-color": "#46f3ff",
-          "border-width": 3 * scale,
-          "shadow-blur": 25 * scale,
+          "border-width": 3.2 * edgeScale,
+          "underlay-color": "#46f3ff",
+          "underlay-opacity": 0.2,
+          "underlay-padding": 11 * edgeScale,
+          "shadow-blur": 28 * edgeScale,
           "shadow-color": "#46f3ff",
           "shadow-opacity": 0.25
         }
       },
       {
+        selector: "node.dimmed",
+        style: {
+          "opacity": 0.24,
+          "text-opacity": 0.4,
+          "underlay-opacity": 0
+        }
+      },
+      {
         selector: "edge",
         style: {
-          "width": 1.6 * scale,
-          "curve-style": "bezier",
+          "width": 1.35 * edgeScale,
+          "curve-style": "unbundled-bezier",
+          "control-point-distances": 24,
+          "control-point-weights": 0.5,
           "line-color": function (ele) { return COLORS[ele.data("type")] || "#2b5572"; },
           "target-arrow-color": function (ele) { return COLORS[ele.data("type")] || "#2b5572"; },
           "target-arrow-shape": "triangle",
-          "arrow-scale": 0.7 * scale,
+          "arrow-scale": 0.65 * edgeScale,
           "line-style": "dashed",
-          "line-dash-pattern": [6 * scale, 10 * scale],
-          "opacity": 0.65,
+          "line-dash-pattern": [5 * edgeScale, 11 * edgeScale],
+          "opacity": 0.42,
           "label": "data(label)",
           "font-family": "JetBrains Mono",
-          "font-size": 7 * scale,
+          "font-size": 7 * textScale,
           "color": "#68889f",
           "text-background-color": "#030711",
-          "text-background-opacity": 0.86,
-          "text-background-padding": 3 * scale,
+          "text-background-opacity": 0.92,
+          "text-background-padding": 4 * edgeScale,
           "text-rotation": "autorotate",
-          "text-margin-y": -8 * scale,
-          "overlay-opacity": 0
+          "text-margin-y": -9 * edgeScale,
+          "text-opacity": 0,
+          "overlay-opacity": 0,
+          "transition-property": "opacity, width, text-opacity",
+          "transition-duration": "150ms"
         }
       },
       {
         selector: "edge[type = 'research'], edge[type = 'audit']",
         style: {"line-style": "dotted"}
+      },
+      {
+        selector: "edge.active-flow",
+        style: {
+          "width": 2.2 * edgeScale,
+          "opacity": 0.92,
+          "text-opacity": 0.9,
+          "z-index": 8
+        }
+      },
+      {
+        selector: "edge.dimmed",
+        style: {
+          "opacity": 0.08,
+          "text-opacity": 0
+        }
       }
     ];
   }
@@ -417,7 +508,7 @@
       style: cyStyle(),
       layout: {name: "preset"},
       minZoom: 0.48,
-      maxZoom: graphScale() > 1 ? 2.5 : 1.7,
+      maxZoom: graphScale() > 1 ? 2.2 : 1.7,
       wheelSensitivity: 0.2,
       boxSelectionEnabled: false,
       autoungrabify: true
@@ -433,10 +524,10 @@
       if (event.target === state.cy) closeInspector();
     });
     state.cy.on("mouseover", "node", function (event) {
-      event.target.animate({style: {"background-color": "#10283a"}}, {duration: 170});
+      event.target.addClass("hovered");
     });
     state.cy.on("mouseout", "node", function (event) {
-      if (!event.target.selected()) event.target.animate({style: {"background-color": "#091625"}}, {duration: 170});
+      event.target.removeClass("hovered");
     });
     return true;
   }
@@ -453,6 +544,7 @@
     closeInspector();
     renderBreadcrumbs();
     renderMinimap(scope.nodes);
+    renderContextDock(scope.portals);
     els.scopeLabel.textContent = nodeLabel(scopeNode) + " · " +
       (state.childrenByParent.get(state.scopeId) || []).length + " children";
     els.back.hidden = !parentOf(state.scopeId);
@@ -495,7 +587,7 @@
   function renderMinimap(nodes) {
     els.minimapNodes.replaceChildren();
     const positions = nodes.map(function (node) {
-      const pos = node.id === state.scopeId ? {x: 500, y: 330} : (node.position || {x: 500, y: 330});
+      const pos = graphPosition(node);
       return {node: node, x: Number(pos.x), y: Number(pos.y)};
     });
     positions.forEach(function (item) {
@@ -510,6 +602,40 @@
     els.minimap.hidden = nodes.length < 7;
   }
 
+  function renderContextDock(portals) {
+    els.contextDockItems.replaceChildren();
+    els.contextDock.hidden = !portals.length;
+    document.body.classList.toggle("context-dock-open", Boolean(portals.length));
+    portals.forEach(function (node) {
+      const button = document.createElement("button");
+      const role = node.edge_color_role || node.kind || "control";
+      button.type = "button";
+      button.className = "context-dock-button";
+      button.style.setProperty("--dock-accent", COLORS[role] || COLORS.control);
+      button.innerHTML = "<span></span><small></small>";
+      button.querySelector("span").textContent = nodeLabel(node);
+      button.querySelector("small").textContent = titleCase(node.kind);
+      button.addEventListener("click", function () {
+        navigateToScope(node.parent_id || node.id, node.id);
+      });
+      els.contextDockItems.appendChild(button);
+    });
+  }
+
+  function highlightFlows(id) {
+    if (!state.cy) return;
+    state.cy.nodes().removeClass("dimmed");
+    state.cy.edges().removeClass("dimmed active-flow");
+    if (!id) return;
+    const selected = state.cy.getElementById(id);
+    if (!selected || !selected.length) return;
+    const connectedEdges = selected.connectedEdges();
+    const connectedNodes = connectedEdges.connectedNodes().union(selected);
+    state.cy.nodes().difference(connectedNodes).addClass("dimmed");
+    state.cy.edges().difference(connectedEdges).addClass("dimmed");
+    connectedEdges.addClass("active-flow");
+  }
+
   function selectNode(id, updateRoute) {
     const node = state.nodesById.get(id);
     if (!node) return;
@@ -518,12 +644,14 @@
       state.cy.$(":selected").unselect();
       const cyNode = state.cy.getElementById(id);
       if (cyNode && cyNode.length) cyNode.select();
+      highlightFlows(id);
     }
     openInspector(node);
     if (updateRoute) setRoute(state.scopeId, id, true);
   }
 
   function openInspector(node) {
+    if (window.innerWidth > 760 && els.outlinePanel.classList.contains("open")) closeOutline();
     const pub = nodePublic(node);
     const local = state.datasetName === "local" ? (node.local || null) : null;
     els.inspectorKicker.textContent = hasChildren(node.id) ? "EXPANDABLE DOMAIN" : "ARCHITECTURE COMPONENT";
@@ -574,6 +702,8 @@
 
     els.inspector.classList.add("open");
     els.inspector.setAttribute("aria-hidden", "false");
+    document.body.classList.add("side-panel-open");
+    refreshGraphViewport();
   }
 
   function closeInspector() {
@@ -581,6 +711,11 @@
     els.inspector.setAttribute("aria-hidden", "true");
     state.selectedId = null;
     if (state.cy) state.cy.$(":selected").unselect();
+    highlightFlows(null);
+    if (!els.outlinePanel.classList.contains("open")) {
+      document.body.classList.remove("side-panel-open");
+      refreshGraphViewport();
+    }
   }
 
   function enterNode(id) {
@@ -724,14 +859,23 @@
   }
 
   function openOutline() {
+    if (window.innerWidth > 760 && els.inspector.classList.contains("open")) closeInspector();
     els.outlinePanel.classList.add("open");
     els.outlinePanel.setAttribute("aria-hidden", "false");
+    if (window.innerWidth > 760) {
+      document.body.classList.add("side-panel-open");
+      refreshGraphViewport();
+    }
   }
 
   function closeOutline() {
     if (window.innerWidth <= 760) return;
     els.outlinePanel.classList.remove("open");
     els.outlinePanel.setAttribute("aria-hidden", "true");
+    if (!els.inspector.classList.contains("open")) {
+      document.body.classList.remove("side-panel-open");
+      refreshGraphViewport();
+    }
   }
 
   function toast(message) {
