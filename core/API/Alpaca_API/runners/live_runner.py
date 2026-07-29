@@ -32,6 +32,7 @@ from strategies.spy_intraday.Policy.order_policy import (
     OptionOrderPolicy,
     OptionOrderPolicyConfig,
 )
+from strategies.spy_intraday.Policy.option_mark_capture import OptionMarkCapture
 from strategies.spy_intraday.Policy.regime_probability_filter import RegimeProbabilityCalibrator
 
 META_CONTEXT_SYMBOLS: tuple[str, ...] = ("QQQ", "IWM", "TLT", "UUP")
@@ -536,6 +537,7 @@ def _build_option_order_policy(
     meta_hard_stop_atr: float = 0.0,
     meta_setup_failure_exit_enabled: bool = True,
     meta_setup_failure_buffer_atr: float = 0.10,
+    meta_setup_failure_grace_minutes: int = 0,
     meta_no_progress_exit_enabled: bool = False,
     meta_no_progress_exit_minutes: int = 10,
     meta_no_progress_exit_atr: float = 0.20,
@@ -624,6 +626,7 @@ def _build_option_order_policy(
         meta_hard_stop_atr=float(meta_hard_stop_atr),
         meta_setup_failure_exit_enabled=bool(meta_setup_failure_exit_enabled),
         meta_setup_failure_buffer_atr=float(meta_setup_failure_buffer_atr),
+        meta_setup_failure_grace_minutes=int(meta_setup_failure_grace_minutes),
         meta_no_progress_exit_enabled=bool(meta_no_progress_exit_enabled),
         meta_no_progress_exit_minutes=int(meta_no_progress_exit_minutes),
         meta_no_progress_exit_atr=float(meta_no_progress_exit_atr),
@@ -667,10 +670,21 @@ def _make_1m_handler(
     print_1m: bool,
     order_policies: dict[str, OptionOrderPolicy] | None = None,
     trace_rows: list[dict] | None = None,
+    option_mark_capture: OptionMarkCapture | None = None,
+    replay_1m_log: Path | None = None,
 ) -> Callable[[str, dict, BarRingBuffer], None]:
     def _handler(symbol: str, bar: dict, _buffer: BarRingBuffer) -> None:
         if order_policies is not None and symbol in order_policies:
-            result = order_policies[symbol].on_1m_bar(bar=bar)
+            policy = order_policies[symbol]
+            if option_mark_capture is not None:
+                option_mark_capture.capture_active(
+                    underlying=symbol, bar=bar, policy_state=policy.snapshot_state(), phase="pre_1m_policy"
+                )
+            result = policy.on_1m_bar(bar=bar)
+            if option_mark_capture is not None:
+                option_mark_capture.capture_active(
+                    underlying=symbol, bar=bar, policy_state=policy.snapshot_state(), phase="post_1m_policy"
+                )
             event = str(result.get("event", "unknown"))
             if trace_rows is not None:
                 trace_rows.append(
@@ -698,6 +712,8 @@ def _make_1m_handler(
                 )
             if event not in {"hold", "no_change"}:
                 print(f"{symbol} order_policy 1m event={event} details={result}")
+        if replay_1m_log is not None:
+            append_jsonl(replay_1m_log, {"event": "one_minute_bar", "symbol": symbol, "bar": bar})
         if print_1m:
             ts = _format_ts_local(bar.get("timestamp"), tz=print_tz)
             print(
@@ -716,6 +732,8 @@ def _make_15m_handler(
     execution_latches: dict[str, DirectionExecutionLatch],
     order_policies: dict[str, OptionOrderPolicy] | None = None,
     signal_audit_log: Path | None = None,
+    option_mark_capture: OptionMarkCapture | None = None,
+    replay_decision_log: Path | None = None,
 ) -> Callable[[str, dict, BarRingBuffer], None]:
     def _handler(symbol: str, bar15: dict, buffer: BarRingBuffer) -> None:
         if print_15m:
@@ -779,6 +797,14 @@ def _make_15m_handler(
                     "signal_audit": signal_audit,
                 },
             )
+            append_jsonl(
+                replay_decision_log,
+                {
+                    "event": "phase4_decision_input", "symbol": symbol, "bar": bar15,
+                    "probs": probs, "thresholds": thresholds, "raw_action": raw_action,
+                    "exec_pos": exec_pos, "gate_status": gate_status,
+                },
+            )
             if order_policies is not None and symbol in order_policies:
                 policy_bar = dict(bar15)
                 policy_bar.update({k: v for k, v in probs.items() if v is not None})
@@ -791,11 +817,21 @@ def _make_15m_handler(
                     }
                 )
                 policy_bar["signal_audit"] = signal_audit
+                if option_mark_capture is not None:
+                    option_mark_capture.capture_active(
+                        underlying=symbol, bar=policy_bar,
+                        policy_state=order_policies[symbol].snapshot_state(), phase="pre_decision_policy",
+                    )
                 result = order_policies[symbol].on_decision(
                     action=float(raw_action if _use_meta_direct_execution(inference) else exec_pos),
                     closed_bar=policy_bar,
                     update_bar_state=False,
                 )
+                if option_mark_capture is not None:
+                    option_mark_capture.capture_active(
+                        underlying=symbol, bar=policy_bar,
+                        policy_state=order_policies[symbol].snapshot_state(), phase="post_decision_policy",
+                    )
                 if isinstance(result, dict):
                     result.setdefault("signal_audit", signal_audit)
                     append_jsonl(
@@ -1945,6 +1981,32 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--meta-trail-atr", type=float, default=0.8, help="Base trail ATR used to build live exit context.")
     parser.add_argument("--meta-trail-atr-after-tp", type=float, default=0.5, help="Tightened trail ATR after TP is seen.")
     parser.add_argument("--meta-hard-stop-atr", type=float, default=0.0, help="Underlying ATR hard-stop distance for option exits; <=0 disables it.")
+    parser.add_argument(
+        "--meta-setup-failure-exit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable underlying setup-invalidation exits for active option positions.",
+    )
+    parser.add_argument(
+        "--meta-setup-failure-buffer-atr",
+        type=float,
+        default=0.10,
+        help="Extra ATR distance beyond the setup invalidation level before exit.",
+    )
+    parser.add_argument(
+        "--meta-setup-failure-grace-minutes",
+        type=int,
+        default=0,
+        help="Do not evaluate setup invalidation until this many minutes after entry.",
+    )
+    parser.add_argument(
+        "--meta-no-progress-exit",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable underlying no-progress exit for active option positions.",
+    )
+    parser.add_argument("--meta-no-progress-minutes", type=int, default=10)
+    parser.add_argument("--meta-no-progress-atr", type=float, default=0.20)
     parser.add_argument("--meta-use-tp-to-tighten-trail", action=argparse.BooleanOptionalAction, default=True, help="Mirror training trail-tightening behavior in live exit context.")
     parser.add_argument(
         "--meta-entry-prob-source",
@@ -2228,6 +2290,16 @@ def _parse_args() -> argparse.Namespace:
         help="Append-only JSONL path for SPY signal/order audit events; set empty to disable.",
     )
     parser.add_argument(
+        "--option-mark-capture-dir",
+        default="Data/inference/spy/option_marks",
+        help="Append-only directory for dual-source active-option bid/ask marks; set empty to disable.",
+    )
+    parser.add_argument(
+        "--spy-replay-capture-dir",
+        default="Data/inference/spy/replay_capture",
+        help="Append-only live 1m bars and Phase-4 decisions for future replay; set empty to disable.",
+    )
+    parser.add_argument(
         "--option-no-close-on-flat",
         action="store_true",
         help="Do not auto close open option when agent action goes flat.",
@@ -2458,6 +2530,12 @@ def main() -> None:
                 scalp_min_signal_range_atr=float(args.scalp_min_signal_range_atr),
                 scalp_require_reversal_close=bool(args.scalp_require_reversal_close),
                 meta_hard_stop_atr=float(args.meta_hard_stop_atr),
+                meta_setup_failure_exit_enabled=bool(args.meta_setup_failure_exit),
+                meta_setup_failure_buffer_atr=float(args.meta_setup_failure_buffer_atr),
+                meta_setup_failure_grace_minutes=int(args.meta_setup_failure_grace_minutes),
+                meta_no_progress_exit_enabled=bool(args.meta_no_progress_exit),
+                meta_no_progress_exit_minutes=int(args.meta_no_progress_minutes),
+                meta_no_progress_exit_atr=float(args.meta_no_progress_atr),
                 meta_trail_activate_atr=float(args.meta_trail_activate_atr),
                 meta_trail_atr=float(args.meta_trail_atr),
                 meta_trail_atr_after_tp=float(args.meta_trail_atr_after_tp),
@@ -2500,11 +2578,26 @@ def main() -> None:
                 except Exception as exc:
                     print(f"[live] Startup sync {symbol} failed: {exc}")
 
+    option_mark_capture = (
+        OptionMarkCapture(output_dir=args.option_mark_capture_dir)
+        if order_policies is not None and str(args.option_mark_capture_dir or "").strip()
+        else None
+    )
+    replay_capture_dir = Path(args.spy_replay_capture_dir) if str(args.spy_replay_capture_dir or "").strip() else None
+    replay_1m_log = replay_capture_dir / "live_1m_bars.jsonl" if replay_capture_dir else None
+    replay_decision_log = replay_capture_dir / "phase4_decisions.jsonl" if replay_capture_dir else None
+    if option_mark_capture is not None:
+        print(f"[live] Active-option marks will be captured from Alpaca and Schwab: {args.option_mark_capture_dir}")
+    if replay_capture_dir is not None:
+        print(f"[live] Replay inputs will be retained: {replay_capture_dir}")
+
     on_1m = (
         _make_1m_handler(
             print_tz=args.tz or "America/New_York",
             print_1m=bool(args.print_1m),
             order_policies=order_policies,
+            option_mark_capture=option_mark_capture,
+            replay_1m_log=replay_1m_log,
         )
         if (args.print_1m or order_policies is not None)
         else None
@@ -2517,6 +2610,8 @@ def main() -> None:
         execution_latches=execution_latches,
         order_policies=order_policies,
         signal_audit_log=Path(args.signal_audit_log) if str(args.signal_audit_log or "").strip() else None,
+        option_mark_capture=option_mark_capture,
+        replay_decision_log=replay_decision_log,
     )
 
     processor = LiveBarProcessor(

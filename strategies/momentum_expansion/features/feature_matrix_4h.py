@@ -84,6 +84,167 @@ def _sector_etf_for(ticker: str) -> str:
     return SECTOR_MAP.get(ticker.upper(), "XLK")
 
 
+# ---------------------------------------------------------------------------
+# Market-regime / sector-context join (WS-B — see
+# docs/superpowers/plans/2026-07-26-market-regime-and-sector-context.md §4).
+# `signals/market_regime/` (WS-A) is a sibling package owned by another
+# workstream and is only READ here (its own config/build/sector_map), never
+# edited. Every helper below fails soft: if the WS-A tables are absent,
+# unreadable, or the package itself is unimportable, the new columns come out
+# NaN (regime_available=0), never zero-filled and never a raised exception —
+# a missing/mid-rebuild regime table must not break feature building or the
+# live runner.
+# ---------------------------------------------------------------------------
+
+_REGIME_TABLE_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
+_REGIME_WARNED_MISSING: set[str] = set()
+_REGIME_WARNED_STALE: set[tuple[str, int]] = set()
+
+# A daily_regime.parquet whose most-recently-joined row is older than this many
+# calendar days from a bar's own session date is almost certainly a stale
+# build (the table is meant to be refreshed daily; a multi-day gap usually
+# means `python -m signals.market_regime.build` hasn't run recently), not a
+# legitimate as-of lag (which is normally 0-1 sessions, a few more across a
+# weekend/holiday). Surfaced as a throttled log warning, never raised —
+# `regime_stale_days` is also exposed as a feature so the model itself sees it.
+_REGIME_STALE_WARN_DAYS = 5
+
+
+def _read_cached_parquet(path: Path) -> pd.DataFrame | None:
+    """mtime-cached parquet read so a multi-hundred-ticker batch build reads
+    daily_regime.parquet / sector_state.parquet once, not once per ticker."""
+    if not path.exists():
+        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    key = str(path)
+    cached = _REGIME_TABLE_CACHE.get(key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        df = pd.read_parquet(path)
+    except Exception as exc:  # pragma: no cover - corrupt/partial file
+        logger.warning("Failed to read %s: %s", path, exc)
+        return None
+    _REGIME_TABLE_CACHE[key] = (mtime, df)
+    return df
+
+
+def _load_daily_regime_table() -> pd.DataFrame | None:
+    try:
+        from signals.market_regime.config import DAILY_REGIME_PATH
+    except Exception as exc:  # pragma: no cover - WS-A package unavailable
+        logger.warning("signals.market_regime unavailable (%s) — regime_* features will be NaN", exc)
+        return None
+    df = _read_cached_parquet(DAILY_REGIME_PATH)
+    if df is None:
+        if str(DAILY_REGIME_PATH) not in _REGIME_WARNED_MISSING:
+            logger.warning(
+                "Daily regime table missing at %s — risk_appetite_z/liquidity_stress_z/"
+                "credit_risk_z/sector_dispersion_21d/regime_* features will be NaN "
+                "(regime_available=0). Build it with `python -m signals.market_regime.build`.",
+                DAILY_REGIME_PATH,
+            )
+            _REGIME_WARNED_MISSING.add(str(DAILY_REGIME_PATH))
+        return None
+    required = {"date", "available_at", "risk_appetite_z", "liquidity_stress_z",
+                "credit_risk_z", "sector_dispersion_raw", "breadth_z"}
+    missing = required - set(df.columns)
+    if missing:
+        logger.warning("Daily regime table missing columns %s — regime_* features will be NaN", sorted(missing))
+        return None
+    return df
+
+
+def _load_sector_state_table() -> pd.DataFrame | None:
+    try:
+        from signals.market_regime.config import SECTOR_STATE_PATH
+    except Exception as exc:  # pragma: no cover - WS-A package unavailable
+        logger.warning("signals.market_regime unavailable (%s) — sector_* features will be NaN", exc)
+        return None
+    df = _read_cached_parquet(SECTOR_STATE_PATH)
+    if df is None:
+        if str(SECTOR_STATE_PATH) not in _REGIME_WARNED_MISSING:
+            logger.warning(
+                "Sector state table missing at %s — sector_* features will be NaN. "
+                "Build it with `python -m signals.market_regime.build`.", SECTOR_STATE_PATH,
+            )
+            _REGIME_WARNED_MISSING.add(str(SECTOR_STATE_PATH))
+        return None
+    required = {"date", "sector_etf", "available_at", "excess_21d", "excess_63d",
+                "rank_21d", "rank_63d", "rs_accel", "above_20d", "above_50d"}
+    missing = required - set(df.columns)
+    if missing:
+        logger.warning("Sector state table missing columns %s — sector_* features will be NaN", sorted(missing))
+        return None
+    return df
+
+
+def _regime_sector_etf_for(ticker: str) -> str | None:
+    """Curated-map-only sector resolution for the NEW sector_* columns.
+
+    Deliberately NOT `_sector_etf_for` above — that function owns
+    `rs_sector_5`/`rs_sector_20` and must keep its XLK fallback byte-for-byte
+    (deployed boosters were trained under that semantics). `signals.market_regime`'s
+    empirical resolver ships with `SECTOR_RESOLVER_ENABLED=False` by default
+    (plan defect D2), so an unresolved ticker here is `None` -> NaN sector_*
+    features, never a silent XLK guess.
+    """
+    try:
+        from signals.market_regime.sector_map import sector_etf_for
+    except Exception as exc:  # pragma: no cover - WS-A package unavailable
+        logger.warning("signals.market_regime.sector_map unavailable (%s)", exc)
+        return None
+    try:
+        return sector_etf_for(ticker)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[%s] sector_etf_for failed: %s", ticker, exc)
+        return None
+
+
+def _asof_join_regime(
+    bar_index: pd.DatetimeIndex, table: pd.DataFrame | None, value_cols: list[str],
+) -> pd.DataFrame:
+    """Backward as-of join of a regime/sector table onto 4H bar timestamps.
+
+    Each bar receives the last table row whose ``available_at`` is <= the
+    bar's own UTC timestamp — never a future row. Same backward-as-of intent
+    as ``_map_to_4h`` below, applied to ``available_at`` instead of calendar
+    ``date``: a naive date merge would leak (a 09:30 ET bar on session D must
+    see only D-1's regime row, not same-day D, since D's row isn't knowable
+    until D's close + settle margin).
+
+    Returns a frame aligned to ``bar_index`` with ``value_cols`` plus
+    ``_regime_date`` (the matched row's session date, used for staleness);
+    all NaN/NaT if ``table`` is ``None``, empty, or every row's
+    ``available_at`` is after every bar timestamp.
+    """
+    out_cols = list(value_cols) + ["_regime_date"]
+    if table is None or table.empty:
+        empty = pd.DataFrame(index=bar_index)
+        for col in value_cols:
+            empty[col] = np.nan
+        empty["_regime_date"] = pd.Series(pd.NaT, index=bar_index, dtype="datetime64[ns]")
+        return empty[out_cols]
+
+    left = pd.DataFrame({"__bar_ts": pd.DatetimeIndex(bar_index).tz_convert("UTC")})
+    left["__order"] = np.arange(len(left))
+    left = left.sort_values("__bar_ts")
+
+    right = table[["available_at", "date"] + list(value_cols)].copy()
+    right["available_at"] = pd.to_datetime(right["available_at"], utc=True)
+    right = right.sort_values("available_at").rename(columns={"date": "_regime_date"})
+
+    merged = pd.merge_asof(
+        left, right, left_on="__bar_ts", right_on="available_at", direction="backward",
+    )
+    merged = merged.sort_values("__order")
+    merged.index = bar_index
+    return merged[out_cols]
+
+
 def _build_metadata_encodings(meta: pd.DataFrame) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
     """Return stable categorical encodings for sector, cap bucket, and asset type."""
     if meta is None or meta.empty:
@@ -478,6 +639,78 @@ def build_ticker_features_4h(
         df["weekly_ret_4"] = np.nan
         df["weekly_trend_state"] = np.nan
 
+    # --- MARKET REGIME / SECTOR CONTEXT (WS-B) ---
+    # Additive, opt-in-only columns (see REGIME_FEATURE_COLUMNS_4H below) —
+    # NOT part of FEATURE_COLUMNS_4H / the deployed training matrix (plan D3).
+    regime_table = _load_daily_regime_table()
+    regime_join = _asof_join_regime(
+        df.index, regime_table,
+        ["risk_appetite_z", "liquidity_stress_z", "credit_risk_z", "sector_dispersion_raw", "breadth_z"],
+    )
+    df["risk_appetite_z"] = regime_join["risk_appetite_z"]
+    df["liquidity_stress_z"] = regime_join["liquidity_stress_z"]
+    df["credit_risk_z"] = regime_join["credit_risk_z"]
+    df["sector_dispersion_21d"] = regime_join["sector_dispersion_raw"]
+    # Genuine market-wide breadth (plan §4 WS-A: fraction of the 11 sector
+    # ETFs above their own 20d/50d SMA, z-scored) -- named `market_breadth_z`,
+    # never `sector_breadth_*`, so it can't be confused with the per-ticker
+    # `sector_above_20d/50d` flags below (which are NOT breadth: they're one
+    # sector's own above/below-SMA state, not a cross-sector fraction).
+    df["market_breadth_z"] = regime_join["breadth_z"]
+
+    bar_session_date = pd.to_datetime(
+        pd.Series(df.index.tz_convert("America/New_York").date, index=df.index)
+    )
+    regime_row_date = pd.to_datetime(regime_join["_regime_date"])
+    df["regime_available"] = regime_row_date.notna().astype(float)
+    df["regime_stale_days"] = (bar_session_date - regime_row_date).dt.days.astype(float)
+
+    sector_etf_ctx = _regime_sector_etf_for(ticker)
+    sector_table = _load_sector_state_table()
+    sector_rows = (
+        sector_table[sector_table["sector_etf"] == sector_etf_ctx]
+        if sector_etf_ctx is not None and sector_table is not None
+        else None
+    )
+    sector_join = _asof_join_regime(
+        df.index, sector_rows,
+        ["excess_21d", "excess_63d", "rank_21d", "rank_63d", "rs_accel", "above_20d", "above_50d"],
+    )
+    df["sector_excess_21d"] = sector_join["excess_21d"]
+    df["sector_excess_63d"] = sector_join["excess_63d"]
+    df["sector_rank_21d"] = sector_join["rank_21d"]
+    df["sector_rank_63d"] = sector_join["rank_63d"]
+    df["sector_rs_accel"] = sector_join["rs_accel"]
+    # NOT breadth (renamed from sector_breadth_20/50): this is the ticker's OWN
+    # resolved sector ETF's above/below-its-own-SMA state (sector_state.parquet's
+    # above_20d/above_50d), a per-ticker binary that varies by sector on a given
+    # bar -- see `market_breadth_z` above for the genuine cross-sector fraction.
+    df["sector_above_20d"] = sector_join["above_20d"]
+    df["sector_above_50d"] = sector_join["above_50d"]
+
+    # Interactions (plan §4 WS-B). NaN-propagating; no extra clipping beyond
+    # what rs_spy_20 / breakout_20 already apply upstream.
+    df["int_rs_spy_20_x_sector_rank_63d"] = df["rs_spy_20"] * df["sector_rank_63d"]
+    df["int_ret_20_x_risk_appetite_z"] = df["ret_20"] * df["risk_appetite_z"]
+    df["int_breakout_20_x_liquidity_stress_z"] = df["breakout_20"] * df["liquidity_stress_z"]
+
+    # Loud (throttled) staleness warning — constraint: the live path must not
+    # silently score on a stale regime table. Warn, never raise (must not
+    # break the live runner); regime_stale_days is also exposed as a feature.
+    if len(df) and pd.notna(df["regime_stale_days"].iloc[-1]):
+        last_stale = int(df["regime_stale_days"].iloc[-1])
+        if last_stale > _REGIME_STALE_WARN_DAYS:
+            warn_key = (ticker, last_stale // _REGIME_STALE_WARN_DAYS)
+            if warn_key not in _REGIME_WARNED_STALE:
+                logger.warning(
+                    "[%s] most recent 4H bar's joined market-regime row is %d days stale "
+                    "(> %d day tolerance) — daily_regime.parquet likely needs a rebuild "
+                    "(`python -m signals.market_regime.build`). Scoring proceeds on stale "
+                    "regime context; regime_stale_days=%d is exposed as a feature.",
+                    ticker, last_stale, _REGIME_STALE_WARN_DAYS, last_stale,
+                )
+                _REGIME_WARNED_STALE.add(warn_key)
+
     # --- BAR TIME (within session) ---
     ny = df.index.tz_convert("America/New_York")
     minutes = ny.hour * 60 + ny.minute
@@ -570,6 +803,38 @@ FEATURE_COLUMNS_4H: list[str] = [
     "xsec_ret_5_rank", "xsec_ret_20_rank", "xsec_rs_spy_20_rank",
     "xsec_rvol_20_rank", "xsec_dollar_vol_surge_20_rank",
     "xsec_atr_expand_rank", "xsec_atr_pct_rank", "xsec_near_high_rank",
+]
+
+
+# ---------------------------------------------------------------------------
+# Market-regime / sector-context features (WS-B). Deliberately NOT part of
+# FEATURE_COLUMNS_4H (plan D3): daily_regime.parquet starts 2020-07-27 and its
+# z-scores need a 252-session warmup, so these columns are NaN across a real,
+# large slice of history and for any ticker whose sector can't be resolved.
+# FEATURE_COLUMNS_4H feeds build_training_matrix's
+# dropna(subset=feature_cols, how="any") (expansion_labels.py); if these were
+# in that list, that dropna would silently delete most of the pre-2021
+# training set. Opt in explicitly (e.g. an ablation trainer) via this list.
+# ---------------------------------------------------------------------------
+REGIME_FEATURE_COLUMNS_4H: list[str] = [
+    # Sector context (signals.market_regime.sector_state, joined on the
+    # ticker's curated-map sector ETF). sector_above_20d/50d are NOT breadth
+    # -- they're one sector's own above/below-its-SMA state, a per-ticker
+    # binary that varies by sector on a given bar. See market_breadth_z below
+    # for the genuine cross-sector fraction (was misnamed sector_breadth_20/50
+    # until this was caught during verification; renamed to avoid confusion
+    # with the real breadth_z composite).
+    "sector_excess_21d", "sector_excess_63d",
+    "sector_rank_21d", "sector_rank_63d", "sector_rs_accel",
+    "sector_above_20d", "sector_above_50d",
+    # Daily market-wide regime composites (signals.market_regime.daily_regime)
+    "sector_dispersion_21d",
+    "risk_appetite_z", "liquidity_stress_z", "credit_risk_z", "market_breadth_z",
+    "regime_available", "regime_stale_days",
+    # Interactions
+    "int_rs_spy_20_x_sector_rank_63d",
+    "int_ret_20_x_risk_appetite_z",
+    "int_breakout_20_x_liquidity_stress_z",
 ]
 
 

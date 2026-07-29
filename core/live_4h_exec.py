@@ -53,7 +53,7 @@ class ExecPolicy:
     stop_loss: float | None = 0.39    # full exit if gain <= -this from ENTRY (premium for options); None disables
     trail_stop: float | None = None   # full exit if value falls this fraction from its PEAK (ratchet); None disables. "Tail-rider" (id4) config: 2026-07-18 val-selected/test-frozen search across Momentum/HTF/Meta's own OOF top-10 streams (research/capstone/exit_policy_cross_module.csv) found this shape (stop 39%, no trail, take-profit 30%/scale 16%, horizon 53) beats the prior stop50/trail35/tp20/scale50/hz25 default on mean return per trade (2-2.5x, ~10-12% vs ~4-5%) with comparable-or-better win rate in every module, at the cost of ~2x hold time (~52 vs ~25 bars). Prior config's own backtest note (mean +7.04%/61% win/ret-per-bar 0.0088 @ trail 0.35) is superseded by that search; kept here for history. Shares-only backtest — no option-premium path modeled, so real option stop/trail behavior may differ; not yet paper-validated live.
     target_notional: float = 5000.0   # target $ per new entry; shares/contracts sized from this
-    roll_trading_days: int = 5        # option monthly-roll buffer
+    roll_trading_days: int = 15       # option monthly-roll buffer
 
 
 @dataclass

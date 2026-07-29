@@ -26,6 +26,7 @@ NAV_PORTS: list[tuple[str, int]] = [
     ("Dealer Ranker", 8773),
     ("Intraday Structure", 8774),
     ("Meta Ranker", 8769),
+    ("Library", 8775),
 ]
 
 THEME_CSS = """:root{

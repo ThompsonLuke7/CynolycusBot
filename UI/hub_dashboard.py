@@ -203,6 +203,17 @@ def _adapt_htf(s: dict) -> dict:
             else f"{len(scan.get('picks', []))} scored"}
 
 
+def _adapt_library(s: dict) -> dict:
+    idx = s.get("index") or {}
+    if idx.get("building"):
+        return {"state": "warming", "detail": "building search index"}
+    rows, tickers = idx.get("rows"), idx.get("tickers")
+    if not idx.get("current"):
+        return {"state": "idle", "detail": "index stale — rebuilds on first search"}
+    return {"state": "ready",
+            "detail": f"{int(rows or 0):,} records · {int(tickers or 0):,} tickers"}
+
+
 def _adapt_intraday_structure(s: dict) -> dict:
     active = len(s.get("active_signals") or [])
     candidates = int(s.get("candidate_count") or 0)
@@ -218,7 +229,8 @@ class HubDashboardApp:
                  port_meta: int = 8769, port_momentum: int = 8770,
                  port_htf: int = 8771, port_amethyst: int = 8772,
                  port_dealer_ranker: int = 8773,
-                 port_intraday_structure: int | None = None) -> None:
+                 port_intraday_structure: int | None = None,
+                 port_library: int | None = 8775) -> None:
         self.host = host
         self.dashboards: list[_Dash] = [
             _Dash("spy", "SPY Intraday", port_spy, startable=True, stoppable=True, tradeable=True,
@@ -249,6 +261,12 @@ class HubDashboardApp:
                 _Dash("intraday_structure", "Intraday Structure", port_intraday_structure,
                       startable=False, stoppable=False, tradeable=False,
                       start_path=None, start_body=lambda live: {}, adapt=_adapt_intraday_structure)
+            )
+        if port_library is not None:
+            self.dashboards.append(
+                _Dash("library", "Library", port_library,
+                      startable=False, stoppable=False, tradeable=False,
+                      start_path=None, start_body=lambda live: {}, adapt=_adapt_library)
             )
 
     def _by_key(self, key: str) -> _Dash:
@@ -416,7 +434,8 @@ var staticDashboards=[
   {key:'amethyst',name:'Amethyst',url:'http://'+location.hostname+':8772/',startable:false,stoppable:false,tradeable:false,up:false,state:'down',detail:'waiting for state'},
   {key:'dealer',name:'Dealer Positioning',url:'http://'+location.hostname+':8768/',startable:true,stoppable:true,tradeable:false,up:false,state:'down',detail:'waiting for state'},
   {key:'dealer_ranker',name:'Dealer Ranker',url:'http://'+location.hostname+':8773/',startable:true,stoppable:false,tradeable:true,up:false,state:'down',detail:'waiting for state'},
-  {key:'meta',name:'Meta Ranker',url:'http://'+location.hostname+':8769/',startable:true,stoppable:false,tradeable:true,up:false,state:'down',detail:'waiting for state'}
+  {key:'meta',name:'Meta Ranker',url:'http://'+location.hostname+':8769/',startable:true,stoppable:false,tradeable:true,up:false,state:'down',detail:'waiting for state'},
+  {key:'library',name:'Library',url:'http://'+location.hostname+':8775/',startable:false,stoppable:false,tradeable:false,up:false,state:'down',detail:'waiting for state'}
 ];
 function setLive(key,v){liveState[key]=v;localStorage.setItem('cyno-hub-live',JSON.stringify(liveState));tick();}
 function f(n,d){if(n==null)return '-';return Number(n).toLocaleString(undefined,{maximumFractionDigits:(d==null?2:d)});}

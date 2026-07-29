@@ -92,6 +92,40 @@ def test_orders_do_not_fire_into_a_closed_market(qpath):
     assert sq.load(qpath)[0]["status"] == "pending"  # retried next boot
 
 
+def test_a_deferred_close_fires_on_a_later_drain_once_the_market_opens(qpath):
+    """The boot drain defers when the market is shut; a later drain must fire it.
+
+    This is what the server's market-hours re-drain slots rely on. Before those
+    existed the queue was only drained once at boot, so a server started
+    overnight deferred a queued liquidate and then never revisited it -- the
+    entry sat pending all day with the position still open.
+    """
+    sq.enqueue(sq.KIND_CLOSE_POSITION, params={"symbol": "SNDK", "qty": "all"}, path=qpath)
+    client = _Client([{"symbol": "SNDK", "qty": "100", "side": "long"}])
+
+    # Boot, overnight: deferred, untouched, and crucially not counted as an attempt.
+    assert _run(qpath, client, is_open=False)["deferred"] == 1
+    assert client.orders == []
+    assert sq.load(qpath)[0]["attempts"] == 0
+
+    # 09:35 slot the same session: same entry, now actually executed.
+    summary = _run(qpath, client, is_open=True)
+    assert summary["done"] == 1
+    assert [o["symbol"] for o in client.orders] == ["SNDK"]
+    assert sq.load(qpath)[0]["status"] == sq.STATUS_DONE
+
+
+def test_redraining_after_completion_does_not_resubmit(qpath):
+    """The 13:00 backstop must be a no-op once the 09:35 slot has closed it."""
+    sq.enqueue(sq.KIND_CLOSE_POSITION, params={"symbol": "SNDK", "qty": "all"}, path=qpath)
+    client = _Client([{"symbol": "SNDK", "qty": "100", "side": "long"}])
+    _run(qpath, client, is_open=True)
+    assert len(client.orders) == 1
+
+    _run(qpath, client, is_open=True)
+    assert len(client.orders) == 1  # not double-submitted
+
+
 def test_live_entry_is_skipped_on_a_paper_server(qpath):
     sq.enqueue(sq.KIND_CLOSE_POSITION, params={"symbol": "SNDK", "qty": "all"},
                account="live", path=qpath)

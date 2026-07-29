@@ -27,12 +27,13 @@ from scripts.analyze_confirmed_entry_trade_quality import (
 )
 from scripts.compare_entry_overlay_policies import (
     DEFAULT_ANALYSIS_DIR,
-    DEFAULT_ONE_MIN,
-    DEFAULT_SIGNAL_FRAME,
     _load_one_min,
     _load_signal_frame,
 )
 
+DEFAULT_REPLAY_CAPTURE_DIR = Path("Data/inference/spy/replay_capture/artifacts")
+DEFAULT_ONE_MIN = DEFAULT_REPLAY_CAPTURE_DIR / "spy_intraday_1min.parquet"
+DEFAULT_SIGNAL_FRAME = DEFAULT_REPLAY_CAPTURE_DIR / "phase4_signal_frame.parquet"
 
 DEFAULT_SUMMARY_OUT = DEFAULT_ANALYSIS_DIR / "phase4_underlying_exit_softening_sweep_summary.csv"
 DEFAULT_TRADES_OUT = DEFAULT_ANALYSIS_DIR / "phase4_underlying_exit_softening_sweep_trades.csv"
@@ -44,6 +45,7 @@ class ExitVariant:
     name: str
     setup_failure_enabled: bool
     setup_failure_buffer_atr: float
+    setup_failure_grace_minutes: int
     no_progress_enabled: bool
     no_progress_minutes: int
     no_progress_atr: float
@@ -54,6 +56,7 @@ TARGETED_VARIANTS = [
         name="option_bracket_only",
         setup_failure_enabled=False,
         setup_failure_buffer_atr=0.10,
+        setup_failure_grace_minutes=0,
         no_progress_enabled=False,
         no_progress_minutes=10,
         no_progress_atr=0.20,
@@ -62,6 +65,7 @@ TARGETED_VARIANTS = [
         name="current_fixed",
         setup_failure_enabled=True,
         setup_failure_buffer_atr=0.10,
+        setup_failure_grace_minutes=0,
         no_progress_enabled=True,
         no_progress_minutes=10,
         no_progress_atr=0.20,
@@ -70,6 +74,7 @@ TARGETED_VARIANTS = [
         name="soft_020_20_020",
         setup_failure_enabled=True,
         setup_failure_buffer_atr=0.20,
+        setup_failure_grace_minutes=3,
         no_progress_enabled=True,
         no_progress_minutes=20,
         no_progress_atr=0.20,
@@ -78,6 +83,7 @@ TARGETED_VARIANTS = [
         name="soft_020_20_035",
         setup_failure_enabled=True,
         setup_failure_buffer_atr=0.20,
+        setup_failure_grace_minutes=3,
         no_progress_enabled=True,
         no_progress_minutes=20,
         no_progress_atr=0.35,
@@ -86,6 +92,7 @@ TARGETED_VARIANTS = [
         name="soft_035_30_035",
         setup_failure_enabled=True,
         setup_failure_buffer_atr=0.35,
+        setup_failure_grace_minutes=5,
         no_progress_enabled=True,
         no_progress_minutes=30,
         no_progress_atr=0.35,
@@ -94,6 +101,7 @@ TARGETED_VARIANTS = [
         name="soft_050_30_050",
         setup_failure_enabled=True,
         setup_failure_buffer_atr=0.50,
+        setup_failure_grace_minutes=5,
         no_progress_enabled=True,
         no_progress_minutes=30,
         no_progress_atr=0.50,
@@ -105,8 +113,10 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Sweep softer underlying-based exits on the live-style SPY order policy replay."
     )
-    parser.add_argument("--signal-frame", default=str(DEFAULT_SIGNAL_FRAME))
-    parser.add_argument("--one-min", default=str(DEFAULT_ONE_MIN))
+    parser.add_argument("--signal-frame", default=str(DEFAULT_SIGNAL_FRAME),
+                        help="Point-in-time Phase-4 decision artifact from build_spy_replay_capture.py.")
+    parser.add_argument("--one-min", default=str(DEFAULT_ONE_MIN),
+                        help="Retained live 1m artifact from build_spy_replay_capture.py.")
     parser.add_argument("--start", default=None)
     parser.add_argument("--end", default=None)
     parser.add_argument("--summary-out", default=str(DEFAULT_SUMMARY_OUT))
@@ -145,6 +155,7 @@ def _replay_variant(
             meta_hard_stop_atr=0.0,
             meta_setup_failure_exit_enabled=variant.setup_failure_enabled,
             meta_setup_failure_buffer_atr=variant.setup_failure_buffer_atr,
+            meta_setup_failure_grace_minutes=variant.setup_failure_grace_minutes,
             meta_no_progress_exit_enabled=variant.no_progress_enabled,
             meta_no_progress_exit_minutes=variant.no_progress_minutes,
             meta_no_progress_exit_atr=variant.no_progress_atr,
@@ -244,9 +255,10 @@ def _replay_variant(
     summary.insert(0, "variant", variant.name)
     summary.insert(1, "setup_failure_enabled", variant.setup_failure_enabled)
     summary.insert(2, "setup_failure_buffer_atr", variant.setup_failure_buffer_atr)
-    summary.insert(3, "no_progress_enabled", variant.no_progress_enabled)
-    summary.insert(4, "no_progress_minutes", variant.no_progress_minutes)
-    summary.insert(5, "no_progress_atr", variant.no_progress_atr)
+    summary.insert(3, "setup_failure_grace_minutes", variant.setup_failure_grace_minutes)
+    summary.insert(4, "no_progress_enabled", variant.no_progress_enabled)
+    summary.insert(5, "no_progress_minutes", variant.no_progress_minutes)
+    summary.insert(6, "no_progress_atr", variant.no_progress_atr)
     print(
         f"[sweep-soft-exits] {variant.name}: "
         f"trades={int(summary.loc[summary['bucket'] == 'all', 'trades'].iloc[0])} "

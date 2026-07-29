@@ -196,15 +196,33 @@ def test_ladder_prefers_roll_when_available():
     assert est.spread_pct == pytest.approx(0.05)
 
 
-def test_ladder_falls_back_to_corwin_schultz_when_roll_none():
+def test_ladder_ignores_corwin_schultz_entirely():
+    """Corwin-Schultz must NEVER be selected by the ladder, even when it is the
+    only contract-specific estimator available.
+
+    Measured on 401 real contracts it is significantly wrong-signed against the
+    realized half-spread (Spearman -0.326, p=2.8e-11): its high/low basis is
+    dominated by real underlying movement rather than bid/ask bounce, so it ranks
+    actively-traded tight-spread contracts as wide. Including it dragged the
+    combined estimator to Spearman 0.044 / R^2 0.008 -- worse than every
+    component. Excluding it restores Spearman 0.516 at full coverage.
+    """
     est = se.combine_spread_estimates(
         roll_pct=None, corwin_schultz_pct=0.08, clustering_pct=0.10, regression_pct=0.20
     )
-    assert est.method == "corwin_schultz"
-    assert est.spread_pct == pytest.approx(0.08)
+    assert est.method == "clustering", "Corwin-Schultz must be skipped, not preferred"
+    assert est.spread_pct == pytest.approx(0.10)
+
+    # Even as the sole candidate it must not be used -- better to report nothing
+    # than to report a backwards estimate.
+    only_cs = se.combine_spread_estimates(
+        roll_pct=None, corwin_schultz_pct=0.08, clustering_pct=None, regression_pct=None
+    )
+    assert only_cs.method == "none"
+    assert only_cs.spread_pct is None
 
 
-def test_ladder_falls_back_to_clustering_when_roll_and_cs_none():
+def test_ladder_falls_back_to_clustering_when_roll_none():
     est = se.combine_spread_estimates(
         roll_pct=None, corwin_schultz_pct=None, clustering_pct=0.10, regression_pct=0.20
     )

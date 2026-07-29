@@ -9,6 +9,7 @@ exceeds the IEX free-tier limit of one concurrent stream.
   Swing dashboard:         http://localhost:8766  (same URL as before)
   Dealer positioning:      http://localhost:8768
   Dealer Ranker:           http://localhost:8773
+  Library (news search):   http://localhost:8775
 
 Usage:
   python -m UI.combined_server [--host 127.0.0.1] [--port-intraday 8765] [--port-swing 8766] [--env .env]
@@ -101,6 +102,7 @@ DEFAULT_PORT_HTF = 8771
 DEFAULT_PORT_AMETHYST = 8772
 DEFAULT_PORT_DEALER_RANKER = 8773
 DEFAULT_PORT_INTRADAY_STRUCTURE = 8774
+DEFAULT_PORT_LIBRARY = 8775
 
 # State book used by the swing real-account (LIVE) policy.
 _SWING_LIVE_BOOK = "Data/inference/multi_ticker_swing/real_account_book_live.json"
@@ -474,6 +476,9 @@ def run_combined(
     data_readiness_startup_check: bool = True,
     startup_queue_enabled: bool = True,
     startup_queue_account: str = "paper",
+    # Market-hours re-drain slots (ET). The boot drain alone cannot fire a
+    # `close_position` entry when the server is started outside 9:30-16:00.
+    startup_queue_market_times: str = "09:35,13:00",
     data_refresher: bool = True,
     data_refresher_interval: int = 300,
     data_refresher_feeds: bool = False,
@@ -485,6 +490,8 @@ def run_combined(
     port_amethyst: int = DEFAULT_PORT_AMETHYST,
     port_dealer_ranker: int = DEFAULT_PORT_DEALER_RANKER,
     port_intraday_structure: int = DEFAULT_PORT_INTRADAY_STRUCTURE,
+    port_library: int = DEFAULT_PORT_LIBRARY,
+    library_enabled: bool = True,
     intraday_structure_enabled: bool = True,
     intraday_structure_config: str = "strategies/intraday_structure/config/intraday_structure_v1.json",
     meta_ranker_times: str = "14:20,16:20",
@@ -530,6 +537,8 @@ def run_combined(
     }
     if intraday_structure_enabled:
         dashboard_ports["intraday_structure"] = port_intraday_structure
+    if library_enabled:
+        dashboard_ports["library"] = port_library
     _assert_ports_free(host, dashboard_ports)
 
     # ------------------------------------------------------------------
@@ -721,7 +730,23 @@ def run_combined(
         logger.info("Intraday Structure:      http://%s:%d (paper-only)", host, port_intraday_structure)
 
     # ------------------------------------------------------------------
-    # 4f. Hub / overview dashboard (port 8764) — links + status + start-all
+    # 4f. Library (port 8775) — read-only searchable news/catalyst archive with
+    #     a daily price overlay. Never touches a broker; its search index is
+    #     built in a subprocess (see LibraryDashboardApp) so the browse page
+    #     cannot add the build's ~650MB peak to this process's RSS.
+    # ------------------------------------------------------------------
+    library_server = None
+    if library_enabled:
+        from UI.library_dashboard import LibraryDashboardApp, make_server as _make_library_server
+
+        library_app = LibraryDashboardApp()
+        library_server = _make_library_server(host, port_library, library_app)
+        threading.Thread(target=library_server.serve_forever, daemon=True,
+                         name="library-http").start()
+        logger.info("Library dashboard:       http://%s:%d", host, port_library)
+
+    # ------------------------------------------------------------------
+    # 4g. Hub / overview dashboard (port 8764) — links + status + start-all
     # ------------------------------------------------------------------
     from UI.hub_dashboard import HubDashboardApp, make_server as _make_hub_server
 
@@ -732,6 +757,7 @@ def run_combined(
         port_amethyst=port_amethyst,
         port_dealer_ranker=port_dealer_ranker,
         port_intraday_structure=port_intraday_structure if intraday_structure_enabled else None,
+        port_library=port_library if library_enabled else None,
     )
     hub_server = _make_hub_server(host, port_hub, hub_app)
     hub_thread = threading.Thread(target=hub_server.serve_forever, daemon=True, name="hub-http")
@@ -751,6 +777,8 @@ def run_combined(
     print(f"  Dealer Ranker:           http://{host}:{port_dealer_ranker}")
     if intraday_structure_enabled:
         print(f"  Intraday Structure:      http://{host}:{port_intraday_structure}  (paper-only)")
+    if library_enabled:
+        print(f"  Library (news search):   http://{host}:{port_library}  (read-only)")
     print(f"  Shared stream:           {len(all_symbols)} symbols")
     print("  Orders default to the PAPER account; LIVE toggle is OFF by default.")
     print("  Press Ctrl+C to stop.")
@@ -1020,6 +1048,26 @@ def run_combined(
             label=f"Broker snapshot {account_label}", tag="READ-ONLY",
         )
 
+    # Re-drain the startup queue during market hours.
+    #
+    # The boot-time drain (5a1b above) runs once, and `close_position` entries
+    # need an open market -- so a server started overnight (the normal case)
+    # defers the entry and then never looks at it again until the next restart.
+    # That made a queued liquidate fire only if you happened to boot between
+    # 9:30 and 16:00 ET. These slots close that hole: 09:35 (after the opening
+    # auction settles) with a 13:00 backstop for a server started mid-morning.
+    # `run_pending` skips anything not still `pending`, so re-running is a
+    # no-op once an entry has completed -- it cannot double-submit an order.
+    startup_queue_schedulers: list = []
+    if startup_queue_enabled:
+        startup_queue_schedulers = _schedule_loop(
+            startup_queue_market_times,
+            lambda: _run_startup_queue(
+                env_file=env_file, account_label=startup_queue_account,
+            ),
+            label="Startup queue (market hours)", tag="ORDERS",
+        )
+
     # Shadow tracker: 10 min after each Momentum/HTF/Meta cycle (14:20/16:20 and
     # 14:25/16:25) so it reads live_state.json after that cycle's entries/exits
     # have landed. Read-only against those state files; never calls a broker.
@@ -1111,6 +1159,8 @@ def run_combined(
     dealer_ranker_server.shutdown()
     if structure_server is not None:
         structure_server.shutdown()
+    if library_server is not None:
+        library_server.shutdown()
     if meta_server is not None:
         meta_server.shutdown()
 
@@ -1269,6 +1319,15 @@ def main() -> None:
                         help="Port for the Dealer Ranker dashboard (default 8773).")
     parser.add_argument("--port-intraday-structure", type=int, default=DEFAULT_PORT_INTRADAY_STRUCTURE,
                         help="Port for the Intraday Structure dashboard (default 8774).")
+    parser.add_argument("--port-library", type=int, default=DEFAULT_PORT_LIBRARY,
+                        help="Port for the Library news/catalyst search dashboard (default 8775).")
+    parser.add_argument(
+        "--library",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run the read-only Library news/catalyst search dashboard (default; "
+             "use --no-library to disable).",
+    )
     parser.add_argument(
         "--intraday-structure",
         action=argparse.BooleanOptionalAction,
@@ -1329,6 +1388,8 @@ def main() -> None:
         port_amethyst=args.port_amethyst,
         port_dealer_ranker=args.port_dealer_ranker,
         port_intraday_structure=args.port_intraday_structure,
+        port_library=args.port_library,
+        library_enabled=bool(args.library),
         intraday_structure_enabled=bool(args.intraday_structure),
         intraday_structure_config=args.intraday_structure_config,
         meta_ranker_times=args.meta_ranker_times,

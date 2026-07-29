@@ -43,6 +43,9 @@ failing value.
 Cache layout (parquet, atomic writes)
 --------------------------------------
 - ``Data/options_history/contracts/{ticker}.parquet`` (+ ``.meta.json``)
+- ``Data/options_history/contracts_full/{ticker}.parquet`` (+ ``.meta.json``) --
+  same contracts, plus ``open_interest_date``/``close_price``/``close_price_date``
+  (see ``discover_contracts_full``), needed for GEX reconstruction.
 - ``Data/options_history/bars/{timeframe}/{ticker}/{expiry}.parquet`` (+ ``.meta.json``)
 - ``Data/options_history/trades/{ticker}/{expiry}.parquet`` (+ ``.meta.json``)
 
@@ -400,6 +403,126 @@ def discover_contracts(
     if existing.empty:
         logger.info("discover_contracts: no contracts found for %s in %s..%s", ticker, expiry_start, expiry_end)
         return _empty_contracts_frame()
+
+    expiry_col = pd.to_datetime(existing["expiry"])
+    mask = (expiry_col >= start_ts.tz_localize(None)) & (expiry_col <= end_ts.tz_localize(None))
+    return existing.loc[mask].reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------
+# discover_contracts_full -- same endpoint/pagination/gap-cache machinery as
+# discover_contracts, but keeps the extra fields that endpoint returns and
+# discover_contracts's narrow schema drops: open_interest_date (the date the
+# OI figure was actually measured -- NOT the query date), close_price, and
+# close_price_date. These three are required by
+# research/options_lab/gex_reconstruct.py: open_interest on
+# ``status=inactive`` (expired) contracts is a single value dated near
+# expiry, not a daily time series, and any historical-GEX reconstruction
+# from it must know exactly which date that value applies to. Kept as a
+# separate cache (``Data/options_history/contracts_full``) rather than
+# widening ``discover_contracts``'s own cache/schema in place, so existing
+# callers/cached files of the narrower function are untouched.
+# --------------------------------------------------------------------------
+
+CONTRACTS_FULL_DIR = CACHE_ROOT / "contracts_full"
+_CONTRACT_FULL_COLUMNS = _CONTRACT_COLUMNS + ["open_interest_date", "close_price", "close_price_date"]
+
+
+def _empty_contracts_full_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=_CONTRACT_FULL_COLUMNS)
+
+
+def _normalize_contract_rows_full(raw_rows: list[dict[str, Any]], ticker: str) -> pd.DataFrame:
+    if not raw_rows:
+        return _empty_contracts_full_frame()
+    out = []
+    for c in raw_rows:
+        osi = c.get("symbol")
+        expiry = c.get("expiration_date")
+        strike = c.get("strike_price")
+        right = c.get("type")
+        oi_raw = c.get("open_interest")
+        if osi is None or expiry is None or strike is None or right is None:
+            logger.warning("options contracts (full): skipping malformed contract row for %s: %r", ticker, c)
+            continue
+        oi = None
+        if oi_raw is not None:
+            try:
+                oi = int(float(oi_raw))
+            except (TypeError, ValueError):
+                oi = None
+        close_price_raw = c.get("close_price")
+        close_price = None
+        if close_price_raw is not None:
+            try:
+                close_price = float(close_price_raw)
+            except (TypeError, ValueError):
+                close_price = None
+        out.append(
+            {
+                "osi_symbol": str(osi).upper(),
+                "ticker": ticker.upper(),
+                "expiry": str(expiry)[:10],
+                "strike": float(strike),
+                "right": "C" if str(right).lower().startswith("c") else "P",
+                "open_interest": oi,
+                "open_interest_date": (str(c.get("open_interest_date"))[:10] if c.get("open_interest_date") else None),
+                "close_price": close_price,
+                "close_price_date": (str(c.get("close_price_date"))[:10] if c.get("close_price_date") else None),
+            }
+        )
+    return pd.DataFrame(out, columns=_CONTRACT_FULL_COLUMNS)
+
+
+def discover_contracts_full(
+    ticker: str, expiry_start: str, expiry_end: str, *, env_file: str | None = ".env"
+) -> pd.DataFrame:
+    """Like ``discover_contracts``, but retains ``open_interest_date``,
+    ``close_price``, and ``close_price_date`` from the raw Alpaca contract
+    record. Cached at ``Data/options_history/contracts_full/{ticker}.parquet``
+    with the same gap-tracking sidecar semantics (a re-request only fetches
+    the portion of ``[expiry_start, expiry_end]`` not already cached).
+
+    Verified (2026-07-27): ``open_interest``/``open_interest_date``/
+    ``close_price``/``close_price_date`` are populated on essentially all
+    ``status=inactive`` (expired) contracts, and are ``null`` on
+    ``status=active`` contracts -- Alpaca does not carry a live/current OI
+    figure for contracts that have not yet expired. Callers needing OI must
+    therefore only trust it for contracts where ``expiry`` is already in
+    the past relative to whenever this was fetched.
+    """
+    ticker = ticker.strip().upper()
+    if not ticker:
+        raise ValueError("ticker is required")
+    start_ts, end_ts = _to_ts(expiry_start), _to_ts(expiry_end)
+    if end_ts < start_ts:
+        raise ValueError(f"expiry_end {expiry_end} before expiry_start {expiry_start}")
+
+    cache_path = CONTRACTS_FULL_DIR / f"{ticker}.parquet"
+    existing = pd.read_parquet(cache_path) if cache_path.exists() else _empty_contracts_full_frame()
+    meta = _load_meta(cache_path)
+
+    gaps = _gaps_for_key(meta, _ALL_KEY, start_ts, end_ts)
+    if gaps:
+        fetched_frames = []
+        for gap_start, gap_end in gaps:
+            g_start_s, g_end_s = gap_start.strftime("%Y-%m-%d"), gap_end.strftime("%Y-%m-%d")
+            logger.info("discover_contracts_full: fetching %s gap %s..%s", ticker, g_start_s, g_end_s)
+            rows: list[dict[str, Any]] = []
+            for status in ("active", "inactive"):
+                rows.extend(_fetch_contracts_page(ticker, status, g_start_s, g_end_s, env_file=env_file))
+            fetched_frames.append(_normalize_contract_rows_full(rows, ticker))
+            _record_window(meta, _ALL_KEY, gap_start, gap_end)
+        non_empty = [f for f in ([existing] + fetched_frames) if not f.empty]
+        new_df = pd.concat(non_empty, ignore_index=True) if non_empty else _empty_contracts_full_frame()
+        new_df = new_df.drop_duplicates(subset=["osi_symbol"], keep="last").reset_index(drop=True)
+        _atomic_write_parquet(new_df, cache_path)
+        _save_meta(cache_path, meta)
+        existing = new_df
+
+    if existing.empty:
+        logger.info("discover_contracts_full: no contracts found for %s in %s..%s", ticker, expiry_start, expiry_end)
+        return _empty_contracts_full_frame()
 
     expiry_col = pd.to_datetime(existing["expiry"])
     mask = (expiry_col >= start_ts.tz_localize(None)) & (expiry_col <= end_ts.tz_localize(None))

@@ -267,7 +267,26 @@ class SpreadEstimate:
     method: str  # "roll" | "corwin_schultz" | "clustering" | "regression" | "none"
 
 
-_LADDER: tuple[str, ...] = ("roll", "corwin_schultz", "clustering", "regression")
+# Corwin-Schultz is DELIBERATELY EXCLUDED from this ladder.
+#
+# Measured on 401 real contracts against the realized half-spread implied by
+# actual fills (`scripts/validate_spread_estimators.py`), Corwin-Schultz is
+# significantly WRONG-SIGNED: Spearman = -0.326, p = 2.8e-11. It does not merely
+# fail to help, it ranks contracts backwards.
+#
+# The mechanism is a broken assumption, not a coding error. Corwin-Schultz infers
+# the spread from consecutive high/low ranges, assuming the intraday range is
+# driven mainly by bid/ask bounce. For options that assumption collapses: the
+# high/low range is dominated by real movement in the underlying, and the
+# contracts with the widest ranges tend to be the actively-traded ones with the
+# TIGHTEST spreads -- hence the inversion.
+#
+# Including it in the ladder was actively harmful: it served 155 of 401 contracts
+# and dragged the combined estimator to Spearman 0.044 / R^2 0.008, far worse than
+# any single component including the regression it was meant to improve on.
+# The estimator function is retained above for reference and testing, but must not
+# feed the combined estimate on options data.
+_LADDER: tuple[str, ...] = ("roll", "clustering", "regression")
 
 
 def combine_spread_estimates(
@@ -277,18 +296,22 @@ def combine_spread_estimates(
     clustering_pct: Optional[float] = None,
     regression_pct: Optional[float] = None,
 ) -> SpreadEstimate:
-    """Apply the fallback ladder: Roll -> Corwin-Schultz -> clustering ->
-    regression -> (none available). The first candidate that is a finite,
-    strictly positive number wins; `None`/non-finite/non-positive candidates
-    are skipped, never coerced. Order reflects estimator quality (see
-    module docstring): Roll and Corwin-Schultz are theory-grounded and
-    contract-specific; clustering is a weaker heuristic; the regression is
-    the R^2~0.10 last resort that predicts approximately the median for
-    every contract.
+    """Apply the fallback ladder: Roll -> clustering -> regression -> (none).
+    The first candidate that is a finite, strictly positive number wins;
+    `None`/non-finite/non-positive candidates are skipped, never coerced.
+
+    Roll is the only contract-specific estimator that measures correctly on this
+    data (Spearman 0.523 vs the regression's 0.340, with clean monotonic tercile
+    separation: 5.3% / 10.8% / 16.6% realized half-spread). Clustering is a weak
+    heuristic; the regression is the R^2~0.12 last resort that predicts
+    approximately the median for every contract.
+
+    ``corwin_schultz_pct`` is accepted for call-compatibility and reporting but is
+    IGNORED for combination -- see the block comment above `_LADDER` for the
+    measured evidence.
     """
     candidates = {
         "roll": roll_pct,
-        "corwin_schultz": corwin_schultz_pct,
         "clustering": clustering_pct,
         "regression": regression_pct,
     }

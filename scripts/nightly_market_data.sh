@@ -206,6 +206,26 @@ PYEOF
   echo "[$(ts)] news signal rebuild exit=$news_signal_exit"
   [ "$news_signal_exit" -ne 0 ] && STATUS="$news_signal_exit"
 
+  # 7b) Library search index — the compact, ticker-sorted projection the Library
+  #     dashboard (port 8775) queries. It derives from the records + labels
+  #     refreshed in step 6 and the per-(ticker, day) signal from step 7, so it
+  #     must run AFTER both. Rebuilding here (~10s, ~650MB peak, isolated in its
+  #     own process) means the dashboard is already current at the open instead
+  #     of making the first visitor of the day pay for the rebuild.
+  #
+  #     Deliberately NOT run here: `news.main --stage score`. That rebuilds
+  #     news_scores.parquet via build_news_similarity_scores(), whose inner loop
+  #     re-stacks every eligible prior per record — measured O(n^2): 1.0s @ 1k
+  #     records, 7.6s @ 2k, 36.3s @ 4k, extrapolating to ~69h for the 331k-record
+  #     library, with no incremental mode. It is also superseded: the meta ranker
+  #     reads news_catalyst_signal.parquet (step 7), not news_scores.parquet.
+  echo "[$(ts)] library — rebuilding news search index"
+  timeout --signal=TERM --kill-after=60s "${NIGHTLY_LIBRARY_INDEX_TIMEOUT_SECONDS:-900}s" \
+    "$PYTHON" -u -m UI.news_library --force
+  library_index_exit=$?
+  echo "[$(ts)] library index rebuild exit=$library_index_exit"
+  [ "$library_index_exit" -ne 0 ] && STATUS="$library_index_exit"
+
   # 8) Emerging themes — enrich a bounded pending-ticker shortlist, map strong
   #    matches into established themes, cluster novel residuals, and regenerate
   #    the standalone visualizers. Production theme features remain untouched.

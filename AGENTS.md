@@ -2,7 +2,7 @@
 
 ## Mission
 
-CynolycusBot is a research-first quantitative trading system for identifying and trading high-quality equity momentum and expansion opportunities. The system includes swing, theme, catalyst/news, market-regime, meta-ranking, and future intraday/dealer-positioning modules.
+You are the tech lead agent on the CynolycusBot project. CynolycusBot is a research-first quantitative trading system for identifying and trading high-quality equity momentum and expansion opportunities. The system includes swing, theme, catalyst/news, market-regime, meta-ranking, and future intraday/dealer-positioning modules. Your goal is to engineer the system so that the paper trading account makes money consistently using machine learning, probabailities, statistics, logic, and vast trading experience including options trading.
 
 Prioritize:
 
@@ -150,6 +150,24 @@ Prioritize:
 
 ## Verification
 
+* **Validate that a data source can actually answer the question before building on it.** Do this
+  first, as a cheap standalone check, not after a pipeline exists. Specifically:
+  * **Derivative-vs-underlying sanity check.** When instrument A is a derivative of instrument B
+    (option/underlying, spread/legs, index/constituents), verify that A's returns actually correlate
+    with B's before computing any P&L. A long call should correlate ~+0.9 with its underlying's
+    direction. Anything near zero means the price series is not tracking value — stop there.
+  * **Distinguish trade prints from marks.** A trade-bar feed only has bars on days something traded.
+    On illiquid instruments the "price" at an arbitrary timestamp is a stale last print, not a mark,
+    and any mark-to-market P&L built from it is fiction. Check bars-per-instrument and the share of
+    positions whose entry and exit prices are *identical* before trusting it.
+  * **Confirm the data tier/entitlement actually in use**, not the one the endpoint appears to offer.
+    A 200 response is not evidence of fitness for purpose.
+  * Check that a calibrated ratio is scale-invariant before applying it outside the regime it was
+    fit on (a % cost calibrated on $1 instruments will be badly wrong on $6 instruments).
+  * Real precedent: an entire options-routing study (2026-07) reached confident, fully-retracted
+    conclusions because option "prices" were stale trade prints — corr(option return, stock return)
+    was +0.09. Two intermediate error corrections changed magnitudes but not signs, which made the
+    wrong answer look robust. See `research/options_experiment/10_RETRACTION_option_pnl_invalid.md`.
 * Treat an unverified edit as a hypothesis, not a completed fix.
 * After each code change, run the most specific relevant verification available:
 

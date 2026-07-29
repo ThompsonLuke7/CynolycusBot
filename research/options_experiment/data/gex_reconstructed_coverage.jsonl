@@ -1,0 +1,250 @@
+{"date": "2026-07-02", "n_contracts": 646, "n_with_terminal_oi": 611, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9458204334365325, "ticker": "AAPL"}
+{"date": "2026-07-07", "n_contracts": 484, "n_with_terminal_oi": 459, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9483471074380165, "ticker": "AAPL"}
+{"date": "2026-07-08", "n_contracts": 502, "n_with_terminal_oi": 470, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9362549800796812, "ticker": "AAPL"}
+{"date": "2026-07-09", "n_contracts": 426, "n_with_terminal_oi": 402, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9436619718309859, "ticker": "AAPL"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "AAPL"}
+{"date": "2026-07-13", "n_contracts": 323, "n_with_terminal_oi": 297, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9195046439628483, "ticker": "AAPL"}
+{"date": "2026-07-14", "n_contracts": 235, "n_with_terminal_oi": 221, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9404255319148936, "ticker": "AAPL"}
+{"date": "2026-07-15", "n_contracts": 236, "n_with_terminal_oi": 221, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9364406779661016, "ticker": "AAPL"}
+{"date": "2026-07-16", "n_contracts": 132, "n_with_terminal_oi": 125, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.946969696969697, "ticker": "AAPL"}
+{"date": "2026-07-17", "n_contracts": 133, "n_with_terminal_oi": 126, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9473684210526315, "ticker": "AAPL"}
+{"date": "2026-07-02", "n_contracts": 845, "n_with_terminal_oi": 759, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8982248520710059, "ticker": "MSFT"}
+{"date": "2026-07-07", "n_contracts": 636, "n_with_terminal_oi": 563, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8852201257861635, "ticker": "MSFT"}
+{"date": "2026-07-08", "n_contracts": 650, "n_with_terminal_oi": 574, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8830769230769231, "ticker": "MSFT"}
+{"date": "2026-07-09", "n_contracts": 536, "n_with_terminal_oi": 479, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8936567164179104, "ticker": "MSFT"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "MSFT"}
+{"date": "2026-07-13", "n_contracts": 406, "n_with_terminal_oi": 366, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9014778325123153, "ticker": "MSFT"}
+{"date": "2026-07-14", "n_contracts": 292, "n_with_terminal_oi": 267, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9143835616438356, "ticker": "MSFT"}
+{"date": "2026-07-15", "n_contracts": 306, "n_with_terminal_oi": 271, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8856209150326797, "ticker": "MSFT"}
+{"date": "2026-07-16", "n_contracts": 194, "n_with_terminal_oi": 174, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8969072164948454, "ticker": "MSFT"}
+{"date": "2026-07-17", "n_contracts": 191, "n_with_terminal_oi": 172, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.900523560209424, "ticker": "MSFT"}
+{"date": "2026-07-02", "n_contracts": 591, "n_with_terminal_oi": 537, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9086294416243654, "ticker": "NVDA"}
+{"date": "2026-07-07", "n_contracts": 433, "n_with_terminal_oi": 394, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9099307159353349, "ticker": "NVDA"}
+{"date": "2026-07-08", "n_contracts": 450, "n_with_terminal_oi": 405, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9, "ticker": "NVDA"}
+{"date": "2026-07-09", "n_contracts": 353, "n_with_terminal_oi": 329, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9320113314447592, "ticker": "NVDA"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "NVDA"}
+{"date": "2026-07-13", "n_contracts": 278, "n_with_terminal_oi": 252, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9064748201438849, "ticker": "NVDA"}
+{"date": "2026-07-14", "n_contracts": 200, "n_with_terminal_oi": 185, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.925, "ticker": "NVDA"}
+{"date": "2026-07-15", "n_contracts": 201, "n_with_terminal_oi": 185, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9203980099502488, "ticker": "NVDA"}
+{"date": "2026-07-16", "n_contracts": 111, "n_with_terminal_oi": 100, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9009009009009009, "ticker": "NVDA"}
+{"date": "2026-07-17", "n_contracts": 108, "n_with_terminal_oi": 98, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9074074074074074, "ticker": "NVDA"}
+{"date": "2026-07-02", "n_contracts": 594, "n_with_terminal_oi": 529, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8905723905723906, "ticker": "AMZN"}
+{"date": "2026-07-07", "n_contracts": 425, "n_with_terminal_oi": 387, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9105882352941177, "ticker": "AMZN"}
+{"date": "2026-07-08", "n_contracts": 432, "n_with_terminal_oi": 392, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9074074074074074, "ticker": "AMZN"}
+{"date": "2026-07-09", "n_contracts": 360, "n_with_terminal_oi": 324, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9, "ticker": "AMZN"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "AMZN"}
+{"date": "2026-07-13", "n_contracts": 292, "n_with_terminal_oi": 240, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.821917808219178, "ticker": "AMZN"}
+{"date": "2026-07-14", "n_contracts": 213, "n_with_terminal_oi": 180, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8450704225352113, "ticker": "AMZN"}
+{"date": "2026-07-15", "n_contracts": 213, "n_with_terminal_oi": 180, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8450704225352113, "ticker": "AMZN"}
+{"date": "2026-07-16", "n_contracts": 123, "n_with_terminal_oi": 105, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8536585365853658, "ticker": "AMZN"}
+{"date": "2026-07-17", "n_contracts": 123, "n_with_terminal_oi": 105, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8536585365853658, "ticker": "AMZN"}
+{"date": "2026-07-02", "n_contracts": 1189, "n_with_terminal_oi": 1111, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9343986543313709, "ticker": "TSLA"}
+{"date": "2026-07-07", "n_contracts": 920, "n_with_terminal_oi": 853, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9271739130434783, "ticker": "TSLA"}
+{"date": "2026-07-08", "n_contracts": 926, "n_with_terminal_oi": 858, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9265658747300216, "ticker": "TSLA"}
+{"date": "2026-07-09", "n_contracts": 755, "n_with_terminal_oi": 690, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9139072847682119, "ticker": "TSLA"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "TSLA"}
+{"date": "2026-07-13", "n_contracts": 583, "n_with_terminal_oi": 507, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.869639794168096, "ticker": "TSLA"}
+{"date": "2026-07-14", "n_contracts": 414, "n_with_terminal_oi": 361, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8719806763285024, "ticker": "TSLA"}
+{"date": "2026-07-15", "n_contracts": 417, "n_with_terminal_oi": 361, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8657074340527577, "ticker": "TSLA"}
+{"date": "2026-07-16", "n_contracts": 232, "n_with_terminal_oi": 206, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8879310344827587, "ticker": "TSLA"}
+{"date": "2026-07-17", "n_contracts": 228, "n_with_terminal_oi": 205, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8991228070175439, "ticker": "TSLA"}
+{"date": "2026-07-02", "n_contracts": 1308, "n_with_terminal_oi": 1217, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9304281345565749, "ticker": "META"}
+{"date": "2026-07-07", "n_contracts": 1007, "n_with_terminal_oi": 929, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9225422045680238, "ticker": "META"}
+{"date": "2026-07-08", "n_contracts": 1047, "n_with_terminal_oi": 969, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9255014326647565, "ticker": "META"}
+{"date": "2026-07-09", "n_contracts": 916, "n_with_terminal_oi": 846, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9235807860262009, "ticker": "META"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "META"}
+{"date": "2026-07-13", "n_contracts": 716, "n_with_terminal_oi": 650, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9078212290502793, "ticker": "META"}
+{"date": "2026-07-14", "n_contracts": 522, "n_with_terminal_oi": 468, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.896551724137931, "ticker": "META"}
+{"date": "2026-07-15", "n_contracts": 526, "n_with_terminal_oi": 469, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8916349809885932, "ticker": "META"}
+{"date": "2026-07-16", "n_contracts": 304, "n_with_terminal_oi": 262, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8618421052631579, "ticker": "META"}
+{"date": "2026-07-17", "n_contracts": 300, "n_with_terminal_oi": 260, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8666666666666667, "ticker": "META"}
+{"date": "2026-07-02", "n_contracts": 764, "n_with_terminal_oi": 705, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9227748691099477, "ticker": "GOOGL"}
+{"date": "2026-07-07", "n_contracts": 568, "n_with_terminal_oi": 527, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9278169014084507, "ticker": "GOOGL"}
+{"date": "2026-07-08", "n_contracts": 580, "n_with_terminal_oi": 534, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9206896551724137, "ticker": "GOOGL"}
+{"date": "2026-07-09", "n_contracts": 489, "n_with_terminal_oi": 450, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9202453987730062, "ticker": "GOOGL"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "GOOGL"}
+{"date": "2026-07-13", "n_contracts": 343, "n_with_terminal_oi": 318, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9271137026239067, "ticker": "GOOGL"}
+{"date": "2026-07-14", "n_contracts": 259, "n_with_terminal_oi": 239, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9227799227799228, "ticker": "GOOGL"}
+{"date": "2026-07-15", "n_contracts": 262, "n_with_terminal_oi": 237, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9045801526717557, "ticker": "GOOGL"}
+{"date": "2026-07-16", "n_contracts": 169, "n_with_terminal_oi": 150, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8875739644970414, "ticker": "GOOGL"}
+{"date": "2026-07-17", "n_contracts": 169, "n_with_terminal_oi": 150, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8875739644970414, "ticker": "GOOGL"}
+{"date": "2026-07-02", "n_contracts": 753, "n_with_terminal_oi": 696, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9243027888446215, "ticker": "AMD"}
+{"date": "2026-07-07", "n_contracts": 594, "n_with_terminal_oi": 555, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9343434343434344, "ticker": "AMD"}
+{"date": "2026-07-08", "n_contracts": 764, "n_with_terminal_oi": 723, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9463350785340314, "ticker": "AMD"}
+{"date": "2026-07-09", "n_contracts": 888, "n_with_terminal_oi": 834, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9391891891891891, "ticker": "AMD"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "AMD"}
+{"date": "2026-07-13", "n_contracts": 725, "n_with_terminal_oi": 669, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9227586206896552, "ticker": "AMD"}
+{"date": "2026-07-14", "n_contracts": 534, "n_with_terminal_oi": 488, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9138576779026217, "ticker": "AMD"}
+{"date": "2026-07-15", "n_contracts": 549, "n_with_terminal_oi": 487, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8870673952641166, "ticker": "AMD"}
+{"date": "2026-07-16", "n_contracts": 314, "n_with_terminal_oi": 284, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9044585987261147, "ticker": "AMD"}
+{"date": "2026-07-17", "n_contracts": 314, "n_with_terminal_oi": 285, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9076433121019108, "ticker": "AMD"}
+{"date": "2026-07-02", "n_contracts": 270, "n_with_terminal_oi": 232, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8592592592592593, "ticker": "NFLX"}
+{"date": "2026-07-07", "n_contracts": 170, "n_with_terminal_oi": 153, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9, "ticker": "NFLX"}
+{"date": "2026-07-08", "n_contracts": 174, "n_with_terminal_oi": 157, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9022988505747126, "ticker": "NFLX"}
+{"date": "2026-07-09", "n_contracts": 175, "n_with_terminal_oi": 158, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9028571428571428, "ticker": "NFLX"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "NFLX"}
+{"date": "2026-07-13", "n_contracts": 83, "n_with_terminal_oi": 83, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 1.0, "ticker": "NFLX"}
+{"date": "2026-07-14", "n_contracts": 84, "n_with_terminal_oi": 84, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 1.0, "ticker": "NFLX"}
+{"date": "2026-07-15", "n_contracts": 84, "n_with_terminal_oi": 84, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 1.0, "ticker": "NFLX"}
+{"date": "2026-07-16", "n_contracts": 84, "n_with_terminal_oi": 84, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 1.0, "ticker": "NFLX"}
+{"date": "2026-07-17", "n_contracts": 82, "n_with_terminal_oi": 82, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 1.0, "ticker": "NFLX"}
+{"date": "2026-07-02", "n_contracts": 298, "n_with_terminal_oi": 267, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8959731543624161, "ticker": "CRM"}
+{"date": "2026-07-07", "n_contracts": 201, "n_with_terminal_oi": 183, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9104477611940298, "ticker": "CRM"}
+{"date": "2026-07-08", "n_contracts": 202, "n_with_terminal_oi": 185, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9158415841584159, "ticker": "CRM"}
+{"date": "2026-07-09", "n_contracts": 200, "n_with_terminal_oi": 184, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.92, "ticker": "CRM"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "CRM"}
+{"date": "2026-07-13", "n_contracts": 92, "n_with_terminal_oi": 88, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9565217391304348, "ticker": "CRM"}
+{"date": "2026-07-14", "n_contracts": 95, "n_with_terminal_oi": 90, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9473684210526315, "ticker": "CRM"}
+{"date": "2026-07-15", "n_contracts": 96, "n_with_terminal_oi": 91, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9479166666666666, "ticker": "CRM"}
+{"date": "2026-07-16", "n_contracts": 94, "n_with_terminal_oi": 89, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9468085106382979, "ticker": "CRM"}
+{"date": "2026-07-17", "n_contracts": 94, "n_with_terminal_oi": 89, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9468085106382979, "ticker": "CRM"}
+{"date": "2026-07-02", "n_contracts": 563, "n_with_terminal_oi": 488, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.866785079928952, "ticker": "COST"}
+{"date": "2026-07-07", "n_contracts": 356, "n_with_terminal_oi": 316, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8876404494382022, "ticker": "COST"}
+{"date": "2026-07-08", "n_contracts": 359, "n_with_terminal_oi": 319, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8885793871866295, "ticker": "COST"}
+{"date": "2026-07-09", "n_contracts": 360, "n_with_terminal_oi": 319, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8861111111111111, "ticker": "COST"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "COST"}
+{"date": "2026-07-13", "n_contracts": 161, "n_with_terminal_oi": 145, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9006211180124224, "ticker": "COST"}
+{"date": "2026-07-14", "n_contracts": 161, "n_with_terminal_oi": 145, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9006211180124224, "ticker": "COST"}
+{"date": "2026-07-15", "n_contracts": 160, "n_with_terminal_oi": 144, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9, "ticker": "COST"}
+{"date": "2026-07-16", "n_contracts": 162, "n_with_terminal_oi": 146, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9012345679012346, "ticker": "COST"}
+{"date": "2026-07-17", "n_contracts": 162, "n_with_terminal_oi": 146, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9012345679012346, "ticker": "COST"}
+{"date": "2026-07-02", "n_contracts": 273, "n_with_terminal_oi": 225, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8241758241758241, "ticker": "WMT"}
+{"date": "2026-07-07", "n_contracts": 179, "n_with_terminal_oi": 151, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8435754189944135, "ticker": "WMT"}
+{"date": "2026-07-08", "n_contracts": 182, "n_with_terminal_oi": 154, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8461538461538461, "ticker": "WMT"}
+{"date": "2026-07-09", "n_contracts": 187, "n_with_terminal_oi": 158, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8449197860962567, "ticker": "WMT"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "WMT"}
+{"date": "2026-07-13", "n_contracts": 96, "n_with_terminal_oi": 84, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.875, "ticker": "WMT"}
+{"date": "2026-07-14", "n_contracts": 98, "n_with_terminal_oi": 85, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8673469387755102, "ticker": "WMT"}
+{"date": "2026-07-15", "n_contracts": 96, "n_with_terminal_oi": 84, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.875, "ticker": "WMT"}
+{"date": "2026-07-16", "n_contracts": 98, "n_with_terminal_oi": 85, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8673469387755102, "ticker": "WMT"}
+{"date": "2026-07-17", "n_contracts": 98, "n_with_terminal_oi": 85, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8673469387755102, "ticker": "WMT"}
+{"date": "2026-07-02", "n_contracts": 319, "n_with_terminal_oi": 276, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8652037617554859, "ticker": "JPM"}
+{"date": "2026-07-07", "n_contracts": 223, "n_with_terminal_oi": 185, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8295964125560538, "ticker": "JPM"}
+{"date": "2026-07-08", "n_contracts": 229, "n_with_terminal_oi": 191, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.834061135371179, "ticker": "JPM"}
+{"date": "2026-07-09", "n_contracts": 233, "n_with_terminal_oi": 195, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8369098712446352, "ticker": "JPM"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "JPM"}
+{"date": "2026-07-13", "n_contracts": 129, "n_with_terminal_oi": 114, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8837209302325582, "ticker": "JPM"}
+{"date": "2026-07-14", "n_contracts": 128, "n_with_terminal_oi": 112, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.875, "ticker": "JPM"}
+{"date": "2026-07-15", "n_contracts": 129, "n_with_terminal_oi": 113, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.875968992248062, "ticker": "JPM"}
+{"date": "2026-07-16", "n_contracts": 129, "n_with_terminal_oi": 113, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.875968992248062, "ticker": "JPM"}
+{"date": "2026-07-17", "n_contracts": 129, "n_with_terminal_oi": 113, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.875968992248062, "ticker": "JPM"}
+{"date": "2026-07-02", "n_contracts": 219, "n_with_terminal_oi": 202, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9223744292237442, "ticker": "BAC"}
+{"date": "2026-07-07", "n_contracts": 151, "n_with_terminal_oi": 139, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9205298013245033, "ticker": "BAC"}
+{"date": "2026-07-08", "n_contracts": 151, "n_with_terminal_oi": 139, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9205298013245033, "ticker": "BAC"}
+{"date": "2026-07-09", "n_contracts": 153, "n_with_terminal_oi": 140, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9150326797385621, "ticker": "BAC"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "BAC"}
+{"date": "2026-07-13", "n_contracts": 84, "n_with_terminal_oi": 79, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9404761904761905, "ticker": "BAC"}
+{"date": "2026-07-14", "n_contracts": 82, "n_with_terminal_oi": 77, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9390243902439024, "ticker": "BAC"}
+{"date": "2026-07-15", "n_contracts": 82, "n_with_terminal_oi": 77, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9390243902439024, "ticker": "BAC"}
+{"date": "2026-07-16", "n_contracts": 82, "n_with_terminal_oi": 77, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9390243902439024, "ticker": "BAC"}
+{"date": "2026-07-17", "n_contracts": 82, "n_with_terminal_oi": 77, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9390243902439024, "ticker": "BAC"}
+{"date": "2026-07-02", "n_contracts": 273, "n_with_terminal_oi": 233, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8534798534798534, "ticker": "XOM"}
+{"date": "2026-07-07", "n_contracts": 182, "n_with_terminal_oi": 164, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9010989010989011, "ticker": "XOM"}
+{"date": "2026-07-08", "n_contracts": 182, "n_with_terminal_oi": 164, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9010989010989011, "ticker": "XOM"}
+{"date": "2026-07-09", "n_contracts": 187, "n_with_terminal_oi": 169, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9037433155080213, "ticker": "XOM"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "XOM"}
+{"date": "2026-07-13", "n_contracts": 96, "n_with_terminal_oi": 92, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9583333333333334, "ticker": "XOM"}
+{"date": "2026-07-14", "n_contracts": 98, "n_with_terminal_oi": 94, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9591836734693877, "ticker": "XOM"}
+{"date": "2026-07-15", "n_contracts": 99, "n_with_terminal_oi": 95, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9595959595959596, "ticker": "XOM"}
+{"date": "2026-07-16", "n_contracts": 100, "n_with_terminal_oi": 96, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.96, "ticker": "XOM"}
+{"date": "2026-07-17", "n_contracts": 101, "n_with_terminal_oi": 97, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9603960396039604, "ticker": "XOM"}
+{"date": "2026-07-02", "n_contracts": 381, "n_with_terminal_oi": 349, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.916010498687664, "ticker": "UNH"}
+{"date": "2026-07-07", "n_contracts": 269, "n_with_terminal_oi": 257, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9553903345724907, "ticker": "UNH"}
+{"date": "2026-07-08", "n_contracts": 288, "n_with_terminal_oi": 276, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9583333333333334, "ticker": "UNH"}
+{"date": "2026-07-09", "n_contracts": 300, "n_with_terminal_oi": 286, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9533333333333334, "ticker": "UNH"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "UNH"}
+{"date": "2026-07-13", "n_contracts": 160, "n_with_terminal_oi": 155, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.96875, "ticker": "UNH"}
+{"date": "2026-07-14", "n_contracts": 163, "n_with_terminal_oi": 157, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9631901840490797, "ticker": "UNH"}
+{"date": "2026-07-15", "n_contracts": 164, "n_with_terminal_oi": 158, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9634146341463414, "ticker": "UNH"}
+{"date": "2026-07-16", "n_contracts": 165, "n_with_terminal_oi": 157, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9515151515151515, "ticker": "UNH"}
+{"date": "2026-07-17", "n_contracts": 165, "n_with_terminal_oi": 157, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9515151515151515, "ticker": "UNH"}
+{"date": "2026-07-02", "n_contracts": 937, "n_with_terminal_oi": 848, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9050160085378869, "ticker": "AVGO"}
+{"date": "2026-07-07", "n_contracts": 706, "n_with_terminal_oi": 654, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9263456090651558, "ticker": "AVGO"}
+{"date": "2026-07-08", "n_contracts": 775, "n_with_terminal_oi": 710, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9161290322580645, "ticker": "AVGO"}
+{"date": "2026-07-09", "n_contracts": 627, "n_with_terminal_oi": 575, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9170653907496013, "ticker": "AVGO"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "AVGO"}
+{"date": "2026-07-13", "n_contracts": 461, "n_with_terminal_oi": 425, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9219088937093276, "ticker": "AVGO"}
+{"date": "2026-07-14", "n_contracts": 323, "n_with_terminal_oi": 299, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9256965944272446, "ticker": "AVGO"}
+{"date": "2026-07-15", "n_contracts": 325, "n_with_terminal_oi": 298, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.916923076923077, "ticker": "AVGO"}
+{"date": "2026-07-16", "n_contracts": 169, "n_with_terminal_oi": 153, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9053254437869822, "ticker": "AVGO"}
+{"date": "2026-07-17", "n_contracts": 167, "n_with_terminal_oi": 152, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9101796407185628, "ticker": "AVGO"}
+{"date": "2026-07-02", "n_contracts": 290, "n_with_terminal_oi": 273, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9413793103448276, "ticker": "ORCL"}
+{"date": "2026-07-07", "n_contracts": 194, "n_with_terminal_oi": 181, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9329896907216495, "ticker": "ORCL"}
+{"date": "2026-07-08", "n_contracts": 241, "n_with_terminal_oi": 225, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9336099585062241, "ticker": "ORCL"}
+{"date": "2026-07-09", "n_contracts": 251, "n_with_terminal_oi": 234, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9322709163346613, "ticker": "ORCL"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "ORCL"}
+{"date": "2026-07-13", "n_contracts": 127, "n_with_terminal_oi": 123, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.968503937007874, "ticker": "ORCL"}
+{"date": "2026-07-14", "n_contracts": 124, "n_with_terminal_oi": 121, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9758064516129032, "ticker": "ORCL"}
+{"date": "2026-07-15", "n_contracts": 130, "n_with_terminal_oi": 126, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9692307692307692, "ticker": "ORCL"}
+{"date": "2026-07-16", "n_contracts": 120, "n_with_terminal_oi": 117, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.975, "ticker": "ORCL"}
+{"date": "2026-07-17", "n_contracts": 122, "n_with_terminal_oi": 119, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9754098360655737, "ticker": "ORCL"}
+{"date": "2026-07-02", "n_contracts": 300, "n_with_terminal_oi": 267, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.89, "ticker": "ADBE"}
+{"date": "2026-07-07", "n_contracts": 205, "n_with_terminal_oi": 193, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9414634146341463, "ticker": "ADBE"}
+{"date": "2026-07-08", "n_contracts": 218, "n_with_terminal_oi": 205, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9403669724770642, "ticker": "ADBE"}
+{"date": "2026-07-09", "n_contracts": 221, "n_with_terminal_oi": 208, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9411764705882353, "ticker": "ADBE"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "ADBE"}
+{"date": "2026-07-13", "n_contracts": 122, "n_with_terminal_oi": 117, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9590163934426229, "ticker": "ADBE"}
+{"date": "2026-07-14", "n_contracts": 116, "n_with_terminal_oi": 113, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9741379310344828, "ticker": "ADBE"}
+{"date": "2026-07-15", "n_contracts": 118, "n_with_terminal_oi": 115, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9745762711864406, "ticker": "ADBE"}
+{"date": "2026-07-16", "n_contracts": 124, "n_with_terminal_oi": 118, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9516129032258065, "ticker": "ADBE"}
+{"date": "2026-07-17", "n_contracts": 126, "n_with_terminal_oi": 119, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9444444444444444, "ticker": "ADBE"}
+{"date": "2026-07-02", "n_contracts": 429, "n_with_terminal_oi": 394, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9184149184149184, "ticker": "INTC"}
+{"date": "2026-07-07", "n_contracts": 341, "n_with_terminal_oi": 323, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9472140762463344, "ticker": "INTC"}
+{"date": "2026-07-08", "n_contracts": 453, "n_with_terminal_oi": 429, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9470198675496688, "ticker": "INTC"}
+{"date": "2026-07-09", "n_contracts": 489, "n_with_terminal_oi": 458, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9366053169734151, "ticker": "INTC"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "INTC"}
+{"date": "2026-07-13", "n_contracts": 400, "n_with_terminal_oi": 365, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9125, "ticker": "INTC"}
+{"date": "2026-07-14", "n_contracts": 284, "n_with_terminal_oi": 265, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9330985915492958, "ticker": "INTC"}
+{"date": "2026-07-15", "n_contracts": 294, "n_with_terminal_oi": 265, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9013605442176871, "ticker": "INTC"}
+{"date": "2026-07-16", "n_contracts": 150, "n_with_terminal_oi": 149, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9933333333333333, "ticker": "INTC"}
+{"date": "2026-07-17", "n_contracts": 146, "n_with_terminal_oi": 145, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9931506849315068, "ticker": "INTC"}
+{"date": "2026-07-02", "n_contracts": 1030, "n_with_terminal_oi": 946, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9184466019417475, "ticker": "MU"}
+{"date": "2026-07-07", "n_contracts": 766, "n_with_terminal_oi": 720, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9399477806788512, "ticker": "MU"}
+{"date": "2026-07-08", "n_contracts": 952, "n_with_terminal_oi": 897, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9422268907563025, "ticker": "MU"}
+{"date": "2026-07-09", "n_contracts": 1099, "n_with_terminal_oi": 1021, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9290263876251137, "ticker": "MU"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "MU"}
+{"date": "2026-07-13", "n_contracts": 785, "n_with_terminal_oi": 730, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9299363057324841, "ticker": "MU"}
+{"date": "2026-07-14", "n_contracts": 586, "n_with_terminal_oi": 537, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9163822525597269, "ticker": "MU"}
+{"date": "2026-07-15", "n_contracts": 575, "n_with_terminal_oi": 532, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9252173913043479, "ticker": "MU"}
+{"date": "2026-07-16", "n_contracts": 335, "n_with_terminal_oi": 322, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9611940298507463, "ticker": "MU"}
+{"date": "2026-07-17", "n_contracts": 334, "n_with_terminal_oi": 321, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9610778443113772, "ticker": "MU"}
+{"date": "2026-07-02", "n_contracts": 407, "n_with_terminal_oi": 376, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9238329238329238, "ticker": "PLTR"}
+{"date": "2026-07-07", "n_contracts": 262, "n_with_terminal_oi": 246, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9389312977099237, "ticker": "PLTR"}
+{"date": "2026-07-08", "n_contracts": 274, "n_with_terminal_oi": 258, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9416058394160584, "ticker": "PLTR"}
+{"date": "2026-07-09", "n_contracts": 278, "n_with_terminal_oi": 263, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9460431654676259, "ticker": "PLTR"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "PLTR"}
+{"date": "2026-07-13", "n_contracts": 124, "n_with_terminal_oi": 121, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9758064516129032, "ticker": "PLTR"}
+{"date": "2026-07-14", "n_contracts": 128, "n_with_terminal_oi": 125, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9765625, "ticker": "PLTR"}
+{"date": "2026-07-15", "n_contracts": 128, "n_with_terminal_oi": 125, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9765625, "ticker": "PLTR"}
+{"date": "2026-07-16", "n_contracts": 128, "n_with_terminal_oi": 125, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9765625, "ticker": "PLTR"}
+{"date": "2026-07-17", "n_contracts": 126, "n_with_terminal_oi": 123, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9761904761904762, "ticker": "PLTR"}
+{"date": "2026-07-02", "n_contracts": 210, "n_with_terminal_oi": 178, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8476190476190476, "ticker": "DIS"}
+{"date": "2026-07-07", "n_contracts": 148, "n_with_terminal_oi": 128, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8648648648648649, "ticker": "DIS"}
+{"date": "2026-07-08", "n_contracts": 151, "n_with_terminal_oi": 128, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.847682119205298, "ticker": "DIS"}
+{"date": "2026-07-09", "n_contracts": 150, "n_with_terminal_oi": 127, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8466666666666667, "ticker": "DIS"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "DIS"}
+{"date": "2026-07-13", "n_contracts": 77, "n_with_terminal_oi": 71, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.922077922077922, "ticker": "DIS"}
+{"date": "2026-07-14", "n_contracts": 79, "n_with_terminal_oi": 71, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8987341772151899, "ticker": "DIS"}
+{"date": "2026-07-15", "n_contracts": 80, "n_with_terminal_oi": 72, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9, "ticker": "DIS"}
+{"date": "2026-07-16", "n_contracts": 80, "n_with_terminal_oi": 72, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9, "ticker": "DIS"}
+{"date": "2026-07-17", "n_contracts": 80, "n_with_terminal_oi": 72, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9, "ticker": "DIS"}
+{"date": "2026-07-02", "n_contracts": 731, "n_with_terminal_oi": 650, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8891928864569083, "ticker": "GS"}
+{"date": "2026-07-07", "n_contracts": 513, "n_with_terminal_oi": 466, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9083820662768031, "ticker": "GS"}
+{"date": "2026-07-08", "n_contracts": 529, "n_with_terminal_oi": 477, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9017013232514177, "ticker": "GS"}
+{"date": "2026-07-09", "n_contracts": 531, "n_with_terminal_oi": 479, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9020715630885122, "ticker": "GS"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "GS"}
+{"date": "2026-07-13", "n_contracts": 265, "n_with_terminal_oi": 248, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9358490566037736, "ticker": "GS"}
+{"date": "2026-07-14", "n_contracts": 272, "n_with_terminal_oi": 250, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9191176470588235, "ticker": "GS"}
+{"date": "2026-07-15", "n_contracts": 272, "n_with_terminal_oi": 250, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9191176470588235, "ticker": "GS"}
+{"date": "2026-07-16", "n_contracts": 274, "n_with_terminal_oi": 251, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.916058394160584, "ticker": "GS"}
+{"date": "2026-07-17", "n_contracts": 275, "n_with_terminal_oi": 252, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9163636363636364, "ticker": "GS"}
+{"date": "2026-07-02", "n_contracts": 309, "n_with_terminal_oi": 275, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.889967637540453, "ticker": "QCOM"}
+{"date": "2026-07-07", "n_contracts": 212, "n_with_terminal_oi": 189, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8915094339622641, "ticker": "QCOM"}
+{"date": "2026-07-08", "n_contracts": 238, "n_with_terminal_oi": 212, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8907563025210085, "ticker": "QCOM"}
+{"date": "2026-07-09", "n_contracts": 246, "n_with_terminal_oi": 215, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.8739837398373984, "ticker": "QCOM"}
+{"date": "2026-07-12", "skip_reason": "no_spot", "ticker": "QCOM"}
+{"date": "2026-07-13", "n_contracts": 125, "n_with_terminal_oi": 117, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.936, "ticker": "QCOM"}
+{"date": "2026-07-14", "n_contracts": 125, "n_with_terminal_oi": 118, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.944, "ticker": "QCOM"}
+{"date": "2026-07-15", "n_contracts": 125, "n_with_terminal_oi": 118, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.944, "ticker": "QCOM"}
+{"date": "2026-07-16", "n_contracts": 121, "n_with_terminal_oi": 115, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9504132231404959, "ticker": "QCOM"}
+{"date": "2026-07-17", "n_contracts": 121, "n_with_terminal_oi": 115, "scope": "through_month", "skip_reason": null, "terminal_oi_coverage_pct": 0.9504132231404959, "ticker": "QCOM"}

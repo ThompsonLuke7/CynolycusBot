@@ -90,6 +90,7 @@ class OptionOrderPolicyConfig:
     meta_stale_retrace_atr: float = 0.25
     meta_setup_failure_exit_enabled: bool = True
     meta_setup_failure_buffer_atr: float = 0.10
+    meta_setup_failure_grace_minutes: int = 0
     meta_no_progress_exit_enabled: bool = False
     meta_no_progress_exit_minutes: int = 10
     meta_no_progress_exit_atr: float = 0.20
@@ -456,15 +457,20 @@ class OptionOrderPolicy:
         close: float,
         high: float,
         low: float,
+        local_ts: datetime | None = None,
     ) -> bool:
         if not bool(self.cfg.meta_setup_failure_exit_enabled):
             return False
         side_key = str(side).strip().lower()
+        trail_state = self._trail_state(side_key)
+        if local_ts is not None and trail_state.entry_ts is not None:
+            elapsed_min = max(0.0, (local_ts - trail_state.entry_ts).total_seconds() / 60.0)
+            if elapsed_min < max(0, int(self.cfg.meta_setup_failure_grace_minutes)):
+                return False
         structure = self._meta_entry_structure.get(side_key)
         if not isinstance(structure, dict):
             return False
         signal_atr = _as_float(structure.get("signal_atr"))
-        trail_state = self._trail_state(side_key)
         ref_atr = signal_atr if math.isfinite(signal_atr) and signal_atr > 0.0 else _as_float(trail_state.entry_atr)
         if not (math.isfinite(ref_atr) and ref_atr > 0.0):
             return False
@@ -3101,6 +3107,7 @@ class OptionOrderPolicy:
             "short_decision_reason": self._meta_side_reason.get("short"),
             "meta_setup_failure_exit_enabled": bool(self.cfg.meta_setup_failure_exit_enabled),
             "meta_setup_failure_buffer_atr": float(self.cfg.meta_setup_failure_buffer_atr),
+            "meta_setup_failure_grace_minutes": int(self.cfg.meta_setup_failure_grace_minutes),
             "meta_no_progress_exit_enabled": bool(self.cfg.meta_no_progress_exit_enabled),
             "meta_no_progress_exit_minutes": int(self.cfg.meta_no_progress_exit_minutes),
             "meta_no_progress_exit_atr": float(self.cfg.meta_no_progress_exit_atr),
@@ -3508,6 +3515,7 @@ class OptionOrderPolicy:
                         close=close,
                         high=high,
                         low=low,
+                        local_ts=local_ts,
                     )
                     if setup_failure_signal:
                         self._meta_side_soft_exit_count[side_key] = 0
@@ -3647,6 +3655,7 @@ class OptionOrderPolicy:
                     close=close,
                     high=high,
                     low=low,
+                    local_ts=local_ts,
                 )
                 if setup_failure_signal:
                     self._meta_side_reason[side_key] = "setup_failure_exit"

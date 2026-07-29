@@ -87,6 +87,29 @@ _SCAN_END_TS   = _time(15, 55)  # skip 30m bar whose last 5m opens at 3:55 (post
 _LIVE_OPTION_FILTER_POLICY = "baseline"
 _CHALLENGER_OPTION_FILTER_POLICY = "calls_only_best_filter_v1"
 _CHALLENGER_ALLOW_SHORT_ENTRIES = False
+
+# LONG-ONLY GATE (independent of the challenger policy above).
+#
+# This module is options-only, so a short signal is expressed by BUYING PUTS. That
+# lost money persistently: across 299 real put fills, -$32,928 vs +$5,827 on 258
+# calls. Three independent problems stack (12_dte_and_put_call_study.md):
+#   1. downside excursion is smaller AND stalls -- 8.3% median by 30d vs 18.7% for
+#      calls, and it plateaus entirely after ~60-90d;
+#   2. pure skew cost -- conditioned on the SAME underlying move, puts returned
+#      15-18pp less than calls at every move size;
+#   3. it is not a regime artifact -- puts lost in all three risk-appetite terciles,
+#      and in risk-OFF they had BETTER underlying movement (2.29% vs 1.57%) yet
+#      still lost $13,772 while calls made $708.
+#
+# Deliberately a separate flag rather than enabling _CHALLENGER_OPTION_FILTER_POLICY,
+# which would also activate blocked-ticker and blocked-time-bucket rules that are a
+# different (and separately-evidenced) decision.
+#
+# This BLOCKS short entries; it does not convert them to short shares. Converting
+# would require an equity execution path this module does not have (it is
+# options-only: no share entry, exit, or reconciliation logic). Per user direction,
+# shares are not to be added here until they are shown to work.
+_ALLOW_SHORT_ENTRIES = False
 _CHALLENGER_BLOCKED_LONG_ENTRY_BUCKETS = {"12:30", "15:00", "15:30"}
 _CHALLENGER_BLOCKED_LONG_ENTRY_TICKERS = {
     # Challenger policy from live fill audit through 2026-05-26.
@@ -214,7 +237,28 @@ class _ConfirmState:
 # Options contract selection
 # ---------------------------------------------------------------------------
 
-_MIN_DTE_DAYS = 0    # allow the nearest listed expiry, including 0DTE/1DTE weeklies
+# DTE floor. Was 0 ("allow the nearest listed expiry, including 0DTE/1DTE weeklies"),
+# which made the median entry a 2-DTE contract with 56% of entries at <=2 DTE.
+#
+# Evidence (research/options_experiment/13_dte_floor_and_regime_rules.md, measured on
+# this module's own 575 real fills + underlying bars):
+#   * 67% of trades eventually reach a +10% favorable underlying move within 60d;
+#     time-to-+10% is median 10 days, p75 22, p90 38.
+#   * A 2-day floor captures only 19% of those moves. 21 days captures 74%
+#     (14d: 60%, 30d: 83%, 45d: 95%) -- 21d is the efficiency knee.
+#   * Even the LOSING trades went on to a 9.2% median favorable move by 30d, i.e.
+#     the thesis was usually right and the clock was wrong.
+#   * Median hold here is only ~20 hours, so the second (and for short holds the
+#     larger) benefit is decay: 20h burns ~40% of a 2-DTE contract's remaining life
+#     but a trivial fraction of a 21-DTE contract's.
+# Nothing observable at signal time predicts move speed (best |r| = 0.22), so a flat
+# floor is the right instrument -- a per-trade adaptive/learned DTE is not supportable.
+#
+# NOT yet proven: that the extra premium of a longer-dated contract is repaid. Option
+# marks cannot be reconstructed historically for this universe
+# (see 10_RETRACTION_option_pnl_invalid.md), so this is an evidence-backed change to
+# the move-capture window, not a validated P&L improvement. Watch realized results.
+_MIN_DTE_DAYS = 21
 _EXPIRY_LOOKAHEAD_DAYS = 90
 _ZERO_DTE_CUTOFF = _time(13, 0)
 _FRIDAY_LATE_EXPIRY_CUTOFF = _time(13, 0)
@@ -1339,6 +1383,16 @@ class SwingLiveRunner:
                     "direction": int(sig.direction),
                     "reason": signal_decision.reason,
                     "signal_policy": signal_decision.to_dict(),
+                })
+                continue
+            # Long-only gate: applies unconditionally, not just under the challenger
+            # policy. See _ALLOW_SHORT_ENTRIES for the evidence.
+            if sig.direction < 0 and not _ALLOW_SHORT_ENTRIES:
+                logger.info("[%s] VETOED: long-only gate (put entries disabled)", sig.ticker)
+                self._emit("entry_skipped", {
+                    "ticker": sig.ticker,
+                    "direction": int(sig.direction),
+                    "reason": "short_entries_disabled_long_only",
                 })
                 continue
             if _challenger_policy_enabled() and sig.direction < 0 and not _CHALLENGER_ALLOW_SHORT_ENTRIES:

@@ -21,6 +21,7 @@ def _isolated_cache(tmp_path, monkeypatch):
     test depends on a real .env file or hits the network."""
     monkeypatch.setattr(chain_cache, "CACHE_ROOT", tmp_path / "options_history")
     monkeypatch.setattr(chain_cache, "CONTRACTS_DIR", tmp_path / "options_history" / "contracts")
+    monkeypatch.setattr(chain_cache, "CONTRACTS_FULL_DIR", tmp_path / "options_history" / "contracts_full")
     monkeypatch.setattr(chain_cache, "BARS_DIR", tmp_path / "options_history" / "bars")
     monkeypatch.setattr(chain_cache, "TRADES_DIR", tmp_path / "options_history" / "trades")
     monkeypatch.setattr(chain_cache, "_credentials", lambda env_file=None: ("key", "secret", "https://data.alpaca.markets"))
@@ -186,6 +187,107 @@ def test_discover_contracts_atomic_write_no_leftover_tmp(monkeypatch, tmp_path):
     assert not any(n.endswith(".tmp") for n in names)
     meta = json.loads((cache_dir / "AAPL.parquet.meta.json").read_text())
     assert "_all_" in meta and len(meta["_all_"]) == 1
+
+
+# --------------------------------------------------------------------------
+# discover_contracts_full
+# --------------------------------------------------------------------------
+
+def _contract_row_full(symbol, expiry, strike, right, oi, *, oi_date=None, close_price=None, close_price_date=None):
+    row = _contract_row(symbol, expiry, strike, right, oi)
+    row["open_interest_date"] = oi_date
+    row["close_price"] = close_price
+    row["close_price_date"] = close_price_date
+    return row
+
+
+def test_discover_contracts_full_keeps_extra_fields(monkeypatch):
+    def fake_get_json(url, params, *, key, secret):
+        if params["status"] == "inactive":
+            return {
+                "option_contracts": [
+                    _contract_row_full(
+                        "AAPL250606C00110000", "2025-06-06", 110, "C", 117,
+                        oi_date="2025-06-05", close_price="95.5", close_price_date="2025-06-06",
+                    )
+                ]
+            }
+        return {"option_contracts": []}
+
+    monkeypatch.setattr(chain_cache, "_get_json", fake_get_json)
+    df = chain_cache.discover_contracts_full("AAPL", "2025-06-01", "2025-06-10")
+    assert list(df.columns) == [
+        "osi_symbol", "ticker", "expiry", "strike", "right", "open_interest",
+        "open_interest_date", "close_price", "close_price_date",
+    ]
+    row = df.iloc[0]
+    assert row["open_interest"] == 117
+    assert row["open_interest_date"] == "2025-06-05"
+    assert row["close_price"] == 95.5
+    assert row["close_price_date"] == "2025-06-06"
+
+
+def test_discover_contracts_full_null_fields_for_active_contract(monkeypatch):
+    def fake_get_json(url, params, *, key, secret):
+        if params["status"] == "active":
+            return {"option_contracts": [_contract_row_full("AAPL260803C00205000", "2026-08-03", 205, "C", None)]}
+        return {"option_contracts": []}
+
+    monkeypatch.setattr(chain_cache, "_get_json", fake_get_json)
+    df = chain_cache.discover_contracts_full("AAPL", "2026-08-01", "2026-08-10")
+    row = df.iloc[0]
+    assert row["open_interest"] is None
+    assert row["open_interest_date"] is None
+    assert row["close_price"] is None
+    assert row["close_price_date"] is None
+
+
+def test_discover_contracts_full_and_discover_contracts_caches_are_independent(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_get_json(url, params, *, key, secret):
+        calls["n"] += 1
+        if params["status"] == "inactive":
+            return {"option_contracts": [_contract_row_full("AAPL250606C00110000", "2025-06-06", 110, "C", 117, oi_date="2025-06-05")]}
+        return {"option_contracts": []}
+
+    monkeypatch.setattr(chain_cache, "_get_json", fake_get_json)
+    narrow = chain_cache.discover_contracts("AAPL", "2025-06-01", "2025-06-10")
+    calls_after_narrow = calls["n"]
+    full = chain_cache.discover_contracts_full("AAPL", "2025-06-01", "2025-06-10")
+    # discover_contracts_full has its own cache/meta -- it must issue its own
+    # fetch even though discover_contracts already covered this window.
+    assert calls["n"] > calls_after_narrow
+    assert "open_interest_date" not in narrow.columns
+    assert "open_interest_date" in full.columns
+    assert (chain_cache.CONTRACTS_DIR / "AAPL.parquet").exists()
+    assert (chain_cache.CONTRACTS_FULL_DIR / "AAPL.parquet").exists()
+
+
+def test_discover_contracts_full_gap_refetch_only_fetches_missing_window(monkeypatch):
+    requested_ranges = []
+
+    def fake_get_json(url, params, *, key, secret):
+        requested_ranges.append((params["status"], params["expiration_date_gte"], params["expiration_date_lte"]))
+        return {"option_contracts": [], "next_page_token": None}
+
+    monkeypatch.setattr(chain_cache, "_get_json", fake_get_json)
+    chain_cache.discover_contracts_full("AAPL", "2024-01-01", "2024-02-01")
+    assert len(requested_ranges) == 2
+
+    requested_ranges.clear()
+    chain_cache.discover_contracts_full("AAPL", "2024-01-01", "2024-03-01")
+    assert len(requested_ranges) == 2
+    for _, gte, lte in requested_ranges:
+        assert gte >= "2024-02-01"
+
+
+def test_discover_contracts_full_no_data_returns_empty_not_none(monkeypatch):
+    monkeypatch.setattr(chain_cache, "_get_json", lambda *a, **k: {"option_contracts": [], "next_page_token": None})
+    df = chain_cache.discover_contracts_full("ZZZZ", "2024-01-01", "2024-02-01")
+    assert df is not None
+    assert df.empty
+    assert "open_interest_date" in df.columns
 
 
 # --------------------------------------------------------------------------

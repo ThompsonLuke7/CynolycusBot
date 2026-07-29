@@ -17,7 +17,7 @@ import json
 import logging
 import os
 import time as time_mod
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -145,7 +145,7 @@ def _load_daily(ticker: str) -> pd.DataFrame | None:
 def _emit_alert(payload: dict, *, log_path: Path | None = None) -> None:
     log_path = Path(log_path or LIVE_CONFIG["alert_log_path"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {**payload, "ts": datetime.utcnow().isoformat() + "Z"}
+    payload = {**payload, "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
     with open(log_path, "a") as f:
         f.write(json.dumps(payload, default=str) + "\n")
     logger.info("alert: %s", payload)

@@ -6,6 +6,7 @@ testpaths = [
     "signals/events/tests",
     "signals/events/forward_guidance/tests",
     "signals/meta_context/tests",
+    "signals/parabolic_filter/tests",
     "strategies/momentum_expansion/tests",
     "strategies/dealer_positioning/tests",
     "strategies/intraday_structure/tests",
