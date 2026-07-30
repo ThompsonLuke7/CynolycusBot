@@ -954,3 +954,5 @@ No implementation was started; next step is user review, then task execution fro
 {2026-07-30 08:28 ET} {agent: Codex} {nervous system execution preflight}
 Created isolated `nervous-system-execution` worktree and SDD ledger; source baseline is 793 passed/20 skipped, with 2 pre-existing catalyst failures and 12 sandbox-only socket errors. Worktree-only failures are missing ignored research/model artifacts.
 Execution is paused before Task 1 for the required baseline decision: proceed while tracking these known failures, or investigate/fix them first.
+{2026-07-30 09:00 ET} {agent: Codex} {catalyst baseline repair}
+Added injectable/disableable forward-guidance features and labels to `build_catalyst_records`; isolated the two catalyst fixtures from process-global earnings-result data. Focused and full catalyst suites pass (3/3); implementation committed as `c3af94b`. Report: `.superpowers/sdd/2026-07-30-cynolycus-nervous-system-mvp/task-0-report.md`.
