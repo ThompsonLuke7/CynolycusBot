@@ -5,6 +5,8 @@ import json
 import math
 from collections.abc import Mapping, Set
 from datetime import datetime, timezone
+from decimal import Decimal
+import re
 from typing import AbstractSet, Annotated, Any, Generic, Self, TypeVar
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
@@ -24,10 +26,26 @@ def _finite(value: float) -> float:
     return value
 
 
+def _finite_decimal(value: Decimal) -> Decimal:
+    if not value.is_finite():
+        raise ValueError("decimal must be finite")
+    return value
+
+
+def _sha256_hex(value: str) -> str:
+    if len(value) != 64 or re.fullmatch(r"[0-9a-fA-F]{64}", value) is None:
+        raise ValueError("value must be a 64-character SHA-256 hex string")
+    return value.lower()
+
+
 UtcDatetime = Annotated[datetime, AfterValidator(_utc)]
 FiniteFloat = Annotated[float, AfterValidator(_finite)]
 Probability = Annotated[FiniteFloat, Field(ge=0.0, le=1.0)]
 PositiveSchemaVersion = Annotated[int, Field(ge=1)]
+FiniteDecimal = Annotated[Decimal, AfterValidator(_finite_decimal)]
+NonNegativeDecimal = Annotated[FiniteDecimal, Field(ge=Decimal("0"))]
+PositiveDecimal = Annotated[FiniteDecimal, Field(gt=Decimal("0"))]
+Sha256Hex = Annotated[str, AfterValidator(_sha256_hex)]
 
 
 _FrozenKey = TypeVar("_FrozenKey")

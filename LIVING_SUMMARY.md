@@ -976,3 +976,6 @@ Validated 10 state and full snapshot JSON round trips, py_compile, five-seed has
 {2026-07-30 10:47 EDT} {agent: Codex} {nervous system Task 3 commit blocker}
 The single commit attempt failed creating the child-worktree `index.lock` because `/home/luket/repos/CynolycusBot/.git` is read-only; no retry was made.
 `HEAD` remains `1d4e1e6`; the three intended tracked files remain staged and the round-4 report is ignored.
+{2026-07-30 11:04 EDT} {agent: Codex} {nervous system Task 4 trading/execution contracts}
+Implemented Task 4 intent, policy, order, execution, decision/outcome contracts plus Decimal/SHA foundation aliases, deep-frozen payloads/maps, explicit NOT_RUN artifacts, and 18 focused tests; report is ignored at `.superpowers/sdd/2026-07-30-cynolycus-nervous-system-mvp/task-4-report.md`.
+Validation: 38 focused Task 2–4/base tests, 74 core nervous-system tests, py_compile, JSON/hash/immutability, and diff checks passed; one commit attempt failed on read-only child-worktree `index.lock`, so HEAD remains `b607d0d` and intended files are staged.
