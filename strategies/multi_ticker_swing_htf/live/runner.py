@@ -384,11 +384,14 @@ def _execute(
     """
     limits = limits or {}
     if args.submit:
+        # After the close, queue entries for the next open instead of erroring on
+        # them — BEFORE the readiness gate, which is re-applied at flush time by
+        # submit_pending_open_entries. See core.live_4h_exec.execute_plan for why
+        # the reverse order silently discarded every after-close entry.
+        plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
         plan, skipped, reason = filter_entry_orders_for_readiness(plan, new_managed=new_managed)
         if skipped:
             print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
-        # After the close, queue entries for the next open instead of erroring on them.
-        plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
         if plan:
             print("\nsubmitting...")
             for item in plan:

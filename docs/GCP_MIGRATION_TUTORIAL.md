@@ -1,6 +1,6 @@
 # CynolycusBot → Google Cloud Platform: Console-First Migration Tutorial
 
-**Created:** 2026-07-26 · **Rewritten Console-first:** 2026-07-26
+**Created:** 2026-07-26 · **Rewritten Console-first:** 2026-07-26 · **Phase 2 upload set re-verified:** 2026-07-29
 **Status:** Phase 0 ✅ complete — Phase 1 next
 **Audience:** You, learning GCP by porting this repo, one small verified step at a time.
 
@@ -23,7 +23,7 @@
 | 7 · Logs, alerts, cost | ✅ fully — Console is *better* here | no |
 | 8 · Live loop | ✅ fully | no |
 
-**The one unavoidable CLI step** is Phase 2.4: uploading ~64 GB across **93,460 files**. The Console's uploader is a browser drag-and-drop — it will stall, time out, or silently drop files at that scale, and it can't resume. `gcloud storage rsync` is resumable, parallel, and verifies checksums. That's a 20-minute exception in an otherwise click-driven migration.
+**The one unavoidable CLI step** is Phase 2.4: uploading ~72 GB across **~108,000 files** (re-measured 2026-07-29 — see §2.3b). The Console's uploader is a browser drag-and-drop — it will stall, time out, or silently drop files at that scale, and it can't resume. `gcloud storage rsync` is resumable, parallel, and verifies checksums. That's a 20-minute exception in an otherwise click-driven migration.
 
 > **Trap: Cloud Shell won't save you here.** The Console has a built-in terminal (Cloud Shell) with `gcloud` preinstalled, and it's great for one-off commands. But Cloud Shell runs on a Google VM — **it cannot see your laptop's filesystem.** Uploading local data must run from your own WSL terminal.
 
@@ -55,20 +55,34 @@ They're in that order deliberately. Storage is reversible and nearly free. The l
 4. **One phase per sitting.** Each has a ✅ Checkpoint you must pass.
 5. **Write notes in §12** as you go. That's what this file is for long-term.
 
-### Your starting state (measured 2026-07-26)
+### Your starting state (re-measured 2026-07-29)
 
 ```
-Repo total:                78 GB
-  strategies/              48 GB   ← gitignored .parquet feature/training matrices
-  signals/                9.9 GB   ← news embeddings, catalyst matrices
-  Data/                   6.0 GB   ← models, shared bars cache, dealer snapshots
-  everything else         ~14 GB   ← .venv, .git, UI, research, themes
+Repo total:                86 GB
+  strategies/              51 GB   ← .parquet feature/training matrices      9,076 files
+  signals/                 11 GB   ← news embeddings, catalyst matrices      8,340 files
+  Data/                    11 GB   ← models, bars cache, options history     89,165 files
+  .venv/                  8.6 GB   ← regenerable, never upload
+  .git/                   5.1 GB   ← already on GitHub, never upload
+  theme_expansion/        408 MB   ← 100% untracked theme outputs            1,869 files
+  UI/swing_audit/         332 MB   ← paper/live session audit logs             298 files
+  research/               169 MB   ← study datasets (confluence, options)      273 files
+  themes/                 120 MB   ← dynamic_theme outputs (live path)         230 files
+  root *.tgz               82 MB   ← meta_ranker model bundles                   2 files
+  logs/ backtests/ etc.    78 MB
 
-Files to upload:        93,460
 GitHub remote:          ThompsonLuke7/CynolycusBot (branch main)
 ```
 
-`.gitignore` already excludes `Data/**` and `*.parquet`, so **~64 GB is untracked generated artifacts** — exactly what Cloud Storage is for. Nothing in Phase 2 touches tracked source code.
+**Correction to the 2026-07-26 version of this section.** It claimed "`.gitignore` already excludes `Data/**` … nothing in Phase 2 touches tracked source code." That is **false** — `.gitignore` rules do not untrack files already committed. Actual tracked-file counts inside the upload trees:
+
+| Tree | Tracked files | Tracked bytes | What they are |
+|---|---|---|---|
+| `Data/` | 4,591 | 82 MB | 4,000 `ga_xgboost/**/tree_dot` files, `inference/live_runs/*.jsonl` |
+| `strategies/` | 374 | 54 MB | live `*.json` models, universe CSVs, frozen-test summaries |
+| `signals/` | 159 | 4.5 MB | meta-ranker native boosters, blacklist, kmeans pickle |
+
+Two consequences, both handled below: the bucket becomes a **second copy** of git-tracked artifacts (divergence risk — git stays authoritative for those), and Phase 2.7's "delete the local directory" would **destroy tracked working-tree files** unless you check first.
 
 ---
 
@@ -112,8 +126,11 @@ GitHub ──► Cloud Build ──► Artifact Registry ──► Cloud Run
                                                    └── Service: dashboards (IAM)     ◄── other people
                                                         │
                                                         ▼
-                                              Cloud Storage  gs://cynolycus-data/
-                                                   ├── Data/  ├── signals/  └── strategies/
+                                              Cloud Storage  gs://cynolycusbot-data/
+                                                   ├── Data/     ├── signals/   ├── strategies/
+                                                   ├── themes/   ├── research/  ├── backtests/
+                                                   ├── theme_expansion/  ├── UI/swing_audit/
+                                                   └── model_bundles/
                                                         │
                                               Cloud Logging + Monitoring + Budget alerts
 ```
@@ -217,7 +234,7 @@ Solves the space problem. Touches **no** application code.
 
 Reasonable question, since the big files *are* structured data. Answer: **object storage is right; a relational database would cost ~100× more and would not make research easier.**
 
-Cost for your 64 GB:
+Cost for your ~72 GB:
 
 | Option | Storage/mo | Compute/mo | **Total** |
 |---|---|---|---|
@@ -251,7 +268,7 @@ float32 + zstd-3 :  244.8 MB   46.6% smaller
 
 That file would go **4.37 GB → 2.33 GB**. It also compounds — smaller files mean less RAM pressure, the thing that crashed WSL on 2026-07-21.
 
-**Repo-wide audit (2026-07-28) — the prize is smaller than that one file suggests.** Footer scan of all 142 parquet files >10 MB (41.0 GB of the ~64 GB):
+**Repo-wide audit (2026-07-28) — the prize is smaller than that one file suggests.** Footer scan of all 142 parquet files >10 MB (41.0 GB of the ~72 GB):
 
 | arrow dtype | GB | share |
 |---|---|---|
@@ -277,7 +294,7 @@ Measured zstd-3 on string-heavy files (`finra_short_volume`, `cboe_unusual_strik
 
 Not the 46.6% that single file implied — **that file was unusually float64-heavy and is not representative.** ~11 GB is still worth having, but it's a tidy-up, not a rescue.
 
-> The remaining **38,673 parquet files under 10 MB (23.7 GB)** weren't footer-scanned. Their file *count* matters more than their dtypes: 93,460 objects makes `rsync` slow and burns Class A operations (free tier is 5,000/month; the overage is cents, but expect to exceed it on first upload).
+> The remaining **38,673 parquet files under 10 MB (23.7 GB)** weren't footer-scanned. Their file *count* matters more than their dtypes: ~108,000 objects makes `rsync` slow and burns Class A operations (free tier is 5,000/month; the overage is cents, but expect to exceed it on first upload).
 
 ⚠️ **Validate before adopting — do not bulk-convert.**
 - Technical features (ATR, returns, cross-sectional ranks) don't need float64's 15 significant digits; float32 gives ~7. But dtype changes can shift model outputs.
@@ -289,16 +306,16 @@ Not the 46.6% that single file implied — **that file was unusually float64-hea
 
 Verified `us-central1` regional prices (2026-07-26):
 
-| Class | $/GB-month | Min. duration | Retrieval fee | **78 GB costs** |
+| Class | $/GB-month | Min. duration | Retrieval fee | **72 GB uploaded costs** |
 |---|---|---|---|---|
-| Standard | $0.020 | none | none | **$1.56/mo** |
-| Nearline | $0.010 | 30 days | $0.01/GB | **$0.78/mo** |
-| Coldline | $0.004 | 90 days | $0.02/GB | **$0.31/mo** |
+| Standard | $0.020 | none | none | **$1.44/mo** |
+| Nearline | $0.010 | 30 days | $0.01/GB | **$0.72/mo** |
+| Coldline | $0.004 | 90 days | $0.02/GB | **$0.29/mo** |
 | Archive | $0.0012 | 365 days | $0.05/GB | **$0.09/mo** |
 
 Free tier: **5 GB-months Standard** (US regions), 5,000 Class A ops, 50,000 Class B ops, 100 GB North America egress/month.
 
-Your entire 78 GB problem costs **about a coffee per year** in Coldline, or **$19/year** in Standard. Highest-leverage item in this document.
+Your entire 72 GB problem costs **about a coffee per year** in Coldline, or **$19/year** in Standard. Highest-leverage item in this document.
 
 > **Minimum storage duration is a real trap.** An object written to Nearline and deleted after 3 days is billed for the full 30. Keep actively-rewritten data (live state, daily caches) in Standard; let lifecycle rules age *cold* things down.
 
@@ -310,7 +327,7 @@ Your entire 78 GB problem costs **about a coffee per year** in Coldline, or **$1
 
 | Field | Value | Why |
 |---|---|---|
-| Name | `cynolycus-data` (add a suffix if taken) | **Globally unique across all of GCP** — same namespace as every other customer |
+| Name | `cynolycusbot-data` (add a suffix if taken) | **Globally unique across all of GCP** — same namespace as every other customer |
 | Location type | **Region** | Cheaper than multi-region; you don't need geo-redundancy |
 | Location | `us-central1` | Free-tier eligible |
 | Storage class | **Standard** | Lifecycle rules will age things down in 2.5 |
@@ -322,41 +339,111 @@ Your entire 78 GB problem costs **about a coffee per year** in Coldline, or **$1
 
 ### 2.3 Learn the tool on ONE small directory (CLI)
 
-Don't start with 48 GB. Start with 17 MB. From your WSL terminal:
+Don't start with 51 GB. Start with 3.6 MB. From your WSL terminal:
 
 ```bash
 cd /home/luket/repos/CynolycusBot
-gcloud storage rsync Data/options_history gs://cynolycus-data/options_history --recursive --dry-run
+gcloud storage rsync Data/outputs gs://cynolycusbot-data/Data/outputs --recursive --dry-run
 ```
 
 `--dry-run` shows exactly what *would* happen without transferring anything. Read it, then drop the flag to run for real.
 
-Verify in the **Console → Cloud Storage → Buckets → cynolycus-data**, and compare against `du -sh Data/options_history`.
+> **Corrected 2026-07-29.** This step used to practise on `Data/options_history` described as "17 MB" — that directory is now **4.4 GB** (3.6 GB of it `trades/`), which is no longer a cheap first lesson. It also wrote to `gs://cynolycusbot-data/options_history` while 2.4 writes the same files to `gs://cynolycusbot-data/Data/options_history` — running both would have stored **4.4 GB twice** under two prefixes. Every destination in Phase 2 now mirrors the local path exactly, so `rsync` recognises what it already uploaded.
+
+Verify in the **Console → Cloud Storage → Buckets → cynolycusbot-data**, and compare against `du -sh Data/outputs`.
 
 ✅ **Checkpoint 2.3** — bucket byte total matches local. If not, stop and find out why before scaling up.
+
+### 2.3b What actually gets uploaded — verified 2026-07-29
+
+Re-derived from the filesystem, not from the earlier estimate. Nine sources, ~72 GB, ~108k objects:
+
+| # | Local path | Size | Files | Why it goes | Tracked in git? |
+|---|---|---|---|---|---|
+| 1 | `Data/` | 11 GB | 89,165 | models, bars cache, options history, `inference/live_runs` logs | 4,591 files |
+| 2 | `signals/` | 11 GB | 8,340 | news embeddings, catalyst + meta-ranker matrices | 159 |
+| 3 | `strategies/` | 51 GB | 9,076 | the feature/training matrices — the whole disk problem | 374 |
+| 4 | `theme_expansion/` | 408 MB | 1,869 | **was missing.** 100% untracked; `theme_daily.parquet`, theme training matrix | 0 |
+| 5 | `themes/` | 120 MB | 230 | **was missing.** `dynamic_theme/outputs/` is gitignored and read by the live theme path | 157 |
+| 6 | `UI/swing_audit/` | 332 MB | 298 | **was missing.** Paper/live session audit logs — gitignored, single copy, no backup | 32 |
+| 7 | `research/` | 169 MB | 273 | **was missing.** Study datasets behind the capstone and the options retraction | 94 |
+| 8 | `backtests/` | 29 MB | 104 | **was missing.** Gitignored per-run outputs | 9 |
+| 9 | `meta_ranker_model_bundle_{quality,upside}.tgz` | 82 MB | 2 | **was missing.** Trained bundles, gitignored (`*.tgz`), only copy on earth | 0 |
+
+Items 4–9 total **~1.1 GB / ~2,800 files** — 1.5% of the bytes, but they include the only copies of the live theme features, every paper-trade audit trail, and two trained model bundles. Leaving them out is the real risk in this phase; the 51 GB was never in danger of being forgotten.
+
+**Deliberately excluded:**
+
+| Excluded | Size | Why |
+|---|---|---|
+| `.venv/` | 8.6 GB | regenerable, platform-specific |
+| `.git/` | 5.1 GB | already on GitHub |
+| `__pycache__/`, `*.py`, `*.pyc` | ~315 files | source belongs in git, not a bucket |
+| `strategies/momentum_expansion/data/training_export/training_matrix_4h.parquet` | 1.15 GB | **verified byte-identical** to `data/processed/training_matrix_4h.parquet` (same size, same md5 over first 200 MB) |
+| `.../training_export_ablation/ablation_colab_bundle.tgz` | 1.04 GB | it is a tar of `training_matrix_4h_with_regime.parquet`, which uploads uncompressed in the same directory |
+| `Data/runtime/live_data_jobs.lock`, `startup_queue.json` | ~1 KB | live process state; meaningless and misleading in a bucket |
+| `logs/` | 39 MB | rotating local churn; not a research artifact |
+| `.env`, `core/API/Schwab_API/schwab_token*.json` | — | secrets → Phase 3 (verified: no `.env`/key/token/pem file exists anywhere in trees 1–9) |
+
+Skipping the two verified duplicates saves **2.2 GB** — more than every missing directory added together.
+
+> `Data/runtime/meta_ranker_matrix_before_{news,treasury}_repair_20260707*.parquet` (128 MB) are pre-repair forensic snapshots. Kept deliberately — `AGENTS.md` treats experiment outputs as non-overwritable, and 128 MB in Coldline is $0.0005/month.
 
 > **`gsutil` is dead — don't learn it.** Google's docs state plainly that "gsutil is not the recommended CLI for Cloud Storage." `gcloud storage` is 79–94% faster on downloads, parallelizes automatically with no `-m` flag, and **gsutil is removed from the CLI package after March 2027.** Any tutorial using `gsutil` is teaching a soon-to-be-deleted tool. (Your install lists `gsutil 5.37` — ignore it.)
 
 ### 2.4 The real upload — the one genuinely CLI-only step
 
-93,460 files. Work up in size, verifying between each.
+~108,000 files, ~72 GB, in the order of §2.3b. Work up in size, verifying between each.
 
 ```bash
-# ~6 GB — shared caches and models the live modules read
-gcloud storage rsync Data gs://cynolycus-data/Data --recursive
+cd /home/luket/repos/CynolycusBot
 
-# ~9.9 GB — news embeddings, catalyst matrices
-gcloud storage rsync signals gs://cynolycus-data/signals --recursive \
-  --exclude=".*/__pycache__/.*|.*\.py$|.*\.pyc$"
+# The same code/cache exclusion applies to every tree below.
+CODE_EX='(.*/)?__pycache__/.*|.*\.pyc?$'
 
-# ~48 GB — the big one
-gcloud storage rsync strategies gs://cynolycus-data/strategies --recursive \
-  --exclude=".*/__pycache__/.*|.*\.py$|.*\.pyc$"
+# --- small ones first: these are the ones that were missing, do them while you're paying attention ---
+
+# 82 MB — trained meta-ranker bundles; gitignored, no other copy exists.
+# Named files via `cp`, NOT rsync of the repo root — the root also holds .env.
+gcloud storage cp meta_ranker_model_bundle_quality.tgz meta_ranker_model_bundle_upside.tgz \
+  gs://cynolycusbot-data/model_bundles/
+
+# 332 MB — paper/live audit logs; AGENTS.md forbids losing these
+gcloud storage rsync UI/swing_audit gs://cynolycusbot-data/UI/swing_audit --recursive --exclude="$CODE_EX"
+
+# 408 MB — theme outputs, 100% untracked
+gcloud storage rsync theme_expansion gs://cynolycusbot-data/theme_expansion --recursive --exclude="$CODE_EX"
+
+# 120 MB — dynamic_theme outputs are read by the live theme path
+gcloud storage rsync themes gs://cynolycusbot-data/themes --recursive --exclude="$CODE_EX"
+
+# 169 MB + 29 MB — study datasets and per-run backtest outputs
+gcloud storage rsync research  gs://cynolycusbot-data/research  --recursive --exclude="$CODE_EX"
+gcloud storage rsync backtests gs://cynolycusbot-data/backtests --recursive --exclude="$CODE_EX"
+
+# --- then the bulk ---
+
+# ~11 GB / 89k files — models, bars cache, options history, live_runs logs
+gcloud storage rsync Data gs://cynolycusbot-data/Data --recursive \
+  --exclude="$CODE_EX|runtime/live_data_jobs\.lock$|runtime/startup_queue\.json$"
+
+# ~11 GB — news embeddings, catalyst + meta-ranker matrices
+gcloud storage rsync signals gs://cynolycusbot-data/signals --recursive --exclude="$CODE_EX"
+
+# ~51 GB — the big one, minus 2.2 GB of verified duplicates
+gcloud storage rsync strategies gs://cynolycusbot-data/strategies --recursive \
+  --exclude="$CODE_EX|momentum_expansion/data/training_export/training_matrix_4h\.parquet$|momentum_expansion/data/training_export_ablation/ablation_colab_bundle\.tgz$"
 ```
 
-> `--exclude` takes a **Python regex, not a glob.** `*.py` silently won't work; `.*\.py$` will. Everyone trips on this once.
+Add `--dry-run` to any of these first. On the 51 GB line, do it — it costs nothing and shows you the object count before you commit.
 
-Run the 48 GB transfer in a terminal you can leave open (or under `tmux`) so a disconnect doesn't kill it. **`rsync` is resumable** — re-running transfers only what's missing, so an interruption costs you nothing.
+> **`--exclude` takes a Python regex, not a glob**, matched against the path **relative to the source directory**. Two traps, both of which the 2026-07-26 version of this section fell into:
+> - `*.py` silently won't work; `.*\.pyc?$` will.
+> - `.*/__pycache__/.*` does **not** match a top-level `__pycache__/` — the pattern requires a literal `/` before the directory name, and `signals/__pycache__/x.pyc` has relative path `__pycache__/x.pyc` with nothing before it. Both `signals/` and `strategies/` do have a top-level `__pycache__`. Verified by local dry-run: the old pattern leaks any **non-`.pyc`** file there (a stale `.json` came through), and is saved only by the separate `.*\.pyc$` alternative. Today that leak is harmless — 0 of the 315 `__pycache__` files in these trees are non-`.pyc` — but `(.*/)?__pycache__/.*` is the form that is actually correct.
+
+> **Before Phase 2.7 deletes anything**, remember trees 1, 2, 3, 5, 6, 7, 8 contain git-tracked files (§ Your starting state). `git ls-files <dir> | wc -l` must be `0` before you `rm -rf` a directory, or use `git clean -nXd <dir>` to delete only ignored files.
+
+Run the 51 GB transfer in a terminal you can leave open (or under `tmux`) so a disconnect doesn't kill it. **`rsync` is resumable** — re-running transfers only what's missing, so an interruption costs you nothing.
 
 Watch progress live in the Console bucket view; it updates as objects land.
 
@@ -366,13 +453,17 @@ Watch progress live in the Console bucket view; it updates as objects land.
 
 Rule 1:
 - Action: **Set storage class to Nearline**
-- Condition: **Age = 45 days**, **Prefix matches** `strategies/`, `signals/`
+- Condition: **Age = 45 days**, **Prefix matches** `strategies/`, `research/`, `backtests/`, `theme_expansion/`
 
 Rule 2:
 - Action: **Set storage class to Coldline**
 - Condition: **Age = 180 days**, same prefixes
 
-This ages *only* frozen research artifacts — never `Data/`, which the live modules read daily and must stay Standard. After 180 days the 58 GB of `strategies/` + `signals/` costs about **$0.23/month.**
+This ages *only* frozen research artifacts. Never `Data/`, which the live modules read daily and must stay Standard.
+
+> **Corrected 2026-07-29 — do not age `signals/` wholesale.** The earlier rule listed `signals/` as a frozen-research prefix. It isn't: a grep of live code shows daily reads and nightly **rewrites** of `signals/news/data/processed/news_records.parquet`, `live_catalyst_records.parquet`, `signals/catalysts/data/processed/catalyst_records.parquet`, and `signals/meta_context/meta_ranker/meta_ranker_matrix.parquet`. Aging those hits both traps named in 2.1 at once — Nearline's **30-day minimum duration** billed against a file rewritten nightly, plus a retrieval fee every time a module reads it. If you want to age part of `signals/`, use narrow prefixes for the frozen subtrees only (e.g. `signals/events/`) and leave `news/`, `catalysts/`, and `meta_context/meta_ranker/` in Standard.
+
+After 180 days the ~52 GB of `strategies/` + the small research prefixes costs about **$0.21/month**; the ~11 GB of `signals/` staying in Standard costs $0.22/month. Total still under $1.
 
 ### 2.6 Versioning — Console
 
@@ -389,15 +480,32 @@ Later, add a lifecycle rule to delete **noncurrent** versions after ~90 days so 
 Read-back test first — download one file through the Console (click any object → Download) or:
 
 ```bash
-gcloud storage cp gs://cynolycus-data/Data/shared/bars/SOME_FILE.parquet /tmp/readback.parquet
+gcloud storage cp gs://cynolycusbot-data/Data/shared/bars/SOME_FILE.parquet /tmp/readback.parquet
 python3 -c "import pandas as pd; d=pd.read_parquet('/tmp/readback.parquet'); print(d.shape); print(d.head())"
 ```
 
 Only after that succeeds, delete **one local directory at a time**, checking the relevant module still starts between each. Regenerable derived matrices go first; raw sources and trained models go last, or never.
 
+⚠️ **Never `rm -rf` a directory without checking for tracked files first.** `Data/` alone holds 4,591 git-tracked files (§ Your starting state); deleting it would gut the working tree and show 4,591 deletions in `git status`. For each candidate:
+
+```bash
+git ls-files <dir> | wc -l      # must be 0 before a plain rm -rf
+git clean -nXd <dir>            # otherwise: dry-run deleting ONLY gitignored files
+git clean -fXd <dir>            # ...then for real
+```
+
+Safest first deletions — checked 2026-07-29, all regenerable and already in the bucket:
+
+| Candidate | Size | Tracked files | Method |
+|---|---|---|---|
+| `strategies/multi_ticker_swing/data/training_export/` | 2.0 GB | 0 | plain `rm -rf` |
+| `Data/options_history/trades/` | 3.6 GB | 0 | plain `rm -rf` (and per the 2026-07 retraction, unfit for the study it was collected for) |
+| `theme_expansion/outputs/` | 300 MB | 0 | plain `rm -rf` |
+| `strategies/momentum_expansion/data/training_export/` | 1.2 GB | **2** | `git clean -fXd` only — a plain `rm -rf` would delete tracked files |
+
 ✅ **Checkpoint 2**
 
-- Console bucket shows ~64 GB
+- Console bucket shows ~72 GB across ~108k objects
 - `df -h /` shows meaningfully more free space
 - Lifecycle and versioning both visible on their tabs
 - Billing still near $0
@@ -451,7 +559,7 @@ Copy the full email — it looks like `cynolycus-runtime@YOUR-PROJECT-ID.iam.gse
 - Principal: your `cynolycus-runtime@...` email
 - Role: **Secret Manager Secret Accessor**
 
-**Bucket:** **Cloud Storage → cynolycus-data → "Permissions" tab → "Grant access"**
+**Bucket:** **Cloud Storage → cynolycusbot-data → "Permissions" tab → "Grant access"**
 - Principal: same email
 - Role: **Storage Object User** (read + write objects)
 
@@ -517,7 +625,7 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 ```
 
-And `.dockerignore` — **not optional**, it's what stops you shipping 78 GB to Cloud Build:
+And `.dockerignore` — **not optional**, it's what stops you shipping 86 GB to Cloud Build:
 
 ```
 .venv/
@@ -682,7 +790,7 @@ Secrets arrive as ordinary env vars — your existing `os.environ` reads work un
 1. **"Mount volume"** (or Add volume)
 2. Volume type: **Cloud Storage bucket**
 3. Mount path: `/mnt/data`
-4. Browse and select `cynolycus-data`
+4. Browse and select `cynolycusbot-data`
 5. Leave **Read-only unchecked** (the nightly job writes)
 6. **Save**
 
@@ -739,7 +847,7 @@ Right call for three independent reasons: it's the `AGENTS.md` separation of con
 - Container command `python`, arguments `-m,UI.hub_dashboard`
 - Env var `CYNOLYCUS_DATA_ROOT` = `/mnt/data`
 - Security → service account: `cynolycus-runtime`
-- Volumes → Cloud Storage bucket `cynolycus-data`, mount `/mnt/data`, **✅ Read-only checked**
+- Volumes → Cloud Storage bucket `cynolycusbot-data`, mount `/mnt/data`, **✅ Read-only checked**
 
 Three settings doing real work:
 
@@ -861,7 +969,7 @@ Console path: **Compute Engine → VM instances → Create instance**, `e2-stand
 
 | Item | Monthly |
 |---|---|
-| Cloud Storage — 64 GB aging to Nearline/Coldline | $0.30 – $1.30 |
+| Cloud Storage — 72 GB aging to Nearline/Coldline | $0.30 – $1.45 |
 | Cloud Run jobs (nightly ~1 hr/day, 8 vCPU/32 GiB) | $3 – $8 |
 | Cloud Run dashboard (scale-to-zero) | ~$0.00 (free tier) |
 | Cloud Scheduler (~10 jobs, 3 free) | ~$0.70 |
@@ -882,7 +990,7 @@ Your $300 trial credit covers roughly **3–5 months of the full stack including
 | Switch project | Top blue bar → project dropdown |
 | See spend | Billing → Reports |
 | Check/edit budget | Billing → Budgets & alerts |
-| Browse my data | Cloud Storage → Buckets → cynolycus-data |
+| Browse my data | Cloud Storage → Buckets → cynolycusbot-data |
 | Change storage aging | Bucket → Lifecycle |
 | Add/rotate an API key | Secret Manager → secret → New version |
 | See who can access what | IAM & Admin → IAM (or a resource's Permissions tab) |
@@ -908,10 +1016,10 @@ gcloud config list
 gcloud config set project YOUR-PROJECT-ID
 
 # Storage
-gcloud storage ls gs://cynolycus-data
-gcloud storage du --summarize gs://cynolycus-data
-gcloud storage rsync LOCAL gs://cynolycus-data/PATH --recursive --dry-run
-gcloud storage cp gs://cynolycus-data/PATH/file.parquet .
+gcloud storage ls gs://cynolycusbot-data
+gcloud storage du --summarize gs://cynolycusbot-data
+gcloud storage rsync LOCAL gs://cynolycusbot-data/PATH --recursive --dry-run
+gcloud storage cp gs://cynolycusbot-data/PATH/file.parquet .
 
 # Run
 gcloud run jobs execute JOB --region=us-central1 --wait
@@ -931,7 +1039,7 @@ gcloud scheduler jobs pause NAME --location=us-central1
 gcloud logging read 'severity>=ERROR' --freshness=1d --limit=50
 
 # IAM introspection
-gcloud storage buckets get-iam-policy gs://cynolycus-data
+gcloud storage buckets get-iam-policy gs://cynolycusbot-data
 ```
 
 **Deliberately out of scope** until something forces it: Kubernetes/GKE, Terraform, custom VPC, load balancers, multi-region, Anthos, service meshes, org policy.
@@ -952,11 +1060,13 @@ gcloud storage buckets get-iam-policy gs://cynolycus-data
 | 2026-07-26 | Storage before compute | Reversible, ~$1/mo, solves the stated disk pain, touches no code |
 | 2026-07-26 | Live Alpaca keys excluded until Phase 8 | `AGENTS.md`: default to paper; live paths separated by credentials |
 | 2026-07-26 | Cloud dashboard read-only, no "Run" button | Prevents a viewer triggering orders; enables scale-to-zero |
-| 2026-07-26 | **Console-first; CLI only for bulk upload** | 93,460 files defeats browser upload; everything else is clearer in the UI while learning |
+| 2026-07-26 | **Console-first; CLI only for bulk upload** | ~108,000 files defeats browser upload; everything else is clearer in the UI while learning |
 | 2026-07-26 | **GitHub continuous deployment over `--source .`** | Repo already on GitHub; deploys become reproducible from pushed commits |
 | 2026-07-26 | **Object storage, not a database** (§2.0) | Cloud SQL ≈ $129/mo vs ~$1.28 for GCS; parquet already is a columnar store; immutable files beat mutable rows for reproducibility |
 | 2026-07-26 | **BigQuery deferred, external tables if ever** (§2.0) | Queries parquet in place — no copy, no migration, 1 TiB/mo free. Revisit only if ad-hoc SQL becomes painful |
 | 2026-07-26 | **float32 + zstd re-encoding = separate change** (§2.0b) | Size cut measured, but dtype changes can shift model outputs; needs frozen-test validation, must not ride along with the migration |
+| 2026-07-29 | **Phase 2.4 upload set re-verified from the filesystem** (§2.3b) | Added 6 missing sources (`theme_expansion/`, `themes/`, `UI/swing_audit/`, `research/`, `backtests/`, root model bundles — ~1.1 GB incl. the only copies of live theme features, all paper-trade audit logs, 2 trained bundles); dropped 2.2 GB of verified duplicates; fixed a 4.4 GB double-upload from a 2.3/2.4 prefix mismatch; corrected the false "no tracked files" claim (5,124 tracked files sit inside the upload trees) |
+| 2026-07-29 | **`signals/` removed from the lifecycle-aging rule** (§2.5) | Live code reads and nightly-rewrites `signals/news`, `signals/catalysts`, `signals/meta_context/meta_ranker` — Nearline's 30-day minimum duration plus retrieval fees would apply to daily-churn files |
 | 2026-07-28 | **Re-encoding downgraded to low priority** (§2.0b) | Repo-wide audit: only 37.8% of parquet bytes are float64 (47.9% already float32), so realistic saving is ~11 GB / 27%, not the 46.6% one unrepresentative file implied. Worth doing eventually; not worth blocking the migration |
 
 ### Phase log

@@ -379,12 +379,22 @@ def execute_plan(
     failed: set[str] = set()
     if not (submit and plan):
         return failed
+    # Order matters. Defer BEFORE gating on readiness: an after-close entry is
+    # not being submitted now, it is being *recorded* for the next open, and
+    # submit_pending_open_entries re-runs the readiness gate at flush time. Doing
+    # readiness first strips the buys (and pops them from new_managed) before
+    # defer_entries_if_market_closed can see any reason=="entry" item, so the
+    # intent is destroyed rather than queued — the whole 18:00-UTC signal stream
+    # is silently discarded whenever the stamp happens to be stale at ~16:20 ET,
+    # even if the overnight refresh fixes the data hours later. Observed
+    # 2026-07-29: every after-close entry vanished with no pending-open queue
+    # written. When the market is open, defer_entries_if_market_closed returns
+    # the plan unchanged, so live-session behaviour is identical to before.
+    plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
     plan, skipped, reason = filter_entry_orders_for_readiness(plan, new_managed=new_managed)
     if skipped:
         print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
         failed.update(skipped)
-    # After the close, queue entries for the next open instead of erroring on them.
-    plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
     if not plan:
         return failed
     plan = _reverify_buys_not_held(client, plan, new_managed)
