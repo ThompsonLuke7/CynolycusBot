@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Set
 from datetime import datetime, timezone
 from typing import Annotated, Any, Self
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import to_jsonable_python
 
 
 def _utc(value: datetime) -> datetime:
@@ -43,7 +44,8 @@ class ContractModel(BaseModel):
 
         payload = self.model_dump()
         payload.update(update)
-        return type(self).model_validate(payload)
+        type(self).model_validate(payload, by_alias=False, by_name=True)
+        return super().model_copy(update=update, deep=deep)
 
     @model_validator(mode="after")
     def reject_nonfinite_recursively(self) -> Self:
@@ -53,7 +55,7 @@ class ContractModel(BaseModel):
             if isinstance(value, dict):
                 for item in value.values():
                     visit(item)
-            elif isinstance(value, (list, tuple)):
+            elif isinstance(value, (list, tuple, Set)):
                 for item in value:
                     visit(item)
 
@@ -62,8 +64,25 @@ class ContractModel(BaseModel):
 
 
 def canonical_json(model: ContractModel) -> str:
-    payload = model.model_dump(mode="json", exclude_none=False)
+    payload = _canonicalize(model.model_dump(mode="python", exclude_none=False))
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _canonical_sort_key(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _canonicalize(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return to_jsonable_python(
+            {key: _canonicalize(item) for key, item in value.items()}
+        )
+    if isinstance(value, Set):
+        items = [_canonicalize(item) for item in value]
+        return sorted(items, key=_canonical_sort_key)
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize(item) for item in value]
+    return to_jsonable_python(value)
 
 
 def content_hash(model: ContractModel) -> str:
