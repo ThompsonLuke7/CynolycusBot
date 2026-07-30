@@ -45,6 +45,21 @@ class FreshnessResult(ContractModel):
     reason_code: str
 
 
+class _SnapshotHashMaterial(ContractModel):
+    decision_time: UtcDatetime
+    strategy_id: str
+    ticker: str
+    freshness_profile: str
+    state_hashes: tuple[str, ...]
+    stale_inputs: tuple[str, ...]
+    missing_inputs: tuple[str, ...]
+    data_quality: DataQualitySummary
+    config_version: str
+    model_versions: tuple[str, ...]
+    feature_versions: tuple[str, ...]
+    schema_version: PositiveSchemaVersion
+
+
 _DISPATCH = {
     MarketState: "market_state",
     SectorState: "sector_states",
@@ -89,7 +104,22 @@ class ContextSnapshot(ContractModel):
     content_hash: str
 
     def computed_content_hash(self) -> str:
-        return content_hash(self, exclude={"snapshot_id", "content_hash"})
+        return content_hash(
+            _SnapshotHashMaterial(
+                decision_time=self.decision_time,
+                strategy_id=self.strategy_id,
+                ticker=self.ticker,
+                freshness_profile=self.freshness_profile,
+                state_hashes=self.state_hashes,
+                stale_inputs=self.stale_inputs,
+                missing_inputs=self.missing_inputs,
+                data_quality=self.data_quality,
+                config_version=self.config_version,
+                model_versions=self.model_versions,
+                feature_versions=self.feature_versions,
+                schema_version=self.schema_version,
+            )
+        )
 
     @model_validator(mode="after")
     def validate_hash_references(self) -> ContextSnapshot:
@@ -97,6 +127,15 @@ class ContextSnapshot(ContractModel):
             raise ValueError("state_ids and state_hashes must be one-to-one")
         if len(set(self.state_ids)) != len(self.state_ids):
             raise ValueError("snapshot contains duplicate state_id")
+        embedded_states = _sorted_embedded_states(self)
+        expected_state_ids = tuple(state.state_id for state in embedded_states)
+        expected_state_hashes = tuple(
+            content_hash(state, exclude={"state_id"}) for state in embedded_states
+        )
+        if self.state_ids != expected_state_ids:
+            raise ValueError("state_ids do not match embedded states")
+        if self.state_hashes != expected_state_hashes:
+            raise ValueError("state_hashes do not match embedded states")
         return self
 
     @classmethod
@@ -246,6 +285,19 @@ def _state_sort_key(state: StateContract) -> tuple[str, ...]:
             str(state.state_id),
         )
     return (type(state).__name__, *business)
+
+
+def _sorted_embedded_states(snapshot: ContextSnapshot) -> tuple[StateContract, ...]:
+    embedded_states: list[StateContract] = []
+    for field_name in _DISPATCH.values():
+        value = getattr(snapshot, field_name)
+        if value is None:
+            continue
+        if isinstance(value, tuple):
+            embedded_states.extend(value)
+        else:
+            embedded_states.append(value)
+    return tuple(sorted(embedded_states, key=_state_sort_key))
 
 
 def _collection_key(state: StateContract) -> tuple[str, ...] | None:

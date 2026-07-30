@@ -1,15 +1,12 @@
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
-import json
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
-from pydantic_core import to_jsonable_python
 
 from core.nervous_system.contracts.context import ContextSnapshot, FreshnessResult, StateRequest
-from core.nervous_system.contracts.base import content_hash
+from core.nervous_system.contracts.base import ContractModel, content_hash
 from core.nervous_system.contracts.enums import (
     AssetClass,
     DealerRegime,
@@ -38,6 +35,40 @@ from core.nervous_system.contracts.states import (
 
 UTC = timezone.utc
 DECISION_TIME = datetime(2026, 7, 30, 18, 20, tzinfo=UTC)
+
+
+class SnapshotHashMaterial(ContractModel):
+    decision_time: datetime
+    strategy_id: str
+    ticker: str
+    freshness_profile: str
+    state_hashes: tuple[str, ...]
+    stale_inputs: tuple[str, ...]
+    missing_inputs: tuple[str, ...]
+    data_quality: DataQualitySummary
+    config_version: str
+    model_versions: tuple[str, ...]
+    feature_versions: tuple[str, ...]
+    schema_version: int
+
+
+def expected_snapshot_hash(snapshot: ContextSnapshot) -> str:
+    return content_hash(
+        SnapshotHashMaterial(
+            decision_time=snapshot.decision_time,
+            strategy_id=snapshot.strategy_id,
+            ticker=snapshot.ticker,
+            freshness_profile=snapshot.freshness_profile,
+            state_hashes=snapshot.state_hashes,
+            stale_inputs=snapshot.stale_inputs,
+            missing_inputs=snapshot.missing_inputs,
+            data_quality=snapshot.data_quality,
+            config_version=snapshot.config_version,
+            model_versions=snapshot.model_versions,
+            feature_versions=snapshot.feature_versions,
+            schema_version=snapshot.schema_version,
+        )
+    )
 
 
 def _envelope(state_type: StateType, entity_id: str, *, state_id: UUID | None = None) -> dict[str, Any]:
@@ -282,9 +313,7 @@ def test_snapshot_embeds_state_and_hash_references():
     assert snapshot.market_state == state
     assert snapshot.state_ids == (state.state_id,)
     assert snapshot.state_hashes == (content_hash(state, exclude={"state_id"}),)
-    assert snapshot.computed_content_hash() == content_hash(
-        snapshot, exclude={"snapshot_id", "content_hash"}
-    )
+    assert snapshot.computed_content_hash() == expected_snapshot_hash(snapshot)
 
 
 def test_snapshot_rejects_state_unavailable_at_decision_time():
@@ -376,13 +405,92 @@ def test_snapshot_hash_is_independent_of_stored_hash_field():
     assert tampered.computed_content_hash() == snapshot.content_hash
     assert tampered.computed_content_hash() != tampered.content_hash
 
-    payload = snapshot.model_dump(
-        mode="python", exclude={"snapshot_id", "content_hash"}
+    assert snapshot.content_hash == expected_snapshot_hash(snapshot)
+
+
+def test_equivalent_states_with_distinct_ids_have_equal_snapshot_content_hashes():
+    first_state = market_state(
+        state_id=UUID("00000000-0000-0000-0000-0000000000d1")
     )
-    canonical = json.dumps(
-        to_jsonable_python(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
+    second_state = market_state(
+        state_id=UUID("00000000-0000-0000-0000-0000000000d2")
     )
-    assert snapshot.content_hash == sha256(canonical.encode("utf-8")).hexdigest()
+    first_snapshot = ContextSnapshot.from_states(
+        snapshot_id=UUID("00000000-0000-0000-0000-0000000000d3"),
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(first_state,),
+        freshness_profile="test@1",
+    )
+    second_snapshot = ContextSnapshot.from_states(
+        snapshot_id=UUID("00000000-0000-0000-0000-0000000000d4"),
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(second_state,),
+        freshness_profile="test@1",
+    )
+    assert first_state.state_id != second_state.state_id
+    assert first_snapshot.snapshot_id != second_snapshot.snapshot_id
+    assert first_snapshot.state_hashes == second_snapshot.state_hashes
+    assert first_snapshot.content_hash == second_snapshot.content_hash
+    assert first_snapshot.content_hash == expected_snapshot_hash(first_snapshot)
+
+
+def test_snapshot_rejects_tampered_parallel_state_id_or_hash():
+    state = market_state(
+        state_id=UUID("00000000-0000-0000-0000-0000000000e1")
+    )
+    snapshot = ContextSnapshot.from_states(
+        snapshot_id=UUID("00000000-0000-0000-0000-0000000000e2"),
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(state,),
+        freshness_profile="test@1",
+    )
+    with pytest.raises(ValidationError, match="state_ids"):
+        snapshot.model_copy(
+            update={
+                "state_ids": (
+                    UUID("00000000-0000-0000-0000-0000000000e3"),
+                )
+            }
+        )
+    with pytest.raises(ValidationError, match="state_hashes"):
+        snapshot.model_copy(update={"state_hashes": ("tampered",)})
+    with pytest.raises(ValidationError, match="state_hashes"):
+        snapshot.model_copy(
+            update={"market_state": state.model_copy(update={"metrics": {"changed": 1.0}})}
+        )
+
+
+def test_changing_state_content_changes_snapshot_content_hash():
+    state = market_state(
+        state_id=UUID("00000000-0000-0000-0000-0000000000f1")
+    )
+    changed_state = state.model_copy(
+        update={"metrics": {"risk_appetite_z": 0.4}}
+    )
+    first_snapshot = ContextSnapshot.from_states(
+        snapshot_id=UUID("00000000-0000-0000-0000-0000000000f2"),
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(state,),
+        freshness_profile="test@1",
+    )
+    changed_snapshot = ContextSnapshot.from_states(
+        snapshot_id=first_snapshot.snapshot_id,
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(changed_state,),
+        freshness_profile="test@1",
+    )
+    assert first_snapshot.state_hashes != changed_snapshot.state_hashes
+    assert first_snapshot.content_hash != changed_snapshot.content_hash
 
 
 def test_state_and_snapshot_round_trip_without_losing_order_or_hash():
