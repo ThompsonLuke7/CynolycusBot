@@ -201,11 +201,11 @@ def catalyst_event(
     ticker: str | None = "AMD",
     **updates: Any,
 ) -> CatalystEvent:
-    event_id = event_id or uuid4()
-    payload = _envelope(StateType.CATALYST_EVENT, str(event_id))
+    event_uuid = event_id or uuid4()
+    payload = _envelope(StateType.CATALYST_EVENT, str(event_uuid))
     payload.update(
         {
-            "event_id": event_id,
+            "event_id": event_uuid,
             "ticker": ticker,
             "event_type": "NEWS",
             "event_time": datetime(2026, 7, 29, 19, 0, tzinfo=UTC),
@@ -586,6 +586,27 @@ def test_catalyst_event_observation_time_is_causal():
             observed_at=datetime(2026, 7, 30, 20, 31, tzinfo=UTC),
             available_at=datetime(2026, 7, 30, 20, 30, tzinfo=UTC),
             generated_at=datetime(2026, 7, 30, 20, 31, tzinfo=UTC),
+        )
+
+
+def test_catalyst_event_identity_matches_event_id_and_is_validated_on_update():
+    event = catalyst_event(
+        event_id=UUID("00000000-0000-0000-0000-0000000000e4")
+    )
+    assert event.entity_id == str(event.event_id)
+    with pytest.raises(ValidationError, match="event_id"):
+        event.model_copy(
+            update={
+                "event_id": UUID("00000000-0000-0000-0000-0000000000e5"),
+            }
+        )
+
+
+def test_catalyst_event_rejects_published_after_observed():
+    with pytest.raises(ValidationError, match="published_at"):
+        catalyst_event(
+            published_at=datetime(2026, 7, 29, 19, 11, tzinfo=UTC),
+            observed_at=datetime(2026, 7, 29, 19, 10, tzinfo=UTC),
         )
 
 

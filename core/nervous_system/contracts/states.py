@@ -158,6 +158,7 @@ class TickerState(StateEnvelope):
 class CatalystEvent(StateEnvelope):
     state_type: StateType = StateType.CATALYST_EVENT
     expected_state_type: ClassVar[StateType] = StateType.CATALYST_EVENT
+    identity_field: ClassVar[str] = "event_id"
     event_id: UUID
     ticker: str | None = None
     event_type: str
@@ -172,6 +173,8 @@ class CatalystEvent(StateEnvelope):
 
     @model_validator(mode="after")
     def validate_event_timing(self) -> CatalystEvent:
+        if self.published_at is not None and self.published_at > self.observed_at:
+            raise ValueError("published_at cannot follow observed_at")
         if self.observed_at > self.available_at:
             raise ValueError("observed_at cannot follow available_at")
         return self
