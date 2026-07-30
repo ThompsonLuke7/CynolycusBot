@@ -956,3 +956,5 @@ Created isolated `nervous-system-execution` worktree and SDD ledger; source base
 Execution is paused before Task 1 for the required baseline decision: proceed while tracking these known failures, or investigate/fix them first.
 {2026-07-30 09:00 ET} {agent: Codex} {catalyst baseline repair}
 Added injectable/disableable forward-guidance features and labels to `build_catalyst_records`; isolated the two catalyst fixtures from process-global earnings-result data. Focused and full catalyst suites pass (3/3); implementation committed as `c3af94b`. Report: `.superpowers/sdd/2026-07-30-cynolycus-nervous-system-mvp/task-0-report.md`.
+{2026-07-30 08:50 EDT} {agent: Codex} {catalyst review correction}
+Untracked the transient SDD report while keeping it available in the ignored worktree; added one-`None` optional-source coverage. Fresh focused/full catalyst suites pass (3/3), `git diff --check` passes; correction committed.
