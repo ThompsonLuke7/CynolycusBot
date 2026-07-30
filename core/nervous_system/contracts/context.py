@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
-from .base import ContractModel, FiniteFloat, PositiveSchemaVersion, UtcDatetime, _canonicalize, content_hash
+from .base import ContractModel, FiniteFloat, PositiveSchemaVersion, UtcDatetime, content_hash
 from .enums import StateType
 from .quality import DataQualitySummary
 from .states import (
@@ -63,13 +61,6 @@ _DISPATCH = {
 _SINGLETON_TYPES = frozenset({MarketState, TickerState, DealerState, PortfolioState, ReadinessState})
 
 
-def _snapshot_canonical_json(snapshot: ContextSnapshot) -> str:
-    payload = _canonicalize(
-        snapshot.model_dump(mode="python", exclude={"content_hash"}, exclude_none=False)
-    )
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
 class ContextSnapshot(ContractModel):
     snapshot_id: UUID
     decision_time: UtcDatetime
@@ -98,7 +89,15 @@ class ContextSnapshot(ContractModel):
     content_hash: str
 
     def computed_content_hash(self) -> str:
-        return hashlib.sha256(_snapshot_canonical_json(self).encode("utf-8")).hexdigest()
+        return content_hash(self, exclude={"snapshot_id", "content_hash"})
+
+    @model_validator(mode="after")
+    def validate_hash_references(self) -> ContextSnapshot:
+        if len(self.state_ids) != len(self.state_hashes):
+            raise ValueError("state_ids and state_hashes must be one-to-one")
+        if len(set(self.state_ids)) != len(self.state_ids):
+            raise ValueError("snapshot contains duplicate state_id")
+        return self
 
     @classmethod
     def from_states(
@@ -114,13 +113,17 @@ class ContextSnapshot(ContractModel):
         missing_inputs: tuple[str, ...] = (),
     ) -> ContextSnapshot:
         buckets: dict[str, list[StateContract]] = {
-            field_name: [] for field_name in set(_DISPATCH.values())
+            field_name: [] for field_name in _DISPATCH.values()
         }
         state_ids: list[UUID] = []
         state_hashes: list[str] = []
         seen_singletons: set[type[StateContract]] = set()
+        seen_state_ids: set[UUID] = set()
+        seen_collection_keys: set[tuple[str, ...]] = set()
 
-        for state in states:
+        sorted_states = sorted(states, key=_state_sort_key)
+
+        for state in sorted_states:
             field_name = _DISPATCH.get(type(state))
             if field_name is None:
                 raise TypeError(f"unsupported concrete state type: {type(state).__name__}")
@@ -129,23 +132,39 @@ class ContextSnapshot(ContractModel):
                     raise ValueError(f"duplicate singleton state: {type(state).__name__}")
                 seen_singletons.add(type(state))
 
+            collection_key = _collection_key(state)
+            if collection_key is not None:
+                if collection_key in seen_collection_keys:
+                    raise ValueError(f"duplicate effective collection selection: {collection_key}")
+                seen_collection_keys.add(collection_key)
+
             if isinstance(state, StateEnvelope):
+                if state.state_id in seen_state_ids:
+                    raise ValueError(f"duplicate state_id: {state.state_id}")
+                seen_state_ids.add(state.state_id)
                 if state.available_at > decision_time:
                     raise ValueError(
                         f"state {state.state_id} is unavailable at decision time"
                     )
                 if decision_time >= state.valid_until:
                     raise ValueError(f"state {state.state_id} is expired at decision time")
+                if isinstance(state, ThemeMembership) and (
+                    decision_time < state.effective_from
+                    or (
+                        state.effective_until is not None
+                        and decision_time >= state.effective_until
+                    )
+                ):
+                    raise ValueError(
+                        f"theme membership {state.ticker}/{state.theme_id} is invalid at decision time"
+                    )
                 state_ids.append(state.state_id)
-            elif decision_time < state.effective_from or (
-                state.effective_until is not None and decision_time >= state.effective_until
-            ):
-                raise ValueError(f"theme membership {state.ticker}/{state.theme_id} is invalid at decision time")
+                _validate_ticker_scope(state, ticker)
 
             buckets[field_name].append(state)
-            state_hashes.append(content_hash(state))
+            state_hashes.append(content_hash(state, exclude={"state_id"}))
 
-        envelope_states = [state for state in states if isinstance(state, StateEnvelope)]
+        envelope_states = [state for state in sorted_states if isinstance(state, StateEnvelope)]
         versions = {
             "config_version": tuple(dict.fromkeys(state.config_version for state in envelope_states)),
             "model_versions": tuple(dict.fromkeys(state.model_version for state in envelope_states)),
@@ -187,6 +206,75 @@ class ContextSnapshot(ContractModel):
         }
         snapshot = cls(**payload)
         return snapshot.model_copy(update={"content_hash": snapshot.computed_content_hash()})
+
+
+def _time_key(value: UtcDatetime | None) -> str:
+    return value.isoformat() if value is not None else ""
+
+
+def _state_sort_key(state: StateContract) -> tuple[str, ...]:
+    if isinstance(state, ThemeMembership):
+        business = (
+            state.ticker,
+            state.theme_id,
+            _time_key(state.effective_from),
+            _time_key(state.effective_until),
+        )
+    elif isinstance(state, CatalystEvent):
+        business = (state.ticker or "", _time_key(state.event_time), str(state.event_id))
+    elif isinstance(state, CatalystPressure):
+        business = (state.scope_type, state.scope_id)
+    elif isinstance(state, (TickerState, DealerState)):
+        business = (state.ticker,)
+    elif isinstance(state, SectorState):
+        business = (state.sector_id,)
+    elif isinstance(state, ThemeState):
+        business = (state.theme_id,)
+    elif isinstance(state, PortfolioState):
+        business = (state.account_alias,)
+    elif isinstance(state, ReadinessState):
+        business = (state.job,)
+    else:
+        business = (state.entity_id,)
+
+    if isinstance(state, StateEnvelope):
+        return (
+            type(state).__name__,
+            *business,
+            _time_key(state.as_of),
+            _time_key(state.available_at),
+            str(state.state_id),
+        )
+    return (type(state).__name__, *business)
+
+
+def _collection_key(state: StateContract) -> tuple[str, ...] | None:
+    if isinstance(state, SectorState):
+        return ("sector", state.sector_id)
+    if isinstance(state, ThemeMembership):
+        return ("theme_membership", state.ticker, state.theme_id)
+    if isinstance(state, ThemeState):
+        return ("theme", state.theme_id)
+    if isinstance(state, CatalystPressure):
+        return ("catalyst_pressure", state.scope_type, state.scope_id)
+    if isinstance(state, CatalystEvent):
+        return ("catalyst_event", str(state.event_id))
+    return None
+
+
+def _validate_ticker_scope(state: StateContract, ticker: str) -> None:
+    if isinstance(state, (TickerState, DealerState, ThemeMembership)):
+        state_ticker = state.ticker
+    elif isinstance(state, CatalystEvent) and state.ticker is not None:
+        state_ticker = state.ticker
+    elif isinstance(state, CatalystPressure) and state.scope_type.upper() == "TICKER":
+        state_ticker = state.scope_id
+    else:
+        return
+    if state_ticker != ticker:
+        raise ValueError(
+            f"ticker-scoped state {type(state).__name__} does not match snapshot ticker {ticker}"
+        )
 
 
 __all__ = ["ContextSnapshot", "FreshnessResult", "FreshnessStatus", "StateRequest"]

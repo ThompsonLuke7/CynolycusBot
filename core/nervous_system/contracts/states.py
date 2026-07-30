@@ -8,6 +8,8 @@ from pydantic import Field, model_validator
 from .base import (
     ContractModel,
     FiniteFloat,
+    ImmutableFloatMap,
+    ImmutableProbabilityMap,
     PositiveSchemaVersion,
     Probability,
     UtcDatetime,
@@ -43,6 +45,7 @@ class StateEnvelope(ContractModel):
     data_quality: DataQualitySummary
 
     expected_state_type: ClassVar[StateType | None] = None
+    identity_field: ClassVar[str | None] = None
 
     @model_validator(mode="after")
     def validate_time_window(self) -> StateEnvelope:
@@ -58,6 +61,11 @@ class StateEnvelope(ContractModel):
             raise ValueError(
                 f"{type(self).__name__} requires state_type={self.expected_state_type.value}"
             )
+        identity_field = getattr(type(self), "identity_field", None)
+        if identity_field is not None and self.entity_id != str(getattr(self, identity_field)):
+            raise ValueError(
+                f"entity_id does not match {identity_field} for {type(self).__name__}"
+            )
         return self
 
 
@@ -67,8 +75,9 @@ class MarketState(StateEnvelope):
     regime: MarketRegime
     risk_on_probability: Probability | None = None
     risk_off_probability: Probability | None = None
-    metrics: dict[str, FiniteFloat] = Field(default_factory=dict)
-    transition_probabilities: dict[str, Probability] = Field(default_factory=dict)
+    identity_field: ClassVar[str | None] = None
+    metrics: ImmutableFloatMap = Field(default_factory=dict)
+    transition_probabilities: ImmutableProbabilityMap = Field(default_factory=dict)
     reason_codes: tuple[str, ...] = ()
 
 
@@ -84,10 +93,14 @@ class SectorState(StateEnvelope):
     rotation_rank: FiniteFloat | None = None
     rank_change: FiniteFloat | None = None
     capital_flow_direction: Direction = Direction.UNKNOWN
-    transition_probabilities: dict[str, Probability] = Field(default_factory=dict)
+    identity_field: ClassVar[str] = "sector_id"
+    transition_probabilities: ImmutableProbabilityMap = Field(default_factory=dict)
 
 
-class ThemeMembership(ContractModel):
+class ThemeMembership(StateEnvelope):
+    state_type: StateType = StateType.THEME
+    expected_state_type: ClassVar[StateType] = StateType.THEME
+    identity_field: ClassVar[str] = "theme_id"
     ticker: str
     theme_id: str
     weight: FiniteFloat
@@ -117,7 +130,8 @@ class ThemeState(StateEnvelope):
     dealer_fragility: FiniteFloat | None = None
     leadership_score: FiniteFloat | None = None
     rotation_rank: FiniteFloat | None = None
-    transition_probabilities: dict[str, Probability] = Field(default_factory=dict)
+    identity_field: ClassVar[str] = "theme_id"
+    transition_probabilities: ImmutableProbabilityMap = Field(default_factory=dict)
 
 
 class TickerState(StateEnvelope):
@@ -136,8 +150,9 @@ class TickerState(StateEnvelope):
     theme_alignment: FiniteFloat | None = None
     market_alignment: FiniteFloat | None = None
     dealer_alignment: FiniteFloat | None = None
-    metrics: dict[str, FiniteFloat] = Field(default_factory=dict)
-    transition_probabilities: dict[str, Probability] = Field(default_factory=dict)
+    identity_field: ClassVar[str] = "ticker"
+    metrics: ImmutableFloatMap = Field(default_factory=dict)
+    transition_probabilities: ImmutableProbabilityMap = Field(default_factory=dict)
 
 
 class CatalystEvent(StateEnvelope):
@@ -153,7 +168,13 @@ class CatalystEvent(StateEnvelope):
     headline: str | None = None
     channel: str
     relation_confidence: Probability | None = None
-    is_direct: bool
+    is_direct: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_event_timing(self) -> CatalystEvent:
+        if self.observed_at > self.available_at:
+            raise ValueError("observed_at cannot follow available_at")
+        return self
 
 
 class CatalystPressure(StateEnvelope):
@@ -161,10 +182,11 @@ class CatalystPressure(StateEnvelope):
     expected_state_type: ClassVar[StateType] = StateType.CATALYST_PRESSURE
     scope_type: str
     scope_id: str
-    channel_scores: dict[str, FiniteFloat] = Field(default_factory=dict)
+    identity_field: ClassVar[str] = "scope_id"
+    channel_scores: ImmutableFloatMap = Field(default_factory=dict)
     aggregate_score: FiniteFloat | None = None
     event_ids: tuple[UUID, ...] = ()
-    transition_probabilities: dict[str, Probability] = Field(default_factory=dict)
+    transition_probabilities: ImmutableProbabilityMap = Field(default_factory=dict)
 
 
 class DealerState(StateEnvelope):
@@ -182,7 +204,8 @@ class DealerState(StateEnvelope):
     air_gap_below_score: FiniteFloat | None = None
     pinning_score: FiniteFloat | None = None
     acceleration_score: FiniteFloat | None = None
-    metrics: dict[str, FiniteFloat] = Field(default_factory=dict)
+    identity_field: ClassVar[str] = "ticker"
+    metrics: ImmutableFloatMap = Field(default_factory=dict)
 
 
 class PortfolioPosition(ContractModel):
@@ -208,6 +231,7 @@ class PortfolioState(StateEnvelope):
     day_pl: FiniteFloat | None = None
     positions: tuple[PortfolioPosition, ...] = ()
     open_order_ids: tuple[str, ...] = ()
+    identity_field: ClassVar[str] = "account_alias"
     broker_observed_at: UtcDatetime
 
 
@@ -221,6 +245,7 @@ class ReadinessState(StateEnvelope):
     checked_at: UtcDatetime
     max_age_hours: FiniteFloat
     latest_required_session: str
+    identity_field: ClassVar[str] = "job"
     reason_codes: tuple[str, ...] = ()
 
 

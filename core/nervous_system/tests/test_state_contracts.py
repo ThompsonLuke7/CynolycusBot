@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from pydantic_core import to_jsonable_python
 
 from core.nervous_system.contracts.context import ContextSnapshot, FreshnessResult, StateRequest
+from core.nervous_system.contracts.base import content_hash
 from core.nervous_system.contracts.enums import (
     AssetClass,
     DealerRegime,
@@ -96,18 +97,29 @@ def sector_state(sector_id: str = "technology") -> SectorState:
     return SectorState(**payload)
 
 
-def theme_membership(theme_id: str, ticker: str) -> ThemeMembership:
-    return ThemeMembership(
-        ticker=ticker,
-        theme_id=theme_id,
-        weight=0.75,
-        membership_version="themes@1",
-        effective_from=datetime(2026, 7, 29, 20, 0, tzinfo=UTC),
-        effective_until=None,
+def theme_membership(
+    theme_id: str,
+    ticker: str,
+    *,
+    state_id: UUID | None = None,
+    **updates: Any,
+) -> ThemeMembership:
+    payload = _envelope(StateType.THEME, theme_id, state_id=state_id)
+    payload.update(
+        {
+            "ticker": ticker,
+            "theme_id": theme_id,
+            "weight": 0.75,
+            "membership_version": "themes@1",
+            "effective_from": datetime(2026, 7, 29, 20, 0, tzinfo=UTC),
+            "effective_until": None,
+        }
     )
+    payload.update(updates)
+    return ThemeMembership(**payload)
 
 
-def theme_state(theme_id: str) -> ThemeState:
+def theme_state(theme_id: str = "semiconductors") -> ThemeState:
     payload = _envelope(StateType.THEME, theme_id)
     payload.update(
         {
@@ -153,11 +165,16 @@ def ticker_state(ticker: str = "AMD") -> TickerState:
     return TickerState(**payload)
 
 
-def catalyst_event(event_id: UUID | None = None, ticker: str = "AMD") -> CatalystEvent:
-    payload = _envelope(StateType.CATALYST_EVENT, str(event_id or uuid4()))
+def catalyst_event(
+    event_id: UUID | None = None,
+    ticker: str | None = "AMD",
+    **updates: Any,
+) -> CatalystEvent:
+    event_id = event_id or uuid4()
+    payload = _envelope(StateType.CATALYST_EVENT, str(event_id))
     payload.update(
         {
-            "event_id": event_id or uuid4(),
+            "event_id": event_id,
             "ticker": ticker,
             "event_type": "NEWS",
             "event_time": datetime(2026, 7, 29, 19, 0, tzinfo=UTC),
@@ -170,10 +187,11 @@ def catalyst_event(event_id: UUID | None = None, ticker: str = "AMD") -> Catalys
             "is_direct": True,
         }
     )
+    payload.update(updates)
     return CatalystEvent(**payload)
 
 
-def catalyst_pressure(scope_id: str = "AMD") -> CatalystPressure:
+def catalyst_pressure(scope_id: str = "AMD", **updates: Any) -> CatalystPressure:
     payload = _envelope(StateType.CATALYST_PRESSURE, scope_id)
     payload.update(
         {
@@ -185,6 +203,7 @@ def catalyst_pressure(scope_id: str = "AMD") -> CatalystPressure:
             "transition_probabilities": {},
         }
     )
+    payload.update(updates)
     return CatalystPressure(**payload)
 
 
@@ -262,8 +281,10 @@ def test_snapshot_embeds_state_and_hash_references():
     )
     assert snapshot.market_state == state
     assert snapshot.state_ids == (state.state_id,)
-    assert snapshot.state_hashes == (snapshot.state_hashes[0],)
-    assert snapshot.computed_content_hash() == snapshot.content_hash
+    assert snapshot.state_hashes == (content_hash(state, exclude={"state_id"}),)
+    assert snapshot.computed_content_hash() == content_hash(
+        snapshot, exclude={"snapshot_id", "content_hash"}
+    )
 
 
 def test_snapshot_rejects_state_unavailable_at_decision_time():
@@ -334,7 +355,10 @@ def test_snapshot_dispatches_all_concrete_state_types_and_preserves_order():
     assert snapshot.sector_states == (states[1],)
     assert snapshot.theme_memberships == (states[2],)
     assert snapshot.catalyst_events == (event_one, event_two)
-    assert snapshot.state_ids == tuple(state.state_id for state in states if isinstance(state, StateEnvelope))
+    expected_state_ids = {
+        state.state_id for state in states if isinstance(state, StateEnvelope)
+    }
+    assert set(snapshot.state_ids) == expected_state_ids
     assert len(snapshot.state_hashes) == len(states)
 
 
@@ -352,7 +376,9 @@ def test_snapshot_hash_is_independent_of_stored_hash_field():
     assert tampered.computed_content_hash() == snapshot.content_hash
     assert tampered.computed_content_hash() != tampered.content_hash
 
-    payload = snapshot.model_dump(mode="python", exclude={"content_hash"})
+    payload = snapshot.model_dump(
+        mode="python", exclude={"snapshot_id", "content_hash"}
+    )
     canonical = json.dumps(
         to_jsonable_python(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
     )
@@ -379,6 +405,226 @@ def test_state_defaults_do_not_share_mutable_mapping_storage():
     first = market_state(metrics={})
     second = market_state(metrics={})
     assert first.metrics is not second.metrics
+
+
+def test_theme_membership_is_an_envelope_and_state_ids_match_hashes():
+    membership = theme_membership("semiconductors", "AMD")
+    snapshot = ContextSnapshot.from_states(
+        snapshot_id=UUID("00000000-0000-0000-0000-000000000061"),
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(membership,),
+        freshness_profile="test@1",
+    )
+    assert isinstance(membership, StateEnvelope)
+    assert membership.state_type is StateType.THEME
+    assert snapshot.state_ids == (membership.state_id,)
+    assert len(snapshot.state_ids) == len(snapshot.state_hashes) == 1
+
+
+def test_identity_excluded_state_hashes_ignore_state_uuid_but_keep_ids_distinct():
+    first = market_state(state_id=UUID("00000000-0000-0000-0000-000000000071"))
+    second = market_state(state_id=UUID("00000000-0000-0000-0000-000000000072"))
+    assert first.state_id != second.state_id
+    assert content_hash(first, exclude={"state_id"}) == content_hash(
+        second, exclude={"state_id"}
+    )
+    assert content_hash(first) != content_hash(second)
+
+
+def test_snapshot_hash_ignores_snapshot_uuid_but_keeps_snapshot_ids_distinct():
+    state = market_state(state_id=UUID("00000000-0000-0000-0000-000000000081"))
+    first = ContextSnapshot.from_states(
+        snapshot_id=UUID("00000000-0000-0000-0000-000000000082"),
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(state,),
+        freshness_profile="test@1",
+    )
+    second = ContextSnapshot.from_states(
+        snapshot_id=UUID("00000000-0000-0000-0000-000000000083"),
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(state,),
+        freshness_profile="test@1",
+    )
+    assert first.snapshot_id != second.snapshot_id
+    assert first.content_hash == second.content_hash
+
+
+@pytest.mark.parametrize(
+    ("factory", "payload_field", "payload_value"),
+    [
+        (sector_state, "sector_id", "wrong-sector"),
+        (theme_state, "theme_id", "wrong-theme"),
+        (ticker_state, "ticker", "MSFT"),
+        (dealer_state, "ticker", "MSFT"),
+        (portfolio_state, "account_alias", "other-account"),
+        (readiness_state, "job", "other-job"),
+    ],
+)
+def test_payload_identity_must_match_state_envelope(factory, payload_field, payload_value):
+    state = factory()
+    with pytest.raises(ValidationError, match="entity_id"):
+        state.model_copy(update={payload_field: payload_value})
+
+
+def test_catalyst_event_observation_time_is_causal():
+    with pytest.raises(ValidationError, match="observed_at"):
+        catalyst_event(
+            observed_at=datetime(2026, 7, 30, 20, 31, tzinfo=UTC),
+            available_at=datetime(2026, 7, 30, 20, 30, tzinfo=UTC),
+            generated_at=datetime(2026, 7, 30, 20, 31, tzinfo=UTC),
+        )
+
+
+def test_future_scheduled_catalyst_is_allowed_and_is_direct_is_optional():
+    state = catalyst_event(
+        event_time=datetime(2026, 8, 15, 13, 30, tzinfo=UTC),
+        is_direct=None,
+    )
+    assert state.event_time > state.observed_at
+    assert state.is_direct is None
+
+
+def test_snapshot_rejects_ticker_mismatch_for_ticker_scoped_states():
+    for state in (
+        ticker_state("MSFT"),
+        dealer_state("MSFT"),
+        theme_membership("semiconductors", "MSFT"),
+        catalyst_event(ticker="MSFT"),
+        catalyst_pressure(scope_id="MSFT"),
+    ):
+        with pytest.raises(ValueError, match="ticker"):
+            ContextSnapshot.from_states(
+                snapshot_id=uuid4(),
+                decision_time=DECISION_TIME,
+                strategy_id="meta_ranker",
+                ticker="AMD",
+                states=(state,),
+                freshness_profile="test@1",
+            )
+
+
+def test_reversed_state_input_has_same_sorted_snapshot_content():
+    states = (
+        market_state(state_id=UUID("00000000-0000-0000-0000-000000000091")),
+        sector_state("financials").model_copy(
+            update={"state_id": UUID("00000000-0000-0000-0000-000000000092")}
+        ),
+        theme_membership(
+            "semiconductors",
+            "AMD",
+            state_id=UUID("00000000-0000-0000-0000-000000000093"),
+        ),
+        theme_state("semiconductors").model_copy(
+            update={"state_id": UUID("00000000-0000-0000-0000-000000000094")}
+        ),
+        ticker_state().model_copy(
+            update={"state_id": UUID("00000000-0000-0000-0000-000000000095")}
+        ),
+        catalyst_event(
+            UUID("00000000-0000-0000-0000-000000000096"),
+            event_time=datetime(2026, 7, 29, 21, 0, tzinfo=UTC),
+        ),
+        catalyst_event(
+            UUID("00000000-0000-0000-0000-000000000097"),
+            event_time=datetime(2026, 7, 29, 20, 0, tzinfo=UTC),
+        ),
+        catalyst_pressure().model_copy(
+            update={"state_id": UUID("00000000-0000-0000-0000-000000000098")}
+        ),
+        dealer_state().model_copy(
+            update={"state_id": UUID("00000000-0000-0000-0000-000000000099")}
+        ),
+        portfolio_state().model_copy(
+            update={"state_id": UUID("00000000-0000-0000-0000-00000000009a")}
+        ),
+        readiness_state().model_copy(
+            update={"state_id": UUID("00000000-0000-0000-0000-00000000009b")}
+        ),
+    )
+    forward = ContextSnapshot.from_states(
+        snapshot_id=UUID("00000000-0000-0000-0000-00000000009c"),
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=states,
+        freshness_profile="test@1",
+    )
+    reversed_snapshot = ContextSnapshot.from_states(
+        snapshot_id=forward.snapshot_id,
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=tuple(reversed(states)),
+        freshness_profile="test@1",
+    )
+    assert forward.state_ids == reversed_snapshot.state_ids
+    assert forward.state_hashes == reversed_snapshot.state_hashes
+    assert forward.catalyst_events[0].event_time < forward.catalyst_events[1].event_time
+    assert forward.content_hash == reversed_snapshot.content_hash
+
+
+def test_snapshot_rejects_duplicate_state_ids_across_classes():
+    state_id = UUID("00000000-0000-0000-0000-0000000000a1")
+    with pytest.raises(ValueError, match="state_id"):
+        ContextSnapshot.from_states(
+            snapshot_id=uuid4(),
+            decision_time=DECISION_TIME,
+            strategy_id="meta_ranker",
+            ticker="AMD",
+            states=(market_state(state_id=state_id), dealer_state().model_copy(update={"state_id": state_id})),
+            freshness_profile="test@1",
+        )
+
+
+def test_snapshot_rejects_duplicate_effective_collection_selection_but_allows_events():
+    duplicate_membership = (
+        theme_membership("semiconductors", "AMD", state_id=UUID("00000000-0000-0000-0000-0000000000b1")),
+        theme_membership("semiconductors", "AMD", state_id=UUID("00000000-0000-0000-0000-0000000000b2")),
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        ContextSnapshot.from_states(
+            snapshot_id=uuid4(),
+            decision_time=DECISION_TIME,
+            strategy_id="meta_ranker",
+            ticker="AMD",
+            states=duplicate_membership,
+            freshness_profile="test@1",
+        )
+
+    snapshot = ContextSnapshot.from_states(
+        snapshot_id=uuid4(),
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(
+            catalyst_event(UUID("00000000-0000-0000-0000-0000000000c1")),
+            catalyst_event(UUID("00000000-0000-0000-0000-0000000000c2")),
+        ),
+        freshness_profile="test@1",
+    )
+    assert len(snapshot.catalyst_events) == 2
+
+
+def test_mapping_payloads_are_deep_frozen_and_json_round_trip():
+    state = market_state(
+        metrics={"z": -0.2},
+        transition_probabilities={"RISK_ON": 0.5},
+    )
+    pressure = catalyst_pressure(channel_scores={"NEWS": 0.8})
+    for mapping in (state.metrics, state.transition_probabilities, pressure.channel_scores):
+        with pytest.raises(TypeError):
+            mapping["new"] = 1.0
+
+    restored = MarketState.model_validate_json(state.model_dump_json())
+    assert restored == state
+    with pytest.raises(TypeError):
+        restored.metrics["new"] = 1.0
 
 
 def test_state_request_and_freshness_result_have_explicit_contract_fields():

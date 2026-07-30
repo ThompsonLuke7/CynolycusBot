@@ -5,7 +5,7 @@ import json
 import math
 from collections.abc import Mapping, Set
 from datetime import datetime, timezone
-from typing import Annotated, Any, Self
+from typing import AbstractSet, Annotated, Any, Generic, Self, TypeVar
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 from pydantic_core import to_jsonable_python
@@ -28,6 +28,49 @@ UtcDatetime = Annotated[datetime, AfterValidator(_utc)]
 FiniteFloat = Annotated[float, AfterValidator(_finite)]
 Probability = Annotated[FiniteFloat, Field(ge=0.0, le=1.0)]
 PositiveSchemaVersion = Annotated[int, Field(ge=1)]
+
+
+_FrozenKey = TypeVar("_FrozenKey")
+_FrozenValue = TypeVar("_FrozenValue")
+
+
+class FrozenDict(dict[_FrozenKey, _FrozenValue], Generic[_FrozenKey, _FrozenValue]):
+    """A JSON-compatible dict that rejects all mutation operations."""
+
+    _ERROR = "FrozenDict is immutable"
+
+    def _reject(self, *args: Any, **kwargs: Any) -> None:
+        raise TypeError(self._ERROR)
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _reject
+
+    def __ior__(self, other: Mapping[_FrozenKey, _FrozenValue]):
+        self._reject(other)
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> FrozenDict[_FrozenKey, _FrozenValue]:
+        return FrozenDict(self)
+
+
+def _freeze_mapping(value: Mapping[_FrozenKey, _FrozenValue]) -> FrozenDict[_FrozenKey, _FrozenValue]:
+    def freeze(item: Any) -> Any:
+        if isinstance(item, Mapping):
+            return FrozenDict({key: freeze(nested) for key, nested in item.items()})
+        if isinstance(item, list):
+            return tuple(freeze(nested) for nested in item)
+        if isinstance(item, tuple):
+            return tuple(freeze(nested) for nested in item)
+        return item
+
+    return FrozenDict({key: freeze(item) for key, item in value.items()})
+
+
+ImmutableFloatMap = Annotated[
+    dict[str, FiniteFloat], AfterValidator(_freeze_mapping)
+]
+ImmutableProbabilityMap = Annotated[
+    dict[str, Probability], AfterValidator(_freeze_mapping)
+]
 
 
 class ContractModel(BaseModel):
@@ -66,8 +109,13 @@ class ContractModel(BaseModel):
         return self
 
 
-def canonical_json(model: ContractModel) -> str:
-    payload = _canonicalize(model.model_dump(mode="python", exclude_none=False))
+def canonical_json(
+    model: ContractModel,
+    exclude: AbstractSet[str] | None = None,
+) -> str:
+    payload = _canonicalize(
+        model.model_dump(mode="python", exclude=exclude, exclude_none=False)
+    )
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
@@ -88,5 +136,8 @@ def _canonicalize(value: Any) -> Any:
     return to_jsonable_python(value)
 
 
-def content_hash(model: ContractModel) -> str:
-    return hashlib.sha256(canonical_json(model).encode("utf-8")).hexdigest()
+def content_hash(
+    model: ContractModel,
+    exclude: AbstractSet[str] | None = None,
+) -> str:
+    return hashlib.sha256(canonical_json(model, exclude=exclude).encode("utf-8")).hexdigest()

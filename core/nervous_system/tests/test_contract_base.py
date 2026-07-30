@@ -285,3 +285,26 @@ def test_lineage_ref_accepts_optional_record_locator():
     lineage = LineageRef(source_id="bars", content_hash="abc123")
 
     assert lineage.record_locator is None
+
+
+def test_canonical_json_and_content_hash_support_backward_compatible_exclusions():
+    first = CanonicalExample(
+        tags={"alpha"},
+        frozen_tags=frozenset({"beta"}),
+        ordered=("first",),
+        observed_at=datetime(2026, 7, 30, 14, tzinfo=timezone.utc),
+        amount=Decimal("1.20"),
+        identifier=UUID("12345678-1234-5678-1234-567812345678"),
+        direction=Direction.LONG,
+    )
+    second = first.model_copy(
+        update={"identifier": UUID("87654321-4321-8765-4321-876543218765")}
+    )
+
+    assert content_hash(first) != content_hash(second)
+    assert content_hash(first, exclude={"identifier"}) == content_hash(
+        second, exclude={"identifier"}
+    )
+    assert canonical_json(first, exclude={"identifier"}) == canonical_json(
+        second, exclude={"identifier"}
+    )
