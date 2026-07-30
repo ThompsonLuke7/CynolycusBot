@@ -44,6 +44,8 @@ def test_build_catalyst_records_handles_empty_inputs(tmp_path) -> None:
         news_path=empty_news_path,
         macro_path=empty_macro_path,
         earnings_path=empty_earnings_path,
+        earnings_result_features_path=None,
+        earnings_result_labels_path=None,
         output_path=out_path,
     )
     assert out.empty

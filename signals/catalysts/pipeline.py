@@ -17,6 +17,8 @@ from signals.catalysts.config import (
 from signals.events.config import EARNINGS_EVENTS_PATH, EVENT_FEATURES_PATH, MACRO_EVENTS_PATH
 from signals.news.config import NEWS_FEATURE_MATRIX_PATH, NEWS_RECORDS_PATH, NEWS_SCORES_PATH
 from signals.catalysts.earnings import build_earnings_result_catalysts
+from signals.events.forward_guidance.config import FEATURES_PATH as FORWARD_GUIDANCE_FEATURES_PATH
+from signals.events.forward_guidance.config import LABELS_PATH as FORWARD_GUIDANCE_LABELS_PATH
 
 
 def _read(path: Path | str) -> pd.DataFrame:
@@ -100,6 +102,8 @@ def build_catalyst_records(
     news_path: Path | str = NEWS_RECORDS_PATH,
     macro_path: Path | str = MACRO_EVENTS_PATH,
     earnings_path: Path | str = EARNINGS_EVENTS_PATH,
+    earnings_result_features_path: Path | str | None = FORWARD_GUIDANCE_FEATURES_PATH,
+    earnings_result_labels_path: Path | str | None = FORWARD_GUIDANCE_LABELS_PATH,
     output_path: Path | str = CATALYST_RECORDS_PATH,
 ) -> pd.DataFrame:
     ensure_dirs()
@@ -107,8 +111,14 @@ def build_catalyst_records(
         news_to_catalysts(_read(news_path)),
         scheduled_events_to_catalysts(_read(macro_path), default_kind="scheduled_event"),
         scheduled_events_to_catalysts(_read(earnings_path), default_kind="earnings"),
-        build_earnings_result_catalysts(),
     ]
+    if earnings_result_features_path is not None and earnings_result_labels_path is not None:
+        frames.append(
+            build_earnings_result_catalysts(
+                features_path=earnings_result_features_path,
+                labels_path=earnings_result_labels_path,
+            )
+        )
     out = pd.concat([f for f in frames if not f.empty], ignore_index=True) if any(not f.empty for f in frames) else pd.DataFrame()
     if not out.empty:
         out = out.sort_values(["timestamp", "ticker", "event_type"]).reset_index(drop=True)
