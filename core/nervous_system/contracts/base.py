@@ -44,8 +44,11 @@ class ContractModel(BaseModel):
 
         payload = self.model_dump()
         payload.update(update)
-        type(self).model_validate(payload, by_alias=False, by_name=True)
-        return super().model_copy(update=update, deep=deep)
+        validated = type(self).model_validate(payload, by_alias=False, by_name=True)
+        normalized_update = {
+            field_name: getattr(validated, field_name) for field_name in update
+        }
+        return super().model_copy(update=normalized_update, deep=deep)
 
     @model_validator(mode="after")
     def reject_nonfinite_recursively(self) -> Self:

@@ -3,7 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from core.nervous_system.contracts import (
     ContractModel as ExportedContractModel,
@@ -83,6 +83,17 @@ class NumericBoundaries(ContractModel):
     schema_version: PositiveSchemaVersion
 
 
+class OrderedRange(ContractModel):
+    start: int
+    end: int
+
+    @model_validator(mode="after")
+    def require_ordered_bounds(self):
+        if self.end < self.start:
+            raise ValueError("end must not precede start")
+        return self
+
+
 def test_contract_normalizes_aware_time_to_utc_and_hashes_stably():
     model = Example(
         observed_at=datetime.fromisoformat("2026-07-30T10:00:00-04:00"),
@@ -148,6 +159,38 @@ def test_contract_model_copy_accepts_field_name_updates_on_aliased_models():
     updated = model.model_copy(update={"value": 2.0})
 
     assert updated.value == 2.0
+
+
+def test_contract_model_copy_normalizes_nested_dict_updates():
+    model = Container(nested={"values": [1]})
+
+    updated = model.model_copy(update={"nested": {"values": [2]}})
+
+    assert isinstance(updated.nested, Nested)
+    assert updated.nested.values == [2]
+
+
+def test_contract_model_copy_normalizes_updated_utc_datetime():
+    model = Example(
+        observed_at=datetime(2026, 7, 30, 14, tzinfo=timezone.utc),
+        value=1.0,
+    )
+
+    updated = model.model_copy(
+        update={
+            "observed_at": datetime.fromisoformat("2026-07-30T10:00:00-04:00")
+        }
+    )
+
+    assert updated.observed_at == datetime(2026, 7, 30, 14, tzinfo=timezone.utc)
+    assert updated.observed_at.tzinfo is timezone.utc
+
+
+def test_contract_model_copy_does_not_bypass_cross_field_validators():
+    model = OrderedRange(start=1, end=2)
+
+    with pytest.raises(ValidationError):
+        model.model_copy(update={"end": 0})
 
 
 def test_contract_model_copy_updates_preserve_shallow_and_deep_identity():
