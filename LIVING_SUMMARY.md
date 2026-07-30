@@ -970,3 +970,9 @@ The one Task 3 commit attempt failed on the read-only child-worktree Git index l
 Fixed all eight review findings: envelope-backed ThemeMembership, identity-excluded hashes, causal/ticker validation, deterministic sorted dispatch, duplicate selection guards, and deep-frozen maps; 48 nervous-system tests, round trips, py_compile, reverse-order, and five-seed hash checks pass. One new commit attempt remains; report records RED `19 failed, 28 passed` against `88d39e8`.
 {2026-07-30 10:22 EDT} {agent: Codex} {nervous system Task 3 review round 2}
 Canonicalized snapshot hashes to metadata plus ordered identity-excluded state hashes and validated sorted embedded state IDs/hashes; RED `3 failed, 27 passed` against `35f5c2d`, then 51 nervous-system tests, round trips, py_compile, reverse-order, FrozenDict, five-seed hashes, and diff checks passed. One commit attempt remains.
+{2026-07-30 10:45 EDT} {agent: Codex} {nervous system Task 3 review round 4}
+Fixed naive decision-time validation and enforced identity-independent snapshot content-hash equality on construction, JSON decode, and model copy; RED `3 failed, 32 passed` against `1d4e1e6`, then 56 core nervous-system tests passed.
+Validated 10 state and full snapshot JSON round trips, py_compile, five-seed hashes, and diff check; next is the single permitted commit attempt.
+{2026-07-30 10:47 EDT} {agent: Codex} {nervous system Task 3 commit blocker}
+The single commit attempt failed creating the child-worktree `index.lock` because `/home/luket/repos/CynolycusBot/.git` is read-only; no retry was made.
+`HEAD` remains `1d4e1e6`; the three intended tracked files remain staged and the round-4 report is ignored.

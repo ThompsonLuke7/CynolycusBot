@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 
 from .base import ContractModel, FiniteFloat, PositiveSchemaVersion, UtcDatetime, content_hash
 from .enums import StateType
@@ -60,6 +60,40 @@ class _SnapshotHashMaterial(ContractModel):
     schema_version: PositiveSchemaVersion
 
 
+_UTC_DATETIME_ADAPTER = TypeAdapter(UtcDatetime)
+
+
+def _snapshot_hash_material(
+    *,
+    decision_time: UtcDatetime,
+    strategy_id: str,
+    ticker: str,
+    freshness_profile: str,
+    state_hashes: tuple[str, ...],
+    stale_inputs: tuple[str, ...],
+    missing_inputs: tuple[str, ...],
+    data_quality: DataQualitySummary,
+    config_version: str,
+    model_versions: tuple[str, ...],
+    feature_versions: tuple[str, ...],
+    schema_version: PositiveSchemaVersion,
+) -> _SnapshotHashMaterial:
+    return _SnapshotHashMaterial(
+        decision_time=decision_time,
+        strategy_id=strategy_id,
+        ticker=ticker,
+        freshness_profile=freshness_profile,
+        state_hashes=state_hashes,
+        stale_inputs=stale_inputs,
+        missing_inputs=missing_inputs,
+        data_quality=data_quality,
+        config_version=config_version,
+        model_versions=model_versions,
+        feature_versions=feature_versions,
+        schema_version=schema_version,
+    )
+
+
 _DISPATCH = {
     MarketState: "market_state",
     SectorState: "sector_states",
@@ -105,7 +139,7 @@ class ContextSnapshot(ContractModel):
 
     def computed_content_hash(self) -> str:
         return content_hash(
-            _SnapshotHashMaterial(
+            _snapshot_hash_material(
                 decision_time=self.decision_time,
                 strategy_id=self.strategy_id,
                 ticker=self.ticker,
@@ -136,6 +170,8 @@ class ContextSnapshot(ContractModel):
             raise ValueError("state_ids do not match embedded states")
         if self.state_hashes != expected_state_hashes:
             raise ValueError("state_hashes do not match embedded states")
+        if self.content_hash != self.computed_content_hash():
+            raise ValueError("content_hash does not match snapshot content")
         return self
 
     @classmethod
@@ -151,6 +187,7 @@ class ContextSnapshot(ContractModel):
         stale_inputs: tuple[str, ...] = (),
         missing_inputs: tuple[str, ...] = (),
     ) -> ContextSnapshot:
+        normalized_decision_time = _UTC_DATETIME_ADAPTER.validate_python(decision_time)
         buckets: dict[str, list[StateContract]] = {
             field_name: [] for field_name in _DISPATCH.values()
         }
@@ -181,17 +218,17 @@ class ContextSnapshot(ContractModel):
                 if state.state_id in seen_state_ids:
                     raise ValueError(f"duplicate state_id: {state.state_id}")
                 seen_state_ids.add(state.state_id)
-                if state.available_at > decision_time:
+                if state.available_at > normalized_decision_time:
                     raise ValueError(
                         f"state {state.state_id} is unavailable at decision time"
                     )
-                if decision_time >= state.valid_until:
+                if normalized_decision_time >= state.valid_until:
                     raise ValueError(f"state {state.state_id} is expired at decision time")
                 if isinstance(state, ThemeMembership) and (
-                    decision_time < state.effective_from
+                    normalized_decision_time < state.effective_from
                     or (
                         state.effective_until is not None
-                        and decision_time >= state.effective_until
+                        and normalized_decision_time >= state.effective_until
                     )
                 ):
                     raise ValueError(
@@ -216,9 +253,25 @@ class ContextSnapshot(ContractModel):
         quality = DataQualitySummary(
             issues=tuple(issue for state in envelope_states for issue in state.data_quality.issues)
         )
+        snapshot_content_hash = content_hash(
+            _snapshot_hash_material(
+                decision_time=normalized_decision_time,
+                strategy_id=strategy_id,
+                ticker=ticker,
+                freshness_profile=freshness_profile,
+                state_hashes=tuple(state_hashes),
+                stale_inputs=stale_inputs,
+                missing_inputs=missing_inputs,
+                data_quality=quality,
+                config_version=config_version,
+                model_versions=versions["model_versions"],
+                feature_versions=versions["feature_versions"],
+                schema_version=1,
+            )
+        )
         payload = {
             "snapshot_id": snapshot_id,
-            "decision_time": decision_time,
+            "decision_time": normalized_decision_time,
             "strategy_id": strategy_id,
             "ticker": ticker,
             "freshness_profile": freshness_profile,
@@ -241,10 +294,9 @@ class ContextSnapshot(ContractModel):
             "model_versions": versions["model_versions"],
             "feature_versions": versions["feature_versions"],
             "schema_version": 1,
-            "content_hash": "",
+            "content_hash": snapshot_content_hash,
         }
-        snapshot = cls(**payload)
-        return snapshot.model_copy(update={"content_hash": snapshot.computed_content_hash()})
+        return cls(**payload)
 
 
 def _time_key(value: UtcDatetime | None) -> str:

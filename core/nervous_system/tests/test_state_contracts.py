@@ -316,6 +316,43 @@ def test_snapshot_embeds_state_and_hash_references():
     assert snapshot.computed_content_hash() == expected_snapshot_hash(snapshot)
 
 
+def test_snapshot_rejects_naive_decision_time_as_validation_error():
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        ContextSnapshot.from_states(
+            snapshot_id=UUID("00000000-0000-0000-0000-000000000010"),
+            decision_time=DECISION_TIME.replace(tzinfo=None),
+            strategy_id="meta_ranker",
+            ticker="AMD",
+            states=(market_state(),),
+            freshness_profile="test@1",
+        )
+
+
+def test_snapshot_normalizes_non_utc_decision_time_before_hashing():
+    state = market_state(
+        state_id=UUID("00000000-0000-0000-0000-000000000013")
+    )
+    utc_snapshot = ContextSnapshot.from_states(
+        snapshot_id=UUID("00000000-0000-0000-0000-000000000014"),
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(state,),
+        freshness_profile="test@1",
+    )
+    eastern_snapshot = ContextSnapshot.from_states(
+        snapshot_id=utc_snapshot.snapshot_id,
+        decision_time=datetime(2026, 7, 30, 14, 20, tzinfo=timezone(timedelta(hours=-4))),
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(state,),
+        freshness_profile="test@1",
+    )
+
+    assert eastern_snapshot.decision_time == DECISION_TIME
+    assert eastern_snapshot.content_hash == utc_snapshot.content_hash
+
+
 def test_snapshot_rejects_state_unavailable_at_decision_time():
     future_available = DECISION_TIME + timedelta(seconds=1)
     state = market_state(available_at=future_available, generated_at=future_available)
@@ -391,7 +428,7 @@ def test_snapshot_dispatches_all_concrete_state_types_and_preserves_order():
     assert len(snapshot.state_hashes) == len(states)
 
 
-def test_snapshot_hash_is_independent_of_stored_hash_field():
+def test_snapshot_rejects_tampered_content_hash_on_model_copy():
     state = market_state(state_id=UUID("00000000-0000-0000-0000-000000000021"))
     snapshot = ContextSnapshot.from_states(
         snapshot_id=UUID("00000000-0000-0000-0000-000000000022"),
@@ -401,11 +438,25 @@ def test_snapshot_hash_is_independent_of_stored_hash_field():
         states=(state,),
         freshness_profile="test@1",
     )
-    tampered = snapshot.model_copy(update={"content_hash": "tampered"})
-    assert tampered.computed_content_hash() == snapshot.content_hash
-    assert tampered.computed_content_hash() != tampered.content_hash
+    with pytest.raises(ValidationError, match="content_hash"):
+        snapshot.model_copy(update={"content_hash": "tampered"})
 
     assert snapshot.content_hash == expected_snapshot_hash(snapshot)
+
+
+def test_snapshot_rejects_tampered_content_hash_from_json():
+    snapshot = ContextSnapshot.from_states(
+        snapshot_id=UUID("00000000-0000-0000-0000-000000000023"),
+        decision_time=DECISION_TIME,
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(market_state(state_id=UUID("00000000-0000-0000-0000-000000000024")),),
+        freshness_profile="test@1",
+    )
+    tampered_json = snapshot.model_dump_json().replace(snapshot.content_hash, "tampered")
+
+    with pytest.raises(ValidationError, match="content_hash"):
+        ContextSnapshot.model_validate_json(tampered_json)
 
 
 def test_equivalent_states_with_distinct_ids_have_equal_snapshot_content_hashes():
