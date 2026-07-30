@@ -18,3 +18,8 @@ numba
 praw
 lightgbm
 pytest
+pydantic>=2.11,<3
+SQLAlchemy>=2.0,<3
+psycopg[binary]>=3.2,<4
+alembic>=1.16,<2
+google-cloud-storage>=3,<4

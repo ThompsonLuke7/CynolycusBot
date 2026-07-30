@@ -16,6 +16,8 @@ testpaths = [
     "UI/tests",
     "scripts/capstone/tests",
     "research/options_lab/tests",
+    "core/nervous_system/tests",
+    "core/API/Alpaca_API/tests",
 ]
 python_files = ["test_*.py"]
 markers = [
@@ -23,5 +25,6 @@ markers = [
     "network: tests that may call external APIs",
     "slow: tests that are intentionally long-running",
     "live: tests that touch live trading/session behavior",
+    "postgres: tests requiring the local PostgreSQL integration database",
 ]
 addopts = "-ra"

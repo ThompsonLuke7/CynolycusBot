@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: cynolycus
+      POSTGRES_USER: cynolycus
+      POSTGRES_PASSWORD: cynolycus_dev_only
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cynolycus -d cynolycus"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - cynolycus_nervous_system_pg:/var/lib/postgresql/data
+
+volumes:
+  cynolycus_nervous_system_pg:
