@@ -951,3 +951,6 @@ Next checkpoint is user approval of the written specification; only then create 
 {2026-07-30 01:09 ET} {agent: Codex} {nervous system implementation plan}
 After user approval, wrote the 27-task LUNA-ready plan at `docs/superpowers/plans/2026-07-30-cynolycus-nervous-system-mvp.md`, including all operational-history import coverage, causal adapters, full bounded-risk options suite, QA-paper gateway/journal/reconciliation, replay, Cloud SQL/GCS, and acceptance gates.
 No implementation was started; next step is user review, then task execution from a clean worktree while preserving current concurrent changes.
+{2026-07-30 08:28 ET} {agent: Codex} {nervous system execution preflight}
+Created isolated `nervous-system-execution` worktree and SDD ledger; source baseline is 793 passed/20 skipped, with 2 pre-existing catalyst failures and 12 sandbox-only socket errors. Worktree-only failures are missing ignored research/model artifacts.
+Execution is paused before Task 1 for the required baseline decision: proceed while tracking these known failures, or investigate/fix them first.
