@@ -2,6 +2,9 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+import os
+import subprocess
+import sys
 from uuid import uuid4
 
 import pytest
@@ -176,22 +179,34 @@ def _policy(**updates: object) -> PolicyDecision:
     return PolicyDecision(**payload)
 
 
-def _event(order_id, *, status=ExecutionStatus.ACCEPTED, observed_at=NOW, previous=None, event_hash="b" * 64):
-    return ExecutionEvent(
-        execution_event_id=uuid4(),
+def _event(
+    order_id,
+    *,
+    status=ExecutionStatus.ACCEPTED,
+    observed_at=NOW,
+    previous=None,
+    client_order_id="cyno-qa-test",
+    broker_order_id="broker-1",
+    broker_parent_order_id=None,
+    broker_event_at=None,
+    filled_quantity=Decimal("0"),
+    average_fill_price=None,
+    leg_reports=None,
+    sanitized_response=None,
+):
+    return ExecutionEvent.create(
         order_request_id=order_id,
         status=status,
         observed_at=observed_at,
-        broker_event_at=observed_at,
-        client_order_id="cyno-qa-test",
-        broker_order_id="broker-1",
-        broker_parent_order_id=None,
-        filled_quantity=Decimal("0"),
-        average_fill_price=None,
-        leg_reports=({"symbol": "AMD260821C00200000", "status": status.value},),
-        sanitized_response={"status": status.value, "nested": {"safe": True}},
+        broker_event_at=broker_event_at if broker_event_at is not None else observed_at,
+        client_order_id=client_order_id,
+        broker_order_id=broker_order_id,
+        broker_parent_order_id=broker_parent_order_id,
+        filled_quantity=filled_quantity,
+        average_fill_price=average_fill_price,
+        leg_reports=leg_reports or ({"symbol": "AMD260821C00200000", "status": status.value},),
+        sanitized_response=sanitized_response or {"status": status.value, "nested": {"safe": True}},
         previous_event_hash=previous,
-        event_hash=event_hash,
     )
 
 
@@ -284,6 +299,8 @@ def test_policy_rejects_vetoed_approval_and_nonzero_rejection_budget():
         _policy(action=PolicyAction.REJECT, final_risk_budget=Decimal("1"), modifiers=())
     with pytest.raises(ValidationError):
         _policy(expires_at=NOW)
+    with pytest.raises(ValidationError):
+        _policy(action=PolicyAction.APPROVE_REDUCED, hard_vetoes=("LIVE_DISABLED",))
 
 
 def test_policy_modifiers_form_a_budget_chain():
@@ -298,6 +315,96 @@ def test_policy_modifiers_form_a_budget_chain():
     assert decision.modifiers[1].budget_before == Decimal("1000")
     with pytest.raises(ValidationError):
         _policy(modifiers=(_modifier(),), final_risk_budget=Decimal("500"))
+    with pytest.raises(ValidationError):
+        _modifier(
+            operation=ModifierOperation.MULTIPLY,
+            configured_value=Decimal("1.01"),
+            budget_before=Decimal("1000"),
+            budget_after=Decimal("1010"),
+        )
+
+
+def test_option_parent_quantity_is_integral_but_equity_quantity_may_be_fractional():
+    with pytest.raises(ValidationError):
+        _order(parent_quantity=Decimal("1.5"))
+    assert _order(
+        instrument_family=InstrumentFamily.EQUITY,
+        equity_symbol="AMD",
+        equity_side=OrderSide.BUY,
+        legs=(),
+        parent_quantity=Decimal("1.5"),
+    ).parent_quantity == Decimal("1.5")
+
+
+def test_single_option_side_determines_debit_or_credit():
+    sell_leg = _leg(side=OrderSide.SELL, position_intent=PositionIntent.SELL_TO_OPEN)
+    with pytest.raises(ValidationError):
+        _order(legs=(sell_leg,), debit_credit=DebitCredit.DEBIT)
+    assert _order(legs=(sell_leg,), debit_credit=DebitCredit.CREDIT).debit_credit is DebitCredit.CREDIT
+
+
+def test_special_payload_values_are_frozen_canonical_and_json_round_trip():
+    artifact = HashedDecisionArtifact.from_payload(
+        "SPECIAL",
+        1,
+        {
+            "symbols": frozenset({"NVDA", "AMD"}),
+            "tags": {"z", "a"},
+            "created_at": NOW,
+            "identifier": uuid4(),
+            "amount": Decimal("1.20"),
+            "direction": Direction.LONG,
+        },
+    )
+    assert artifact.payload["symbols"] == ("AMD", "NVDA")
+    assert artifact.payload["tags"] == ("a", "z")
+    with pytest.raises(TypeError):
+        artifact.payload["symbols"] += ("TSLA",)
+    assert HashedDecisionArtifact.model_validate_json(artifact.model_dump_json()) == artifact
+
+
+def test_nonfinite_decimal_is_rejected_in_arbitrary_artifact_payload():
+    with pytest.raises(ValueError):
+        HashedDecisionArtifact.from_payload("BAD", 1, {"bad": Decimal("NaN")})
+    with pytest.raises(ValidationError):
+        HashedDecisionArtifact(
+            artifact_type="BAD",
+            schema_version=1,
+            content_hash="0" * 64,
+            payload={"bad": Decimal("Infinity")},
+        )
+    with pytest.raises(ValidationError):
+        HashedDecisionArtifact(
+            artifact_type="BAD",
+            schema_version=1,
+            content_hash=_sha({"bad": "Infinity"}),
+            payload={"bad": Decimal("Infinity")},
+        )
+
+
+def test_special_artifact_hash_is_stable_across_python_hash_seeds():
+    script = (
+        "from datetime import datetime, timezone; from decimal import Decimal; "
+        "from core.nervous_system.contracts.decisions import HashedDecisionArtifact; "
+        "from core.nervous_system.contracts.enums import Direction; "
+        "p={'symbols': frozenset({'NVDA','AMD'}), 'tags': {'z','a'}, "
+        "'created_at': datetime(2026,7,30,18,20,tzinfo=timezone.utc), "
+        "'amount': Decimal('1.20'), 'direction': Direction.LONG}; "
+        "print(HashedDecisionArtifact.from_payload('SPECIAL',1,p).content_hash)"
+    )
+    outputs = []
+    for seed in ("1", "2"):
+        env = os.environ.copy()
+        env["PYTHONHASHSEED"] = seed
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        outputs.append(result.stdout.strip())
+    assert outputs[0] == outputs[1]
 
 
 def test_hashed_artifacts_and_decision_maps_are_deeply_immutable_and_round_trip():
@@ -334,13 +441,12 @@ def test_hashed_artifact_rejects_payload_hash_mismatch_and_invalid_hash_case():
 
 def test_execution_report_requires_ordered_hash_chain_and_last_status():
     order = _order()
-    first = _event(order.order_request_id, event_hash="b" * 64)
+    first = _event(order.order_request_id)
     second = _event(
         order.order_request_id,
         status=ExecutionStatus.FILLED,
         observed_at=NOW + timedelta(seconds=1),
-        previous="b" * 64,
-        event_hash="c" * 64,
+        previous=first.event_hash,
     )
     report = ExecutionReport(
         order_request_id=order.order_request_id,
@@ -374,6 +480,54 @@ def test_execution_payloads_and_leg_reports_are_immutable():
     assert ExecutionEvent.model_validate_json(event.model_dump_json()) == event
 
 
+def test_execution_event_hash_authenticates_content_but_excludes_event_identity():
+    event = _event(uuid4())
+    assert event.event_hash == event.computed_event_hash()
+    assert _event(event.order_request_id).event_hash == event.event_hash
+    assert _event(uuid4()).event_hash != event.event_hash
+
+    tampered = event.model_dump()
+    tampered["sanitized_response"]["status"] = "TAMPERED"
+    with pytest.raises(ValidationError):
+        ExecutionEvent(**tampered)
+    with pytest.raises(ValidationError):
+        event.model_copy(update={"sanitized_response": {"status": "TAMPERED"}})
+    encoded = json.loads(event.model_dump_json())
+    encoded["sanitized_response"]["status"] = "TAMPERED"
+    with pytest.raises(ValidationError):
+        ExecutionEvent.model_validate_json(json.dumps(encoded))
+
+
+def test_execution_event_rejects_future_broker_time_and_report_identity_drift():
+    with pytest.raises(ValidationError):
+        _event(uuid4(), broker_event_at=NOW + timedelta(seconds=1))
+    order_id = uuid4()
+    first = _event(order_id, broker_order_id=None, broker_parent_order_id=None)
+    second = _event(
+        order_id,
+        observed_at=NOW + timedelta(seconds=1),
+        previous=first.event_hash,
+        client_order_id="different-client",
+        broker_order_id="broker-1",
+    )
+    with pytest.raises(ValidationError):
+        ExecutionReport(order_request_id=order_id, events=(first, second), current_status=second.status)
+    third = _event(
+        order_id,
+        observed_at=NOW + timedelta(seconds=1),
+        previous=first.event_hash,
+        broker_order_id="broker-1",
+    )
+    fourth = _event(
+        order_id,
+        observed_at=NOW + timedelta(seconds=2),
+        previous=third.event_hash,
+        broker_order_id=None,
+    )
+    with pytest.raises(ValidationError):
+        ExecutionReport(order_request_id=order_id, events=(first, third, fourth), current_status=fourth.status)
+
+
 def test_decision_record_requires_explicit_not_run_artifacts_for_upstream_veto():
     record = _decision(
         raw_strategy_output=_not_run_artifact("STRATEGY"),
@@ -384,6 +538,20 @@ def test_decision_record_requires_explicit_not_run_artifacts_for_upstream_veto()
     assert record.instrument_selection.payload["status"] == "NOT_RUN"
     with pytest.raises(ValidationError):
         _decision(instrument_selection=None)
+    with pytest.raises(ValidationError):
+        _decision(
+            raw_strategy_output=_not_run_artifact("STRATEGY"),
+            exposure_report=_artifact("EXPOSURE_REPORT"),
+        )
+
+
+def test_decision_record_rejects_duplicate_order_ids():
+    duplicate = uuid4()
+    with pytest.raises(ValidationError):
+        _decision(
+            order_request_ids=(duplicate, duplicate),
+            order_hashes=("6" * 64, "7" * 64),
+        )
 
 
 def test_outcome_factory_rejects_evaluation_before_linked_decision():

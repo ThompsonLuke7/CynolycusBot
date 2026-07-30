@@ -15,7 +15,9 @@ from .base import (
     PositiveSchemaVersion,
     Sha256Hex,
     UtcDatetime,
+    _canonicalize,
     _freeze_mapping,
+    _reject_nonfinite,
 )
 
 
@@ -24,8 +26,9 @@ ImmutableStringMap = Annotated[dict[str, str], AfterValidator(_freeze_mapping)]
 
 
 def _payload_hash(payload: dict[str, object]) -> str:
+    _reject_nonfinite(payload)
     encoded = json.dumps(
-        to_jsonable_python(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
+        _canonicalize(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
     )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -40,7 +43,9 @@ class HashedDecisionArtifact(ContractModel):
     def validate_payload_hash(self) -> HashedDecisionArtifact:
         if self.content_hash != _payload_hash(self.payload):
             raise ValueError("content_hash does not match artifact payload")
-        if self.payload.get("status") == "NOT_RUN":
+        if self.artifact_type == "NOT_RUN" or self.payload.get("status") == "NOT_RUN":
+            if self.payload.get("status") != "NOT_RUN":
+                raise ValueError("NOT_RUN artifacts require status=NOT_RUN")
             if not self.payload.get("blocking_stage") or not self.payload.get("reason"):
                 raise ValueError("NOT_RUN artifacts require blocking_stage and reason")
         return self
@@ -93,15 +98,22 @@ class DecisionRecord(ContractModel):
     def validate_decision_links(self) -> DecisionRecord:
         if len(self.order_request_ids) != len(self.order_hashes):
             raise ValueError("order request IDs and hashes must be one-to-one")
+        if len(set(self.order_request_ids)) != len(self.order_request_ids):
+            raise ValueError("order request IDs must be unique")
         artifacts = (
             self.raw_strategy_output,
             self.exposure_report,
             self.instrument_candidates,
             self.instrument_selection,
         )
+        seen_not_run = False
         for artifact in artifacts:
             if not artifact.payload:
                 raise ValueError("decision stages must contain explicit artifact payloads")
+            is_not_run = artifact.payload.get("status") == "NOT_RUN"
+            if seen_not_run and not is_not_run:
+                raise ValueError("downstream decision stages must remain NOT_RUN")
+            seen_not_run = seen_not_run or is_not_run
         return self
 
 

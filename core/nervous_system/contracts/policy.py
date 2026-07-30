@@ -32,6 +32,8 @@ class PolicyModifier(ContractModel):
     @model_validator(mode="after")
     def validate_budget_operation(self) -> PolicyModifier:
         if self.operation is ModifierOperation.MULTIPLY:
+            if self.configured_value > Decimal("1.0"):
+                raise ValueError("MULTIPLY modifiers must not increase risk")
             expected = self.budget_before * self.configured_value
         else:
             expected = min(self.budget_before, self.configured_value)
@@ -69,8 +71,8 @@ class PolicyDecision(ContractModel):
             raise ValueError("policy expires_at must be after created_at")
         if self.final_risk_budget > self.base_risk_budget:
             raise ValueError("final_risk_budget must not exceed base_risk_budget")
-        if self.action is PolicyAction.APPROVE and self.hard_vetoes:
-            raise ValueError("APPROVE cannot contain hard vetoes")
+        if self.action in {PolicyAction.APPROVE, PolicyAction.APPROVE_REDUCED} and self.hard_vetoes:
+            raise ValueError("approved actions cannot contain hard vetoes")
         if self.action is PolicyAction.REJECT and self.final_risk_budget != Decimal("0"):
             raise ValueError("REJECT must have zero final_risk_budget")
         prior = self.base_risk_budget

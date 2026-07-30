@@ -32,6 +32,19 @@ def _finite_decimal(value: Decimal) -> Decimal:
     return value
 
 
+def _reject_nonfinite(value: Any) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("contract contains a non-finite number")
+    if isinstance(value, Decimal) and not value.is_finite():
+        raise ValueError("contract contains a non-finite number")
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _reject_nonfinite(item)
+    elif isinstance(value, (list, tuple, Set)):
+        for item in value:
+            _reject_nonfinite(item)
+
+
 def _sha256_hex(value: str) -> str:
     if len(value) != 64 or re.fullmatch(r"[0-9a-fA-F]{64}", value) is None:
         raise ValueError("value must be a 64-character SHA-256 hex string")
@@ -71,14 +84,22 @@ class FrozenDict(dict[_FrozenKey, _FrozenValue], Generic[_FrozenKey, _FrozenValu
 
 
 def _freeze_mapping(value: Mapping[_FrozenKey, _FrozenValue]) -> FrozenDict[_FrozenKey, _FrozenValue]:
+    _reject_nonfinite(value)
+
     def freeze(item: Any) -> Any:
         if isinstance(item, Mapping):
             return FrozenDict({key: freeze(nested) for key, nested in item.items()})
+        if isinstance(item, (set, frozenset)):
+            frozen_items = [freeze(nested) for nested in item]
+            return tuple(sorted(frozen_items, key=_canonical_sort_key))
         if isinstance(item, list):
             return tuple(freeze(nested) for nested in item)
         if isinstance(item, tuple):
             return tuple(freeze(nested) for nested in item)
-        return item
+        normalized = to_jsonable_python(item)
+        if type(normalized) is type(item) and normalized == item:
+            return item
+        return freeze(normalized)
 
     return FrozenDict({key: freeze(item) for key, item in value.items()})
 
@@ -113,17 +134,7 @@ class ContractModel(BaseModel):
 
     @model_validator(mode="after")
     def reject_nonfinite_recursively(self) -> Self:
-        def visit(value: Any) -> None:
-            if isinstance(value, float) and not math.isfinite(value):
-                raise ValueError("contract contains a non-finite number")
-            if isinstance(value, dict):
-                for item in value.values():
-                    visit(item)
-            elif isinstance(value, (list, tuple, Set)):
-                for item in value:
-                    visit(item)
-
-        visit(self.model_dump())
+        _reject_nonfinite(self.model_dump())
         return self
 
 

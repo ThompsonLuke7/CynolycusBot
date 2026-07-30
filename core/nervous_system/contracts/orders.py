@@ -79,6 +79,14 @@ class OrderRequest(ContractModel):
                 raise ValueError("option requests require one to four legs")
             if self.instrument_family is InstrumentFamily.EQUITY:
                 raise ValueError("option requests cannot use the EQUITY instrument family")
+            if self.parent_quantity != self.parent_quantity.to_integral_value():
+                raise ValueError("option parent_quantity must be integral")
+            if len(self.legs) == 1:
+                expected_debit_credit = (
+                    DebitCredit.DEBIT if self.legs[0].side is OrderSide.BUY else DebitCredit.CREDIT
+                )
+                if self.debit_credit is not expected_debit_credit:
+                    raise ValueError("single-option side must agree with debit_credit")
         if self.debit_credit is DebitCredit.CREDIT and self.net_limit_price <= 0:
             raise ValueError("credit requests require a positive credit limit magnitude")
         return self
