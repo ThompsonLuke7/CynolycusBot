@@ -958,3 +958,7 @@ Execution is paused before Task 1 for the required baseline decision: proceed wh
 Added injectable/disableable forward-guidance features and labels to `build_catalyst_records`; isolated the two catalyst fixtures from process-global earnings-result data. Focused and full catalyst suites pass (3/3); implementation committed as `c3af94b`. Report: `.superpowers/sdd/2026-07-30-cynolycus-nervous-system-mvp/task-0-report.md`.
 {2026-07-30 08:50 EDT} {agent: Codex} {catalyst review correction}
 Untracked the transient SDD report while keeping it available in the ignored worktree; added one-`None` optional-source coverage. Fresh focused/full catalyst suites pass (3/3), `git diff --check` passes; correction committed.
+{2026-07-30 09:11 EDT} {agent: Codex} {nervous system Task 2 contracts}
+Implemented strict UTC/finite contracts, canonical hashes, complete enums, quality/lineage models, package exports, and validated `model_copy(update=...)`; 9/9 Task 1+2 tests, py_compile, enum audit, and diff check pass. Report: `.superpowers/sdd/2026-07-30-cynolycus-nervous-system-mvp/task-2-report.md`; next commit focused source/tests.
+{2026-07-30 09:13 EDT} {agent: Codex} {nervous system Task 2 commit blocker}
+The single focused commit attempt failed because the child worktree Git index lock path is read-only; no retry was made. Verified source/tests remain staged and the report records the blocker; no commit SHA exists.
