@@ -17,6 +17,7 @@ from core.nervous_system.contracts.decisions import (
 )
 from core.nervous_system.contracts.enums import (
     DebitCredit,
+    DecisionKind,
     Direction,
     ExecutionStatus,
     InstrumentFamily,
@@ -115,6 +116,9 @@ def _order(**updates: object) -> OrderRequest:
         "policy_decision_id": uuid4(),
         "environment": RuntimeEnvironment.QA_PAPER,
         "account_alias": "paper",
+        "decision_kind": DecisionKind.ENTRY,
+        "risk_reducing": False,
+        "broker_position_key": None,
         "instrument_family": InstrumentFamily.VERTICAL,
         "legs": (_leg(),),
         "parent_quantity": 1,
@@ -192,9 +196,14 @@ def _event(
     average_fill_price=None,
     leg_reports=None,
     sanitized_response=None,
+    event_type="BROKER_UPDATE",
+    sequence_no=1,
+    previous_event_id=None,
 ):
     return ExecutionEvent.create(
         order_request_id=order_id,
+        event_type=event_type,
+        sequence_no=sequence_no,
         status=status,
         observed_at=observed_at,
         broker_event_at=broker_event_at if broker_event_at is not None else observed_at,
@@ -205,6 +214,7 @@ def _event(
         average_fill_price=average_fill_price,
         leg_reports=leg_reports or ({"symbol": "AMD260821C00200000", "status": status.value},),
         sanitized_response=sanitized_response or {"status": status.value, "nested": {"safe": True}},
+        previous_event_id=previous_event_id,
         previous_event_hash=previous,
     )
 
@@ -296,6 +306,32 @@ def test_order_rejects_bad_money_bounds_expiry_and_credit_limit():
         _order(parent_quantity=0)
     with pytest.raises(ValidationError):
         _order(debit_credit=DebitCredit.CREDIT, net_limit_price=Decimal("0"))
+
+
+def test_order_exit_semantics_require_a_position_key_for_risk_reduction():
+    exit_order = _order(
+        decision_kind=DecisionKind.EXIT,
+        risk_reducing=True,
+        broker_position_key="paper:AMD",
+    )
+    assert exit_order.decision_kind is DecisionKind.EXIT
+    assert exit_order.risk_reducing is True
+    assert exit_order.broker_position_key == "paper:AMD"
+
+    with pytest.raises(ValidationError, match="ENTRY orders cannot be risk-reducing"):
+        _order(decision_kind=DecisionKind.ENTRY, risk_reducing=True, broker_position_key="paper:AMD")
+    with pytest.raises(ValidationError, match="risk-reducing orders require broker_position_key"):
+        _order(decision_kind=DecisionKind.EXIT, risk_reducing=True)
+
+
+def test_order_hash_includes_exit_semantics():
+    entry = _order()
+    exit_order = _order(
+        decision_kind=DecisionKind.EXIT,
+        risk_reducing=True,
+        broker_position_key="paper:AMD",
+    )
+    assert entry.request_hash != exit_order.request_hash
 
 
 def test_order_accepts_market_equity_without_limit_price_and_hashes_deterministically():
@@ -473,7 +509,7 @@ def test_order_hash_is_stable_across_python_hash_seeds():
         "from datetime import datetime, timezone; from decimal import Decimal; "
         "from uuid import UUID; "
         "from core.nervous_system.contracts.enums import "
-        "DebitCredit, InstrumentFamily, OptionType, OrderSide, PositionIntent, RuntimeEnvironment; "
+        "DebitCredit, DecisionKind, InstrumentFamily, OptionType, OrderSide, PositionIntent, RuntimeEnvironment; "
         "from core.nervous_system.contracts.orders import OptionLeg, OrderRequest; "
         "now=datetime(2026,7,30,18,20,tzinfo=timezone.utc); "
         "leg=OptionLeg(symbol='AMD260821C00200000',underlying='AMD',option_type=OptionType.CALL,"
@@ -484,6 +520,7 @@ def test_order_hash_is_stable_across_python_hash_seeds():
         "decision_id=UUID('00000000-0000-0000-0000-000000000002'),"
         "policy_decision_id=UUID('00000000-0000-0000-0000-000000000003'),"
         "environment=RuntimeEnvironment.QA_PAPER,account_alias='paper',"
+        "decision_kind=DecisionKind.ENTRY,risk_reducing=False,broker_position_key=None,"
         "instrument_family=InstrumentFamily.VERTICAL,legs=(leg,),parent_quantity=1,"
         "debit_credit=DebitCredit.DEBIT,net_limit_price=Decimal('5.00'),"
         "maximum_loss=Decimal('500'),buying_power_required=Decimal('500'),"
@@ -608,6 +645,8 @@ def test_execution_report_requires_ordered_hash_chain_and_last_status():
         order.order_request_id,
         status=ExecutionStatus.FILLED,
         observed_at=NOW + timedelta(seconds=1),
+        sequence_no=2,
+        previous_event_id=first.execution_event_id,
         previous=first.event_hash,
     )
     report = ExecutionReport(
@@ -627,6 +666,29 @@ def test_execution_report_requires_ordered_hash_chain_and_last_status():
             order_request_id=order.order_request_id,
             events=(first, second),
             current_status=ExecutionStatus.ACCEPTED,
+        )
+
+
+def test_execution_events_require_positive_sequence_and_report_predecessor_identity():
+    order_id = uuid4()
+    first = _event(order_id)
+    with pytest.raises(ValidationError):
+        _event(order_id, sequence_no=0)
+    with pytest.raises(ValidationError):
+        _event(order_id, sequence_no=2, previous=first.event_hash)
+
+    wrong_predecessor = _event(
+        order_id,
+        observed_at=NOW + timedelta(seconds=1),
+        sequence_no=2,
+        previous_event_id=uuid4(),
+        previous=first.event_hash,
+    )
+    with pytest.raises(ValidationError, match="predecessor IDs"):
+        ExecutionReport(
+            order_request_id=order_id,
+            events=(first, wrong_predecessor),
+            current_status=wrong_predecessor.status,
         )
 
 
@@ -668,6 +730,8 @@ def test_execution_event_rejects_future_broker_time_and_report_identity_drift():
     second = _event(
         order_id,
         observed_at=NOW + timedelta(seconds=1),
+        sequence_no=2,
+        previous_event_id=first.execution_event_id,
         previous=first.event_hash,
         client_order_id="different-client",
         broker_order_id="broker-1",
@@ -677,12 +741,16 @@ def test_execution_event_rejects_future_broker_time_and_report_identity_drift():
     third = _event(
         order_id,
         observed_at=NOW + timedelta(seconds=1),
+        sequence_no=2,
+        previous_event_id=first.execution_event_id,
         previous=first.event_hash,
         broker_order_id="broker-1",
     )
     fourth = _event(
         order_id,
         observed_at=NOW + timedelta(seconds=2),
+        sequence_no=3,
+        previous_event_id=third.execution_event_id,
         previous=third.event_hash,
         broker_order_id=None,
     )

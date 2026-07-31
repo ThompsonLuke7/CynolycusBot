@@ -1007,3 +1007,11 @@ Targeted migrations `20 passed`; full nervous-system suite `143 passed`; Postgre
 {2026-07-30 22:43 ET} {agent: Codex} {nervous system Task 6 correction}
 Typed order requests with lowercase limit/market literals and nullable hash/model/create price; added market/invalid semantics and contract-derived migration coverage while preserving hashes/limit behavior.
 Focused `58 passed` + full `149 passed`, each with one PostgreSQL skip; compileall and diff checks clean. Committing correction files now.
+
+{2026-07-30 22:52 ET} {agent: Codex} {nervous system Task 6 PostgreSQL validation}
+Validated the reviewed schema against disposable PostgreSQL `cynolycus_nervous_system_test`: real upgrade/inspect/downgrade/re-upgrade passed, and the full nervous-system suite passed `150/150`.
+The earlier psycopg failure was isolated to Codex localhost sandbox denial; PostgreSQL itself and the migrations are healthy. Task 7 repository/UOW implementation continues.
+
+{2026-07-30 23:20 ET} {agent: Codex} {nervous system Task 7 persistence}
+Added causal repositories, shared UOW, typed decision/execution/registry/outbox persistence, and aligned order/execution contracts with tamper-resistant hashes.
+Focused Task 7 tests `63 passed`; all core nervous-system tests `175 passed`; disposable PostgreSQL migration cycle, compileall, and diff-check pass. Commit is next.

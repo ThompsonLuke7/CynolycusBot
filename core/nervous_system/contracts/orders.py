@@ -14,7 +14,15 @@ from .base import (
     UtcDatetime,
     content_hash,
 )
-from .enums import DebitCredit, InstrumentFamily, OptionType, OrderSide, PositionIntent, RuntimeEnvironment
+from .enums import (
+    DebitCredit,
+    DecisionKind,
+    InstrumentFamily,
+    OptionType,
+    OrderSide,
+    PositionIntent,
+    RuntimeEnvironment,
+)
 
 
 class OptionLeg(ContractModel):
@@ -52,6 +60,9 @@ class _OrderRequestHashMaterial(ContractModel):
     policy_decision_id: UUID
     environment: RuntimeEnvironment
     account_alias: str
+    decision_kind: DecisionKind
+    risk_reducing: bool
+    broker_position_key: str | None
     instrument_family: InstrumentFamily
     equity_symbol: str | None
     equity_side: OrderSide | None
@@ -76,6 +87,9 @@ class OrderRequest(ContractModel):
     policy_decision_id: UUID
     environment: RuntimeEnvironment
     account_alias: str
+    decision_kind: DecisionKind
+    risk_reducing: bool
+    broker_position_key: str | None = None
     instrument_family: InstrumentFamily
     equity_symbol: str | None = None
     equity_side: OrderSide | None = None
@@ -100,6 +114,9 @@ class OrderRequest(ContractModel):
             policy_decision_id=self.policy_decision_id,
             environment=self.environment,
             account_alias=self.account_alias,
+            decision_kind=self.decision_kind,
+            risk_reducing=self.risk_reducing,
+            broker_position_key=self.broker_position_key,
             instrument_family=self.instrument_family,
             equity_symbol=self.equity_symbol,
             equity_side=self.equity_side,
@@ -129,6 +146,8 @@ class OrderRequest(ContractModel):
         policy_decision_id: UUID,
         environment: RuntimeEnvironment,
         account_alias: str,
+        decision_kind: DecisionKind,
+        risk_reducing: bool,
         instrument_family: InstrumentFamily,
         parent_quantity: PositiveDecimal,
         debit_credit: DebitCredit,
@@ -140,6 +159,7 @@ class OrderRequest(ContractModel):
         idempotency_key: str,
         created_at: UtcDatetime,
         expires_at: UtcDatetime,
+        broker_position_key: str | None = None,
         order_request_id: UUID | None = None,
         equity_symbol: str | None = None,
         equity_side: OrderSide | None = None,
@@ -152,6 +172,9 @@ class OrderRequest(ContractModel):
             policy_decision_id=policy_decision_id,
             environment=environment,
             account_alias=account_alias,
+            decision_kind=decision_kind,
+            risk_reducing=risk_reducing,
+            broker_position_key=broker_position_key,
             instrument_family=instrument_family,
             equity_symbol=equity_symbol,
             equity_side=equity_side,
@@ -175,6 +198,9 @@ class OrderRequest(ContractModel):
             policy_decision_id=policy_decision_id,
             environment=environment,
             account_alias=account_alias,
+            decision_kind=decision_kind,
+            risk_reducing=risk_reducing,
+            broker_position_key=broker_position_key,
             instrument_family=instrument_family,
             equity_symbol=equity_symbol,
             equity_side=equity_side,
@@ -200,6 +226,10 @@ class OrderRequest(ContractModel):
     def validate_order(self) -> OrderRequest:
         if self.expires_at <= self.created_at:
             raise ValueError("order expires_at must be after created_at")
+        if self.decision_kind is DecisionKind.ENTRY and self.risk_reducing:
+            raise ValueError("ENTRY orders cannot be risk-reducing")
+        if self.risk_reducing and not self.broker_position_key:
+            raise ValueError("risk-reducing orders require broker_position_key")
         is_equity = self.equity_symbol is not None or self.equity_side is not None
         if is_equity:
             if self.equity_symbol is None or self.equity_side is None or self.legs:

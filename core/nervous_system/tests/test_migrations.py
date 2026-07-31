@@ -670,6 +670,7 @@ def test_order_type_check_matches_lowercase_contract_and_price_semantics() -> No
 
     from core.nervous_system.contracts.enums import (
         DebitCredit,
+        DecisionKind,
         InstrumentFamily,
         OrderSide,
         RuntimeEnvironment,
@@ -682,6 +683,9 @@ def test_order_type_check_matches_lowercase_contract_and_price_semantics() -> No
         "policy_decision_id": uuid4(),
         "environment": RuntimeEnvironment.QA_PAPER,
         "account_alias": "paper",
+        "decision_kind": DecisionKind.ENTRY,
+        "risk_reducing": False,
+        "broker_position_key": None,
         "instrument_family": InstrumentFamily.EQUITY,
         "equity_symbol": "SPY",
         "equity_side": OrderSide.BUY,
