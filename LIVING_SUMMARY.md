@@ -979,3 +979,7 @@ The single commit attempt failed creating the child-worktree `index.lock` becaus
 {2026-07-30 11:04 EDT} {agent: Codex} {nervous system Task 4 trading/execution contracts}
 Implemented Task 4 intent, policy, order, execution, decision/outcome contracts plus Decimal/SHA foundation aliases, deep-frozen payloads/maps, explicit NOT_RUN artifacts, and 18 focused tests; report is ignored at `.superpowers/sdd/2026-07-30-cynolycus-nervous-system-mvp/task-4-report.md`.
 Validation: 38 focused Task 2–4/base tests, 74 core nervous-system tests, py_compile, JSON/hash/immutability, and diff checks passed; one commit attempt failed on read-only child-worktree `index.lock`, so HEAD remains `b607d0d` and intended files are staged.
+
+{2026-07-30 20:45 ET} {agent: Codex} {nervous system Task 5 runtime/config}
+Added immutable settings from the exact CYNOLYCUS environment contract, enum normalization, missing-key aggregation, QA-paper/GCS/pool/URL boundaries, safe `model_copy` revalidation, and SQLAlchemy engine/session/healthcheck interfaces.
+Focused Task 5 tests `19 passed`; all core nervous-system tests `107 passed`; compile/import/static checks pass. Docker/PostgreSQL runtime was not available; the single commit attempt is next.
