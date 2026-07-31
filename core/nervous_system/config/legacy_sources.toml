@@ -1,0 +1,171 @@
+version = 1
+
+[[source]]
+kind = "account_snapshot"
+glob = "Data/inference/account_snapshots/*.jsonl"
+adapter = "broker_equity_snapshot"
+
+[[source]]
+kind = "meta_signal_audit"
+glob = "Data/inference/meta_ranker/live_signal_audit.jsonl"
+adapter = "live_signal_audit"
+
+[[source]]
+kind = "meta_closed_trade"
+glob = "Data/inference/meta_ranker/closed_trades.jsonl"
+adapter = "closed_trade"
+
+[[source]]
+kind = "momentum_signal_audit"
+glob = "Data/inference/momentum_expansion/live_signal_audit.jsonl"
+adapter = "live_signal_audit"
+
+[[source]]
+kind = "momentum_closed_trade"
+glob = "Data/inference/momentum_expansion/closed_trades.jsonl"
+adapter = "closed_trade"
+
+[[source]]
+kind = "htf_signal_audit"
+glob = "Data/inference/multi_ticker_swing_htf/live_signal_audit.jsonl"
+adapter = "live_signal_audit"
+
+[[source]]
+kind = "htf_closed_trade"
+glob = "Data/inference/multi_ticker_swing_htf/closed_trades.jsonl"
+adapter = "closed_trade"
+
+[[source]]
+kind = "strategy_live_state"
+glob = "signals/meta_context/meta_ranker/live_state.json"
+adapter = "managed_state"
+
+[[source]]
+kind = "strategy_live_state"
+glob = "strategies/momentum_expansion/live/momentum_live_state.json"
+adapter = "managed_state"
+
+[[source]]
+kind = "strategy_alert"
+glob = "strategies/momentum_expansion/live/alerts.jsonl"
+adapter = "raw_operational_event"
+
+[[source]]
+kind = "strategy_live_state"
+glob = "strategies/multi_ticker_swing_htf/live/htf_live_state.json"
+adapter = "managed_state"
+
+[[source]]
+kind = "dealer_signal_audit"
+glob = "Data/inference/dealer_ranker/live_signal_audit.jsonl"
+adapter = "live_signal_audit"
+
+[[source]]
+kind = "dealer_closed_trade"
+glob = "Data/inference/dealer_ranker/closed_trades.jsonl"
+adapter = "closed_trade"
+
+[[source]]
+kind = "dealer_live_state"
+glob = "Data/inference/dealer_ranker/live_state.json"
+adapter = "managed_state"
+
+[[source]]
+kind = "intraday_structure_state"
+glob = "Data/inference/intraday_structure/*.json"
+adapter = "managed_state"
+
+[[source]]
+kind = "intraday_structure_transition"
+glob = "Data/inference/intraday_structure/transitions.jsonl"
+adapter = "raw_operational_event"
+
+[[source]]
+kind = "shadow_audit"
+glob = "Data/inference/shadow_two_sleeve/*_shadow_audit.jsonl"
+adapter = "live_signal_audit"
+
+[[source]]
+kind = "shadow_state"
+glob = "Data/inference/shadow_two_sleeve/*_shadow_state.json"
+adapter = "managed_state"
+
+[[source]]
+kind = "legacy_position_book"
+glob = "Data/inference/multi_ticker_swing/*.json"
+adapter = "managed_state"
+
+[[source]]
+kind = "spy_broker_state"
+glob = "Data/inference/live_runs/*/broker-state.jsonl"
+adapter = "broker_state"
+
+[[source]]
+kind = "spy_execution"
+glob = "Data/inference/live_runs/*/trade-events.jsonl"
+adapter = "broker_trade_event"
+
+[[source]]
+kind = "spy_action"
+glob = "Data/inference/live_runs/*/actions.jsonl"
+adapter = "raw_operational_event"
+
+[[source]]
+kind = "spy_decision"
+glob = "Data/inference/live_runs/*/decision-10m.jsonl"
+adapter = "legacy_decision"
+
+[[source]]
+kind = "spy_log"
+glob = "Data/inference/live_runs/*/logs.jsonl"
+adapter = "raw_operational_event"
+
+[[source]]
+kind = "spy_policy"
+glob = "Data/inference/live_runs/*/order-policy.jsonl"
+adapter = "legacy_policy"
+
+[[source]]
+kind = "spy_session"
+glob = "Data/inference/live_runs/*/session.jsonl"
+adapter = "raw_operational_event"
+
+[[source]]
+kind = "spy_session_metadata"
+glob = "Data/inference/live_runs/*/session_meta.json"
+adapter = "raw_operational_event"
+
+[[source]]
+kind = "spy_startup_sync"
+glob = "Data/inference/live_runs/*/startup-sync.jsonl"
+adapter = "broker_state"
+
+[[source]]
+kind = "spy_status"
+glob = "Data/inference/live_runs/*/status.jsonl"
+adapter = "raw_operational_event"
+
+[[source]]
+kind = "spy_broker_order_export"
+glob = "Data/inference/live_runs/*/unique_broker_orders_*.csv"
+adapter = "broker_trade_event"
+
+[[source]]
+kind = "swing_session"
+glob = "UI/swing_audit/swing_session_*.jsonl"
+adapter = "swing_session"
+
+[[source]]
+kind = "swing_session"
+glob = "UI/swing_audit/paper/swing_session_*.jsonl"
+adapter = "swing_session"
+
+[[source]]
+kind = "runtime_queue"
+glob = "Data/runtime/*.json"
+adapter = "runtime_evidence"
+
+[[source]]
+kind = "readiness"
+glob = "Data/readiness/*.json"
+adapter = "runtime_evidence"

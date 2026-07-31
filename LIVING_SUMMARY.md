@@ -1019,3 +1019,7 @@ Focused Task 7 tests `63 passed`; all core nervous-system tests `175 passed`; di
 {2026-07-30 23:47 ET} {agent: Codex} {nervous system Task 7 correction}
 Closed failed-decision persistence, atomic outbox enqueue, strict UTC, and canonical config-hash review findings with focused regression coverage.
 Focused `59 passed`; full nervous-system `182 passed`; compileall and diff-check clean; correction report appended and commit amended.
+
+{2026-07-31 00:12 EDT} {agent: Codex} {nervous system Task 8 source registry/import}
+Implemented immutable 34-glob source registration, streaming parsers, causal legacy adapters, source-hash/locator/version idempotency, quarantine retention, typed portfolio state, UNASSIGNED ownership candidates, and PostgreSQL-only dry-run CLI; report: `.superpowers/sdd/2026-07-30-cynolycus-nervous-system-mvp/task-8-report.md`.
+Focused Task 8 `13 passed`; full nervous-system `195 passed`; compileall/diff-check/discovery comparison clean. Full unbounded CLI dry-run remains a reviewed batching concern because the worktree exposes 349,383 candidate lines; no persistent-dev import was performed.

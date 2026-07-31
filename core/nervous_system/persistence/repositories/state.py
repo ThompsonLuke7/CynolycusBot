@@ -134,6 +134,18 @@ class StateRepository:
         self._session.flush()
         return state
 
+    def get_state_by_content_hash(self, state_hash: str) -> StateEnvelope | None:
+        """Load an existing immutable state so a revised source can add lineage."""
+
+        if len(state_hash) != 64:
+            raise ValueError("state_hash must be a 64-character SHA-256 hex string")
+        row = _one_or_none(
+            self._session.execute(
+                select(StateRecord).where(StateRecord.content_hash == state_hash)
+            )
+        )
+        return None if row is None else _contract_from_payload(row)
+
     def get_latest_valid_state(
         self,
         state_type: StateType,

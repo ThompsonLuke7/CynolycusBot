@@ -205,6 +205,71 @@ class RegistryRepository:
         self._session.flush()
         return item
 
+    def get_import_item(
+        self,
+        *,
+        source_id: UUID,
+        record_locator: str,
+        importer_version: str,
+        normalized_hash: str,
+    ) -> ImportItemRecord | None:
+        """Return one previously seen item identity without mutating the session."""
+
+        _validate_hash(normalized_hash, "normalized_hash")
+        row = _one_or_none(
+            self._session.execute(
+                select(ImportItemRow).where(
+                    ImportItemRow.source_id == source_id,
+                    ImportItemRow.record_locator == record_locator,
+                    ImportItemRow.importer_version == importer_version,
+                    ImportItemRow.normalized_hash == normalized_hash,
+                )
+            )
+        )
+        if row is None:
+            return None
+        return ImportItemRecord(
+            import_item_id=row.import_item_id,
+            import_run_id=row.import_run_id,
+            source_id=row.source_id,
+            importer_version=row.importer_version,
+            record_locator=row.record_locator,
+            normalized_hash=row.normalized_hash,
+            target_type=row.target_type,
+            target_id=row.target_id,
+            status=row.status,
+            warnings=row.warnings,
+        )
+
+    def finish_import_run(
+        self,
+        import_run_id: UUID,
+        *,
+        finished_at: datetime,
+        status: str,
+        counts: Mapping[str, Any],
+    ) -> ImportRunRecord:
+        """Finish a run in the caller's transaction; never commit internally."""
+
+        _validate_time(finished_at, "finished_at")
+        row = self._session.get(ImportRunRow, import_run_id)
+        if row is None:
+            raise ValueError(f"unknown import_run_id: {import_run_id}")
+        if finished_at < row.started_at:
+            raise ValueError("finished_at must not precede started_at")
+        row.finished_at = finished_at
+        row.status = status
+        row.counts = dict(counts)
+        self._session.flush()
+        return ImportRunRecord(
+            import_run_id=row.import_run_id,
+            importer_version=row.importer_version,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+            status=row.status,
+            counts=row.counts,
+        )
+
     def save_import_quarantine(
         self, quarantine: ImportQuarantineRecord
     ) -> ImportQuarantineRecord:
