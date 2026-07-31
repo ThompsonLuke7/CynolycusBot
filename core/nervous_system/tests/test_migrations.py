@@ -660,6 +660,64 @@ def test_order_exit_semantics_and_portfolio_lineage_are_explicit() -> None:
     assert ownership.c.order_request_id.nullable is True
 
 
+def test_order_type_check_matches_lowercase_contract_and_price_semantics() -> None:
+    from datetime import datetime, timedelta, timezone
+    from decimal import Decimal
+    from uuid import uuid4
+
+    from sqlalchemy import CheckConstraint
+
+    from core.nervous_system.contracts.enums import (
+        DebitCredit,
+        InstrumentFamily,
+        OrderSide,
+        RuntimeEnvironment,
+    )
+    from core.nervous_system.contracts.orders import OrderRequest
+
+    created_at = datetime(2026, 7, 30, 14, 30, tzinfo=timezone.utc)
+    request = OrderRequest.create(
+        decision_id=uuid4(),
+        policy_decision_id=uuid4(),
+        environment=RuntimeEnvironment.QA_PAPER,
+        account_alias="paper",
+        instrument_family=InstrumentFamily.EQUITY,
+        equity_symbol="SPY",
+        equity_side=OrderSide.BUY,
+        parent_quantity=Decimal("1"),
+        debit_credit=DebitCredit.DEBIT,
+        net_limit_price=Decimal("1.25"),
+        maximum_loss=Decimal("125"),
+        buying_power_required=Decimal("125"),
+        time_in_force="day",
+        order_type="limit",
+        idempotency_key="task-6-lowercase-order-type",
+        created_at=created_at,
+        expires_at=created_at + timedelta(minutes=5),
+    )
+    assert request.order_type == "limit"
+
+    checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in _table("order_requests").constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    check_sql = checks["ck_ns_order_requests_limit_price_semantics"]
+    assert f"order_type = '{request.order_type}'" in check_sql
+    assert "net_limit_price IS NOT NULL" in check_sql
+    assert "net_limit_price > 0" in check_sql
+    assert "order_type = 'market'" in check_sql
+    assert "net_limit_price IS NULL" in check_sql
+    assert "order_type = 'LIMIT'" not in check_sql
+    assert "order_type = 'MARKET'" not in check_sql
+
+    migration_sql = _offline_sql("upgrade")
+    assert f"order_type = '{request.order_type}'" in migration_sql
+    assert "order_type = 'market'" in migration_sql
+    assert "order_type = 'LIMIT'" not in migration_sql
+    assert "order_type = 'MARKET'" not in migration_sql
+
+
 def test_failed_decision_records_can_be_durable_before_the_chain_exists() -> None:
     decision_records = _table("decision_records")
     for column_name in ("snapshot_id", "intent_id", "policy_decision_id"):

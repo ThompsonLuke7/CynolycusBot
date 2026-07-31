@@ -999,3 +999,7 @@ Focused `35 passed`; all core nervous-system tests `123 passed`; py_compile/comp
 {2026-07-30 22:18 ET} {agent: Codex} {nervous system Task 6 PostgreSQL schema}
 Added the exact 23-table ORM/Alembic schema with audited decision, execution, journal, job, outbox, and recovery constraints; targeted 19 passed and full suite 142 passed.
 Compileall/offline upgrade+downgrade/import/diff checks pass; real PostgreSQL cycle skipped only because no disposable test URL/server is available.
+
+{2026-07-30 22:35 ET} {agent: Codex} {nervous system Task 6 review correction}
+Aligned the order-request price constraint with the typed contract's lowercase `limit`/`market` values and added a contract-derived regression test.
+Targeted migrations `20 passed`; full nervous-system suite `143 passed`; PostgreSQL integration still awaits the local Docker socket fix.

@@ -82,8 +82,8 @@ class OrderRequest(Base):
             name="ck_ns_order_requests_nonnegative_values",
         ),
         CheckConstraint(
-            "((order_type = 'LIMIT' AND net_limit_price IS NOT NULL AND net_limit_price > 0) OR "
-            "(order_type = 'MARKET' AND net_limit_price IS NULL))",
+            "((order_type = 'limit' AND net_limit_price IS NOT NULL AND net_limit_price > 0) OR "
+            "(order_type = 'market' AND net_limit_price IS NULL))",
             name="ck_ns_order_requests_limit_price_semantics",
         ),
     )
