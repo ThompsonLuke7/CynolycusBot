@@ -1024,6 +1024,10 @@ Focused `59 passed`; full nervous-system `182 passed`; compileall and diff-check
 Implemented immutable 34-glob source registration, streaming parsers, causal legacy adapters, source-hash/locator/version idempotency, quarantine retention, typed portfolio state, UNASSIGNED ownership candidates, and PostgreSQL-only dry-run CLI; report: `.superpowers/sdd/2026-07-30-cynolycus-nervous-system-mvp/task-8-report.md`.
 Focused Task 8 `13 passed`; full nervous-system `195 passed`; compileall/diff-check/discovery comparison clean. Full unbounded CLI dry-run remains a reviewed batching concern because the worktree exposes 349,383 candidate lines; no persistent-dev import was performed.
 
+{2026-07-31 10:09 ET} {agent: Codex} {nervous system Task 8 historical PostgreSQL import}
+After correction/re-review, the full suite passed `218`; unbounded dry run passed in `31.17s`; empty local `cynolycus` migrated to `0002` and historical write import completed in `224.06s` with status `COMPLETED`.
+Persisted 208 artifacts, 204,449 imported + 28,950 quarantined evidence rows, and 204,449 lineage edges; one malformed JSON row explains parsed-vs-status totals. Raw sources were unchanged.
+
 {2026-07-31 09:48 ET} {agent: Codex} {nervous system Task 8 correction round 1}
 Closed discovery completeness, causal timestamp, PostgreSQL CLI, atomic identity, batching/resumability, source mutation, future leakage, portfolio fail-closed, bounded JSON, and reversible raw-text findings; correction report appended.
 Focused Task 8 `36 passed`; full nervous-system `218 passed`; canonical unbounded dry-run `208 artifacts / 233398 parsed / 204449 imported / 28950 quarantined` in `21.23s`; compileall/diff clean, no persistent-dev import.
