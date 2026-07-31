@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
+import json
 from typing import Any
 
 import pytest
@@ -26,6 +27,13 @@ def _env(**overrides: str) -> dict[str, str]:
     }
     values.update(overrides)
     return values
+
+
+_SECRET_USERNAME = "UNMISTAKABLE_DB_USERNAME_9f3a"
+_SECRET_PASSWORD = "UNMISTAKABLE_DB_PASSWORD_4c7b"
+_SECRET_DATABASE_URL = (
+    f"postgresql+psycopg://{_SECRET_USERNAME}:{_SECRET_PASSWORD}@db/cynolycus"
+)
 
 
 def test_from_env_normalizes_case_and_hyphenated_enum_values() -> None:
@@ -153,6 +161,42 @@ def test_from_env_rejects_nonpositive_pool_values(key: str, value: str) -> None:
 def test_from_env_requires_valid_postgresql_psycopg_url(database_url: str) -> None:
     with pytest.raises(ValidationError, match="postgresql\\+psycopg"):
         NervousSystemSettings.from_env(_env(CYNOLYCUS_DATABASE_URL=database_url))
+
+
+def test_database_credentials_are_redacted_from_public_representations() -> None:
+    settings = NervousSystemSettings.from_env(
+        _env(CYNOLYCUS_DATABASE_URL=_SECRET_DATABASE_URL)
+    )
+
+    rendered = "\n".join(
+        (
+            repr(settings),
+            str(settings),
+            json.dumps(settings.model_dump(mode="json")),
+            settings.model_dump_json(),
+        )
+    )
+
+    assert _SECRET_USERNAME not in rendered
+    assert _SECRET_PASSWORD not in rendered
+    assert isinstance(settings.database_url, str)
+    assert settings.database_url == _SECRET_DATABASE_URL
+    assert settings.model_dump()["database_url"] != _SECRET_DATABASE_URL
+
+
+def test_database_credentials_are_hidden_from_url_validation_errors() -> None:
+    invalid_url = (
+        f"postgresql+psycopg://{_SECRET_USERNAME}:{_SECRET_PASSWORD}@db"
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        NervousSystemSettings.from_env(
+            _env(CYNOLYCUS_DATABASE_URL=invalid_url)
+        )
+
+    message = str(exc_info.value)
+    assert _SECRET_USERNAME not in message
+    assert _SECRET_PASSWORD not in message
 
 
 def test_production_live_is_parseable_without_a_live_execution_path() -> None:

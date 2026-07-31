@@ -983,3 +983,7 @@ Validation: 38 focused Task 2–4/base tests, 74 core nervous-system tests, py_c
 {2026-07-30 20:45 ET} {agent: Codex} {nervous system Task 5 runtime/config}
 Added immutable settings from the exact CYNOLYCUS environment contract, enum normalization, missing-key aggregation, QA-paper/GCS/pool/URL boundaries, safe `model_copy` revalidation, and SQLAlchemy engine/session/healthcheck interfaces.
 Focused Task 5 tests `19 passed`; all core nervous-system tests `107 passed`; compile/import/static checks pass. Docker/PostgreSQL runtime was not available; the single commit attempt is next.
+
+{2026-07-30 20:56 ET} {agent: Codex} {nervous system Task 5 correction round 1}
+Redacted database credentials from settings `repr`/`str`/`model_dump`/JSON and URL validation errors while preserving the plain validated URL and unchanged SQLAlchemy factory behavior; added adversarial regressions.
+Focused tests `21 passed`; all core nervous-system tests `109 passed`; py_compile, compileall, secret probes, and diff check pass. One correction commit attempt is next.
