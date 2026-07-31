@@ -1015,3 +1015,7 @@ The earlier psycopg failure was isolated to Codex localhost sandbox denial; Post
 {2026-07-30 23:20 ET} {agent: Codex} {nervous system Task 7 persistence}
 Added causal repositories, shared UOW, typed decision/execution/registry/outbox persistence, and aligned order/execution contracts with tamper-resistant hashes.
 Focused Task 7 tests `63 passed`; all core nervous-system tests `175 passed`; disposable PostgreSQL migration cycle, compileall, and diff-check pass. Commit is next.
+
+{2026-07-30 23:47 ET} {agent: Codex} {nervous system Task 7 correction}
+Closed failed-decision persistence, atomic outbox enqueue, strict UTC, and canonical config-hash review findings with focused regression coverage.
+Focused `59 passed`; full nervous-system `182 passed`; compileall and diff-check clean; correction report appended and commit amended.

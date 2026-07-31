@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+import json
+from threading import Barrier
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import event, func, select
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import Session
 
 from core.nervous_system.persistence.repositories.operations import OperationsRepository
+from core.nervous_system.persistence.models import OutboxEvent
 from core.nervous_system.persistence.repositories.registry import (
+    ConfigSnapshotRecord,
     ImportItemRecord,
     ImportQuarantineRecord,
     ImportRunRecord,
@@ -21,22 +29,29 @@ NOW = datetime(2026, 7, 30, 18, 20, tzinfo=timezone.utc)
 
 
 class _Result:
+    def __init__(self, rows=()):
+        self._rows = list(rows)
+
     def scalars(self):
         return self
 
     def all(self):
-        return []
+        return list(self._rows)
+
+    def first(self):
+        return self._rows[0] if self._rows else None
 
 
 class _Session:
     def __init__(self):
         self.statements = []
         self.added = []
+        self.rows = {}
         self.flushes = 0
         self.commits = 0
 
-    def get(self, *_args):
-        return None
+    def get(self, _model, identifier):
+        return self.rows.get(identifier)
 
     def add(self, value):
         self.added.append(value)
@@ -46,6 +61,13 @@ class _Session:
 
     def execute(self, statement):
         self.statements.append(statement)
+        if statement.is_insert:
+            values = statement.compile(dialect=postgresql.dialect()).params
+            row = OutboxEvent(**values)
+            if row.outbox_event_id not in self.rows and not any(
+                existing.event_hash == row.event_hash for existing in self.rows.values()
+            ):
+                self.rows[row.outbox_event_id] = row
         return _Result()
 
 
@@ -73,6 +95,65 @@ def test_enqueue_hash_and_id_are_deterministic_without_committing():
     assert isinstance(first.outbox_event_id, UUID)
     assert first_session.commits == 0
     assert second_session.commits == 0
+
+
+def test_enqueue_rejects_naive_available_at():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        OperationsRepository(_Session()).enqueue(
+            event_type="UTCValidation",
+            aggregate_type="test",
+            aggregate_id="task7-utc-validation",
+            payload={"value": 1},
+            created_at=NOW,
+            available_at=datetime(2026, 7, 30, 18, 20),
+        )
+
+
+def test_enqueue_rejects_non_utc_available_at():
+    with pytest.raises(ValueError, match="UTC"):
+        OperationsRepository(_Session()).enqueue(
+            event_type="UTCValidationOffset",
+            aggregate_type="test",
+            aggregate_id="task7-utc-validation-offset",
+            payload={"value": 1},
+            created_at=NOW,
+            available_at=datetime(
+                2026, 7, 30, 18, 20, tzinfo=timezone(timedelta(hours=-4))
+            ),
+        )
+
+
+def _canonical_config_hash(payload: dict[str, object]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def test_config_snapshot_accepts_hash_matching_canonical_payload():
+    payload = {"nested": {"b": 2, "a": 1}, "enabled": True}
+    snapshot = ConfigSnapshotRecord(
+        config_version="task7-test@1",
+        content_hash=_canonical_config_hash(payload),
+        payload=payload,
+        created_at=NOW,
+    )
+
+    saved = RegistryRepository(_Session()).save_config_snapshot(snapshot)
+
+    assert saved == snapshot
+
+
+def test_config_snapshot_rejects_hash_mismatch_before_write():
+    session = _Session()
+    snapshot = ConfigSnapshotRecord(
+        config_version="task7-test@1",
+        content_hash="a" * 64,
+        payload={"enabled": True},
+        created_at=NOW,
+    )
+
+    with pytest.raises(ValueError, match="content_hash"):
+        RegistryRepository(session).save_config_snapshot(snapshot)
+    assert session.added == []
 
 
 def test_claim_statement_uses_postgresql_skip_locked_and_deterministic_order():
@@ -157,6 +238,53 @@ def test_registry_records_are_typed_and_preserve_raw_quarantine_evidence_offline
     assert edge.source_id == source.source_id
     assert len(session.added) == 5
     assert session.commits == 0
+
+
+@pytest.mark.postgres
+def test_concurrent_identical_enqueue_is_atomic_and_returns_equivalent_records(session_factory):
+    barrier = Barrier(2)
+    first_session = session_factory()
+    second_session = session_factory()
+    tracked_sessions = {first_session, second_session}
+    flushed_sessions: set[Session] = set()
+
+    def synchronize_first_flush(session, _flush_context, _instances):
+        if session in tracked_sessions and session not in flushed_sessions:
+            flushed_sessions.add(session)
+            barrier.wait(timeout=10)
+
+    event.listen(Session, "before_flush", synchronize_first_flush)
+    event_payload = {
+        "event_type": "ConcurrentEnqueue",
+        "aggregate_type": "test",
+        "aggregate_id": f"task7-concurrent-identical-{uuid4().hex}",
+        "payload": {"value": 1},
+        "created_at": NOW,
+        "available_at": NOW + timedelta(minutes=1),
+    }
+
+    def enqueue_once(session):
+        try:
+            record = OperationsRepository(session).enqueue(**event_payload)
+            session.commit()
+            return record
+        finally:
+            session.close()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            records = tuple(executor.map(enqueue_once, (first_session, second_session)))
+    finally:
+        event.remove(Session, "before_flush", synchronize_first_flush)
+
+    assert records[0].outbox_event_id == records[1].outbox_event_id
+    assert records[0].event_hash == records[1].event_hash
+    with session_factory() as session:
+        assert session.scalar(
+            select(func.count()).where(
+                OutboxEvent.event_hash == records[0].event_hash
+            )
+        ) == 1
 
 
 @pytest.mark.postgres

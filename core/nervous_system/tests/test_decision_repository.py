@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
 
-from core.nervous_system.contracts.decisions import DecisionOutcome
+from core.nervous_system.contracts.decisions import DecisionOutcome, DecisionRecord
 from core.nervous_system.persistence.models import DecisionRecord as DecisionRecordRow
 from core.nervous_system.persistence.models import OutboxEvent
 from core.nervous_system.persistence.repositories.decision import (
     CompleteDecisionChain,
     DecisionRepository,
+    _record_from_row,
 )
 from core.nervous_system.persistence.uow import UnitOfWork
 
@@ -141,3 +143,36 @@ def test_decision_outcome_is_validated_against_persisted_record(
     with session_factory() as session:
         with pytest.raises(ValueError, match="decision record"):
             DecisionRepository(session).append_decision_outcome(invalid)
+
+
+@pytest.mark.postgres
+def test_failed_decision_record_persists_status_failure_and_optional_links(session_factory):
+    failure_message = f"risk budget exhausted {uuid4().hex}"
+    failed = DecisionRecord(
+        decision_record_id=uuid4(),
+        decision_time=datetime(2026, 7, 30, 18, 20, tzinfo=timezone.utc),
+        status="FAILED",
+        failure_stage="policy",
+        failure_code="RISK_LIMIT",
+        failure_message=failure_message,
+    )
+
+    with session_factory() as session:
+        repository = DecisionRepository(session)
+        repository.save_decision_record(failed)
+        row = session.get(DecisionRecordRow, failed.decision_record_id)
+        assert row is not None
+        assert row.status == "FAILED"
+        assert row.failure_stage == "policy"
+        assert row.failure_reason == failure_message
+        assert row.snapshot_id is None
+        assert row.intent_id is None
+        assert row.policy_decision_id is None
+        assert row.payload["failure_code"] == "RISK_LIMIT"
+        assert _record_from_row(row) == failed
+        session.commit()
+
+    with session_factory() as session:
+        persisted = session.get(DecisionRecordRow, failed.decision_record_id)
+        assert persisted is not None
+        assert _record_from_row(persisted) == failed

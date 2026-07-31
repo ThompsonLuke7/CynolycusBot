@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import AfterValidator, model_validator
+from pydantic import AfterValidator, Field, model_validator
 from pydantic_core import to_jsonable_python
 
 from .base import (
@@ -76,23 +76,27 @@ class HashedDecisionArtifact(ContractModel):
 class DecisionRecord(ContractModel):
     decision_record_id: UUID
     decision_time: UtcDatetime
-    snapshot_id: UUID
-    intent_id: UUID
-    policy_decision_id: UUID
-    order_request_ids: tuple[UUID, ...]
-    source_manifest_hash: Sha256Hex
-    snapshot_hash: Sha256Hex
-    intent_hash: Sha256Hex
-    policy_hash: Sha256Hex
-    raw_strategy_output: HashedDecisionArtifact
-    exposure_report: HashedDecisionArtifact
-    instrument_candidates: HashedDecisionArtifact
-    instrument_selection: HashedDecisionArtifact
-    order_hashes: tuple[Sha256Hex, ...]
-    config_hash: Sha256Hex
-    model_versions: ImmutableStringMap
-    feature_versions: ImmutableStringMap
-    schema_version: PositiveSchemaVersion
+    status: Literal["COMPLETE", "FAILED"] = "COMPLETE"
+    snapshot_id: UUID | None = None
+    intent_id: UUID | None = None
+    policy_decision_id: UUID | None = None
+    order_request_ids: tuple[UUID, ...] = ()
+    source_manifest_hash: Sha256Hex | None = None
+    snapshot_hash: Sha256Hex | None = None
+    intent_hash: Sha256Hex | None = None
+    policy_hash: Sha256Hex | None = None
+    raw_strategy_output: HashedDecisionArtifact | None = None
+    exposure_report: HashedDecisionArtifact | None = None
+    instrument_candidates: HashedDecisionArtifact | None = None
+    instrument_selection: HashedDecisionArtifact | None = None
+    order_hashes: tuple[Sha256Hex, ...] = ()
+    config_hash: Sha256Hex | None = None
+    model_versions: ImmutableStringMap = Field(default_factory=dict)
+    feature_versions: ImmutableStringMap = Field(default_factory=dict)
+    schema_version: PositiveSchemaVersion = 1
+    failure_stage: str | None = None
+    failure_code: str | None = None
+    failure_message: str | None = None
 
     @model_validator(mode="after")
     def validate_decision_links(self) -> DecisionRecord:
@@ -100,14 +104,45 @@ class DecisionRecord(ContractModel):
             raise ValueError("order request IDs and hashes must be one-to-one")
         if len(set(self.order_request_ids)) != len(self.order_request_ids):
             raise ValueError("order request IDs must be unique")
+        links = (
+            ("snapshot", self.snapshot_id, self.snapshot_hash),
+            ("intent", self.intent_id, self.intent_hash),
+            ("policy", self.policy_decision_id, self.policy_hash),
+        )
+        for link_name, link_id, link_hash in links:
+            if (link_id is None) != (link_hash is None):
+                raise ValueError(f"{link_name} link and hash must be supplied together")
+
+        if self.status == "FAILED":
+            if not self.failure_stage:
+                raise ValueError("FAILED decision records require failure_stage")
+            if not self.failure_code:
+                raise ValueError("FAILED decision records require failure_code")
+            if not self.failure_message:
+                raise ValueError("FAILED decision records require failure_message")
+            return self
+
+        if any((self.failure_stage, self.failure_code, self.failure_message)):
+            raise ValueError("COMPLETE decision records cannot contain failure fields")
+        if any(link_id is None for _, link_id, _ in links):
+            raise ValueError(
+                "COMPLETE decision records require snapshot, intent, and policy links"
+            )
+        if any(link_hash is None for _, _, link_hash in links):
+            raise ValueError(
+                "COMPLETE decision records require snapshot, intent, and policy hashes"
+            )
         artifacts = (
             self.raw_strategy_output,
             self.exposure_report,
             self.instrument_candidates,
             self.instrument_selection,
         )
+        if any(artifact is None for artifact in artifacts):
+            raise ValueError("COMPLETE decision records require all decision artifacts")
         seen_not_run = False
         for artifact in artifacts:
+            assert artifact is not None
             if not artifact.payload:
                 raise ValueError("decision stages must contain explicit artifact payloads")
             is_not_run = artifact.payload.get("status") == "NOT_RUN"
@@ -157,6 +192,8 @@ class DecisionOutcome(ContractModel):
     def validate_against(self, decision_record: DecisionRecord) -> DecisionOutcome:
         if self.decision_record_id != decision_record.decision_record_id:
             raise ValueError("outcome does not reference the supplied decision record")
+        if decision_record.status != "COMPLETE":
+            raise ValueError("outcomes require complete decision records")
         if self.evaluated_at < decision_record.decision_time:
             raise ValueError("outcome evaluated_at must not precede decision_time")
         return self

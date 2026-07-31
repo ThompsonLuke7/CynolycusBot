@@ -42,6 +42,8 @@ class CompleteDecisionChain:
     order_requests: tuple[OrderRequest, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.record.status != "COMPLETE":
+            raise ValueError("CompleteDecisionChain requires a COMPLETE decision record")
         if self.snapshot.content_hash != self.snapshot.computed_content_hash():
             raise ValueError("decision chain snapshot content_hash does not match snapshot")
         if self.intent.snapshot_id != self.snapshot.snapshot_id:
@@ -94,14 +96,21 @@ def _record_from_row(row: DecisionRecordRow) -> DecisionRecord:
     expected_hash = _hash_without_identity(record, "decision_record_id")
     if row.content_hash != expected_hash:
         raise ValueError("decision record content_hash does not match payload")
-    if row.status != "COMPLETE":
-        raise ValueError("only complete decision records can have typed outcomes")
-    if row.snapshot_id != record.snapshot_id:
-        raise ValueError("decision record snapshot link does not match payload")
-    if row.intent_id != record.intent_id:
-        raise ValueError("decision record intent link does not match payload")
-    if row.policy_decision_id != record.policy_decision_id:
-        raise ValueError("decision record policy link does not match payload")
+    if row.status != record.status:
+        raise ValueError("decision record status does not match payload")
+    for field_name in ("snapshot_id", "intent_id", "policy_decision_id"):
+        if getattr(row, field_name) != getattr(record, field_name):
+            raise ValueError(f"decision record {field_name} link does not match payload")
+    if row.status == "COMPLETE":
+        if any((row.failure_stage, row.failure_reason)):
+            raise ValueError("complete decision record cannot contain failure fields")
+    elif row.status == "FAILED":
+        if row.failure_stage != record.failure_stage:
+            raise ValueError("decision record failure_stage does not match payload")
+        if row.failure_reason != record.failure_message:
+            raise ValueError("decision record failure_message does not match payload")
+    else:
+        raise ValueError("decision record has an unsupported status")
     return record
 
 
@@ -195,6 +204,7 @@ class DecisionRepository:
         self._session.flush()
 
     def save_decision_record(self, record: DecisionRecord) -> None:
+        failure_reason = record.failure_message if record.status == "FAILED" else None
         self._session.add(
             DecisionRecordRow(
                 decision_record_id=record.decision_record_id,
@@ -202,9 +212,9 @@ class DecisionRepository:
                 snapshot_id=record.snapshot_id,
                 intent_id=record.intent_id,
                 policy_decision_id=record.policy_decision_id,
-                status="COMPLETE",
-                failure_stage=None,
-                failure_reason=None,
+                status=record.status,
+                failure_stage=record.failure_stage,
+                failure_reason=failure_reason,
                 content_hash=_hash_without_identity(record, "decision_record_id"),
                 payload=record.model_dump(mode="json"),
                 created_at=record.decision_time,

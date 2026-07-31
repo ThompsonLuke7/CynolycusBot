@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 from pydantic_core import to_jsonable_python
 from sqlalchemy import or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from core.nervous_system.persistence.models import OutboxEvent as OutboxEventRow
@@ -36,8 +37,8 @@ class OutboxEventRecord:
 
 
 def _aware(value: datetime, field_name: str) -> None:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field_name} must be timezone-aware")
+    if value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise ValueError(f"{field_name} must be timezone-aware UTC")
 
 
 def _event_hash(
@@ -109,35 +110,35 @@ class OperationsRepository:
         aggregate_id = str(aggregate_id)
         event_hash = _event_hash(event_type, aggregate_type, aggregate_id, payload)
         event_id = _event_id(event_hash)
-        existing = self._session.get(OutboxEventRow, event_id)
-        if existing is not None:
-            expected = _event_hash(
-                existing.event_type,
-                existing.aggregate_type,
-                existing.aggregate_id,
-                existing.payload,
-            )
-            if existing.event_hash != event_hash or expected != existing.event_hash:
-                raise ValueError("existing outbox row failed deterministic hash validation")
-            return _record(existing)
-
         created = created_at or datetime.now(timezone.utc)
         available = available_at or created
         _aware(created, "created_at")
         _aware(available, "available_at")
-        row = OutboxEventRow(
-            outbox_event_id=event_id,
-            event_type=event_type,
-            aggregate_type=aggregate_type,
-            aggregate_id=aggregate_id,
-            payload=dict(payload),
-            created_at=created,
-            available_at=available,
-            delivery_attempts=0,
-            event_hash=event_hash,
+        values = {
+            "outbox_event_id": event_id,
+            "event_type": event_type,
+            "aggregate_type": aggregate_type,
+            "aggregate_id": aggregate_id,
+            "payload": dict(payload),
+            "created_at": created,
+            "available_at": available,
+            "delivery_attempts": 0,
+            "event_hash": event_hash,
+        }
+        self._session.execute(
+            pg_insert(OutboxEventRow.__table__)
+            .values(**values)
+            .on_conflict_do_nothing()
         )
-        self._session.add(row)
-        self._session.flush()
+        row = self._session.get(OutboxEventRow, event_id)
+        if row is None:
+            row = self._session.execute(
+                select(OutboxEventRow).where(OutboxEventRow.event_hash == event_hash)
+            ).scalars().first()
+        if row is None:
+            raise RuntimeError("outbox enqueue did not produce or find its deterministic row")
+        if row.event_hash != event_hash:
+            raise ValueError("outbox conflict contains a non-identical payload")
         return _record(row)
 
     def claim(

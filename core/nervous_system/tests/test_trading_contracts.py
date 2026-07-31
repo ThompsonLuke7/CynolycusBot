@@ -245,12 +245,44 @@ def _decision(**updates: object) -> DecisionRecord:
     return DecisionRecord(**payload)
 
 
+def _failed_decision(**updates: object) -> DecisionRecord:
+    payload: dict[str, object] = {
+        "decision_record_id": uuid4(),
+        "decision_time": NOW,
+        "status": "FAILED",
+        "failure_stage": "policy",
+        "failure_code": "RISK_LIMIT",
+        "failure_message": "risk budget exhausted",
+    }
+    payload.update(updates)
+    return DecisionRecord(**payload)
+
+
 def test_uncalibrated_meta_intent_keeps_probability_null_and_copy_revalidates():
     intent = _intent()
 
     assert intent.raw_probability is None
     with pytest.raises(ValidationError):
         intent.model_copy(update={"raw_probability": 1.01})
+
+
+def test_failed_decision_record_is_typed_without_complete_chain_links():
+    record = _failed_decision()
+
+    assert record.status == "FAILED"
+    assert record.snapshot_id is None
+    assert record.intent_id is None
+    assert record.policy_decision_id is None
+    assert record.failure_stage == "policy"
+    assert record.failure_code == "RISK_LIMIT"
+    assert record.failure_message == "risk budget exhausted"
+
+    with pytest.raises(ValidationError, match="failure_code"):
+        _failed_decision(failure_code=None)
+    with pytest.raises(ValidationError, match="failure_message"):
+        _failed_decision(failure_message=None)
+    with pytest.raises(ValidationError, match="COMPLETE"):
+        _decision(status="COMPLETE", snapshot_id=None)
 
 
 @pytest.mark.parametrize("field", ["position_size_requested", "preferred_entry", "target", "stop"])

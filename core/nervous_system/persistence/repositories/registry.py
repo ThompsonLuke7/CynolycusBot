@@ -5,10 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+import hashlib
+import json
 import re
 from typing import Any
 from uuid import UUID, uuid4
 
+from pydantic_core import to_jsonable_python
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -97,6 +100,17 @@ def _validate_hash(value: str, field_name: str) -> None:
 def _validate_time(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
+
+
+def _canonical_payload_hash(payload: Mapping[str, Any]) -> str:
+    normalized = to_jsonable_python(dict(payload))
+    encoded = json.dumps(
+        normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _one_or_none(result: Any) -> Any:
@@ -230,6 +244,8 @@ class RegistryRepository:
 
     def save_config_snapshot(self, snapshot: ConfigSnapshotRecord) -> ConfigSnapshotRecord:
         _validate_hash(snapshot.content_hash, "content_hash")
+        if snapshot.content_hash.lower() != _canonical_payload_hash(snapshot.payload):
+            raise ValueError("content_hash does not match configuration payload")
         _validate_time(snapshot.created_at, "created_at")
         self._session.add(
             ConfigSnapshotRow(
