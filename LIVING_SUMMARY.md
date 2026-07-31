@@ -987,3 +987,7 @@ Focused Task 5 tests `19 passed`; all core nervous-system tests `107 passed`; co
 {2026-07-30 20:56 ET} {agent: Codex} {nervous system Task 5 correction round 1}
 Redacted database credentials from settings `repr`/`str`/`model_dump`/JSON and URL validation errors while preserving the plain validated URL and unchanged SQLAlchemy factory behavior; added adversarial regressions.
 Focused tests `21 passed`; all core nervous-system tests `109 passed`; py_compile, compileall, secret probes, and diff check pass. One correction commit attempt is next.
+
+{2026-07-30 21:10 ET} {agent: Codex} {nervous system Task 5 correction round 2}
+Sanitized structured `ValidationError.errors()`/`.json()` inputs at the settings construction and copy boundaries, including percent-encoded credentials, while preserving actionable types, locations, messages, and the plain internal database URL.
+Focused tests `27 passed`; all core nervous-system tests `115 passed`; py_compile, compileall, recursive secret probes, and diff check pass. One correction commit attempt is next.

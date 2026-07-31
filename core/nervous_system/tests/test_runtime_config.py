@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 import json
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from pydantic import ValidationError
@@ -34,6 +35,57 @@ _SECRET_PASSWORD = "UNMISTAKABLE_DB_PASSWORD_4c7b"
 _SECRET_DATABASE_URL = (
     f"postgresql+psycopg://{_SECRET_USERNAME}:{_SECRET_PASSWORD}@db/cynolycus"
 )
+_STRUCTURED_USERNAME = "structured.user+qa@example.com"
+_STRUCTURED_PASSWORD = "structured:password/with@symbols"
+_STRUCTURED_USERNAME_ENCODED = quote(_STRUCTURED_USERNAME, safe="")
+_STRUCTURED_PASSWORD_ENCODED = quote(_STRUCTURED_PASSWORD, safe="")
+_STRUCTURED_DATABASE_URL = (
+    "postgresql+psycopg://"
+    f"{_STRUCTURED_USERNAME_ENCODED}:{_STRUCTURED_PASSWORD_ENCODED}"
+    "@db/cynolycus"
+)
+
+
+def _structured_qa_payload() -> dict[str, str]:
+    return {
+        "environment": "QA_PAPER",
+        "policy_mode": "SHADOW",
+        "database_url": _STRUCTURED_DATABASE_URL,
+        "operational_root": "Data/operational/nervous_system",
+        "journal_backend": "gcs",
+        "gcs_bucket": "qa-journal",
+        "account_alias": "live",
+    }
+
+
+def _assert_validation_error_is_secret_free(error: ValidationError) -> None:
+    secrets = (
+        _STRUCTURED_USERNAME,
+        _STRUCTURED_PASSWORD,
+        _STRUCTURED_USERNAME_ENCODED,
+        _STRUCTURED_PASSWORD_ENCODED,
+    )
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                visit(key)
+                visit(nested)
+            return
+        if isinstance(value, (list, tuple, set, frozenset)):
+            for nested in value:
+                visit(nested)
+            return
+        rendered = f"{value!r} {value}"
+        assert all(secret not in rendered for secret in secrets)
+
+    details = error.errors()
+    assert details
+    assert details[0]["loc"] == ()
+    assert "QA_PAPER requires the paper account alias" in details[0]["msg"]
+    visit(details)
+    rendered_json = error.json()
+    assert all(secret not in rendered_json for secret in secrets)
 
 
 def test_from_env_normalizes_case_and_hyphenated_enum_values() -> None:
@@ -197,6 +249,73 @@ def test_database_credentials_are_hidden_from_url_validation_errors() -> None:
     message = str(exc_info.value)
     assert _SECRET_USERNAME not in message
     assert _SECRET_PASSWORD not in message
+
+
+def test_from_env_structured_errors_redact_percent_encoded_credentials() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        NervousSystemSettings.from_env(
+            _env(
+                CYNOLYCUS_ENVIRONMENT="qa-paper",
+                CYNOLYCUS_DATABASE_URL=_STRUCTURED_DATABASE_URL,
+                CYNOLYCUS_EXECUTION_JOURNAL="gcs",
+                CYNOLYCUS_EXECUTION_JOURNAL_BUCKET="qa-journal",
+                CYNOLYCUS_ACCOUNT_ALIAS="live",
+            )
+        )
+
+    assert "QA_PAPER requires the paper account alias" in str(exc_info.value)
+    _assert_validation_error_is_secret_free(exc_info.value)
+
+
+def test_direct_model_validate_structured_errors_are_secret_free() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        NervousSystemSettings.model_validate(_structured_qa_payload())
+
+    assert "QA_PAPER requires the paper account alias" in str(exc_info.value)
+    _assert_validation_error_is_secret_free(exc_info.value)
+
+
+def test_model_validate_json_structured_errors_are_secret_free() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        NervousSystemSettings.model_validate_json(
+            json.dumps(_structured_qa_payload())
+        )
+
+    assert "QA_PAPER requires the paper account alias" in str(exc_info.value)
+    _assert_validation_error_is_secret_free(exc_info.value)
+
+
+def test_model_validate_strings_structured_errors_are_secret_free() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        NervousSystemSettings.model_validate_strings(_structured_qa_payload())
+
+    assert "QA_PAPER requires the paper account alias" in str(exc_info.value)
+    _assert_validation_error_is_secret_free(exc_info.value)
+
+
+def test_direct_construction_structured_errors_are_secret_free() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        NervousSystemSettings(**_structured_qa_payload())
+
+    assert "QA_PAPER requires the paper account alias" in str(exc_info.value)
+    _assert_validation_error_is_secret_free(exc_info.value)
+
+
+def test_model_copy_structured_errors_are_secret_free() -> None:
+    settings = NervousSystemSettings.from_env(
+        _env(
+            CYNOLYCUS_ENVIRONMENT="qa-paper",
+            CYNOLYCUS_DATABASE_URL=_STRUCTURED_DATABASE_URL,
+            CYNOLYCUS_EXECUTION_JOURNAL="gcs",
+            CYNOLYCUS_EXECUTION_JOURNAL_BUCKET="qa-journal",
+        )
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        settings.model_copy(update={"account_alias": "live"})
+
+    assert "QA_PAPER requires the paper account alias" in str(exc_info.value)
+    _assert_validation_error_is_secret_free(exc_info.value)
 
 
 def test_production_live_is_parseable_without_a_live_execution_path() -> None:

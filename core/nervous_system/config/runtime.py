@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import os
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Literal, NoReturn, Self
 
 from pydantic import (
     BaseModel,
@@ -71,6 +71,51 @@ def _redact_database_url(value: str) -> str:
     return parsed_url.render_as_string(hide_password=True)
 
 
+def _sanitize_error_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            _sanitize_error_value(key): _sanitize_error_value(nested)
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_error_value(nested) for nested in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_error_value(nested) for nested in value)
+    if isinstance(value, (set, frozenset)):
+        return type(value)(_sanitize_error_value(nested) for nested in value)
+    if isinstance(value, BaseException):
+        return ValueError(_sanitize_error_text(str(value)))
+    if isinstance(value, str) and value.lower().startswith(
+        ("postgresql+psycopg://", "postgresql://")
+    ):
+        return _redact_database_url(value)
+    return value
+
+
+def _sanitize_error_text(value: str) -> str:
+    if value.lower().startswith(("postgresql+psycopg://", "postgresql://")):
+        return _redact_database_url(value)
+    return value
+
+
+def _sanitize_validation_error(error: ValidationError) -> ValidationError:
+    line_errors: list[dict[str, Any]] = []
+    for detail in error.errors(include_context=True, include_url=False):
+        sanitized: dict[str, Any] = {
+            "type": detail["type"],
+            "loc": detail["loc"],
+            "input": _sanitize_error_value(detail.get("input")),
+        }
+        if "ctx" in detail:
+            sanitized["ctx"] = _sanitize_error_value(detail["ctx"])
+        line_errors.append(sanitized)
+    return ValidationError.from_exception_data(error.title, line_errors)
+
+
+def _raise_sanitized_validation_error(error: ValidationError) -> NoReturn:
+    raise _sanitize_validation_error(error) from None
+
+
 class NervousSystemSettings(ContractModel):
     """Immutable, validated configuration for one nervous-system process."""
 
@@ -85,6 +130,26 @@ class NervousSystemSettings(ContractModel):
     journal_backend: Literal["local", "gcs"]
     gcs_bucket: str | None = None
     account_alias: str
+
+    def __init__(self, **data: Any) -> None:
+        try:
+            super().__init__(**data)
+        except ValidationError as error:
+            _raise_sanitized_validation_error(error)
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> Self:
+        try:
+            return super().model_validate(obj, **kwargs)
+        except ValidationError as error:
+            _raise_sanitized_validation_error(error)
+
+    @classmethod
+    def model_validate_strings(cls, obj: Any, **kwargs: Any) -> Self:
+        try:
+            return super().model_validate_strings(obj, **kwargs)
+        except ValidationError as error:
+            _raise_sanitized_validation_error(error)
 
     @field_serializer("database_url")
     def serialize_database_url(self, value: str) -> str:
