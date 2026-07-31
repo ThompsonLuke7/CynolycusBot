@@ -995,3 +995,7 @@ Focused tests `27 passed`; all core nervous-system tests `115 passed`; py_compil
 {2026-07-30 21:24 ET} {agent: Codex} {nervous system Task 5 correction round 3}
 Fixed the sanitizer’s secondary `path_type` failure by passing through credential-safe Pydantic errors and preserving unsupported types in mixed redaction cases; added built-in error and secret-output probes.
 Focused `35 passed`; all core nervous-system tests `123 passed`; py_compile/compileall/imports and diff check pass. One correction commit attempt is next.
+
+{2026-07-30 22:18 ET} {agent: Codex} {nervous system Task 6 PostgreSQL schema}
+Added the exact 23-table ORM/Alembic schema with audited decision, execution, journal, job, outbox, and recovery constraints; targeted 19 passed and full suite 142 passed.
+Compileall/offline upgrade+downgrade/import/diff checks pass; real PostgreSQL cycle skipped only because no disposable test URL/server is available.
