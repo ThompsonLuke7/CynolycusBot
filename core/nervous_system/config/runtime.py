@@ -15,6 +15,7 @@ from pydantic import (
     field_serializer,
     model_validator,
 )
+from pydantic_core import PydanticCustomError
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
@@ -98,11 +99,53 @@ def _sanitize_error_text(value: str) -> str:
     return value
 
 
+def _contains_database_url(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            _contains_database_url(key) or _contains_database_url(nested)
+            for key, nested in value.items()
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_contains_database_url(nested) for nested in value)
+    if isinstance(value, BaseException):
+        return _contains_database_url(str(value))
+    return isinstance(value, str) and value.lower().startswith(
+        ("postgresql+psycopg://", "postgresql://")
+    )
+
+
+def _reconstruction_error_type(
+    title: str,
+    detail: Mapping[str, Any],
+) -> Any:
+    try:
+        ValidationError.from_exception_data(
+            title,
+            [dict(detail)],
+        )
+    except KeyError:
+        context = detail.get("ctx")
+        return PydanticCustomError(
+            str(detail["type"]),
+            str(detail["msg"]),
+            context if isinstance(context, Mapping) else None,
+        )
+    return detail["type"]
+
+
 def _sanitize_validation_error(error: ValidationError) -> ValidationError:
+    details = error.errors(include_context=True, include_url=False)
+    if not any(
+        _contains_database_url(detail.get("input"))
+        or _contains_database_url(detail.get("ctx"))
+        for detail in details
+    ):
+        return error
+
     line_errors: list[dict[str, Any]] = []
-    for detail in error.errors(include_context=True, include_url=False):
+    for detail in details:
         sanitized: dict[str, Any] = {
-            "type": detail["type"],
+            "type": _reconstruction_error_type(error.title, detail),
             "loc": detail["loc"],
             "input": _sanitize_error_value(detail.get("input")),
         }

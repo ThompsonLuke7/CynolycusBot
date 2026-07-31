@@ -88,6 +88,160 @@ def _assert_validation_error_is_secret_free(error: ValidationError) -> None:
     assert all(secret not in rendered_json for secret in secrets)
 
 
+def _builtin_error_payload() -> dict[str, Any]:
+    return {
+        "environment": "DEVELOPMENT",
+        "policy_mode": "OFF",
+        "database_url": _STRUCTURED_DATABASE_URL,
+        "operational_root": "Data/operational/nervous_system",
+        "journal_backend": "local",
+        "account_alias": "paper",
+    }
+
+
+def _assert_builtin_error_is_secret_free(
+    error: ValidationError,
+    *,
+    expected_type: str,
+    expected_loc: tuple[str, ...],
+    expected_message: str,
+) -> None:
+    details = error.errors()
+    assert len(details) == 1
+    assert details[0]["type"] == expected_type
+    assert details[0]["loc"] == expected_loc
+    assert details[0]["msg"] == expected_message
+
+    secrets = (
+        _STRUCTURED_USERNAME,
+        _STRUCTURED_PASSWORD,
+        _STRUCTURED_USERNAME_ENCODED,
+        _STRUCTURED_PASSWORD_ENCODED,
+    )
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                visit(key)
+                visit(nested)
+            return
+        if isinstance(value, (list, tuple, set, frozenset)):
+            for nested in value:
+                visit(nested)
+            return
+        rendered = f"{value!r} {value}"
+        assert all(secret not in rendered for secret in secrets)
+
+    visit(details)
+    rendered_json = error.json()
+    assert all(secret not in rendered_json for secret in secrets)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "remove", "expected_type", "expected_message"),
+    [
+        (
+            "operational_root",
+            object(),
+            False,
+            "path_type",
+            "Input is not a valid path for <class 'pathlib.Path'>",
+        ),
+        (
+            "db_pool_size",
+            "not-an-int",
+            False,
+            "int_parsing",
+            "Input should be a valid integer, unable to parse string as an integer",
+        ),
+        (
+            "db_pool_size",
+            0,
+            False,
+            "greater_than",
+            "Input should be greater than 0",
+        ),
+        (
+            "journal_backend",
+            "not-a-backend",
+            False,
+            "literal_error",
+            "Input should be 'local' or 'gcs'",
+        ),
+        (
+            "environment",
+            "NOT_AN_ENVIRONMENT",
+            False,
+            "enum",
+            "Input should be 'DEVELOPMENT', 'QA_PAPER' or 'PRODUCTION_LIVE'",
+        ),
+        (
+            "surprise",
+            True,
+            False,
+            "extra_forbidden",
+            "Extra inputs are not permitted",
+        ),
+        (
+            "account_alias",
+            None,
+            True,
+            "missing",
+            "Field required",
+        ),
+    ],
+)
+def test_builtin_validation_errors_preserve_details_without_secret_leaks(
+    field: str,
+    value: Any,
+    remove: bool,
+    expected_type: str,
+    expected_message: str,
+) -> None:
+    payload = _builtin_error_payload()
+    if remove:
+        payload.pop(field)
+    else:
+        payload[field] = value
+
+    with pytest.raises(ValidationError) as exc_info:
+        NervousSystemSettings.model_validate(payload)
+
+    _assert_builtin_error_is_secret_free(
+        exc_info.value,
+        expected_type=expected_type,
+        expected_loc=(field,),
+        expected_message=expected_message,
+    )
+
+
+def test_mixed_validation_errors_redact_database_input_without_secondary_errors() -> None:
+    payload = _builtin_error_payload()
+    payload["operational_root"] = object()
+    payload.pop("account_alias")
+
+    with pytest.raises(ValidationError) as exc_info:
+        NervousSystemSettings.model_validate(payload)
+
+    details = exc_info.value.errors()
+    assert [(detail["type"], detail["loc"], detail["msg"]) for detail in details] == [
+        (
+            "path_type",
+            ("operational_root",),
+            "Input is not a valid path for <class 'pathlib.Path'>",
+        ),
+        ("missing", ("account_alias",), "Field required"),
+    ]
+    rendered = f"{str(exc_info.value)}\n{details!r}\n{exc_info.value.json()}"
+    for secret in (
+        _STRUCTURED_USERNAME,
+        _STRUCTURED_PASSWORD,
+        _STRUCTURED_USERNAME_ENCODED,
+        _STRUCTURED_PASSWORD_ENCODED,
+    ):
+        assert secret not in rendered
+
+
 def test_from_env_normalizes_case_and_hyphenated_enum_values() -> None:
     settings = NervousSystemSettings.from_env(
         _env(

@@ -991,3 +991,7 @@ Focused tests `21 passed`; all core nervous-system tests `109 passed`; py_compil
 {2026-07-30 21:10 ET} {agent: Codex} {nervous system Task 5 correction round 2}
 Sanitized structured `ValidationError.errors()`/`.json()` inputs at the settings construction and copy boundaries, including percent-encoded credentials, while preserving actionable types, locations, messages, and the plain internal database URL.
 Focused tests `27 passed`; all core nervous-system tests `115 passed`; py_compile, compileall, recursive secret probes, and diff check pass. One correction commit attempt is next.
+
+{2026-07-30 21:24 ET} {agent: Codex} {nervous system Task 5 correction round 3}
+Fixed the sanitizer’s secondary `path_type` failure by passing through credential-safe Pydantic errors and preserving unsupported types in mixed redaction cases; added built-in error and secret-output probes.
+Focused `35 passed`; all core nervous-system tests `123 passed`; py_compile/compileall/imports and diff check pass. One correction commit attempt is next.
