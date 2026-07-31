@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from pydantic import Field, model_validator
@@ -58,11 +58,11 @@ class _OrderRequestHashMaterial(ContractModel):
     legs: tuple[OptionLeg, ...]
     parent_quantity: PositiveDecimal
     debit_credit: DebitCredit
-    net_limit_price: PositiveDecimal
+    net_limit_price: PositiveDecimal | None
     maximum_loss: NonNegativeDecimal
     buying_power_required: NonNegativeDecimal
     time_in_force: str
-    order_type: str
+    order_type: Literal["limit", "market"]
     idempotency_key: str
     quote_snapshot_id: UUID | None
     supersedes_order_request_id: UUID | None
@@ -82,11 +82,11 @@ class OrderRequest(ContractModel):
     legs: tuple[OptionLeg, ...] = ()
     parent_quantity: PositiveDecimal
     debit_credit: DebitCredit
-    net_limit_price: PositiveDecimal
+    net_limit_price: PositiveDecimal | None
     maximum_loss: NonNegativeDecimal
     buying_power_required: NonNegativeDecimal
     time_in_force: str
-    order_type: str
+    order_type: Literal["limit", "market"]
     idempotency_key: str
     request_hash: Sha256Hex
     quote_snapshot_id: UUID | None = None
@@ -132,11 +132,11 @@ class OrderRequest(ContractModel):
         instrument_family: InstrumentFamily,
         parent_quantity: PositiveDecimal,
         debit_credit: DebitCredit,
-        net_limit_price: PositiveDecimal,
+        net_limit_price: PositiveDecimal | None,
         maximum_loss: NonNegativeDecimal,
         buying_power_required: NonNegativeDecimal,
         time_in_force: str,
-        order_type: str,
+        order_type: Literal["limit", "market"],
         idempotency_key: str,
         created_at: UtcDatetime,
         expires_at: UtcDatetime,
@@ -219,7 +219,13 @@ class OrderRequest(ContractModel):
                 )
                 if self.debit_credit is not expected_debit_credit:
                     raise ValueError("single-option side must agree with debit_credit")
-        if self.debit_credit is DebitCredit.CREDIT and self.net_limit_price <= 0:
+        if self.order_type == "limit" and self.net_limit_price is None:
+            raise ValueError("limit orders require a positive non-null net_limit_price")
+        if self.order_type == "market" and self.net_limit_price is not None:
+            raise ValueError("market orders require net_limit_price to be null")
+        if self.debit_credit is DebitCredit.CREDIT and (
+            self.net_limit_price is None or self.net_limit_price <= 0
+        ):
             raise ValueError("credit requests require a positive credit limit magnitude")
         if self.request_hash != self.computed_request_hash():
             raise ValueError("request_hash does not match order request content")

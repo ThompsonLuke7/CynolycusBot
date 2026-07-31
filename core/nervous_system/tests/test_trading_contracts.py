@@ -298,6 +298,48 @@ def test_order_rejects_bad_money_bounds_expiry_and_credit_limit():
         _order(debit_credit=DebitCredit.CREDIT, net_limit_price=Decimal("0"))
 
 
+def test_order_accepts_market_equity_without_limit_price_and_hashes_deterministically():
+    order = _order(
+        instrument_family=InstrumentFamily.EQUITY,
+        equity_symbol="AMD",
+        equity_side=OrderSide.SELL,
+        legs=(),
+        order_type="market",
+        net_limit_price=None,
+    )
+
+    assert order.order_type == "market"
+    assert order.net_limit_price is None
+    assert order.request_hash == order.computed_request_hash()
+    same_content = OrderRequest.create(
+        order_request_id=uuid4(),
+        **order.request_hash_material().model_dump(),
+    )
+    assert same_content.request_hash == order.request_hash
+
+
+def test_order_rejects_limit_without_price():
+    with pytest.raises(
+        ValidationError,
+        match="limit orders require a positive non-null net_limit_price",
+    ):
+        _order(net_limit_price=None)
+
+
+def test_order_rejects_market_with_price():
+    with pytest.raises(
+        ValidationError,
+        match="market orders require net_limit_price to be null",
+    ):
+        _order(order_type="market", net_limit_price=Decimal("5.00"))
+
+
+@pytest.mark.parametrize("order_type", ["stop", "LIMIT", "MARKET"])
+def test_order_rejects_unsupported_or_uppercase_order_types(order_type):
+    with pytest.raises(ValidationError, match="Input should be 'limit' or 'market'"):
+        _order(order_type=order_type)
+
+
 def test_policy_rejects_vetoed_approval_and_nonzero_rejection_budget():
     with pytest.raises(ValidationError):
         _policy(action=PolicyAction.APPROVE, hard_vetoes=("LIVE_DISABLED",))

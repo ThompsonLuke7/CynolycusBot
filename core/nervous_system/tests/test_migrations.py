@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
+from pydantic import ValidationError
 from sqlalchemy import DateTime, Integer, Numeric, String, Text, inspect
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable
@@ -676,26 +677,46 @@ def test_order_type_check_matches_lowercase_contract_and_price_semantics() -> No
     from core.nervous_system.contracts.orders import OrderRequest
 
     created_at = datetime(2026, 7, 30, 14, 30, tzinfo=timezone.utc)
-    request = OrderRequest.create(
-        decision_id=uuid4(),
-        policy_decision_id=uuid4(),
-        environment=RuntimeEnvironment.QA_PAPER,
-        account_alias="paper",
-        instrument_family=InstrumentFamily.EQUITY,
-        equity_symbol="SPY",
-        equity_side=OrderSide.BUY,
-        parent_quantity=Decimal("1"),
-        debit_credit=DebitCredit.DEBIT,
+    common_request_fields = {
+        "decision_id": uuid4(),
+        "policy_decision_id": uuid4(),
+        "environment": RuntimeEnvironment.QA_PAPER,
+        "account_alias": "paper",
+        "instrument_family": InstrumentFamily.EQUITY,
+        "equity_symbol": "SPY",
+        "equity_side": OrderSide.BUY,
+        "parent_quantity": Decimal("1"),
+        "debit_credit": DebitCredit.DEBIT,
+        "maximum_loss": Decimal("125"),
+        "buying_power_required": Decimal("125"),
+        "time_in_force": "day",
+        "created_at": created_at,
+        "expires_at": created_at + timedelta(minutes=5),
+    }
+    limit_request = OrderRequest.create(
+        **common_request_fields,
         net_limit_price=Decimal("1.25"),
-        maximum_loss=Decimal("125"),
-        buying_power_required=Decimal("125"),
-        time_in_force="day",
         order_type="limit",
-        idempotency_key="task-6-lowercase-order-type",
-        created_at=created_at,
-        expires_at=created_at + timedelta(minutes=5),
+        idempotency_key="task-6-lowercase-limit-order",
     )
-    assert request.order_type == "limit"
+    market_request = OrderRequest.create(
+        **common_request_fields,
+        net_limit_price=None,
+        order_type="market",
+        idempotency_key="task-6-lowercase-market-order",
+    )
+    with pytest.raises(ValidationError):
+        OrderRequest.create(
+            **common_request_fields,
+            net_limit_price=None,
+            order_type="stop",
+            idempotency_key="task-6-unsupported-order",
+        )
+
+    assert limit_request.order_type == "limit"
+    assert limit_request.net_limit_price == Decimal("1.25")
+    assert market_request.order_type == "market"
+    assert market_request.net_limit_price is None
 
     checks = {
         constraint.name: str(constraint.sqltext)
@@ -703,17 +724,17 @@ def test_order_type_check_matches_lowercase_contract_and_price_semantics() -> No
         if isinstance(constraint, CheckConstraint)
     }
     check_sql = checks["ck_ns_order_requests_limit_price_semantics"]
-    assert f"order_type = '{request.order_type}'" in check_sql
+    assert f"order_type = '{limit_request.order_type}'" in check_sql
     assert "net_limit_price IS NOT NULL" in check_sql
     assert "net_limit_price > 0" in check_sql
-    assert "order_type = 'market'" in check_sql
+    assert f"order_type = '{market_request.order_type}'" in check_sql
     assert "net_limit_price IS NULL" in check_sql
     assert "order_type = 'LIMIT'" not in check_sql
     assert "order_type = 'MARKET'" not in check_sql
 
     migration_sql = _offline_sql("upgrade")
-    assert f"order_type = '{request.order_type}'" in migration_sql
-    assert "order_type = 'market'" in migration_sql
+    assert f"order_type = '{limit_request.order_type}'" in migration_sql
+    assert f"order_type = '{market_request.order_type}'" in migration_sql
     assert "order_type = 'LIMIT'" not in migration_sql
     assert "order_type = 'MARKET'" not in migration_sql
 

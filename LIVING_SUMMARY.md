@@ -1003,3 +1003,7 @@ Compileall/offline upgrade+downgrade/import/diff checks pass; real PostgreSQL cy
 {2026-07-30 22:35 ET} {agent: Codex} {nervous system Task 6 review correction}
 Aligned the order-request price constraint with the typed contract's lowercase `limit`/`market` values and added a contract-derived regression test.
 Targeted migrations `20 passed`; full nervous-system suite `143 passed`; PostgreSQL integration still awaits the local Docker socket fix.
+
+{2026-07-30 22:43 ET} {agent: Codex} {nervous system Task 6 correction}
+Typed order requests with lowercase limit/market literals and nullable hash/model/create price; added market/invalid semantics and contract-derived migration coverage while preserving hashes/limit behavior.
+Focused `58 passed` + full `149 passed`, each with one PostgreSQL skip; compileall and diff checks clean. Committing correction files now.
