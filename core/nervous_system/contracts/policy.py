@@ -73,13 +73,15 @@ class PolicyDecision(ContractModel):
             raise ValueError("final_risk_budget must not exceed base_risk_budget")
         if self.action in {PolicyAction.APPROVE, PolicyAction.APPROVE_REDUCED} and self.hard_vetoes:
             raise ValueError("approved actions cannot contain hard vetoes")
-        if self.action is PolicyAction.REJECT and self.final_risk_budget != Decimal("0"):
-            raise ValueError("REJECT must have zero final_risk_budget")
         prior = self.base_risk_budget
         for modifier in self.modifiers:
             if modifier.budget_before != prior:
                 raise ValueError("policy modifier budgets must form an ordered chain")
             prior = modifier.budget_after
+        if self.action is PolicyAction.REJECT:
+            if self.final_risk_budget != Decimal("0"):
+                raise ValueError("REJECT must have zero final_risk_budget")
+            return self
         if self.final_risk_budget != prior:
             raise ValueError("final_risk_budget must equal the last modifier budget")
         return self

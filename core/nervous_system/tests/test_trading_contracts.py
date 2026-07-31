@@ -125,12 +125,11 @@ def _order(**updates: object) -> OrderRequest:
         "time_in_force": "day",
         "order_type": "limit",
         "idempotency_key": "ns-test",
-        "request_hash": "a" * 64,
         "created_at": NOW,
         "expires_at": NOW + timedelta(minutes=40),
     }
     payload.update(updates)
-    return OrderRequest(**payload)
+    return OrderRequest.create(**payload)
 
 
 def _modifier(**updates: object) -> PolicyModifier:
@@ -269,14 +268,21 @@ def test_order_rejects_more_than_four_option_legs():
         _order(legs=(_leg(), _leg(), _leg(), _leg(), _leg()))
 
 
-def test_order_enforces_equity_option_exclusivity_and_hash_shape():
+def test_order_enforces_equity_option_exclusivity_and_hash_integrity():
     with pytest.raises(ValidationError):
         _order(equity_symbol="AMD", equity_side=OrderSide.BUY)
     with pytest.raises(ValidationError):
         _order(legs=(), equity_symbol=None, equity_side=OrderSide.BUY)
+
+    order = _order()
+    invalid_hash = order.model_dump()
+    invalid_hash["request_hash"] = "not-a-sha256"
     with pytest.raises(ValidationError):
-        _order(request_hash="not-a-sha256")
-    assert _order(request_hash="A" * 64).request_hash == "a" * 64
+        OrderRequest(**invalid_hash)
+
+    uppercase_hash = order.model_dump()
+    uppercase_hash["request_hash"] = order.request_hash.upper()
+    assert OrderRequest(**uppercase_hash).request_hash == order.request_hash
 
 
 def test_order_rejects_bad_money_bounds_expiry_and_credit_limit():
@@ -301,6 +307,41 @@ def test_policy_rejects_vetoed_approval_and_nonzero_rejection_budget():
         _policy(expires_at=NOW)
     with pytest.raises(ValidationError):
         _policy(action=PolicyAction.APPROVE_REDUCED, hard_vetoes=("LIVE_DISABLED",))
+
+
+@pytest.mark.parametrize("hard_vetoes", [(), ("ENV_DISABLED",)])
+def test_policy_reject_allows_positive_base_and_zero_final_without_modifier(hard_vetoes):
+    decision = _policy(
+        action=PolicyAction.REJECT,
+        base_risk_budget=Decimal("2000"),
+        final_risk_budget=Decimal("0"),
+        hard_vetoes=hard_vetoes,
+        modifiers=(),
+    )
+
+    assert decision.base_risk_budget == Decimal("2000")
+    assert decision.final_risk_budget == Decimal("0")
+
+
+def test_policy_reject_validates_modifier_chain_without_requiring_zeroing_modifier():
+    decision = _policy(
+        action=PolicyAction.REJECT,
+        final_risk_budget=Decimal("0"),
+        modifiers=(_modifier(),),
+    )
+    assert decision.modifiers[-1].budget_after == Decimal("1000")
+
+    misaligned = _modifier(
+        configured_value=Decimal("500"),
+        budget_before=Decimal("1000"),
+        budget_after=Decimal("500"),
+    )
+    with pytest.raises(ValidationError):
+        _policy(
+            action=PolicyAction.REJECT,
+            final_risk_budget=Decimal("0"),
+            modifiers=(misaligned,),
+        )
 
 
 def test_policy_modifiers_form_a_budget_chain():
@@ -341,6 +382,85 @@ def test_single_option_side_determines_debit_or_credit():
     with pytest.raises(ValidationError):
         _order(legs=(sell_leg,), debit_credit=DebitCredit.DEBIT)
     assert _order(legs=(sell_leg,), debit_credit=DebitCredit.CREDIT).debit_credit is DebitCredit.CREDIT
+
+
+def test_order_hash_authenticates_content_across_construction_copy_and_json():
+    order = _order()
+    assert order.request_hash == order.computed_request_hash()
+
+    same_content = OrderRequest.create(
+        order_request_id=uuid4(),
+        **order.request_hash_material().model_dump(),
+    )
+    assert same_content.request_hash == order.request_hash
+    assert order.model_copy(update={"order_request_id": uuid4()}).request_hash == order.request_hash
+    assert OrderRequest.model_validate_json(order.model_dump_json()) == order
+
+    tampered = order.model_dump()
+    tampered["maximum_loss"] = Decimal("501")
+    with pytest.raises(ValidationError):
+        OrderRequest(**tampered)
+    with pytest.raises(ValidationError):
+        order.model_copy(update={"maximum_loss": Decimal("501")})
+    encoded = json.loads(order.model_dump_json())
+    encoded["maximum_loss"] = "501"
+    with pytest.raises(ValidationError):
+        OrderRequest.model_validate_json(json.dumps(encoded))
+
+
+def test_order_hash_preserves_option_leg_order():
+    long_leg = _leg()
+    short_leg = _leg(
+        symbol="AMD260821C00210000",
+        strike=Decimal("210"),
+        side=OrderSide.SELL,
+        position_intent=PositionIntent.SELL_TO_OPEN,
+        bid=Decimal("2.40"),
+        ask=Decimal("2.60"),
+    )
+    order = _order(legs=(long_leg, short_leg))
+    material = order.request_hash_material().model_dump()
+    material["legs"] = (short_leg, long_leg)
+    reversed_order = OrderRequest.create(order_request_id=uuid4(), **material)
+
+    assert reversed_order.request_hash != order.request_hash
+
+
+def test_order_hash_is_stable_across_python_hash_seeds():
+    script = (
+        "from datetime import datetime, timezone; from decimal import Decimal; "
+        "from uuid import UUID; "
+        "from core.nervous_system.contracts.enums import "
+        "DebitCredit, InstrumentFamily, OptionType, OrderSide, PositionIntent, RuntimeEnvironment; "
+        "from core.nervous_system.contracts.orders import OptionLeg, OrderRequest; "
+        "now=datetime(2026,7,30,18,20,tzinfo=timezone.utc); "
+        "leg=OptionLeg(symbol='AMD260821C00200000',underlying='AMD',option_type=OptionType.CALL,"
+        "strike=Decimal('200'),expiration='2026-08-21',side=OrderSide.BUY,ratio=1,"
+        "position_intent=PositionIntent.BUY_TO_OPEN,quote_at=now,bid=Decimal('4.90'),"
+        "ask=Decimal('5.10')); "
+        "order=OrderRequest.create(order_request_id=UUID('00000000-0000-0000-0000-000000000001'),"
+        "decision_id=UUID('00000000-0000-0000-0000-000000000002'),"
+        "policy_decision_id=UUID('00000000-0000-0000-0000-000000000003'),"
+        "environment=RuntimeEnvironment.QA_PAPER,account_alias='paper',"
+        "instrument_family=InstrumentFamily.VERTICAL,legs=(leg,),parent_quantity=1,"
+        "debit_credit=DebitCredit.DEBIT,net_limit_price=Decimal('5.00'),"
+        "maximum_loss=Decimal('500'),buying_power_required=Decimal('500'),"
+        "time_in_force='day',order_type='limit',idempotency_key='ns-test',"
+        "created_at=now,expires_at=now.replace(hour=19)); print(order.request_hash)"
+    )
+    outputs = []
+    for seed in ("1", "2"):
+        env = os.environ.copy()
+        env["PYTHONHASHSEED"] = seed
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        outputs.append(result.stdout.strip())
+    assert outputs[0] == outputs[1]
 
 
 def test_special_payload_values_are_frozen_canonical_and_json_round_trip():
