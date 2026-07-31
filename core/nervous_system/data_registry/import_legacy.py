@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -14,12 +14,17 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
 from core.nervous_system.contracts.base import content_hash
 from core.nervous_system.contracts.decisions import DecisionRecord
 from core.nervous_system.contracts.states import StateEnvelope
-from core.nervous_system.data_registry.artifacts import SourceArtifact, register_artifact
+from core.nervous_system.data_registry.artifacts import (
+    SourceArtifact,
+    register_artifact,
+    snapshot_artifact,
+)
 from core.nervous_system.data_registry.legacy_adapters import (
     LegacyAdapterResult,
     adapt_legacy_record,
@@ -41,7 +46,11 @@ from core.nervous_system.persistence.repositories.registry import (
 from core.nervous_system.persistence.uow import UnitOfWork
 
 
-DISPOSABLE_DATABASE_NAME = "cynolycus_nervous_system_test"
+IMPORT_BATCH_SIZE = 1000
+
+
+class SourceMutationError(ValueError):
+    """Raised when the path no longer represents the registered bytes."""
 
 
 @dataclass(frozen=True)
@@ -66,6 +75,15 @@ class DiscoveryComparison:
     @property
     def complete(self) -> bool:
         return not self.unmatched
+
+    def require_complete(self) -> "DiscoveryComparison":
+        if not self.complete:
+            preview = ", ".join(path.as_posix() for path in self.unmatched[:5])
+            suffix = "" if len(self.unmatched) <= 5 else " ..."
+            raise ValueError(
+                f"unmatched operational evidence ({len(self.unmatched)}): {preview}{suffix}"
+            )
+        return self
 
 
 @dataclass(frozen=True)
@@ -95,6 +113,14 @@ class ImportSummary:
             "source_hashes": list(self.source_hashes),
             "import_run_id": str(self.import_run_id),
         }
+
+
+@dataclass(frozen=True)
+class _PendingImport:
+    item: ImportItemRecord
+    quarantine: ImportQuarantineRecord | None = None
+    lineage: LineageEdgeRecord | None = None
+    contract: Any | None = None
 
 
 OPERATIONAL_ROOTS = (
@@ -204,10 +230,18 @@ def discover_manifest_sources(
     return tuple(discovered)
 
 
+_EXPLICIT_OPTION_CHAIN_METADATA_PATHS = frozenset(
+    {
+        "Data/inference/meta_ranker/options.meta.json",
+        "Data/inference/live_runs/option_chain.meta.json",
+    }
+)
+
+
 def _is_explicitly_excluded(relative_path: Path) -> bool:
-    # Option-chain metadata is a JSON artifact but is intentionally only
-    # registered by reference in the analytical data layer, not row-imported.
-    return relative_path.name.endswith(".meta.json")
+    """Return true only for named option-chain metadata artifacts."""
+
+    return relative_path.as_posix() in _EXPLICIT_OPTION_CHAIN_METADATA_PATHS
 
 
 def _operational_candidates(root: Path) -> set[Path]:
@@ -239,6 +273,8 @@ def _operational_candidates(root: Path) -> set[Path]:
 def compare_operational_discovery(
     root: Path,
     manifest_path: Path | None = None,
+    *,
+    require_complete: bool = False,
 ) -> DiscoveryComparison:
     """Compare audited operational candidates with manifest matches.
 
@@ -260,11 +296,14 @@ def compare_operational_discovery(
         for candidate in candidates
         if _is_explicitly_excluded(candidate.relative_to(source_root))
     }
-    return DiscoveryComparison(
+    comparison = DiscoveryComparison(
         matched=tuple(sorted(candidates & matched)),
         explicitly_excluded=tuple(sorted(excluded - matched)),
         unmatched=tuple(sorted(candidates - matched - excluded)),
     )
+    if require_complete:
+        comparison.require_complete()
+    return comparison
 
 
 def _raw_identity_payload(raw_item: RawImportItem) -> Mapping[str, Any]:
@@ -323,80 +362,218 @@ def _persist_contract(
     return target_id_for_identity(identity)
 
 
-def _save_quarantined_item(
-    uow: UnitOfWork,
-    *,
-    run_id: UUID,
-    source_id: UUID,
-    importer_version: str,
-    identity: ImportIdentity,
-    target_type: str,
-    raw_payload: Mapping[str, Any] | None,
-    raw_text: str | None,
-    error_code: str,
-    error_message: str,
-    warning_values: Mapping[str, Any],
-) -> None:
-    uow.registry.save_import_item(
-        ImportItemRecord(
-            import_run_id=run_id,
-            source_id=source_id,
-            importer_version=importer_version,
-            record_locator=identity.record_locator,
-            normalized_hash=identity.normalized_hash,
-            target_type=target_type,
-            target_id=None,
-            status="QUARANTINED",
-            warnings=warning_values,
-        )
-    )
-    uow.registry.save_import_quarantine(
-        ImportQuarantineRecord(
-            import_run_id=run_id,
-            source_id=source_id,
-            record_locator=identity.record_locator,
-            raw_payload=None if raw_payload is None else dict(raw_payload),
-            raw_text=raw_text,
-            error_code=error_code,
-            error_message=error_message,
-            created_at=_now(),
-        )
+def _identity_key(item: ImportItemRecord) -> tuple[UUID, str, str, str]:
+    return (
+        item.source_id,
+        item.record_locator,
+        item.importer_version,
+        item.normalized_hash,
     )
 
 
-def _save_imported_item(
+def _flush_batch(
     uow: UnitOfWork,
-    *,
-    run_id: UUID,
-    source_id: UUID,
-    importer_version: str,
-    identity: ImportIdentity,
-    target_type: str,
-    target_id: str,
-    warning_values: Mapping[str, Any],
+    pending: list[_PendingImport],
+    counts: dict[str, int],
 ) -> None:
-    uow.registry.save_import_item(
-        ImportItemRecord(
-            import_run_id=run_id,
-            source_id=source_id,
-            importer_version=importer_version,
-            record_locator=identity.record_locator,
-            normalized_hash=identity.normalized_hash,
-            target_type=target_type,
-            target_id=target_id,
-            status="IMPORTED",
-            warnings=warning_values,
-        )
+    if not pending:
+        return
+    typed_states = [
+        entry.contract
+        for entry in pending
+        if isinstance(entry.contract, StateEnvelope)
+    ]
+    state_ids = uow.states.insert_states_if_absent(typed_states)
+    if state_ids:
+        for index, entry in enumerate(pending):
+            if not isinstance(entry.contract, StateEnvelope):
+                continue
+            state_hash = content_hash(entry.contract, exclude={"state_id"})
+            target_id = str(state_ids[state_hash])
+            pending[index] = replace(
+                entry,
+                item=replace(entry.item, target_id=target_id),
+                lineage=replace(entry.lineage, target_id=target_id)
+                if entry.lineage is not None
+                else None,
+            )
+    inserted = uow.registry.insert_import_items_if_absent(
+        [entry.item for entry in pending]
     )
-    uow.registry.save_lineage_edge(
-        LineageEdgeRecord(
-            source_id=source_id,
-            target_type=target_type,
+    counts["duplicates"] += len(pending) - len(inserted)
+    quarantines = [
+        entry.quarantine
+        for entry in pending
+        if entry.quarantine is not None and _identity_key(entry.item) in inserted
+    ]
+    edges = [
+        entry.lineage
+        for entry in pending
+        if entry.lineage is not None and _identity_key(entry.item) in inserted
+    ]
+    uow.registry.save_import_quarantines(
+        [quarantine for quarantine in quarantines if quarantine is not None]
+    )
+    uow.registry.save_lineage_edges([edge for edge in edges if edge is not None])
+    counts["quarantined"] += len(quarantines)
+    counts["imported"] += len(edges)
+    pending.clear()
+    # Bulk Core statements do not populate the ORM identity map.  Discard any
+    # small number of state objects created by a typed adapter before the next
+    # batch so memory remains bounded for large JSONL sources.
+    uow.session.expunge_all()
+
+
+def _verify_source_unchanged(path: Path, expected: SourceArtifact) -> None:
+    try:
+        current = register_artifact(path)
+    except FileNotFoundError as exc:
+        raise SourceMutationError(
+            f"source artifact changed during import: {path} is no longer readable"
+        ) from exc
+    if current.sha256 != expected.sha256 or current.byte_size != expected.byte_size:
+        raise SourceMutationError(
+            f"source artifact changed during import: {path} no longer matches "
+            f"registered SHA-256 {expected.sha256}"
+        )
+
+
+def _pending_from_event(
+    event: RawImportItem | ParseIssue,
+    *,
+    item: DiscoveredSource,
+    artifact: SourceArtifact,
+    source_record: SourceArtifactRecord,
+    run_id: UUID,
+    uow: UnitOfWork,
+    counts: dict[str, int],
+) -> _PendingImport:
+    if isinstance(event, ParseIssue):
+        if event.skippable:
+            counts["skipped"] += 1
+            raise StopIteration
+        raw_payload = _parse_issue_identity_payload(event)
+        identity = ImportIdentity.build(
+            source_sha256=artifact.sha256,
+            record_locator=event.record_locator,
+            adapter=item.spec.adapter,
+            normalized_payload=raw_payload,
+        )
+        return _PendingImport(
+            item=ImportItemRecord(
+                import_run_id=run_id,
+                source_id=source_record.source_id,
+                importer_version=identity.importer_version,
+                record_locator=identity.record_locator,
+                normalized_hash=identity.normalized_hash,
+                target_type=item.spec.kind.upper(),
+                target_id=None,
+                status="QUARANTINED",
+                warnings=_warnings(
+                    raw_payload=raw_payload,
+                    artifact=artifact,
+                    spec=item.spec,
+                    adapter_result=None,
+                    retain_raw_payload=True,
+                ),
+            ),
+            quarantine=ImportQuarantineRecord(
+                run_id,
+                source_record.source_id,
+                event.record_locator,
+                None,
+                event.raw_text,
+                event.error_code,
+                event.error_message,
+                _now(),
+            ),
+        )
+
+    counts["parsed"] += 1
+    identity = ImportIdentity.build(
+        source_sha256=artifact.sha256,
+        record_locator=event.record_locator,
+        adapter=item.spec.adapter,
+        normalized_payload=_raw_identity_payload(event),
+    )
+    result = adapt_legacy_record(item.spec.kind, item.spec.adapter, event.raw_payload)
+    warning_values = _warnings(
+        raw_payload=event.raw_payload,
+        artifact=artifact,
+        spec=item.spec,
+        adapter_result=result,
+        retain_raw_payload=result.quarantine_code is not None,
+    )
+    if result.quarantine_code is not None or result.contract is None:
+        return _PendingImport(
+            item=ImportItemRecord(
+                import_run_id=run_id,
+                source_id=source_record.source_id,
+                importer_version=identity.importer_version,
+                record_locator=identity.record_locator,
+                normalized_hash=identity.normalized_hash,
+                target_type=result.target_type,
+                target_id=None,
+                status="QUARANTINED",
+                warnings=warning_values,
+            ),
+            quarantine=ImportQuarantineRecord(
+                run_id,
+                source_record.source_id,
+                event.record_locator,
+                event.raw_payload,
+                event.raw_text,
+                result.quarantine_code or "NO_NORMALIZED_CONTRACT",
+                result.quarantine_message or "legacy adapter returned no contract",
+                _now(),
+            ),
+        )
+
+    target_id = None
+    if not isinstance(result.contract, StateEnvelope):
+        target_id = _persist_contract(uow, result.contract, identity=identity.normalized_hash)
+    imported_item = ImportItemRecord(
+        import_run_id=run_id,
+        source_id=source_record.source_id,
+        importer_version=identity.importer_version,
+        record_locator=identity.record_locator,
+        normalized_hash=identity.normalized_hash,
+        target_type=result.target_type,
+        target_id=target_id,
+        status="IMPORTED",
+        warnings=warning_values,
+    )
+    return _PendingImport(
+        item=imported_item,
+        lineage=LineageEdgeRecord(
+            source_id=source_record.source_id,
+            target_type=result.target_type,
             target_id=target_id,
             relationship="IMPORTED_AS",
             created_at=_now(),
-        )
+        ),
+        contract=result.contract,
     )
+
+
+def _validate_event_for_dry_run(
+    event: RawImportItem | ParseIssue,
+    *,
+    item: DiscoveredSource,
+    counts: dict[str, int],
+) -> None:
+    if isinstance(event, ParseIssue):
+        if event.skippable:
+            counts["skipped"] += 1
+        else:
+            counts["quarantined"] += 1
+        return
+    counts["parsed"] += 1
+    result = adapt_legacy_record(item.spec.kind, item.spec.adapter, event.raw_payload)
+    if result.quarantine_code is not None or result.contract is None:
+        counts["quarantined"] += 1
+    else:
+        counts["imported"] += 1
 
 
 def import_manifest(
@@ -407,12 +584,24 @@ def import_manifest(
     limit: int | None = None,
     source_kind: str | None = None,
 ) -> ImportSummary:
-    """Import every manifest record in one caller-owned transaction."""
+    """Parse all records and import write-mode batches with resumable commits."""
 
     if limit is not None and limit <= 0:
         raise ValueError("limit must be positive when supplied")
     manifest_path = Path(path)
-    discovered = discover_manifest_sources(manifest_path, source_kind=source_kind)
+    specs = load_manifest(manifest_path)
+    discovery_root = _manifest_root(manifest_path, specs)
+    if source_kind is None:
+        compare_operational_discovery(
+            discovery_root,
+            manifest_path,
+            require_complete=True,
+        )
+    discovered = discover_manifest_sources(
+        manifest_path,
+        root=discovery_root,
+        source_kind=source_kind,
+    )
     run_id = uuid4()
     counts = {
         "discovered_artifacts": len({item.path for item in discovered}),
@@ -422,10 +611,41 @@ def import_manifest(
         "skipped": 0,
         "quarantined": 0,
     }
-    registered: list[tuple[DiscoveredSource, SourceArtifact, SourceArtifactRecord]] = []
-    source_hashes: list[str] = []
+    registered = [(item, register_artifact(item.path)) for item in discovered]
+    source_hashes = [artifact.sha256 for _, artifact in registered]
+
+    if dry_run:
+        records_seen = 0
+        stop = False
+        for item, expected_artifact in registered:
+            if stop:
+                break
+            with snapshot_artifact(item.path) as (artifact, source_file):
+                if artifact.sha256 != expected_artifact.sha256 or artifact.byte_size != expected_artifact.byte_size:
+                    raise SourceMutationError(
+                        f"source artifact changed during import: {item.path} changed before parsing"
+                    )
+                for event in iter_source_events(item.path, source_file=source_file):
+                    if limit is not None and records_seen >= limit:
+                        stop = True
+                        break
+                    records_seen += 1
+                    _validate_event_for_dry_run(event, item=item, counts=counts)
+                _verify_source_unchanged(item.path, expected_artifact)
+        return ImportSummary(
+            discovered_artifacts=counts["discovered_artifacts"],
+            parsed=counts["parsed"],
+            imported=counts["imported"],
+            duplicates=counts["duplicates"],
+            skipped=counts["skipped"],
+            quarantined=counts["quarantined"],
+            source_hashes=tuple(sorted(set(source_hashes))),
+            import_run_id=run_id,
+        )
+
+    started_at = _now()
+    run_saved = False
     with uow_factory() as uow:
-        started_at = _now()
         uow.registry.save_import_run(
             ImportRunRecord(
                 import_run_id=run_id,
@@ -436,156 +656,98 @@ def import_manifest(
                 counts=counts,
             )
         )
-        for item in discovered:
-            artifact = register_artifact(item.path)
-            source_hashes.append(artifact.sha256)
-            source_record = uow.registry.get_source_artifact(artifact.uri, artifact.sha256)
-            if source_record is None:
-                source_record = uow.registry.save_source_artifact(
-                    SourceArtifactRecord(
-                        uri=artifact.uri,
-                        sha256=artifact.sha256,
-                        byte_size=artifact.byte_size,
-                        source_kind=item.spec.kind,
-                        discovered_at=started_at,
-                        metadata={
-                            "manifest_glob": item.spec.glob,
-                            "adapter": item.spec.adapter,
-                            "format": item.path.suffix.lower().lstrip("."),
-                        },
-                    )
-                )
-            registered.append((item, artifact, source_record))
-
+        uow.commit()
+        run_saved = True
+        committed_counts = dict(counts)
         records_seen = 0
         stop = False
-        for item, artifact, source_record in registered:
-            if stop:
-                break
-            for event in iter_source_events(item.path):
-                if limit is not None and records_seen >= limit:
-                    stop = True
+        try:
+            for item, expected_artifact in registered:
+                if stop:
                     break
-                records_seen += 1
-                if isinstance(event, ParseIssue):
-                    if event.skippable:
-                        counts["skipped"] += 1
-                        continue
-                    identity = ImportIdentity.build(
-                        source_sha256=artifact.sha256,
-                        record_locator=event.record_locator,
-                        adapter=item.spec.adapter,
-                        normalized_payload=_parse_issue_identity_payload(event),
-                    )
+                with snapshot_artifact(item.path) as (artifact, source_file):
                     if (
-                        uow.registry.get_import_item(
-                            source_id=source_record.source_id,
-                            record_locator=identity.record_locator,
-                            importer_version=identity.importer_version,
-                            normalized_hash=identity.normalized_hash,
-                        )
-                        is not None
+                        artifact.sha256 != expected_artifact.sha256
+                        or artifact.byte_size != expected_artifact.byte_size
                     ):
-                        counts["duplicates"] += 1
-                        continue
-                    _save_quarantined_item(
-                        uow,
-                        run_id=run_id,
-                        source_id=source_record.source_id,
-                        importer_version=identity.importer_version,
-                        identity=identity,
-                        target_type=item.spec.kind.upper(),
-                        raw_payload=None,
-                        raw_text=event.raw_text,
-                        error_code=event.error_code,
-                        error_message=event.error_message,
-                        warning_values=_warnings(
-                            raw_payload=_parse_issue_identity_payload(event),
-                            artifact=artifact,
-                            spec=item.spec,
-                            adapter_result=None,
-                            retain_raw_payload=True,
-                        ),
+                        raise SourceMutationError(
+                            f"source artifact changed during import: {item.path} changed before parsing"
+                        )
+                    source_record = uow.registry.insert_source_artifact_if_absent(
+                        SourceArtifactRecord(
+                            uri=artifact.uri,
+                            sha256=artifact.sha256,
+                            byte_size=artifact.byte_size,
+                            source_kind=item.spec.kind,
+                            discovered_at=started_at,
+                            metadata={
+                                "manifest_glob": item.spec.glob,
+                                "adapter": item.spec.adapter,
+                                "format": item.path.suffix.lower().lstrip("."),
+                            },
+                        )
                     )
-                    counts["quarantined"] += 1
-                    continue
+                    pending: list[_PendingImport] = []
+                    for event in iter_source_events(item.path, source_file=source_file):
+                        if limit is not None and records_seen >= limit:
+                            stop = True
+                            break
+                        records_seen += 1
+                        try:
+                            pending.append(
+                                _pending_from_event(
+                                    event,
+                                    item=item,
+                                    artifact=artifact,
+                                    source_record=source_record,
+                                    run_id=run_id,
+                                    uow=uow,
+                                    counts=counts,
+                                )
+                            )
+                        except StopIteration:
+                            continue
+                        if len(pending) >= IMPORT_BATCH_SIZE:
+                            _flush_batch(uow, pending, counts)
+                            uow.registry.update_import_run_progress(run_id, counts)
+                            uow.commit()
+                            committed_counts = dict(counts)
+                    _flush_batch(uow, pending, counts)
+                    _verify_source_unchanged(item.path, expected_artifact)
+                uow.registry.update_import_run_progress(run_id, counts)
+                uow.commit()
+                committed_counts = dict(counts)
 
-                counts["parsed"] += 1
-                identity = ImportIdentity.build(
-                    source_sha256=artifact.sha256,
-                    record_locator=event.record_locator,
-                    adapter=item.spec.adapter,
-                    normalized_payload=_raw_identity_payload(event),
-                )
-                if (
-                    uow.registry.get_import_item(
-                        source_id=source_record.source_id,
-                        record_locator=identity.record_locator,
-                        importer_version=identity.importer_version,
-                        normalized_hash=identity.normalized_hash,
-                    )
-                    is not None
-                ):
-                    counts["duplicates"] += 1
-                    continue
-                result = adapt_legacy_record(item.spec.kind, item.spec.adapter, event.raw_payload)
-                warning_values = _warnings(
-                    raw_payload=event.raw_payload,
-                    artifact=artifact,
-                    spec=item.spec,
-                    adapter_result=result,
-                    retain_raw_payload=result.quarantine_code is not None,
-                )
-                if result.quarantine_code is not None or result.contract is None:
-                    _save_quarantined_item(
-                        uow,
-                        run_id=run_id,
-                        source_id=source_record.source_id,
-                        importer_version=identity.importer_version,
-                        identity=identity,
-                        target_type=result.target_type,
-                        raw_payload=event.raw_payload,
-                        raw_text=event.raw_text,
-                        error_code=result.quarantine_code or "NO_NORMALIZED_CONTRACT",
-                        error_message=result.quarantine_message or "legacy adapter returned no contract",
-                        warning_values=warning_values,
-                    )
-                    counts["quarantined"] += 1
-                    continue
-                target_id = _persist_contract(uow, result.contract, identity=identity.normalized_hash)
-                _save_imported_item(
-                    uow,
-                    run_id=run_id,
-                    source_id=source_record.source_id,
-                    importer_version=identity.importer_version,
-                    identity=identity,
-                    target_type=result.target_type,
-                    target_id=target_id,
-                    warning_values=warning_values,
-                )
-                counts["imported"] += 1
-
-        summary = ImportSummary(
-            discovered_artifacts=counts["discovered_artifacts"],
-            parsed=counts["parsed"],
-            imported=counts["imported"],
-            duplicates=counts["duplicates"],
-            skipped=counts["skipped"],
-            quarantined=counts["quarantined"],
-            source_hashes=tuple(sorted(set(source_hashes))),
-            import_run_id=run_id,
-        )
-        uow.registry.finish_import_run(
-            run_id,
-            finished_at=_now(),
-            status="DRY_RUN" if dry_run else "COMPLETED",
-            counts=summary.counts(),
-        )
-        if dry_run:
-            uow.rollback()
-        else:
+            summary = ImportSummary(
+                discovered_artifacts=counts["discovered_artifacts"],
+                parsed=counts["parsed"],
+                imported=counts["imported"],
+                duplicates=counts["duplicates"],
+                skipped=counts["skipped"],
+                quarantined=counts["quarantined"],
+                source_hashes=tuple(sorted(set(source_hashes))),
+                import_run_id=run_id,
+            )
+            uow.registry.finish_import_run(
+                run_id,
+                finished_at=_now(),
+                status="COMPLETED",
+                counts=summary.counts(),
+            )
             uow.commit()
-    return summary
+            return summary
+        except Exception as exc:
+            if run_saved:
+                uow.rollback()
+                failure_counts = {**committed_counts, "error": str(exc)}
+                uow.registry.finish_import_run(
+                    run_id,
+                    finished_at=_now(),
+                    status="FAILED",
+                    counts=failure_counts,
+                )
+                uow.commit()
+            raise
 
 
 def _uow_factory_for_database(database_url: str) -> tuple[Callable[[], UnitOfWork], Any]:
@@ -594,15 +756,19 @@ def _uow_factory_for_database(database_url: str) -> tuple[Callable[[], UnitOfWor
     return lambda: UnitOfWork(sessions), engine
 
 
+def redact_database_url(database_url: str) -> str:
+    """Render a database URL without exposing its password."""
+
+    try:
+        return make_url(database_url).render_as_string(hide_password=True)
+    except (TypeError, ValueError):
+        return "<redacted database URL>"
+
+
 def _validate_cli_database_url(database_url: str) -> None:
     parsed = make_url(database_url)
     if parsed.get_backend_name() != "postgresql":
         raise ValueError("historical operational import requires PostgreSQL")
-    if parsed.database != DISPOSABLE_DATABASE_NAME:
-        raise ValueError(
-            "historical operational import is restricted to the disposable "
-            f"database {DISPOSABLE_DATABASE_NAME!r}"
-        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -626,8 +792,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         finally:
             engine.dispose()
-    except (OSError, ValueError) as exc:
-        parser.error(str(exc))
+    except (OSError, ValueError, SQLAlchemyError) as exc:
+        message = str(exc)
+        redacted_url = redact_database_url(args.database_url)
+        message = message.replace(args.database_url, redacted_url)
+        parser.error(message)
     print(json.dumps(summary.as_dict(), sort_keys=True, separators=(",", ":")))
     return 0
 
@@ -637,14 +806,16 @@ if __name__ == "__main__":
 
 
 __all__ = [
-    "DISPOSABLE_DATABASE_NAME",
     "DiscoveryComparison",
+    "IMPORT_BATCH_SIZE",
     "ImportSummary",
     "OPERATIONAL_ROOTS",
+    "SourceMutationError",
     "SourceSpec",
     "compare_operational_discovery",
     "discover_manifest_sources",
     "import_manifest",
     "load_manifest",
     "main",
+    "redact_database_url",
 ]

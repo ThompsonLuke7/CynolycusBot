@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from pydantic_core import to_jsonable_python
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.orm import Session
 
 from core.nervous_system.persistence.models import (
@@ -120,6 +121,39 @@ def _one_or_none(result: Any) -> Any:
     return scalars.first()
 
 
+def _is_postgresql(session: Session) -> bool:
+    bind = getattr(session, "bind", None)
+    dialect = getattr(bind, "dialect", None)
+    return getattr(dialect, "name", None) == "postgresql"
+
+
+def _source_record(row: Any) -> SourceArtifactRecord:
+    return SourceArtifactRecord(
+        source_id=row.source_id,
+        uri=row.uri,
+        sha256=row.sha256,
+        byte_size=row.byte_size,
+        source_kind=row.source_kind,
+        discovered_at=row.discovered_at,
+        metadata=row.metadata_json,
+    )
+
+
+def _import_item_record(row: Any) -> ImportItemRecord:
+    return ImportItemRecord(
+        import_item_id=row.import_item_id,
+        import_run_id=row.import_run_id,
+        source_id=row.source_id,
+        importer_version=row.importer_version,
+        record_locator=row.record_locator,
+        normalized_hash=row.normalized_hash,
+        target_type=row.target_type,
+        target_id=row.target_id,
+        status=row.status,
+        warnings=row.warnings,
+    )
+
+
 class RegistryRepository:
     def __init__(self, session: Session):
         self._session = session
@@ -129,6 +163,30 @@ class RegistryRepository:
         if artifact.byte_size < 0:
             raise ValueError("source artifact byte_size must be nonnegative")
         _validate_time(artifact.discovered_at, "discovered_at")
+        if _is_postgresql(self._session):
+            statement = (
+                postgres_insert(SourceArtifactRow)
+                .values(
+                    source_id=artifact.source_id,
+                    uri=artifact.uri,
+                    sha256=artifact.sha256,
+                    byte_size=artifact.byte_size,
+                    source_kind=artifact.source_kind,
+                    discovered_at=artifact.discovered_at,
+                    metadata_json=dict(artifact.metadata),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[SourceArtifactRow.uri, SourceArtifactRow.sha256]
+                )
+                .returning(SourceArtifactRow.source_id)
+            )
+            inserted_id = self._session.execute(statement).scalar_one_or_none()
+            if inserted_id is not None:
+                return artifact
+            existing = self.get_source_artifact(artifact.uri, artifact.sha256)
+            if existing is None:
+                raise RuntimeError("source artifact conflict did not produce a readable row")
+            return existing
         self._session.add(
             SourceArtifactRow(
                 source_id=artifact.source_id,
@@ -142,6 +200,13 @@ class RegistryRepository:
         )
         self._session.flush()
         return artifact
+
+    def insert_source_artifact_if_absent(
+        self, artifact: SourceArtifactRecord
+    ) -> SourceArtifactRecord:
+        """Atomically register one immutable source identity."""
+
+        return self.save_source_artifact(artifact)
 
     register_source_artifact = save_source_artifact
 
@@ -157,15 +222,7 @@ class RegistryRepository:
         )
         if row is None:
             return None
-        return SourceArtifactRecord(
-            source_id=row.source_id,
-            uri=row.uri,
-            sha256=row.sha256,
-            byte_size=row.byte_size,
-            source_kind=row.source_kind,
-            discovered_at=row.discovered_at,
-            metadata=row.metadata_json,
-        )
+        return _source_record(row)
 
     def save_import_run(self, run: ImportRunRecord) -> ImportRunRecord:
         _validate_time(run.started_at, "started_at")
@@ -205,6 +262,177 @@ class RegistryRepository:
         self._session.flush()
         return item
 
+    def insert_import_item_if_absent(
+        self, item: ImportItemRecord
+    ) -> tuple[ImportItemRecord, bool]:
+        """Insert one identity atomically and return the converged row."""
+
+        _validate_hash(item.normalized_hash, "normalized_hash")
+        values = {
+            "import_item_id": item.import_item_id,
+            "import_run_id": item.import_run_id,
+            "source_id": item.source_id,
+            "importer_version": item.importer_version,
+            "record_locator": item.record_locator,
+            "normalized_hash": item.normalized_hash,
+            "target_type": item.target_type,
+            "target_id": item.target_id,
+            "status": item.status,
+            "warnings": dict(item.warnings),
+        }
+        if _is_postgresql(self._session):
+            statement = (
+                postgres_insert(ImportItemRow)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        ImportItemRow.source_id,
+                        ImportItemRow.record_locator,
+                        ImportItemRow.importer_version,
+                        ImportItemRow.normalized_hash,
+                    ]
+                )
+                .returning(ImportItemRow.import_item_id)
+            )
+            inserted_id = self._session.execute(statement).scalar_one_or_none()
+            if inserted_id is not None:
+                return item, True
+            row = _one_or_none(
+                self._session.execute(
+                    select(ImportItemRow).where(
+                        ImportItemRow.source_id == item.source_id,
+                        ImportItemRow.record_locator == item.record_locator,
+                        ImportItemRow.importer_version == item.importer_version,
+                        ImportItemRow.normalized_hash == item.normalized_hash,
+                    )
+                )
+            )
+            if row is None:
+                raise RuntimeError("import item conflict did not produce a readable row")
+            return _import_item_record(row), False
+
+        existing = self.get_import_item(
+            source_id=item.source_id,
+            record_locator=item.record_locator,
+            importer_version=item.importer_version,
+            normalized_hash=item.normalized_hash,
+        )
+        if existing is not None:
+            return existing, False
+        self.save_import_item(item)
+        return item, True
+
+    def insert_import_items_if_absent(
+        self, items: Sequence[ImportItemRecord]
+    ) -> set[tuple[UUID, str, str, str]]:
+        """Bulk insert a bounded batch and return identities inserted by this call."""
+
+        if not items:
+            return set()
+        for item in items:
+            _validate_hash(item.normalized_hash, "normalized_hash")
+        if not _is_postgresql(self._session):
+            inserted: set[tuple[UUID, str, str, str]] = set()
+            for item in items:
+                _, was_inserted = self.insert_import_item_if_absent(item)
+                if was_inserted:
+                    inserted.add(
+                        (item.source_id, item.record_locator, item.importer_version, item.normalized_hash)
+                    )
+            return inserted
+        values = [
+            {
+                "import_item_id": item.import_item_id,
+                "import_run_id": item.import_run_id,
+                "source_id": item.source_id,
+                "importer_version": item.importer_version,
+                "record_locator": item.record_locator,
+                "normalized_hash": item.normalized_hash,
+                "target_type": item.target_type,
+                "target_id": item.target_id,
+                "status": item.status,
+                "warnings": dict(item.warnings),
+            }
+            for item in items
+        ]
+        statement = (
+            postgres_insert(ImportItemRow)
+            .values(values)
+            .on_conflict_do_nothing(
+                index_elements=[
+                    ImportItemRow.source_id,
+                    ImportItemRow.record_locator,
+                    ImportItemRow.importer_version,
+                    ImportItemRow.normalized_hash,
+                ]
+            )
+            .returning(
+                ImportItemRow.source_id,
+                ImportItemRow.record_locator,
+                ImportItemRow.importer_version,
+                ImportItemRow.normalized_hash,
+            )
+        )
+        return {
+            (row[0], row[1], row[2], row[3])
+            for row in self._session.execute(statement).all()
+        }
+
+    def save_import_quarantines(
+        self, quarantines: Sequence[ImportQuarantineRecord]
+    ) -> None:
+        """Bulk insert one bounded quarantine batch."""
+
+        if not quarantines:
+            return
+        values = [
+            {
+                "quarantine_id": quarantine.quarantine_id,
+                "import_run_id": quarantine.import_run_id,
+                "source_id": quarantine.source_id,
+                "record_locator": quarantine.record_locator,
+                "raw_payload": (
+                    None
+                    if quarantine.raw_payload is None
+                    else dict(quarantine.raw_payload)
+                ),
+                "raw_text": quarantine.raw_text,
+                "error_code": quarantine.error_code,
+                "error_message": quarantine.error_message,
+                "created_at": quarantine.created_at,
+            }
+            for quarantine in quarantines
+        ]
+        if _is_postgresql(self._session):
+            self._session.execute(postgres_insert(ImportQuarantineRow).values(values))
+            return
+        for value in values:
+            self._session.add(ImportQuarantineRow(**value))
+        self._session.flush()
+
+    def save_lineage_edges(self, edges: Sequence[LineageEdgeRecord]) -> None:
+        """Bulk insert one bounded lineage batch."""
+
+        if not edges:
+            return
+        values = [
+            {
+                "lineage_edge_id": edge.lineage_edge_id,
+                "source_id": edge.source_id,
+                "target_type": edge.target_type,
+                "target_id": edge.target_id,
+                "relationship": edge.relationship,
+                "created_at": edge.created_at,
+            }
+            for edge in edges
+        ]
+        if _is_postgresql(self._session):
+            self._session.execute(postgres_insert(LineageEdgeRow).values(values))
+            return
+        for value in values:
+            self._session.add(LineageEdgeRow(**value))
+        self._session.flush()
+
     def get_import_item(
         self,
         *,
@@ -228,18 +456,7 @@ class RegistryRepository:
         )
         if row is None:
             return None
-        return ImportItemRecord(
-            import_item_id=row.import_item_id,
-            import_run_id=row.import_run_id,
-            source_id=row.source_id,
-            importer_version=row.importer_version,
-            record_locator=row.record_locator,
-            normalized_hash=row.normalized_hash,
-            target_type=row.target_type,
-            target_id=row.target_id,
-            status=row.status,
-            warnings=row.warnings,
-        )
+        return _import_item_record(row)
 
     def finish_import_run(
         self,
@@ -269,6 +486,18 @@ class RegistryRepository:
             status=row.status,
             counts=row.counts,
         )
+
+    def update_import_run_progress(
+        self, import_run_id: UUID, counts: Mapping[str, Any]
+    ) -> None:
+        """Persist bounded progress while leaving the run in ``RUNNING``."""
+
+        row = self._session.get(ImportRunRow, import_run_id)
+        if row is None:
+            raise ValueError(f"unknown import_run_id: {import_run_id}")
+        row.status = "RUNNING"
+        row.counts = dict(counts)
+        self._session.flush()
 
     def save_import_quarantine(
         self, quarantine: ImportQuarantineRecord

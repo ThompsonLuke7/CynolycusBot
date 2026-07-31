@@ -53,6 +53,8 @@ class StateEnvelope(ContractModel):
             raise ValueError("source window start follows source window end")
         if self.source_window_end > self.as_of:
             raise ValueError("source window ends after as_of")
+        if self.as_of > self.available_at:
+            raise ValueError("as_of cannot follow available_at")
         if self.available_at > self.generated_at:
             raise ValueError("generated_at precedes available_at")
         if self.valid_until <= self.available_at:

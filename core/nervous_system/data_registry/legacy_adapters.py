@@ -19,6 +19,16 @@ from core.nervous_system.contracts.states import (
 )
 
 
+LEGACY_PORTFOLIO_VALIDITY_RULE = "legacy-portfolio-validity@1d@1"
+_TS_AVAILABILITY_ADAPTERS = frozenset({"closed_trade", "swing_session"})
+_ASSET_CLASS_VALUES = {
+    "EQUITY": AssetClass.EQUITY,
+    "US_EQUITY": AssetClass.EQUITY,
+    "OPTION": AssetClass.OPTION,
+    "US_OPTION": AssetClass.OPTION,
+}
+
+
 class AdapterIssue(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -103,8 +113,12 @@ def _optional_timestamp(
     return _timestamp(value, field_name=field_name, code_prefix=code_prefix)
 
 
-def _required_availability(payload: Mapping[str, Any]) -> datetime:
-    names = (
+def _required_availability(
+    payload: Mapping[str, Any],
+    *,
+    allow_ts: bool = False,
+) -> datetime:
+    names = [
         "available_at",
         "available_at_utc",
         "observed_at",
@@ -116,7 +130,9 @@ def _required_availability(payload: Mapping[str, Any]) -> datetime:
         "timestamp",
         "created_at",
         "updated_at",
-    )
+    ]
+    if allow_ts:
+        names.insert(2, "ts")
     for name in names:
         value = _value(payload, (name,))
         if value is not None:
@@ -148,6 +164,14 @@ def _as_of(
     return _timestamp(value, field_name=names[0], code_prefix="AS_OF")
 
 
+def _validate_causal_order(as_of: datetime, available_at: datetime) -> None:
+    if as_of > available_at:
+        raise AdapterIssue(
+            "AS_OF_AFTER_AVAILABLE_AT",
+            "as_of cannot follow available_at; evidence would leak future information",
+        )
+
+
 def _common_warnings(payload: Mapping[str, Any]) -> tuple[str, ...]:
     if any(key in payload for key in ("score", "raw_score", "confidence")):
         return ("legacy score retained as raw evidence; not mapped to probability",)
@@ -161,9 +185,11 @@ def _generic_contract(
     target_type: str,
     signal: bool = False,
     ownership_candidate: bool = False,
+    allow_ts_availability: bool = False,
 ) -> tuple[ContractModel, tuple[str, ...]]:
-    available_at = _required_availability(payload)
+    available_at = _required_availability(payload, allow_ts=allow_ts_availability)
     as_of = _as_of(payload, available_at, signal=signal)
+    _validate_causal_order(as_of, available_at)
     observed_at = _optional_timestamp(
         payload,
         ("observed_at", "captured_at_utc", "captured_at", "timestamp"),
@@ -229,14 +255,41 @@ def _finite_number(payload: Mapping[str, Any], names: tuple[str, ...]) -> float 
 
 
 def _portfolio_position(value: Mapping[str, Any], index: int) -> PortfolioPosition:
-    symbol = str(value.get("symbol") or value.get("asset") or value.get("underlying") or "UNKNOWN")
+    symbol_value = value.get("symbol") or value.get("asset") or value.get("underlying")
+    if symbol_value is None or not str(symbol_value).strip():
+        raise AdapterIssue(
+            "INVALID_PORTFOLIO_POSITION",
+            f"position {index} requires a non-empty symbol",
+        )
+    symbol = str(symbol_value)
     underlying = str(value.get("underlying") or symbol)
-    asset_value = str(value.get("asset_class") or "EQUITY").upper()
-    try:
-        asset_class = AssetClass(asset_value)
-    except ValueError:
-        asset_class = AssetClass.EQUITY
-    quantity = value.get("quantity", value.get("qty", 0.0))
+    asset_value = value.get("asset_class")
+    if asset_value is None or not str(asset_value).strip():
+        raise AdapterIssue(
+            "UNKNOWN_ASSET_CLASS",
+            f"position {index} is missing an explicit asset class",
+        )
+    asset_key = str(asset_value).strip().upper().replace("-", "_")
+    asset_class = _ASSET_CLASS_VALUES.get(asset_key)
+    if asset_class is None:
+        raise AdapterIssue(
+            "UNKNOWN_ASSET_CLASS",
+            f"position {index} has unsupported asset class {asset_value!r}",
+        )
+    if "quantity" in value:
+        quantity = value["quantity"]
+    elif "qty" in value:
+        quantity = value["qty"]
+    else:
+        raise AdapterIssue(
+            "MISSING_POSITION_QUANTITY",
+            f"position {index} is missing quantity",
+        )
+    if quantity is None:
+        raise AdapterIssue(
+            "MISSING_POSITION_QUANTITY",
+            f"position {index} is missing quantity",
+        )
     try:
         quantity_float = float(quantity)
     except (TypeError, ValueError) as exc:
@@ -266,6 +319,7 @@ def _portfolio_position(value: Mapping[str, Any], index: int) -> PortfolioPositi
 def _portfolio_state(payload: Mapping[str, Any], adapter: str) -> tuple[PortfolioState, tuple[str, ...]]:
     available_at = _required_availability(payload)
     as_of = _as_of(payload, available_at)
+    _validate_causal_order(as_of, available_at)
     account_alias = str(_value(payload, ("account_alias", "account_id", "account")) or "legacy")
     equity = _finite_number(payload, ("equity", "account_equity", "portfolio_value"))
     cash = _finite_number(payload, ("cash", "cash_balance"))
@@ -275,28 +329,33 @@ def _portfolio_state(payload: Mapping[str, Any], adapter: str) -> tuple[Portfoli
             "INCOMPLETE_PORTFOLIO_STATE",
             "account snapshot lacks equity, cash, or buying_power",
         )
-    positions_value = _value(payload, ("positions",)) or ()
-    if isinstance(positions_value, Mapping):
-        positions_value = tuple(positions_value.values())
+    positions_value = _value(payload, ("positions",))
+    if positions_value is None:
+        positions_value = ()
     if not isinstance(positions_value, (tuple, list)):
         raise AdapterIssue("INVALID_PORTFOLIO_POSITION", "positions must be a list")
-    positions = tuple(
-        _portfolio_position(position, index)
-        for index, position in enumerate(positions_value, start=1)
-        if isinstance(position, Mapping)
-    )
+    positions_list = []
+    for index, position in enumerate(positions_value, start=1):
+        if not isinstance(position, Mapping):
+            raise AdapterIssue(
+                "INVALID_PORTFOLIO_POSITION",
+                f"position {index} must be an object",
+            )
+        positions_list.append(_portfolio_position(position, index))
+    positions = tuple(positions_list)
     generated_at = _optional_timestamp(
         payload,
         ("generated_at", "observed_at", "captured_at_utc", "captured_at"),
         field_name="generated_at",
         code_prefix="GENERATED_AT",
     ) or available_at
-    valid_until = _optional_timestamp(
+    explicit_valid_until = _optional_timestamp(
         payload,
         ("valid_until",),
         field_name="valid_until",
         code_prefix="VALID_UNTIL",
-    ) or (available_at + timedelta(days=1))
+    )
+    valid_until = explicit_valid_until or (available_at + timedelta(days=1))
     source_start = _optional_timestamp(
         payload,
         ("source_window_start",),
@@ -323,7 +382,7 @@ def _portfolio_state(payload: Mapping[str, Any], adapter: str) -> tuple[Portfoli
             producer="legacy_import",
             model_version="legacy@1",
             feature_version="legacy@1",
-            config_version="legacy@1",
+            config_version=LEGACY_PORTFOLIO_VALIDITY_RULE,
             lineage_ids=(),
             data_quality=DataQualitySummary(),
             account_alias=account_alias,
@@ -337,7 +396,10 @@ def _portfolio_state(payload: Mapping[str, Any], adapter: str) -> tuple[Portfoli
         )
     except ValueError as exc:
         raise AdapterIssue("INVALID_PORTFOLIO_STATE", str(exc)) from exc
-    return state, _common_warnings(payload)
+    warnings = list(_common_warnings(payload))
+    if explicit_valid_until is None:
+        warnings.append(f"valid_until derived by {LEGACY_PORTFOLIO_VALIDITY_RULE}")
+    return state, tuple(warnings)
 
 
 def adapt_legacy_record(
@@ -396,6 +458,7 @@ def adapt_legacy_record(
                 payload,
                 adapter=adapter,
                 target_type=source_kind.upper(),
+                allow_ts_availability=adapter in _TS_AVAILABILITY_ADAPTERS,
             )
             return LegacyAdapterResult(source_kind.upper(), contract, warnings, None, None)
         return LegacyAdapterResult(
@@ -425,6 +488,7 @@ def adapt_legacy_record(
 
 __all__ = [
     "AdapterIssue",
+    "LEGACY_PORTFOLIO_VALIDITY_RULE",
     "LegacyAdapterResult",
     "LegacyOperationalEvidence",
     "OwnershipCandidateEvidence",

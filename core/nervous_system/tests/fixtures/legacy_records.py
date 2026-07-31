@@ -41,6 +41,7 @@ def account_snapshot_payload() -> dict[str, object]:
                 "broker_position_id": "pos-1",
                 "symbol": "AMD",
                 "underlying": "AMD",
+                "asset_class": "EQUITY",
                 "quantity": 10,
                 "current_price": 100.0,
             }

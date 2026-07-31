@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import and_, or_, select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.orm import Session
 
 from core.nervous_system.contracts.base import content_hash
@@ -106,33 +107,84 @@ def _one_or_none(result: Any) -> Any:
     return scalars.first()
 
 
+def _is_postgresql(session: Session) -> bool:
+    bind = getattr(session, "bind", None)
+    dialect = getattr(bind, "dialect", None)
+    return getattr(dialect, "name", None) == "postgresql"
+
+
+def _state_values(state: StateEnvelope) -> dict[str, Any]:
+    return {
+        "state_id": state.state_id,
+        "state_type": state.state_type.value,
+        "entity_id": state.entity_id,
+        "as_of": state.as_of,
+        "available_at": state.available_at,
+        "generated_at": state.generated_at,
+        "valid_until": state.valid_until,
+        "schema_version": state.schema_version,
+        "producer": state.producer,
+        "model_version": state.model_version,
+        "feature_version": state.feature_version,
+        "config_version": state.config_version,
+        "quality_severity": _quality_severity(state.data_quality),
+        "content_hash": content_hash(state, exclude={"state_id"}),
+        "payload": state.model_dump(mode="json"),
+        "created_at": state.generated_at,
+    }
+
+
 class StateRepository:
     def __init__(self, session: Session):
         self._session = session
 
     def save_state(self, state: StateEnvelope) -> StateEnvelope:
-        payload = state.model_dump(mode="json")
-        row = StateRecord(
-            state_id=state.state_id,
-            state_type=state.state_type.value,
-            entity_id=state.entity_id,
-            as_of=state.as_of,
-            available_at=state.available_at,
-            generated_at=state.generated_at,
-            valid_until=state.valid_until,
-            schema_version=state.schema_version,
-            producer=state.producer,
-            model_version=state.model_version,
-            feature_version=state.feature_version,
-            config_version=state.config_version,
-            quality_severity=_quality_severity(state.data_quality),
-            content_hash=content_hash(state, exclude={"state_id"}),
-            payload=payload,
-            created_at=state.generated_at,
-        )
+        row = StateRecord(**_state_values(state))
         self._session.add(row)
         self._session.flush()
         return state
+
+    def insert_states_if_absent(
+        self, states: Sequence[StateEnvelope]
+    ) -> dict[str, Any]:
+        """Bulk insert immutable states and resolve every content hash to its ID."""
+
+        if not states:
+            return {}
+        states_by_hash: dict[str, StateEnvelope] = {}
+        for state in states:
+            state_hash = content_hash(state, exclude={"state_id"})
+            states_by_hash.setdefault(state_hash, state)
+        values = [_state_values(state) for state in states_by_hash.values()]
+        if not _is_postgresql(self._session):
+            resolved: dict[str, Any] = {}
+            for state_hash, state in states_by_hash.items():
+                existing = self.get_state_by_content_hash(state_hash)
+                if existing is None:
+                    self.save_state(state)
+                    resolved[state_hash] = state.state_id
+                else:
+                    resolved[state_hash] = existing.state_id
+            return resolved
+
+        inserted = self._session.execute(
+            postgres_insert(StateRecord)
+            .values(values)
+            .on_conflict_do_nothing(index_elements=[StateRecord.content_hash])
+            .returning(StateRecord.content_hash, StateRecord.state_id)
+        ).all()
+        resolved = {row[0]: row[1] for row in inserted}
+        missing_hashes = set(states_by_hash) - set(resolved)
+        if missing_hashes:
+            existing = self._session.execute(
+                select(StateRecord.content_hash, StateRecord.state_id).where(
+                    StateRecord.content_hash.in_(missing_hashes)
+                )
+            ).all()
+            resolved.update({row[0]: row[1] for row in existing})
+        if set(resolved) != set(states_by_hash):
+            raise RuntimeError("state conflict did not produce a readable row")
+        return resolved
 
     def get_state_by_content_hash(self, state_hash: str) -> StateEnvelope | None:
         """Load an existing immutable state so a revised source can add lineage."""
