@@ -15,15 +15,23 @@ warmup NaNs that shouldn't be there).
 from __future__ import annotations
 
 import argparse
+from hashlib import sha256
 import logging
 from pathlib import Path
+from collections.abc import Callable
+from datetime import datetime
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from .config import DAILY_REGIME_PATH, SECTOR_STATE_PATH
 from .daily_regime import build_daily_regime
+from .nervous_system_adapter import persist_market_regime_outputs
 from .sector_state import build_sector_state
 from .timeutil import atomic_write_parquet
+
+if TYPE_CHECKING:
+    from core.nervous_system.persistence.uow import UnitOfWork
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +44,25 @@ def _filter_dates(df: pd.DataFrame, *, start: str | None, end: str | None) -> pd
     return df
 
 
-def main(argv: list[str] | None = None) -> int:
+def _artifact_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _attach_source_lineage(df: pd.DataFrame, *, path: Path, source_id: str) -> None:
+    df.attrs["source_id"] = source_id
+    df.attrs["content_hash"] = _artifact_sha256(path)
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    unit_of_work: "UnitOfWork | None" = None,
+    valid_until_for: Callable[[datetime], datetime] | None = None,
+) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start", default=None, help="Inclusive output start date (YYYY-MM-DD)")
     parser.add_argument("--end", default=None, help="Inclusive output end date (YYYY-MM-DD)")
@@ -58,6 +84,18 @@ def main(argv: list[str] | None = None) -> int:
     out_sector_state = Path(args.out_sector_state)
     atomic_write_parquet(regime, out_regime, index=False)
     atomic_write_parquet(sector_state, out_sector_state, index=False)
+
+    if unit_of_work is not None:
+        if valid_until_for is None:
+            raise ValueError("valid_until_for is required when publishing nervous-system states")
+        _attach_source_lineage(regime, path=out_regime, source_id=str(out_regime))
+        _attach_source_lineage(sector_state, path=out_sector_state, source_id=str(out_sector_state))
+        persist_market_regime_outputs(
+            regime,
+            sector_state,
+            unit_of_work=unit_of_work,
+            valid_until_for=valid_until_for,
+        )
 
     logger.info(
         "daily_regime: %d rows [%s .. %s] -> %s",
