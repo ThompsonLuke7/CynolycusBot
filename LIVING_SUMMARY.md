@@ -1028,6 +1028,10 @@ Focused Task 8 `13 passed`; full nervous-system `195 passed`; compileall/diff-ch
 After correction/re-review, the full suite passed `218`; unbounded dry run passed in `31.17s`; empty local `cynolycus` migrated to `0002` and historical write import completed in `224.06s` with status `COMPLETED`.
 Persisted 208 artifacts, 204,449 imported + 28,950 quarantined evidence rows, and 204,449 lineage edges; one malformed JSON row explains parsed-vs-status totals. Raw sources were unchanged.
 
+{2026-07-31 10:31 ET} {agent: Codex} {nervous system Task 8 crash recovery}
+Added and reviewed pinned PostgreSQL advisory locking plus stale-run reconciliation after a real disconnect; focused `38` and full nervous-system `220` tests pass.
+Real recovery rerun marked the orphan `FAILED`, completed with 233,399 duplicates/zero new rows in `235.04s`, and preserved authoritative item, quarantine, and lineage totals.
+
 {2026-07-31 09:48 ET} {agent: Codex} {nervous system Task 8 correction round 1}
 Closed discovery completeness, causal timestamp, PostgreSQL CLI, atomic identity, batching/resumability, source mutation, future leakage, portfolio fail-closed, bounded JSON, and reversible raw-text findings; correction report appended.
 Focused Task 8 `36 passed`; full nervous-system `218 passed`; canonical unbounded dry-run `208 artifacts / 233398 parsed / 204449 imported / 28950 quarantined` in `21.23s`; compileall/diff clean, no persistent-dev import.
