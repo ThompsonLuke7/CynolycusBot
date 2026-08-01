@@ -1142,3 +1142,7 @@ Meta suite was `22 passed/1 pre-existing missing ignored model-manifest failure`
 {2026-08-01 14:08 EDT} {agent: Codex} {nervous system Task 12 correction round 1}
 Parallel fixes closed real Meta-bar enrichment/revision identity, dealer scope/regime loss, pre-commit publication status/naive time, and disabled/latest-session readiness semantics.
 Focused `75`, broker/readiness `29`, dealer `94`, Meta `32+1 deselected`, and disposable-PostgreSQL core `247` passed; compile/diff-check clean. Commit/re-review are next.
+
+{2026-08-01 14:32 EDT} {agent: Codex} {nervous system Task 12 correction round 2}
+Actual raw dealer and aggregate-ranking evidence now have honest separate paths; broker backup records observed-empty versus unavailable open orders and refuses staging incomplete portfolio state.
+Focused `90`, dealer `104`, broker `21`, and disposable-PostgreSQL core `252` passed; compile/diff-check clean. Commit/re-review are next.

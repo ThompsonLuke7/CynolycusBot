@@ -247,6 +247,25 @@ def _selected_scope(
     return raw_scope
 
 
+def _snapshot_date(row: Mapping[str, object], *, field_name: str) -> date:
+    value = row.get("snapshot_date")
+    if hasattr(value, "to_pydatetime") and not isinstance(value, datetime):
+        try:
+            value = value.to_pydatetime()
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} snapshot_date must be an ISO date") from exc
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError as exc:
+            raise ValueError(f"{field_name} snapshot_date must be an ISO date") from exc
+    raise ValueError(f"{field_name} must contain snapshot_date")
+
+
 def _dealer_regime(snapshot: Mapping[str, object]) -> DealerRegime:
     evidence: list[DealerRegime] = []
     if "dealer_direction" in snapshot and snapshot["dealer_direction"] is not None:
@@ -269,7 +288,7 @@ def _dealer_regime(snapshot: Mapping[str, object]) -> DealerRegime:
         evidence.append(regime)
 
     if not evidence:
-        raise ValueError("snapshot must contain dealer_direction or dealer_regime evidence")
+        return DealerRegime.UNKNOWN
     if any(regime is not evidence[0] for regime in evidence[1:]):
         raise ValueError("conflicting dealer direction/regime values")
     return evidence[0]
@@ -431,6 +450,18 @@ def _scope_quality_issue(scope: str) -> DataQualityIssue:
     )
 
 
+def _uncalibrated_direction_quality_issue() -> DataQualityIssue:
+    return DataQualityIssue(
+        code="DEALER_DIRECTION_UNCALIBRATED",
+        severity=DataQualitySeverity.WARNING,
+        component=_PRODUCER,
+        message=(
+            "no calibrated dealer direction or regime evidence; "
+            "dealer regime remains UNKNOWN"
+        ),
+    )
+
+
 def _stable_state_id(
     *,
     ticker: str,
@@ -550,6 +581,11 @@ def adapt_dealer_state(
     metrics["selected_scope_weight"] = _SCOPE_WEIGHTS[scope]
     quality_issues = (
         *_quality_issues(snapshot_row, dynamics_row),
+        *(
+            (_uncalibrated_direction_quality_issue(),)
+            if dealer_regime is DealerRegime.UNKNOWN
+            else ()
+        ),
         _scope_quality_issue(scope),
     )
     quality = DataQualitySummary(issues=quality_issues)
@@ -597,4 +633,115 @@ def adapt_dealer_state(
     )
 
 
-__all__ = ["adapt_dealer_state"]
+def adapt_dealer_state_with_ranking(
+    snapshot: Mapping[str, object],
+    dynamics: Mapping[str, object] | None,
+    ranking: Mapping[str, object],
+    *,
+    captured_at: datetime,
+    ranking_available_at: datetime,
+    valid_until: datetime,
+    lineage: tuple[LineageRef, ...],
+    ranking_lineage: tuple[LineageRef, ...],
+) -> DealerState:
+    """Join one selected raw scope row with separately available ranking evidence.
+
+    ``ranking`` must be the ticker-aggregate output of ``build_rankings`` and
+    therefore must not declare a scope. The selected canonical scope and all
+    singleton dealer levels continue to come only from ``snapshot``.
+    """
+
+    snapshot_row = _mapping(snapshot, field_name="snapshot")
+    dynamics_row = (
+        _mapping(dynamics, field_name="dynamics") if dynamics is not None else None
+    )
+    ranking_row = _mapping(ranking, field_name="ranking")
+    if "scope" in ranking_row:
+        raise ValueError("aggregate ranking must not declare or fabricate scope")
+
+    captured_at_utc = _timestamp(captured_at, field_name="captured_at")
+    ranking_available_at_utc = _timestamp(
+        ranking_available_at, field_name="ranking_available_at"
+    )
+    if ranking_available_at_utc < captured_at_utc:
+        raise ValueError("ranking_available_at cannot precede captured_at")
+    if "available_at" in ranking_row and ranking_row["available_at"] is not None:
+        row_available_at = _timestamp(
+            ranking_row["available_at"], field_name="ranking available_at"
+        )
+        if row_available_at != ranking_available_at_utc:
+            raise ValueError("ranking available_at conflicts with ranking_available_at")
+
+    if "captured_at" not in ranking_row or ranking_row["captured_at"] is None:
+        raise ValueError("ranking must contain captured_at")
+    ranking_captured_at = _timestamp(
+        ranking_row["captured_at"], field_name="ranking captured_at"
+    )
+    if ranking_captured_at != captured_at_utc:
+        raise ValueError("ranking captured_at conflicts with captured_at")
+
+    snapshot_ticker = _ticker(snapshot_row)
+    ranking_ticker = _ticker(ranking_row)
+    if ranking_ticker != snapshot_ticker:
+        raise ValueError("ranking ticker conflicts with snapshot ticker")
+    if _snapshot_date(ranking_row, field_name="ranking") != _snapshot_date(
+        snapshot_row, field_name="snapshot"
+    ):
+        raise ValueError("ranking snapshot_date conflicts with snapshot snapshot_date")
+
+    if "scope_count" not in ranking_row or "scope_weight_sum" not in ranking_row:
+        raise ValueError("ranking must contain aggregate scope_count and scope_weight_sum")
+    scope_count = _finite(ranking_row["scope_count"], field_name="scope_count")
+    scope_weight_sum = _finite(
+        ranking_row["scope_weight_sum"], field_name="scope_weight_sum"
+    )
+    if scope_count < 1 or not scope_count.is_integer() or scope_weight_sum <= 0:
+        raise ValueError("ranking aggregate scope evidence is invalid")
+
+    raw_regime = _dealer_regime(snapshot_row)
+    ranking_regime = _dealer_regime(ranking_row)
+    if ranking_regime is DealerRegime.UNKNOWN:
+        raise ValueError("ranking must contain explicit dealer direction or regime evidence")
+    if raw_regime is not DealerRegime.UNKNOWN and raw_regime is not ranking_regime:
+        raise ValueError("ranking dealer regime conflicts with snapshot dealer regime")
+
+    normalized_snapshot = dict(snapshot_row)
+    for field_name in ("dealer_direction", "dealer_regime", "regime"):
+        if field_name in ranking_row and ranking_row[field_name] is not None:
+            normalized_snapshot[field_name] = ranking_row[field_name]
+
+    normalized_dynamics = dict(dynamics_row or {})
+    if dynamics_row is None:
+        normalized_dynamics["scope"] = _selected_scope(snapshot_row, None)
+        normalized_dynamics["captured_at"] = captured_at_utc
+        evidence_available_at = captured_at_utc
+    else:
+        if "available_at" not in dynamics_row or dynamics_row["available_at"] is None:
+            raise ValueError("dynamics must contain explicit available_at")
+        evidence_available_at = _timestamp(
+            dynamics_row["available_at"], field_name="available_at"
+        )
+    normalized_dynamics["available_at"] = max(
+        evidence_available_at, ranking_available_at_utc
+    )
+    for name, value in _numeric_metrics(ranking_row).items():
+        if name in normalized_dynamics and normalized_dynamics[name] != value:
+            raise ValueError(f"conflicting {name} values across dynamics and ranking")
+        normalized_dynamics[name] = value
+
+    validated_lineage = _validated_lineage(lineage)
+    validated_ranking_lineage = _validated_lineage(ranking_lineage)
+    lineage_ids = set(_lineage_ids(validated_lineage))
+    if lineage_ids.intersection(_lineage_ids(validated_ranking_lineage)):
+        raise ValueError("ranking_lineage must identify separate ranking evidence")
+
+    return adapt_dealer_state(
+        normalized_snapshot,
+        normalized_dynamics,
+        captured_at=captured_at_utc,
+        valid_until=valid_until,
+        lineage=(*validated_lineage, *validated_ranking_lineage),
+    )
+
+
+__all__ = ["adapt_dealer_state", "adapt_dealer_state_with_ranking"]

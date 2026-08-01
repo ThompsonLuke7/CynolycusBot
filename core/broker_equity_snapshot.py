@@ -140,6 +140,68 @@ def _open_order_ids(raw: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(identifiers))
 
 
+def _open_orders_observation(
+    raw: Mapping[str, Any],
+) -> tuple[tuple[str, ...], str, str | None]:
+    has_orders = "open_order_ids" in raw or "open_orders" in raw
+    evidence = raw.get("open_orders_observation")
+    if evidence is None:
+        if has_orders:
+            return _open_order_ids(raw), "OBSERVED", None
+        return (), "NOT_OBSERVED", "snapshot has no open-order observation evidence"
+    if not isinstance(evidence, Mapping):
+        raise ValueError("open_orders_observation must be a mapping")
+    status = str(evidence.get("status") or "").strip().upper()
+    if status not in {"OBSERVED", "UNAVAILABLE", "UNSUPPORTED", "FAILED", "NOT_OBSERVED"}:
+        raise ValueError(f"open_orders_observation has unsupported status {status!r}")
+    error_value = evidence.get("error")
+    error = str(error_value).strip() if error_value is not None else None
+    if status == "OBSERVED":
+        if not has_orders:
+            raise ValueError("observed open-order evidence must include open_orders")
+        return _open_order_ids(raw), status, error
+    if has_orders:
+        raise ValueError(f"open_orders must be absent when observation status is {status}")
+    return (), status, error
+
+
+def _observation_failure(status: str, error: str) -> dict[str, Any]:
+    return {"open_orders_observation": {"status": status, "error": error}}
+
+
+def _capture_open_orders(client: Any) -> dict[str, Any]:
+    try:
+        get_orders = getattr(client, "get_orders")
+    except AttributeError:
+        return _observation_failure("UNSUPPORTED", "client does not provide get_orders")
+    except Exception as exc:
+        detail = str(exc).strip()
+        error = type(exc).__name__ + (f": {detail}" if detail else "")
+        return _observation_failure("FAILED", error)
+    if not callable(get_orders):
+        return _observation_failure("UNSUPPORTED", "client does not provide get_orders")
+    try:
+        values = get_orders(status="open")
+        if not isinstance(values, (list, tuple)):
+            raise ValueError("get_orders(status='open') must return a list")
+        orders = []
+        for index, value in enumerate(values, start=1):
+            if not isinstance(value, Mapping):
+                raise ValueError(f"open order {index} must be a mapping")
+            identifier = str(value.get("id") or "").strip()
+            if not identifier:
+                raise ValueError(f"open order {index} has no id")
+            orders.append({"id": identifier})
+    except Exception as exc:
+        detail = str(exc).strip()
+        error = type(exc).__name__ + (f": {detail}" if detail else "")
+        return _observation_failure("FAILED", error)
+    return {
+        "open_orders": sorted(orders, key=lambda order: order["id"]),
+        "open_orders_observation": {"status": "OBSERVED"},
+    }
+
+
 def _lineage_id(*, source_hash: str, account_alias: str, captured_at: datetime) -> str:
     return json.dumps(
         {
@@ -222,15 +284,16 @@ def adapt_broker_portfolio_snapshot(
         )
 
     positions_tuple = tuple(sorted(positions, key=lambda item: (item.symbol, item.broker_position_id)))
+    open_order_ids, open_orders_status, open_orders_error = _open_orders_observation(raw)
     source_hash = hashlib.sha256(_canonical_json(raw).encode("utf-8")).hexdigest()
     lineage_id = _lineage_id(
         source_hash=source_hash,
         account_alias=account_alias,
         captured_at=captured_at,
     )
-    quality_issues = ()
+    quality_issues: list[DataQualityIssue] = []
     if unmatched_symbols:
-        quality_issues = (
+        quality_issues.append(
             DataQualityIssue(
                 code="UNMATCHED_POSITION_OWNERSHIP",
                 severity=DataQualitySeverity.WARNING,
@@ -239,9 +302,20 @@ def adapt_broker_portfolio_snapshot(
                     "fill-derived ownership was unavailable for: "
                     + ", ".join(sorted(unmatched_symbols))
                 ),
-            ),
+            )
         )
-    data_quality = DataQualitySummary(issues=quality_issues)
+    if open_orders_status != "OBSERVED":
+        detail = f": {open_orders_error}" if open_orders_error else ""
+        quality_issues.append(
+            DataQualityIssue(
+                code="OPEN_ORDERS_NOT_OBSERVED",
+                severity=DataQualitySeverity.WARNING,
+                component=_PORTFOLIO_PRODUCER,
+                message=f"open orders were not observed ({open_orders_status}){detail}",
+                fallback_used="open_order_ids left empty",
+            )
+        )
+    data_quality = DataQualitySummary(issues=tuple(quality_issues))
     identity = {
         "account_alias": account_alias,
         "captured_at": captured_at.isoformat(),
@@ -279,7 +353,7 @@ def adapt_broker_portfolio_snapshot(
         buying_power=buying_power,
         day_pl=day_pl,
         positions=positions_tuple,
-        open_order_ids=_open_order_ids(raw),
+        open_order_ids=open_order_ids,
         broker_observed_at=captured_at,
     )
 
@@ -347,6 +421,7 @@ def capture_snapshot(
     )
     account = client.get_account() or {}
     positions = client.get_positions() or []
+    open_orders_evidence = _capture_open_orders(client)
     account_fields = {field: _json_scalar(account.get(field)) for field in _ACCOUNT_FIELDS}
     equity = _as_float(account.get("equity"))
     last_equity = _as_float(account.get("last_equity"))
@@ -368,6 +443,7 @@ def capture_snapshot(
             else None
         ),
         "positions": [_position_record(position) for position in positions],
+        **open_orders_evidence,
     }
     out = snapshot_path(account_label=account_label, root=root, now=captured)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -381,6 +457,19 @@ def capture_snapshot(
         **record,
     }
     if unit_of_work is None:
+        return result
+    open_orders_status = record["open_orders_observation"]["status"]
+    if open_orders_status != "OBSERVED":
+        observation_error = record["open_orders_observation"].get("error")
+        detail = f": {observation_error}" if observation_error else ""
+        result.update(
+            {
+                "publication_status": "FAILED",
+                "publication_error": (
+                    f"open-order observation {open_orders_status}{detail}"
+                ),
+            }
+        )
         return result
     try:
         state = adapt_broker_portfolio_snapshot(

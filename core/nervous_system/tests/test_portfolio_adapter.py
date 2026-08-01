@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 from core.broker_equity_snapshot import adapt_broker_portfolio_snapshot, capture_snapshot
 from core.nervous_system.contracts.enums import AssetClass
 from core.nervous_system.contracts.base import content_hash
@@ -131,6 +132,22 @@ def test_portfolio_adapter_does_not_call_a_broker_or_infer_underlying_ownership(
     assert positions["AAPL260821C00195000"].ownership_status == "UNASSIGNED"
 
 
+def test_portfolio_adapter_warns_when_open_orders_were_not_observed() -> None:
+    raw = _raw_snapshot()
+    raw.pop("open_orders")
+    raw["open_orders_observation"] = {
+        "status": "FAILED",
+        "error": "RuntimeError: orders unavailable",
+    }
+
+    state = adapt_broker_portfolio_snapshot(raw, strategy_ownership={})
+
+    assert state.open_order_ids == ()
+    issues = {issue.code: issue for issue in state.data_quality.issues}
+    assert issues["OPEN_ORDERS_NOT_OBSERVED"].severity.value == "WARNING"
+    assert "FAILED" in issues["OPEN_ORDERS_NOT_OBSERVED"].message
+
+
 @pytest.mark.parametrize(
     "captured_at",
     [None, "2026-07-30T20:05:00", "not-a-timestamp"],
@@ -167,6 +184,31 @@ def test_portfolio_adapter_fails_closed_for_non_finite_position_quantity() -> No
 
 
 class _Client:
+    def __init__(self, *, orders=None, orders_error: Exception | None = None):
+        self.calls = []
+        self.orders = (
+            [{"id": "order-2", "symbol": "MSFT"}, {"id": "order-1", "symbol": "AAPL"}]
+            if orders is None
+            else orders
+        )
+        self.orders_error = orders_error
+
+    def get_account(self):
+        self.calls.append("get_account")
+        return _raw_snapshot()["account"]
+
+    def get_positions(self):
+        self.calls.append("get_positions")
+        return _raw_snapshot()["positions"]
+
+    def get_orders(self, **params):
+        self.calls.append(("get_orders", params))
+        if self.orders_error is not None:
+            raise self.orders_error
+        return self.orders
+
+
+class _LegacyClient:
     def __init__(self):
         self.calls = []
 
@@ -177,10 +219,6 @@ class _Client:
     def get_positions(self):
         self.calls.append("get_positions")
         return _raw_snapshot()["positions"]
-
-    def get_orders(self):
-        self.calls.append("get_orders")
-        raise AssertionError("snapshot writer must not add a broker order call")
 
 
 class _RecordingStates:
@@ -208,11 +246,7 @@ class _RecordingUow:
         raise AssertionError("snapshot writer must not rollback caller-owned UOW")
 
 
-def test_snapshot_stages_only_after_fsync_and_leaves_commit_to_caller(
-    tmp_path, monkeypatch
-) -> None:
-    events: list[tuple[str, object]] = []
-    path = tmp_path / "broker_equity_20260730_paper.jsonl"
+def _record_fsync(monkeypatch, events: list[tuple[str, object]]) -> None:
     original_fsync = __import__("os").fsync
 
     def recording_fsync(fd):
@@ -220,6 +254,35 @@ def test_snapshot_stages_only_after_fsync_and_leaves_commit_to_caller(
         return original_fsync(fd)
 
     monkeypatch.setattr("core.broker_equity_snapshot.os.fsync", recording_fsync)
+
+
+def test_alpaca_client_open_order_method_uses_read_only_get_and_status_param() -> None:
+    calls = []
+    client = object.__new__(AlpacaOptionsClient)
+    client._trading_base = "https://paper-api.alpaca.markets"  # type: ignore[attr-defined]
+
+    def record_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return [{"id": "order-1"}]
+
+    client._request = record_request  # type: ignore[method-assign]
+
+    assert client.get_orders(status="open") == [{"id": "order-1"}]
+    assert calls == [
+        (
+            "GET",
+            "https://paper-api.alpaca.markets/v2/orders",
+            {"params": {"status": "open"}},
+        )
+    ]
+
+
+def test_snapshot_stages_only_after_fsync_and_leaves_commit_to_caller(
+    tmp_path, monkeypatch
+) -> None:
+    events: list[tuple[str, object]] = []
+    path = tmp_path / "broker_equity_20260730_paper.jsonl"
+    _record_fsync(monkeypatch, events)
     uow = _RecordingUow(events, path)
     client = _Client()
     result = capture_snapshot(
@@ -235,8 +298,123 @@ def test_snapshot_stages_only_after_fsync_and_leaves_commit_to_caller(
     assert result["publication_status"] != "PUBLISHED"
     assert [event[0] for event in events] == ["fsync", "stage"]
     assert len(uow.states.staged_states) == 1
+    assert client.calls == [
+        "get_account",
+        "get_positions",
+        ("get_orders", {"status": "open"}),
+    ]
+    row = json.loads(path.read_text())
+    assert row["open_orders_observation"] == {"status": "OBSERVED"}
+    assert row["open_orders"] == [{"id": "order-1"}, {"id": "order-2"}]
+    state = uow.states.staged_states[0]
+    assert state.open_order_ids == ("order-1", "order-2")
+    assert "OPEN_ORDERS_NOT_OBSERVED" not in {
+        issue.code for issue in state.data_quality.issues
+    }
+
+
+def test_snapshot_distinguishes_observed_zero_open_orders_from_unavailable(
+    tmp_path,
+) -> None:
+    path = tmp_path / "broker_equity_20260730_paper.jsonl"
+    events: list[tuple[str, object]] = []
+    uow = _RecordingUow(events, path)
+    client = _Client(orders=[])
+
+    result = capture_snapshot(
+        client=client,
+        account_label="paper",
+        root=tmp_path,
+        now=CAPTURED_AT,
+        unit_of_work=uow,
+    )
+
+    row = json.loads(path.read_text())
+    assert result["publication_status"] == "STAGED"
+    assert row["open_orders_observation"] == {"status": "OBSERVED"}
+    assert row["open_orders"] == []
+    assert uow.states.staged_states[0].open_order_ids == ()
+    assert "OPEN_ORDERS_NOT_OBSERVED" not in {
+        issue.code for issue in uow.states.staged_states[0].data_quality.issues
+    }
+    assert client.calls == [
+        "get_account",
+        "get_positions",
+        ("get_orders", {"status": "open"}),
+    ]
+
+
+def test_snapshot_unsupported_open_orders_remain_durable_but_are_not_staged(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "broker_equity_20260730_paper.jsonl"
+    events: list[tuple[str, object]] = []
+    _record_fsync(monkeypatch, events)
+    uow = _RecordingUow(events, path)
+    client = _LegacyClient()
+
+    result = capture_snapshot(
+        client=client,
+        account_label="paper",
+        root=tmp_path,
+        now=CAPTURED_AT,
+        unit_of_work=uow,
+    )
+
+    row = json.loads(path.read_text())
+    assert result["publication_status"] == "FAILED"
+    assert "UNSUPPORTED" in result["publication_error"]
+    assert row["open_orders_observation"] == {
+        "status": "UNSUPPORTED",
+        "error": "client does not provide get_orders",
+    }
+    assert "open_orders" not in row
     assert client.calls == ["get_account", "get_positions"]
-    assert "open_orders" not in json.loads(path.read_text())
+    assert [event[0] for event in events] == ["fsync"]
+    assert uow.states.staged_states == []
+    local_state = adapt_broker_portfolio_snapshot(row, strategy_ownership={})
+    assert local_state.open_order_ids == ()
+    assert "OPEN_ORDERS_NOT_OBSERVED" in {
+        issue.code for issue in local_state.data_quality.issues
+    }
+
+
+def test_snapshot_failed_open_order_read_remains_durable_but_is_not_staged(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "broker_equity_20260730_paper.jsonl"
+    events: list[tuple[str, object]] = []
+    _record_fsync(monkeypatch, events)
+    uow = _RecordingUow(events, path)
+    client = _Client(orders_error=RuntimeError("orders unavailable"))
+
+    result = capture_snapshot(
+        client=client,
+        account_label="paper",
+        root=tmp_path,
+        now=CAPTURED_AT,
+        unit_of_work=uow,
+    )
+
+    row = json.loads(path.read_text())
+    assert result["publication_status"] == "FAILED"
+    assert "orders unavailable" in result["publication_error"]
+    assert row["open_orders_observation"] == {
+        "status": "FAILED",
+        "error": "RuntimeError: orders unavailable",
+    }
+    assert "open_orders" not in row
+    assert client.calls == [
+        "get_account",
+        "get_positions",
+        ("get_orders", {"status": "open"}),
+    ]
+    assert [event[0] for event in events] == ["fsync"]
+    assert uow.states.staged_states == []
+    local_state = adapt_broker_portfolio_snapshot(row, strategy_ownership={})
+    assert "OPEN_ORDERS_NOT_OBSERVED" in {
+        issue.code for issue in local_state.data_quality.issues
+    }
 
 
 def test_snapshot_rejects_naive_now_before_broker_file_or_uow_side_effects(tmp_path) -> None:
@@ -265,14 +443,18 @@ def test_snapshot_rejects_naive_now_before_broker_file_or_uow_side_effects(tmp_p
     assert "now must be timezone-aware" in str(error)
 
 
-def test_snapshot_default_now_is_utc_and_uses_only_account_and_positions(tmp_path) -> None:
+def test_snapshot_default_now_is_utc_and_observes_open_orders(tmp_path) -> None:
     client = _Client()
 
     result = capture_snapshot(client=client, account_label="paper", root=tmp_path)
 
     captured_at = datetime.fromisoformat(result["captured_at_utc"])
     assert captured_at.utcoffset() == timezone.utc.utcoffset(captured_at)
-    assert client.calls == ["get_account", "get_positions"]
+    assert client.calls == [
+        "get_account",
+        "get_positions",
+        ("get_orders", {"status": "open"}),
+    ]
     assert list(tmp_path.glob("broker_equity_*_paper.jsonl"))
 
 
