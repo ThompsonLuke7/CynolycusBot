@@ -21,7 +21,7 @@ def _args():
 
 
 def test_mixed_manage_and_entry(monkeypatch):
-    monkeypatch.setattr(lr, "_ref_price", lambda t: 50.0)
+    monkeypatch.setattr(lr, "_ref_price", lambda t, **_: 50.0)
 
     def fake_route(client, t, px, **_):
         if t == "NEWOPT":

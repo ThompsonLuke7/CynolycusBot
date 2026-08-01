@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
+from dataclasses import dataclass, field
+from decimal import Decimal
 import hashlib
 import json
 import math
@@ -13,7 +15,15 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pandas as pd
 
-from core.nervous_system.contracts.enums import DataQualitySeverity, StateType, TickerSetup
+from core.nervous_system.contracts.enums import (
+    DataQualitySeverity,
+    DecisionKind,
+    Direction,
+    InstrumentFamily,
+    StateType,
+    TickerSetup,
+)
+from core.nervous_system.contracts.intent import TradeIntent
 from core.nervous_system.contracts.quality import (
     DataQualityIssue,
     DataQualitySummary,
@@ -28,6 +38,43 @@ _MODEL_VERSION = "meta-ranker-adapter@1"
 _FEATURE_VERSION = "meta-ranker-matrix@1"
 _CONFIG_VERSION = "meta-ranker-ticker@1"
 _SHA256_LENGTH = 64
+
+_DEFAULT_INSTRUMENT_PREFERENCES = tuple(InstrumentFamily)
+
+
+@dataclass(frozen=True)
+class MetaIntentConfig:
+    """Pure, versioned metadata for Meta Ranker entry intents."""
+
+    strategy_id: str = "meta_ranker"
+    quality_floor: float = 0.4
+    held_tickers: frozenset[str] = field(default_factory=frozenset)
+    requested_notional: Decimal | float | int = Decimal("5000")
+    model_version: str = "meta-ranker-model@1"
+    feature_version: str = _FEATURE_VERSION
+    config_version: str = "meta-ranker-intent@1"
+    instrument_preferences: tuple[InstrumentFamily, ...] = _DEFAULT_INSTRUMENT_PREFERENCES
+    expected_holding_period: str = "53x4h"
+    entry_window: str = "current-or-next-open"
+    reason_codes: tuple[str, ...] = ("META_TOP_K", "META_LONG_ENTRY")
+
+    def __post_init__(self) -> None:
+        if not self.strategy_id.strip():
+            raise ValueError("strategy_id must be non-empty")
+        if not math.isfinite(float(self.quality_floor)):
+            raise ValueError("quality_floor must be finite")
+        notional = Decimal(str(self.requested_notional))
+        if notional.is_nan() or notional.is_finite() is False or notional < 0:
+            raise ValueError("requested_notional must be a finite non-negative amount")
+        for field_name in ("model_version", "feature_version", "config_version"):
+            if not str(getattr(self, field_name)).strip():
+                raise ValueError(f"{field_name} must be non-empty")
+        object.__setattr__(
+            self,
+            "held_tickers",
+            frozenset(str(ticker).strip().upper() for ticker in self.held_tickers if str(ticker).strip()),
+        )
+        object.__setattr__(self, "requested_notional", notional)
 
 _NON_METRIC_FIELDS = frozenset(
     {
@@ -309,6 +356,116 @@ def _ticker(value: object, *, field_name: str) -> str:
     return ticker
 
 
+def _intent_idempotency_key(
+    *,
+    strategy_id: str,
+    decision_bar: datetime,
+    ticker: str,
+    side: Direction,
+    config_version: str,
+    intent_ordinal: int,
+) -> str:
+    material = {
+        "strategy_id": strategy_id,
+        "decision_bar": decision_bar.isoformat(),
+        "ticker": ticker,
+        "side": side.value,
+        "config_version": config_version,
+        "intent_ordinal": intent_ordinal,
+    }
+    canonical = json.dumps(material, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def build_trade_intents(
+    ranked: pd.DataFrame,
+    *,
+    decision_time: datetime,
+    decision_bar: datetime,
+    snapshot_id_by_ticker: Mapping[str, UUID],
+    config: MetaIntentConfig,
+) -> tuple[TradeIntent, ...]:
+    """Build deterministic Meta LONG ENTRY intents from selected ranked rows."""
+
+    if not isinstance(ranked, pd.DataFrame):
+        raise TypeError("ranked must be a pandas DataFrame")
+    if not isinstance(config, MetaIntentConfig):
+        raise TypeError("config must be a MetaIntentConfig")
+    required = {"ticker", "timestamp", "close", "s_combo", "s_upside", "s_quality"}
+    missing = sorted(required.difference(ranked.columns))
+    if missing:
+        raise KeyError(f"ranked is missing required intent columns: {missing}")
+
+    decision_time_utc = _timestamp(decision_time, field_name="decision_time")
+    decision_bar_utc = _timestamp(decision_bar, field_name="decision_bar")
+    if decision_bar_utc > decision_time_utc:
+        raise ValueError("decision_bar must not be after decision_time")
+    row_timestamps = pd.to_datetime(ranked["timestamp"], utc=True, errors="coerce")
+    if row_timestamps.isna().any() or not bool(row_timestamps.eq(pd.Timestamp(decision_bar_utc)).all()):
+        raise ValueError("ranked rows must all match the exact decision bar")
+
+    intents: list[TradeIntent] = []
+    for row in ranked.to_dict(orient="records"):
+        ticker = _ticker(row.get("ticker"), field_name="ranked ticker")
+        quality = _finite(row.get("s_quality"), field_name=f"{ticker} s_quality")
+        if ticker in config.held_tickers or quality < config.quality_floor:
+            continue
+
+        score_components = {
+            name: _finite(row.get(name), field_name=f"{ticker} {name}")
+            for name in ("s_combo", "s_upside", "s_quality")
+        }
+        reference_price = _finite(row.get("close"), field_name=f"{ticker} close")
+        if reference_price <= 0:
+            raise ValueError(f"{ticker} selected-bar close must be positive")
+        try:
+            snapshot_id = snapshot_id_by_ticker[ticker]
+        except KeyError as exc:
+            raise KeyError(f"missing context snapshot ID for {ticker}") from exc
+
+        intent_ordinal = len(intents) + 1
+        side = Direction.LONG
+        idempotency_key = _intent_idempotency_key(
+            strategy_id=config.strategy_id,
+            decision_bar=decision_bar_utc,
+            ticker=ticker,
+            side=side,
+            config_version=config.config_version,
+            intent_ordinal=intent_ordinal,
+        )
+        intents.append(
+            TradeIntent(
+                intent_id=uuid5(NAMESPACE_URL, idempotency_key),
+                strategy_id=config.strategy_id,
+                ticker=ticker,
+                direction=side,
+                decision_kind=DecisionKind.ENTRY,
+                raw_score=score_components["s_combo"],
+                raw_probability=None,
+                expected_return=None,
+                expected_holding_period=config.expected_holding_period,
+                snapshot_id=snapshot_id,
+                selected_bar=decision_bar_utc,
+                entry_window=config.entry_window,
+                preferred_entry=Decimal(str(reference_price)),
+                invalidation=None,
+                target=None,
+                stop=None,
+                position_size_requested=config.requested_notional,
+                instrument_preferences=config.instrument_preferences,
+                feature_timestamp=decision_bar_utc,
+                created_at=decision_time_utc,
+                model_version=config.model_version,
+                feature_version=config.feature_version,
+                reason_codes=config.reason_codes,
+                score_components=score_components,
+                config_version=config.config_version,
+                idempotency_key=idempotency_key,
+            )
+        )
+    return tuple(intents)
+
+
 def adapt_scored_ticker_state(
     scored_row: Mapping[str, object],
     selected_bar: Mapping[str, object],
@@ -465,4 +622,9 @@ def adapt_ticker_state(
     )
 
 
-__all__ = ["adapt_scored_ticker_state", "adapt_ticker_state"]
+__all__ = [
+    "MetaIntentConfig",
+    "adapt_scored_ticker_state",
+    "adapt_ticker_state",
+    "build_trade_intents",
+]

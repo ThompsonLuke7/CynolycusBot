@@ -19,8 +19,10 @@ Run:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -31,6 +33,7 @@ MODELS_DIR = HERE / "models"
 DEFAULT_MATRIX = HERE / "meta_ranker_matrix.parquet"
 LABELS = ("upside", "quality")
 ID_COLS = ["timestamp", "ticker", "theme"]
+BoosterLoader = Callable[[str], tuple[Any, list[str]]]
 
 
 def _load_booster(label: str) -> tuple[xgb.Booster, list[str]]:
@@ -41,11 +44,17 @@ def _load_booster(label: str) -> tuple[xgb.Booster, list[str]]:
     return bst, feats
 
 
-def score_frame(df: pd.DataFrame, labels=LABELS) -> pd.DataFrame:
+def score_frame(
+    df: pd.DataFrame,
+    labels=LABELS,
+    *,
+    booster_loader: BoosterLoader | None = None,
+) -> pd.DataFrame:
     """Add per-label score columns (s_<label>) to a meta-ranker matrix frame."""
     out = df.copy()
+    load_booster = booster_loader or _load_booster
     for label in labels:
-        bst, feats = _load_booster(label)
+        bst, feats = load_booster(label)
         missing = [f for f in feats if f not in out.columns]
         if missing:
             raise KeyError(f"{label}: matrix missing {len(missing)} features e.g. {missing[:5]}")

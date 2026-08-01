@@ -23,11 +23,14 @@ Run:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+from dataclasses import dataclass, field
 import json
 import logging
 import math
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -39,6 +42,10 @@ from core.live_signal_audit import (
     build_signal_audit,
 )
 from signals.meta_context.meta_ranker.score import score_frame
+from signals.meta_context.meta_ranker.nervous_system_adapter import (
+    MetaIntentConfig,
+    build_trade_intents,
+)
 from core.live_4h_exec import (
     ExecPolicy,
     build_mixed_plan,
@@ -69,6 +76,76 @@ AUDIT_MODULE = "meta_ranker"
 DEFAULT_AUDIT_LOG = REPO / "Data/inference/meta_ranker/live_signal_audit.jsonl"
 
 
+@dataclass(frozen=True)
+class MetaRankingConfig:
+    """Pure Meta selection policy and the injectable model boundary."""
+
+    top_k: int = 10
+    liquidity_floor: float = 0.6
+    combo_floor: float = 0.90
+    blacklist: frozenset[str] = field(default_factory=frozenset)
+    booster_loader: Callable[[str], tuple[Any, list[str]]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.top_k <= 0:
+            raise ValueError("top_k must be positive")
+        object.__setattr__(
+            self,
+            "blacklist",
+            frozenset(str(ticker).strip().upper() for ticker in self.blacklist if str(ticker).strip()),
+        )
+
+
+def _decision_timestamp(value: datetime | pd.Timestamp, *, field_name: str) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return timestamp.tz_convert("UTC")
+
+
+def rank_meta_candidates(
+    feature_matrix: pd.DataFrame,
+    *,
+    bar: pd.Timestamp,
+    config: MetaRankingConfig,
+) -> pd.DataFrame:
+    """Score and rank exactly one supplied Meta decision bar.
+
+    The model boundary remains ``score_frame``; all selection behavior below
+    mirrors the existing paper runner.  No latest-row inference or file/clock
+    access occurs here.
+    """
+
+    if not isinstance(feature_matrix, pd.DataFrame):
+        raise TypeError("feature_matrix must be a pandas DataFrame")
+    if not isinstance(config, MetaRankingConfig):
+        raise TypeError("config must be a MetaRankingConfig")
+    if "timestamp" not in feature_matrix.columns:
+        raise KeyError("feature_matrix requires a timestamp column")
+
+    decision_bar = _decision_timestamp(bar, field_name="bar")
+    timestamps = pd.to_datetime(feature_matrix["timestamp"], utc=True)
+    selected_mask = timestamps == decision_bar
+    if not bool(selected_mask.any()):
+        raise ValueError(f"feature_matrix has no rows for exact decision bar {decision_bar.isoformat()}")
+
+    selected = feature_matrix.loc[selected_mask].copy()
+    selected["timestamp"] = timestamps.loc[selected_mask]
+    scored = score_frame(selected, booster_loader=config.booster_loader)
+
+    n0 = len(scored)
+    eligible = scored[scored["s_combo"] >= config.combo_floor]
+    if "dollar_vol_pctile_252" in eligible.columns:
+        eligible = eligible[eligible["dollar_vol_pctile_252"].fillna(0) >= config.liquidity_floor]
+    if config.blacklist:
+        eligible = eligible[~eligible["ticker"].str.upper().isin(config.blacklist)]
+    ranked = eligible.sort_values("s_combo", ascending=False).head(config.top_k)
+    ranked.attrs["scored_count"] = n0
+    ranked.attrs["eligible_count"] = len(eligible)
+    ranked.attrs["decision_bar"] = decision_bar
+    return ranked
+
+
 def _load_blacklist() -> set[str]:
     if not BLACKLIST_PATH.exists():
         return set()
@@ -90,14 +167,38 @@ def _save_state(state: dict) -> None:
     STATE_PATH.write_text(json.dumps(state, indent=2, default=str))
 
 
-def _ref_price(ticker: str) -> float | None:
+def _ref_price(ticker: str, *, decision_bar: datetime | pd.Timestamp) -> float:
+    """Read one exact completed-bar close for compatibility callers.
+
+    This is deliberately strict: an unscoped or stale last print is not a
+    reference price for a decision.
+    """
+
+    selected_bar = _decision_timestamp(decision_bar, field_name="decision_bar")
     p = BARS_4H / f"{ticker}.parquet"
     if not p.exists():
-        return None
-    b = pd.read_parquet(p, columns=["close"])
-    if b.empty:
-        return None
-    return float(b["close"].iloc[-1])
+        raise ValueError(f"no reference-bar Parquet exists for {ticker}")
+    b = pd.read_parquet(p)
+    if "timestamp" not in b.columns:
+        if b.index.name == "timestamp":
+            b = b.reset_index()
+        else:
+            raise ValueError(f"{ticker} reference Parquet has no timestamp column")
+    if "close" not in b.columns:
+        raise ValueError(f"{ticker} reference Parquet has no close column")
+    timestamps = pd.to_datetime(b["timestamp"], utc=True, errors="coerce")
+    matches = b.loc[timestamps == selected_bar]
+    if len(matches) == 0:
+        raise ValueError(f"{ticker} reference Parquet has no exact decision-bar match")
+    if len(matches) != 1:
+        raise ValueError(f"{ticker} reference Parquet has duplicate exact decision-bar matches")
+    try:
+        close = float(matches.iloc[0]["close"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{ticker} exact decision-bar close is not finite") from exc
+    if not math.isfinite(close):
+        raise ValueError(f"{ticker} exact decision-bar close is not finite")
+    return close
 
 
 def _latest_full_bar(df: pd.DataFrame) -> pd.Timestamp:
@@ -205,25 +306,26 @@ def main():
             f"Rebuild via build_meta_ranker_matrix.py or pass --allow-stale."
         )
 
-    scored = score_frame(df[df["timestamp"] == bar].copy())
     # Eligibility filters (validated to generalize out-of-sample; see analyze_policy notes):
     #   liquidity floor + combo confidence floor + optional manual hard-exclusions.
-    n0 = len(scored)
-    elig = scored[scored["s_combo"] >= args.combo_floor]
-    if "dollar_vol_pctile_252" in elig.columns:
-        elig = elig[elig["dollar_vol_pctile_252"].fillna(0) >= args.liquidity_floor]
     blacklist = _load_blacklist()
-    if blacklist:
-        elig = elig[~elig["ticker"].str.upper().isin(blacklist)]
-    top = elig.sort_values("s_combo", ascending=False).head(args.top_k)
+    ranking_config = MetaRankingConfig(
+        top_k=args.top_k,
+        liquidity_floor=args.liquidity_floor,
+        combo_floor=args.combo_floor,
+        blacklist=frozenset(blacklist),
+    )
+    top = rank_meta_candidates(df, bar=bar, config=ranking_config)
+    n0 = int(top.attrs.get("scored_count", len(top)))
+    eligible_count = int(top.attrs.get("eligible_count", len(top)))
     targets = list(top["ticker"])
     # Quality gate is applied to NEW ENTRIES only (held names exit via horizon/grace,
     # not a quality dip). A combo top-K name is bought only if its s_quality clears
     # the floor — this is the backtested "cross-in + quality" entry rule.
-    quality_by_ticker = scored.set_index("ticker")["s_quality"].to_dict()
+    quality_by_ticker = top.set_index("ticker")["s_quality"].to_dict()
     entry_ok = {t: float(quality_by_ticker.get(t, float("-inf"))) >= args.quality_floor for t in targets}
     signal_audits = _signal_audits(top, bar=bar, entry_ok=entry_ok)
-    print(f"\neligible {len(elig)}/{n0} after filters "
+    print(f"\neligible {eligible_count}/{n0} after filters "
           f"(combo>={args.combo_floor}, liq>={args.liquidity_floor}, blacklist={len(blacklist)})")
     print(f"combo top-{args.top_k}: {targets}")
     if signal_audits:
@@ -336,7 +438,7 @@ def main():
             continue
         if not entry_ok.get(t, False):
             continue
-        qty = shares_for_notional(_ref_price(t), args.target_notional)
+        qty = shares_for_notional(_ref_price(t, decision_bar=bar), args.target_notional)
         plan.append((t, "buy", qty, "entry"))
         order_audits[t] = build_equity_order_audit(
             signal_audit=signal_audits.get(t),
@@ -344,13 +446,13 @@ def main():
             side="buy",
             qty=qty,
             reason="entry",
-            reference_price=_ref_price(t),
+            reference_price=_ref_price(t, decision_bar=bar),
         )
         new_managed[t] = {"qty": qty, "runs_held": 0, "bars_out": 0, "trimmed": False, "entry_bar": str(bar)}
 
     print(f"\n--- order plan ({len(plan)} orders) ---")
     for sym, side, qty, reason in plan:
-        px = _ref_price(sym) or 0.0
+        px = _ref_price(sym, decision_bar=bar)
         print(f"  {side.upper():4} {qty:>4} {sym:<6} (~${qty*px:,.0f} @ {px:.2f})  [{reason}]")
     if not plan:
         print("  (nothing to do — positions within policy)")
@@ -373,7 +475,8 @@ def _run_options(args, client, targets, state, managed, pos_info, bar, entry_ok=
     res = build_mixed_plan(
         client, targets=targets, managed=managed, pos_info=pos_info, bar=bar,
         signal_audits=signal_audits, policy=policy, route_fn=route_option_or_shares,
-        ref_price_fn=_ref_price, entry_ok=entry_ok, gate_reason="quality_gated",
+        ref_price_fn=lambda ticker: _ref_price(ticker, decision_bar=bar),
+        entry_ok=entry_ok, gate_reason="quality_gated",
     )
     _execute(
         args, client, res.plan, state, res.new_managed, bar, targets,

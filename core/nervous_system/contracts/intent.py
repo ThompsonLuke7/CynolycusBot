@@ -2,9 +2,17 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
-from .base import ContractModel, FiniteFloat, NonNegativeDecimal, PositiveDecimal, Probability, UtcDatetime
+from .base import (
+    ContractModel,
+    FiniteFloat,
+    ImmutableFloatMap,
+    NonNegativeDecimal,
+    PositiveDecimal,
+    Probability,
+    UtcDatetime,
+)
 from .enums import DecisionKind, Direction, InstrumentFamily
 
 
@@ -32,6 +40,11 @@ class TradeIntent(ContractModel):
     model_version: str
     feature_version: str
     reason_codes: tuple[str, ...]
+    # Task 14 fields are optional so previously persisted/constructed intents
+    # remain valid; new producers populate all three deterministically.
+    score_components: ImmutableFloatMap = Field(default_factory=dict)
+    config_version: str = "UNKNOWN"
+    idempotency_key: str = ""
 
     @model_validator(mode="after")
     def validate_timing(self) -> TradeIntent:

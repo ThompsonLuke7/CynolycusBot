@@ -1182,3 +1182,7 @@ RED `10 failed`; affected/focused `86` and disposable-PostgreSQL core `398` pass
 {2026-08-01 17:17 EDT} {agent: Codex} {nervous system Task 13 completion}
 Task 13 passed both final LUNA review domains with zero Critical/Important/Minor findings; causal snapshots are versioned, atomic, session-correct, and future-append invariant.
 Final head `64bf7b3`; focused/affected `96`, final regression `10`, and disposable-PostgreSQL core `398` passed. Next is Task 14 Meta intent parity.
+
+{2026-08-01 17:32 EDT} {agent: Codex} {nervous system Task 14 Meta intent parity}
+Added exact-bar pure Meta ranking, deterministic UUIDv5 trade intents, finite score components/config/idempotency contract defaults, and strict selected-bar reference pricing; no order/live path touched.
+Task 14 focused `7`, affected Meta excluding the known artifact `38`, contracts `42`, adapter `23` passed; full Meta is `39 passed/1 unchanged manifest failure`; report saved, no commit.
