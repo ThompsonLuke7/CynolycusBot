@@ -1064,3 +1064,7 @@ Focused `40 passed`; full themes `68 passed, 2 warnings`; disposable-PostgreSQL 
 {2026-08-01 03:24 EDT} {agent: Codex} {nervous system Task 10 correction round 5}
 Step 9 now enforces exact complete feature-schema equality before every empty return, preservation/concat, and serialization; missing/extra/duplicate columns fail closed without mutation, while complete schemas canonicalize deterministically.
 Focused `48 passed`; full themes `76 passed, 2 warnings`; disposable-PostgreSQL nervous system `223 passed`; compileall/diff-check clean. Final correction commit follows.
+
+{2026-08-01 03:31 EDT} {agent: Codex} {nervous system Task 10 completion}
+Task 10 passed fresh review after five correction rounds: durable theme history/state identity, causal availability, legacy membership reads, run/taxonomy binding, and exact fail-closed Step 9 schema are approved.
+Controller verification: themes `76 passed, 2 pre-existing warnings`; PostgreSQL nervous system `223 passed`; final head `a4e52ca`; next is Task 11 catalyst timing.
