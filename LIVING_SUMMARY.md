@@ -4,6 +4,8 @@
 Hardened path/time-independent theme state identity, feature-causal availability, raw-label semantic IDs, strict history timestamps, schema-less warnings, and legacy THEME membership reads with PostgreSQL coverage. Focused/full theme and full nervous-system suites pass; next commit correction.
 {2026-08-01 02:23 EDT} {agent: Codex} {Task 10 correction round 2/5}
 Pinned publication to the run's exact date/taxonomy/feature lineage, tightened legacy JSONB key routing, and moved history availability capture after validation. Full themes `54 passed`; PostgreSQL nervous-system `223 passed`; correction commit next.
+{2026-08-01 02:46 EDT} {agent: Codex} {Task 10 correction round 3/5}
+Persisted Step 9 taxonomy metadata for normal/empty outputs and same-date revisions; publication now selects exact date+taxonomy and fails closed on malformed or absent feature evidence. Focused `35`, full themes `63`, PostgreSQL nervous-system `223` passed; commit next.
 
 {2026-08-01 01:26 EDT} {agent: Codex} {Task 10: durable theme history and theme-state publication}
 Added semantic taxonomy hashing, atomic append-preserving membership history, UNKNOWN score-preserving ThemeState adaptation, exact lineage, and caller-owned optional publication; focused/full theme and relevant nervous-system tests pass. Commit created with the requested message; PostgreSQL integration remains unexercised because no disposable test URL is configured.

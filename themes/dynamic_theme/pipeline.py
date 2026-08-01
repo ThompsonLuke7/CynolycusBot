@@ -213,15 +213,55 @@ def _publish_completed_theme_outputs(
             "and taxonomy_version"
         )
 
+    feature_taxonomy_attr: str | None = None
+    if "taxonomy_version" in features.attrs:
+        raw_feature_taxonomy = features.attrs["taxonomy_version"]
+        if (
+            not pd.api.types.is_scalar(raw_feature_taxonomy)
+            or pd.isna(raw_feature_taxonomy)
+            or not str(raw_feature_taxonomy).strip()
+        ):
+            raise ValueError("ambiguous feature taxonomy_version metadata")
+        feature_taxonomy_attr = str(raw_feature_taxonomy).strip()
+        if feature_taxonomy_attr != taxonomy_version:
+            raise ValueError("conflicting feature taxonomy_version metadata")
+
     if features.empty:
         run_features = features.copy()
     else:
-        if "date" not in features.columns:
-            raise ValueError("current theme features must contain date")
+        required_feature_columns = {"ticker", "date", "taxonomy_version"}
+        missing_feature_columns = sorted(
+            required_feature_columns - set(features.columns)
+        )
+        if missing_feature_columns:
+            raise ValueError(
+                f"current theme features missing columns: {missing_feature_columns}"
+            )
+        if features["taxonomy_version"].isna().any():
+            raise ValueError("current theme features contain missing taxonomy_version")
+        feature_taxonomies = features["taxonomy_version"].map(
+            lambda value: str(value).strip()
+        )
+        if (feature_taxonomies == "").any():
+            raise ValueError("current theme features contain empty taxonomy_version")
         feature_dates = features["date"].map(
             lambda value: _represented_date(value, field_name="features.date")
         )
-        run_features = features.loc[feature_dates == run_date].copy()
+        run_features = features.loc[
+            (feature_dates == run_date)
+            & (feature_taxonomies == taxonomy_version)
+        ].copy()
+        if run_features.empty:
+            raise ValueError(
+                "no theme feature evidence for exact represented_as_of "
+                f"{run_date.isoformat()} and taxonomy_version {taxonomy_version!r}"
+            )
+        feature_evidence_key = ["date", "ticker", "taxonomy_version"]
+        if run_features.duplicated(feature_evidence_key, keep=False).any():
+            raise ValueError(
+                "ambiguous theme feature evidence for exact represented_as_of "
+                "and taxonomy_version"
+            )
     membership_available_at = max(
         _aware_utc(value, field_name="history.available_at")
         for value in history["available_at"].tolist()

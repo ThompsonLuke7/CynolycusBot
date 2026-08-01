@@ -16,6 +16,7 @@ from themes.dynamic_theme.nervous_system_adapter import (
     persist_theme_states,
 )
 from themes.dynamic_theme.stages import step08_memberships as step08
+from themes.dynamic_theme.stages import step09_meta_features as step09
 
 
 UTC = timezone.utc
@@ -68,12 +69,17 @@ def _history_frame(
     )
 
 
-def _features_frame(*, as_of: date = AS_OF) -> pd.DataFrame:
+def _features_frame(
+    *,
+    as_of: date = AS_OF,
+    taxonomy_version: str = "taxonomy-v1",
+) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
                 "ticker": "BBB",
                 "date": as_of,
+                "taxonomy_version": taxonomy_version,
                 "primary_theme": "alpha_theme",
                 "theme_breadth": 0.75,
                 "theme_heat_score": 0.20,
@@ -83,6 +89,7 @@ def _features_frame(*, as_of: date = AS_OF) -> pd.DataFrame:
             {
                 "ticker": "AAA",
                 "date": as_of,
+                "taxonomy_version": taxonomy_version,
                 "primary_theme": "alpha_theme",
                 "theme_breadth": 0.75,
                 "theme_heat_score": 0.20,
@@ -91,6 +98,113 @@ def _features_frame(*, as_of: date = AS_OF) -> pd.DataFrame:
             },
         ]
     )
+
+
+def _configure_step09(monkeypatch, tmp_path) -> Path:
+    features_path = tmp_path / "ticker_theme_features.parquet"
+    monkeypatch.setattr(step09, "TICKER_THEME_FEATURES_PATH", features_path)
+    monkeypatch.setattr(step09, "ensure_outputs", lambda: None)
+    monkeypatch.setattr(step09, "_load_registry_or_empty", lambda: pd.DataFrame())
+    monkeypatch.setattr(step09, "load_relationships", lambda **kwargs: pd.DataFrame())
+    monkeypatch.setattr(step09, "_load_daily_returns", lambda *args, **kwargs: pd.DataFrame())
+    return features_path
+
+
+def test_step9_persists_exact_taxonomy_in_normal_output_and_parquet(
+    monkeypatch,
+    tmp_path,
+):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+
+    out = step09.build_meta_features(
+        memberships_df=_membership_frame(taxonomy_version="taxonomy-v1"),
+        as_of=pd.Timestamp(AS_OF),
+    )
+    persisted = pd.read_parquet(features_path)
+
+    expected_columns = [
+        "ticker",
+        "date",
+        "taxonomy_version",
+        "primary_theme",
+        "primary_theme_rank",
+        "theme_heat_score",
+        "theme_breadth",
+        "theme_acceleration",
+        "theme_strength",
+        "membership_score",
+        "parent_theme_heat",
+        "related_theme_heat",
+        "related_theme_rank",
+        "theme_age_days",
+        "theme_newness_score",
+    ]
+    assert list(out.columns) == expected_columns
+    assert list(persisted.columns) == expected_columns
+    assert set(out["taxonomy_version"]) == {"taxonomy-v1"}
+    assert set(persisted["taxonomy_version"]) == {"taxonomy-v1"}
+    assert out.attrs["taxonomy_version"] == "taxonomy-v1"
+    assert set(persisted["primary_theme"]) == {"alpha_theme"}
+
+
+def test_step9_empty_output_persists_taxonomy_schema(monkeypatch, tmp_path):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+    memberships = pd.DataFrame(
+        columns=["ticker", "theme", "membership_score", "date"]
+    )
+    memberships.attrs["taxonomy_version"] = "taxonomy-v1"
+
+    out = step09.build_meta_features(
+        memberships_df=memberships,
+        as_of=pd.Timestamp(AS_OF),
+    )
+    assert features_path.exists()
+    persisted = pd.read_parquet(features_path)
+
+    assert out.empty
+    assert "taxonomy_version" in out.columns
+    assert out.attrs["taxonomy_version"] == "taxonomy-v1"
+    assert persisted.empty
+    assert list(persisted.columns) == list(out.columns)
+
+
+def test_step9_preserves_same_date_taxonomy_revisions(monkeypatch, tmp_path):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+
+    step09.build_meta_features(
+        memberships_df=_membership_frame(taxonomy_version="taxonomy-v2"),
+        as_of=pd.Timestamp(AS_OF),
+    )
+    step09.build_meta_features(
+        memberships_df=_membership_frame(taxonomy_version="taxonomy-v1"),
+        as_of=pd.Timestamp(AS_OF),
+    )
+
+    persisted = pd.read_parquet(features_path)
+    assert set(persisted["taxonomy_version"]) == {"taxonomy-v1", "taxonomy-v2"}
+    assert len(persisted) == 4
+
+
+def test_step9_rejects_missing_or_conflicting_membership_taxonomy(
+    monkeypatch,
+    tmp_path,
+):
+    _configure_step09(monkeypatch, tmp_path)
+    missing = _membership_frame()
+    missing.attrs.clear()
+    conflicting = _membership_frame(taxonomy_version="taxonomy-v1")
+    conflicting["taxonomy_version"] = "taxonomy-v2"
+
+    with pytest.raises(ValueError, match="taxonomy_version"):
+        step09.build_meta_features(
+            memberships_df=missing,
+            as_of=pd.Timestamp(AS_OF),
+        )
+    with pytest.raises(ValueError, match="conflicting.*taxonomy_version"):
+        step09.build_meta_features(
+            memberships_df=conflicting,
+            as_of=pd.Timestamp(AS_OF),
+        )
 
 
 def _lineage() -> tuple[LineageRef, ...]:
@@ -733,7 +847,7 @@ def test_historical_daily_rerun_publishes_only_its_exact_date_taxonomy_and_linea
     )
     features = pd.concat(
         [
-            _features_frame(as_of=newer_date),
+            _features_frame(as_of=newer_date, taxonomy_version="taxonomy-v2"),
             _features_frame(as_of=AS_OF),
         ],
         ignore_index=True,
@@ -789,6 +903,167 @@ def test_historical_daily_rerun_publishes_only_its_exact_date_taxonomy_and_linea
         pipeline._artifact_sha256(features_path)
     }
     assert captured["taxonomy_version"] == "taxonomy-v1"
+
+
+def test_publication_selects_exact_taxonomy_from_same_date_feature_revisions(
+    monkeypatch,
+    tmp_path,
+):
+    import themes.dynamic_theme.pipeline as pipeline
+
+    history_path = tmp_path / "membership_history.parquet"
+    features_path = tmp_path / "features.parquet"
+    history = _history_frame(taxonomy_version="taxonomy-v1")
+    features = pd.concat(
+        [
+            _features_frame(taxonomy_version="taxonomy-v2"),
+            _features_frame(taxonomy_version="taxonomy-v1"),
+        ],
+        ignore_index=True,
+    )
+    features.attrs["taxonomy_version"] = "taxonomy-v1"
+    history.to_parquet(history_path, index=False)
+    features.to_parquet(features_path, index=False)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(pipeline, "TICKER_MEMBERSHIP_HISTORY_PATH", history_path)
+    monkeypatch.setattr(pipeline, "TICKER_THEME_FEATURES_PATH", features_path)
+
+    def capture_publication(memberships, selected_features, **kwargs):
+        captured["memberships"] = memberships
+        captured["features"] = selected_features
+        captured.update(kwargs)
+
+    monkeypatch.setattr(pipeline, "persist_theme_states", capture_publication)
+
+    pipeline._publish_completed_theme_outputs(
+        _membership_frame(taxonomy_version="taxonomy-v1"),
+        features,
+        unit_of_work=object(),
+        valid_until_for=lambda available: available + timedelta(days=1),
+        represented_as_of=pd.Timestamp(AS_OF, tz="UTC"),
+        feature_completion_at=AVAILABLE_AT,
+    )
+
+    selected_features = captured["features"]
+    assert set(selected_features["taxonomy_version"]) == {"taxonomy-v1"}
+    assert set(selected_features["ticker"]) == {"AAA", "BBB"}
+    assert {
+        ref.record_locator
+        for ref in captured["lineage"]
+        if "ticker_theme_features" in ref.record_locator
+    } == {
+        "ticker_theme_features:row:2",
+        "ticker_theme_features:row:3",
+    }
+
+
+def test_publication_fails_when_same_date_has_only_wrong_taxonomy_features(
+    monkeypatch,
+    tmp_path,
+):
+    import themes.dynamic_theme.pipeline as pipeline
+
+    history_path = tmp_path / "membership_history.parquet"
+    features_path = tmp_path / "features.parquet"
+    _history_frame(taxonomy_version="taxonomy-v1").to_parquet(history_path, index=False)
+    features = _features_frame(taxonomy_version="taxonomy-v2")
+    features.to_parquet(features_path, index=False)
+    monkeypatch.setattr(pipeline, "TICKER_MEMBERSHIP_HISTORY_PATH", history_path)
+    monkeypatch.setattr(pipeline, "TICKER_THEME_FEATURES_PATH", features_path)
+    monkeypatch.setattr(pipeline, "persist_theme_states", lambda *a, **k: None)
+
+    with pytest.raises(
+        ValueError,
+        match="no theme feature evidence.*2026-07-30.*taxonomy-v1",
+    ):
+        pipeline._publish_completed_theme_outputs(
+            _membership_frame(taxonomy_version="taxonomy-v1"),
+            features,
+            unit_of_work=object(),
+            valid_until_for=lambda available: available + timedelta(days=1),
+            represented_as_of=pd.Timestamp(AS_OF, tz="UTC"),
+            feature_completion_at=AVAILABLE_AT,
+        )
+
+
+def test_publication_rejects_missing_feature_taxonomy_metadata(monkeypatch, tmp_path):
+    import themes.dynamic_theme.pipeline as pipeline
+
+    history_path = tmp_path / "membership_history.parquet"
+    features_path = tmp_path / "features.parquet"
+    _history_frame().to_parquet(history_path, index=False)
+    features = _features_frame().drop(columns="taxonomy_version")
+    features.to_parquet(features_path, index=False)
+    monkeypatch.setattr(pipeline, "TICKER_MEMBERSHIP_HISTORY_PATH", history_path)
+    monkeypatch.setattr(pipeline, "TICKER_THEME_FEATURES_PATH", features_path)
+    monkeypatch.setattr(pipeline, "persist_theme_states", lambda *a, **k: None)
+
+    with pytest.raises(ValueError, match="features.*taxonomy_version"):
+        pipeline._publish_completed_theme_outputs(
+            _membership_frame(),
+            features,
+            unit_of_work=object(),
+            valid_until_for=lambda available: available + timedelta(days=1),
+            represented_as_of=pd.Timestamp(AS_OF, tz="UTC"),
+            feature_completion_at=AVAILABLE_AT,
+        )
+
+
+def test_publication_rejects_conflicting_feature_taxonomy_metadata(
+    monkeypatch,
+    tmp_path,
+):
+    import themes.dynamic_theme.pipeline as pipeline
+
+    history_path = tmp_path / "membership_history.parquet"
+    features_path = tmp_path / "features.parquet"
+    _history_frame().to_parquet(history_path, index=False)
+    features = _features_frame(taxonomy_version="taxonomy-v1")
+    features.attrs["taxonomy_version"] = "taxonomy-v2"
+    features.to_parquet(features_path, index=False)
+    monkeypatch.setattr(pipeline, "TICKER_MEMBERSHIP_HISTORY_PATH", history_path)
+    monkeypatch.setattr(pipeline, "TICKER_THEME_FEATURES_PATH", features_path)
+    monkeypatch.setattr(pipeline, "persist_theme_states", lambda *a, **k: None)
+
+    with pytest.raises(ValueError, match="conflicting.*taxonomy_version"):
+        pipeline._publish_completed_theme_outputs(
+            _membership_frame(),
+            features,
+            unit_of_work=object(),
+            valid_until_for=lambda available: available + timedelta(days=1),
+            represented_as_of=pd.Timestamp(AS_OF, tz="UTC"),
+            feature_completion_at=AVAILABLE_AT,
+        )
+
+
+def test_publication_rejects_ambiguous_exact_feature_evidence(monkeypatch, tmp_path):
+    import themes.dynamic_theme.pipeline as pipeline
+
+    history_path = tmp_path / "membership_history.parquet"
+    features_path = tmp_path / "features.parquet"
+    _history_frame().to_parquet(history_path, index=False)
+    features = pd.concat(
+        [
+            _features_frame(),
+            _features_frame().assign(theme_heat_score=0.91),
+        ],
+        ignore_index=True,
+    )
+    features.to_parquet(features_path, index=False)
+    monkeypatch.setattr(pipeline, "TICKER_MEMBERSHIP_HISTORY_PATH", history_path)
+    monkeypatch.setattr(pipeline, "TICKER_THEME_FEATURES_PATH", features_path)
+    monkeypatch.setattr(pipeline, "persist_theme_states", lambda *a, **k: None)
+
+    with pytest.raises(ValueError, match="ambiguous.*feature evidence"):
+        pipeline._publish_completed_theme_outputs(
+            _membership_frame(),
+            features,
+            unit_of_work=object(),
+            valid_until_for=lambda available: available + timedelta(days=1),
+            represented_as_of=pd.Timestamp(AS_OF, tz="UTC"),
+            feature_completion_at=AVAILABLE_AT,
+        )
 
 
 def test_publication_fails_clearly_without_exact_date_taxonomy_evidence(

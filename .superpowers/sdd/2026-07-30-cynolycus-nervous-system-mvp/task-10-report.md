@@ -429,3 +429,92 @@ EXIT_CODE=0 for both commands
 - The only warnings are the two pre-existing pandas `FutureWarning`s in
   `step05_claude_labeling.py`. No Task 8/9, plan/ledger, persistent database,
   or unrelated theme clustering/model behavior was changed.
+
+## Correction round 3/5
+
+### RED evidence
+
+The Step 9 schema/round-trip and exact feature-taxonomy publication
+regressions were added before production changes:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q
+9 failed, 26 passed
+EXIT_CODE=1
+```
+
+The failures proved that normal and empty Step 9 outputs omitted taxonomy,
+same-date taxonomy revisions were discarded, missing/conflicting membership
+taxonomy was accepted, and publication combined or accepted wrong, absent,
+missing, conflicting, and duplicate feature-taxonomy evidence.
+
+### GREEN evidence
+
+- Step 9 derives one exact taxonomy version from current membership evidence,
+  rejects missing/ambiguous/conflicting evidence, and writes an explicit
+  `taxonomy_version` column in both normal and empty output schemas.
+- Normal and empty Parquet round trips retain the taxonomy-bearing schema.
+  Same-date revisions are keyed by `(date, taxonomy_version)`, so rerunning one
+  taxonomy replaces only its own feature evidence and preserves the other.
+- Publication validates feature taxonomy attrs when present, requires explicit
+  taxonomy on every nonempty feature row, selects only the exact run date and
+  current membership taxonomy, and rejects an absent exact match or duplicate
+  `(date, ticker, taxonomy_version)` evidence.
+- A same-date `taxonomy-v2` plus `taxonomy-v1` artifact publishes only the v1
+  rows and their original Parquet row locators for v1 memberships. A same-date
+  artifact containing only v2 fails closed for v1 memberships.
+
+Focused Task 10 suite:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q
+35 passed
+EXIT_CODE=0
+```
+
+Full theme suite:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests -q
+63 passed, 2 warnings
+EXIT_CODE=0
+```
+
+Full nervous-system suite with the exact disposable PostgreSQL URL:
+
+```text
+NERVOUS_SYSTEM_TEST_DATABASE_URL='postgresql://cynolycus:cynolycus_dev_only@127.0.0.1:55432/cynolycus_nervous_system_test' ./.venv/bin/python -m pytest core/nervous_system/tests -q
+223 passed
+EXIT_CODE=0
+```
+
+Compilation and diff checks:
+
+```text
+./.venv/bin/python -m compileall -q themes/dynamic_theme core/nervous_system
+git diff --check
+EXIT_CODE=0 for both commands
+```
+
+### Correction files
+
+- `themes/dynamic_theme/stages/step09_meta_features.py`
+- `themes/dynamic_theme/pipeline.py`
+- `themes/dynamic_theme/tests/test_nervous_system_adapter.py`
+
+### Self-review and concerns
+
+- Review found no remaining Critical, Important, or Minor issue against the
+  sole round-3 finding or prior Task 10 closures. A reviewer subagent was not
+  available, so the review checklist was applied directly to the full diff.
+- Existing nonempty Step 9 Parquet without explicit taxonomy now fails closed
+  instead of being silently mixed or overwritten. Regenerating that artifact
+  from taxonomy-bearing Step 8 evidence is required; no synthetic migration or
+  fallback was introduced.
+- Raw labels and joins remain unchanged. Taxonomy is an identity field, not a
+  score/probability; state identity and lineage behavior are unchanged.
+- Research mode still returns before publication without a UOW, and no commit
+  or rollback ownership was added. No Task 8/9, plan/ledger, persistent
+  database, or unrelated clustering/model behavior was modified.
+- The full theme suite retains only the two pre-existing pandas
+  `FutureWarning`s in `step05_claude_labeling.py`.

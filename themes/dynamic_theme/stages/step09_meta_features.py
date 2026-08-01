@@ -18,7 +18,7 @@ Features:
   theme_newness_score      1 / (1 + theme_age_days / 30)
 
 Output: ticker_theme_features.parquet
-Schema : ticker | date | <feature columns>
+Schema : ticker | date | taxonomy_version | <feature columns>
 """
 from __future__ import annotations
 
@@ -43,6 +43,85 @@ from themes.dynamic_theme.stages.step07_relationships import load_relationships
 from themes.dynamic_theme.stages.step08_memberships import get_primary_theme, load_memberships
 
 logger = logging.getLogger(__name__)
+
+THEME_FEATURE_COLUMNS = [
+    "primary_theme",
+    "primary_theme_rank",
+    "theme_heat_score",
+    "theme_breadth",
+    "theme_acceleration",
+    "theme_strength",
+    "membership_score",
+    "parent_theme_heat",
+    "related_theme_heat",
+    "related_theme_rank",
+    "theme_age_days",
+    "theme_newness_score",
+]
+_FEATURE_OUTPUT_COLUMNS = [
+    "ticker",
+    "date",
+    "taxonomy_version",
+    *THEME_FEATURE_COLUMNS,
+]
+
+
+def _taxonomy_from_memberships(memberships: pd.DataFrame) -> str:
+    attr_value = memberships.attrs.get("taxonomy_version")
+    attr_taxonomy: str | None = None
+    if attr_value is not None:
+        if not pd.api.types.is_scalar(attr_value) or pd.isna(attr_value):
+            raise ValueError("membership taxonomy_version metadata must be one scalar value")
+        attr_taxonomy = str(attr_value).strip()
+        if not attr_taxonomy:
+            raise ValueError("membership taxonomy_version metadata must be non-empty")
+
+    column_taxonomy: str | None = None
+    if "taxonomy_version" in memberships.columns and not memberships.empty:
+        if memberships["taxonomy_version"].isna().any():
+            raise ValueError("membership taxonomy_version column contains missing values")
+        values = {
+            str(value).strip()
+            for value in memberships["taxonomy_version"].tolist()
+        }
+        if "" in values:
+            raise ValueError("membership taxonomy_version column contains empty values")
+        if len(values) != 1:
+            raise ValueError("membership taxonomy_version column is ambiguous")
+        column_taxonomy = values.pop()
+
+    if attr_taxonomy is None and column_taxonomy is None:
+        raise ValueError("current memberships require exact taxonomy_version evidence")
+    if (
+        attr_taxonomy is not None
+        and column_taxonomy is not None
+        and attr_taxonomy != column_taxonomy
+    ):
+        raise ValueError("conflicting membership taxonomy_version metadata")
+    if attr_taxonomy is not None:
+        return attr_taxonomy
+    assert column_taxonomy is not None
+    return column_taxonomy
+
+
+def _validated_existing_features(path: Path) -> pd.DataFrame:
+    existing = pd.read_parquet(path)
+    required = {"ticker", "date", "taxonomy_version"}
+    missing = sorted(required - set(existing.columns))
+    if missing:
+        raise ValueError(f"existing theme features missing columns: {missing}")
+    if existing.empty:
+        return existing
+    if existing["taxonomy_version"].isna().any():
+        raise ValueError("existing theme features contain missing taxonomy_version")
+    existing = existing.copy()
+    existing["taxonomy_version"] = existing["taxonomy_version"].map(
+        lambda value: str(value).strip()
+    )
+    if (existing["taxonomy_version"] == "").any():
+        raise ValueError("existing theme features contain empty taxonomy_version")
+    existing["date"] = pd.to_datetime(existing["date"], errors="raise").dt.normalize()
+    return existing
 
 
 # ── price helpers ─────────────────────────────────────────────────────────────
@@ -128,9 +207,15 @@ def build_meta_features(
     if memberships_df is None:
         memberships_df = load_memberships(latest_only=True)
 
+    taxonomy_version = _taxonomy_from_memberships(memberships_df)
+
     if memberships_df.empty:
         logger.warning("No memberships — cannot build meta features")
-        return pd.DataFrame()
+        empty = pd.DataFrame(columns=_FEATURE_OUTPUT_COLUMNS)
+        empty.attrs["taxonomy_version"] = taxonomy_version
+        if not TICKER_THEME_FEATURES_PATH.exists():
+            empty.to_parquet(TICKER_THEME_FEATURES_PATH, index=False)
+        return empty
 
     registry = _load_registry_or_empty()
     if not registry.empty and "date" in registry.columns:
@@ -269,6 +354,7 @@ def build_meta_features(
             {
                 "ticker": ticker,
                 "date": as_of,
+                "taxonomy_version": taxonomy_version,
                 "primary_theme": theme,
                 "primary_theme_rank": rank,
                 "theme_heat_score": heat,
@@ -284,34 +370,30 @@ def build_meta_features(
             }
         )
 
-    out = pd.DataFrame(rows)
+    out = pd.DataFrame(rows, columns=_FEATURE_OUTPUT_COLUMNS)
 
-    # Append to historical parquet (keep all dates)
+    # Replace only the current date/taxonomy evidence. A revised taxonomy on
+    # the same represented date remains separate historical evidence.
     if TICKER_THEME_FEATURES_PATH.exists():
-        try:
-            existing = pd.read_parquet(TICKER_THEME_FEATURES_PATH)
-            existing = existing[existing["date"] < as_of]
-            out = pd.concat([existing, out], ignore_index=True)
-        except Exception as exc:
-            logger.warning("Could not load existing features: %s — overwriting", exc)
+        existing = _validated_existing_features(TICKER_THEME_FEATURES_PATH)
+        same_evidence = (
+            (existing["date"] == as_of)
+            & (existing["taxonomy_version"] == taxonomy_version)
+        )
+        out = pd.concat([existing.loc[~same_evidence], out], ignore_index=True)
 
-    out = out.sort_values(["date", "ticker"]).reset_index(drop=True)
+    out = out.sort_values(["date", "taxonomy_version", "ticker"]).reset_index(drop=True)
+    out.attrs["taxonomy_version"] = taxonomy_version
     out.to_parquet(TICKER_THEME_FEATURES_PATH, index=False)
-    logger.info("Wrote %s  rows=%d  date=%s", TICKER_THEME_FEATURES_PATH, len(out[out["date"] == as_of]), as_of.date())
+    current_rows = out[
+        (out["date"] == as_of)
+        & (out["taxonomy_version"] == taxonomy_version)
+    ]
+    logger.info(
+        "Wrote %s  rows=%d  date=%s taxonomy=%s",
+        TICKER_THEME_FEATURES_PATH,
+        len(current_rows),
+        as_of.date(),
+        taxonomy_version,
+    )
     return out
-
-
-THEME_FEATURE_COLUMNS = [
-    "primary_theme",
-    "primary_theme_rank",
-    "theme_heat_score",
-    "theme_breadth",
-    "theme_acceleration",
-    "theme_strength",
-    "membership_score",
-    "parent_theme_heat",
-    "related_theme_heat",
-    "related_theme_rank",
-    "theme_age_days",
-    "theme_newness_score",
-]
