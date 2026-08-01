@@ -1150,3 +1150,7 @@ Focused `90`, dealer `104`, broker `21`, and disposable-PostgreSQL core `252` pa
 {2026-08-01 14:55 EDT} {agent: Codex} {nervous system Task 12 correction round 3}
 Dealer optional nulls and dynamics identity are causal/fail-closed; real Parquet replay adapted `2,022/2,022` rows. Broker failure evidence is fixed-code/type only and passed credential probes.
 Focused `108`, dealer `122`, security `57`, and disposable-PostgreSQL core `252` passed; compile/diff-check clean. Commit/re-review are next.
+
+{2026-08-01 15:18 EDT} {agent: Codex} {nervous system Task 12 correction round 4}
+Dealer capture metadata and numeric schema are strict; deterministic fixture plus explicit no-fallback full replay passed exactly `2,022/2,022` rows without imputation.
+Focused `146+1 skipped`, explicit replay `1`, dealer `160+1 skipped`, and disposable-PostgreSQL core `252` passed; compile/diff-check clean. Commit/re-review are next.

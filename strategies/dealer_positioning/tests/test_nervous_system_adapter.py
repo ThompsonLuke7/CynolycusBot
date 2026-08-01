@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,8 @@ RANKING_LINEAGE = (
         record_locator="dealer_swing_rankings:SPY:20260730",
     ),
 )
+LOCAL_REPLAY_PATH_ENV = "CYNOLYCUS_DEALER_REPLAY_PATH"
+LOCAL_REPLAY_EXPECTED_ROWS_ENV = "CYNOLYCUS_DEALER_REPLAY_EXPECTED_ROWS"
 
 
 def _snapshot(**updates: object) -> dict[str, object]:
@@ -199,6 +202,88 @@ def test_gamma_levels_timestamp_is_never_used_without_explicit_capture_metadata(
         valid_until=VALID_UNTIL,
         lineage=LINEAGE,
     )
+    assert state.available_at == CAPTURED_AT
+
+
+@pytest.mark.parametrize(
+    "row_captured_at",
+    [None, pd.NA, pd.NaT, "", "not-a-timestamp", "2026-07-30T19:45:00"],
+)
+def test_raw_capture_requires_valid_row_captured_at(row_captured_at: object) -> None:
+    with pytest.raises(ValueError, match="snapshot.*captured_at|captured_at"):
+        adapt_dealer_state(
+            _snapshot(captured_at=row_captured_at),
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+def test_raw_capture_requires_row_captured_at_key() -> None:
+    row = _snapshot()
+    row.pop("captured_at")
+
+    with pytest.raises(ValueError, match="snapshot.*captured_at|captured_at"):
+        adapt_dealer_state(
+            row,
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+@pytest.mark.parametrize(
+    "snapshot_date",
+    [None, pd.NA, pd.NaT, np.float64(np.nan), "", "not-a-date", "2026-02-30"],
+)
+def test_raw_capture_requires_valid_snapshot_date(snapshot_date: object) -> None:
+    with pytest.raises(ValueError, match="snapshot.*snapshot_date|snapshot_date"):
+        adapt_dealer_state(
+            _snapshot(snapshot_date=snapshot_date),
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+def test_raw_capture_requires_snapshot_date_key() -> None:
+    row = _snapshot()
+    row.pop("snapshot_date")
+
+    with pytest.raises(ValueError, match="snapshot.*snapshot_date|snapshot_date"):
+        adapt_dealer_state(
+            row,
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+def test_raw_snapshot_date_cannot_be_later_than_capture_date() -> None:
+    with pytest.raises(ValueError, match="snapshot_date.*after.*captured_at"):
+        adapt_dealer_state(
+            _snapshot(snapshot_date="2026-07-31"),
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+def test_historical_snapshot_date_may_precede_later_capture_availability() -> None:
+    state = adapt_dealer_state(
+        _snapshot(snapshot_date="2026-07-28"),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert state.as_of == CAPTURED_AT
     assert state.available_at == CAPTURED_AT
 
 
@@ -379,50 +464,152 @@ def test_present_optional_infinities_still_fail(updates: dict[str, object]) -> N
         )
 
 
-def test_bounded_local_parquet_replay_adapts_eligible_rows() -> None:
-    worktree_root = Path(__file__).resolve().parents[3]
-    data_roots = [
-        worktree_root / "Data" / "dealer_positioning" / "historical_snapshots",
-        worktree_root.parents[1]
-        / "Data"
-        / "dealer_positioning"
-        / "historical_snapshots",
-    ]
-    paths = sorted(
-        path
-        for root in data_roots
-        if root.exists()
-        for path in root.glob("*/dealer_level_summary.parquet")
-        if path.stat().st_size > 0
-    )
-    if not paths:
-        pytest.skip("local dealer summary parquet is unavailable")
+@pytest.mark.parametrize(
+    ("field", "malformed_value"),
+    [
+        ("next_magnet_below", "not-a-number"),
+        ("vega_below", {"value": 630.0}),
+        ("avg_dollar_volume_20d", [75_000_000.0]),
+        ("next_magnet_above", np.array([645.0])),
+        ("market_cap", True),
+        ("vacuum_above", np.array([np.nan])),
+    ],
+)
+def test_present_malformed_raw_numeric_evidence_fails_closed(
+    field: str, malformed_value: object
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        adapt_dealer_state(
+            _snapshot(**{field: malformed_value}),
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
 
-    frame = pd.read_parquet(paths[-1]).head(256)
+
+@pytest.mark.parametrize(
+    ("field", "malformed_value"),
+    [
+        ("vega_below", "not-a-number"),
+        ("next_magnet_below", [635.0]),
+        ("gamma_density", np.array([0.5])),
+        ("dealer_bias", False),
+    ],
+)
+def test_nested_malformed_numeric_evidence_fails_closed(
+    field: str, malformed_value: object
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        adapt_dealer_state(
+            _snapshot(
+                per_dte_levels={
+                    "daily_week": {
+                        field: malformed_value,
+                    }
+                }
+            ),
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed_value"),
+    [
+        ("wall_change_1d", "not-a-number"),
+        ("gex_concentration_change", {"value": -0.05}),
+        ("distance_to_call_wall_atr", [1.2]),
+        ("oi_change_by_dte", np.array([100.0])),
+        ("level_stability_days", True),
+    ],
+)
+def test_present_malformed_dynamics_numeric_evidence_fails_closed(
+    field: str, malformed_value: object
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        adapt_dealer_state(
+            _snapshot(),
+            _dynamics(**{field: malformed_value}),
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed_value"),
+    [
+        ("avg_vacuum_component", "not-a-number"),
+        ("max_scope_score", {"value": 81.0}),
+        ("avg_gamma_density", [0.3]),
+        ("dealer_change_intensity_rank", np.array([2])),
+        ("avg_wall_room_component", False),
+    ],
+)
+def test_present_malformed_ranking_numeric_evidence_fails_closed(
+    field: str, malformed_value: object
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        dealer_adapter.adapt_dealer_state_with_ranking(
+            _snapshot(),
+            None,
+            _ranking(**{field: malformed_value}),
+            captured_at=CAPTURED_AT,
+            ranking_available_at=RANKING_AVAILABLE_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+            ranking_lineage=RANKING_LINEAGE,
+        )
+
+
+def test_declared_categorical_and_expiration_payloads_are_not_metrics() -> None:
+    state = adapt_dealer_state(
+        _snapshot(
+            expirations=["2026-07-31"],
+            available_expirations=("2026-07-31",),
+            nearest_level_type="Magnet",
+            market_cap_bucket="mega",
+            cap_tier="large",
+        ),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert {
+        "expirations",
+        "available_expirations",
+        "nearest_level_type",
+        "market_cap_bucket",
+        "cap_tier",
+    }.isdisjoint(state.metrics)
+
+
+def _replay_dealer_parquet(path: Path, *, expected_rows: int) -> int:
+    assert path.is_file(), f"explicit dealer replay path does not exist: {path}"
+    frame = pd.read_parquet(path)
+    assert len(frame) == expected_rows
+
     adapted = 0
     failures: list[str] = []
     for index, series in frame.iterrows():
         row = series.to_dict()
-        symbol = row.get("symbol")
-        scope = row.get("scope")
-        spot = row.get("spot")
-        captured_at = pd.Timestamp(row.get("captured_at"))
-        eligible = (
-            isinstance(symbol, str)
-            and bool(symbol.strip())
-            and scope in {"daily_week", "through_month", "two_months"}
-            and not pd.isna(spot)
-            and math.isfinite(float(spot))
-            and float(spot) > 0
-            and captured_at.tzinfo is not None
-        )
-        if not eligible:
+        try:
+            captured_at = pd.Timestamp(row["captured_at"])
+            if captured_at.tzinfo is None:
+                raise ValueError("captured_at must be timezone-aware")
+        except (KeyError, TypeError, ValueError) as exc:
+            failures.append(f"{index}:invalid captured_at:{exc}")
             continue
         lineage = (
             LineageRef(
                 source_id="dealer-local-replay",
-                content_hash=sha256(f"{paths[-1]}:{index}".encode()).hexdigest(),
-                record_locator=f"{paths[-1].name}:{index}",
+                content_hash=sha256(f"{path}:{index}".encode()).hexdigest(),
+                record_locator=f"{path.name}:{index}",
             ),
         )
         try:
@@ -434,16 +621,66 @@ def test_bounded_local_parquet_replay_adapts_eligible_rows() -> None:
                 lineage=lineage,
             )
         except ValueError as exc:
-            failures.append(f"{index}:{symbol}:{scope}:{exc}")
+            failures.append(
+                f"{index}:{row.get('symbol')}:{row.get('scope')}:{exc}"
+            )
             continue
 
-        null_columns = {name for name, value in row.items() if pd.isna(value)}
+        null_columns = {
+            name
+            for name, value in row.items()
+            if pd.api.types.is_scalar(value) and bool(pd.isna(value))
+        }
         assert null_columns.isdisjoint(state.metrics)
         assert all(math.isfinite(value) for value in state.metrics.values())
         adapted += 1
 
-    assert adapted > 0
     assert failures == []
+    assert adapted == expected_rows
+    return adapted
+
+
+def test_explicit_parquet_fixture_replays_exact_row_count(tmp_path: Path) -> None:
+    path = tmp_path / "dealer_level_summary.parquet"
+    rows = [
+        _snapshot(),
+        _snapshot(
+            symbol="QQQ",
+            scope="through_month",
+            scope_label="through_month",
+            next_magnet_below=np.float64(np.nan),
+        ),
+        _snapshot(
+            symbol="IWM",
+            scope="two_months",
+            scope_label="two_months",
+            vega_below=np.float64(np.nan),
+            avg_dollar_volume_20d=np.float64(np.nan),
+        ),
+    ]
+    pd.DataFrame(rows).to_parquet(path, index=False)
+
+    assert _replay_dealer_parquet(path, expected_rows=3) == 3
+
+
+def test_explicit_opt_in_local_parquet_replay() -> None:
+    path_value = os.environ.get(LOCAL_REPLAY_PATH_ENV)
+    if path_value is None:
+        pytest.skip(f"opt in by setting {LOCAL_REPLAY_PATH_ENV}")
+    expected_value = os.environ.get(LOCAL_REPLAY_EXPECTED_ROWS_ENV)
+    assert expected_value is not None, (
+        f"{LOCAL_REPLAY_EXPECTED_ROWS_ENV} is required with {LOCAL_REPLAY_PATH_ENV}"
+    )
+    try:
+        expected_rows = int(expected_value)
+    except ValueError as exc:
+        raise AssertionError(
+            f"{LOCAL_REPLAY_EXPECTED_ROWS_ENV} must be an integer"
+        ) from exc
+    assert expected_rows > 0
+
+    path = Path(path_value).expanduser()
+    assert _replay_dealer_parquet(path, expected_rows=expected_rows) == expected_rows
 
 
 def test_naive_or_conflicting_capture_timestamps_are_rejected() -> None:

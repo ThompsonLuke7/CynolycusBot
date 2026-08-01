@@ -40,6 +40,65 @@ _DIRECTION_REGIMES = {
     "bearish": DealerRegime.DOWNSIDE_ACCELERATION,
 }
 
+_KNOWN_NUMERIC_FIELDS = frozenset(
+    """
+    spot spot_price strike_window_pct row_count total_gex put_wall call_wall
+    nearest_magnet magnet next_magnet_above next_magnet_below vega_wall
+    vega_above vega_below next_vega_wall_above next_vega_wall_below gamma_flip
+    ceiling floor air_gap_above_score air_gap_below_score
+    magnet_threshold_abs_net_gex vega_threshold_total_vex
+    avg_dollar_volume_20d market_cap total_option_oi total_option_volume
+    pct_to_gamma_flip pct_to_call_wall pct_to_put_wall pct_to_magnet
+    pct_to_vega_wall pct_to_vega_above pct_to_vega_below
+    distance_callwall_putwall distance_gammaflip_callwall
+    distance_gammaflip_magnet distance_magnet_putwall distance_magnet_callwall
+    distance_floor_ceiling largest_positive_gex largest_negative_gex
+    largest_call_gex largest_put_gex total_positive_gex total_negative_gex
+    net_gex total_abs_gex weighted_average_strike weighted_average_call
+    weighted_average_put median_gex_strike gex_entropy
+    gex_concentration_index strike_skew strike_kurtosis positive_gex_above
+    positive_gex_below negative_gex_above negative_gex_below call_gex_above
+    put_gex_below ratio_above_vs_below vacuum_above vacuum_below
+    nearest_level_distance vacuum_score compression_score pinning_score
+    acceleration_score dealer_bias magnet_strength magnet_distance
+    magnet_relative_strength nearest_competing_magnet gamma_density_5pct
+    gamma_density_10pct gamma_density wall_dominance dealer_imbalance
+    call_gex_total put_gex_total avg_strike_spacing gamma_flip_change_1d
+    call_wall_change put_wall_change magnet_change vega_wall_change
+    ceiling_change floor_change gamma_flip_velocity_3d magnet_velocity_3d
+    callwall_velocity_3d dealer_imbalance_rank vacuum_score_rank
+    distance_to_gamma_flip_percentile gamma_density_percentile
+    gex_concentration_percentile distance_to_magnet_percentile
+    wall_change_1d wall_change_1d_gap_days wall_change_3d
+    wall_change_3d_gap_days gex_concentration_change gamma_flip_velocity
+    distance_to_call_wall_atr distance_to_put_wall_atr level_stability_days
+    oi_change_by_dte volume_to_prior_oi iv_skew_change
+    near_level_option_volume_share prior_gap_days third_gap_days atr_14d
+    scope_count scope_weight_sum dealer_swing_potential_score
+    dealer_direction_bias dealer_change_intensity_score
+    dealer_change_direction_bias max_scope_score max_change_scope_score
+    avg_vacuum_component avg_sparse_gamma_component
+    avg_pinning_room_component avg_imbalance_component
+    avg_wall_room_component avg_magnet_room_component
+    avg_wall_change_component avg_magnet_change_component
+    avg_gamma_flip_change_component avg_velocity_change_component
+    avg_floor_ceiling_change_component avg_vega_change_component
+    avg_gamma_density avg_dealer_imbalance min_pct_to_magnet
+    avg_gamma_flip_change_1d avg_call_wall_change avg_put_wall_change
+    avg_magnet_change avg_vega_wall_change avg_ceiling_change avg_floor_change
+    avg_gamma_flip_velocity_3d avg_magnet_velocity_3d
+    avg_callwall_velocity_3d dealer_swing_rank dealer_change_intensity_rank
+    dealer_change_bullish_rank dealer_change_bearish_rank stale_days
+    option_data_age_days data_staleness_days print_count option_print_count
+    trade_print_count expected_prints expected_print_count print_coverage
+    print_coverage_ratio option_print_coverage
+    """.split()
+)
+_KNOWN_NUMERIC_PATTERNS = (
+    re.compile(r".+_(?:score|rank|percentile|component|bias)\Z"),
+    re.compile(r".+_(?:change(?:_[13]d)?|velocity(?:_3d)?|gap_days)\Z"),
+)
+
 _NON_METRIC_FIELDS = frozenset(
     {
         "available_at",
@@ -52,8 +111,12 @@ _NON_METRIC_FIELDS = frozenset(
         "market_cap_bucket",
         "nearest_level_type",
         "dealer_direction",
+        "dealer_change_direction",
         "dealer_regime",
         "regime",
+        "prior_snapshot_date",
+        "third_snapshot_date",
+        "ranking_source_path",
         "ref_date_et",
         "scope",
         "scope_label",
@@ -61,6 +124,7 @@ _NON_METRIC_FIELDS = frozenset(
         "source_id",
         "source_artifact_id",
         "source_hash",
+        "scope_scores_json",
         "record_locator",
         "symbol",
         "ticker",
@@ -71,6 +135,7 @@ _NON_METRIC_FIELDS = frozenset(
         "above_magnet",
         "below_vega_wall",
         "has_prior_snapshot_1d",
+        "has_prior_snapshot_3d",
         "inside_call_wall_zone",
         "prior_gap_stale",
         "third_gap_stale",
@@ -81,6 +146,8 @@ _NON_METRIC_FIELDS = frozenset(
 def _is_missing(value: object) -> bool:
     if value is None or value is pd.NaT or value is pd.NA:
         return True
+    if not pd.api.types.is_scalar(value):
+        return False
     try:
         result = pd.isna(value)
     except (TypeError, ValueError):
@@ -119,7 +186,10 @@ def _timestamp(value: object, *, field_name: str) -> datetime:
 
 
 def _finite(value: object, *, field_name: str) -> float:
-    if isinstance(value, (bool, date, datetime)):
+    if (
+        isinstance(value, (bool, bytes, date, datetime))
+        or not pd.api.types.is_scalar(value)
+    ):
         raise ValueError(f"{field_name} must be a finite numeric value")
     try:
         result = float(value)
@@ -159,7 +229,29 @@ def _mapping(value: object, *, field_name: str) -> Mapping[str, object]:
         if not isinstance(key, str):
             raise ValueError(f"{field_name} keys must be strings")
     _reject_nonfinite(value, path=field_name)
+    _validate_known_numeric_evidence(value, path=field_name)
     return value
+
+
+def _is_known_numeric_field(name: str) -> bool:
+    return name in _KNOWN_NUMERIC_FIELDS or any(
+        pattern.fullmatch(name) is not None for pattern in _KNOWN_NUMERIC_PATTERNS
+    )
+
+
+def _validate_known_numeric_evidence(value: object, *, path: str) -> None:
+    if isinstance(value, Mapping):
+        for name, nested in value.items():
+            nested_path = f"{path}.{name}"
+            if isinstance(name, str) and _is_known_numeric_field(name):
+                if not _is_missing(nested):
+                    _finite(nested, field_name=nested_path)
+                continue
+            _validate_known_numeric_evidence(nested, path=nested_path)
+        return
+    if pd.api.types.is_list_like(value) and not isinstance(value, (str, bytes)):
+        for index, nested in enumerate(value):
+            _validate_known_numeric_evidence(nested, path=f"{path}[{index}]")
 
 
 def _validated_lineage(lineage: object) -> tuple[LineageRef, ...]:
@@ -316,11 +408,19 @@ def _dealer_regime(snapshot: Mapping[str, object]) -> DealerRegime:
 
 
 def _check_capture_metadata(
-    row: Mapping[str, object], *, captured_at: datetime, field_name: str
+    row: Mapping[str, object],
+    *,
+    captured_at: datetime,
+    field_name: str,
+    required: bool = False,
 ) -> None:
     if "captured_at" not in row or _is_missing(row["captured_at"]):
+        if required:
+            raise ValueError(f"{field_name} must contain captured_at")
         return
-    row_captured_at = _timestamp(row["captured_at"], field_name="captured_at")
+    row_captured_at = _timestamp(
+        row["captured_at"], field_name=f"{field_name} captured_at"
+    )
     if row_captured_at != captured_at:
         raise ValueError(f"{field_name} captured_at conflicts with explicit captured_at")
 
@@ -328,7 +428,12 @@ def _check_capture_metadata(
 def _numeric_metrics(row: Mapping[str, object]) -> dict[str, float]:
     metrics: dict[str, float] = {}
     for name, value in row.items():
-        if name in _NON_METRIC_FIELDS or _is_missing(value) or isinstance(value, bool):
+        if name in _NON_METRIC_FIELDS or _is_missing(value):
+            continue
+        if _is_known_numeric_field(name):
+            metrics[name] = _finite(value, field_name=name)
+            continue
+        if isinstance(value, bool):
             continue
         if isinstance(value, (str, bytes, date, datetime, Mapping, list, tuple, set, frozenset)):
             continue
@@ -541,7 +646,10 @@ def adapt_dealer_state(
     any cross-scope aggregation must happen upstream and still declare the
     canonical scope supplying the singleton level fields.
 
-    ``captured_at`` is the only accepted availability for a raw capture.
+    Raw rows must carry producer ``snapshot_date`` and ``captured_at``
+    evidence, and row ``captured_at`` must exactly match the explicit
+    parameter. ``snapshot_date`` may precede capture for a backfill but may
+    never describe a later calendar date. Raw availability is captured_at.
     Dynamics must carry their own explicit, timezone-aware ``available_at``;
     ``GammaLevels.timestamp`` is deliberately ignored as capture evidence.
     """
@@ -554,7 +662,15 @@ def adapt_dealer_state(
     valid_until_utc = _timestamp(valid_until, field_name="valid_until")
     if valid_until_utc <= captured_at_utc:
         raise ValueError("valid_until must be exclusive and after captured_at")
-    _check_capture_metadata(snapshot_row, captured_at=captured_at_utc, field_name="snapshot")
+    _check_capture_metadata(
+        snapshot_row,
+        captured_at=captured_at_utc,
+        field_name="snapshot",
+        required=True,
+    )
+    snapshot_day = _snapshot_date(snapshot_row, field_name="snapshot")
+    if snapshot_day > captured_at_utc.date():
+        raise ValueError("snapshot snapshot_date cannot be after captured_at")
 
     available_at = captured_at_utc
     if dynamics_row is not None:
