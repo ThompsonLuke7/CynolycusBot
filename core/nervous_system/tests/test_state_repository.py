@@ -10,9 +10,9 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy import event, select
 
 from core.nervous_system.contracts.context import ContextSnapshot, StateRequest
-from core.nervous_system.contracts.enums import MarketRegime, StateType
+from core.nervous_system.contracts.enums import MarketRegime, StateType, ThemeRegime
 from core.nervous_system.contracts.quality import DataQualitySummary
-from core.nervous_system.contracts.states import MarketState
+from core.nervous_system.contracts.states import MarketState, ThemeState
 from core.nervous_system.persistence.models import (
     ContextSnapshot as ContextSnapshotRow,
     StateRecord,
@@ -247,12 +247,40 @@ def test_save_context_snapshot_persists_validated_payload(pg_session):
     assert pg_session.get(ContextSnapshotRow, snapshot.snapshot_id).content_hash == snapshot.content_hash
 
 
-def _legacy_theme_membership_row() -> StateRecord:
-    state_id = UUID("00000000-0000-0000-0000-000000000201")
+def _theme(*, state_id: UUID, theme_id: str) -> ThemeState:
+    return ThemeState(
+        state_id=state_id,
+        entity_id=theme_id,
+        as_of=datetime(2026, 7, 30, 20, 0, tzinfo=UTC),
+        available_at=datetime(2026, 7, 30, 20, 5, tzinfo=UTC),
+        generated_at=datetime(2026, 7, 30, 20, 4, tzinfo=UTC),
+        valid_until=datetime(2026, 7, 31, 20, 5, tzinfo=UTC),
+        source_window_start=datetime(2026, 7, 30, 20, 0, tzinfo=UTC),
+        source_window_end=datetime(2026, 7, 30, 20, 0, tzinfo=UTC),
+        schema_version=1,
+        producer="themes.dynamic_theme",
+        model_version="theme-taxonomy@1",
+        feature_version="theme-features@1",
+        config_version="theme-state@1:taxonomy-v1",
+        lineage_ids=("generic:row:0",),
+        data_quality=DataQualitySummary(),
+        theme_id=theme_id,
+        theme_regime=ThemeRegime.UNKNOWN,
+        membership_scores={"AAA": 0.82},
+    )
+
+
+def _legacy_theme_membership_row(
+    *,
+    state_id: UUID = UUID("00000000-0000-0000-0000-000000000201"),
+    entity_id: str = "alpha_theme",
+    payload_updates: dict[str, object] | None = None,
+    remove_keys: tuple[str, ...] = (),
+) -> StateRecord:
     payload = {
         "state_id": str(state_id),
         "state_type": "THEME",
-        "entity_id": "alpha_theme",
+        "entity_id": entity_id,
         "as_of": "2026-07-30T20:00:00Z",
         "available_at": "2026-07-30T20:05:00Z",
         "generated_at": "2026-07-30T20:04:00Z",
@@ -267,9 +295,12 @@ def _legacy_theme_membership_row() -> StateRecord:
         "lineage_ids": ["legacy:row:0"],
         "data_quality": {"issues": []},
         "ticker": "AAA",
-        "theme": "alpha_theme",
+        "theme": entity_id,
         "membership_score": 0.82,
     }
+    payload.update(payload_updates or {})
+    for key in remove_keys:
+        payload.pop(key, None)
     digest_payload = {key: value for key, value in payload.items() if key != "state_id"}
     state_hash = hashlib.sha256(
         json.dumps(digest_payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
@@ -279,7 +310,7 @@ def _legacy_theme_membership_row() -> StateRecord:
     return StateRecord(
         state_id=state_id,
         state_type="THEME",
-        entity_id="alpha_theme",
+        entity_id=entity_id,
         as_of=as_of,
         available_at=available_at,
         generated_at=datetime(2026, 7, 30, 20, 4, tzinfo=UTC),
@@ -329,3 +360,97 @@ def test_theme_membership_queries_round_trip_legacy_theme_payload(pg_session):
     pg_session.flush()
     with pytest.raises(ValueError, match="content_hash"):
         repo.get_state_as_of(StateType.THEME_MEMBERSHIP, "alpha_theme", decision_time)
+
+
+@pytest.mark.postgres
+def test_legacy_membership_queries_require_absent_aggregate_membership_key(pg_session):
+    legacy = _legacy_theme_membership_row(
+        state_id=UUID("00000000-0000-0000-0000-000000000211"),
+        entity_id="legacy_theme",
+    )
+    explicit_null = _legacy_theme_membership_row(
+        state_id=UUID("00000000-0000-0000-0000-000000000212"),
+        entity_id="explicit_null_theme",
+        payload_updates={"membership_scores": None},
+    )
+    malformed = _legacy_theme_membership_row(
+        state_id=UUID("00000000-0000-0000-0000-000000000213"),
+        entity_id="malformed_theme",
+        remove_keys=("membership_score",),
+    )
+    generic = _theme(
+        state_id=UUID("00000000-0000-0000-0000-000000000214"),
+        theme_id="generic_theme",
+    )
+    pg_session.add_all((legacy, explicit_null, malformed))
+    repo = StateRepository(pg_session)
+    repo.save_state(generic)
+    pg_session.flush()
+    decision_time = datetime(2026, 7, 30, 21, 0, tzinfo=UTC)
+
+    selected_legacy = repo.get_latest_valid_state(
+        StateType.THEME_MEMBERSHIP,
+        "legacy_theme",
+        decision_time,
+    )
+    assert selected_legacy is not None
+    assert selected_legacy.state_type is StateType.THEME_MEMBERSHIP
+    assert repo.get_latest_valid_state(
+        StateType.THEME_MEMBERSHIP,
+        "explicit_null_theme",
+        decision_time,
+    ) is None
+    assert repo.get_state_as_of(
+        StateType.THEME_MEMBERSHIP,
+        "malformed_theme",
+        decision_time,
+    ) is None
+    assert repo.get_latest_valid_state(
+        StateType.THEME_MEMBERSHIP,
+        "generic_theme",
+        decision_time,
+    ) is None
+
+    membership_snapshot = repo.get_states_for_snapshot(
+        (
+            StateRequest(
+                state_type=StateType.THEME_MEMBERSHIP,
+                entity_id="legacy_theme",
+                required=True,
+            ),
+            StateRequest(
+                state_type=StateType.THEME_MEMBERSHIP,
+                entity_id="explicit_null_theme",
+                required=True,
+            ),
+            StateRequest(
+                state_type=StateType.THEME_MEMBERSHIP,
+                entity_id="malformed_theme",
+                required=True,
+            ),
+            StateRequest(
+                state_type=StateType.THEME_MEMBERSHIP,
+                entity_id="generic_theme",
+                required=True,
+            ),
+        ),
+        decision_time,
+    )
+    generic_snapshot = repo.get_states_for_snapshot(
+        (
+            StateRequest(
+                state_type=StateType.THEME,
+                entity_id="generic_theme",
+                required=True,
+            ),
+        ),
+        decision_time,
+    )
+
+    assert membership_snapshot == (selected_legacy,)
+    assert generic_snapshot == (generic,)
+    assert repo.get_latest_valid_state(
+        StateType.THEME,
+        "generic_theme",
+        decision_time,
+    ) == generic

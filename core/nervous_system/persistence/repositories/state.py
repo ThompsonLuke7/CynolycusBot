@@ -185,11 +185,12 @@ def _legacy_theme_membership_contract(row: StateRecord) -> ThemeMembership:
 
 
 def _legacy_membership_query_condition():
+    payload = StateRecord.payload
     return and_(
-        StateRecord.payload["ticker"].as_string().is_not(None),
-        StateRecord.payload["theme"].as_string().is_not(None),
-        StateRecord.payload["membership_score"].as_string().is_not(None),
-        StateRecord.payload["membership_scores"].as_string().is_(None),
+        payload.op("?")("ticker"),
+        payload.op("?")("theme"),
+        payload.op("?")("membership_score"),
+        ~payload.op("?")("membership_scores"),
     )
 
 

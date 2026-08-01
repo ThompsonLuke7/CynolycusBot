@@ -304,3 +304,128 @@ EXIT_CODE=0 for both commands
   are limited to the required Task 10 theme semantics and legacy read path.
 - The full theme suite retains two pre-existing `step05_claude_labeling.py`
   `FutureWarning`s. No new warning or test failure remains.
+
+## Correction round 2/5
+
+### RED evidence
+
+The new theme regressions were added before production changes. The focused
+run failed on each reviewed behavior:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q
+5 failed, 20 passed
+EXIT_CODE=1
+```
+
+The failures showed availability captured before history normalization,
+historical publication selecting the global latest date, absent current
+taxonomy attrs and duplicate exact evidence being accepted, and weekly
+publication omitting `represented_as_of`.
+
+The PostgreSQL regression was run against the exact disposable URL:
+
+```text
+NERVOUS_SYSTEM_TEST_DATABASE_URL='postgresql://cynolycus:cynolycus_dev_only@127.0.0.1:55432/cynolycus_nervous_system_test' ./.venv/bin/python -m pytest core/nervous_system/tests/test_state_repository.py -q
+1 failed, 9 passed
+EXIT_CODE=1
+```
+
+The explicit `membership_scores: null` fixture was incorrectly selected by a
+`THEME_MEMBERSHIP` query and then failed `ThemeState` reconstruction. This
+confirmed that JSON value extraction conflated an absent key with JSON null.
+
+### GREEN evidence
+
+- Daily and weekly runs now pass their represented `as_of` into publication.
+  Publication preserves the caller's represented calendar date, requires the
+  taxonomy version from current membership attrs, and selects history and
+  features only for that exact date and taxonomy. Missing evidence and
+  duplicate exact keys fail clearly; global latest history is never selected.
+- The historical rerun regression preloads a newer date and proves the older
+  run publishes only its own date, taxonomy, feature rows, exact Parquet
+  hashes, and original row locators.
+- Legacy membership SQL now uses PostgreSQL JSONB key-existence predicates for
+  all required legacy keys and requires aggregate `membership_scores` to be
+  absent. True legacy rows remain readable; explicit-null, malformed, and
+  generic aggregate rows are not routed to legacy conversion. Valid generic
+  `THEME` query and snapshot behavior is preserved.
+- History captures `available_at` only after current-input validation and
+  existing-history normalization, immediately before materializing immutable
+  rows for serialization/publication. The clock-controlled test proves the
+  order and exact timestamp.
+
+Final focused Task 10 suite:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q
+26 passed
+EXIT_CODE=0
+```
+
+Focused repository suite with PostgreSQL:
+
+```text
+NERVOUS_SYSTEM_TEST_DATABASE_URL='postgresql://cynolycus:cynolycus_dev_only@127.0.0.1:55432/cynolycus_nervous_system_test' ./.venv/bin/python -m pytest core/nervous_system/tests/test_state_repository.py -q
+10 passed
+EXIT_CODE=0
+```
+
+Full theme suite:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests -q
+54 passed, 2 warnings
+EXIT_CODE=0
+```
+
+Full nervous-system suite with PostgreSQL:
+
+```text
+NERVOUS_SYSTEM_TEST_DATABASE_URL='postgresql://cynolycus:cynolycus_dev_only@127.0.0.1:55432/cynolycus_nervous_system_test' ./.venv/bin/python -m pytest core/nervous_system/tests -q
+223 passed
+EXIT_CODE=0
+```
+
+Cross-seed/path/order/timestamp taxonomy evidence:
+
+```text
+PYTHONHASHSEED=1
+taxonomy:fbc6a6fa7ccaadcf2e798b8d19663a9e65c77b9030660b27e75511fd4867265c
+
+PYTHONHASHSEED=777
+taxonomy:fbc6a6fa7ccaadcf2e798b8d19663a9e65c77b9030660b27e75511fd4867265c
+EXIT_CODE=0 for both commands
+```
+
+Compilation and diff checks:
+
+```text
+./.venv/bin/python -m compileall -q themes/dynamic_theme core/nervous_system
+git diff --check
+EXIT_CODE=0 for both commands
+```
+
+### Correction files
+
+- `themes/dynamic_theme/pipeline.py`
+- `themes/dynamic_theme/stages/step08_memberships.py`
+- `core/nervous_system/persistence/repositories/state.py`
+- `themes/dynamic_theme/tests/test_nervous_system_adapter.py`
+- `core/nervous_system/tests/test_state_repository.py`
+
+### Self-review and concerns
+
+- Structured review found no remaining Critical, Important, or Minor finding
+  against the three round-2 requirements or the six prior closed findings. A
+  separate reviewer subagent was unavailable in this session.
+- The history `available_at` semantic boundary is the instant after required
+  current/prior evidence validates and immediately before serialization. A
+  Parquet artifact cannot record its own post-rename completion time without a
+  destructive second rewrite, so no mtime or post-write rewrite is used.
+- Explicit-null or malformed generic `THEME` payloads remain fail-closed under
+  generic contract reconstruction; they are never reinterpreted as legacy
+  memberships. Valid aggregate `THEME` rows query and snapshot normally.
+- The only warnings are the two pre-existing pandas `FutureWarning`s in
+  `step05_claude_labeling.py`. No Task 8/9, plan/ledger, persistent database,
+  or unrelated theme clustering/model behavior was changed.

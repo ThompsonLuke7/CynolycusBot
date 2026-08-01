@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from hashlib import sha256
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -91,6 +91,24 @@ def _aware_utc(value: object, *, field_name: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _represented_date(value: object, *, field_name: str) -> date:
+    """Return the calendar date represented by the caller without zone shifting."""
+
+    if isinstance(value, datetime):
+        if pd.isna(value):
+            raise ValueError(f"{field_name} must be a valid represented date")
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        parsed = pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a valid represented date") from exc
+    if pd.isna(parsed):
+        raise ValueError(f"{field_name} must be a valid represented date")
+    return parsed.date()
+
+
 def _artifact_sha256(path: Path) -> str:
     digest = sha256()
     with Path(path).open("rb") as handle:
@@ -128,6 +146,7 @@ def _publish_completed_theme_outputs(
     *,
     unit_of_work: "UnitOfWork | None",
     valid_until_for: Callable[[datetime], datetime] | None,
+    represented_as_of: object,
     feature_completion_at: datetime | None = None,
 ) -> None:
     if unit_of_work is None:
@@ -141,26 +160,68 @@ def _publish_completed_theme_outputs(
     history = pd.read_parquet(TICKER_MEMBERSHIP_HISTORY_PATH)
     if history.empty:
         raise ValueError("cannot publish theme states without membership history rows")
-    history["as_of"] = pd.to_datetime(history["as_of"], errors="raise").dt.date
-    latest_date = history["as_of"].max()
-    taxonomy_version = str(
-        memberships.attrs.get(
-            "taxonomy_version",
-            history.loc[history["as_of"] == latest_date, "taxonomy_version"].iloc[-1],
+    required_history_columns = {
+        "as_of",
+        "available_at",
+        "ticker",
+        "theme",
+        "taxonomy_version",
+    }
+    missing_history_columns = sorted(required_history_columns - set(history.columns))
+    if missing_history_columns:
+        raise ValueError(
+            f"membership history missing publication columns: {missing_history_columns}"
         )
+    run_date = _represented_date(represented_as_of, field_name="represented_as_of")
+    history["as_of"] = history["as_of"].map(
+        lambda value: _represented_date(value, field_name="history.as_of")
     )
+
+    taxonomy_attr = memberships.attrs.get("taxonomy_version")
+    if not pd.api.types.is_scalar(taxonomy_attr) or pd.isna(taxonomy_attr):
+        raise ValueError(
+            "current memberships attrs must contain one taxonomy_version"
+        )
+    taxonomy_version = str(taxonomy_attr).strip()
+    if not taxonomy_version:
+        raise ValueError(
+            "current memberships attrs must contain one taxonomy_version"
+        )
+    if "taxonomy_version" in memberships.columns:
+        current_taxonomies = {
+            str(value).strip()
+            for value in memberships["taxonomy_version"].dropna().tolist()
+        }
+        if current_taxonomies and current_taxonomies != {taxonomy_version}:
+            raise ValueError(
+                "current memberships contain ambiguous taxonomy_version evidence"
+            )
+
     history = history[
-        (history["as_of"] == latest_date)
+        (history["as_of"] == run_date)
         & (history["taxonomy_version"].astype(str) == taxonomy_version)
     ].copy()
     if history.empty:
-        raise ValueError("selected taxonomy has no current membership history rows")
+        raise ValueError(
+            "no membership history evidence for exact represented_as_of "
+            f"{run_date.isoformat()} and taxonomy_version {taxonomy_version!r}"
+        )
+    evidence_key = ["as_of", "ticker", "theme", "taxonomy_version"]
+    if history.duplicated(evidence_key, keep=False).any():
+        raise ValueError(
+            "ambiguous membership history evidence for exact represented_as_of "
+            "and taxonomy_version"
+        )
 
     if features.empty:
-        latest_features = features.copy()
+        run_features = features.copy()
     else:
-        feature_dates = pd.to_datetime(features["date"], errors="raise").dt.date
-        latest_features = features.loc[feature_dates == latest_date].copy()
+        if "date" not in features.columns:
+            raise ValueError("current theme features must contain date")
+        feature_dates = features["date"].map(
+            lambda value: _represented_date(value, field_name="features.date")
+        )
+        run_features = features.loc[feature_dates == run_date].copy()
     membership_available_at = max(
         _aware_utc(value, field_name="history.available_at")
         for value in history["available_at"].tolist()
@@ -175,18 +236,16 @@ def _publish_completed_theme_outputs(
         history,
         path=TICKER_MEMBERSHIP_HISTORY_PATH,
         table_name="ticker_theme_membership_history",
-    ) + _lineage_for_frame(
-        latest_features,
-        path=TICKER_THEME_FEATURES_PATH,
-        table_name="ticker_theme_features",
-    ) if not latest_features.empty else _lineage_for_frame(
-        history,
-        path=TICKER_MEMBERSHIP_HISTORY_PATH,
-        table_name="ticker_theme_membership_history",
     )
+    if not run_features.empty:
+        lineage += _lineage_for_frame(
+            run_features,
+            path=TICKER_THEME_FEATURES_PATH,
+            table_name="ticker_theme_features",
+        )
     persist_theme_states(
         history,
-        latest_features,
+        run_features,
         unit_of_work=unit_of_work,
         available_at=available_at,
         valid_until=valid_until,
@@ -246,6 +305,7 @@ def daily_run(
         features,
         unit_of_work=unit_of_work,
         valid_until_for=valid_until_for,
+        represented_as_of=as_of,
         feature_completion_at=feature_completion_at,
     )
 
@@ -322,6 +382,7 @@ def weekly_run(
         features,
         unit_of_work=unit_of_work,
         valid_until_for=valid_until_for,
+        represented_as_of=as_of,
         feature_completion_at=feature_completion_at,
     )
 

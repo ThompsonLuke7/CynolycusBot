@@ -386,7 +386,13 @@ def append_membership_history(
     as_of: date,
     generated_at: datetime,
 ) -> pd.DataFrame:
-    """Append new immutable membership evidence and atomically replace history."""
+    """Append new immutable membership evidence and atomically replace history.
+
+    ``available_at`` marks when validated current and prior evidence is ready
+    for serialization/publication.  It is captured immediately before the new
+    immutable rows are materialized; the following same-directory atomic write
+    does not infer or rewrite that timestamp from filesystem metadata.
+    """
 
     required = {"ticker", "theme", "membership_score"}
     missing = sorted(required - set(current.columns))
@@ -397,34 +403,57 @@ def append_membership_history(
     if not isinstance(as_of, date):
         raise ValueError("as_of must be a date")
     generated_at_utc = _aware_utc(generated_at, field_name="generated_at")
-    available_at_utc = _aware_utc(_utc_now(), field_name="available_at")
-    if generated_at_utc > available_at_utc:
-        raise ValueError("generated_at follows available_at")
     as_of_start = datetime.combine(as_of, datetime.min.time(), tzinfo=UTC)
     if generated_at_utc < as_of_start:
         raise ValueError("generated_at precedes as_of")
     taxonomy_version = _taxonomy_from_current(current)
     producer_version = str(current.attrs.get("producer_version", PRODUCER_VERSION))
 
-    incoming_rows: list[dict[str, object]] = []
+    validated_rows: list[dict[str, object]] = []
     for row in current.itertuples(index=False):
         row_data = row._asdict()
-        incoming_rows.append(
+        validated_rows.append(
             {
-                "as_of": as_of,
-                "available_at": available_at_utc,
-                "generated_at": generated_at_utc,
                 "ticker": str(row_data["ticker"]).strip().upper(),
                 "theme": _theme_label(row_data["theme"]),
                 "membership_score": _validate_score(row_data["membership_score"]),
-                "taxonomy_version": taxonomy_version,
-                "producer_version": producer_version,
             }
         )
+    validated = pd.DataFrame(
+        validated_rows,
+        columns=["ticker", "theme", "membership_score"],
+    )
+    duplicate_mask = validated.duplicated(["ticker", "theme"], keep=False)
+    if duplicate_mask.any():
+        duplicates = validated.loc[duplicate_mask]
+        for _, group in duplicates.groupby(["ticker", "theme"], sort=False):
+            if group["membership_score"].nunique(dropna=False) != 1:
+                raise ValueError("conflicting immutable membership rows in current memberships")
+        validated = validated.drop_duplicates(["ticker", "theme"], keep="first")
+
+    existing = _normalize_existing_history(Path(history_path))
+
+    # Semantic boundary: all inputs are validated and the record is now ready
+    # for serialization/publication.  The atomic Parquet replacement follows.
+    available_at_utc = _aware_utc(_utc_now(), field_name="available_at")
+    if generated_at_utc > available_at_utc:
+        raise ValueError("generated_at follows available_at")
+    incoming_rows = [
+        {
+            "as_of": as_of,
+            "available_at": available_at_utc,
+            "generated_at": generated_at_utc,
+            "ticker": row.ticker,
+            "theme": row.theme,
+            "membership_score": row.membership_score,
+            "taxonomy_version": taxonomy_version,
+            "producer_version": producer_version,
+        }
+        for row in validated.itertuples(index=False)
+    ]
     incoming = pd.DataFrame(incoming_rows, columns=_HISTORY_COLUMNS)
     incoming = _dedupe_history_rows(incoming, source_name="current memberships")
     _validate_history_timestamps(incoming, source_name="current memberships")
-    existing = _normalize_existing_history(Path(history_path))
 
     existing_keys = set(_history_key_tuples(existing).tolist())
     incoming = incoming.loc[~_history_key_tuples(incoming).isin(existing_keys)].copy()

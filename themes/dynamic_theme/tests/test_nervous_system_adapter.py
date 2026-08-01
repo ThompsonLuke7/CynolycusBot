@@ -489,6 +489,49 @@ def test_history_rejects_naive_existing_availability_timestamp(monkeypatch, tmp_
         )
 
 
+def test_history_captures_availability_after_existing_history_normalization(
+    monkeypatch,
+    tmp_path,
+):
+    history_path = tmp_path / "history.parquet"
+    _history_frame().to_parquet(history_path, index=False)
+    completion = AVAILABLE_AT + timedelta(minutes=10)
+    events: list[str] = []
+    real_normalize = step08._normalize_existing_history
+    real_replace = os.replace
+
+    def normalize_existing(path):
+        events.append("history_normalized")
+        return real_normalize(path)
+
+    def capture_completion():
+        events.append("availability_captured")
+        return completion
+
+    def replace(source, destination):
+        events.append("history_replaced")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(step08, "_normalize_existing_history", normalize_existing)
+    monkeypatch.setattr(step08, "_utc_now", capture_completion)
+    monkeypatch.setattr(step08.os, "replace", replace)
+
+    out = step08.append_membership_history(
+        _membership_frame(taxonomy_version="taxonomy-v2"),
+        history_path=history_path,
+        as_of=AS_OF,
+        generated_at=GENERATED_AT,
+    )
+
+    assert events == [
+        "history_normalized",
+        "availability_captured",
+        "history_replaced",
+    ]
+    new_rows = out[out["taxonomy_version"] == "taxonomy-v2"]
+    assert set(new_rows["available_at"]) == {pd.Timestamp(completion)}
+
+
 class _FakeStates:
     def __init__(self, *, error: Exception | None = None):
         self.error = error
@@ -663,3 +706,240 @@ def test_pipeline_uses_feature_completion_for_effective_availability(monkeypatch
 
     assert captured["available_at"] == feature_completion
     assert captured["valid_until"] == feature_completion + timedelta(days=1)
+
+
+def test_historical_daily_rerun_publishes_only_its_exact_date_taxonomy_and_lineage(
+    monkeypatch,
+    tmp_path,
+):
+    import themes.dynamic_theme.pipeline as pipeline
+
+    history_path = tmp_path / "membership_history.parquet"
+    features_path = tmp_path / "features.parquet"
+    newer_date = AS_OF + timedelta(days=1)
+    represented_as_of = pd.Timestamp("2026-07-30T23:30:00-04:00")
+    feature_completion = AVAILABLE_AT + timedelta(days=2)
+    history = pd.concat(
+        [
+            _history_frame(
+                as_of=newer_date,
+                taxonomy_version="taxonomy-v2",
+                generated_at=GENERATED_AT + timedelta(days=1),
+                available_at=AVAILABLE_AT + timedelta(days=1),
+            ),
+            _history_frame(as_of=AS_OF, taxonomy_version="taxonomy-v1"),
+        ],
+        ignore_index=True,
+    )
+    features = pd.concat(
+        [
+            _features_frame(as_of=newer_date),
+            _features_frame(as_of=AS_OF),
+        ],
+        ignore_index=True,
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(pipeline, "TICKER_MEMBERSHIP_HISTORY_PATH", history_path)
+    monkeypatch.setattr(pipeline, "TICKER_THEME_FEATURES_PATH", features_path)
+    monkeypatch.setattr(pipeline, "ensure_outputs", lambda: None)
+    monkeypatch.setattr(pipeline, "build_ticker_documents", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(pipeline, "generate_embeddings", lambda *a, **k: pd.DataFrame())
+
+    def write_memberships(*args, **kwargs):
+        history.to_parquet(history_path, index=False)
+        return _membership_frame(as_of=AS_OF, taxonomy_version="taxonomy-v1")
+
+    def write_features(*args, **kwargs):
+        features.to_parquet(features_path, index=False)
+        return features
+
+    def capture_publication(memberships, selected_features, **kwargs):
+        captured["memberships"] = memberships
+        captured["features"] = selected_features
+        captured.update(kwargs)
+
+    monkeypatch.setattr(pipeline, "compute_memberships", write_memberships)
+    monkeypatch.setattr(pipeline, "build_meta_features", write_features)
+    monkeypatch.setattr(pipeline, "persist_theme_states", capture_publication)
+    monkeypatch.setattr(pipeline, "_utc_now", lambda: feature_completion)
+
+    pipeline.daily_run(
+        as_of=represented_as_of,
+        tickers=["AAA"],
+        unit_of_work=object(),
+        valid_until_for=lambda available: available + timedelta(days=1),
+    )
+
+    selected_history = captured["memberships"]
+    selected_features = captured["features"]
+    assert set(selected_history["as_of"]) == {AS_OF}
+    assert set(selected_history["taxonomy_version"]) == {"taxonomy-v1"}
+    assert set(selected_features["date"]) == {AS_OF}
+    lineage = captured["lineage"]
+    assert {ref.record_locator for ref in lineage} == {
+        "ticker_theme_membership_history:row:1",
+        "ticker_theme_features:row:2",
+        "ticker_theme_features:row:3",
+    }
+    assert {ref.content_hash for ref in lineage if "membership_history" in ref.source_id} == {
+        pipeline._artifact_sha256(history_path)
+    }
+    assert {ref.content_hash for ref in lineage if "features" in ref.source_id} == {
+        pipeline._artifact_sha256(features_path)
+    }
+    assert captured["taxonomy_version"] == "taxonomy-v1"
+
+
+def test_publication_fails_clearly_without_exact_date_taxonomy_evidence(
+    monkeypatch,
+    tmp_path,
+):
+    import themes.dynamic_theme.pipeline as pipeline
+
+    history_path = tmp_path / "membership_history.parquet"
+    monkeypatch.setattr(pipeline, "TICKER_MEMBERSHIP_HISTORY_PATH", history_path)
+    _history_frame(as_of=AS_OF + timedelta(days=1)).to_parquet(
+        history_path,
+        index=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="no membership history evidence.*2026-07-30.*taxonomy-v1",
+    ):
+        pipeline._publish_completed_theme_outputs(
+            _membership_frame(),
+            pd.DataFrame(),
+            unit_of_work=object(),
+            valid_until_for=lambda available: available + timedelta(days=1),
+            represented_as_of=pd.Timestamp(AS_OF, tz="UTC"),
+            feature_completion_at=AVAILABLE_AT,
+        )
+
+
+def test_publication_requires_taxonomy_version_from_current_membership_attrs(
+    monkeypatch,
+    tmp_path,
+):
+    import themes.dynamic_theme.pipeline as pipeline
+
+    history_path = tmp_path / "membership_history.parquet"
+    features_path = tmp_path / "features.parquet"
+    memberships = _membership_frame()
+    memberships.attrs.clear()
+
+    monkeypatch.setattr(pipeline, "TICKER_MEMBERSHIP_HISTORY_PATH", history_path)
+    monkeypatch.setattr(pipeline, "TICKER_THEME_FEATURES_PATH", features_path)
+    monkeypatch.setattr(pipeline, "ensure_outputs", lambda: None)
+    monkeypatch.setattr(pipeline, "build_ticker_documents", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(pipeline, "generate_embeddings", lambda *a, **k: pd.DataFrame())
+
+    def write_memberships(*args, **kwargs):
+        _history_frame().to_parquet(history_path, index=False)
+        return memberships
+
+    def write_features(*args, **kwargs):
+        features = _features_frame()
+        features.to_parquet(features_path, index=False)
+        return features
+
+    monkeypatch.setattr(pipeline, "compute_memberships", write_memberships)
+    monkeypatch.setattr(pipeline, "build_meta_features", write_features)
+    monkeypatch.setattr(pipeline, "persist_theme_states", lambda *a, **k: None)
+
+    with pytest.raises(ValueError, match="attrs.*taxonomy_version"):
+        pipeline.daily_run(
+            as_of=pd.Timestamp(AS_OF, tz="UTC"),
+            tickers=["AAA"],
+            unit_of_work=object(),
+            valid_until_for=lambda available: available + timedelta(days=1),
+        )
+
+
+def test_publication_rejects_ambiguous_exact_date_taxonomy_history(
+    monkeypatch,
+    tmp_path,
+):
+    import themes.dynamic_theme.pipeline as pipeline
+
+    history_path = tmp_path / "membership_history.parquet"
+    features_path = tmp_path / "features.parquet"
+    history = pd.concat(
+        [
+            _history_frame(),
+            _history_frame().assign(membership_score=0.11),
+        ],
+        ignore_index=True,
+    )
+
+    monkeypatch.setattr(pipeline, "TICKER_MEMBERSHIP_HISTORY_PATH", history_path)
+    monkeypatch.setattr(pipeline, "TICKER_THEME_FEATURES_PATH", features_path)
+    monkeypatch.setattr(pipeline, "ensure_outputs", lambda: None)
+    monkeypatch.setattr(pipeline, "build_ticker_documents", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(pipeline, "generate_embeddings", lambda *a, **k: pd.DataFrame())
+
+    def write_memberships(*args, **kwargs):
+        history.to_parquet(history_path, index=False)
+        return _membership_frame()
+
+    def write_features(*args, **kwargs):
+        features = _features_frame()
+        features.to_parquet(features_path, index=False)
+        return features
+
+    monkeypatch.setattr(pipeline, "compute_memberships", write_memberships)
+    monkeypatch.setattr(pipeline, "build_meta_features", write_features)
+    monkeypatch.setattr(pipeline, "persist_theme_states", lambda *a, **k: None)
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        pipeline.daily_run(
+            as_of=pd.Timestamp(AS_OF, tz="UTC"),
+            tickers=["AAA"],
+            unit_of_work=object(),
+            valid_until_for=lambda available: available + timedelta(days=1),
+        )
+
+
+def test_weekly_run_passes_its_represented_as_of_to_publication(monkeypatch):
+    import themes.dynamic_theme.pipeline as pipeline
+
+    represented_as_of = pd.Timestamp("2026-07-30T23:30:00-04:00")
+    registry = pd.DataFrame({"cluster_id": [7], "theme_name": ["alpha_theme"]})
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(pipeline, "ensure_outputs", lambda: None)
+    monkeypatch.setattr(pipeline, "build_ticker_documents", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(pipeline, "generate_embeddings", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(
+        pipeline,
+        "cluster_tickers",
+        lambda *a, **k: pd.DataFrame({"ticker": ["AAA"], "cluster_id": [7]}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "build_cluster_summaries",
+        lambda *a, **k: [{"cluster_id": 7, "tickers": ["AAA"]}],
+    )
+    monkeypatch.setattr(pipeline, "label_clusters", lambda *a, **k: registry)
+    monkeypatch.setattr(pipeline, "discover_new_themes", lambda *a, **k: (0, registry))
+    monkeypatch.setattr(pipeline, "compute_active_theme_centroids", lambda *a, **k: ({}, {}))
+    monkeypatch.setattr(pipeline, "find_duplicate_groups", lambda *a, **k: [])
+    monkeypatch.setattr(pipeline, "build_canonical_map", lambda *a, **k: {})
+    monkeypatch.setattr(pipeline, "build_relationship_graph", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "compute_memberships", lambda *a, **k: _membership_frame())
+    monkeypatch.setattr(pipeline, "build_meta_features", lambda *a, **k: _features_frame())
+    monkeypatch.setattr(
+        pipeline,
+        "_publish_completed_theme_outputs",
+        lambda *a, **kwargs: captured.update(kwargs),
+    )
+
+    pipeline.weekly_run(
+        as_of=represented_as_of,
+        tickers=["AAA"],
+        unit_of_work=object(),
+        valid_until_for=lambda available: available + timedelta(days=1),
+    )
+
+    assert captured["represented_as_of"] == represented_as_of
