@@ -107,6 +107,19 @@ def _clean_ticker(series: pd.Series) -> pd.Series:
     return series.astype(str).str.upper().str.replace("$", "", regex=False).str.strip()
 
 
+def _clean_optional_ticker(series: pd.Series) -> pd.Series:
+    return pd.Series(
+        [
+            None
+            if _missing_scalar(value)
+            else (str(value).upper().replace("$", "").strip() or None)
+            for value in series
+        ],
+        index=series.index,
+        dtype=object,
+    )
+
+
 def _event_type_from_source(source: pd.Series) -> pd.Series:
     """Preserve the actual SEC form (or 'company_news' for press wire) in event_type."""
     s = source.astype(str)
@@ -156,9 +169,14 @@ def news_to_catalysts(news: pd.DataFrame) -> pd.DataFrame:
             "impact_role": _series(news, "impact_role", "unknown"),
             "relation_confidence": _series(news, "relation_confidence", np.nan),
             "is_direct_catalyst": _series(news, "is_direct_catalyst", np.nan),
+            "directional_score": _series(news, "directional_score", np.nan),
+            "raw_score": _series(news, "raw_score", np.nan),
+            "catalyst_score": _series(news, "catalyst_score", np.nan),
+            "score": _series(news, "score", np.nan),
             "hindsight_evidence": _hindsight_markers(news),
             "ingestion_quarantine_code": _series(news, "ingestion_quarantine_code", None),
             "ingestion_quarantine_message": _series(news, "ingestion_quarantine_message", None),
+            "raw_ingestion_fields": _series(news, "raw_ingestion_fields", None),
         }
     )
     # Keep malformed source rows so the adapter can quarantine them with
@@ -169,20 +187,21 @@ def news_to_catalysts(news: pd.DataFrame) -> pd.DataFrame:
 def scheduled_events_to_catalysts(events: pd.DataFrame, *, default_kind: str) -> pd.DataFrame:
     if events.empty:
         return pd.DataFrame()
-    ticker = _series(events, "ticker", "")
+    ticker = _clean_optional_ticker(_series(events, "ticker", None))
     title = _series(events, "title") if "title" in events.columns else _series(events, "event_type", "")
     event_type = _series(events, "event_type", "").astype(str).str.lower()
     timestamp = pd.to_datetime(_series(events, "timestamp", pd.NaT), utc=True, errors="coerce")
-    event_time = _fill_missing_values(_strict_causal_series(events, "event_time"), timestamp)
+    raw_timestamp = _strict_causal_series(events, "timestamp")
+    event_time = _fill_missing_values(_strict_causal_series(events, "event_time"), raw_timestamp)
     source = _series(events, "source", default_kind)
-    has_ticker = ticker.astype(str).str.strip().ne("") & ticker.astype(str).str.lower().ne("nan")
+    has_ticker = ticker.notna()
     event_identity_values = []
     for t, ts, et in zip(ticker, event_time, event_type):
         try:
             time_key = pd.Timestamp(ts).isoformat()
         except (TypeError, ValueError):
             time_key = str(ts)
-        event_identity_values.append(f"{default_kind}:{str(t).upper()}:{time_key}:{et}")
+        event_identity_values.append(f"{default_kind}:{t or ''}:{time_key}:{et}")
     generated_source_ids = pd.Series(
         event_identity_values,
         index=events.index,
@@ -195,7 +214,7 @@ def scheduled_events_to_catalysts(events: pd.DataFrame, *, default_kind: str) ->
         {
             "catalyst_id": event_identity_values,
             "record_id": "",
-            "ticker": _clean_ticker(pd.Series(ticker, index=events.index)).replace("NAN", ""),
+            "ticker": ticker,
             "timestamp": timestamp,
             "event_time": event_time,
             "published_at": _strict_causal_series(events, "published_at"),
@@ -216,9 +235,14 @@ def scheduled_events_to_catalysts(events: pd.DataFrame, *, default_kind: str) ->
             "impact_role": np.where(event_type.eq("earnings"), "earnings_event", "event_risk"),
             "relation_confidence": 1.0,
             "is_direct_catalyst": np.where(has_ticker, 1.0, 0.0),
+            "directional_score": _series(events, "directional_score", np.nan),
+            "raw_score": _series(events, "raw_score", np.nan),
+            "catalyst_score": _series(events, "catalyst_score", np.nan),
+            "score": _series(events, "score", np.nan),
             "hindsight_evidence": _hindsight_markers(events),
             "ingestion_quarantine_code": _series(events, "ingestion_quarantine_code", None),
             "ingestion_quarantine_message": _series(events, "ingestion_quarantine_message", None),
+            "raw_ingestion_fields": _series(events, "raw_ingestion_fields", None),
         }
     )
     # Keep malformed scheduled rows so the adapter can quarantine them with

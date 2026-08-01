@@ -67,6 +67,44 @@ QA_HEADINGS = (
     "analyst question",
 )
 
+# Every field emitted by this post-earnings text extractor is research/result
+# evidence, never decision-time scheduled-catalyst evidence.  Keep the
+# declaration beside the producer so adapter boundaries fail closed when the
+# extractor surface grows.
+FORWARD_SECTION_OUTPUT_FIELDS = frozenset({"forward_guidance", "qa"})
+STRUCTURED_GUIDANCE_OUTPUT_FIELDS = frozenset(
+    {
+        "guidance_text_chars",
+        "guidance_revenue_raise_cut",
+        "guidance_eps_raise_cut",
+        "margin_expansion_score",
+        "ai_demand_mentions",
+        "backlog_order_mentions",
+        "uncertainty_language",
+        "confidence_language",
+        "capex_expansion",
+        "hiring_slowdown",
+        "guidance_strength_score",
+    }
+)
+FINBERT_OUTPUT_FIELDS = frozenset(
+    {
+        "finbert_positive",
+        "finbert_negative",
+        "finbert_neutral",
+        "finbert_tone_score",
+    }
+)
+ALT_FINBERT_OUTPUT_FIELDS = frozenset(f"alt_{name}" for name in FINBERT_OUTPUT_FIELDS)
+FORWARD_GUIDANCE_EXTRACTOR_OUTPUT_FIELDS = (
+    FORWARD_SECTION_OUTPUT_FIELDS
+    | STRUCTURED_GUIDANCE_OUTPUT_FIELDS
+    | FINBERT_OUTPUT_FIELDS
+    | ALT_FINBERT_OUTPUT_FIELDS
+    | {"embedding_available", "finbert_available"}
+)
+FORWARD_GUIDANCE_EXTRACTOR_OUTPUT_PREFIXES = ("emb_", "metric_")
+
 
 def normalize_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")

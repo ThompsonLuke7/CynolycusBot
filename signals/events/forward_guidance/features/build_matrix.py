@@ -25,6 +25,8 @@ from signals.events.forward_guidance.features.market_context import (
 )
 from signals.events.forward_guidance.features.nlp import (
     DEFAULT_SENTENCE_MODEL,
+    FORWARD_GUIDANCE_EXTRACTOR_OUTPUT_FIELDS,
+    FORWARD_GUIDANCE_EXTRACTOR_OUTPUT_PREFIXES,
     embedding_feature_dict,
     embed_sentence_transformer,
     extract_forward_sections,
@@ -63,6 +65,12 @@ LABEL_COLUMNS = {
 }
 
 POST_EVENT_FEATURE_COLUMNS = POST_EVENT_FEATURE_COLUMNS | {"guidance_reaction_disagreement_score"}
+FORWARD_GUIDANCE_ARTIFACT_FIELDS = (
+    frozenset(LABEL_COLUMNS)
+    | frozenset(POST_EVENT_FEATURE_COLUMNS)
+    | FORWARD_GUIDANCE_EXTRACTOR_OUTPUT_FIELDS
+)
+FORWARD_GUIDANCE_ARTIFACT_PREFIXES = FORWARD_GUIDANCE_EXTRACTOR_OUTPUT_PREFIXES
 
 
 def _metrics_for_event(event: EarningsEvent) -> dict[str, object]:

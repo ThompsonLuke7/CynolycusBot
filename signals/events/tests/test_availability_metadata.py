@@ -164,6 +164,11 @@ def test_scheduled_catalyst_pipeline_does_not_drop_invalid_occurrence_rows() -> 
     normalized = scheduled_events_to_catalysts(source_rows, default_kind="scheduled_event")
 
     assert len(normalized) == 1
+    assert normalized.iloc[0]["ingestion_quarantine_code"] == "INVALID_EVENT_TIME"
+    assert normalized.iloc[0]["ingestion_quarantine_message"]
+    raw = normalized.iloc[0]["raw_ingestion_fields"]
+    assert raw["timestamp"] == "not-a-scheduled-time"
+    assert raw["observed_at"] == "2026-07-30T14:00:00Z"
 
 
 def test_scheduled_schema_preserves_hindsight_evidence_for_adapter_quarantine() -> None:

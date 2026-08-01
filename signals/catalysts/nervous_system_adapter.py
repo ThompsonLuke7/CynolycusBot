@@ -36,8 +36,10 @@ from core.nervous_system.persistence.repositories.registry import (
     SourceArtifactRecord,
 )
 from core.nervous_system.persistence.uow import UnitOfWork as NervousSystemUnitOfWork
-from signals.events.forward_guidance.features.build_matrix import LABEL_COLUMNS
-from signals.events.forward_guidance.features.market_context import POST_EVENT_FEATURE_COLUMNS
+from signals.events.forward_guidance.features.build_matrix import (
+    FORWARD_GUIDANCE_ARTIFACT_FIELDS,
+    FORWARD_GUIDANCE_ARTIFACT_PREFIXES,
+)
 
 
 UTC = timezone.utc
@@ -100,7 +102,7 @@ _HINDSIGHT_EXACT_FIELDS = frozenset(
         "post_er_move_pct", "post_er_gap_pct", "technical_stabilization_flag",
     }
 )
-_HINDSIGHT_EXACT_FIELDS |= frozenset(LABEL_COLUMNS) | frozenset(POST_EVENT_FEATURE_COLUMNS) | {
+_HINDSIGHT_EXACT_FIELDS |= frozenset(FORWARD_GUIDANCE_ARTIFACT_FIELDS) | {
     "guidance_reaction_disagreement_score",
 }
 _HINDSIGHT_META_FIELDS = frozenset(
@@ -320,7 +322,8 @@ def _revision_hash(row: Mapping[str, object]) -> str:
     material = {
         str(key): value
         for key, value in row.items()
-        if key not in _NON_IDENTITY_FIELDS and key not in {"record_locator", "source_row_locator"}
+        if key not in _NON_IDENTITY_FIELDS
+        and key not in {"record_locator", "source_record_locator", "source_row_locator"}
     }
     return hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
 
@@ -405,7 +408,11 @@ def hindsight_evidence_fields(row: Mapping[str, object]) -> dict[str, object]:
             continue
         if _missing(value) or normalized in _HINDSIGHT_META_FIELDS:
             continue
-        if normalized in _HINDSIGHT_EXACT_FIELDS or any(pattern.search(normalized) for pattern in _HINDSIGHT_FIELD_PATTERNS):
+        if (
+            normalized in _HINDSIGHT_EXACT_FIELDS
+            or normalized.startswith(FORWARD_GUIDANCE_ARTIFACT_PREFIXES)
+            or any(pattern.search(normalized) for pattern in _HINDSIGHT_FIELD_PATTERNS)
+        ):
             evidence[str(key)] = value
     return evidence
 
@@ -634,7 +641,28 @@ def _logical_key_for_result(row: Mapping[str, object], source_artifact: LineageR
     return _source_logical_key(row, source_artifact=source_artifact)
 
 
-def _batch_lineage(
+def _path_bearing_locator(value: str) -> bool:
+    return "/" in value or "\\" in value
+
+
+def _hashed_locator_token(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+
+
+def _batch_locator_namespace(source_artifact: LineageRef) -> str:
+    prefix = source_artifact.record_locator.strip().rsplit(":", 1)[0].strip()
+    if prefix and not _path_bearing_locator(prefix):
+        return prefix
+    identity = _canonical_json(
+        {
+            "source_id": source_artifact.source_id,
+            "record_locator": source_artifact.record_locator.strip(),
+        }
+    )
+    return f"catalyst_records:{_hashed_locator_token(identity)}"
+
+
+def _row_lineage(
     source_artifact: LineageRef,
     row: Mapping[str, object],
     row_index: int,
@@ -649,15 +677,31 @@ def _batch_lineage(
 
     if not re.search(r"(?:^|:)batch$", source_artifact.record_locator.strip(), re.IGNORECASE):
         return source_artifact
-    explicit = _first(row, ("record_locator", "source_record_locator"))
+    explicit = _first(
+        row,
+        ("record_locator", "source_record_locator", "source_row_locator"),
+    )
+    namespace = _batch_locator_namespace(source_artifact)
+    if explicit is not None:
+        explicit_locator = str(explicit).strip()
+        locator = (
+            f"{namespace}:row:{_hashed_locator_token(explicit_locator)}"
+            if _path_bearing_locator(explicit_locator)
+            else explicit_locator
+        )
+        return source_artifact.model_copy(update={"record_locator": locator})
+
     source_record_id = _first(row, ("source_record_id", "source_id", "id"))
     fallback_identity = source_record_id
     if fallback_identity is None:
         logical_key = _source_logical_key(row, source_artifact=source_artifact)
         fallback_identity = hashlib.sha256(logical_key.encode("utf-8")).hexdigest()[:32]
-    # A batch marker is not a per-row lineage identity.  Expand it uniformly,
-    # and never retain filesystem/path fragments supplied by a producer.
-    locator = f"{source_artifact.record_locator.rsplit(':', 1)[0]}:row:{str(fallback_identity).strip()}"
+    fallback = str(fallback_identity).strip()
+    if _path_bearing_locator(fallback):
+        fallback = _hashed_locator_token(fallback)
+    # A batch marker is not a per-row lineage identity. Expand it uniformly;
+    # caller-supplied path fragments participate only through a stable hash.
+    locator = f"{namespace}:row:{fallback}"
     return source_artifact.model_copy(update={"record_locator": locator})
 
 
@@ -674,7 +718,7 @@ def _normalize_catalyst_records_with_rows(
     by_event_id: dict[UUID, int] = {}
     by_logical_key: dict[str, set[UUID]] = {}
     for row_index, row in enumerate(rows):
-        row_lineage = _batch_lineage(lineage, row, row_index)
+        row_lineage = _row_lineage(lineage, row, row_index)
         result = normalize_catalyst_record(row, source_artifact=row_lineage)
         event = result.event
         if event is None:

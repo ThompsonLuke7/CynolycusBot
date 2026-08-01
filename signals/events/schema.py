@@ -232,7 +232,7 @@ def events_from_frame(
                     hindsight_evidence=hindsight_evidence_fields(row.to_dict()) or None,
                 ).to_record()
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             # Keep a row whose occurrence metadata is malformed so the
             # causal adapter can return a deterministic quarantine result.
             # Unsupported/disallowed event kinds remain excluded by the
@@ -242,6 +242,7 @@ def events_from_frame(
                 continue
             if normalized_type not in ALLOWED_MACRO_EVENT_TYPES and normalized_type != "earnings":
                 continue
+            raw = row.to_dict()
             rows.append(
                 {
                     "event_type": normalized_type,
@@ -261,6 +262,11 @@ def events_from_frame(
                     "source": str(_first_present(row, ("source",)) or "manual"),
                     "ticker": _first_present(row, ("ticker", "symbol")),
                     "url": _first_present(row, ("url",)),
+                    "ingestion_quarantine_code": "INVALID_EVENT_TIME",
+                    "ingestion_quarantine_message": (
+                        f"explicit timestamp/occurrence is invalid: {exc}"
+                    ),
+                    "raw_ingestion_fields": raw,
                 }
             )
     out = pd.DataFrame(rows)

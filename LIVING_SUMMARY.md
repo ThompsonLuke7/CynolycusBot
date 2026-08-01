@@ -1107,3 +1107,11 @@ Focused Task 11 `58 passed`, forward guidance `6`, DB-free core `191 passed/35 s
 {2026-08-01 06:19 EDT} {agent: Codex} {nervous system Task 11 controller verification}
 Disposable-PostgreSQL publication passed twice consecutively and full nervous-system passed `226`; focused Task 11 passed `59`, forward guidance `6`, and the signal surface passed `85` with one unchanged timing test deselected.
 Compileall/diff-check passed; persistent `cynolycus` was untouched. Correction round 2 is ready for commit and fresh LUNA review.
+
+{2026-08-01 12:35 EDT} {agent: Codex} {nervous system Task 11 correction round 3}
+Closed complete extractor-output hindsight quarantine, malformed raw-evidence propagation, canonical explicit/path-safe row lineage, and null-ticker MARKET routing; RED `53 failed/58 passed`, GREEN focused `111 passed`.
+Forward guidance `6` and DB-free core `191 passed/35 skipped`; compileall/hash-seed/diff-check passed. Controller owns PostgreSQL and commit; no persistent DB or earnings-calendar/live path was touched.
+
+{2026-08-01 12:37 EDT} {agent: Codex} {nervous system Task 11 round 3 controller verification}
+Disposable publication passed twice consecutively; full PostgreSQL nervous-system passed `226`, focused Task 11 `111`, forward guidance `6`, and relevant signals `137` with one unchanged timing test deselected.
+Compileall/diff-check passed; persistent `cynolycus` was untouched. Correction round 3 is ready for commit and fresh review.

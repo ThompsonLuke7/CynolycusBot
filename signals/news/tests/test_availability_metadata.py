@@ -297,6 +297,11 @@ def test_news_frame_retains_missing_required_rows_for_quarantine() -> None:
     )
     assert len(out) == 1
     assert out.iloc[0]["ingestion_quarantine_code"] == "MISSING_REQUIRED_NEWS_FIELD"
+    assert out.iloc[0]["raw_ingestion_fields"]["ticker"] == "ABC"
+
+    projected = news_to_catalysts(out)
+    assert projected.iloc[0]["ingestion_quarantine_code"] == "MISSING_REQUIRED_NEWS_FIELD"
+    assert projected.iloc[0]["raw_ingestion_fields"]["ticker"] == "ABC"
 
 
 def test_news_pipeline_does_not_promote_local_record_id_to_source_record_id() -> None:
