@@ -27,6 +27,16 @@ _FEATURE_VERSION = "dealer-positioning@1"
 _CONFIG_VERSION = "dealer-positioning@1"
 _SCHEMA_VERSION = 1
 _SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
+_SCOPE_WEIGHTS = {
+    "daily_week": 0.45,
+    "through_month": 0.35,
+    "two_months": 0.20,
+}
+_DIRECTION_REGIMES = {
+    "bullish": DealerRegime.UPSIDE_ACCELERATION,
+    "neutral": DealerRegime.NEUTRAL_GAMMA,
+    "bearish": DealerRegime.DOWNSIDE_ACCELERATION,
+}
 
 _NON_METRIC_FIELDS = frozenset(
     {
@@ -39,6 +49,9 @@ _NON_METRIC_FIELDS = frozenset(
         "liquidity_pass_reason",
         "market_cap_bucket",
         "nearest_level_type",
+        "dealer_direction",
+        "dealer_regime",
+        "regime",
         "ref_date_et",
         "scope",
         "scope_label",
@@ -217,6 +230,51 @@ def _ticker(row: Mapping[str, object]) -> str:
     return values[0]
 
 
+def _selected_scope(
+    snapshot: Mapping[str, object], dynamics: Mapping[str, object] | None
+) -> str:
+    raw_scope = snapshot.get("scope")
+    if not isinstance(raw_scope, str) or raw_scope not in _SCOPE_WEIGHTS:
+        names = ", ".join(_SCOPE_WEIGHTS)
+        raise ValueError(f"snapshot scope must be exactly one of: {names}")
+    if dynamics is not None:
+        dynamics_scope = dynamics.get("scope")
+        if not isinstance(dynamics_scope, str) or dynamics_scope not in _SCOPE_WEIGHTS:
+            names = ", ".join(_SCOPE_WEIGHTS)
+            raise ValueError(f"dynamics scope must be exactly one of: {names}")
+        if dynamics_scope != raw_scope:
+            raise ValueError("dynamics scope conflicts with snapshot scope")
+    return raw_scope
+
+
+def _dealer_regime(snapshot: Mapping[str, object]) -> DealerRegime:
+    evidence: list[DealerRegime] = []
+    if "dealer_direction" in snapshot and snapshot["dealer_direction"] is not None:
+        direction = snapshot["dealer_direction"]
+        if not isinstance(direction, str) or direction not in _DIRECTION_REGIMES:
+            names = ", ".join(_DIRECTION_REGIMES)
+            raise ValueError(f"dealer_direction must be exactly one of: {names}")
+        evidence.append(_DIRECTION_REGIMES[direction])
+
+    for field_name in ("dealer_regime", "regime"):
+        if field_name not in snapshot or snapshot[field_name] is None:
+            continue
+        value = snapshot[field_name]
+        try:
+            regime = DealerRegime(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be a canonical DealerRegime value") from exc
+        if regime is DealerRegime.UNKNOWN:
+            raise ValueError(f"{field_name} cannot be UNKNOWN")
+        evidence.append(regime)
+
+    if not evidence:
+        raise ValueError("snapshot must contain dealer_direction or dealer_regime evidence")
+    if any(regime is not evidence[0] for regime in evidence[1:]):
+        raise ValueError("conflicting dealer direction/regime values")
+    return evidence[0]
+
+
 def _check_capture_metadata(
     row: Mapping[str, object], *, captured_at: datetime, field_name: str
 ) -> None:
@@ -364,6 +422,15 @@ def _quality_issues(
     return tuple(issues)
 
 
+def _scope_quality_issue(scope: str) -> DataQualityIssue:
+    return DataQualityIssue(
+        code="DEALER_SCOPE_SELECTED",
+        severity=DataQualitySeverity.INFO,
+        component=_PRODUCER,
+        message=f"selected canonical producer scope: {scope}",
+    )
+
+
 def _stable_state_id(
     *,
     ticker: str,
@@ -371,7 +438,7 @@ def _stable_state_id(
     available_at: datetime,
     valid_until: datetime,
     metrics: Mapping[str, float],
-    fields: Mapping[str, float | None],
+    fields: Mapping[str, float | str | None],
     quality: tuple[DataQualityIssue, ...],
     lineage_ids: tuple[str, ...],
 ) -> UUID:
@@ -416,6 +483,12 @@ def adapt_dealer_state(
 ) -> DealerState:
     """Adapt one captured dealer summary and optional level-dynamics row.
 
+    The caller must first select exactly one row for the ticker from the
+    canonical producer scopes ``daily_week``, ``through_month``, or
+    ``two_months``. This adapter never chooses among same-ticker scope rows;
+    any cross-scope aggregation must happen upstream and still declare the
+    canonical scope supplying the singleton level fields.
+
     ``captured_at`` is the only accepted availability for a raw capture.
     Dynamics must carry their own explicit, timezone-aware ``available_at``;
     ``GammaLevels.timestamp`` is deliberately ignored as capture evidence.
@@ -445,6 +518,8 @@ def adapt_dealer_state(
     validated_lineage = _validated_lineage(lineage)
     lineage_ids = _lineage_ids(validated_lineage)
     ticker = _ticker(snapshot_row)
+    scope = _selected_scope(snapshot_row, dynamics_row)
+    dealer_regime = _dealer_regime(snapshot_row)
     spot = _required_alias_value(snapshot_row, ("spot", "spot_price"), field_name="spot")
     if spot <= 0:
         raise ValueError("spot must be greater than zero")
@@ -471,7 +546,12 @@ def adapt_dealer_state(
         ),
     }
     metrics = _merge_metrics(snapshot_row, dynamics_row)
-    quality_issues = _quality_issues(snapshot_row, dynamics_row)
+    metrics[f"selected_scope_{scope}"] = 1.0
+    metrics["selected_scope_weight"] = _SCOPE_WEIGHTS[scope]
+    quality_issues = (
+        *_quality_issues(snapshot_row, dynamics_row),
+        _scope_quality_issue(scope),
+    )
     quality = DataQualitySummary(issues=quality_issues)
     state_id = _stable_state_id(
         ticker=ticker,
@@ -479,7 +559,7 @@ def adapt_dealer_state(
         available_at=available_at,
         valid_until=valid_until_utc,
         metrics=metrics,
-        fields={"spot": spot, **state_fields},
+        fields={"dealer_regime": dealer_regime.value, "spot": spot, **state_fields},
         quality=quality_issues,
         lineage_ids=lineage_ids,
     )
@@ -502,7 +582,7 @@ def adapt_dealer_state(
         lineage_ids=lineage_ids,
         data_quality=quality,
         ticker=ticker,
-        dealer_regime=DealerRegime.UNKNOWN,
+        dealer_regime=dealer_regime,
         spot=spot,
         total_gex=state_fields["total_gex"],
         call_wall=state_fields["call_wall"],

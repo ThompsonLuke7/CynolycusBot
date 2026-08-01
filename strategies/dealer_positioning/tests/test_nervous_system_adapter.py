@@ -8,6 +8,7 @@ import pytest
 
 from core.nervous_system.contracts.base import content_hash
 from core.nervous_system.contracts.context import ContextSnapshot
+from core.nervous_system.contracts.enums import DealerRegime
 from core.nervous_system.contracts.quality import LineageRef
 from strategies.dealer_positioning.nervous_system_adapter import adapt_dealer_state
 
@@ -28,6 +29,7 @@ LINEAGE = (
 def _snapshot(**updates: object) -> dict[str, object]:
     row: dict[str, object] = {
         "symbol": "SPY",
+        "scope": "daily_week",
         "captured_at": CAPTURED_AT,
         # GammaLevels.timestamp is intentionally not the availability source.
         "timestamp": "2026-07-30T19:45:00+00:00",
@@ -40,6 +42,7 @@ def _snapshot(**updates: object) -> dict[str, object]:
         "air_gap_above_score": 0.35,
         "air_gap_below_score": 0.55,
         "dealer_exposure": -2.5,
+        "dealer_direction": "bullish",
         "level_score": 0.8,
     }
     row.update(updates)
@@ -60,7 +63,11 @@ def _snapshot_at(state, decision_time: datetime) -> ContextSnapshot:
 def test_dealer_capture_and_dynamics_use_causal_availability() -> None:
     state = adapt_dealer_state(
         _snapshot(),
-        {"available_at": LEVELS_AVAILABLE_AT, "wall_change": 2.0},
+        {
+            "scope": "daily_week",
+            "available_at": LEVELS_AVAILABLE_AT,
+            "wall_change": 2.0,
+        },
         captured_at=CAPTURED_AT,
         valid_until=VALID_UNTIL,
         lineage=LINEAGE,
@@ -116,7 +123,11 @@ def test_gamma_levels_timestamp_is_never_used_without_explicit_capture_metadata(
 def test_dealer_metrics_are_not_relabelled_as_probabilities() -> None:
     state = adapt_dealer_state(
         _snapshot(),
-        {"available_at": LEVELS_AVAILABLE_AT, "exposure_score": 4.5},
+        {
+            "scope": "daily_week",
+            "available_at": LEVELS_AVAILABLE_AT,
+            "exposure_score": 4.5,
+        },
         captured_at=CAPTURED_AT,
         valid_until=VALID_UNTIL,
         lineage=LINEAGE,
@@ -155,14 +166,22 @@ def test_dynamics_without_explicit_availability_are_rejected() -> None:
 def test_dealer_state_identity_versions_and_lineage_are_deterministic() -> None:
     first = adapt_dealer_state(
         _snapshot(),
-        {"available_at": LEVELS_AVAILABLE_AT, "wall_change": 2.0},
+        {
+            "scope": "daily_week",
+            "available_at": LEVELS_AVAILABLE_AT,
+            "wall_change": 2.0,
+        },
         captured_at=CAPTURED_AT,
         valid_until=VALID_UNTIL,
         lineage=LINEAGE,
     )
     second = adapt_dealer_state(
         _snapshot(),
-        {"available_at": LEVELS_AVAILABLE_AT, "wall_change": 2.0},
+        {
+            "scope": "daily_week",
+            "available_at": LEVELS_AVAILABLE_AT,
+            "wall_change": 2.0,
+        },
         captured_at=CAPTURED_AT,
         valid_until=VALID_UNTIL,
         lineage=LINEAGE,
@@ -224,3 +243,175 @@ def test_dynamics_availability_must_be_explicit_and_timezone_aware() -> None:
             valid_until=VALID_UNTIL,
             lineage=LINEAGE,
         )
+
+
+@pytest.mark.parametrize(
+    ("scope", "weight"),
+    [
+        ("daily_week", 0.45),
+        ("through_month", 0.35),
+        ("two_months", 0.20),
+    ],
+)
+def test_explicit_canonical_scope_is_preserved(
+    scope: str, weight: float
+) -> None:
+    state = adapt_dealer_state(
+        _snapshot(scope=scope),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert state.metrics[f"selected_scope_{scope}"] == 1.0
+    assert state.metrics["selected_scope_weight"] == weight
+    scope_issues = [
+        issue
+        for issue in state.data_quality.issues
+        if issue.code == "DEALER_SCOPE_SELECTED"
+    ]
+    assert len(scope_issues) == 1
+    assert scope in scope_issues[0].message
+
+
+def test_scope_only_variants_cannot_collapse() -> None:
+    daily_week = adapt_dealer_state(
+        _snapshot(scope="daily_week"),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+    through_month = adapt_dealer_state(
+        _snapshot(scope="through_month"),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert daily_week.state_id != through_month.state_id
+    assert content_hash(daily_week, exclude={"state_id"}) != content_hash(
+        through_month, exclude={"state_id"}
+    )
+
+
+@pytest.mark.parametrize("scope", [None, "", "monthly", ("daily_week", "through_month")])
+def test_missing_ambiguous_or_noncanonical_scope_is_rejected(scope: object) -> None:
+    with pytest.raises(ValueError, match="scope"):
+        adapt_dealer_state(
+            _snapshot(scope=scope),
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+def test_dynamics_scope_must_match_selected_snapshot_scope() -> None:
+    with pytest.raises(ValueError, match="scope"):
+        adapt_dealer_state(
+            _snapshot(scope="daily_week"),
+            {
+                "scope": "through_month",
+                "available_at": LEVELS_AVAILABLE_AT,
+                "wall_change": 2.0,
+            },
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected"),
+    [
+        ("bullish", DealerRegime.UPSIDE_ACCELERATION),
+        ("neutral", DealerRegime.NEUTRAL_GAMMA),
+        ("bearish", DealerRegime.DOWNSIDE_ACCELERATION),
+    ],
+)
+def test_actual_producer_dealer_direction_maps_to_regime(
+    direction: str, expected: DealerRegime
+) -> None:
+    state = adapt_dealer_state(
+        _snapshot(dealer_direction=direction),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert state.dealer_regime is expected
+
+
+@pytest.mark.parametrize("field", ["dealer_regime", "regime"])
+def test_explicit_contract_regime_is_preserved(field: str) -> None:
+    row = _snapshot()
+    row.pop("dealer_direction")
+    row[field] = DealerRegime.PINNING.value
+
+    state = adapt_dealer_state(
+        row,
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert state.dealer_regime is DealerRegime.PINNING
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"dealer_direction": "sideways"},
+        {"dealer_direction": "bullish", "regime": DealerRegime.SHORT_GAMMA.value},
+        {"dealer_direction": "bullish", "dealer_regime": DealerRegime.UNKNOWN.value},
+    ],
+)
+def test_unknown_or_conflicting_regime_evidence_fails_closed(
+    updates: dict[str, object]
+) -> None:
+    with pytest.raises(ValueError, match="dealer.*(direction|regime)|regime"):
+        adapt_dealer_state(
+            _snapshot(**updates),
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+def test_missing_regime_evidence_fails_closed() -> None:
+    row = _snapshot()
+    row.pop("dealer_direction")
+
+    with pytest.raises(ValueError, match="dealer.*(direction|regime)"):
+        adapt_dealer_state(
+            row,
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+def test_direction_only_variants_have_distinct_state_ids() -> None:
+    bullish = adapt_dealer_state(
+        _snapshot(dealer_direction="bullish"),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+    bearish = adapt_dealer_state(
+        _snapshot(dealer_direction="bearish"),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert bullish.state_id != bearish.state_id

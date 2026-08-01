@@ -24,6 +24,9 @@ _FEATURE_VERSION = "readiness@1"
 _CONFIG_VERSION = "readiness-policy@1"
 _DEFAULT_JOB = "UNKNOWN"
 _DEFAULT_SESSION = "UNKNOWN"
+_PREDATES_LATEST_SESSION_REASON = (
+    "readiness stamp predates latest completed trading session"
+)
 
 
 def _timestamp(value: object, *, field_name: str) -> datetime:
@@ -171,8 +174,53 @@ def adapt_readiness_status(
     status: str
     available_at: datetime
     effective_ready = bool(ready) if isinstance(ready, bool) else False
+    environment = os.getenv("CYNOLYCUS_ENVIRONMENT", "UNKNOWN")
+    environment = environment.strip().replace("-", "_").upper()
+    gate_disabled = os.getenv("CYNOLYCUS_READINESS_REQUIRED", "1").strip() == "0"
 
-    if raw_completed_at is None or (
+    if gate_disabled:
+        status = "DISABLED"
+        available_at = checked_at_utc
+        if environment == "QA_PAPER":
+            effective_ready = False
+            reason_codes.append("READINESS_DISABLED_NOT_ACCEPTED_IN_QA")
+            issues.append(
+                _quality_issue(
+                    "READINESS_DISABLED_NOT_ACCEPTED_IN_QA",
+                    "CYNOLYCUS_READINESS_REQUIRED=0 is not accepted in QA-paper",
+                    severity=DataQualitySeverity.ERROR,
+                )
+            )
+        elif environment == "DEVELOPMENT":
+            reason_codes.append("READINESS_DISABLED_WARNING")
+            issues.append(
+                _quality_issue(
+                    "READINESS_DISABLED_WARNING",
+                    "CYNOLYCUS_READINESS_REQUIRED=0 is active in development",
+                    severity=DataQualitySeverity.WARNING,
+                )
+            )
+        elif environment == "PRODUCTION_LIVE":
+            effective_ready = False
+            reason_codes.append("READINESS_DISABLED_NOT_ACCEPTED_IN_LIVE")
+            issues.append(
+                _quality_issue(
+                    "READINESS_DISABLED_NOT_ACCEPTED_IN_LIVE",
+                    "CYNOLYCUS_READINESS_REQUIRED=0 is not accepted in production-live",
+                    severity=DataQualitySeverity.ERROR,
+                )
+            )
+        else:
+            effective_ready = False
+            reason_codes.append("READINESS_DISABLED_NOT_ACCEPTED_IN_RUNTIME")
+            issues.append(
+                _quality_issue(
+                    "READINESS_DISABLED_NOT_ACCEPTED_IN_RUNTIME",
+                    "CYNOLYCUS_READINESS_REQUIRED=0 requires an explicit supported environment",
+                    severity=DataQualitySeverity.ERROR,
+                )
+            )
+    elif raw_completed_at is None or (
         isinstance(raw_completed_at, str) and not raw_completed_at.strip()
     ):
         status = "MISSING"
@@ -230,7 +278,7 @@ def adapt_readiness_status(
             else:
                 available_at = completed_at
                 age_hours = (checked_at_utc - completed_at).total_seconds() / 3600.0
-                if not effective_ready or age_hours > max_age:
+                if age_hours > max_age:
                     status = "STALE"
                     effective_ready = False
                     reason_codes.append("READINESS_STALE")
@@ -241,52 +289,23 @@ def adapt_readiness_status(
                             severity=DataQualitySeverity.ERROR,
                         )
                     )
+                elif not effective_ready:
+                    status = "STALE"
+                    code = (
+                        "READINESS_PREDATES_LATEST_COMPLETED_SESSION"
+                        if reason_text.startswith(_PREDATES_LATEST_SESSION_REASON)
+                        else "READINESS_STALE"
+                    )
+                    reason_codes.append(code)
+                    issues.append(
+                        _quality_issue(
+                            code,
+                            reason_text,
+                            severity=DataQualitySeverity.ERROR,
+                        )
+                    )
                 else:
                     status = "CURRENT"
-
-    environment = os.getenv("CYNOLYCUS_ENVIRONMENT", "UNKNOWN")
-    environment = environment.strip().replace("-", "_").upper()
-    gate_disabled = os.getenv("CYNOLYCUS_READINESS_REQUIRED", "1").strip() == "0"
-    if gate_disabled:
-        if environment == "QA_PAPER":
-            effective_ready = False
-            reason_codes.append("READINESS_DISABLED_NOT_ACCEPTED_IN_QA")
-            issues.append(
-                _quality_issue(
-                    "READINESS_DISABLED_NOT_ACCEPTED_IN_QA",
-                    "CYNOLYCUS_READINESS_REQUIRED=0 is not accepted in QA-paper",
-                    severity=DataQualitySeverity.ERROR,
-                )
-            )
-        elif environment == "DEVELOPMENT":
-            reason_codes.append("READINESS_DISABLED_WARNING")
-            issues.append(
-                _quality_issue(
-                    "READINESS_DISABLED_WARNING",
-                    "CYNOLYCUS_READINESS_REQUIRED=0 is active in development",
-                    severity=DataQualitySeverity.WARNING,
-                )
-            )
-        elif environment == "PRODUCTION_LIVE":
-            effective_ready = False
-            reason_codes.append("READINESS_DISABLED_NOT_ACCEPTED_IN_LIVE")
-            issues.append(
-                _quality_issue(
-                    "READINESS_DISABLED_NOT_ACCEPTED_IN_LIVE",
-                    "CYNOLYCUS_READINESS_REQUIRED=0 is not accepted in production-live",
-                    severity=DataQualitySeverity.ERROR,
-                )
-            )
-        else:
-            effective_ready = False
-            reason_codes.append("READINESS_DISABLED_NOT_ACCEPTED_IN_RUNTIME")
-            issues.append(
-                _quality_issue(
-                    "READINESS_DISABLED_NOT_ACCEPTED_IN_RUNTIME",
-                    "CYNOLYCUS_READINESS_REQUIRED=0 requires an explicit supported environment",
-                    severity=DataQualitySeverity.ERROR,
-                )
-            )
 
     reason_codes_tuple = tuple(dict.fromkeys(reason_codes))
     data_quality = DataQualitySummary(issues=tuple(issues))

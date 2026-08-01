@@ -337,10 +337,14 @@ def capture_snapshot(
     """Read broker account/positions and append one JSONL close-mark snapshot.
 
     If supplied, ``unit_of_work`` remains caller-owned.  The local JSONL record
-    is durable before the optional state publication begins, and publication
-    failures are returned alongside that durable backup.
+    is durable before the optional state staging begins.  Successful insertion
+    returns ``publication_status="STAGED"`` because the caller must still commit;
+    failures are returned alongside the durable local backup.
     """
-    captured = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    captured = _aware_utc(
+        now if now is not None else datetime.now(timezone.utc),
+        field="now",
+    )
     account = client.get_account() or {}
     positions = client.get_positions() or []
     account_fields = {field: _json_scalar(account.get(field)) for field in _ACCOUNT_FIELDS}
@@ -392,7 +396,7 @@ def capture_snapshot(
             }
         )
     else:
-        result["publication_status"] = "PUBLISHED"
+        result["publication_status"] = "STAGED"
     return result
 
 

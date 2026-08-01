@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
+import hashlib
 import json
 import math
 from numbers import Real
@@ -173,6 +174,7 @@ def _stable_state_id(
     selected_bar: datetime,
     available_at: datetime,
     lineage: tuple[LineageRef, ...],
+    content_revision: str,
 ) -> UUID:
     material = {
         "state_type": StateType.TICKER.value,
@@ -184,6 +186,7 @@ def _stable_state_id(
         "model_version": _MODEL_VERSION,
         "feature_version": _FEATURE_VERSION,
         "config_version": _CONFIG_VERSION,
+        "content_revision": content_revision,
         "lineage": [
             {
                 "source_id": ref.source_id,
@@ -194,6 +197,49 @@ def _stable_state_id(
         ],
     }
     return uuid5(NAMESPACE_URL, json.dumps(material, sort_keys=True, separators=(",", ":")))
+
+
+def _content_revision_digest(
+    *,
+    valid_until: datetime,
+    reference_price: float,
+    ticker_setup: TickerSetup,
+    trend_state: str,
+    relative_strength_state: str,
+    support_state: str,
+    volume_state: str,
+    reversal_state: str,
+    breakdown_state: str,
+    theme_alignment: float | None,
+    market_alignment: float | None,
+    dealer_alignment: float | None,
+    metrics: Mapping[str, float],
+    data_quality: DataQualitySummary,
+) -> str:
+    projected_content = {
+        "valid_until": valid_until.isoformat(),
+        "reference_price": reference_price,
+        "ticker_setup": ticker_setup.value,
+        "trend_state": trend_state,
+        "relative_strength_state": relative_strength_state,
+        "support_state": support_state,
+        "volume_state": volume_state,
+        "reversal_state": reversal_state,
+        "breakdown_state": breakdown_state,
+        "theme_alignment": theme_alignment,
+        "market_alignment": market_alignment,
+        "dealer_alignment": dealer_alignment,
+        "metrics": dict(metrics),
+        "data_quality": data_quality.model_dump(mode="json"),
+        "transition_probabilities": {},
+    }
+    canonical = json.dumps(
+        projected_content,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _text(row: Mapping[str, object], name: str, default: str = "UNKNOWN") -> str:
@@ -254,6 +300,67 @@ def _quality(row: Mapping[str, object]) -> DataQualitySummary:
     return DataQualitySummary(issues=tuple(issues))
 
 
+def _ticker(value: object, *, field_name: str) -> str:
+    if _is_missing(value) or not str(value).strip():
+        raise ValueError(f"{field_name} must contain a ticker")
+    ticker = str(value).strip().upper().replace("$", "")
+    if not ticker:
+        raise ValueError(f"{field_name} must contain a ticker")
+    return ticker
+
+
+def adapt_scored_ticker_state(
+    scored_row: Mapping[str, object],
+    selected_bar: Mapping[str, object],
+    *,
+    bar_ticker: str,
+    decision_bar: datetime,
+    available_at: datetime,
+    valid_until: datetime,
+    matrix_lineage: tuple[LineageRef, ...],
+    bar_lineage: tuple[LineageRef, ...],
+) -> TickerState:
+    """Join one scored Meta row to one explicitly selected exact 4H bar."""
+
+    if not isinstance(scored_row, Mapping):
+        raise TypeError("scored_row must be a single mapping")
+    if not isinstance(selected_bar, Mapping):
+        raise TypeError("selected_bar must be a single selected-bar mapping")
+    if not matrix_lineage:
+        raise ValueError("matrix lineage is required")
+    if not bar_lineage:
+        raise ValueError("bar lineage is required")
+
+    decision_bar_utc = _timestamp(decision_bar, field_name="decision_bar")
+    scored_ticker = _ticker(scored_row.get("ticker"), field_name="scored row")
+    selected_ticker = _ticker(bar_ticker, field_name="bar_ticker")
+    if selected_ticker != scored_ticker:
+        raise ValueError("selected bar ticker does not match scored-row ticker")
+    if "ticker" in selected_bar:
+        embedded_ticker = _ticker(selected_bar.get("ticker"), field_name="selected bar")
+        if embedded_ticker != selected_ticker:
+            raise ValueError("selected bar ticker evidence conflicts with bar_ticker")
+
+    selected_timestamp = _timestamp(
+        selected_bar.get("timestamp"), field_name="selected bar timestamp"
+    )
+    if selected_timestamp != decision_bar_utc:
+        raise ValueError("selected 4H bar timestamp does not match the decision bar")
+
+    enriched = dict(scored_row)
+    for name in ("open", "high", "low", "close", "volume"):
+        if name in selected_bar:
+            enriched[name] = selected_bar[name]
+
+    return adapt_ticker_state(
+        enriched,
+        decision_bar=decision_bar_utc,
+        available_at=available_at,
+        valid_until=valid_until,
+        lineage=_validated_lineage(matrix_lineage) + _validated_lineage(bar_lineage),
+    )
+
+
 def adapt_ticker_state(
     row: Mapping[str, object],
     *,
@@ -284,16 +391,38 @@ def adapt_ticker_state(
     if row_bar != selected_bar:
         raise ValueError("row timestamp does not match the selected decision bar")
 
-    raw_ticker = row.get("ticker")
-    if _is_missing(raw_ticker) or not str(raw_ticker).strip():
-        raise ValueError("selected Meta row must contain a ticker")
-    ticker = str(raw_ticker).strip().upper().replace("$", "")
-    if not ticker:
-        raise ValueError("selected Meta row must contain a ticker")
+    ticker = _ticker(row.get("ticker"), field_name="selected Meta row")
 
     close = _finite(row.get("close"), field_name="close")
     validated_lineage = _validated_lineage(lineage)
     metrics = _metric_values(row)
+    ticker_setup = _ticker_setup(row)
+    trend_state = _text(row, "trend_state")
+    relative_strength_state = _text(row, "relative_strength_state")
+    support_state = _text(row, "support_state")
+    volume_state = _text(row, "volume_state")
+    reversal_state = _text(row, "reversal_state")
+    breakdown_state = _text(row, "breakdown_state")
+    theme_alignment = _optional_finite(row, "theme_alignment")
+    market_alignment = _optional_finite(row, "market_alignment")
+    dealer_alignment = _optional_finite(row, "dealer_alignment")
+    data_quality = _quality(row)
+    content_revision = _content_revision_digest(
+        valid_until=valid_until_utc,
+        reference_price=close,
+        ticker_setup=ticker_setup,
+        trend_state=trend_state,
+        relative_strength_state=relative_strength_state,
+        support_state=support_state,
+        volume_state=volume_state,
+        reversal_state=reversal_state,
+        breakdown_state=breakdown_state,
+        theme_alignment=theme_alignment,
+        market_alignment=market_alignment,
+        dealer_alignment=dealer_alignment,
+        metrics=metrics,
+        data_quality=data_quality,
+    )
 
     return TickerState(
         state_id=_stable_state_id(
@@ -301,6 +430,7 @@ def adapt_ticker_state(
             selected_bar=selected_bar,
             available_at=observed_at,
             lineage=validated_lineage,
+            content_revision=content_revision,
         ),
         state_type=StateType.TICKER,
         entity_id=ticker,
@@ -316,23 +446,23 @@ def adapt_ticker_state(
         feature_version=_FEATURE_VERSION,
         config_version=_CONFIG_VERSION,
         lineage_ids=_lineage_ids(validated_lineage),
-        data_quality=_quality(row),
+        data_quality=data_quality,
         ticker=ticker,
         selected_bar=selected_bar,
         reference_price=close,
-        ticker_setup=_ticker_setup(row),
-        trend_state=_text(row, "trend_state"),
-        relative_strength_state=_text(row, "relative_strength_state"),
-        support_state=_text(row, "support_state"),
-        volume_state=_text(row, "volume_state"),
-        reversal_state=_text(row, "reversal_state"),
-        breakdown_state=_text(row, "breakdown_state"),
-        theme_alignment=_optional_finite(row, "theme_alignment"),
-        market_alignment=_optional_finite(row, "market_alignment"),
-        dealer_alignment=_optional_finite(row, "dealer_alignment"),
+        ticker_setup=ticker_setup,
+        trend_state=trend_state,
+        relative_strength_state=relative_strength_state,
+        support_state=support_state,
+        volume_state=volume_state,
+        reversal_state=reversal_state,
+        breakdown_state=breakdown_state,
+        theme_alignment=theme_alignment,
+        market_alignment=market_alignment,
+        dealer_alignment=dealer_alignment,
         metrics=metrics,
         transition_probabilities={},
     )
 
 
-__all__ = ["adapt_ticker_state"]
+__all__ = ["adapt_scored_ticker_state", "adapt_ticker_state"]

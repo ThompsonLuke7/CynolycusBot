@@ -1138,3 +1138,7 @@ Final head `b6f63e3`; focused `169`, relevant signals `197`, disposable PostgreS
 {2026-08-01 13:42 EDT} {agent: Codex} {nervous system Task 12 implementation}
 Parallel TDD added ticker, dealer, broker-portfolio/local-first publication, and readiness adapters; exact focused `44`, broker/readiness `8`, dealer `75`, contracts `36`, and disposable-PostgreSQL core `245` passed.
 Meta suite was `22 passed/1 pre-existing missing ignored model-manifest failure`; compile/diff-check passed. Integrated commit and fresh review are next.
+
+{2026-08-01 14:08 EDT} {agent: Codex} {nervous system Task 12 correction round 1}
+Parallel fixes closed real Meta-bar enrichment/revision identity, dealer scope/regime loss, pre-commit publication status/naive time, and disabled/latest-session readiness semantics.
+Focused `75`, broker/readiness `29`, dealer `94`, Meta `32+1 deselected`, and disposable-PostgreSQL core `247` passed; compile/diff-check clean. Commit/re-review are next.

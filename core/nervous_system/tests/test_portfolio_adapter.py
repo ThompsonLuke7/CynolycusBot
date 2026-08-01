@@ -167,13 +167,19 @@ def test_portfolio_adapter_fails_closed_for_non_finite_position_quantity() -> No
 
 
 class _Client:
+    def __init__(self):
+        self.calls = []
+
     def get_account(self):
+        self.calls.append("get_account")
         return _raw_snapshot()["account"]
 
     def get_positions(self):
+        self.calls.append("get_positions")
         return _raw_snapshot()["positions"]
 
     def get_orders(self):
+        self.calls.append("get_orders")
         raise AssertionError("snapshot writer must not add a broker order call")
 
 
@@ -181,10 +187,13 @@ class _RecordingStates:
     def __init__(self, events: list[tuple[str, object]], path):
         self.events = events
         self.path = path
+        self.staged_states = []
 
     def insert_states_idempotently(self, states):
-        self.events.append(("publish", self.path.read_text()))
-        return {state.state_id: state.state_id for state in states}
+        staged = tuple(states)
+        self.staged_states.extend(staged)
+        self.events.append(("stage", self.path.read_text()))
+        return {state.state_id: state.state_id for state in staged}
 
 
 class _RecordingUow:
@@ -199,7 +208,9 @@ class _RecordingUow:
         raise AssertionError("snapshot writer must not rollback caller-owned UOW")
 
 
-def test_snapshot_publishes_only_after_append_and_fsync(tmp_path, monkeypatch) -> None:
+def test_snapshot_stages_only_after_fsync_and_leaves_commit_to_caller(
+    tmp_path, monkeypatch
+) -> None:
     events: list[tuple[str, object]] = []
     path = tmp_path / "broker_equity_20260730_paper.jsonl"
     original_fsync = __import__("os").fsync
@@ -210,8 +221,9 @@ def test_snapshot_publishes_only_after_append_and_fsync(tmp_path, monkeypatch) -
 
     monkeypatch.setattr("core.broker_equity_snapshot.os.fsync", recording_fsync)
     uow = _RecordingUow(events, path)
+    client = _Client()
     result = capture_snapshot(
-        client=_Client(),
+        client=client,
         account_label="paper",
         root=tmp_path,
         now=CAPTURED_AT,
@@ -219,9 +231,49 @@ def test_snapshot_publishes_only_after_append_and_fsync(tmp_path, monkeypatch) -
         strategy_ownership={"AAPL": "meta_ranker"},
     )
 
-    assert result["publication_status"] == "PUBLISHED"
-    assert [event[0] for event in events] == ["fsync", "publish"]
+    assert result["publication_status"] == "STAGED"
+    assert result["publication_status"] != "PUBLISHED"
+    assert [event[0] for event in events] == ["fsync", "stage"]
+    assert len(uow.states.staged_states) == 1
+    assert client.calls == ["get_account", "get_positions"]
     assert "open_orders" not in json.loads(path.read_text())
+
+
+def test_snapshot_rejects_naive_now_before_broker_file_or_uow_side_effects(tmp_path) -> None:
+    events: list[tuple[str, object]] = []
+    path = tmp_path / "broker_equity_20260730_paper.jsonl"
+    client = _Client()
+    uow = _RecordingUow(events, path)
+    error = None
+
+    try:
+        capture_snapshot(
+            client=client,
+            account_label="paper",
+            root=tmp_path,
+            now=datetime(2026, 7, 30, 20, 5),
+            unit_of_work=uow,
+        )
+    except ValueError as exc:
+        error = exc
+
+    assert client.calls == []
+    assert list(tmp_path.iterdir()) == []
+    assert events == []
+    assert uow.states.staged_states == []
+    assert error is not None
+    assert "now must be timezone-aware" in str(error)
+
+
+def test_snapshot_default_now_is_utc_and_uses_only_account_and_positions(tmp_path) -> None:
+    client = _Client()
+
+    result = capture_snapshot(client=client, account_label="paper", root=tmp_path)
+
+    captured_at = datetime.fromisoformat(result["captured_at_utc"])
+    assert captured_at.utcoffset() == timezone.utc.utcoffset(captured_at)
+    assert client.calls == ["get_account", "get_positions"]
+    assert list(tmp_path.glob("broker_equity_*_paper.jsonl"))
 
 
 def test_snapshot_returns_publication_failure_after_local_snapshot_is_durable(tmp_path) -> None:

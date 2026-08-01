@@ -58,7 +58,7 @@ def test_stale_success_remains_observed_with_completed_availability() -> None:
     assert state.status == "STALE"
     assert state.available_at == completed
     assert state.completed_at == completed
-    assert "READINESS_STALE" in state.reason_codes
+    assert state.reason_codes == ("READINESS_STALE",)
 
 
 def test_missing_stamp_is_a_non_ready_observation_at_check_time() -> None:
@@ -107,32 +107,55 @@ def test_naive_observation_timestamp_is_rejected_without_inventing_utc() -> None
 def test_disabled_gate_is_not_accepted_in_qa_paper(monkeypatch) -> None:
     monkeypatch.setenv("CYNOLYCUS_READINESS_REQUIRED", "0")
     monkeypatch.setenv("CYNOLYCUS_ENVIRONMENT", "QA_PAPER")
+    ready, reason, payload = readiness_status(now=CHECKED_AT)
+
+    assert (ready, reason, payload) == (
+        True,
+        "readiness gate disabled by CYNOLYCUS_READINESS_REQUIRED=0",
+        {},
+    )
     state = adapt_readiness_status(
-        ready=True,
-        reason="readiness gate disabled by CYNOLYCUS_READINESS_REQUIRED=0",
-        payload=_payload(),
+        ready=ready,
+        reason=reason,
+        payload=payload,
         checked_at=CHECKED_AT,
         max_age_hours=96.0,
     )
 
     assert state.ready is False
-    assert "READINESS_DISABLED_NOT_ACCEPTED_IN_QA" in state.reason_codes
+    assert state.status == "DISABLED"
+    assert state.completed_at is None
+    assert state.available_at == CHECKED_AT
+    assert state.reason_codes == ("READINESS_DISABLED_NOT_ACCEPTED_IN_QA",)
 
 
 def test_disabled_gate_is_warning_only_in_development(monkeypatch) -> None:
     monkeypatch.setenv("CYNOLYCUS_READINESS_REQUIRED", "0")
     monkeypatch.setenv("CYNOLYCUS_ENVIRONMENT", "DEVELOPMENT")
+    ready, reason, payload = readiness_status(now=CHECKED_AT)
+
+    assert (ready, reason, payload) == (
+        True,
+        "readiness gate disabled by CYNOLYCUS_READINESS_REQUIRED=0",
+        {},
+    )
     state = adapt_readiness_status(
-        ready=True,
-        reason="readiness gate disabled by CYNOLYCUS_READINESS_REQUIRED=0",
-        payload=_payload(),
+        ready=ready,
+        reason=reason,
+        payload=payload,
         checked_at=CHECKED_AT,
         max_age_hours=96.0,
     )
 
     assert state.ready is True
-    assert "READINESS_DISABLED_WARNING" in state.reason_codes
-    assert any(issue.code == "READINESS_DISABLED_WARNING" for issue in state.data_quality.issues)
+    assert state.status == "DISABLED"
+    assert state.completed_at is None
+    assert state.available_at == CHECKED_AT
+    assert state.reason_codes == ("READINESS_DISABLED_WARNING",)
+    assert tuple(issue.code for issue in state.data_quality.issues) == (
+        "READINESS_DISABLED_WARNING",
+    )
+    assert state.data_quality.is_usable is True
 
 
 def test_source_hash_identity_versions_and_quality_are_deterministic() -> None:
@@ -176,35 +199,46 @@ def test_source_hash_identity_versions_and_quality_are_deterministic() -> None:
 
 def test_existing_latest_completed_session_check_remains_authoritative(tmp_path) -> None:
     stamp = tmp_path / "latest_success.json"
-    stamp.write_text(
-        json.dumps(
-            {
-                "job": "nightly_data_readiness",
-                "status": "success",
-                # Sunday stamp authorizes Monday but not Tuesday after Monday traded.
-                "completed_at_utc": "2026-07-12T17:26:44+00:00",
-            }
-        )
-    )
-    monday_ok, _, monday_payload = readiness_status(
+    stamp_payload = {
+        "job": "nightly_data_readiness",
+        "status": "success",
+        # Sunday stamp authorizes Monday but not Tuesday after Monday traded.
+        "completed_at_utc": "2026-07-12T17:26:44+00:00",
+    }
+    stamp.write_text(json.dumps(stamp_payload))
+    monday_result = readiness_status(
         path=stamp,
         now=datetime(2026, 7, 13, 13, 0, tzinfo=UTC),
     )
-    tuesday_ok, _, tuesday_payload = readiness_status(
+    tuesday_result = readiness_status(
         path=stamp,
         now=datetime(2026, 7, 14, 13, 0, tzinfo=UTC),
     )
 
+    assert monday_result == (
+        True,
+        "readiness stamp OK (19.6h old)",
+        stamp_payload,
+    )
+    assert tuesday_result == (
+        False,
+        "readiness stamp predates latest completed trading session "
+        "(2026-07-13 16:00 ET)",
+        stamp_payload,
+    )
+    monday_ok, monday_reason, monday_payload = monday_result
+    tuesday_ok, tuesday_reason, tuesday_payload = tuesday_result
+
     monday = adapt_readiness_status(
         ready=monday_ok,
-        reason="readiness stamp OK" if monday_ok else "not ready",
+        reason=monday_reason,
         payload=monday_payload,
         checked_at=datetime(2026, 7, 13, 13, 0, tzinfo=UTC),
         max_age_hours=96.0,
     )
     tuesday = adapt_readiness_status(
         ready=tuesday_ok,
-        reason="readiness stamp predates latest completed trading session",
+        reason=tuesday_reason,
         payload=tuesday_payload,
         checked_at=datetime(2026, 7, 14, 13, 0, tzinfo=UTC),
         max_age_hours=96.0,
@@ -212,3 +246,9 @@ def test_existing_latest_completed_session_check_remains_authoritative(tmp_path)
     assert monday.ready is True
     assert tuesday.ready is False
     assert tuesday.status == "STALE"
+    assert tuesday.reason_codes == (
+        "READINESS_PREDATES_LATEST_COMPLETED_SESSION",
+    )
+    assert tuple(issue.code for issue in tuesday.data_quality.issues) == (
+        "READINESS_PREDATES_LATEST_COMPLETED_SESSION",
+    )
