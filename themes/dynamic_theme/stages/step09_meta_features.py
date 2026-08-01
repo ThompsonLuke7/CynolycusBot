@@ -110,14 +110,32 @@ def _validated_feature_evidence(
     *,
     source: str,
 ) -> pd.DataFrame:
-    required = {"ticker", "date", "taxonomy_version"}
-    missing = sorted(required - set(features.columns))
-    if missing:
-        raise ValueError(f"{source} theme features missing columns: {missing}")
-    if features.empty:
-        return features.copy()
+    duplicate_columns = sorted(
+        set(features.columns[features.columns.duplicated()].tolist())
+    )
+    if duplicate_columns:
+        raise ValueError(
+            f"{source} theme features contain duplicate persisted columns: "
+            f"{duplicate_columns}"
+        )
 
-    validated = features.copy()
+    expected_columns = set(_FEATURE_OUTPUT_COLUMNS)
+    actual_columns = set(features.columns)
+    missing = sorted(expected_columns - actual_columns)
+    if missing:
+        raise ValueError(
+            f"{source} theme features missing columns from persisted schema: {missing}"
+        )
+    unexpected = sorted(actual_columns - expected_columns)
+    if unexpected:
+        raise ValueError(
+            f"{source} theme features contain unexpected persisted columns: "
+            f"{unexpected}"
+        )
+
+    validated = features.reindex(columns=_FEATURE_OUTPUT_COLUMNS).copy()
+    if validated.empty:
+        return validated
     if validated["taxonomy_version"].isna().any():
         raise ValueError(f"{source} theme features contain missing taxonomy_version")
     if not validated["taxonomy_version"].map(
@@ -266,7 +284,10 @@ def build_meta_features(
 
     if memberships_df.empty:
         logger.warning("No memberships — cannot build meta features")
-        empty = pd.DataFrame(columns=_FEATURE_OUTPUT_COLUMNS)
+        empty = _validated_feature_evidence(
+            pd.DataFrame(columns=_FEATURE_OUTPUT_COLUMNS),
+            source="current",
+        )
         empty.attrs["taxonomy_version"] = taxonomy_version
         if TICKER_THEME_FEATURES_PATH.exists():
             _validated_existing_features(TICKER_THEME_FEATURES_PATH)
@@ -440,8 +461,11 @@ def build_meta_features(
             (existing["date"] == as_of)
             & (existing["taxonomy_version"] == taxonomy_version)
         )
-        out = pd.concat([existing.loc[~same_evidence], out], ignore_index=True)
+        preserved = existing.loc[~same_evidence]
+        if not preserved.empty:
+            out = pd.concat([preserved, out], ignore_index=True)
 
+    out = _validated_feature_evidence(out, source="combined")
     out = out.sort_values(["date", "taxonomy_version", "ticker"]).reset_index(drop=True)
     out.attrs["taxonomy_version"] = taxonomy_version
     out.to_parquet(TICKER_THEME_FEATURES_PATH, index=False)

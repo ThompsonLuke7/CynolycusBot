@@ -608,3 +608,114 @@ EXIT_CODE=0 for both commands
   sandbox network denial; the unrestricted disposable-database run passed.
 - No pipeline publication, state identity, lineage, raw-label joins, UOW,
   Task 8/9, plan/ledger, or persistent `cynolycus` behavior was changed.
+
+## Correction round 5/5
+
+### RED evidence
+
+Complete-schema regressions were added before production changes. After fixing
+one test-fixture construction error, the focused command failed only for the
+missing behavior:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q -k 'identity_only_existing or unexpected_existing_feature_column or valid_exact_schema_empty_artifact'
+4 failed, 1 passed, 40 deselected, 2 warnings
+EXIT_CODE=1
+```
+
+The failures proved that identity-only artifacts were accepted for empty and
+nonempty current runs, an unexpected persisted column was accepted, and a
+complete reordered schema was concatenated without canonical reindexing. The
+valid exact-schema empty preservation control passed.
+
+The alternate duplicate-column-label bypass was then captured independently:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q -k 'duplicate_feature_column_labels'
+1 failed, 45 deselected
+EXIT_CODE=1
+```
+
+Finally, treating `FutureWarning` as an error proved that concatenating a valid
+empty artifact still took pandas' deprecated empty-frame path:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q -k 'nonempty_run_replaces_valid_exact_schema_empty_artifact'
+1 failed, 45 deselected
+EXIT_CODE=1
+```
+
+### GREEN evidence
+
+- `_validated_feature_evidence` now rejects duplicate labels, every missing
+  `_FEATURE_OUTPUT_COLUMNS` field, and every unexpected column before any empty
+  return. The persisted schema policy is exact column-name set equality; no
+  arbitrary metadata columns are permitted.
+- Only after schema completeness is proven does validation reindex to the
+  canonical `_FEATURE_OUTPUT_COLUMNS` order. Missing fields are never created
+  with `NaN`. Value, taxonomy, date, and duplicate-evidence checks then run on
+  the canonical frame as before.
+- The gate validates newly constructed empty output, current nonempty output,
+  every existing artifact before preservation/replacement/concatenation, and
+  the combined frame immediately before sort/serialization.
+- Empty and nonempty identity-only artifacts fail for both empty and nonempty
+  current runs, with byte-for-byte no-mutation assertions. Exact-schema empty
+  artifacts remain preservable, complete reordered artifacts canonicalize on
+  nonempty serialization, and valid normal outputs retain exact parity.
+- Empty preserved evidence no longer enters `pd.concat`, avoiding the pandas
+  deprecated empty-frame behavior without changing output rows.
+
+Focused Task 10 suite:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q
+48 passed
+EXIT_CODE=0
+```
+
+Full theme suite:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests -q
+76 passed, 2 warnings
+EXIT_CODE=0
+```
+
+Full nervous-system suite against only the requested disposable PostgreSQL
+database:
+
+```text
+NERVOUS_SYSTEM_TEST_DATABASE_URL='postgresql://cynolycus:cynolycus_dev_only@127.0.0.1:55432/cynolycus_nervous_system_test' ./.venv/bin/python -m pytest core/nervous_system/tests -q
+223 passed
+EXIT_CODE=0
+```
+
+Compilation and diff checks:
+
+```text
+./.venv/bin/python -m compileall -q themes/dynamic_theme core/nervous_system
+git diff --check
+EXIT_CODE=0 for both commands
+```
+
+### Correction files
+
+- `themes/dynamic_theme/stages/step09_meta_features.py`
+- `themes/dynamic_theme/tests/test_nervous_system_adapter.py`
+
+### Rigorous post-pass and concerns
+
+- The review traced every Step 9 return, concat, and Parquet serialization
+  path. No alternate schema bypass remains: current, existing, combined, empty,
+  nonempty, missing, extra, duplicate-label, and reordered-column cases are
+  covered. No Critical, Important, or Minor issue was found against round 5 or
+  prior Task 10 closures.
+- A reviewer subagent capability was unavailable, so the Superpowers review
+  template was applied directly to the complete diff and caller paths.
+- Strict exact-schema policy intentionally makes any legacy/additive Step 9
+  artifact fail closed; it must be regenerated from taxonomy-bearing evidence.
+  No migration, silent dropping, or synthetic feature fill was added.
+- The two warnings remain the pre-existing pandas `FutureWarning`s in
+  `step05_claude_labeling.py`. No pipeline publication, lineage, state identity,
+  availability, JSONB compatibility, raw-label join, DB/UOW ownership, Task
+  8/9, plan/ledger, or persistent `cynolycus` behavior changed.

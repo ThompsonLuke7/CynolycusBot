@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -25,6 +26,23 @@ AVAILABLE_AT = datetime(2026, 7, 30, 20, 5, tzinfo=UTC)
 GENERATED_AT = datetime(2026, 7, 30, 20, 4, tzinfo=UTC)
 VALID_UNTIL = datetime(2026, 7, 31, 20, 5, tzinfo=UTC)
 ARTIFACT_HASH = "a" * 64
+_EXPECTED_STEP9_OUTPUT_COLUMNS = [
+    "ticker",
+    "date",
+    "taxonomy_version",
+    "primary_theme",
+    "primary_theme_rank",
+    "theme_heat_score",
+    "theme_breadth",
+    "theme_acceleration",
+    "theme_strength",
+    "membership_score",
+    "parent_theme_heat",
+    "related_theme_heat",
+    "related_theme_rank",
+    "theme_age_days",
+    "theme_newness_score",
+]
 
 
 def _membership_frame(
@@ -41,6 +59,17 @@ def _membership_frame(
             {"ticker": ticker, "theme": theme, "membership_score": score, "date": as_of}
             for ticker, theme, score in scores
         ]
+    )
+    frame.attrs["taxonomy_version"] = taxonomy_version
+    return frame
+
+
+def _empty_membership_frame(
+    *,
+    taxonomy_version: str = "taxonomy-v1",
+) -> pd.DataFrame:
+    frame = pd.DataFrame(
+        columns=["ticker", "theme", "membership_score", "date"]
     )
     frame.attrs["taxonomy_version"] = taxonomy_version
     return frame
@@ -166,6 +195,133 @@ def test_step9_empty_output_persists_taxonomy_schema(monkeypatch, tmp_path):
     assert out.attrs["taxonomy_version"] == "taxonomy-v1"
     assert persisted.empty
     assert list(persisted.columns) == list(out.columns)
+
+
+@pytest.mark.parametrize("empty_current", [True, False], ids=["empty", "nonempty"])
+@pytest.mark.parametrize(
+    "existing_has_row",
+    [False, True],
+    ids=["empty-artifact", "nonempty-artifact"],
+)
+def test_step9_rejects_identity_only_existing_artifact_without_mutation(
+    monkeypatch,
+    tmp_path,
+    empty_current,
+    existing_has_row,
+):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+    rows = (
+        [{"ticker": "AAA", "date": AS_OF, "taxonomy_version": "taxonomy-v1"}]
+        if existing_has_row
+        else []
+    )
+    pd.DataFrame(
+        rows,
+        columns=["ticker", "date", "taxonomy_version"],
+    ).to_parquet(
+        features_path,
+        index=False,
+    )
+    before = features_path.read_bytes()
+    memberships = (
+        _empty_membership_frame()
+        if empty_current
+        else _membership_frame(taxonomy_version="taxonomy-v1")
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="missing columns.*primary_theme",
+    ):
+        step09.build_meta_features(
+            memberships_df=memberships,
+            as_of=pd.Timestamp(AS_OF),
+        )
+
+    assert features_path.read_bytes() == before
+
+
+def test_step9_rejects_unexpected_existing_feature_column_without_mutation(
+    monkeypatch,
+    tmp_path,
+):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+    malformed = pd.DataFrame(columns=[*_EXPECTED_STEP9_OUTPUT_COLUMNS, "debug_note"])
+    malformed.to_parquet(features_path, index=False)
+    before = features_path.read_bytes()
+
+    with pytest.raises(
+        ValueError,
+        match="unexpected persisted columns.*debug_note",
+    ):
+        step09.build_meta_features(
+            memberships_df=_empty_membership_frame(),
+            as_of=pd.Timestamp(AS_OF),
+        )
+
+    assert features_path.read_bytes() == before
+
+
+def test_step9_rejects_duplicate_feature_column_labels_before_empty_return():
+    duplicate_columns = [
+        *_EXPECTED_STEP9_OUTPUT_COLUMNS,
+        "theme_heat_score",
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="duplicate persisted columns.*theme_heat_score",
+    ):
+        step09._validated_feature_evidence(
+            pd.DataFrame(columns=duplicate_columns),
+            source="existing",
+        )
+
+
+def test_step9_empty_run_preserves_valid_exact_schema_empty_artifact(
+    monkeypatch,
+    tmp_path,
+):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+    pd.DataFrame(columns=_EXPECTED_STEP9_OUTPUT_COLUMNS).to_parquet(
+        features_path,
+        index=False,
+    )
+    before = features_path.read_bytes()
+
+    out = step09.build_meta_features(
+        memberships_df=_empty_membership_frame(taxonomy_version="taxonomy-v2"),
+        as_of=pd.Timestamp(AS_OF),
+    )
+
+    assert out.empty
+    assert list(out.columns) == _EXPECTED_STEP9_OUTPUT_COLUMNS
+    assert out.attrs["taxonomy_version"] == "taxonomy-v2"
+    assert features_path.read_bytes() == before
+
+
+def test_step9_nonempty_run_replaces_valid_exact_schema_empty_artifact(
+    monkeypatch,
+    tmp_path,
+):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+    pd.DataFrame(columns=list(reversed(_EXPECTED_STEP9_OUTPUT_COLUMNS))).to_parquet(
+        features_path,
+        index=False,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        out = step09.build_meta_features(
+            memberships_df=_membership_frame(taxonomy_version="taxonomy-v1"),
+            as_of=pd.Timestamp(AS_OF),
+        )
+    persisted = pd.read_parquet(features_path)
+
+    assert len(out) == 2
+    assert len(persisted) == 2
+    assert list(out.columns) == _EXPECTED_STEP9_OUTPUT_COLUMNS
+    assert list(persisted.columns) == _EXPECTED_STEP9_OUTPUT_COLUMNS
 
 
 def test_step9_empty_run_rejects_legacy_feature_artifact_without_mutation(

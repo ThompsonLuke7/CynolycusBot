@@ -1060,3 +1060,7 @@ Focused adapter `32 passed`; full market-regime `53 passed, 1 skipped`; targeted
 {2026-08-01 03:06 EDT} {agent: Codex} {nervous system Task 10 correction round 4}
 Empty Step 9 runs now fail closed on invalid existing feature evidence, while exact-key conflicts reject without mutation and field-identical duplicates deduplicate deterministically on nonempty serialization.
 Focused `40 passed`; full themes `68 passed, 2 warnings`; disposable-PostgreSQL nervous system `223 passed`; compileall/diff-check clean. Report appended; correction commit follows.
+
+{2026-08-01 03:24 EDT} {agent: Codex} {nervous system Task 10 correction round 5}
+Step 9 now enforces exact complete feature-schema equality before every empty return, preservation/concat, and serialization; missing/extra/duplicate columns fail closed without mutation, while complete schemas canonicalize deterministically.
+Focused `48 passed`; full themes `76 passed, 2 warnings`; disposable-PostgreSQL nervous system `223 passed`; compileall/diff-check clean. Final correction commit follows.
