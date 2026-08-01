@@ -1042,3 +1042,7 @@ Focused `38 passed`; full nervous-system `220 passed`; compileall/diff clean. Ex
 {2026-08-01 00:31 ET} {agent: Codex} {nervous system Task 9 causal adapters}
 Implemented strict market/sector state adapters, lineage-preserving optional UOW publication after Parquet, UNKNOWN rule-vector handling, canonical sector mapping with XLK fallback, and duplicate/finite/validity guards; research CLI remains DB-free.
 Focused adapter `21 passed`; full market-regime `42 passed, 1 skipped`; core nervous-system `190 passed, 30 skipped`; next is final diff review and the requested Task 9 commit atop `cc8009a`.
+
+{2026-08-01 00:55 EDT} {agent: Codex} {nervous system Task 9 correction round 1}
+Added named/versioned warm-up publication filtering, deterministic lineage-based state identity with atomic PostgreSQL reruns, strict lineage/Boolean validation, and caller-owned transactions; Parquet behavior is unchanged.
+Focused adapter `32 passed`; full market-regime `53 passed, 1 skipped`; targeted PostgreSQL `8 passed`; full nervous-system `221 passed`; final commit/report follow after diff verification.

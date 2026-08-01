@@ -10,17 +10,18 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
-import hashlib
 import json
 import math
 from numbers import Real
+import re
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, UUID, uuid5
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
-from core.nervous_system.contracts.enums import Direction, MarketRegime
+from core.nervous_system.contracts.enums import Direction, MarketRegime, StateType
 from core.nervous_system.contracts.quality import DataQualitySummary, LineageRef
 from core.nervous_system.contracts.states import MarketState, SectorState
 from core.nervous_system.persistence.uow import UnitOfWork as NervousSystemUnitOfWork
@@ -37,6 +38,57 @@ _MODEL_VERSION = "rules@1"
 _FEATURE_VERSION = "market-regime@1"
 _CONFIG_VERSION = "market-regime@1"
 _UNKNOWN_RULE_VECTOR = "MARKET_REGIME_UNCLASSIFIED_RULE_VECTOR"
+FINITE_ROW_PUBLICATION_POLICY = "leading-warmup-finite-required-metrics@1"
+
+# These tuples mirror the producer's ordered output columns.  A row is
+# publishable only when every required producer metric is finite.
+MARKET_REQUIRED_METRICS = (
+    "risk_appetite_xly_xlp_z",
+    "risk_appetite_iwm_spy_z",
+    "risk_appetite_hyg_iei_z",
+    "risk_appetite_rsp_spy_z",
+    "risk_appetite_z",
+    "risk_appetite_z_n_components",
+    "risk_appetite_z_stale_days",
+    "liquidity_stress_amihud_z",
+    "liquidity_stress_dollar_vol_z",
+    "liquidity_stress_credit_z",
+    "liquidity_stress_rv20_z",
+    "liquidity_stress_z",
+    "liquidity_stress_z_n_components",
+    "liquidity_stress_z_stale_days",
+    "credit_risk_ratio",
+    "credit_risk_z",
+    "credit_risk_z_n_components",
+    "credit_risk_z_stale_days",
+    "credit_risk_hyg_lqd_z",
+    "breadth_raw",
+    "breadth_z",
+    "breadth_z_n_components",
+    "breadth_z_stale_days",
+    "sector_dispersion_raw",
+    "sector_dispersion_z",
+    "sector_dispersion_z_n_components",
+    "sector_dispersion_z_stale_days",
+    "spy_rv20_raw",
+    "spy_rv20_z",
+    "spy_rv20_z_n_components",
+    "spy_rv20_z_stale_days",
+    "spy_trend_state",
+    "spy_trend_state_n_components",
+    "spy_trend_state_stale_days",
+)
+SECTOR_REQUIRED_METRICS = (
+    "excess_21d",
+    "excess_63d",
+    "rank_21d",
+    "rank_63d",
+    "rs_accel",
+    "above_20d",
+    "above_50d",
+    "stale_days",
+)
+_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
 
 _TIMESTAMP_FIELDS = frozenset(
     {
@@ -89,10 +141,10 @@ def _is_missing(value: object) -> bool:
 def _timestamp(value: object, *, field_name: str) -> datetime:
     if _is_missing(value):
         raise ValueError(f"{field_name} must be an explicit timezone-aware timestamp")
-    if isinstance(value, datetime):
-        parsed = value
-    elif isinstance(value, pd.Timestamp):
+    if isinstance(value, pd.Timestamp):
         parsed = value.to_pydatetime()
+    elif isinstance(value, datetime):
+        parsed = value
     elif isinstance(value, str):
         text = value.strip()
         if text.endswith("Z"):
@@ -133,8 +185,12 @@ def _session_close(session: date) -> datetime:
     return datetime.combine(session, _MARKET_CLOSE, tzinfo=_EASTERN).astimezone(UTC)
 
 
+def _is_boolean_scalar(value: object) -> bool:
+    return isinstance(value, (bool, np.bool_))
+
+
 def _finite(value: object, *, field_name: str) -> float:
-    if isinstance(value, bool):
+    if _is_boolean_scalar(value):
         raise ValueError(f"{field_name} must be a finite numeric value")
     try:
         result = float(value)
@@ -159,7 +215,9 @@ def _metric_values(row: Mapping[str, object]) -> dict[str, float]:
     for name, value in row.items():
         if name in _TIMESTAMP_FIELDS or name in _IDENTITY_FIELDS or value is None:
             continue
-        if isinstance(value, (str, bytes, bool, date, datetime, Mapping)):
+        if _is_boolean_scalar(value):
+            raise ValueError(f"{name} must be a finite numeric value, not boolean")
+        if isinstance(value, (str, bytes, date, datetime, Mapping)):
             continue
         if not isinstance(value, (Real, Decimal)):
             try:
@@ -193,13 +251,73 @@ def _lineage_ids(lineage: tuple[LineageRef, ...]) -> tuple[str, ...]:
     )
 
 
+def _validated_lineage(lineage: tuple[LineageRef, ...]) -> tuple[LineageRef, ...]:
+    if not lineage:
+        raise ValueError("exact source artifact hash and record locator are required")
+    validated: list[LineageRef] = []
+    for ref in lineage:
+        if not isinstance(ref, LineageRef):
+            raise ValueError("lineage must contain LineageRef values")
+        if not ref.source_id.strip():
+            raise ValueError("lineage source_id must be non-empty")
+        if _SHA256_RE.fullmatch(ref.content_hash) is None:
+            raise ValueError("lineage content_hash must be an exact SHA-256 hex digest")
+        if ref.record_locator is None or not ref.record_locator.strip():
+            raise ValueError("exact original record locator is required for lineage")
+        validated.append(
+            ref.model_copy(
+                update={
+                    "source_id": ref.source_id.strip(),
+                    "content_hash": ref.content_hash.lower(),
+                    "record_locator": ref.record_locator.strip(),
+                }
+            )
+        )
+    return tuple(validated)
+
+
+def _stable_state_id(
+    *,
+    state_type: StateType,
+    entity_id: str,
+    as_of: datetime,
+    available_at: datetime,
+    lineage: tuple[LineageRef, ...],
+) -> UUID:
+    material = {
+        "state_type": state_type.value,
+        "entity_id": entity_id,
+        "as_of": as_of.isoformat(),
+        "available_at": available_at.isoformat(),
+        "schema_version": 1,
+        "producer": _PRODUCER,
+        "model_version": _MODEL_VERSION,
+        "feature_version": _FEATURE_VERSION,
+        "config_version": _CONFIG_VERSION,
+        "lineage": [
+            {
+                "source_id": ref.source_id,
+                "content_hash": ref.content_hash,
+                "record_locator": ref.record_locator,
+            }
+            for ref in lineage
+        ],
+    }
+    return uuid5(
+        NAMESPACE_URL,
+        json.dumps(material, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _common_state_values(
     row: Mapping[str, object],
     *,
     valid_until: datetime,
     lineage: tuple[LineageRef, ...],
     entity_id: str,
+    state_type: StateType,
 ) -> dict[str, Any]:
+    lineage = _validated_lineage(lineage)
     session = _session_date(row)
     as_of = _session_close(session)
     available_at = _timestamp(row.get("available_at"), field_name="available_at")
@@ -222,7 +340,13 @@ def _common_state_values(
     if valid_until_utc <= available_at:
         raise ValueError("valid_until must be exclusive and after available_at")
     return {
-        "state_id": uuid4(),
+        "state_id": _stable_state_id(
+            state_type=state_type,
+            entity_id=entity_id,
+            as_of=as_of,
+            available_at=available_at,
+            lineage=lineage,
+        ),
         "entity_id": entity_id,
         "as_of": as_of,
         "available_at": available_at,
@@ -253,6 +377,7 @@ def adapt_market_row(
         valid_until=valid_until,
         lineage=lineage,
         entity_id=str(row.get("entity_id") or "US"),
+        state_type=StateType.MARKET,
     )
     return MarketState(
         **values,
@@ -304,6 +429,7 @@ def adapt_sector_row(
         valid_until=valid_until,
         lineage=lineage,
         entity_id=sector_id,
+        state_type=StateType.SECTOR,
     )
     relative_strength = _optional_finite(
         row, ("relative_strength", "excess_21d"), field_name="relative_strength"
@@ -338,44 +464,118 @@ def adapt_sector_row(
     )
 
 
-def _row_hash(row: Mapping[str, object]) -> str:
-    material = repr(sorted((str(key), repr(value)) for key, value in row.items()))
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
 def _lineage_for_row(
     row: Mapping[str, object], *, table_name: str, row_index: object, attrs: Mapping[str, object]
 ) -> tuple[LineageRef, ...]:
     supplied = row.get("lineage")
     if isinstance(supplied, LineageRef):
-        return (supplied,)
-    if isinstance(supplied, tuple) and all(isinstance(item, LineageRef) for item in supplied):
-        return supplied
-    source_id = row.get("source_id") or row.get("source_artifact_id") or attrs.get("source_id")
-    content_hash = (
-        row.get("content_hash")
-        or row.get("artifact_hash")
-        or row.get("source_hash")
-        or attrs.get("content_hash")
-    )
-    locator = row.get("record_locator") or row.get("source_row_locator")
-    if _is_missing(source_id):
-        source_id = f"signals.market_regime/{table_name}"
-    if _is_missing(content_hash):
-        content_hash = _row_hash(row)
-    if _is_missing(locator):
-        locator = f"{table_name}:row:{row_index}"
-    return (
-        LineageRef(
-            source_id=str(source_id),
-            content_hash=str(content_hash),
-            record_locator=str(locator),
+        return _validated_lineage((supplied,))
+    if isinstance(supplied, (tuple, list)):
+        return _validated_lineage(tuple(supplied))
+    if supplied is not None:
+        raise ValueError("lineage must contain LineageRef values")
+
+    source_id = next(
+        (
+            row.get(name)
+            for name in ("source_id", "source_artifact_id")
+            if not _is_missing(row.get(name))
         ),
+        attrs.get("source_id"),
+    )
+    content_hash = next(
+        (
+            row.get(name)
+            for name in ("content_hash", "artifact_hash", "source_hash")
+            if not _is_missing(row.get(name))
+        ),
+        attrs.get("content_hash"),
+    )
+    locator = next(
+        (
+            row.get(name)
+            for name in ("record_locator", "source_row_locator")
+            if not _is_missing(row.get(name))
+        ),
+        None,
+    )
+    if _is_missing(locator):
+        locators = attrs.get("record_locators")
+        if isinstance(locators, Mapping):
+            locator = locators.get(row_index)
+            if _is_missing(locator):
+                locator = locators.get(str(row_index))
+    if _is_missing(source_id) or _is_missing(content_hash) or _is_missing(locator):
+        raise ValueError(
+            f"exact source lineage is required for {table_name} row {row_index}: "
+            "artifact hash and original record locator are mandatory"
+        )
+    return _validated_lineage(
+        (
+            LineageRef(
+                source_id=str(source_id),
+                content_hash=str(content_hash),
+                record_locator=str(locator),
+            ),
+        )
     )
 
 
 def _rows(frame: pd.DataFrame) -> list[tuple[dict[str, object], object]]:
     return [(series.to_dict(), index) for index, series in frame.iterrows()]
+
+
+def _required_metric_gaps(
+    row: Mapping[str, object], required_metrics: tuple[str, ...]
+) -> tuple[str, ...]:
+    gaps: list[str] = []
+    for name in required_metrics:
+        if name not in row or _is_missing(row[name]) or _is_boolean_scalar(row[name]):
+            gaps.append(name)
+            continue
+        try:
+            value = float(row[name])
+        except (TypeError, ValueError):
+            gaps.append(name)
+            continue
+        if not math.isfinite(value):
+            gaps.append(name)
+    return tuple(gaps)
+
+
+def _publication_rows(
+    rows: list[tuple[dict[str, object], object]],
+    *,
+    table_name: str,
+    required_metrics: tuple[str, ...],
+    entity_for: Callable[[Mapping[str, object]], str],
+) -> list[tuple[dict[str, object], object]]:
+    grouped: dict[str, list[tuple[dict[str, object], object, int]]] = {}
+    for ordinal, (row, row_index) in enumerate(rows):
+        entity = entity_for(row)
+        grouped.setdefault(entity, []).append((row, row_index, ordinal))
+
+    selected: list[tuple[dict[str, object], object]] = []
+    for entity in sorted(grouped):
+        group = sorted(
+            grouped[entity],
+            key=lambda item: (_session_date(item[0]), item[2]),
+        )
+        publication_started = False
+        for row, row_index, _ in group:
+            gaps = _required_metric_gaps(row, required_metrics)
+            if not gaps:
+                publication_started = True
+                selected.append((row, row_index))
+                continue
+            if publication_started:
+                gap_text = ",".join(gaps)
+                raise ValueError(
+                    f"{FINITE_ROW_PUBLICATION_POLICY}: non-finite required metric "
+                    f"after warm-up for {table_name} entity={entity} "
+                    f"session={_session_date(row).isoformat()} metrics={gap_text}"
+                )
+    return selected
 
 
 def _validate_unique_sector_rows(
@@ -396,10 +596,20 @@ def persist_market_regime_outputs(
     unit_of_work: NervousSystemUnitOfWork,
     valid_until_for: Callable[[datetime], datetime],
 ) -> tuple[int, int]:
-    """Publish both producer tables atomically through the supplied UOW."""
+    """Publish both producer tables through the caller-owned UOW."""
 
-    market_rows = _rows(daily_regime)
-    sector_rows = _rows(sector_state)
+    market_rows = _publication_rows(
+        _rows(daily_regime),
+        table_name="daily_regime",
+        required_metrics=MARKET_REQUIRED_METRICS,
+        entity_for=lambda row: str(row.get("entity_id") or "US"),
+    )
+    sector_rows = _publication_rows(
+        _rows(sector_state),
+        table_name="sector_state",
+        required_metrics=SECTOR_REQUIRED_METRICS,
+        entity_for=_sector_id,
+    )
     _validate_unique_sector_rows(sector_rows)
     states: list[MarketState | SectorState] = []
     market_states: list[MarketState] = []
@@ -438,22 +648,15 @@ def persist_market_regime_outputs(
     states.extend(sector_states)
     if not states:
         return 0, 0
-    try:
-        unit_of_work.states.insert_states_if_absent(states)
-        unit_of_work.commit()
-    except Exception:
-        rollback = getattr(unit_of_work, "rollback", None)
-        if callable(rollback):
-            try:
-                rollback()
-            except Exception:
-                pass
-        raise
+    unit_of_work.states.insert_states_idempotently(states)
     return len(market_states), len(sector_states)
 
 
 __all__ = [
+    "FINITE_ROW_PUBLICATION_POLICY",
+    "MARKET_REQUIRED_METRICS",
     "NervousSystemUnitOfWork",
+    "SECTOR_REQUIRED_METRICS",
     "adapt_market_row",
     "adapt_sector_row",
     "persist_market_regime_outputs",

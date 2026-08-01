@@ -5,13 +5,16 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.dialects import postgresql
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 from core.nervous_system.contracts.context import ContextSnapshot, StateRequest
 from core.nervous_system.contracts.enums import MarketRegime, StateType
 from core.nervous_system.contracts.quality import DataQualitySummary
 from core.nervous_system.contracts.states import MarketState
-from core.nervous_system.persistence.models import ContextSnapshot as ContextSnapshotRow
+from core.nervous_system.persistence.models import (
+    ContextSnapshot as ContextSnapshotRow,
+    StateRecord,
+)
 from core.nervous_system.persistence.repositories.state import StateRepository
 
 
@@ -110,6 +113,39 @@ def test_snapshot_selection_is_one_bounded_query_and_preserves_request_order_off
     sql = str(session.statements[0].compile(dialect=postgresql.dialect()))
     assert "state_records.available_at <=" in sql
     assert "state_records.valid_until >" in sql
+
+
+@pytest.mark.postgres
+def test_insert_states_idempotently_converges_on_state_identity_and_preserves_revision(pg_session):
+    repo = StateRepository(pg_session)
+    stable_id = UUID("00000000-0000-0000-0000-000000000101")
+    first = _market(state_id=stable_id, metrics={"version": 1}).model_copy(
+        update={"generated_at": datetime(2026, 7, 29, 21, 0, tzinfo=UTC)}
+    )
+    rerun = first.model_copy(
+        update={"generated_at": datetime(2026, 7, 30, 21, 0, tzinfo=UTC)}
+    )
+    revised = first.model_copy(
+        update={
+            "state_id": UUID("00000000-0000-0000-0000-000000000102"),
+            "lineage_ids": ("revised-artifact:row:1",),
+        }
+    )
+
+    repo.insert_states_idempotently((first,))
+    repo.insert_states_idempotently((rerun,))
+    repo.insert_states_idempotently((revised,))
+    pg_session.flush()
+
+    rows = pg_session.execute(
+        select(StateRecord).where(StateRecord.entity_id == "US")
+    ).scalars().all()
+    assert {row.state_id for row in rows} >= {first.state_id, revised.state_id}
+    assert sum(row.state_id == first.state_id for row in rows) == 1
+    stored = pg_session.get(StateRecord, stable_id)
+    assert stored is not None
+    assert stored.generated_at == first.generated_at
+    assert len(rows) == 2
 
 
 @pytest.mark.postgres

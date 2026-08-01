@@ -52,9 +52,16 @@ def _artifact_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _attach_source_lineage(df: pd.DataFrame, *, path: Path, source_id: str) -> None:
+def _attach_source_lineage(
+    df: pd.DataFrame, *, path: Path, source_id: str, table_name: str
+) -> None:
     df.attrs["source_id"] = source_id
     df.attrs["content_hash"] = _artifact_sha256(path)
+    # The filtered frame retains the producer's original index.  Publish an
+    # explicit locator map after the Parquet write so attrs never alter output.
+    df.attrs["record_locators"] = {
+        index: f"{table_name}:row:{index}" for index in df.index
+    }
 
 
 def main(
@@ -88,8 +95,18 @@ def main(
     if unit_of_work is not None:
         if valid_until_for is None:
             raise ValueError("valid_until_for is required when publishing nervous-system states")
-        _attach_source_lineage(regime, path=out_regime, source_id=str(out_regime))
-        _attach_source_lineage(sector_state, path=out_sector_state, source_id=str(out_sector_state))
+        _attach_source_lineage(
+            regime,
+            path=out_regime,
+            source_id=str(out_regime),
+            table_name="daily_regime",
+        )
+        _attach_source_lineage(
+            sector_state,
+            path=out_sector_state,
+            source_id=str(out_sector_state),
+            table_name="sector_state",
+        )
         persist_market_regime_outputs(
             regime,
             sector_state,

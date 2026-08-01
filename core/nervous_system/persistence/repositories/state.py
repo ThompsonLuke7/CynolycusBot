@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
@@ -184,6 +185,89 @@ class StateRepository:
             resolved.update({row[0]: row[1] for row in existing})
         if set(resolved) != set(states_by_hash):
             raise RuntimeError("state conflict did not produce a readable row")
+        return resolved
+
+    def insert_states_idempotently(
+        self, states: Sequence[StateEnvelope]
+    ) -> dict[UUID, UUID]:
+        """Atomically insert states by their stable identity.
+
+        The state payload retains its producer generation timestamp, including
+        the reviewed call-time fallback.  Publication identity is instead the
+        deterministic ``state_id`` supplied by the adapter.  PostgreSQL's
+        conflict-free insert handles reruns without turning an expected race
+        into an integrity-error control flow; a changed source lineage gets a
+        different identity and remains new evidence.
+        """
+
+        if not states:
+            return {}
+        states_by_id: dict[UUID, StateEnvelope] = {}
+        for state in states:
+            existing = states_by_id.get(state.state_id)
+            if existing is not None and content_hash(existing, exclude={"state_id"}) != content_hash(
+                state, exclude={"state_id"}
+            ):
+                raise ValueError("same state_id was supplied for different state content")
+            states_by_id.setdefault(state.state_id, state)
+
+        values = [_state_values(state) for state in states_by_id.values()]
+        if not _is_postgresql(self._session):
+            resolved: dict[UUID, UUID] = {}
+            for state_id, state in states_by_id.items():
+                existing_row = self._session.get(StateRecord, state_id)
+                if existing_row is not None:
+                    _contract_from_payload(existing_row)
+                    resolved[state_id] = existing_row.state_id
+                    continue
+                existing = self.get_state_by_content_hash(
+                    content_hash(state, exclude={"state_id"})
+                )
+                if existing is not None:
+                    resolved[state_id] = existing.state_id
+                    continue
+                self.save_state(state)
+                resolved[state_id] = state_id
+            return resolved
+
+        inserted = self._session.execute(
+            postgres_insert(StateRecord)
+            .values(values)
+            .on_conflict_do_nothing()
+            .returning(StateRecord.state_id)
+        ).all()
+        resolved = {row[0]: row[0] for row in inserted}
+        missing_ids = set(states_by_id) - set(resolved)
+        if missing_ids:
+            existing_rows = self._session.execute(
+                select(StateRecord).where(StateRecord.state_id.in_(missing_ids))
+            ).scalars().all()
+            for row in existing_rows:
+                _contract_from_payload(row)
+                resolved[row.state_id] = row.state_id
+
+        # A content-hash conflict can only occur when an equivalent immutable
+        # state was already published under another identity.  Resolve it
+        # without catching an integrity error; revised lineage/content remains
+        # a new row because its hash and stable identity differ.
+        unresolved_ids = set(states_by_id) - set(resolved)
+        if unresolved_ids:
+            content_hashes = {
+                content_hash(states_by_id[state_id], exclude={"state_id"})
+                for state_id in unresolved_ids
+            }
+            existing_rows = self._session.execute(
+                select(StateRecord).where(StateRecord.content_hash.in_(content_hashes))
+            ).scalars().all()
+            by_hash = {row.content_hash: row for row in existing_rows}
+            for state_id in unresolved_ids:
+                state_hash = content_hash(states_by_id[state_id], exclude={"state_id"})
+                row = by_hash.get(state_hash)
+                if row is not None:
+                    _contract_from_payload(row)
+                    resolved[state_id] = row.state_id
+        if set(resolved) != set(states_by_id):
+            raise RuntimeError("state identity conflict did not produce a readable row")
         return resolved
 
     def get_state_by_content_hash(self, state_hash: str) -> StateEnvelope | None:
