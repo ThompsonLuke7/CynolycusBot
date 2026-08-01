@@ -17,7 +17,10 @@ import pandas as pd
 from core.nervous_system.contracts.enums import DataQualitySeverity, StateType, ThemeRegime
 from core.nervous_system.contracts.quality import DataQualityIssue, DataQualitySummary, LineageRef
 from core.nervous_system.contracts.states import ThemeState
-from themes.dynamic_theme.stages.step08_memberships import canonical_theme_id
+from themes.dynamic_theme.stages.step08_memberships import (
+    _theme_label,
+    canonical_theme_id,
+)
 
 if TYPE_CHECKING:
     from core.nervous_system.persistence.uow import UnitOfWork
@@ -159,7 +162,6 @@ def _stable_state_id(
     *,
     theme_id: str,
     as_of: datetime,
-    available_at: datetime,
     taxonomy_version: str,
     lineage: tuple[LineageRef, ...],
 ) -> UUID:
@@ -167,7 +169,6 @@ def _stable_state_id(
         "state_type": StateType.THEME.value,
         "theme_id": theme_id,
         "as_of": as_of.isoformat(),
-        "available_at": available_at.isoformat(),
         "schema_version": 1,
         "producer": _PRODUCER,
         "model_version": _MODEL_VERSION,
@@ -176,20 +177,30 @@ def _stable_state_id(
         "lineage": sorted(
             [
                 {
-                    "source_id": ref.source_id,
                     "content_hash": ref.content_hash,
-                    "record_locator": ref.record_locator,
+                    "record_locator": _identity_locator(ref.record_locator or ""),
                 }
                 for ref in lineage
             ],
             key=lambda item: (
-                item["source_id"],
-                item["record_locator"],
                 item["content_hash"],
+                item["record_locator"],
             ),
         ),
     }
     return uuid5(NAMESPACE_URL, json.dumps(material, sort_keys=True, separators=(",", ":")))
+
+
+def _identity_locator(locator: str) -> str:
+    """Use the stable row locator portion, never a source/worktree path."""
+
+    locator = locator.strip()
+    row_match = re.search(r"(?:^|:)row:[^:]+$", locator)
+    if row_match is not None:
+        return locator[row_match.start() + (1 if locator[row_match.start()] == ":" else 0) :]
+    if "/" in locator or "\\" in locator:
+        raise ValueError("lineage record_locator must not be path-prefixed")
+    return locator
 
 
 def _normalize_memberships(
@@ -197,6 +208,15 @@ def _normalize_memberships(
     *,
     taxonomy_version: str,
 ) -> pd.DataFrame:
+    if memberships.empty:
+        return pd.DataFrame(
+            {
+                "ticker": pd.Series(dtype="string"),
+                "theme": pd.Series(dtype="object"),
+                "membership_score": pd.Series(dtype="float64"),
+                "as_of": pd.Series(dtype="object"),
+            }
+        )
     required = {"ticker", "theme", "membership_score"}
     missing = sorted(required - set(memberships.columns))
     if missing:
@@ -214,7 +234,7 @@ def _normalize_memberships(
         lambda value: _represented_date(value, field_name=date_column)
     )
     frame["ticker"] = frame["ticker"].map(lambda value: str(value).strip().upper())
-    frame["theme"] = frame["theme"].map(canonical_theme_id)
+    frame["theme"] = frame["theme"].map(_theme_label)
     frame["membership_score"] = frame["membership_score"].map(
         lambda value: _finite(value, field_name="membership_score")
     )
@@ -229,7 +249,7 @@ def _normalize_features(features: pd.DataFrame) -> pd.DataFrame:
     date_column = "as_of" if "as_of" in frame.columns else "date"
     if theme_column not in frame.columns or date_column not in frame.columns:
         raise ValueError("features must contain theme/primary_theme and as_of/date")
-    frame["theme"] = frame[theme_column].map(canonical_theme_id)
+    frame["theme"] = frame[theme_column].map(_theme_label)
     frame["as_of"] = frame[date_column].map(
         lambda value: _represented_date(value, field_name=date_column)
     )
@@ -287,7 +307,10 @@ def _generated_at(
         for value in frame["generated_at"].tolist():
             if not _is_missing(value):
                 timestamps.append(_timestamp(value, field_name="generated_at"))
-    return max([available_at, *timestamps]) if timestamps else available_at
+    generated_at = max(timestamps) if timestamps else available_at
+    if generated_at > available_at:
+        raise ValueError("generated_at follows available_at")
+    return generated_at
 
 
 def _quality_issue(code: str, message: str) -> DataQualityIssue:
@@ -331,6 +354,7 @@ def adapt_theme_states(
     )
     keys = sorted(membership_keys | feature_keys, key=lambda item: (item[0], item[1]))
     states: list[ThemeState] = []
+    semantic_labels: dict[str, str] = {}
 
     for theme_id, represented_date in keys:
         membership_group = normalized_memberships[
@@ -354,14 +378,14 @@ def adapt_theme_states(
         if membership_group.empty:
             issues.append(
                 _quality_issue(
-                    "THEME_MEMBERSHIPS_MISSING",
+                    "MISSING_MEMBERSHIPS",
                     f"no membership rows for {theme_id} on {represented_date.isoformat()}",
                 )
             )
         if feature_group.empty:
             issues.append(
                 _quality_issue(
-                    "THEME_FEATURES_MISSING",
+                    "MISSING_FEATURES",
                     f"no feature rows for {theme_id} on {represented_date.isoformat()}",
                 )
             )
@@ -372,18 +396,26 @@ def adapt_theme_states(
             feature_group,
             available_at=available_at_utc,
         )
+        if generated_at < as_of:
+            raise ValueError("generated_at precedes as_of")
         metrics = _numeric_feature_metrics(feature_group)
         config_version = f"{_CONFIG_VERSION}:{taxonomy_version}"
+        semantic_theme_id = canonical_theme_id(theme_id)
+        prior_label = semantic_labels.get(semantic_theme_id)
+        if prior_label is not None and prior_label != theme_id:
+            raise ValueError(
+                f"theme ID collision: {prior_label!r} and {theme_id!r} map to {semantic_theme_id}"
+            )
+        semantic_labels[semantic_theme_id] = theme_id
         state = ThemeState(
             state_id=_stable_state_id(
-                theme_id=theme_id,
+                theme_id=semantic_theme_id,
                 as_of=as_of,
-                available_at=available_at_utc,
                 taxonomy_version=taxonomy_version,
                 lineage=validated_lineage,
             ),
             state_type=StateType.THEME,
-            entity_id=theme_id,
+            entity_id=semantic_theme_id,
             as_of=as_of,
             available_at=available_at_utc,
             generated_at=generated_at,
@@ -397,7 +429,7 @@ def adapt_theme_states(
             config_version=config_version,
             lineage_ids=_lineage_ids(validated_lineage),
             data_quality=DataQualitySummary(issues=tuple(issues)),
-            theme_id=theme_id,
+            theme_id=semantic_theme_id,
             theme_regime=ThemeRegime.UNKNOWN,
             relative_strength=_feature_metric(
                 feature_group, ("relative_strength", "theme_strength")

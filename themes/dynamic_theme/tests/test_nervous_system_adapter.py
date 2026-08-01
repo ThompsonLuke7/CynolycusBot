@@ -21,7 +21,7 @@ from themes.dynamic_theme.stages import step08_memberships as step08
 UTC = timezone.utc
 AS_OF = date(2026, 7, 30)
 AVAILABLE_AT = datetime(2026, 7, 30, 20, 5, tzinfo=UTC)
-GENERATED_AT = datetime(2026, 7, 30, 20, 6, tzinfo=UTC)
+GENERATED_AT = datetime(2026, 7, 30, 20, 4, tzinfo=UTC)
 VALID_UNTIL = datetime(2026, 7, 31, 20, 5, tzinfo=UTC)
 ARTIFACT_HASH = "a" * 64
 
@@ -104,6 +104,21 @@ def _lineage() -> tuple[LineageRef, ...]:
             source_id="ticker_theme_features.parquet",
             content_hash="b" * 64,
             record_locator="ticker_theme_features:row:4",
+        ),
+    )
+
+
+def _lineage_from_root(root: str, *, content_hash: str = ARTIFACT_HASH, locator: str = "row:17") -> tuple[LineageRef, ...]:
+    return (
+        LineageRef(
+            source_id=f"{root}/ticker_theme_membership_history.parquet",
+            content_hash=content_hash,
+            record_locator=locator,
+        ),
+        LineageRef(
+            source_id=f"{root}/ticker_theme_features.parquet",
+            content_hash="b" * 64,
+            record_locator="row:4",
         ),
     )
 
@@ -324,7 +339,7 @@ def test_theme_state_uses_quality_warning_when_memberships_are_missing():
 
     assert len(states) == 1
     assert states[0].membership_scores == {}
-    assert any(issue.code == "THEME_MEMBERSHIPS_MISSING" for issue in states[0].data_quality.issues)
+    assert any(issue.code == "MISSING_MEMBERSHIPS" for issue in states[0].data_quality.issues)
 
 
 def test_theme_state_rejects_missing_or_synthetic_lineage():
@@ -360,6 +375,118 @@ def test_theme_state_ids_are_deterministic_and_taxonomy_revision_is_new_evidence
 
     assert first[0].state_id == rerun[0].state_id
     assert first[0].state_id != revised[0].state_id
+
+
+def test_theme_state_identity_excludes_completion_time_and_local_source_path():
+    first = adapt_theme_states(
+        _history_frame(),
+        _features_frame(),
+        available_at=AVAILABLE_AT,
+        valid_until=VALID_UNTIL,
+        taxonomy_version="taxonomy-v1",
+        lineage=_lineage_from_root("/worktree/one"),
+    )[0]
+    rerun = adapt_theme_states(
+        _history_frame(),
+        _features_frame(),
+        available_at=AVAILABLE_AT + timedelta(minutes=1),
+        valid_until=VALID_UNTIL + timedelta(minutes=1),
+        taxonomy_version="taxonomy-v1",
+        lineage=_lineage_from_root("/worktree/two"),
+    )[0]
+    revised_artifact = adapt_theme_states(
+        _history_frame(),
+        _features_frame(),
+        available_at=AVAILABLE_AT + timedelta(minutes=1),
+        valid_until=VALID_UNTIL + timedelta(minutes=1),
+        taxonomy_version="taxonomy-v1",
+        lineage=_lineage_from_root("/worktree/two", content_hash="c" * 64),
+    )[0]
+    revised_locator = adapt_theme_states(
+        _history_frame(),
+        _features_frame(),
+        available_at=AVAILABLE_AT + timedelta(minutes=1),
+        valid_until=VALID_UNTIL + timedelta(minutes=1),
+        taxonomy_version="taxonomy-v1",
+        lineage=_lineage_from_root("/worktree/two", locator="row:18"),
+    )[0]
+
+    assert first.state_id == rerun.state_id
+    assert first.available_at != rerun.available_at
+    assert first.state_id != revised_artifact.state_id
+    assert first.state_id != revised_locator.state_id
+
+
+def test_raw_theme_labels_remain_distinct_and_membership_output_preserves_them(tmp_path, monkeypatch):
+    monkeypatch.setattr(step08, "TICKER_MEMBERSHIP_PATH", tmp_path / "current.parquet")
+    monkeypatch.setattr(step08, "TICKER_MEMBERSHIP_HISTORY_PATH", tmp_path / "history.parquet")
+    monkeypatch.setattr(step08, "ensure_outputs", lambda: None)
+    monkeypatch.setattr(step08, "_utc_now", lambda: AVAILABLE_AT)
+    embeddings = pd.DataFrame(
+        {"ticker": ["AAA", "BBB"], "embedding": [[1.0, 0.0], [0.0, 1.0]]}
+    )
+    clusters = pd.DataFrame({"ticker": ["AAA", "BBB"], "cluster_id": [0, 1]})
+    registry = pd.DataFrame(
+        {"cluster_id": [0, 1], "theme_name": ["AI & ML", "AI/ML"]}
+    )
+
+    output = step08.compute_memberships(
+        embeddings_df=embeddings,
+        clusters_df=clusters,
+        registry_df=registry,
+        as_of=pd.Timestamp(AS_OF),
+        generated_at=GENERATED_AT,
+    )
+
+    assert set(output["theme"]) == {"AI & ML", "AI/ML"}
+    assert set(pd.read_parquet(tmp_path / "history.parquet")["theme"]) == {
+        "AI & ML",
+        "AI/ML",
+    }
+    assert step08.canonical_theme_id("AI & ML") != step08.canonical_theme_id("AI/ML")
+
+
+def test_schema_less_empty_memberships_emit_feature_identified_warning_state():
+    states = adapt_theme_states(
+        pd.DataFrame(),
+        _features_frame(),
+        available_at=AVAILABLE_AT,
+        valid_until=VALID_UNTIL,
+        taxonomy_version="taxonomy-v1",
+        lineage=_lineage(),
+    )
+
+    assert len(states) == 1
+    assert states[0].membership_scores == {}
+    assert any(issue.code == "MISSING_MEMBERSHIPS" for issue in states[0].data_quality.issues)
+
+
+def test_history_rejects_generated_at_after_actual_completion(monkeypatch, tmp_path):
+    monkeypatch.setattr(step08, "_utc_now", lambda: AVAILABLE_AT)
+
+    with pytest.raises(ValueError, match="generated_at"):
+        step08.append_membership_history(
+            _membership_frame(),
+            history_path=tmp_path / "history.parquet",
+            as_of=AS_OF,
+            generated_at=AVAILABLE_AT + timedelta(seconds=1),
+        )
+
+
+def test_history_rejects_naive_existing_availability_timestamp(monkeypatch, tmp_path):
+    monkeypatch.setattr(step08, "_utc_now", lambda: AVAILABLE_AT)
+    existing = _history_frame()
+    existing["available_at"] = existing["available_at"].dt.tz_localize(None)
+    history_path = tmp_path / "history.parquet"
+    existing.to_parquet(history_path, index=False)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        step08.append_membership_history(
+            _membership_frame(),
+            history_path=history_path,
+            as_of=AS_OF,
+            generated_at=GENERATED_AT,
+        )
 
 
 class _FakeStates:
@@ -477,6 +604,8 @@ def test_pipeline_publishes_only_after_artifacts_and_propagates_failure(monkeypa
             valid_until_for=lambda available: available + timedelta(days=1),
         )
     assert events[-3:] == ["membership_parquet", "feature_parquet", "publish"]
+    assert history_path.exists()
+    assert features_path.exists()
 
 
 def test_pipeline_research_run_does_not_publish_without_uow(monkeypatch):
@@ -493,3 +622,44 @@ def test_pipeline_research_run_does_not_publish_without_uow(monkeypatch):
     pipeline.daily_run(as_of=pd.Timestamp(AS_OF, tz="UTC"), tickers=["AAA"])
 
     assert events == []
+
+
+def test_pipeline_uses_feature_completion_for_effective_availability(monkeypatch, tmp_path):
+    import themes.dynamic_theme.pipeline as pipeline
+
+    history_path = tmp_path / "membership_history.parquet"
+    features_path = tmp_path / "features.parquet"
+    feature_completion = AVAILABLE_AT + timedelta(minutes=5)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(pipeline, "TICKER_MEMBERSHIP_HISTORY_PATH", history_path)
+    monkeypatch.setattr(pipeline, "TICKER_THEME_FEATURES_PATH", features_path)
+    monkeypatch.setattr(pipeline, "ensure_outputs", lambda: None)
+    monkeypatch.setattr(pipeline, "build_ticker_documents", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(pipeline, "generate_embeddings", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(
+        pipeline,
+        "compute_memberships",
+        lambda *a, **k: (lambda frame: (frame.to_parquet(history_path, index=False), _membership_frame())[1])(_history_frame()),
+    )
+
+    def write_features(*args, **kwargs):
+        frame = _features_frame()
+        frame.to_parquet(features_path, index=False)
+        return frame
+
+    def capture_publication(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(pipeline, "build_meta_features", write_features)
+    monkeypatch.setattr(pipeline, "persist_theme_states", capture_publication)
+    monkeypatch.setattr(pipeline, "_utc_now", lambda: feature_completion, raising=False)
+
+    pipeline.daily_run(
+        as_of=pd.Timestamp(AS_OF, tz="UTC"),
+        tickers=["AAA"],
+        unit_of_work=object(),
+        valid_until_for=lambda available: available + timedelta(days=1),
+    )
+
+    assert captured["available_at"] == feature_completion
+    assert captured["valid_until"] == feature_completion + timedelta(days=1)

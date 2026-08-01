@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
+import hashlib
+import json
 from typing import Any
 from uuid import UUID
 
@@ -64,9 +66,156 @@ def _validate_aware(value: datetime, field_name: str) -> None:
         raise ValueError(f"{field_name} must be timezone-aware")
 
 
+def _is_legacy_theme_membership_payload(payload: object) -> bool:
+    return (
+        isinstance(payload, dict)
+        and all(field in payload for field in ("ticker", "theme", "membership_score"))
+        and "membership_scores" not in payload
+    )
+
+
+def _payload_timestamp(value: object, field_name: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"legacy payload {field_name} is not a timestamp") from exc
+    else:
+        raise ValueError(f"legacy payload {field_name} is not a timestamp")
+    _validate_aware(parsed, f"legacy payload {field_name}")
+    return parsed.astimezone(timezone.utc)
+
+
+def _legacy_payload_hash(payload: dict[str, Any]) -> str:
+    material = {key: value for key, value in payload.items() if key != "state_id"}
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _legacy_quality_severity(payload: dict[str, Any]) -> str:
+    quality = payload.get("data_quality", {})
+    issues = quality.get("issues", []) if isinstance(quality, dict) else []
+    severities = {
+        str(issue.get("severity"))
+        for issue in issues
+        if isinstance(issue, dict) and issue.get("severity") is not None
+    }
+    for severity in (
+        DataQualitySeverity.CRITICAL.value,
+        DataQualitySeverity.ERROR.value,
+        DataQualitySeverity.WARNING.value,
+        DataQualitySeverity.INFO.value,
+    ):
+        if severity in severities:
+            return severity
+    return DataQualitySeverity.INFO.value
+
+
+def _validate_legacy_theme_membership_row(row: StateRecord) -> dict[str, Any]:
+    payload = row.payload
+    if not isinstance(payload, dict):
+        raise ValueError("legacy state payload must be an object")
+    if str(payload.get("state_id")) != str(row.state_id):
+        raise ValueError("legacy state payload state_id does not match relational state_id")
+    if payload.get("state_type") != row.state_type:
+        raise ValueError("legacy state payload state_type does not match relational state_type")
+    if payload.get("entity_id") != row.entity_id:
+        raise ValueError("legacy state payload entity_id does not match relational entity_id")
+    for field_name in ("as_of", "available_at", "generated_at", "valid_until"):
+        payload_value = _payload_timestamp(payload.get(field_name), field_name)
+        row_value = getattr(row, field_name)
+        _validate_aware(row_value, f"state row {field_name}")
+        if payload_value != row_value.astimezone(timezone.utc):
+            raise ValueError(f"legacy state payload {field_name} does not match relational column")
+    for field_name in (
+        "schema_version",
+        "producer",
+        "model_version",
+        "feature_version",
+        "config_version",
+    ):
+        if payload.get(field_name) != getattr(row, field_name):
+            raise ValueError(f"legacy state payload {field_name} does not match relational column")
+    if payload.get("theme") != payload.get("entity_id"):
+        raise ValueError("legacy membership theme does not match entity_id")
+    if row.quality_severity != _legacy_quality_severity(payload):
+        raise ValueError("state quality_severity does not match legacy payload")
+    if row.content_hash != _legacy_payload_hash(payload):
+        raise ValueError("state content_hash does not match legacy payload")
+    return payload
+
+
+def _legacy_theme_membership_contract(row: StateRecord) -> ThemeMembership:
+    payload = _validate_legacy_theme_membership_row(row)
+    theme_id = str(payload["theme"])
+    converted = {
+        "state_id": str(row.state_id),
+        "state_type": StateType.THEME_MEMBERSHIP.value,
+        "entity_id": theme_id,
+        "as_of": payload["as_of"],
+        "available_at": payload["available_at"],
+        "generated_at": payload["generated_at"],
+        "valid_until": payload["valid_until"],
+        "source_window_start": payload.get("source_window_start", payload["as_of"]),
+        "source_window_end": payload.get("source_window_end", payload["as_of"]),
+        "schema_version": payload["schema_version"],
+        "producer": payload["producer"],
+        "model_version": payload["model_version"],
+        "feature_version": payload["feature_version"],
+        "config_version": payload["config_version"],
+        "lineage_ids": payload.get("lineage_ids", []),
+        "data_quality": payload.get("data_quality", {"issues": []}),
+        "ticker": str(payload["ticker"]),
+        "theme_id": theme_id,
+        "weight": payload["membership_score"],
+        "membership_version": str(
+            payload.get("membership_version")
+            or payload.get("taxonomy_version")
+            or row.config_version
+        ),
+        "effective_from": payload.get("effective_from", payload["as_of"]),
+        "effective_until": payload.get("effective_until"),
+    }
+    return ThemeMembership.model_validate(converted)
+
+
+def _legacy_membership_query_condition():
+    return and_(
+        StateRecord.payload["ticker"].as_string().is_not(None),
+        StateRecord.payload["theme"].as_string().is_not(None),
+        StateRecord.payload["membership_score"].as_string().is_not(None),
+        StateRecord.payload["membership_scores"].as_string().is_(None),
+    )
+
+
+def _state_type_query_condition(state_type: StateType):
+    if state_type is StateType.THEME:
+        return and_(
+            StateRecord.state_type == StateType.THEME.value,
+            ~_legacy_membership_query_condition(),
+        )
+    if state_type is not StateType.THEME_MEMBERSHIP:
+        return StateRecord.state_type == state_type.value
+    return or_(
+        StateRecord.state_type == StateType.THEME_MEMBERSHIP.value,
+        and_(
+            StateRecord.state_type == StateType.THEME.value,
+            _legacy_membership_query_condition(),
+        ),
+    )
+
+
 def _contract_from_payload(row: StateRecord) -> StateEnvelope:
+    state_type = StateType(row.state_type)
+    if state_type is StateType.THEME and _is_legacy_theme_membership_payload(row.payload):
+        return _legacy_theme_membership_contract(row)
     errors: list[str] = []
-    for contract_type in _STATE_TYPES[StateType(row.state_type)]:
+    for contract_type in _STATE_TYPES[state_type]:
         try:
             state = contract_type.model_validate(row.payload)
         except Exception as exc:  # Pydantic provides the useful field detail.
@@ -293,7 +442,7 @@ class StateRepository:
         stmt = (
             select(StateRecord)
             .where(
-                StateRecord.state_type == state_type.value,
+                _state_type_query_condition(state_type),
                 StateRecord.entity_id == entity_id,
                 StateRecord.available_at <= decision_time,
                 StateRecord.valid_until > decision_time,
@@ -319,7 +468,7 @@ class StateRepository:
         stmt = (
             select(StateRecord)
             .where(
-                StateRecord.state_type == state_type.value,
+                _state_type_query_condition(state_type),
                 StateRecord.entity_id == entity_id,
                 StateRecord.as_of <= decision_time,
                 StateRecord.available_at <= decision_time,
@@ -346,7 +495,7 @@ class StateRepository:
         request_conditions = []
         for request in requests:
             condition = [
-                StateRecord.state_type == request.state_type.value,
+                _state_type_query_condition(request.state_type),
                 StateRecord.entity_id == request.entity_id,
                 StateRecord.available_at <= decision_time,
                 StateRecord.valid_until > decision_time,
@@ -358,7 +507,6 @@ class StateRepository:
             select(StateRecord)
             .where(or_(*request_conditions))
             .order_by(
-                StateRecord.state_type.asc(),
                 StateRecord.entity_id.asc(),
                 StateRecord.available_at.desc(),
                 StateRecord.generated_at.desc(),
@@ -369,7 +517,12 @@ class StateRepository:
         rows = self._session.execute(stmt).scalars().all()
         by_key: dict[tuple[str, str], list[StateRecord]] = {}
         for row in rows:
-            by_key.setdefault((row.state_type, row.entity_id), []).append(row)
+            row_type = row.state_type
+            if row_type == StateType.THEME.value and _is_legacy_theme_membership_payload(
+                row.payload
+            ):
+                row_type = StateType.THEME_MEMBERSHIP.value
+            by_key.setdefault((row_type, row.entity_id), []).append(row)
 
         selected: list[StateEnvelope] = []
         for request in requests:

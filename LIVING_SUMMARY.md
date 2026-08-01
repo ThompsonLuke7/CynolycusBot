@@ -1,5 +1,8 @@
 # Living Summary
 
+{2026-08-01 01:57 EDT} {agent: Codex} {Task 10 correction round 1/5}
+Hardened path/time-independent theme state identity, feature-causal availability, raw-label semantic IDs, strict history timestamps, schema-less warnings, and legacy THEME membership reads with PostgreSQL coverage. Focused/full theme and full nervous-system suites pass; next commit correction.
+
 {2026-08-01 01:26 EDT} {agent: Codex} {Task 10: durable theme history and theme-state publication}
 Added semantic taxonomy hashing, atomic append-preserving membership history, UNKNOWN score-preserving ThemeState adaptation, exact lineage, and caller-owned optional publication; focused/full theme and relevant nervous-system tests pass. Commit created with the requested message; PostgreSQL integration remains unexercised because no disposable test URL is configured.
 

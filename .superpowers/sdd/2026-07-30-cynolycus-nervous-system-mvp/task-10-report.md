@@ -174,3 +174,133 @@ failure propagation, deterministic state IDs, and no ephemeral cluster IDs.
 - A deliberate database migration/import decision would be required before
   reading any historical rows that were previously persisted as generic
   `THEME` `ThemeMembership` records; no such migration was run in this task.
+
+## Correction round 1/5
+
+### RED evidence
+
+The new regression tests were added before the correction implementation. The
+focused Task 10 run failed on the expected old behavior:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q
+7 failed, 13 passed
+EXIT_CODE=1
+```
+
+The first required PostgreSQL attempt used the exact disposable URL but the
+pre-existing `postgresql://` fixture had no psycopg2 bridge installed:
+
+```text
+NERVOUS_SYSTEM_TEST_DATABASE_URL='postgresql://cynolycus:cynolycus_dev_only@127.0.0.1:55432/cynolycus_nervous_system_test' ./.venv/bin/python -m pytest core/nervous_system/tests/test_state_repository.py -q
+2 passed, 7 errors — ModuleNotFoundError: psycopg2
+EXIT_CODE=1
+```
+
+After installing the test-only `psycopg2-binary` bridge, the same command
+reached the database and reported the unavailable listener (`2 passed, 7
+errors`, `OperationalError`). The existing disposable PostgreSQL container
+was then verified healthy and the integration run was repeated outside the
+sandbox.
+
+### GREEN evidence
+
+The correction implements all six review findings:
+
+- State IDs now use stable semantic theme IDs, `as_of`, taxonomy/version
+  material, and lineage content hashes plus path-free row locators; runtime
+  completion timestamps and local source paths are excluded. Artifact-hash or
+  row-locator revisions produce new IDs, while the Task 9 atomic idempotent
+  repository path remains the publication path.
+- Pipeline publication captures UTC feature completion immediately after Step
+  9 returns, and passes `max(membership_available_at, feature_completion_at)`
+  to validity calculation and the adapter. Mtime is not consulted.
+- Legacy `THEME` rows with the explicit `(ticker, theme, membership_score)`
+  shape are hash/relationally validated before a copied
+  `THEME_MEMBERSHIP` contract is returned. THEME_MEMBERSHIP queries and
+  snapshots include only that legacy shape; generic THEME queries exclude it.
+- Raw theme labels remain in compatibility/history/features joins. Semantic
+  IDs carry a stable SHA-256 suffix and collision checks; `AI & ML` and
+  `AI/ML` remain distinct, and ephemeral cluster labels are rejected.
+- Schema-less empty memberships produce feature-identified warning states
+  with empty scores and `MISSING_MEMBERSHIPS`.
+- Existing and incoming history timestamps must be timezone-aware and obey
+  `as_of <= generated_at <= available_at`; ThemeState/ThemeMembership causal
+  validation follows the same direction.
+
+Focused Task 10 suite:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q
+20 passed
+EXIT_CODE=0
+```
+
+Full theme suite:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests -q
+48 passed, 2 warnings
+EXIT_CODE=0
+```
+
+Focused nervous-system contract/repository suite with the exact disposable
+PostgreSQL URL:
+
+```text
+NERVOUS_SYSTEM_TEST_DATABASE_URL='postgresql://cynolycus:cynolycus_dev_only@127.0.0.1:55432/cynolycus_nervous_system_test' ./.venv/bin/python -m pytest core/nervous_system/tests/test_state_contracts.py core/nervous_system/tests/test_state_repository.py -q
+44 passed
+EXIT_CODE=0
+```
+
+The legacy PostgreSQL round-trip/query/snapshot/tamper fixture is included in
+that result. Full relevant nervous-system suite:
+
+```text
+NERVOUS_SYSTEM_TEST_DATABASE_URL='postgresql://cynolycus:cynolycus_dev_only@127.0.0.1:55432/cynolycus_nervous_system_test' ./.venv/bin/python -m pytest core/nervous_system/tests -q
+222 passed
+EXIT_CODE=0
+```
+
+Cross-seed deterministic taxonomy evidence (same output for seeds 1 and 777):
+
+```text
+1 taxonomy:ad5a398a3e021d914a7f9b61f4ce998c3831104a0f81fb9f41266b8e788e7c55
+777 taxonomy:ad5a398a3e021d914a7f9b61f4ce998c3831104a0f81fb9f41266b8e788e7c55
+EXIT_CODE=0
+```
+
+Compilation and diff checks:
+
+```text
+./.venv/bin/python -m compileall -q themes/dynamic_theme core/nervous_system
+git diff --check
+EXIT_CODE=0 for both commands
+```
+
+### Correction files
+
+- `themes/dynamic_theme/stages/step08_memberships.py`
+- `themes/dynamic_theme/nervous_system_adapter.py`
+- `themes/dynamic_theme/pipeline.py`
+- `core/nervous_system/contracts/states.py`
+- `core/nervous_system/persistence/repositories/state.py`
+- `themes/dynamic_theme/tests/test_nervous_system_adapter.py`
+- `core/nervous_system/tests/test_state_repository.py`
+
+### Correction self-review and concerns
+
+- Compatibility output remains the four-column latest view; history remains a
+  separate exact-schema append-preserving artifact with immutable same-date
+  convergence and revised-taxonomy evidence.
+- State identity contains no runtime `available_at`, generated timestamp,
+  source path, mtime, cluster number, or row-number-only fallback. Exact
+  source hashes and original locators remain in lineage payloads.
+- No transaction ownership was added: publication still propagates UOW
+  persistence errors without commit/rollback, while Parquet artifacts remain
+  present after failure. Research runs remain DB-free.
+- No Task 8/9 producer/importer files, plan/ledger files, or persistent
+  `cynolycus` database were modified. The shared contract/repository changes
+  are limited to the required Task 10 theme semantics and legacy read path.
+- The full theme suite retains two pre-existing `step05_claude_labeling.py`
+  `FutureWarning`s. No new warning or test failure remains.

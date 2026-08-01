@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 from uuid import UUID, uuid4
 
 import pytest
@@ -243,3 +245,87 @@ def test_save_context_snapshot_persists_validated_payload(pg_session):
     saved = StateRepository(pg_session).save_context_snapshot(snapshot)
     assert saved == snapshot
     assert pg_session.get(ContextSnapshotRow, snapshot.snapshot_id).content_hash == snapshot.content_hash
+
+
+def _legacy_theme_membership_row() -> StateRecord:
+    state_id = UUID("00000000-0000-0000-0000-000000000201")
+    payload = {
+        "state_id": str(state_id),
+        "state_type": "THEME",
+        "entity_id": "alpha_theme",
+        "as_of": "2026-07-30T20:00:00Z",
+        "available_at": "2026-07-30T20:05:00Z",
+        "generated_at": "2026-07-30T20:04:00Z",
+        "valid_until": "2026-07-31T20:05:00Z",
+        "source_window_start": "2026-07-30T20:00:00Z",
+        "source_window_end": "2026-07-30T20:00:00Z",
+        "schema_version": 1,
+        "producer": "themes.dynamic_theme",
+        "model_version": "theme-taxonomy@1",
+        "feature_version": "theme-features@1",
+        "config_version": "theme-state@1:taxonomy-v1",
+        "lineage_ids": ["legacy:row:0"],
+        "data_quality": {"issues": []},
+        "ticker": "AAA",
+        "theme": "alpha_theme",
+        "membership_score": 0.82,
+    }
+    digest_payload = {key: value for key, value in payload.items() if key != "state_id"}
+    state_hash = hashlib.sha256(
+        json.dumps(digest_payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    ).hexdigest()
+    as_of = datetime(2026, 7, 30, 20, 0, tzinfo=UTC)
+    available_at = datetime(2026, 7, 30, 20, 5, tzinfo=UTC)
+    return StateRecord(
+        state_id=state_id,
+        state_type="THEME",
+        entity_id="alpha_theme",
+        as_of=as_of,
+        available_at=available_at,
+        generated_at=datetime(2026, 7, 30, 20, 4, tzinfo=UTC),
+        valid_until=datetime(2026, 7, 31, 20, 5, tzinfo=UTC),
+        schema_version=1,
+        producer="themes.dynamic_theme",
+        model_version="theme-taxonomy@1",
+        feature_version="theme-features@1",
+        config_version="theme-state@1:taxonomy-v1",
+        quality_severity="INFO",
+        content_hash=state_hash,
+        payload=payload,
+        created_at=available_at,
+    )
+
+
+@pytest.mark.postgres
+def test_theme_membership_queries_round_trip_legacy_theme_payload(pg_session):
+    row = _legacy_theme_membership_row()
+    pg_session.add(row)
+    pg_session.flush()
+    repo = StateRepository(pg_session)
+    decision_time = datetime(2026, 7, 30, 21, 0, tzinfo=UTC)
+
+    latest = repo.get_latest_valid_state(
+        StateType.THEME_MEMBERSHIP, "alpha_theme", decision_time
+    )
+    historical = repo.get_state_as_of(
+        StateType.THEME_MEMBERSHIP, "alpha_theme", decision_time
+    )
+    snapshot = repo.get_states_for_snapshot(
+        (StateRequest(state_type=StateType.THEME_MEMBERSHIP, entity_id="alpha_theme", required=True),),
+        decision_time,
+    )
+
+    assert latest is not None
+    assert latest.state_type is StateType.THEME_MEMBERSHIP
+    assert latest.state_id == row.state_id
+    assert latest.entity_id == "alpha_theme"
+    assert latest.ticker == "AAA"
+    assert latest.weight == 0.82
+    assert historical == latest
+    assert snapshot == (latest,)
+    assert repo.get_latest_valid_state(StateType.THEME, "alpha_theme", decision_time) is None
+
+    row.payload = {**row.payload, "membership_score": 0.81}
+    pg_session.flush()
+    with pytest.raises(ValueError, match="content_hash"):
+        repo.get_state_as_of(StateType.THEME_MEMBERSHIP, "alpha_theme", decision_time)

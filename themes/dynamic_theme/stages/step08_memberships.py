@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import unicodedata
 
 import numpy as np
 import pandas as pd
@@ -69,6 +70,7 @@ _IGNORED_CANONICAL_KEYS = {
     "available_at",
     "created_at",
 }
+_CANONICAL_THEME_ID_RE = re.compile(r"^.+--[0-9a-f]{64}$")
 
 
 def _utc_now() -> datetime:
@@ -127,19 +129,48 @@ def _canonical_value(value: object, *, key: str | None = None) -> object:
     return str(value)
 
 
-def canonical_theme_id(value: object) -> str:
-    """Normalize a semantic theme label and reject ephemeral cluster labels."""
-
+def _theme_label(value: object) -> str:
     if value is None or value is pd.NA or value is pd.NaT:
-        raise ValueError("theme ID must be a non-empty semantic identifier")
+        raise ValueError("theme label must be a non-empty semantic identifier")
     if isinstance(value, (float, np.floating)) and math.isnan(float(value)):
-        raise ValueError("theme ID must be a non-empty semantic identifier")
-    normalized = re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+        raise ValueError("theme label must be a non-empty semantic identifier")
+    label = str(value).strip()
+    if not label:
+        raise ValueError("theme label must be a non-empty semantic identifier")
+    return label
+
+
+def canonical_theme_id(value: object) -> str:
+    """Return a stable semantic ID while retaining the raw label separately."""
+
+    label = _theme_label(value)
+    normalized = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        unicodedata.normalize("NFKC", label).casefold(),
+    ).strip("_")
     if not normalized:
-        raise ValueError("theme ID must be a non-empty semantic identifier")
+        normalized = "theme"
     if _EPHEMERAL_THEME_RE.fullmatch(normalized):
-        raise ValueError(f"ephemeral cluster label is not a durable theme ID: {value}")
-    return normalized
+        raise ValueError(f"ephemeral cluster label is not a durable theme ID: {label}")
+    if _CANONICAL_THEME_ID_RE.fullmatch(label):
+        return label
+    digest = hashlib.sha256(label.encode("utf-8")).hexdigest()
+    return f"{normalized[:48]}--{digest}"
+
+
+def _theme_id_map(values: Iterable[object]) -> dict[str, str]:
+    ids: dict[str, str] = {}
+    for value in values:
+        label = _theme_label(value)
+        theme_id = canonical_theme_id(label)
+        prior = ids.get(theme_id)
+        if prior is not None and prior != label:
+            raise ValueError(
+                f"theme ID collision: {prior!r} and {label!r} map to {theme_id}"
+            )
+        ids[theme_id] = label
+    return ids
 
 
 def _registry_theme_ids(registry_df: pd.DataFrame | None) -> list[str]:
@@ -153,7 +184,7 @@ def _registry_theme_ids(registry_df: pd.DataFrame | None) -> list[str]:
         column = "theme"
     if column not in registry_df.columns:
         raise ValueError("theme registry must contain theme_name")
-    return sorted({canonical_theme_id(value) for value in registry_df[column].tolist()})
+    return sorted(_theme_id_map(registry_df[column].tolist()))
 
 
 def _default_seed_members() -> dict[str, list[str]]:
@@ -195,7 +226,7 @@ def canonical_taxonomy_json(
     if theme_ids is None:
         ids = _registry_theme_ids(registry_df)
     else:
-        ids = sorted({canonical_theme_id(value) for value in theme_ids})
+        ids = sorted(_theme_id_map(theme_ids))
 
     raw_seed_members = _default_seed_members() if seed_members is None else seed_members
     normalized_seed_members = {
@@ -322,13 +353,30 @@ def _normalize_existing_history(history_path: Path) -> pd.DataFrame:
     existing = existing.copy()
     existing["as_of"] = pd.to_datetime(existing["as_of"], errors="raise").dt.date
     for column in ("available_at", "generated_at"):
-        existing[column] = pd.to_datetime(existing[column], utc=True, errors="raise")
+        values = [
+            _aware_utc(value, field_name=f"history.{column}")
+            for value in existing[column].tolist()
+        ]
+        existing[column] = pd.to_datetime(values, utc=True)
+    _validate_history_timestamps(existing, source_name=str(history_path))
     existing["ticker"] = existing["ticker"].map(lambda value: str(value).strip().upper())
-    existing["theme"] = existing["theme"].map(canonical_theme_id)
+    existing["theme"] = existing["theme"].map(_theme_label)
     existing["membership_score"] = existing["membership_score"].map(_validate_score)
     existing["taxonomy_version"] = existing["taxonomy_version"].map(str)
     existing["producer_version"] = existing["producer_version"].map(str)
     return _dedupe_history_rows(existing, source_name=str(history_path))
+
+
+def _validate_history_timestamps(frame: pd.DataFrame, *, source_name: str) -> None:
+    for row in frame.itertuples(index=False):
+        as_of = row.as_of
+        generated_at = row.generated_at.to_pydatetime()
+        available_at = row.available_at.to_pydatetime()
+        as_of_start = datetime.combine(as_of, datetime.min.time(), tzinfo=UTC)
+        if generated_at < as_of_start:
+            raise ValueError(f"generated_at precedes as_of in {source_name}")
+        if generated_at > available_at:
+            raise ValueError(f"generated_at follows available_at in {source_name}")
 
 
 def append_membership_history(
@@ -350,6 +398,11 @@ def append_membership_history(
         raise ValueError("as_of must be a date")
     generated_at_utc = _aware_utc(generated_at, field_name="generated_at")
     available_at_utc = _aware_utc(_utc_now(), field_name="available_at")
+    if generated_at_utc > available_at_utc:
+        raise ValueError("generated_at follows available_at")
+    as_of_start = datetime.combine(as_of, datetime.min.time(), tzinfo=UTC)
+    if generated_at_utc < as_of_start:
+        raise ValueError("generated_at precedes as_of")
     taxonomy_version = _taxonomy_from_current(current)
     producer_version = str(current.attrs.get("producer_version", PRODUCER_VERSION))
 
@@ -362,7 +415,7 @@ def append_membership_history(
                 "available_at": available_at_utc,
                 "generated_at": generated_at_utc,
                 "ticker": str(row_data["ticker"]).strip().upper(),
-                "theme": canonical_theme_id(row_data["theme"]),
+                "theme": _theme_label(row_data["theme"]),
                 "membership_score": _validate_score(row_data["membership_score"]),
                 "taxonomy_version": taxonomy_version,
                 "producer_version": producer_version,
@@ -370,6 +423,7 @@ def append_membership_history(
         )
     incoming = pd.DataFrame(incoming_rows, columns=_HISTORY_COLUMNS)
     incoming = _dedupe_history_rows(incoming, source_name="current memberships")
+    _validate_history_timestamps(incoming, source_name="current memberships")
     existing = _normalize_existing_history(Path(history_path))
 
     existing_keys = set(_history_key_tuples(existing).tolist())
@@ -430,26 +484,35 @@ def compute_memberships(
         return empty
 
     centroids_by_id = compute_centroids(matrix, tickers, clusters_df)
-    id_to_theme = {
-        cluster_id: canonical_theme_id(theme_name)
-        for cluster_id, theme_name in zip(registry_df["cluster_id"], registry_df["theme_name"])
-    }
+    id_to_theme: dict[object, str] = {}
+    theme_ids: dict[str, str] = {}
+    for cluster_id, theme_name in zip(registry_df["cluster_id"], registry_df["theme_name"]):
+        raw_label = _theme_label(theme_name)
+        semantic_id = canonical_theme_id(raw_label)
+        prior = theme_ids.get(semantic_id)
+        if prior is not None and prior != raw_label:
+            raise ValueError(
+                f"theme ID collision: {prior!r} and {raw_label!r} map to {semantic_id}"
+            )
+        theme_ids[semantic_id] = raw_label
+        id_to_theme[cluster_id] = raw_label
 
     from themes.dynamic_theme.seed_themes import seed_centroids
 
     seed_cents, seed_names = seed_centroids(tickers, matrix)
-    existing_names = set(id_to_theme.values())
+    existing_names = {canonical_theme_id(name) for name in id_to_theme.values()}
     for cluster_id, name in seed_names.items():
-        semantic_name = canonical_theme_id(name)
+        raw_label = _theme_label(name)
+        semantic_name = canonical_theme_id(raw_label)
         if semantic_name in existing_names:
             logger.info("Seed theme '%s' already emerged this run — not injecting seed", name)
             continue
         centroids_by_id[cluster_id] = seed_cents[cluster_id]
-        id_to_theme[cluster_id] = semantic_name
+        id_to_theme[cluster_id] = raw_label
 
     valid_ids = sorted(
         (cluster_id for cluster_id in centroids_by_id if cluster_id in id_to_theme),
-        key=lambda cluster_id: id_to_theme[cluster_id],
+        key=lambda cluster_id: canonical_theme_id(id_to_theme[cluster_id]),
     )
     if not valid_ids:
         logger.warning("No cluster centroids match current registry")

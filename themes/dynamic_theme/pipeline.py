@@ -67,6 +67,30 @@ if TYPE_CHECKING:
     from core.nervous_system.persistence.uow import UnitOfWork
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _aware_utc(value: object, *, field_name: str) -> datetime:
+    if isinstance(value, pd.Timestamp):
+        parsed = value.to_pydatetime()
+    elif isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be an ISO-8601 timestamp") from exc
+    else:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
 def _artifact_sha256(path: Path) -> str:
     digest = sha256()
     with Path(path).open("rb") as handle:
@@ -104,6 +128,7 @@ def _publish_completed_theme_outputs(
     *,
     unit_of_work: "UnitOfWork | None",
     valid_until_for: Callable[[datetime], datetime] | None,
+    feature_completion_at: datetime | None = None,
 ) -> None:
     if unit_of_work is None:
         return
@@ -136,11 +161,15 @@ def _publish_completed_theme_outputs(
     else:
         feature_dates = pd.to_datetime(features["date"], errors="raise").dt.date
         latest_features = features.loc[feature_dates == latest_date].copy()
-    available_at = (
-        pd.to_datetime(history["available_at"], utc=True, errors="raise")
-        .max()
-        .to_pydatetime()
+    membership_available_at = max(
+        _aware_utc(value, field_name="history.available_at")
+        for value in history["available_at"].tolist()
     )
+    feature_completion_utc = _aware_utc(
+        feature_completion_at if feature_completion_at is not None else _utc_now(),
+        field_name="feature_completion_at",
+    )
+    available_at = max(membership_available_at, feature_completion_utc)
     valid_until = valid_until_for(available_at)
     lineage = _lineage_for_frame(
         history,
@@ -211,11 +240,13 @@ def daily_run(
     embeddings = generate_embeddings(docs, as_of=as_of)
     memberships = compute_memberships(embeddings_df=embeddings, as_of=as_of)
     features = build_meta_features(memberships_df=memberships, as_of=as_of)
+    feature_completion_at = _utc_now()
     _publish_completed_theme_outputs(
         memberships,
         features,
         unit_of_work=unit_of_work,
         valid_until_for=valid_until_for,
+        feature_completion_at=feature_completion_at,
     )
 
     logger.info("=== Daily run complete ===")
@@ -285,11 +316,13 @@ def weekly_run(
 
     # Step 9: meta features
     features = build_meta_features(memberships_df=memberships, as_of=as_of)
+    feature_completion_at = _utc_now()
     _publish_completed_theme_outputs(
         memberships,
         features,
         unit_of_work=unit_of_work,
         valid_until_for=valid_until_for,
+        feature_completion_at=feature_completion_at,
     )
 
     logger.info("=== Weekly run complete ===")
