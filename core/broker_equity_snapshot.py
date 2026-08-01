@@ -8,14 +8,22 @@ attribution reproducible from the exact broker marks observed at those times.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
+import hashlib
 import json
+import math
 import os
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+from core.nervous_system.contracts.enums import AssetClass, DataQualitySeverity
+from core.nervous_system.contracts.quality import DataQualityIssue, DataQualitySummary
+from core.nervous_system.contracts.states import PortfolioPosition, PortfolioState
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -27,6 +35,12 @@ _POSITION_FIELDS = (
     "market_value", "cost_basis", "unrealized_pl", "unrealized_plpc",
     "unrealized_intraday_pl", "unrealized_intraday_plpc",
 )
+_PORTFOLIO_PRODUCER = "core.broker_equity_snapshot"
+_PORTFOLIO_MODEL_VERSION = "broker-portfolio-adapter@1"
+_PORTFOLIO_FEATURE_VERSION = "broker-portfolio@1"
+_PORTFOLIO_CONFIG_VERSION = "broker-portfolio@1:validity-24h"
+_PORTFOLIO_VALIDITY = timedelta(hours=24)
+_OCC_TAIL = re.compile(r"^\d{6}[CP]\d{8}$")
 
 
 def _json_scalar(value: Any) -> Any:
@@ -40,7 +54,234 @@ def _as_float(value: Any) -> float | None:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    return out if out == out else None  # reject NaN
+    return out if math.isfinite(out) else None
+
+
+def _required_finite(value: Any, *, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be finite")
+    result = _as_float(value)
+    if result is None:
+        raise ValueError(f"{field} must be finite")
+    return result
+
+
+def _optional_finite(value: Any, *, field: str) -> float | None:
+    if value is None:
+        return None
+    return _required_finite(value, field=field)
+
+
+def _aware_utc(value: Any, *, field: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"{field} must be a valid ISO-8601 timestamp") from exc
+    else:
+        raise ValueError(f"{field} must be a timezone-aware timestamp")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
+
+
+def _canonical_json(value: Any) -> str:
+    def default(item: Any) -> str:
+        if isinstance(item, datetime):
+            return item.isoformat()
+        return str(item)
+
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=default,
+        allow_nan=False,
+    )
+
+
+def _position_asset_class(value: Any, *, field: str) -> AssetClass:
+    key = str(value or "").strip().upper().replace("-", "_")
+    if key in {"US_EQUITY", "EQUITY", "STOCK"}:
+        return AssetClass.EQUITY
+    if key in {"US_OPTION", "OPTION"}:
+        return AssetClass.OPTION
+    raise ValueError(f"{field} has unsupported asset class {value!r}")
+
+
+def _position_underlying(symbol: str, asset_class: AssetClass) -> str:
+    if asset_class is AssetClass.EQUITY:
+        return symbol
+    if len(symbol) <= 15 or _OCC_TAIL.fullmatch(symbol[-15:]) is None:
+        raise ValueError(f"option symbol {symbol!r} is not a valid OCC identity")
+    underlying = symbol[:-15].rstrip()
+    if not underlying:
+        raise ValueError(f"option symbol {symbol!r} has no underlying")
+    return underlying
+
+
+def _open_order_ids(raw: Mapping[str, Any]) -> tuple[str, ...]:
+    values = raw.get("open_order_ids")
+    if values is None:
+        values = raw.get("open_orders", ())
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("open_order_ids/open_orders must be a list")
+    identifiers: list[str] = []
+    for index, value in enumerate(values, start=1):
+        candidate = value.get("id") if isinstance(value, Mapping) else value
+        if candidate is None or not str(candidate).strip():
+            raise ValueError(f"open order {index} has no id")
+        identifiers.append(str(candidate))
+    return tuple(sorted(identifiers))
+
+
+def _lineage_id(*, source_hash: str, account_alias: str, captured_at: datetime) -> str:
+    return json.dumps(
+        {
+            "content_hash": source_hash,
+            "record_locator": f"account_snapshot:{account_alias}:{captured_at.isoformat()}",
+            "source_id": _PORTFOLIO_PRODUCER,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def adapt_broker_portfolio_snapshot(
+    raw: Mapping[str, object],
+    *,
+    strategy_ownership: Mapping[str, str],
+) -> PortfolioState:
+    """Adapt one durable broker snapshot without reading broker/API state."""
+    if not isinstance(raw, Mapping):
+        raise ValueError("raw broker snapshot must be a mapping")
+    if not isinstance(strategy_ownership, Mapping):
+        raise ValueError("strategy_ownership must be a mapping")
+
+    captured_at = _aware_utc(raw.get("captured_at_utc"), field="captured_at_utc")
+    account_alias_value = raw.get("account_label")
+    if account_alias_value is None or not str(account_alias_value).strip():
+        raise ValueError("account_label must be non-empty")
+    account_alias = str(account_alias_value).strip()
+    account = raw.get("account")
+    if not isinstance(account, Mapping):
+        raise ValueError("account must be a mapping")
+    equity = _required_finite(account.get("equity"), field="equity")
+    cash = _required_finite(account.get("cash"), field="cash")
+    buying_power = _required_finite(account.get("buying_power"), field="buying_power")
+    day_pl = _optional_finite(raw.get("day_pl"), field="day_pl")
+
+    positions_value = raw.get("positions", ())
+    if not isinstance(positions_value, (list, tuple)):
+        raise ValueError("positions must be a list")
+    positions: list[PortfolioPosition] = []
+    unmatched_symbols: list[str] = []
+    for index, value in enumerate(positions_value, start=1):
+        if not isinstance(value, Mapping):
+            raise ValueError(f"position {index} must be a mapping")
+        symbol_value = value.get("symbol")
+        if symbol_value is None or not str(symbol_value).strip():
+            raise ValueError(f"position {index} symbol must be non-empty")
+        symbol = str(symbol_value)
+        asset_class = _position_asset_class(
+            value.get("asset_class"), field=f"position {index} asset_class"
+        )
+        quantity = _required_finite(value.get("qty"), field=f"position {index} qty")
+        strategy_id: str | None = None
+        if symbol in strategy_ownership:
+            supplied_strategy = strategy_ownership[symbol]
+            if supplied_strategy is None or not str(supplied_strategy).strip():
+                raise ValueError(f"strategy_ownership[{symbol!r}] must be non-empty")
+            strategy_id = str(supplied_strategy)
+        else:
+            unmatched_symbols.append(symbol)
+        positions.append(
+            PortfolioPosition(
+                broker_position_id=str(value.get("broker_position_id") or value.get("id") or symbol),
+                symbol=symbol,
+                underlying=_position_underlying(symbol, asset_class),
+                asset_class=asset_class,
+                quantity=quantity,
+                average_entry_price=_optional_finite(
+                    value.get("avg_entry_price"), field=f"position {index} avg_entry_price"
+                ),
+                current_price=_optional_finite(
+                    value.get("current_price"), field=f"position {index} current_price"
+                ),
+                market_value=_optional_finite(
+                    value.get("market_value"), field=f"position {index} market_value"
+                ),
+                strategy_id=strategy_id,
+                ownership_status="ASSIGNED" if strategy_id is not None else "UNASSIGNED",
+            )
+        )
+
+    positions_tuple = tuple(sorted(positions, key=lambda item: (item.symbol, item.broker_position_id)))
+    source_hash = hashlib.sha256(_canonical_json(raw).encode("utf-8")).hexdigest()
+    lineage_id = _lineage_id(
+        source_hash=source_hash,
+        account_alias=account_alias,
+        captured_at=captured_at,
+    )
+    quality_issues = ()
+    if unmatched_symbols:
+        quality_issues = (
+            DataQualityIssue(
+                code="UNMATCHED_POSITION_OWNERSHIP",
+                severity=DataQualitySeverity.WARNING,
+                component=_PORTFOLIO_PRODUCER,
+                message=(
+                    "fill-derived ownership was unavailable for: "
+                    + ", ".join(sorted(unmatched_symbols))
+                ),
+            ),
+        )
+    data_quality = DataQualitySummary(issues=quality_issues)
+    identity = {
+        "account_alias": account_alias,
+        "captured_at": captured_at.isoformat(),
+        "ownership": sorted(
+            (position.symbol, position.strategy_id)
+            for position in positions_tuple
+            if position.strategy_id is not None
+        ),
+        "producer": _PORTFOLIO_PRODUCER,
+        "source_hash": source_hash,
+    }
+    state_id = uuid5(
+        NAMESPACE_URL,
+        _canonical_json(identity),
+    )
+    return PortfolioState(
+        state_id=state_id,
+        entity_id=account_alias,
+        as_of=captured_at,
+        available_at=captured_at,
+        generated_at=captured_at,
+        valid_until=captured_at + _PORTFOLIO_VALIDITY,
+        source_window_start=captured_at,
+        source_window_end=captured_at,
+        schema_version=1,
+        producer=_PORTFOLIO_PRODUCER,
+        model_version=_PORTFOLIO_MODEL_VERSION,
+        feature_version=_PORTFOLIO_FEATURE_VERSION,
+        config_version=_PORTFOLIO_CONFIG_VERSION,
+        lineage_ids=(lineage_id,),
+        data_quality=data_quality,
+        account_alias=account_alias,
+        equity=equity,
+        cash=cash,
+        buying_power=buying_power,
+        day_pl=day_pl,
+        positions=positions_tuple,
+        open_order_ids=_open_order_ids(raw),
+        broker_observed_at=captured_at,
+    )
 
 
 def session_phase(now: datetime) -> str:
@@ -90,8 +331,15 @@ def capture_snapshot(
     account_label: str = "paper",
     root: Path = DEFAULT_ROOT,
     now: datetime | None = None,
+    unit_of_work: Any | None = None,
+    strategy_ownership: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Read broker account/positions and append one JSONL close-mark snapshot."""
+    """Read broker account/positions and append one JSONL close-mark snapshot.
+
+    If supplied, ``unit_of_work`` remains caller-owned.  The local JSONL record
+    is durable before the optional state publication begins, and publication
+    failures are returned alongside that durable backup.
+    """
     captured = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     account = client.get_account() or {}
     positions = client.get_positions() or []
@@ -123,7 +371,29 @@ def capture_snapshot(
         fh.write(json.dumps(record, sort_keys=True) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
-    return {"path": str(out), "position_count": len(record["positions"]), **record}
+    result: dict[str, Any] = {
+        "path": str(out),
+        "position_count": len(record["positions"]),
+        **record,
+    }
+    if unit_of_work is None:
+        return result
+    try:
+        state = adapt_broker_portfolio_snapshot(
+            record,
+            strategy_ownership=strategy_ownership or {},
+        )
+        unit_of_work.states.insert_states_idempotently((state,))
+    except Exception as exc:  # publication must be explicit after local durability
+        result.update(
+            {
+                "publication_status": "FAILED",
+                "publication_error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+    else:
+        result["publication_status"] = "PUBLISHED"
+    return result
 
 
 def capture_from_env(*, env_file: str, account_label: str = "paper", root: Path = DEFAULT_ROOT) -> dict[str, Any]:

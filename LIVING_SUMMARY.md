@@ -1134,3 +1134,7 @@ Round 4 production remains backed by consecutive dirty-DB publication passes and
 {2026-08-01 13:16 EDT} {agent: Codex} {nervous system Task 11 completion}
 Task 11 passed final fresh review after five correction rounds with zero findings; causal catalyst timing, complete no-hindsight schema, lossless quarantine, stable path-free identity, honest registry reruns, and MARKET/ticker pressure alignment are approved.
 Final head `b6f63e3`; focused `169`, relevant signals `197`, disposable PostgreSQL publication twice and full core `226` passed. Next is Task 12 adapters.
+
+{2026-08-01 13:42 EDT} {agent: Codex} {nervous system Task 12 implementation}
+Parallel TDD added ticker, dealer, broker-portfolio/local-first publication, and readiness adapters; exact focused `44`, broker/readiness `8`, dealer `75`, contracts `36`, and disposable-PostgreSQL core `245` passed.
+Meta suite was `22 passed/1 pre-existing missing ignored model-manifest failure`; compile/diff-check passed. Integrated commit and fresh review are next.
