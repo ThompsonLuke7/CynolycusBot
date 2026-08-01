@@ -1158,3 +1158,7 @@ Focused `146+1 skipped`, explicit replay `1`, dealer `160+1 skipped`, and dispos
 {2026-08-01 15:42 EDT} {agent: Codex} {nervous system Task 12 correction round 5}
 Dealer numeric/schema validation now matches the real dynamics producer, direct dynamics identity is exact, and replay cannot pass vacuously; exact replay remained `2,022/2,022`.
 Focused `221+1 skipped`, dealer `235+1 skipped`, and disposable-PostgreSQL core `252` passed; compile/diff-check clean. Final commit/re-review are next.
+
+{2026-08-01 15:58 EDT} {agent: Codex} {nervous system Task 12 completion}
+Task 12 passed final fresh scoped LUNA review with zero Critical/Important/Minor findings after five correction rounds; adapters and durable local-first broker backup are approved.
+Final head `d0c10fd`; focused `221`, dealer `235`, exact replay `2,022/2,022`, and disposable-PostgreSQL core `252` passed. Next is Task 13 snapshots.
