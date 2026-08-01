@@ -31,6 +31,10 @@ TICKER_CLUSTERS_PATH    = OUTPUTS_DIR / "ticker_clusters.parquet"
 THEME_REGISTRY_PATH     = OUTPUTS_DIR / "theme_registry.parquet"
 THEME_RELATIONSHIPS_PATH = OUTPUTS_DIR / "theme_relationships.parquet"
 TICKER_MEMBERSHIP_PATH  = OUTPUTS_DIR / "ticker_theme_membership.parquet"
+TICKER_MEMBERSHIP_HISTORY_PATH = OUTPUTS_DIR / "ticker_theme_membership_history.parquet"
+# Descriptive alias for callers that do not need the legacy ticker-prefixed name.
+MEMBERSHIP_HISTORY_PATH = TICKER_MEMBERSHIP_HISTORY_PATH
+membership_history_path = TICKER_MEMBERSHIP_HISTORY_PATH
 TICKER_THEME_FEATURES_PATH = OUTPUTS_DIR / "ticker_theme_features.parquet"
 PENDING_THEME_CANDIDATES_PATH = OUTPUTS_DIR / "pending_theme_candidates.parquet"
 PENDING_THEME_REGISTRY_PATH = OUTPUTS_DIR / "pending_theme_registry.parquet"

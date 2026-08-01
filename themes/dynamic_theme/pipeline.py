@@ -20,9 +20,12 @@ Weekly run (Sunday, after the Sunday universe refresh):
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+from hashlib import sha256
 import logging
-from datetime import datetime
-from typing import Iterable
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -33,7 +36,14 @@ try:
 except ImportError:
     pass
 
-from themes.dynamic_theme.config import THEME_REGISTRY_PATH, ensure_outputs
+from core.nervous_system.contracts.quality import LineageRef
+from themes.dynamic_theme.config import (
+    THEME_REGISTRY_PATH,
+    TICKER_MEMBERSHIP_HISTORY_PATH,
+    TICKER_THEME_FEATURES_PATH,
+    ensure_outputs,
+)
+from themes.dynamic_theme.nervous_system_adapter import persist_theme_states
 from themes.dynamic_theme.stages.step01_build_documents import build_ticker_documents
 from themes.dynamic_theme.stages.step02_embed import generate_embeddings
 from themes.dynamic_theme.stages.step03_cluster import cluster_tickers
@@ -51,6 +61,109 @@ from themes.dynamic_theme.stages.step08_memberships import compute_memberships
 from themes.dynamic_theme.stages.step09_meta_features import build_meta_features
 
 logger = logging.getLogger(__name__)
+UTC = timezone.utc
+
+if TYPE_CHECKING:
+    from core.nervous_system.persistence.uow import UnitOfWork
+
+
+def _artifact_sha256(path: Path) -> str:
+    digest = sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _lineage_for_frame(
+    frame: pd.DataFrame,
+    *,
+    path: Path,
+    table_name: str,
+) -> tuple[LineageRef, ...]:
+    """Attach exact post-write artifact hash and original row locators."""
+
+    if not Path(path).exists():
+        raise FileNotFoundError(f"published artifact does not exist: {path}")
+    artifact_hash = _artifact_sha256(Path(path))
+    if frame.empty:
+        raise ValueError(f"cannot publish empty {table_name} artifact without row lineage")
+    return tuple(
+        LineageRef(
+            source_id=str(path),
+            content_hash=artifact_hash,
+            record_locator=f"{table_name}:row:{index}",
+        )
+        for index in frame.index
+    )
+
+
+def _publish_completed_theme_outputs(
+    memberships: pd.DataFrame,
+    features: pd.DataFrame,
+    *,
+    unit_of_work: "UnitOfWork | None",
+    valid_until_for: Callable[[datetime], datetime] | None,
+) -> None:
+    if unit_of_work is None:
+        return
+    if valid_until_for is None:
+        raise ValueError("valid_until_for is required when publishing nervous-system states")
+    if not TICKER_MEMBERSHIP_HISTORY_PATH.exists():
+        raise FileNotFoundError(
+            f"membership history artifact is required for publication: {TICKER_MEMBERSHIP_HISTORY_PATH}"
+        )
+    history = pd.read_parquet(TICKER_MEMBERSHIP_HISTORY_PATH)
+    if history.empty:
+        raise ValueError("cannot publish theme states without membership history rows")
+    history["as_of"] = pd.to_datetime(history["as_of"], errors="raise").dt.date
+    latest_date = history["as_of"].max()
+    taxonomy_version = str(
+        memberships.attrs.get(
+            "taxonomy_version",
+            history.loc[history["as_of"] == latest_date, "taxonomy_version"].iloc[-1],
+        )
+    )
+    history = history[
+        (history["as_of"] == latest_date)
+        & (history["taxonomy_version"].astype(str) == taxonomy_version)
+    ].copy()
+    if history.empty:
+        raise ValueError("selected taxonomy has no current membership history rows")
+
+    if features.empty:
+        latest_features = features.copy()
+    else:
+        feature_dates = pd.to_datetime(features["date"], errors="raise").dt.date
+        latest_features = features.loc[feature_dates == latest_date].copy()
+    available_at = (
+        pd.to_datetime(history["available_at"], utc=True, errors="raise")
+        .max()
+        .to_pydatetime()
+    )
+    valid_until = valid_until_for(available_at)
+    lineage = _lineage_for_frame(
+        history,
+        path=TICKER_MEMBERSHIP_HISTORY_PATH,
+        table_name="ticker_theme_membership_history",
+    ) + _lineage_for_frame(
+        latest_features,
+        path=TICKER_THEME_FEATURES_PATH,
+        table_name="ticker_theme_features",
+    ) if not latest_features.empty else _lineage_for_frame(
+        history,
+        path=TICKER_MEMBERSHIP_HISTORY_PATH,
+        table_name="ticker_theme_membership_history",
+    )
+    persist_theme_states(
+        history,
+        latest_features,
+        unit_of_work=unit_of_work,
+        available_at=available_at,
+        valid_until=valid_until,
+        taxonomy_version=taxonomy_version,
+        lineage=lineage,
+    )
 
 
 def _get_tickers() -> list[str]:
@@ -84,6 +197,8 @@ def daily_run(
     *,
     as_of: pd.Timestamp | None = None,
     tickers: list[str] | None = None,
+    unit_of_work: "UnitOfWork | None" = None,
+    valid_until_for: Callable[[datetime], datetime] | None = None,
 ) -> None:
     """Run the daily theme feature refresh (no reclustering)."""
     ensure_outputs()
@@ -95,7 +210,13 @@ def daily_run(
     docs = build_ticker_documents(tickers, as_of=as_of)
     embeddings = generate_embeddings(docs, as_of=as_of)
     memberships = compute_memberships(embeddings_df=embeddings, as_of=as_of)
-    build_meta_features(memberships_df=memberships, as_of=as_of)
+    features = build_meta_features(memberships_df=memberships, as_of=as_of)
+    _publish_completed_theme_outputs(
+        memberships,
+        features,
+        unit_of_work=unit_of_work,
+        valid_until_for=valid_until_for,
+    )
 
     logger.info("=== Daily run complete ===")
 
@@ -104,6 +225,8 @@ def weekly_run(
     *,
     as_of: pd.Timestamp | None = None,
     tickers: list[str] | None = None,
+    unit_of_work: "UnitOfWork | None" = None,
+    valid_until_for: Callable[[datetime], datetime] | None = None,
 ) -> None:
     """Run the full weekly theme taxonomy refresh (recluster + Claude labeling)."""
     ensure_outputs()
@@ -161,7 +284,13 @@ def weekly_run(
     )
 
     # Step 9: meta features
-    build_meta_features(memberships_df=memberships, as_of=as_of)
+    features = build_meta_features(memberships_df=memberships, as_of=as_of)
+    _publish_completed_theme_outputs(
+        memberships,
+        features,
+        unit_of_work=unit_of_work,
+        valid_until_for=valid_until_for,
+    )
 
     logger.info("=== Weekly run complete ===")
 

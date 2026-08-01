@@ -100,8 +100,8 @@ class SectorState(StateEnvelope):
 
 
 class ThemeMembership(StateEnvelope):
-    state_type: StateType = StateType.THEME
-    expected_state_type: ClassVar[StateType] = StateType.THEME
+    state_type: StateType = StateType.THEME_MEMBERSHIP
+    expected_state_type: ClassVar[StateType] = StateType.THEME_MEMBERSHIP
     identity_field: ClassVar[str] = "theme_id"
     ticker: str
     theme_id: str
@@ -132,6 +132,10 @@ class ThemeState(StateEnvelope):
     dealer_fragility: FiniteFloat | None = None
     leadership_score: FiniteFloat | None = None
     rotation_rank: FiniteFloat | None = None
+    membership_scores: ImmutableFloatMap = Field(default_factory=dict)
+    crowding: FiniteFloat | None = None
+    persistence: FiniteFloat | None = None
+    metrics: ImmutableFloatMap = Field(default_factory=dict)
     identity_field: ClassVar[str] = "theme_id"
     transition_probabilities: ImmutableProbabilityMap = Field(default_factory=dict)
 

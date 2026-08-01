@@ -35,7 +35,8 @@ from core.nervous_system.persistence.models import StateRecord
 _STATE_TYPES: dict[StateType, tuple[type[StateEnvelope], ...]] = {
     StateType.MARKET: (MarketState,),
     StateType.SECTOR: (SectorState,),
-    StateType.THEME: (ThemeMembership, ThemeState),
+    StateType.THEME: (ThemeState,),
+    StateType.THEME_MEMBERSHIP: (ThemeMembership,),
     StateType.TICKER: (TickerState,),
     StateType.CATALYST_EVENT: (CatalystEvent,),
     StateType.CATALYST_PRESSURE: (CatalystPressure,),

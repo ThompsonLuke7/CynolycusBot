@@ -106,5 +106,40 @@ def test_write_registry_adds_seed_when_missing(tmp_path, monkeypatch):
     assert (out[out["theme_name"] == "memory_storage"]["cluster_id"] < 0).all()  # seed id
 
 
+def test_taxonomy_version_ignores_cluster_numbers_paths_order_and_timestamps():
+    from themes.dynamic_theme.stages.step08_memberships import compute_taxonomy_version
+
+    first = pd.DataFrame(
+        [
+            {
+                "cluster_id": 17,
+                "theme_name": "beta_theme",
+                "date": pd.Timestamp("2026-07-30"),
+                "local_path": "/tmp/one.parquet",
+            },
+            {
+                "cluster_id": 3,
+                "theme_name": "alpha_theme",
+                "date": pd.Timestamp("2026-07-30"),
+                "local_path": "/tmp/one.parquet",
+            },
+        ]
+    )
+    second = first.iloc[::-1].copy()
+    second["cluster_id"] = [900, 401]
+    second["date"] = pd.Timestamp("2099-01-01")
+    second["local_path"] = "/different/machine/taxonomy.parquet"
+
+    assert compute_taxonomy_version(first) == compute_taxonomy_version(second)
+
+
+def test_taxonomy_version_rejects_ephemeral_cluster_theme_ids():
+    from themes.dynamic_theme.stages.step08_memberships import compute_taxonomy_version
+
+    registry = pd.DataFrame({"theme_name": ["cluster_17"]})
+    with pytest.raises(ValueError, match="ephemeral"):
+        compute_taxonomy_version(registry)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

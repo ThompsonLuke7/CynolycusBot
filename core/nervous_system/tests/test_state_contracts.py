@@ -135,7 +135,7 @@ def theme_membership(
     state_id: UUID | None = None,
     **updates: Any,
 ) -> ThemeMembership:
-    payload = _envelope(StateType.THEME, theme_id, state_id=state_id)
+    payload = _envelope(StateType.THEME_MEMBERSHIP, theme_id, state_id=state_id)
     payload.update(
         {
             "ticker": ticker,
@@ -577,7 +577,7 @@ def test_theme_membership_is_an_envelope_and_state_ids_match_hashes():
         freshness_profile="test@1",
     )
     assert isinstance(membership, StateEnvelope)
-    assert membership.state_type is StateType.THEME
+    assert membership.state_type is StateType.THEME_MEMBERSHIP
     assert snapshot.state_ids == (membership.state_id,)
     assert len(snapshot.state_ids) == len(snapshot.state_hashes) == 1
 
