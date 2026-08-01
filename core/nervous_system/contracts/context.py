@@ -309,6 +309,8 @@ class ContextSnapshot(ContractModel):
     @model_validator(mode="after")
     def validate_hash_references(self) -> ContextSnapshot:
         if self.uses_extended_evidence:
+            if self.decision_bar is None:
+                raise ValueError("extended evidence requires decision_bar")
             for field_name in ("strategy_id", "ticker", "freshness_profile"):
                 value = getattr(self, field_name)
                 if not isinstance(value, str) or not value.strip():

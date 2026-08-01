@@ -5,7 +5,12 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
-from core.nervous_system.contracts.context import ContextSnapshot, FreshnessResult, StateRequest
+from core.nervous_system.contracts.context import (
+    ContextSnapshot,
+    FreshnessResult,
+    RejectedCandidate,
+    StateRequest,
+)
 from core.nervous_system.contracts.base import ContractModel, content_hash
 from core.nervous_system.contracts.enums import (
     AssetClass,
@@ -428,6 +433,81 @@ def test_legacy_snapshot_without_decision_bar_remains_backward_compatible():
     )
     assert snapshot.decision_bar is None
     assert snapshot.uses_extended_evidence is False
+
+
+_EXTENDED_EVIDENCE_WITHOUT_BAR_CASES = (
+    pytest.param({"freshness_profile_hash": "a" * 64}, id="profile-hash"),
+    pytest.param({"decision_session": "2026-07-30"}, id="decision-session"),
+    pytest.param(
+        {
+            "requirement_results": (
+                FreshnessResult(
+                    state_type=StateType.TICKER,
+                    entity_id="AMD",
+                    required=True,
+                    status="MISSING",
+                    selected_state_id=None,
+                    age_seconds=None,
+                    max_age_seconds=21_600.0,
+                    reason_code="MISSING_REQUIRED_STATE",
+                ),
+            )
+        },
+        id="requirements",
+    ),
+    pytest.param(
+        {
+            "rejected_candidates": (
+                RejectedCandidate(
+                    state_id=UUID("00000000-0000-0000-0000-000000000015"),
+                    state_type=StateType.TICKER,
+                    entity_id="AMD",
+                    reason_code="FUTURE_BAR",
+                ),
+            )
+        },
+        id="rejections",
+    ),
+    pytest.param({"valid": False}, id="invalid"),
+)
+
+
+@pytest.mark.parametrize("extended_evidence", _EXTENDED_EVIDENCE_WITHOUT_BAR_CASES)
+def test_from_states_rejects_extended_evidence_without_decision_bar(extended_evidence):
+    with pytest.raises(ValueError, match="extended evidence requires decision_bar"):
+        ContextSnapshot.from_states(
+            snapshot_id=uuid4(),
+            decision_time=DECISION_TIME,
+            decision_bar=None,
+            strategy_id="meta_ranker",
+            ticker="AMD",
+            states=(),
+            freshness_profile="test@1",
+            **extended_evidence,
+        )
+
+
+@pytest.mark.parametrize("extended_evidence", _EXTENDED_EVIDENCE_WITHOUT_BAR_CASES)
+def test_model_validate_rejects_extended_evidence_without_decision_bar(
+    extended_evidence,
+):
+    seed = ContextSnapshot.from_states(
+        snapshot_id=uuid4(),
+        decision_time=DECISION_TIME,
+        decision_bar=DECISION_TIME - timedelta(minutes=20),
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(),
+        freshness_profile="test@1",
+        **extended_evidence,
+    )
+    payload = seed.model_dump(mode="python")
+    payload["decision_bar"] = None
+    unvalidated = ContextSnapshot.model_construct(**payload)
+    payload["content_hash"] = unvalidated.computed_content_hash()
+
+    with pytest.raises(ValidationError, match="extended evidence requires decision_bar"):
+        ContextSnapshot.model_validate(payload)
 
 
 def test_snapshot_normalizes_non_utc_decision_time_before_hashing():

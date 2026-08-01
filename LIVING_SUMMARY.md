@@ -1174,3 +1174,7 @@ Correction RED `5 failed/5 passed`; focused GREEN `10 passed`; full disposable-P
 {2026-08-01 17:00 EDT} {agent: Codex} {nervous system Task 13 formal correction round 1}
 Atomic concurrent snapshots, decision-chain reuse, explicit version ties, effective membership windows, exact prior-session market policy, metadata hashing, and extended snapshot validation are TDD-covered.
 Focused `30`, affected `66`, and disposable-PostgreSQL core `388` passed; compileall/diff-check clean; no commit or persistent/live path access.
+
+{2026-08-01 17:14 EDT} {agent: Codex} {nervous system Task 13 correction round 2}
+Extended snapshot evidence now requires a decision bar at construction and deserialization; original no-evidence legacy snapshots remain compatible.
+RED `10 failed`; affected/focused `86` and disposable-PostgreSQL core `398` passed; compileall/diff-check clean; no commit or persistent/live access.
