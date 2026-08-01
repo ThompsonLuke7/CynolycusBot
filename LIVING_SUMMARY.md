@@ -1162,3 +1162,11 @@ Focused `221+1 skipped`, dealer `235+1 skipped`, and disposable-PostgreSQL core 
 {2026-08-01 15:58 EDT} {agent: Codex} {nervous system Task 12 completion}
 Task 12 passed final fresh scoped LUNA review with zero Critical/Important/Minor findings after five correction rounds; adapters and durable local-first broker backup are approved.
 Final head `d0c10fd`; focused `221`, dealer `235`, exact replay `2,022/2,022`, and disposable-PostgreSQL core `252` passed. Next is Task 13 snapshots.
+
+{2026-08-01 16:00 EDT} {agent: Codex} {nervous system Task 13 handoff}
+Task 13 snapshot builder/profile implementation and evidence tests are preserved uncommitted; focused disposable-DB GREEN is `6 passed`, with prior full core `258 passed` and DB-free `218 passed/40 skipped`.
+Report written with RED/GREEN evidence, policy-value and bar-bound classification concerns, and confirmation that persistent DB/live paths were untouched.
+
+{2026-08-01 16:30 EDT} {agent: Codex} {nervous system Task 13 correction round 1}
+Closed controller concerns with TDD: bar-bound types are explicit, optional context covers memberships/events/pressure/dealer, sector/theme/catalyst relevance is exact, and session-safe MVP freshness defaults are versioned.
+Correction RED `5 failed/5 passed`; focused GREEN `10 passed`; full disposable-PostgreSQL core `262 passed`; compileall/diff-check clean; no commit or persistent/live path access.

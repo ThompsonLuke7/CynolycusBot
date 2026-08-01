@@ -433,6 +433,53 @@ class StateRepository:
         )
         return None if row is None else _contract_from_payload(row)
 
+    def get_state_candidates_for_snapshot(
+        self,
+        state_types: Sequence[StateType],
+        decision_time: datetime,
+    ) -> tuple[StateEnvelope, ...]:
+        """Load the causal candidate pool in one query.
+
+        Availability is the only time predicate applied in SQL.  Expiry and
+        bar-bound checks intentionally remain in the pure snapshot selector so
+        the builder can retain deterministic rejection evidence.  Rows that
+        were not yet available at the decision time are excluded here; that
+        keeps a later append from changing an already-built snapshot payload.
+        """
+
+        _validate_aware(decision_time, "decision_time")
+        normalized_types = tuple(dict.fromkeys(state_types))
+        if not normalized_types:
+            return ()
+        if any(not isinstance(state_type, StateType) for state_type in normalized_types):
+            raise ValueError("state_types must contain only StateType values")
+        type_conditions = [_state_type_query_condition(state_type) for state_type in normalized_types]
+        stmt = (
+            select(StateRecord)
+            .where(
+                or_(*type_conditions),
+                StateRecord.available_at <= decision_time,
+            )
+            .order_by(
+                StateRecord.state_type.asc(),
+                StateRecord.entity_id.asc(),
+                StateRecord.available_at.desc(),
+                StateRecord.generated_at.desc(),
+                StateRecord.state_id.desc(),
+            )
+        )
+        rows = self._session.execute(stmt).scalars().all()
+        return tuple(_contract_from_payload(row) for row in rows)
+
+    def load_state_candidates(
+        self,
+        state_types: Sequence[StateType],
+        decision_time: datetime,
+    ) -> tuple[StateEnvelope, ...]:
+        """Compatibility alias for the one-query snapshot candidate loader."""
+
+        return self.get_state_candidates_for_snapshot(state_types, decision_time)
+
     def get_latest_valid_state(
         self,
         state_type: StateType,
@@ -556,3 +603,34 @@ class StateRepository:
         self._session.add(row)
         self._session.flush()
         return snapshot
+
+    def get_context_snapshot(self, snapshot_id: UUID) -> ContextSnapshot | None:
+        """Load and validate one persisted snapshot without changing the transaction."""
+
+        row = self._session.get(ContextSnapshotRow, snapshot_id)
+        if row is None:
+            return None
+        snapshot = ContextSnapshot.model_validate(row.payload)
+        if snapshot.snapshot_id != row.snapshot_id:
+            raise ValueError("snapshot payload snapshot_id does not match relational snapshot_id")
+        if snapshot.content_hash != row.content_hash:
+            raise ValueError("snapshot content_hash does not match relational content_hash")
+        if snapshot.decision_time != row.decision_time:
+            raise ValueError("snapshot decision_time does not match relational column")
+        if snapshot.strategy_id != row.strategy_id or snapshot.ticker != row.ticker:
+            raise ValueError("snapshot identity does not match relational columns")
+        if snapshot.freshness_profile != row.freshness_profile:
+            raise ValueError("snapshot freshness_profile does not match relational column")
+        if snapshot.content_hash != snapshot.computed_content_hash():
+            raise ValueError("snapshot content_hash does not match content")
+        return snapshot
+
+    def save_context_snapshot_idempotently(self, snapshot: ContextSnapshot) -> ContextSnapshot:
+        """Persist a snapshot or return the identical existing snapshot."""
+
+        existing = self.get_context_snapshot(snapshot.snapshot_id)
+        if existing is not None:
+            if existing.content_hash != snapshot.content_hash:
+                raise ValueError("snapshot identity already exists with different content")
+            return existing
+        return self.save_context_snapshot(snapshot)

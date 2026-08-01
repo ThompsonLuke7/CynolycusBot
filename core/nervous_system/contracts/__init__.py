@@ -40,7 +40,13 @@ from .enums import (
     TickerSetup,
 )
 from .quality import DataQualityIssue, DataQualitySummary, LineageRef
-from .context import ContextSnapshot, FreshnessResult, FreshnessStatus, StateRequest
+from .context import (
+    ContextSnapshot,
+    FreshnessResult,
+    FreshnessStatus,
+    RejectedCandidate,
+    StateRequest,
+)
 from .states import (
     CatalystEvent,
     CatalystPressure,
@@ -111,6 +117,7 @@ __all__ = [
     "PortfolioPosition",
     "PortfolioState",
     "ReadinessState",
+    "RejectedCandidate",
     "SectorState",
     "StateContract",
     "StateEnvelope",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 from uuid import UUID
 
@@ -45,6 +46,15 @@ class FreshnessResult(ContractModel):
     reason_code: str
 
 
+class RejectedCandidate(ContractModel):
+    """Evidence for a causal state candidate that was not selected."""
+
+    state_id: UUID
+    state_type: StateType
+    entity_id: str
+    reason_code: str
+
+
 class _SnapshotHashMaterial(ContractModel):
     decision_time: UtcDatetime
     strategy_id: str
@@ -53,6 +63,27 @@ class _SnapshotHashMaterial(ContractModel):
     state_hashes: tuple[str, ...]
     stale_inputs: tuple[str, ...]
     missing_inputs: tuple[str, ...]
+    data_quality: DataQualitySummary
+    config_version: str
+    model_versions: tuple[str, ...]
+    feature_versions: tuple[str, ...]
+    schema_version: PositiveSchemaVersion
+
+
+class _ExtendedSnapshotHashMaterial(ContractModel):
+    decision_time: UtcDatetime
+    decision_bar: UtcDatetime | None
+    decision_session: str | None
+    strategy_id: str
+    ticker: str
+    freshness_profile: str
+    freshness_profile_hash: str
+    state_hashes: tuple[str, ...]
+    stale_inputs: tuple[str, ...]
+    missing_inputs: tuple[str, ...]
+    rejected_candidates: tuple[RejectedCandidate, ...]
+    requirement_results: tuple[FreshnessResult, ...]
+    valid: bool
     data_quality: DataQualitySummary
     config_version: str
     model_versions: tuple[str, ...]
@@ -94,6 +125,49 @@ def _snapshot_hash_material(
     )
 
 
+def _extended_snapshot_hash_material(
+    *,
+    decision_time: UtcDatetime,
+    decision_bar: UtcDatetime | None,
+    decision_session: str | None,
+    strategy_id: str,
+    ticker: str,
+    freshness_profile: str,
+    freshness_profile_hash: str,
+    state_hashes: tuple[str, ...],
+    stale_inputs: tuple[str, ...],
+    missing_inputs: tuple[str, ...],
+    rejected_candidates: tuple[RejectedCandidate, ...],
+    requirement_results: tuple[FreshnessResult, ...],
+    valid: bool,
+    data_quality: DataQualitySummary,
+    config_version: str,
+    model_versions: tuple[str, ...],
+    feature_versions: tuple[str, ...],
+    schema_version: PositiveSchemaVersion,
+) -> _ExtendedSnapshotHashMaterial:
+    return _ExtendedSnapshotHashMaterial(
+        decision_time=decision_time,
+        decision_bar=decision_bar,
+        decision_session=decision_session,
+        strategy_id=strategy_id,
+        ticker=ticker,
+        freshness_profile=freshness_profile,
+        freshness_profile_hash=freshness_profile_hash,
+        state_hashes=state_hashes,
+        stale_inputs=stale_inputs,
+        missing_inputs=missing_inputs,
+        rejected_candidates=rejected_candidates,
+        requirement_results=requirement_results,
+        valid=valid,
+        data_quality=data_quality,
+        config_version=config_version,
+        model_versions=model_versions,
+        feature_versions=feature_versions,
+        schema_version=schema_version,
+    )
+
+
 _DISPATCH = {
     MarketState: "market_state",
     SectorState: "sector_states",
@@ -116,6 +190,9 @@ class ContextSnapshot(ContractModel):
     strategy_id: str
     ticker: str
     freshness_profile: str
+    freshness_profile_hash: str = ""
+    decision_bar: UtcDatetime | None = None
+    decision_session: str | None = None
     market_state: MarketState | None = None
     sector_states: tuple[SectorState, ...] = ()
     theme_memberships: tuple[ThemeMembership, ...] = ()
@@ -130,6 +207,9 @@ class ContextSnapshot(ContractModel):
     state_hashes: tuple[str, ...] = ()
     stale_inputs: tuple[str, ...] = ()
     missing_inputs: tuple[str, ...] = ()
+    rejected_candidates: tuple[RejectedCandidate, ...] = ()
+    requirement_results: tuple[FreshnessResult, ...] = ()
+    valid: bool = True
     data_quality: DataQualitySummary = Field(default_factory=DataQualitySummary)
     config_version: str = "UNKNOWN"
     model_versions: tuple[str, ...] = ()
@@ -138,6 +218,29 @@ class ContextSnapshot(ContractModel):
     content_hash: str
 
     def computed_content_hash(self) -> str:
+        if self.uses_extended_evidence:
+            return content_hash(
+                _extended_snapshot_hash_material(
+                    decision_time=self.decision_time,
+                    decision_bar=self.decision_bar,
+                    decision_session=self.decision_session,
+                    strategy_id=self.strategy_id,
+                    ticker=self.ticker,
+                    freshness_profile=self.freshness_profile,
+                    freshness_profile_hash=self.freshness_profile_hash,
+                    state_hashes=self.state_hashes,
+                    stale_inputs=self.stale_inputs,
+                    missing_inputs=self.missing_inputs,
+                    rejected_candidates=self.rejected_candidates,
+                    requirement_results=self.requirement_results,
+                    valid=self.valid,
+                    data_quality=self.data_quality,
+                    config_version=self.config_version,
+                    model_versions=self.model_versions,
+                    feature_versions=self.feature_versions,
+                    schema_version=self.schema_version,
+                )
+            )
         return content_hash(
             _snapshot_hash_material(
                 decision_time=self.decision_time,
@@ -155,8 +258,60 @@ class ContextSnapshot(ContractModel):
             )
         )
 
+    @property
+    def uses_extended_evidence(self) -> bool:
+        return bool(
+            self.freshness_profile_hash
+            or self.decision_bar is not None
+            or self.decision_session is not None
+            or self.rejected_candidates
+            or self.requirement_results
+            or not self.valid
+        )
+
+    @property
+    def is_valid(self) -> bool:
+        return self.valid
+
+    @property
+    def profile_hash(self) -> str:
+        return self.freshness_profile_hash
+
+    @property
+    def requirements(self) -> tuple[FreshnessResult, ...]:
+        return self.requirement_results
+
+    @property
+    def freshness_results(self) -> tuple[FreshnessResult, ...]:
+        return self.requirement_results
+
+    @property
+    def rejected_state_ids(self) -> tuple[UUID, ...]:
+        return tuple(item.state_id for item in self.rejected_candidates)
+
+    @property
+    def rejected_candidate_ids(self) -> tuple[UUID, ...]:
+        return self.rejected_state_ids
+
+    @property
+    def rejected_reasons(self) -> tuple[str, ...]:
+        return tuple(item.reason_code for item in self.rejected_candidates)
+
+    @property
+    def warning_reasons(self) -> tuple[str, ...]:
+        return tuple(
+            result.reason_code
+            for result in self.requirement_results
+            if not result.required and result.status != "FRESH"
+        )
+
     @model_validator(mode="after")
     def validate_hash_references(self) -> ContextSnapshot:
+        if self.freshness_profile_hash and (
+            len(self.freshness_profile_hash) != 64
+            or re.fullmatch(r"[0-9a-fA-F]{64}", self.freshness_profile_hash) is None
+        ):
+            raise ValueError("freshness_profile_hash must be a SHA-256 hex string")
         if len(self.state_ids) != len(self.state_hashes):
             raise ValueError("state_ids and state_hashes must be one-to-one")
         if len(set(self.state_ids)) != len(self.state_ids):
@@ -186,6 +341,12 @@ class ContextSnapshot(ContractModel):
         freshness_profile: str,
         stale_inputs: tuple[str, ...] = (),
         missing_inputs: tuple[str, ...] = (),
+        freshness_profile_hash: str = "",
+        decision_bar: UtcDatetime | None = None,
+        decision_session: str | None = None,
+        rejected_candidates: tuple[RejectedCandidate, ...] = (),
+        requirement_results: tuple[FreshnessResult, ...] = (),
+        valid: bool = True,
     ) -> ContextSnapshot:
         normalized_decision_time = _UTC_DATETIME_ADAPTER.validate_python(decision_time)
         buckets: dict[str, list[StateContract]] = {
@@ -253,28 +414,62 @@ class ContextSnapshot(ContractModel):
         quality = DataQualitySummary(
             issues=tuple(issue for state in envelope_states for issue in state.data_quality.issues)
         )
-        snapshot_content_hash = content_hash(
-            _snapshot_hash_material(
-                decision_time=normalized_decision_time,
-                strategy_id=strategy_id,
-                ticker=ticker,
-                freshness_profile=freshness_profile,
-                state_hashes=tuple(state_hashes),
-                stale_inputs=stale_inputs,
-                missing_inputs=missing_inputs,
-                data_quality=quality,
-                config_version=config_version,
-                model_versions=versions["model_versions"],
-                feature_versions=versions["feature_versions"],
-                schema_version=1,
+        if (
+            freshness_profile_hash
+            or decision_bar is not None
+            or decision_session is not None
+            or rejected_candidates
+            or requirement_results
+            or not valid
+        ):
+            snapshot_content_hash = content_hash(
+                _extended_snapshot_hash_material(
+                    decision_time=normalized_decision_time,
+                    decision_bar=decision_bar,
+                    decision_session=decision_session,
+                    strategy_id=strategy_id,
+                    ticker=ticker,
+                    freshness_profile=freshness_profile,
+                    freshness_profile_hash=freshness_profile_hash,
+                    state_hashes=tuple(state_hashes),
+                    stale_inputs=stale_inputs,
+                    missing_inputs=missing_inputs,
+                    rejected_candidates=rejected_candidates,
+                    requirement_results=requirement_results,
+                    valid=valid,
+                    data_quality=quality,
+                    config_version=config_version,
+                    model_versions=versions["model_versions"],
+                    feature_versions=versions["feature_versions"],
+                    schema_version=1,
+                )
             )
-        )
+        else:
+            snapshot_content_hash = content_hash(
+                _snapshot_hash_material(
+                    decision_time=normalized_decision_time,
+                    strategy_id=strategy_id,
+                    ticker=ticker,
+                    freshness_profile=freshness_profile,
+                    state_hashes=tuple(state_hashes),
+                    stale_inputs=stale_inputs,
+                    missing_inputs=missing_inputs,
+                    data_quality=quality,
+                    config_version=config_version,
+                    model_versions=versions["model_versions"],
+                    feature_versions=versions["feature_versions"],
+                    schema_version=1,
+                )
+            )
         payload = {
             "snapshot_id": snapshot_id,
             "decision_time": normalized_decision_time,
             "strategy_id": strategy_id,
             "ticker": ticker,
             "freshness_profile": freshness_profile,
+            "freshness_profile_hash": freshness_profile_hash,
+            "decision_bar": decision_bar,
+            "decision_session": decision_session,
             "market_state": buckets["market_state"][0] if buckets["market_state"] else None,
             "sector_states": tuple(buckets["sector_states"]),
             "theme_memberships": tuple(buckets["theme_memberships"]),
@@ -289,6 +484,9 @@ class ContextSnapshot(ContractModel):
             "state_hashes": tuple(state_hashes),
             "stale_inputs": stale_inputs,
             "missing_inputs": missing_inputs,
+            "rejected_candidates": rejected_candidates,
+            "requirement_results": requirement_results,
+            "valid": valid,
             "data_quality": quality,
             "config_version": config_version,
             "model_versions": versions["model_versions"],
@@ -381,4 +579,10 @@ def _validate_ticker_scope(state: StateContract, ticker: str) -> None:
         )
 
 
-__all__ = ["ContextSnapshot", "FreshnessResult", "FreshnessStatus", "StateRequest"]
+__all__ = [
+    "ContextSnapshot",
+    "FreshnessResult",
+    "FreshnessStatus",
+    "RejectedCandidate",
+    "StateRequest",
+]
