@@ -9,7 +9,8 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import event, func, select
+from sqlalchemy import event, func, select, text
+from sqlalchemy.orm import Session
 
 from core.nervous_system.contracts.states import PortfolioState
 from core.nervous_system.data_registry.artifacts import register_artifact
@@ -39,6 +40,7 @@ from core.nervous_system.persistence.models import (
     ImportItem,
     ImportRun,
     ImportQuarantine,
+    LineageEdge,
     SourceArtifact,
     StateRecord,
 )
@@ -78,6 +80,26 @@ def write_manifest(
         encoding="utf-8",
     )
     return manifest
+
+
+def _save_running_import_run(session_factory, *, counts: dict[str, object]) -> str:
+    run_id = uuid4()
+    with session_factory() as session:
+        RegistryRepository(session).save_import_run(
+            ImportRunRecord(
+                import_run_id=run_id,
+                importer_version="legacy-operational-evidence@1",
+                started_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+                finished_at=None,
+                status="RUNNING",
+                counts=counts,
+            )
+        )
+        session.commit()
+    return run_id
+
+
+TASK8_IMPORT_ADVISORY_LOCK_KEY = 0x43594E4C4F474943
 
 
 @pytest.mark.postgres
@@ -129,6 +151,143 @@ def test_import_is_idempotent_and_preserves_bad_row(pg_uow_factory, tmp_path):
         assert quarantine_rows[0].raw_text == (
             '{"event":"signal_decision","module":"meta_ranker","bar":"not-a-time"}\n'
         )
+
+
+@pytest.mark.postgres
+def test_write_import_fails_fast_when_another_importer_holds_the_lock(
+    pg_uow_factory, session_factory, postgres_engine, tmp_path
+):
+    source = tmp_path / "audit.jsonl"
+    source.write_text(
+        '{"event":"signal_decision","bar":"2026-07-29T18:00:00Z",'
+        '"observed_at":"2026-07-29T18:00:01Z"}\n',
+        encoding="utf-8",
+    )
+    manifest = write_manifest(tmp_path, source, kind="meta_signal_audit")
+    active_run_id = _save_running_import_run(
+        session_factory,
+        counts={"discovered_artifacts": 1, "parsed": 7, "imported": 3},
+    )
+    with session_factory() as session:
+        run_ids_before = set(session.scalars(select(ImportRun.import_run_id)).all())
+
+    holder = postgres_engine.connect()
+    try:
+        assert holder.scalar(
+            text("SELECT pg_try_advisory_lock(:lock_key)"),
+            {"lock_key": TASK8_IMPORT_ADVISORY_LOCK_KEY},
+        ) is True
+        with pytest.raises(RuntimeError, match="another importer holds the lock"):
+            import_manifest(manifest, pg_uow_factory, dry_run=False)
+    finally:
+        # Returning a pooled connection is not process-style death: the
+        # backend would remain alive with its session advisory lock.  Force
+        # the physical connection closed so PostgreSQL releases the lock.
+        holder.invalidate()
+        holder.close()
+
+    with session_factory() as session:
+        run_ids_after = set(session.scalars(select(ImportRun.import_run_id)).all())
+        active_run = session.get(ImportRun, active_run_id)
+        assert run_ids_after == run_ids_before
+        assert active_run is not None
+        assert active_run.status == "RUNNING"
+        assert active_run.finished_at is None
+        assert active_run.counts == {
+            "discovered_artifacts": 1,
+            "parsed": 7,
+            "imported": 3,
+        }
+
+
+@pytest.mark.postgres
+def test_released_connection_recovers_stale_run_and_rerun_adds_no_authoritative_rows(
+    pg_uow_factory, session_factory, postgres_engine, tmp_path
+):
+    source = tmp_path / "audit.jsonl"
+    source.write_text(
+        '{"event":"signal_decision","bar":"2026-07-29T18:00:00Z",'
+        '"observed_at":"2026-07-29T18:00:01Z"}\n',
+        encoding="utf-8",
+    )
+    manifest = write_manifest(tmp_path, source, kind="meta_signal_audit")
+
+    interrupted_connection = postgres_engine.connect()
+    interrupted_session = Session(
+        bind=interrupted_connection,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    stale_run_id = uuid4()
+    try:
+        RegistryRepository(interrupted_session).save_import_run(
+            ImportRunRecord(
+                import_run_id=stale_run_id,
+                importer_version="legacy-operational-evidence@1",
+                started_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+                finished_at=None,
+                status="RUNNING",
+                counts={
+                    "discovered_artifacts": 2,
+                    "parsed": 11,
+                    "imported": 5,
+                    "quarantined": 1,
+                },
+            )
+        )
+        interrupted_session.commit()
+        assert interrupted_connection.scalar(
+            text("SELECT pg_try_advisory_lock(:lock_key)"),
+            {"lock_key": TASK8_IMPORT_ADVISORY_LOCK_KEY},
+        ) is True
+    finally:
+        interrupted_session.close()
+        interrupted_connection.invalidate()
+        interrupted_connection.close()
+
+    first = import_manifest(manifest, pg_uow_factory, dry_run=False)
+
+    with session_factory() as session:
+        recovered = session.get(ImportRun, stale_run_id)
+        completed = session.get(ImportRun, first.import_run_id)
+        assert recovered is not None
+        assert recovered.status == "FAILED"
+        assert recovered.finished_at is not None
+        assert recovered.counts["discovered_artifacts"] == 2
+        assert recovered.counts["parsed"] == 11
+        assert recovered.counts["imported"] == 5
+        assert recovered.counts["quarantined"] == 1
+        assert recovered.counts["recovery"] == {
+            "code": "STALE_RUNNING_IMPORT_RECOVERED",
+            "message": (
+                "A later importer invocation acquired the advisory lock and "
+                "reconciled this stale RUNNING run."
+            ),
+        }
+        assert completed is not None
+        assert completed.status == "COMPLETED"
+        assert completed.finished_at is not None
+
+        counts_before_rerun = {
+            "source_artifacts": session.scalar(select(func.count()).select_from(SourceArtifact)),
+            "import_items": session.scalar(select(func.count()).select_from(ImportItem)),
+            "quarantines": session.scalar(select(func.count()).select_from(ImportQuarantine)),
+            "lineage_edges": session.scalar(select(func.count()).select_from(LineageEdge)),
+        }
+
+    second = import_manifest(manifest, pg_uow_factory, dry_run=False)
+
+    assert first.imported == 1
+    assert second.imported == 0
+    assert second.duplicates == 1
+    with session_factory() as session:
+        counts_after_rerun = {
+            "source_artifacts": session.scalar(select(func.count()).select_from(SourceArtifact)),
+            "import_items": session.scalar(select(func.count()).select_from(ImportItem)),
+            "quarantines": session.scalar(select(func.count()).select_from(ImportQuarantine)),
+            "lineage_edges": session.scalar(select(func.count()).select_from(LineageEdge)),
+        }
+        assert counts_after_rerun == counts_before_rerun
 
 
 def test_register_artifact_streams_bytes_and_does_not_use_mtime(tmp_path, monkeypatch):

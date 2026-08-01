@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import tomllib
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import create_engine
-from sqlalchemy.engine import make_url
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Connection, Engine, make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
@@ -47,10 +48,20 @@ from core.nervous_system.persistence.uow import UnitOfWork
 
 
 IMPORT_BATCH_SIZE = 1000
+IMPORT_ADVISORY_LOCK_KEY = 0x43594E4C4F474943
+STALE_RUN_RECOVERY_CODE = "STALE_RUNNING_IMPORT_RECOVERED"
+STALE_RUN_RECOVERY_MESSAGE = (
+    "A later importer invocation acquired the advisory lock and reconciled "
+    "this stale RUNNING run."
+)
 
 
 class SourceMutationError(ValueError):
     """Raised when the path no longer represents the registered bytes."""
+
+
+class ImportAlreadyRunningError(RuntimeError):
+    """Raised when another write-mode importer already owns the lock."""
 
 
 @dataclass(frozen=True)
@@ -146,6 +157,72 @@ OPERATIONAL_ROOTS = (
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _engine_for_uow_factory(uow_factory: Callable[[], UnitOfWork]) -> Engine:
+    """Resolve the factory's engine without borrowing its session connection."""
+
+    with uow_factory() as probe:
+        bind = probe.session.get_bind()
+    engine = getattr(bind, "engine", bind)
+    if not isinstance(engine, Engine):
+        raise TypeError("write-mode historical import requires a SQLAlchemy engine")
+    return engine
+
+
+def _acquire_import_advisory_lock(connection: Connection) -> None:
+    if connection.dialect.name != "postgresql":
+        raise ValueError("write-mode historical import requires PostgreSQL")
+    acquired = connection.scalar(
+        text("SELECT pg_try_advisory_lock(:lock_key)"),
+        {"lock_key": IMPORT_ADVISORY_LOCK_KEY},
+    )
+    if acquired is not True:
+        raise ImportAlreadyRunningError("another importer holds the lock")
+    # ``pg_try_advisory_lock`` is session-scoped, so it survives this commit.
+    # End the implicit transaction opened by the lock query before binding a
+    # SQLAlchemy Session to the external connection; otherwise Session.commit
+    # would leave that outer transaction open and connection teardown could
+    # roll back the import.
+    connection.commit()
+
+
+def _pinned_uow(connection: Connection) -> UnitOfWork:
+    sessions = sessionmaker(
+        bind=connection,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    return UnitOfWork(sessions)
+
+
+@contextmanager
+def _import_connection(
+    uow_factory: Callable[[], UnitOfWork],
+    *,
+    dry_run: bool,
+) -> Iterator[Connection | None]:
+    """Hold the importer lock on the same connection used by every batch."""
+
+    if dry_run:
+        yield None
+        return
+    engine = _engine_for_uow_factory(uow_factory)
+    with engine.connect() as connection:
+        _acquire_import_advisory_lock(connection)
+        try:
+            yield connection
+        finally:
+            try:
+                connection.scalar(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": IMPORT_ADVISORY_LOCK_KEY},
+                )
+                connection.commit()
+            except SQLAlchemyError:
+                # A broken connection is sufficient for PostgreSQL to release
+                # its session-level lock when the backend disappears.
+                connection.invalidate()
 
 
 def load_manifest(path: Path) -> tuple[SourceSpec, ...]:
@@ -589,79 +666,35 @@ def import_manifest(
     if limit is not None and limit <= 0:
         raise ValueError("limit must be positive when supplied")
     manifest_path = Path(path)
-    specs = load_manifest(manifest_path)
-    discovery_root = _manifest_root(manifest_path, specs)
-    if source_kind is None:
-        compare_operational_discovery(
-            discovery_root,
-            manifest_path,
-            require_complete=True,
-        )
-    discovered = discover_manifest_sources(
-        manifest_path,
-        root=discovery_root,
-        source_kind=source_kind,
-    )
-    run_id = uuid4()
-    counts = {
-        "discovered_artifacts": len({item.path for item in discovered}),
-        "parsed": 0,
-        "imported": 0,
-        "duplicates": 0,
-        "skipped": 0,
-        "quarantined": 0,
-    }
-    registered = [(item, register_artifact(item.path)) for item in discovered]
-    source_hashes = [artifact.sha256 for _, artifact in registered]
-
-    if dry_run:
-        records_seen = 0
-        stop = False
-        for item, expected_artifact in registered:
-            if stop:
-                break
-            with snapshot_artifact(item.path) as (artifact, source_file):
-                if artifact.sha256 != expected_artifact.sha256 or artifact.byte_size != expected_artifact.byte_size:
-                    raise SourceMutationError(
-                        f"source artifact changed during import: {item.path} changed before parsing"
-                    )
-                for event in iter_source_events(item.path, source_file=source_file):
-                    if limit is not None and records_seen >= limit:
-                        stop = True
-                        break
-                    records_seen += 1
-                    _validate_event_for_dry_run(event, item=item, counts=counts)
-                _verify_source_unchanged(item.path, expected_artifact)
-        return ImportSummary(
-            discovered_artifacts=counts["discovered_artifacts"],
-            parsed=counts["parsed"],
-            imported=counts["imported"],
-            duplicates=counts["duplicates"],
-            skipped=counts["skipped"],
-            quarantined=counts["quarantined"],
-            source_hashes=tuple(sorted(set(source_hashes))),
-            import_run_id=run_id,
-        )
-
-    started_at = _now()
-    run_saved = False
-    with uow_factory() as uow:
-        uow.registry.save_import_run(
-            ImportRunRecord(
-                import_run_id=run_id,
-                importer_version=IMPORTER_VERSION,
-                started_at=started_at,
-                finished_at=None,
-                status="RUNNING",
-                counts=counts,
+    with _import_connection(uow_factory, dry_run=dry_run) as pinned_connection:
+        specs = load_manifest(manifest_path)
+        discovery_root = _manifest_root(manifest_path, specs)
+        if source_kind is None:
+            compare_operational_discovery(
+                discovery_root,
+                manifest_path,
+                require_complete=True,
             )
+        discovered = discover_manifest_sources(
+            manifest_path,
+            root=discovery_root,
+            source_kind=source_kind,
         )
-        uow.commit()
-        run_saved = True
-        committed_counts = dict(counts)
-        records_seen = 0
-        stop = False
-        try:
+        run_id = uuid4()
+        counts = {
+            "discovered_artifacts": len({item.path for item in discovered}),
+            "parsed": 0,
+            "imported": 0,
+            "duplicates": 0,
+            "skipped": 0,
+            "quarantined": 0,
+        }
+        registered = [(item, register_artifact(item.path)) for item in discovered]
+        source_hashes = [artifact.sha256 for _, artifact in registered]
+
+        if dry_run:
+            records_seen = 0
+            stop = False
             for item, expected_artifact in registered:
                 if stop:
                     break
@@ -673,52 +706,14 @@ def import_manifest(
                         raise SourceMutationError(
                             f"source artifact changed during import: {item.path} changed before parsing"
                         )
-                    source_record = uow.registry.insert_source_artifact_if_absent(
-                        SourceArtifactRecord(
-                            uri=artifact.uri,
-                            sha256=artifact.sha256,
-                            byte_size=artifact.byte_size,
-                            source_kind=item.spec.kind,
-                            discovered_at=started_at,
-                            metadata={
-                                "manifest_glob": item.spec.glob,
-                                "adapter": item.spec.adapter,
-                                "format": item.path.suffix.lower().lstrip("."),
-                            },
-                        )
-                    )
-                    pending: list[_PendingImport] = []
                     for event in iter_source_events(item.path, source_file=source_file):
                         if limit is not None and records_seen >= limit:
                             stop = True
                             break
                         records_seen += 1
-                        try:
-                            pending.append(
-                                _pending_from_event(
-                                    event,
-                                    item=item,
-                                    artifact=artifact,
-                                    source_record=source_record,
-                                    run_id=run_id,
-                                    uow=uow,
-                                    counts=counts,
-                                )
-                            )
-                        except StopIteration:
-                            continue
-                        if len(pending) >= IMPORT_BATCH_SIZE:
-                            _flush_batch(uow, pending, counts)
-                            uow.registry.update_import_run_progress(run_id, counts)
-                            uow.commit()
-                            committed_counts = dict(counts)
-                    _flush_batch(uow, pending, counts)
+                        _validate_event_for_dry_run(event, item=item, counts=counts)
                     _verify_source_unchanged(item.path, expected_artifact)
-                uow.registry.update_import_run_progress(run_id, counts)
-                uow.commit()
-                committed_counts = dict(counts)
-
-            summary = ImportSummary(
+            return ImportSummary(
                 discovered_artifacts=counts["discovered_artifacts"],
                 parsed=counts["parsed"],
                 imported=counts["imported"],
@@ -728,26 +723,123 @@ def import_manifest(
                 source_hashes=tuple(sorted(set(source_hashes))),
                 import_run_id=run_id,
             )
-            uow.registry.finish_import_run(
-                run_id,
-                finished_at=_now(),
-                status="COMPLETED",
-                counts=summary.counts(),
+
+        if pinned_connection is None:
+            raise RuntimeError("write-mode import did not receive a pinned connection")
+        started_at = _now()
+        run_saved = False
+        with _pinned_uow(pinned_connection) as uow:
+            uow.registry.recover_stale_import_runs(
+                importer_version=IMPORTER_VERSION,
+                finished_at=started_at,
+                recovery_reason={
+                    "code": STALE_RUN_RECOVERY_CODE,
+                    "message": STALE_RUN_RECOVERY_MESSAGE,
+                },
             )
             uow.commit()
-            return summary
-        except Exception as exc:
-            if run_saved:
-                uow.rollback()
-                failure_counts = {**committed_counts, "error": str(exc)}
+            uow.registry.save_import_run(
+                ImportRunRecord(
+                    import_run_id=run_id,
+                    importer_version=IMPORTER_VERSION,
+                    started_at=started_at,
+                    finished_at=None,
+                    status="RUNNING",
+                    counts=counts,
+                )
+            )
+            uow.commit()
+            run_saved = True
+            committed_counts = dict(counts)
+            records_seen = 0
+            stop = False
+            try:
+                for item, expected_artifact in registered:
+                    if stop:
+                        break
+                    with snapshot_artifact(item.path) as (artifact, source_file):
+                        if (
+                            artifact.sha256 != expected_artifact.sha256
+                            or artifact.byte_size != expected_artifact.byte_size
+                        ):
+                            raise SourceMutationError(
+                                f"source artifact changed during import: {item.path} changed before parsing"
+                            )
+                        source_record = uow.registry.insert_source_artifact_if_absent(
+                            SourceArtifactRecord(
+                                uri=artifact.uri,
+                                sha256=artifact.sha256,
+                                byte_size=artifact.byte_size,
+                                source_kind=item.spec.kind,
+                                discovered_at=started_at,
+                                metadata={
+                                    "manifest_glob": item.spec.glob,
+                                    "adapter": item.spec.adapter,
+                                    "format": item.path.suffix.lower().lstrip("."),
+                                },
+                            )
+                        )
+                        pending: list[_PendingImport] = []
+                        for event in iter_source_events(item.path, source_file=source_file):
+                            if limit is not None and records_seen >= limit:
+                                stop = True
+                                break
+                            records_seen += 1
+                            try:
+                                pending.append(
+                                    _pending_from_event(
+                                        event,
+                                        item=item,
+                                        artifact=artifact,
+                                        source_record=source_record,
+                                        run_id=run_id,
+                                        uow=uow,
+                                        counts=counts,
+                                    )
+                                )
+                            except StopIteration:
+                                continue
+                            if len(pending) >= IMPORT_BATCH_SIZE:
+                                _flush_batch(uow, pending, counts)
+                                uow.registry.update_import_run_progress(run_id, counts)
+                                uow.commit()
+                                committed_counts = dict(counts)
+                        _flush_batch(uow, pending, counts)
+                        _verify_source_unchanged(item.path, expected_artifact)
+                    uow.registry.update_import_run_progress(run_id, counts)
+                    uow.commit()
+                    committed_counts = dict(counts)
+
+                summary = ImportSummary(
+                    discovered_artifacts=counts["discovered_artifacts"],
+                    parsed=counts["parsed"],
+                    imported=counts["imported"],
+                    duplicates=counts["duplicates"],
+                    skipped=counts["skipped"],
+                    quarantined=counts["quarantined"],
+                    source_hashes=tuple(sorted(set(source_hashes))),
+                    import_run_id=run_id,
+                )
                 uow.registry.finish_import_run(
                     run_id,
                     finished_at=_now(),
-                    status="FAILED",
-                    counts=failure_counts,
+                    status="COMPLETED",
+                    counts=summary.counts(),
                 )
                 uow.commit()
-            raise
+                return summary
+            except Exception as exc:
+                if run_saved:
+                    uow.rollback()
+                    failure_counts = {**committed_counts, "error": str(exc)}
+                    uow.registry.finish_import_run(
+                        run_id,
+                        finished_at=_now(),
+                        status="FAILED",
+                        counts=failure_counts,
+                    )
+                    uow.commit()
+                raise
 
 
 def _uow_factory_for_database(database_url: str) -> tuple[Callable[[], UnitOfWork], Any]:
@@ -792,7 +884,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         finally:
             engine.dispose()
-    except (OSError, ValueError, SQLAlchemyError) as exc:
+    except (OSError, ValueError, SQLAlchemyError, ImportAlreadyRunningError) as exc:
         message = str(exc)
         redacted_url = redact_database_url(args.database_url)
         message = message.replace(args.database_url, redacted_url)
@@ -808,10 +900,14 @@ if __name__ == "__main__":
 __all__ = [
     "DiscoveryComparison",
     "IMPORT_BATCH_SIZE",
+    "IMPORT_ADVISORY_LOCK_KEY",
+    "ImportAlreadyRunningError",
     "ImportSummary",
     "OPERATIONAL_ROOTS",
     "SourceMutationError",
     "SourceSpec",
+    "STALE_RUN_RECOVERY_CODE",
+    "STALE_RUN_RECOVERY_MESSAGE",
     "compare_operational_discovery",
     "discover_manifest_sources",
     "import_manifest",

@@ -499,6 +499,52 @@ class RegistryRepository:
         row.counts = dict(counts)
         self._session.flush()
 
+    def recover_stale_import_runs(
+        self,
+        *,
+        importer_version: str,
+        finished_at: datetime,
+        recovery_reason: Mapping[str, Any],
+    ) -> tuple[ImportRunRecord, ...]:
+        """Mark prior ``RUNNING`` runs failed after the importer lock is held.
+
+        The caller must hold the importer-wide advisory lock before invoking
+        this method.  The lock makes every matching row stale rather than
+        concurrently active, while the row locks keep this reconciliation
+        deterministic inside the caller's transaction.
+        """
+
+        _validate_time(finished_at, "finished_at")
+        rows = self._session.scalars(
+            select(ImportRunRow)
+            .where(
+                ImportRunRow.importer_version == importer_version,
+                ImportRunRow.status == "RUNNING",
+            )
+            .order_by(ImportRunRow.started_at, ImportRunRow.import_run_id)
+            .with_for_update()
+        ).all()
+        recovered: list[ImportRunRecord] = []
+        for row in rows:
+            row_finished_at = max(finished_at, row.started_at)
+            counts = dict(row.counts or {})
+            counts["recovery"] = dict(recovery_reason)
+            row.finished_at = row_finished_at
+            row.status = "FAILED"
+            row.counts = counts
+            recovered.append(
+                ImportRunRecord(
+                    import_run_id=row.import_run_id,
+                    importer_version=row.importer_version,
+                    started_at=row.started_at,
+                    finished_at=row.finished_at,
+                    status=row.status,
+                    counts=row.counts,
+                )
+            )
+        self._session.flush()
+        return tuple(recovered)
+
     def save_import_quarantine(
         self, quarantine: ImportQuarantineRecord
     ) -> ImportQuarantineRecord:

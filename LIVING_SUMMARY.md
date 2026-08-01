@@ -1031,3 +1031,6 @@ Persisted 208 artifacts, 204,449 imported + 28,950 quarantined evidence rows, an
 {2026-07-31 09:48 ET} {agent: Codex} {nervous system Task 8 correction round 1}
 Closed discovery completeness, causal timestamp, PostgreSQL CLI, atomic identity, batching/resumability, source mutation, future leakage, portfolio fail-closed, bounded JSON, and reversible raw-text findings; correction report appended.
 Focused Task 8 `36 passed`; full nervous-system `218 passed`; canonical unbounded dry-run `208 artifacts / 233398 parsed / 204449 imported / 28950 quarantined` in `21.23s`; compileall/diff clean, no persistent-dev import.
+{2026-08-01 00:11 ET} {agent: Codex} {nervous system Task 8 correction round 2}
+Added deterministic PostgreSQL advisory-lock ownership on a dedicated pinned connection, stale `RUNNING` recovery with safe structured reason, explicit normal/failure unlock, and real disconnect/lock/idempotency regressions; Task 9+ and persistent `cynolycus` remain untouched.
+Focused `38 passed`; full nervous-system `220 passed`; compileall/diff clean. Exact RED/GREEN evidence is appended to `task-8-report.md`.
