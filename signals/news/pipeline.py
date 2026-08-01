@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -26,7 +27,12 @@ from signals.news.dedup import deduplicate_news
 from signals.news.earnings import enrich_earnings_catalyst_fields
 from signals.news.nlp import embed_texts_bge, finbert_scores_batch
 from signals.news.relations import classify_news_relations
-from signals.news.schema import empty_news_frame, records_from_frame
+from signals.news.schema import (
+    TIMESTAMP_SEMANTICS_VERSION,
+    add_observation_metadata,
+    empty_news_frame,
+    records_from_frame,
+)
 from signals.news.sources import (
     enrich_sec_8k_ex99_text,
     fetch_clinicaltrials_updates,
@@ -63,6 +69,10 @@ def collect_company_news(
     for a clean rebuild.
     """
     ensure_data_dirs()
+    # One observation timestamp describes the exact collection batch.  It is
+    # captured before any source call and is never replaced by event time,
+    # publication time, or a file timestamp.
+    batch_observed_at = datetime.now(timezone.utc)
     frames = []
     source_set = set(sources)
     if "finnhub" in source_set:
@@ -105,7 +115,11 @@ def collect_company_news(
         frames.append(fetch_yfinance_unusual_options_activity(tickers))
     if "fmp_transcripts" in source_set:
         frames.append(fetch_fmp_earnings_transcripts(tickers))
-    raw = pd.concat(frames, ignore_index=True) if frames else empty_news_frame()
+    raw = pd.concat([frame for frame in frames if not frame.empty], ignore_index=True) if any(
+        not frame.empty for frame in frames
+    ) else empty_news_frame()
+    if not raw.empty:
+        raw = add_observation_metadata(raw, observed_at=batch_observed_at)
     if not raw.empty:
         raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True, errors="coerce")
         start_ts = pd.Timestamp(start, tz="UTC")
@@ -114,19 +128,46 @@ def collect_company_news(
     if merge_with_existing and Path(output_path).exists():
         existing = pd.read_parquet(output_path)
         if not existing.empty:
-            existing_cols = set(existing.columns)
-            raw_cols = set(raw.columns)
-            shared = list(existing_cols & raw_cols)
-            raw = pd.concat([existing[shared], raw[shared]], ignore_index=True) if shared else raw
+            # Keep legacy and causal columns together.  Reusing only the
+            # intersection would silently discard metadata from either side.
+            raw = pd.concat([existing, raw], ignore_index=True, sort=False)
     out = deduplicate_news(raw)
     out = classify_source_quality(classify_catalyst_types(enrich_earnings_catalyst_fields(classify_news_relations(out))))
     out.to_parquet(output_path, index=False)
     return out
 
 
-def collect_news_from_csv(input_csv: Path | str, *, output_path: Path | str = NEWS_RECORDS_PATH) -> pd.DataFrame:
+def collect_news_from_csv(
+    input_csv: Path | str,
+    *,
+    output_path: Path | str = NEWS_RECORDS_PATH,
+    observed_at: datetime | str | None = None,
+    collection_time: datetime | str | None = None,
+) -> pd.DataFrame:
+    """Normalize CSV news while retaining unknown availability explicitly.
+
+    A caller may provide one aware collection time for the batch.  Without
+    it, the output keeps ``observed_at``/``available_at`` null so the catalyst
+    adapter can quarantine the row instead of inventing causality.
+    """
+
     ensure_data_dirs()
-    out = classify_source_quality(classify_catalyst_types(enrich_earnings_catalyst_fields(classify_news_relations(deduplicate_news(records_from_frame(pd.read_csv(input_csv), source="csv"))))))
+    out = classify_source_quality(
+        classify_catalyst_types(
+            enrich_earnings_catalyst_fields(
+                classify_news_relations(
+                    deduplicate_news(
+                        records_from_frame(
+                            pd.read_csv(input_csv),
+                            source="csv",
+                            observed_at=observed_at,
+                            collection_time=collection_time,
+                        )
+                    )
+                )
+            )
+        )
+    )
     out.to_parquet(output_path, index=False)
     return out
 

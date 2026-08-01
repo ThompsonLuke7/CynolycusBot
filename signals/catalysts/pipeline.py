@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -16,9 +18,23 @@ from signals.catalysts.config import (
 )
 from signals.events.config import EARNINGS_EVENTS_PATH, EVENT_FEATURES_PATH, MACRO_EVENTS_PATH
 from signals.news.config import NEWS_FEATURE_MATRIX_PATH, NEWS_RECORDS_PATH, NEWS_SCORES_PATH
-from signals.catalysts.earnings import build_earnings_result_catalysts
 from signals.events.forward_guidance.config import FEATURES_PATH as FORWARD_GUIDANCE_FEATURES_PATH
 from signals.events.forward_guidance.config import LABELS_PATH as FORWARD_GUIDANCE_LABELS_PATH
+
+from core.nervous_system.contracts.quality import LineageRef
+from signals.catalysts.nervous_system_adapter import publish_catalyst_states
+
+if TYPE_CHECKING:
+    from core.nervous_system.persistence.uow import UnitOfWork
+
+
+TIMESTAMP_SEMANTICS_VERSION = "catalyst-time@1"
+
+
+def _series(news: pd.DataFrame, column: str, default: object = "") -> pd.Series:
+    if column in news.columns:
+        return news[column]
+    return pd.Series([default] * len(news), index=news.index)
 
 
 def _read(path: Path | str) -> pd.DataFrame:
@@ -46,22 +62,44 @@ def news_to_catalysts(news: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     source = news["source"].astype(str) if "source" in news.columns else pd.Series([""] * len(news), index=news.index)
     is_sec = source.str.startswith("sec")
+    record_ids = _series(news, "record_id")
+    source_record_ids = (
+        _series(news, "source_record_id")
+        if "source_record_id" in news.columns
+        else record_ids
+    )
+    source_record_ids = source_record_ids.astype(object)
+    source_record_ids = source_record_ids.where(
+        source_record_ids.astype(str).str.strip().ne(""), record_ids
+    )
+    timestamp = pd.to_datetime(_series(news, "timestamp", pd.NaT), utc=True, errors="coerce")
+    event_time = pd.to_datetime(_series(news, "event_time", pd.NaT), utc=True, errors="coerce")
+    event_time = event_time.fillna(timestamp)
     out = pd.DataFrame(
         {
-            "catalyst_id": news["record_id"],
-            "record_id": news["record_id"],
-            "ticker": _clean_ticker(news["ticker"]),
-            "timestamp": pd.to_datetime(news["timestamp"], utc=True, errors="coerce"),
+            "catalyst_id": record_ids,
+            "record_id": record_ids,
+            "ticker": _clean_ticker(_series(news, "ticker")),
+            "timestamp": timestamp,
+            "event_time": event_time,
+            "published_at": pd.to_datetime(_series(news, "published_at", pd.NaT), utc=True, errors="coerce"),
+            "observed_at": pd.to_datetime(_series(news, "observed_at", pd.NaT), utc=True, errors="coerce"),
+            "available_at": pd.to_datetime(_series(news, "available_at", pd.NaT), utc=True, errors="coerce"),
+            "source_record_id": source_record_ids,
+            "source_artifact_hash": _series(news, "source_artifact_hash", None),
+            "timestamp_semantics_version": _series(
+                news, "timestamp_semantics_version", TIMESTAMP_SEMANTICS_VERSION
+            ),
             "catalyst_kind": np.where(is_sec, "sec_filing", "news"),
             "event_type": _event_type_from_source(source),
-            "headline": news.get("headline", ""),
-            "summary": news.get("summary", ""),
+            "headline": _series(news, "headline"),
+            "summary": _series(news, "summary"),
             "source": source,
-            "url": news.get("url", ""),
-            "relation_type": news.get("relation_type", "ambiguous"),
-            "impact_role": news.get("impact_role", "unknown"),
-            "relation_confidence": news.get("relation_confidence", np.nan),
-            "is_direct_catalyst": news.get("is_direct_catalyst", np.nan),
+            "url": _series(news, "url"),
+            "relation_type": _series(news, "relation_type", "ambiguous"),
+            "impact_role": _series(news, "impact_role", "unknown"),
+            "relation_confidence": _series(news, "relation_confidence", np.nan),
+            "is_direct_catalyst": _series(news, "is_direct_catalyst", np.nan),
         }
     )
     return out.dropna(subset=["timestamp"]).reset_index(drop=True)
@@ -70,28 +108,52 @@ def news_to_catalysts(news: pd.DataFrame) -> pd.DataFrame:
 def scheduled_events_to_catalysts(events: pd.DataFrame, *, default_kind: str) -> pd.DataFrame:
     if events.empty:
         return pd.DataFrame()
-    ticker = events["ticker"] if "ticker" in events.columns else ""
-    title = events["title"] if "title" in events.columns else events.get("event_type", "")
-    event_type = events["event_type"].astype(str).str.lower()
+    ticker = _series(events, "ticker", "")
+    title = _series(events, "title") if "title" in events.columns else _series(events, "event_type", "")
+    event_type = _series(events, "event_type", "").astype(str).str.lower()
+    timestamp = pd.to_datetime(_series(events, "timestamp", pd.NaT), utc=True, errors="coerce")
+    event_time = pd.to_datetime(_series(events, "event_time", pd.NaT), utc=True, errors="coerce").fillna(timestamp)
+    source = _series(events, "source", default_kind)
+    has_ticker = ticker.astype(str).str.strip().ne("") & ticker.astype(str).str.lower().ne("nan")
+    generated_source_ids = pd.Series(
+        [
+            f"{default_kind}:{str(t).upper()}:{pd.Timestamp(ts).isoformat()}:{et}"
+            for t, ts, et in zip(ticker, event_time, event_type)
+        ],
+        index=events.index,
+    )
+    source_record_ids = _series(events, "source_record_id") if "source_record_id" in events.columns else generated_source_ids
+    source_record_ids = source_record_ids.astype(object).where(
+        source_record_ids.astype(str).str.strip().ne(""), generated_source_ids
+    )
     out = pd.DataFrame(
         {
             "catalyst_id": [
                 f"{default_kind}:{str(t).upper()}:{pd.Timestamp(ts).isoformat()}:{et}"
-                for t, ts, et in zip(ticker, events["timestamp"], event_type)
+                for t, ts, et in zip(ticker, event_time, event_type)
             ],
             "record_id": "",
             "ticker": _clean_ticker(pd.Series(ticker, index=events.index)).replace("NAN", ""),
-            "timestamp": pd.to_datetime(events["timestamp"], utc=True, errors="coerce"),
+            "timestamp": timestamp,
+            "event_time": event_time,
+            "published_at": pd.to_datetime(_series(events, "published_at", pd.NaT), utc=True, errors="coerce"),
+            "observed_at": pd.to_datetime(_series(events, "observed_at", pd.NaT), utc=True, errors="coerce"),
+            "available_at": pd.to_datetime(_series(events, "available_at", pd.NaT), utc=True, errors="coerce"),
+            "source_record_id": source_record_ids,
+            "source_artifact_hash": _series(events, "source_artifact_hash", None),
+            "timestamp_semantics_version": _series(
+                events, "timestamp_semantics_version", TIMESTAMP_SEMANTICS_VERSION
+            ),
             "catalyst_kind": default_kind,
             "event_type": event_type,
             "headline": title,
             "summary": "",
-            "source": events["source"] if "source" in events.columns else default_kind,
-            "url": events["url"] if "url" in events.columns else "",
-            "relation_type": np.where(pd.Series(ticker, index=events.index).astype(str).str.strip().ne(""), "scheduled_ticker_event", "scheduled_macro_event"),
+            "source": source,
+            "url": _series(events, "url", ""),
+            "relation_type": np.where(has_ticker, "scheduled_ticker_event", "scheduled_macro_event"),
             "impact_role": np.where(event_type.eq("earnings"), "earnings_event", "event_risk"),
             "relation_confidence": 1.0,
-            "is_direct_catalyst": np.where(pd.Series(ticker, index=events.index).astype(str).str.strip().ne(""), 1.0, 0.0),
+            "is_direct_catalyst": np.where(has_ticker, 1.0, 0.0),
         }
     )
     return out.dropna(subset=["timestamp"]).reset_index(drop=True)
@@ -105,6 +167,10 @@ def build_catalyst_records(
     earnings_result_features_path: Path | str | None = FORWARD_GUIDANCE_FEATURES_PATH,
     earnings_result_labels_path: Path | str | None = FORWARD_GUIDANCE_LABELS_PATH,
     output_path: Path | str = CATALYST_RECORDS_PATH,
+    unit_of_work: "UnitOfWork | None" = None,
+    source_artifact: LineageRef | None = None,
+    decision_time: datetime | None = None,
+    valid_until: datetime | None = None,
 ) -> pd.DataFrame:
     ensure_dirs()
     frames = [
@@ -112,17 +178,25 @@ def build_catalyst_records(
         scheduled_events_to_catalysts(_read(macro_path), default_kind="scheduled_event"),
         scheduled_events_to_catalysts(_read(earnings_path), default_kind="earnings"),
     ]
-    if earnings_result_features_path is not None and earnings_result_labels_path is not None:
-        frames.append(
-            build_earnings_result_catalysts(
-                features_path=earnings_result_features_path,
-                labels_path=earnings_result_labels_path,
-            )
-        )
+    # Forward-guidance features/labels contain post-result observations and
+    # realized forward returns.  They are retained as research evidence in
+    # their own artifacts, but are never eligible catalyst-event states.
     out = pd.concat([f for f in frames if not f.empty], ignore_index=True) if any(not f.empty for f in frames) else pd.DataFrame()
     if not out.empty:
         out = out.sort_values(["timestamp", "ticker", "event_type"]).reset_index(drop=True)
     out.to_parquet(output_path, index=False)
+    if unit_of_work is not None:
+        if source_artifact is None:
+            raise ValueError(
+                "exact source_artifact LineageRef is required for catalyst publication"
+            )
+        publish_catalyst_states(
+            out.to_dict(orient="records"),
+            unit_of_work=unit_of_work,
+            source_artifact=source_artifact,
+            decision_time=decision_time,
+            valid_until=valid_until,
+        )
     return out
 
 
@@ -139,7 +213,31 @@ def build_catalyst_scores(
         out.to_parquet(output_path, index=False)
         return out
     news_scores = _read(news_scores_path)
-    out = catalysts[["catalyst_id", "record_id", "ticker", "timestamp", "catalyst_kind", "event_type", "relation_type", "impact_role"]].copy()
+    # Explicitly exclude quarantined/post-result legacy evidence if an older
+    # Parquet artifact still contains it.
+    hindsight_mask = pd.Series(False, index=catalysts.index)
+    for column in ("catalyst_kind", "event_type"):
+        if column in catalysts.columns:
+            hindsight_mask |= catalysts[column].astype(str).str.lower().str.contains("earnings_result")
+    catalysts = catalysts.loc[~hindsight_mask].copy()
+    base_columns = [
+        "catalyst_id",
+        "record_id",
+        "ticker",
+        "timestamp",
+        "event_time",
+        "published_at",
+        "observed_at",
+        "available_at",
+        "source_record_id",
+        "source_artifact_hash",
+        "timestamp_semantics_version",
+        "catalyst_kind",
+        "event_type",
+        "relation_type",
+        "impact_role",
+    ]
+    out = catalysts[[column for column in base_columns if column in catalysts.columns]].copy()
     if not news_scores.empty:
         out = out.merge(
             news_scores[["record_id", "ticker", "timestamp", "news_similarity_score", "news_similarity_neighbor_count", "news_similarity_max", "realized_news_score"]],
@@ -155,7 +253,9 @@ def build_catalyst_scores(
     out.loc[out["event_type"].isin(["cpi", "fomc_decision", "fomc_minutes", "nfp", "ppi", "gdp"]), "scheduled_event_score"] = -0.20
     out.loc[out["event_type"].eq("opex"), "scheduled_event_score"] = -0.10
     out.loc[out["event_type"].eq("earnings"), "scheduled_event_score"] = -0.05
-    out["catalyst_score"] = out["news_similarity_score"].fillna(out["scheduled_event_score"]).clip(-1.0, 1.0)
+    # Keep the producer's directional score on its original scale.  This is
+    # not a calibrated probability and is never copied into a probability map.
+    out["catalyst_score"] = out["news_similarity_score"].fillna(out["scheduled_event_score"])
     out.to_parquet(output_path, index=False)
     return out
 

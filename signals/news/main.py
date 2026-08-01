@@ -80,6 +80,11 @@ def main() -> int:
     parser.add_argument("--start", default=None)
     parser.add_argument("--end", default=None)
     parser.add_argument("--input-csv", default=None)
+    parser.add_argument(
+        "--collection-time",
+        default=None,
+        help="Aware UTC collection time for CSV news availability metadata; omit to quarantine unknown availability.",
+    )
     parser.add_argument("--timestamps-csv", default=None)
     parser.add_argument("--bars-csv", default=None)
     parser.add_argument("--bars-per-day", type=int, default=None, help="Defaults to auto-detected from bar timestamps")
@@ -99,7 +104,11 @@ def main() -> int:
 
     if args.stage in {"collect", "collect-sec-history"}:
         if args.input_csv:
-            collect_news_from_csv(args.input_csv, output_path=Path(args.output) if args.output else NEWS_RECORDS_PATH)
+            collect_news_from_csv(
+                args.input_csv,
+                output_path=Path(args.output) if args.output else NEWS_RECORDS_PATH,
+                collection_time=args.collection_time,
+            )
         else:
             tickers = list(args.tickers)
             if args.use_backtest_universe:

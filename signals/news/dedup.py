@@ -15,21 +15,36 @@ def deduplicate_news(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
     out = df.copy()
+    if "source" not in out.columns:
+        out["source"] = "unknown"
     out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True, errors="coerce")
     out["_url_key"] = out["url"].map(_norm_url) if "url" in out.columns else ""
     out["_headline_key"] = (
         out["headline"].astype(str).str.lower().str.replace(r"[^a-z0-9]+", " ", regex=True).str.strip()
     )
-    key_cols = ["ticker", "content_hash"]
-    out = out.sort_values(["timestamp", "source"]).drop_duplicates(key_cols, keep="first")
+    # Identical source content is idempotent.  A changed payload with the same
+    # source logical ID is a revision and must remain as separate evidence.
+    # Older frames may not have source_record_id; content_hash still gives the
+    # legacy content-level convergence behavior.
+    source_col = out["source"].astype(str) if "source" in out.columns else ""
+    revision_col = out["content_hash"].astype(str) if "content_hash" in out.columns else out["_headline_key"]
+    out["_source_revision_key"] = source_col + "|" + revision_col
+    out = out.sort_values(["timestamp", "source"]).drop_duplicates(
+        ["ticker", "_source_revision_key"], keep="first"
+    )
     with_url = out["_url_key"].astype(str).ne("")
     out = pd.concat(
         [
-            out.loc[with_url].drop_duplicates(["ticker", "_url_key"], keep="first"),
+            out.loc[with_url].drop_duplicates(
+                ["ticker", "_url_key", "_source_revision_key"], keep="first"
+            ),
             out.loc[~with_url],
         ],
         ignore_index=True,
     )
-    out = out.drop_duplicates(["ticker", "_headline_key", "timestamp"], keep="first")
-    return out.drop(columns=["_url_key", "_headline_key"]).sort_values(["timestamp", "ticker"]).reset_index(drop=True)
-
+    out = out.drop_duplicates(
+        ["ticker", "_headline_key", "timestamp", "_source_revision_key"], keep="first"
+    )
+    return out.drop(columns=["_url_key", "_headline_key", "_source_revision_key"]).sort_values(
+        ["timestamp", "ticker"]
+    ).reset_index(drop=True)

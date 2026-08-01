@@ -1068,3 +1068,10 @@ Focused `48 passed`; full themes `76 passed, 2 warnings`; disposable-PostgreSQL 
 {2026-08-01 03:31 EDT} {agent: Codex} {nervous system Task 10 completion}
 Task 10 passed fresh review after five correction rounds: durable theme history/state identity, causal availability, legacy membership reads, run/taxonomy binding, and exact fail-closed Step 9 schema are approved.
 Controller verification: themes `76 passed, 2 pre-existing warnings`; PostgreSQL nervous system `223 passed`; final head `a4e52ca`; next is Task 11 catalyst timing.
+
+{2026-08-01 03:59 EDT} {agent: Codex} {nervous system Task 11 catalyst timing}
+Added causal news/event metadata, deterministic catalyst normalization/revision handling, availability-gated pressure, no-hindsight earnings quarantine, and caller-owned optional publication; focused `18`, full signals `39`, DB-free core `190` passed.
+Required disposable-PostgreSQL core run was attempted but port 55432 had no listener (`191 passed, 31 errors, 1 failed` in fixture setup); detailed evidence is in `task-11-report.md`, next rerun when the disposable service is available.
+
+{2026-08-01 04:01 EDT} {agent: Codex} {nervous system Task 11 handoff}
+Validation/reporting complete, but the requested commit could not be created because the worktree’s shared Git metadata is read-only (`index.lock`, exit 128); no commit SHA exists and changes remain in the worktree.
