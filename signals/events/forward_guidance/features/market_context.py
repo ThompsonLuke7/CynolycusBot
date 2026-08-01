@@ -10,13 +10,24 @@ import pandas as pd
 
 from signals.events.forward_guidance.data.schema import EarningsEvent
 
-POST_EVENT_FEATURE_COLUMNS = frozenset({
-    "post_er_gap_pct",
-    "post_er_move_pct",
-    "intraday_reversal",
-    "bad_initial_reaction_flag",
-    "technical_stabilization_flag",
-})
+
+_MARKET_CONTEXT_DEFAULTS = {
+    "post_er_gap_pct": float("nan"),
+    "post_er_move_pct": float("nan"),
+    "intraday_reversal": float("nan"),
+    "prior_3m_momentum": float("nan"),
+    "atr_pct_14": float("nan"),
+    "rvol_20": float("nan"),
+    "sector_strength_20d": float("nan"),
+    "spy_regime": float("nan"),
+    "qqq_regime": float("nan"),
+    "vix_regime": float("nan"),
+    "bad_initial_reaction_flag": 0.0,
+    "technical_stabilization_flag": 0.0,
+}
+MARKET_CONTEXT_FEATURE_COLUMNS = frozenset(_MARKET_CONTEXT_DEFAULTS)
+# Compatibility export consumed by the forward-guidance artifact boundary.
+POST_EVENT_FEATURE_COLUMNS = MARKET_CONTEXT_FEATURE_COLUMNS
 
 
 def _ensure_timestamp(df: pd.DataFrame) -> pd.DataFrame:
@@ -105,20 +116,7 @@ def compute_market_context(event: EarningsEvent, bars_by_symbol: Mapping[str, pd
     reaction = pd.Timestamp(event.reaction_date).normalize()
     daily = _daily_for(symbol, bars_by_symbol)
     idx, row = _row_at_or_before(daily, reaction)
-    features: dict[str, float] = {
-        "post_er_gap_pct": float("nan"),
-        "post_er_move_pct": float("nan"),
-        "intraday_reversal": float("nan"),
-        "prior_3m_momentum": float("nan"),
-        "atr_pct_14": float("nan"),
-        "rvol_20": float("nan"),
-        "sector_strength_20d": float("nan"),
-        "spy_regime": float("nan"),
-        "qqq_regime": float("nan"),
-        "vix_regime": float("nan"),
-        "bad_initial_reaction_flag": 0.0,
-        "technical_stabilization_flag": 0.0,
-    }
+    features: dict[str, float] = dict(_MARKET_CONTEXT_DEFAULTS)
     if row is not None and idx is not None and idx > 0:
         prev = daily.loc[idx - 1]
         prev_close = _value(prev, "close")

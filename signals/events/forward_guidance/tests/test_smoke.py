@@ -14,6 +14,7 @@ import pandas as pd
 from signals.events.forward_guidance.data.schema import EarningsEvent
 from signals.events.forward_guidance.data.discover_events import _parse_yfinance_earnings_dates, dedupe_events
 from signals.events.forward_guidance.data.sec_client import decompress_response_bytes
+from signals.events.forward_guidance.features.build_matrix import FORWARD_GUIDANCE_ARTIFACT_FIELDS
 from signals.events.forward_guidance.features.market_context import compute_forward_labels, compute_market_context
 from signals.events.forward_guidance.features.nlp import extract_forward_sections, extract_structured_guidance_features
 from signals.events.forward_guidance.models.train import walk_forward_splits
@@ -77,6 +78,33 @@ def test_market_context_and_labels() -> None:
     assert labels["fwd_ret_60d"] == labels["fwd_ret_60d"]
     assert labels["fwd_60d_excess_ret_vs_sector"] == labels["fwd_60d_excess_ret_vs_sector"]
     assert labels["target"] in {0.0, 1.0}
+
+
+def test_market_context_producer_output_is_fully_covered_by_artifact_schema() -> None:
+    event = EarningsEvent(
+        ticker="NVDA",
+        earnings_date="2025-12-31",
+        report_time="BMO",
+        sector_etf="XLK",
+    )
+    output_fields = set(compute_market_context(event, {}).keys())
+    expected_fields = {
+        "atr_pct_14",
+        "bad_initial_reaction_flag",
+        "intraday_reversal",
+        "post_er_gap_pct",
+        "post_er_move_pct",
+        "prior_3m_momentum",
+        "qqq_regime",
+        "rvol_20",
+        "sector_strength_20d",
+        "spy_regime",
+        "technical_stabilization_flag",
+        "vix_regime",
+    }
+
+    assert output_fields == expected_fields
+    assert output_fields <= FORWARD_GUIDANCE_ARTIFACT_FIELDS
 
 
 def test_walk_forward_splits_are_ordered() -> None:

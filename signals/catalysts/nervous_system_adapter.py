@@ -261,6 +261,24 @@ def _registry_raw_payload(row: Mapping[str, object]) -> dict[str, object]:
     return value if isinstance(value, dict) else {"raw": value}
 
 
+def _path_bearing_locator(value: str) -> bool:
+    return "/" in value or "\\" in value
+
+
+def _hashed_locator_token(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+
+
+def _canonical_record_locator(value: str) -> str:
+    locator = value.strip()
+    if not _path_bearing_locator(locator):
+        return locator
+    digest = _hashed_locator_token(locator)
+    if re.search(r"(?:^|:)batch$", locator, re.IGNORECASE):
+        return f"catalyst_records:{digest}:batch"
+    return f"catalyst_records:row:{digest}"
+
+
 def _validated_lineage(source_artifact: LineageRef) -> LineageRef:
     if not isinstance(source_artifact, LineageRef):
         raise AdapterIssue("INVALID_SOURCE_LINEAGE", "source_artifact must be a LineageRef")
@@ -274,7 +292,9 @@ def _validated_lineage(source_artifact: LineageRef) -> LineageRef:
         update={
             "source_id": source_artifact.source_id.strip().lower(),
             "content_hash": source_artifact.content_hash.lower(),
-            "record_locator": source_artifact.record_locator.strip(),
+            "record_locator": _canonical_record_locator(
+                source_artifact.record_locator
+            ),
         }
     )
 
@@ -641,14 +661,6 @@ def _logical_key_for_result(row: Mapping[str, object], source_artifact: LineageR
     return _source_logical_key(row, source_artifact=source_artifact)
 
 
-def _path_bearing_locator(value: str) -> bool:
-    return "/" in value or "\\" in value
-
-
-def _hashed_locator_token(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
-
-
 def _batch_locator_namespace(source_artifact: LineageRef) -> str:
     prefix = source_artifact.record_locator.strip().rsplit(":", 1)[0].strip()
     if prefix and not _path_bearing_locator(prefix):
@@ -669,10 +681,9 @@ def _row_lineage(
 ) -> LineageRef:
     """Expand the pipeline's batch locator into stable row locators.
 
-    Direct callers pass the exact source-artifact/record lineage and it is
-    preserved byte-for-byte.  Only the adapter's own synthetic batch marker
-    receives a deterministic row suffix; no filesystem path or runtime value
-    participates.
+    Path-free direct callers retain exact source-artifact/record lineage.
+    Batch markers receive deterministic row locators, while filesystem paths
+    participate only through their canonical hash.
     """
 
     if not re.search(r"(?:^|:)batch$", source_artifact.record_locator.strip(), re.IGNORECASE):
@@ -683,12 +694,7 @@ def _row_lineage(
     )
     namespace = _batch_locator_namespace(source_artifact)
     if explicit is not None:
-        explicit_locator = str(explicit).strip()
-        locator = (
-            f"{namespace}:row:{_hashed_locator_token(explicit_locator)}"
-            if _path_bearing_locator(explicit_locator)
-            else explicit_locator
-        )
+        locator = _canonical_record_locator(str(explicit))
         return source_artifact.model_copy(update={"record_locator": locator})
 
     source_record_id = _first(row, ("source_record_id", "source_id", "id"))

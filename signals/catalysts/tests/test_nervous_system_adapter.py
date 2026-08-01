@@ -61,6 +61,15 @@ _ACTUAL_FORWARD_GUIDANCE_EXTRACTOR_FIELDS = tuple(
         }
     )
 )
+_ACTUAL_MARKET_CONTEXT_FIELDS_MISSING_FROM_PRIOR_SCHEMA = (
+    "atr_pct_14",
+    "prior_3m_momentum",
+    "rvol_20",
+    "sector_strength_20d",
+    "spy_regime",
+    "qqq_regime",
+    "vix_regime",
+)
 
 
 def _time(hour: int, minute: int = 0) -> datetime:
@@ -572,6 +581,35 @@ def test_every_actual_forward_guidance_extractor_output_and_alias_is_quarantined
     assert result.quarantine_code == "HINDSIGHT_EARNINGS_EVIDENCE", field_name
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    tuple(
+        alias
+        for emitted in _ACTUAL_MARKET_CONTEXT_FIELDS_MISSING_FROM_PRIOR_SCHEMA
+        for alias in (emitted, emitted.upper().replace("_", "-"))
+    ),
+)
+def test_every_market_context_output_and_normalized_alias_is_quarantined(
+    field_name: str,
+) -> None:
+    result = normalize_catalyst_record(
+        {
+            "source": "forward-guidance",
+            "source_record_id": f"market-context:{field_name}",
+            "ticker": "ABC",
+            "event_type": "calendar",
+            "event_time": _time(20),
+            "observed_at": _time(14),
+            "available_at": _time(14),
+            field_name: 0.25,
+        },
+        source_artifact=SOURCE,
+    )
+
+    assert result.event is None, field_name
+    assert result.quarantine_code == "HINDSIGHT_EARNINGS_EVIDENCE", field_name
+
+
 def test_source_lineage_identity_normalizes_logical_feed_variants() -> None:
     row = {
         "source": "wire",
@@ -713,6 +751,126 @@ def test_batch_lineage_honors_explicit_rows_and_sanitizes_path_fallbacks() -> No
         "duplicates": 4,
     }
     assert uow.commits == uow.rollbacks == 0
+
+
+def test_direct_path_lineage_is_sanitized_everywhere_and_reruns_converge() -> None:
+    source = LineageRef(
+        source_id="direct-feed",
+        content_hash="b" * 64,
+        record_locator=" /tmp/input.csv:row:3 ",
+    )
+    expected_locator = "catalyst_records:row:96fe65dceb1aee8622b77c7a856642e3"
+    valid = {
+        "source": "wire",
+        "source_record_id": "direct-valid",
+        "ticker": "ABC",
+        "event_type": "company_news",
+        "event_time": _time(13),
+        "observed_at": _time(13, 3),
+        "available_at": _time(13, 3),
+        "headline": "Direct path source",
+    }
+    invalid = dict(
+        valid,
+        source_record_id="direct-invalid",
+        observed_at="2026-07-30 13:03:00",
+    )
+    uow = _RecordingUow()
+
+    first = publish_catalyst_states(
+        (valid, invalid), unit_of_work=uow, source_artifact=source
+    )
+    second = publish_catalyst_states(
+        (valid, invalid),
+        unit_of_work=uow,
+        source_artifact=source.model_copy(
+            update={"record_locator": "/tmp/input.csv:row:3"}
+        ),
+    )
+
+    assert [result.quarantine_code for result in first] == [None, "NAIVE_OBSERVED_AT"]
+    assert [result.quarantine_code for result in second] == [None, "NAIVE_OBSERVED_AT"]
+    assert first[0].event is not None and second[0].event is not None
+    assert first[0].event.event_id == second[0].event.event_id
+    event_lineage = json.loads(first[0].event.lineage_ids[0])
+    assert event_lineage["record_locator"] == expected_locator
+
+    assert len(uow.registry.artifacts) == 1
+    artifact = uow.registry.artifacts[0]
+    assert artifact.metadata["record_locator"] == expected_locator
+    assert len(uow.registry.items) == 2
+    assert {item.record_locator for item in uow.registry.items} == {expected_locator}
+    assert {
+        item.warnings["source_lineage"]["record_locator"]
+        for item in uow.registry.items
+    } == {expected_locator}
+    assert len(uow.registry.quarantines) == 1
+    assert uow.registry.quarantines[0].record_locator == expected_locator
+    assert len(uow.registry.edges) == 1
+    edge = uow.registry.edges[0]
+    assert edge.source_id == artifact.source_id
+    assert edge.target_id == str(first[0].event.event_id)
+    assert edge.relationship == "IMPORTED_AS"
+    assert uow.registry.runs[0].counts == {
+        "attempted": 2,
+        "parsed": 2,
+        "imported": 1,
+        "quarantined": 1,
+        "duplicates": 0,
+    }
+    assert uow.registry.runs[1].counts == {
+        "attempted": 2,
+        "parsed": 2,
+        "imported": 0,
+        "quarantined": 0,
+        "duplicates": 2,
+    }
+    persisted_evidence = json.dumps(
+        {
+            "artifact": artifact.metadata,
+            "event": event_lineage,
+            "items": [item.record_locator for item in uow.registry.items],
+            "quarantine": uow.registry.quarantines[0].record_locator,
+        },
+        sort_keys=True,
+    )
+    assert "/tmp/input.csv" not in persisted_evidence
+    assert uow.commits == uow.rollbacks == 0
+
+
+def test_direct_path_locators_stay_distinct_and_path_free_direct_is_unchanged() -> None:
+    row = {
+        "source": "wire",
+        "source_record_id": "direct-distinct",
+        "ticker": "ABC",
+        "event_type": "company_news",
+        "event_time": _time(13),
+        "observed_at": _time(13, 3),
+        "available_at": _time(13, 3),
+    }
+    row_three = normalize_catalyst_record(
+        row,
+        source_artifact=SOURCE.model_copy(
+            update={"record_locator": "/tmp/input.csv:row:3"}
+        ),
+    ).event
+    row_four = normalize_catalyst_record(
+        row,
+        source_artifact=SOURCE.model_copy(
+            update={"record_locator": "/tmp/input.csv:row:4"}
+        ),
+    ).event
+    path_free = normalize_catalyst_record(row, source_artifact=SOURCE).event
+
+    assert row_three is not None and row_four is not None and path_free is not None
+    assert row_three.event_id != row_four.event_id
+    assert json.loads(row_three.lineage_ids[0])["record_locator"] == (
+        "catalyst_records:row:96fe65dceb1aee8622b77c7a856642e3"
+    )
+    assert json.loads(row_four.lineage_ids[0])["record_locator"] == (
+        "catalyst_records:row:e12e762a47033549bcd39e6f4db7996f"
+    )
+    assert json.loads(path_free.lineage_ids[0])["record_locator"] == SOURCE.record_locator
 
 
 def test_news_pipeline_carries_hindsight_fields_to_adapter_quarantine() -> None:

@@ -1115,3 +1115,11 @@ Forward guidance `6` and DB-free core `191 passed/35 skipped`; compileall/hash-s
 {2026-08-01 12:37 EDT} {agent: Codex} {nervous system Task 11 round 3 controller verification}
 Disposable publication passed twice consecutively; full PostgreSQL nervous-system passed `226`, focused Task 11 `111`, forward guidance `6`, and relevant signals `137` with one unchanged timing test deselected.
 Compileall/diff-check passed; persistent `cynolycus` was untouched. Correction round 3 is ready for commit and fresh review.
+
+{2026-08-01 12:53 EDT} {agent: Codex} {nervous system Task 11 correction round 4}
+Closed producer market-context schema drift and universal direct/batch path-locator canonicalization; RED cycles were `15 failed` and `2 failed`, GREEN focused Task 11 `127 passed`.
+Forward guidance `7`, DB-free core `191 passed/35 skipped`, seed/locator `4`, compileall/diff-check passed. Controller owns PostgreSQL/commit; no DB, ledger/design, earnings, or live path was touched.
+
+{2026-08-01 12:55 EDT} {agent: Codex} {nervous system Task 11 round 4 controller verification}
+Disposable publication passed twice; full PostgreSQL nervous-system passed `226`, focused Task 11 `127`, forward guidance `7`, and relevant signals `154` with one unchanged timing test deselected.
+Compileall/diff-check passed; persistent `cynolycus` was untouched. Round 4 is ready for commit and fresh review.
