@@ -12,7 +12,7 @@ from sqlalchemy import event, select
 from core.nervous_system.contracts.context import ContextSnapshot, StateRequest
 from core.nervous_system.contracts.enums import MarketRegime, StateType, ThemeRegime
 from core.nervous_system.contracts.quality import DataQualitySummary
-from core.nervous_system.contracts.states import MarketState, ThemeState
+from core.nervous_system.contracts.states import CatalystEvent, MarketState, ThemeState
 from core.nervous_system.persistence.models import (
     ContextSnapshot as ContextSnapshotRow,
     StateRecord,
@@ -148,6 +148,50 @@ def test_insert_states_idempotently_converges_on_state_identity_and_preserves_re
     assert stored is not None
     assert stored.generated_at == first.generated_at
     assert len(rows) == 2
+
+
+@pytest.mark.postgres
+def test_catalyst_event_raw_score_round_trips_through_state_repository(pg_session):
+    event_id = UUID("00000000-0000-0000-0000-000000000301")
+    available_at = datetime(2026, 7, 30, 13, 3, tzinfo=UTC)
+    event = CatalystEvent(
+        state_id=event_id,
+        entity_id=str(event_id),
+        as_of=datetime(2026, 7, 30, 13, 0, tzinfo=UTC),
+        available_at=available_at,
+        generated_at=available_at,
+        valid_until=datetime(2026, 7, 31, 13, 3, tzinfo=UTC),
+        source_window_start=datetime(2026, 7, 30, 13, 0, tzinfo=UTC),
+        source_window_end=datetime(2026, 7, 30, 13, 0, tzinfo=UTC),
+        schema_version=1,
+        producer="test.catalyst",
+        model_version="test@1",
+        feature_version="test@1",
+        config_version="test@1",
+        lineage_ids=("wire:sha:row-1",),
+        data_quality=DataQualitySummary(),
+        event_id=event_id,
+        ticker="ABC",
+        event_type="company_news",
+        event_time=datetime(2026, 7, 30, 13, 0, tzinfo=UTC),
+        published_at=datetime(2026, 7, 30, 13, 1, tzinfo=UTC),
+        observed_at=available_at,
+        source="wire",
+        headline="typed score",
+        channel="WIRE",
+        raw_score=4.5,
+    )
+
+    repository = StateRepository(pg_session)
+    repository.insert_states_idempotently((event,))
+    restored = repository.get_state_as_of(
+        StateType.CATALYST_EVENT,
+        str(event_id),
+        datetime(2026, 7, 30, 14, 0, tzinfo=UTC),
+    )
+
+    assert isinstance(restored, CatalystEvent)
+    assert restored.raw_score == 4.5
 
 
 @pytest.mark.postgres

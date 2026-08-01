@@ -1075,3 +1075,13 @@ Required disposable-PostgreSQL core run was attempted but port 55432 had no list
 
 {2026-08-01 04:01 EDT} {agent: Codex} {nervous system Task 11 handoff}
 Validation/reporting complete, but the requested commit could not be created because the worktree’s shared Git metadata is read-only (`index.lock`, exit 128); no commit SHA exists and changes remain in the worktree.
+{2026-08-01 04:55 EDT} {agent: Codex} {nervous system Task 11 correction round 1}
+Closed all ten reviewer findings with strict causal validation, robust hindsight quarantine, entity-scoped publication, deterministic revisions, public raw scores, and Task 8 registry evidence; focused/full signal and DB-free core checks are green.
+The specified disposable PostgreSQL endpoint remains unavailable, so URL-gated integration validation is blocked; commit creation is being retried after evidence append.
+{2026-08-01 04:57 EDT} {agent: Codex} {nervous system Task 11 correction round 1 handoff}
+Correction implementation/evidence is complete: focused `47`, full signal `68`, and DB-free core `191` passed; compileall and diff-check are clean, while the disposable PostgreSQL endpoint is unavailable.
+Changes are staged, but the requested commit remains blocked by the shared Git `index.lock` read-only filesystem; no commit SHA was created.
+
+{2026-08-01 04:59 EDT} {agent: Codex} {nervous system Task 11 correction round 1 controller verification}
+Superseding the nested-sandbox limitation: disposable PostgreSQL is healthy; targeted publication/round-trip `12 passed`, full nervous-system `226 passed`, and full signals `68 passed` with compileall/diff-check clean.
+Only `cynolycus_nervous_system_test` was used; persistent data was untouched. Correction commit and fresh re-review are next.

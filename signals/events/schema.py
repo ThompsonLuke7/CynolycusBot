@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
 
 from signals.events.config import ALLOWED_MACRO_EVENT_TYPES, DEFAULT_TIMEZONE, DISALLOWED_EVENT_TYPES
+from signals.catalysts.nervous_system_adapter import hindsight_evidence_fields
 
 
 TIMESTAMP_SEMANTICS_VERSION = "catalyst-time@1"
@@ -53,6 +55,22 @@ def normalize_observation_timestamp(value: Any) -> pd.Timestamp | None:
     return ts.tz_convert("UTC")
 
 
+def _preserve_observation_timestamp(value: Any) -> pd.Timestamp | Any | None:
+    """Retain invalid explicit metadata so the catalyst adapter can quarantine it."""
+
+    if value is None or value is pd.NaT or value is pd.NA:
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return normalize_observation_timestamp(value)
+    except (TypeError, ValueError):
+        return value
+
+
 def _first_present(row: Any, names: tuple[str, ...]) -> Any:
     for name in names:
         value = row.get(name)
@@ -84,6 +102,7 @@ class ScheduledEvent:
     source_record_id: str = ""
     source_artifact_hash: str | None = None
     timestamp_semantics_version: str = TIMESTAMP_SEMANTICS_VERSION
+    hindsight_evidence: Mapping[str, Any] | None = None
 
     @property
     def normalized_type(self) -> str:
@@ -101,9 +120,13 @@ class ScheduledEvent:
             raise ValueError(f"Unsupported scheduled event type: {self.event_type}")
         ticker = str(self.ticker).upper().replace("$", "").strip() if self.ticker else None
         event_time = normalize_timestamp(self.event_time if self.event_time is not None else self.timestamp)
-        published_at = normalize_timestamp(self.published_at) if self.published_at is not None else None
-        observed_at = normalize_observation_timestamp(self.observed_at)
-        available_at = normalize_observation_timestamp(self.available_at)
+        published_at = (
+            _preserve_observation_timestamp(self.published_at)
+            if self.published_at is not None
+            else None
+        )
+        observed_at = _preserve_observation_timestamp(self.observed_at)
+        available_at = _preserve_observation_timestamp(self.available_at)
         if available_at is None:
             available_at = observed_at
         source_record_id = str(self.source_record_id or "").strip()
@@ -131,6 +154,7 @@ class ScheduledEvent:
             "source_record_id": source_record_id,
             "source_artifact_hash": self.source_artifact_hash,
             "timestamp_semantics_version": self.timestamp_semantics_version,
+            "hindsight_evidence": dict(self.hindsight_evidence or {}) or None,
             "title": self.title,
             "source": self.source,
             "ticker": ticker or None,
@@ -164,10 +188,10 @@ def events_from_frame(
         )
     rows = []
     for _, row in df.iterrows():
+        timestamp_value = _first_present(row, ("timestamp", "date", "event_time"))
+        if timestamp_value is None:
+            continue
         try:
-            timestamp_value = _first_present(row, ("timestamp", "date", "event_time"))
-            if timestamp_value is None:
-                continue
             rows.append(
                 ScheduledEvent(
                     event_type=_first_present(row, ("event_type", "type")) or "",
@@ -188,11 +212,45 @@ def events_from_frame(
                         _first_present(row, ("timestamp_semantics_version",))
                         or TIMESTAMP_SEMANTICS_VERSION
                     ),
+                    hindsight_evidence=hindsight_evidence_fields(row.to_dict()) or None,
                 ).to_record()
             )
         except (TypeError, ValueError):
-            continue
+            # Keep a row whose occurrence metadata is malformed so the
+            # causal adapter can return a deterministic quarantine result.
+            # Unsupported/disallowed event kinds remain excluded by the
+            # scheduled-event producer contract.
+            normalized_type = normalize_event_type(_first_present(row, ("event_type", "type")) or "")
+            if normalized_type in DISALLOWED_EVENT_TYPES:
+                continue
+            if normalized_type not in ALLOWED_MACRO_EVENT_TYPES and normalized_type != "earnings":
+                continue
+            rows.append(
+                {
+                    "event_type": normalized_type,
+                    "timestamp": timestamp_value,
+                    "event_time": _first_present(row, ("event_time",)) or timestamp_value,
+                    "published_at": _first_present(row, ("published_at",)),
+                    "observed_at": _first_present(row, ("observed_at", "collection_time", "captured_at")),
+                    "available_at": _first_present(row, ("available_at",)),
+                    "source_record_id": _first_present(row, ("source_record_id", "source_id", "id")) or "",
+                    "source_artifact_hash": _first_present(row, ("source_artifact_hash",)),
+                    "hindsight_evidence": hindsight_evidence_fields(row.to_dict()) or None,
+                    "timestamp_semantics_version": (
+                        _first_present(row, ("timestamp_semantics_version",))
+                        or TIMESTAMP_SEMANTICS_VERSION
+                    ),
+                    "title": str(_first_present(row, ("title", "headline")) or ""),
+                    "source": str(_first_present(row, ("source",)) or "manual"),
+                    "ticker": _first_present(row, ("ticker", "symbol")),
+                    "url": _first_present(row, ("url",)),
+                }
+            )
     out = pd.DataFrame(rows)
     if out.empty:
         return events_from_frame(pd.DataFrame())
-    return out.sort_values(["timestamp", "event_type", "ticker"], na_position="last").reset_index(drop=True)
+    out["_sort_timestamp"] = pd.to_datetime(out["timestamp"], utc=True, errors="coerce")
+    return out.sort_values(
+        ["_sort_timestamp", "event_type", "ticker"],
+        na_position="last",
+    ).drop(columns=["_sort_timestamp"]).reset_index(drop=True)

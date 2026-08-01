@@ -661,6 +661,14 @@ def test_catalyst_event_rejects_published_after_observed():
         )
 
 
+def test_catalyst_event_raw_directional_score_is_typed_and_json_round_trips():
+    event = catalyst_event(raw_score=4.5)
+    restored = CatalystEvent.model_validate_json(event.model_dump_json())
+
+    assert event.raw_score == 4.5
+    assert restored == event
+
+
 def test_future_scheduled_catalyst_is_allowed_and_is_direct_is_optional():
     state = catalyst_event(
         event_time=datetime(2026, 8, 15, 13, 30, tzinfo=UTC),

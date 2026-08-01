@@ -8,9 +8,17 @@ import pandas as pd
 
 from signals.events.collectors import collect_earnings_dates, collect_macro_events
 from signals.events.schema import events_from_frame
+from signals.catalysts.nervous_system_adapter import normalize_catalyst_record
+from signals.catalysts.pipeline import scheduled_events_to_catalysts
+from core.nervous_system.contracts.quality import LineageRef
 
 
 UTC = timezone.utc
+SOURCE = LineageRef(
+    source_id="calendar-feed",
+    content_hash="b" * 64,
+    record_locator="calendar:row:1",
+)
 
 
 def test_scheduled_schema_separates_future_occurrence_from_calendar_availability() -> None:
@@ -73,3 +81,108 @@ def test_earnings_collector_keeps_known_date_and_collection_time_distinct(tmp_pa
 
     assert out.iloc[0]["event_time"] > out.iloc[0]["available_at"]
     assert out.iloc[0]["available_at"] == pd.Timestamp(collection_time)
+
+
+def test_invalid_scheduled_metadata_reaches_adapter_quarantine() -> None:
+    out = events_from_frame(
+        pd.DataFrame(
+            [
+                {
+                    "event_type": "CPI",
+                    "timestamp": "2026-08-13T13:30:00Z",
+                    "observed_at": "2026-07-30 14:00:00",
+                    "available_at": "2026-07-30T14:00:00Z",
+                    "title": "Naive observation must remain evidence",
+                }
+            ]
+        )
+    )
+
+    assert len(out) == 1
+    result = normalize_catalyst_record(out.iloc[0].to_dict(), source_artifact=SOURCE)
+    assert result.event is None
+    assert result.quarantine_code == "NAIVE_OBSERVED_AT"
+
+
+def test_invalid_scheduled_publication_time_reaches_adapter_quarantine() -> None:
+    out = events_from_frame(
+        pd.DataFrame(
+            [
+                {
+                    "event_type": "CPI",
+                    "timestamp": "2026-08-13T13:30:00Z",
+                    "published_at": "2026-07-30 13:00:00",
+                    "observed_at": "2026-07-30T14:00:00Z",
+                    "available_at": "2026-07-30T14:00:00Z",
+                    "title": "Naive publication must remain evidence",
+                }
+            ]
+        )
+    )
+
+    result = normalize_catalyst_record(out.iloc[0].to_dict(), source_artifact=SOURCE)
+    assert result.event is None
+    assert result.quarantine_code == "NAIVE_PUBLISHED_AT"
+
+
+def test_invalid_scheduled_event_time_reaches_adapter_quarantine() -> None:
+    out = events_from_frame(
+        pd.DataFrame(
+            [
+                {
+                    "event_type": "CPI",
+                    "timestamp": "not-a-scheduled-time",
+                    "observed_at": "2026-07-30T14:00:00Z",
+                    "available_at": "2026-07-30T14:00:00Z",
+                    "title": "Malformed occurrence remains evidence",
+                }
+            ]
+        )
+    )
+
+    assert len(out) == 1
+    result = normalize_catalyst_record(out.iloc[0].to_dict(), source_artifact=SOURCE)
+    assert result.event is None
+    assert result.quarantine_code == "INVALID_EVENT_TIME"
+
+
+def test_scheduled_catalyst_pipeline_does_not_drop_invalid_occurrence_rows() -> None:
+    source_rows = events_from_frame(
+        pd.DataFrame(
+            [
+                {
+                    "event_type": "CPI",
+                    "timestamp": "not-a-scheduled-time",
+                    "observed_at": "2026-07-30T14:00:00Z",
+                    "available_at": "2026-07-30T14:00:00Z",
+                    "title": "Malformed occurrence remains evidence",
+                }
+            ]
+        )
+    )
+
+    normalized = scheduled_events_to_catalysts(source_rows, default_kind="scheduled_event")
+
+    assert len(normalized) == 1
+
+
+def test_scheduled_schema_preserves_hindsight_evidence_for_adapter_quarantine() -> None:
+    out = events_from_frame(
+        pd.DataFrame(
+            [
+                {
+                    "event_type": "earnings",
+                    "timestamp": "2026-08-13T13:30:00Z",
+                    "observed_at": "2026-07-30T14:00:00Z",
+                    "available_at": "2026-07-30T14:00:00Z",
+                    "title": "Result artifact",
+                    "guidance_strength_score": 0.8,
+                }
+            ]
+        )
+    )
+    normalized = scheduled_events_to_catalysts(out, default_kind="earnings")
+    result = normalize_catalyst_record(normalized.iloc[0].to_dict(), source_artifact=SOURCE)
+
+    assert result.event is None
+    assert result.quarantine_code == "HINDSIGHT_EARNINGS_EVIDENCE"

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
+
+from signals.catalysts.nervous_system_adapter import hindsight_evidence_fields
 
 
 TIMESTAMP_SEMANTICS_VERSION = "catalyst-time@1"
@@ -42,6 +45,22 @@ def normalize_observation_timestamp(value: Any) -> pd.Timestamp | None:
     if ts.tzinfo is None or ts.utcoffset() is None:
         raise ValueError("observation timestamps must be timezone-aware")
     return ts.tz_convert("UTC")
+
+
+def _preserve_observation_timestamp(value: Any) -> pd.Timestamp | Any | None:
+    """Normalize valid metadata but retain invalid explicit values for quarantine."""
+
+    if value is None or value is pd.NaT or value is pd.NA:
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return normalize_observation_timestamp(value)
+    except (TypeError, ValueError):
+        return value
 
 
 def _first_present(row: Any, names: tuple[str, ...]) -> Any:
@@ -82,6 +101,7 @@ class NewsRecord:
     source_record_id: str = ""
     source_artifact_hash: str | None = None
     timestamp_semantics_version: str = TIMESTAMP_SEMANTICS_VERSION
+    hindsight_evidence: Mapping[str, Any] | None = None
 
     @property
     def clean_ticker(self) -> str:
@@ -97,22 +117,29 @@ class NewsRecord:
 
     @property
     def record_id(self) -> str:
-        source_key = self.source_id or text_fingerprint(self.timestamp_utc.isoformat(), self.url, self.headline)
+        source_key = (
+            self.source_record_id
+            or self.source_id
+            or text_fingerprint(self.timestamp_utc.isoformat(), self.url, self.headline)
+        )
         return text_fingerprint(self.clean_ticker, source_key)
 
     def to_record(self) -> dict[str, Any]:
         timestamp = self.timestamp_utc
         event_time = normalize_timestamp(self.event_time) if self.event_time is not None else timestamp
         published_at = (
-            normalize_timestamp(self.published_at)
+            _preserve_observation_timestamp(self.published_at)
             if self.published_at is not None
-            else timestamp
+            else None
         )
-        observed_at = normalize_observation_timestamp(self.observed_at)
-        available_at = normalize_observation_timestamp(self.available_at)
+        observed_at = _preserve_observation_timestamp(self.observed_at)
+        available_at = _preserve_observation_timestamp(self.available_at)
         if available_at is None:
             available_at = observed_at
-        source_record_id = str(self.source_record_id or self.source_id or self.record_id).strip()
+        # An absent provider ID remains absent.  ``record_id`` is a local
+        # compatibility identity, not source evidence and must not turn into
+        # a false logical source key for deduplication.
+        source_record_id = str(self.source_record_id or self.source_id).strip()
         return {
             "record_id": self.record_id,
             "ticker": self.clean_ticker,
@@ -127,6 +154,7 @@ class NewsRecord:
             "source_record_id": source_record_id,
             "source_artifact_hash": self.source_artifact_hash,
             "timestamp_semantics_version": self.timestamp_semantics_version,
+            "hindsight_evidence": dict(self.hindsight_evidence or {}) or None,
             "headline": str(self.headline or "").strip(),
             "summary": str(self.summary or "").strip(),
             "body": str(self.body or "").strip(),
@@ -156,7 +184,7 @@ def add_observation_metadata(
     if "event_time" not in out.columns:
         out["event_time"] = out.get("timestamp", pd.Series(pd.NaT, index=out.index))
     if "published_at" not in out.columns:
-        out["published_at"] = out.get("timestamp", pd.Series(pd.NaT, index=out.index))
+        out["published_at"] = pd.NaT
     if "observed_at" not in out.columns:
         out["observed_at"] = pd.NaT
     if "available_at" not in out.columns:
@@ -179,8 +207,8 @@ def add_observation_metadata(
     observed_values = []
     available_values = []
     for observed, available in zip(out["observed_at"], out["available_at"]):
-        observed_ts = normalize_observation_timestamp(observed)
-        available_ts = normalize_observation_timestamp(available)
+        observed_ts = _preserve_observation_timestamp(observed)
+        available_ts = _preserve_observation_timestamp(available)
         if available_ts is None:
             available_ts = observed_ts
         observed_values.append(observed_ts)
@@ -190,7 +218,7 @@ def add_observation_metadata(
 
     source_ids = []
     for _, row in out.iterrows():
-        existing = _first_present(row, ("source_record_id", "source_id", "id", "record_id"))
+        existing = _first_present(row, ("source_record_id", "source_id", "id"))
         source_ids.append(str(existing or "").strip())
     out["source_record_id"] = source_ids
     return out
@@ -209,6 +237,7 @@ def records_from_frame(
     for _, row in df.iterrows():
         ticker = _first_present(row, ("ticker", "symbol"))
         timestamp = _first_present(row, ("timestamp", "datetime", "published_at", "time_published"))
+        published_at = _first_present(row, ("published_at", "time_published"))
         headline = _first_present(row, ("headline", "title"))
         if not ticker or not timestamp or not headline:
             continue
@@ -225,7 +254,7 @@ def records_from_frame(
                 source=_first_present(row, ("source",)) or source,
                 source_id=_first_present(row, ("source_id", "id")) or "",
                 event_time=_first_present(row, ("event_time",)) or timestamp,
-                published_at=_first_present(row, ("published_at",)) or timestamp,
+                published_at=published_at,
                 observed_at=row_observed if row_observed is not None else (observed_at or collection_time),
                 available_at=row_available,
                 source_record_id=_first_present(row, ("source_record_id", "source_id", "id")) or "",
@@ -234,6 +263,7 @@ def records_from_frame(
                     _first_present(row, ("timestamp_semantics_version",))
                     or TIMESTAMP_SEMANTICS_VERSION
                 ),
+                hindsight_evidence=hindsight_evidence_fields(row.to_dict()) or None,
             ).to_record()
         )
     return pd.DataFrame(rows) if rows else empty_news_frame()
@@ -252,6 +282,7 @@ def empty_news_frame() -> pd.DataFrame:
             "source_record_id",
             "source_artifact_hash",
             "timestamp_semantics_version",
+            "hindsight_evidence",
             "headline",
             "summary",
             "body",

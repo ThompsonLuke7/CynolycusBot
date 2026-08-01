@@ -22,7 +22,10 @@ from signals.events.forward_guidance.config import FEATURES_PATH as FORWARD_GUID
 from signals.events.forward_guidance.config import LABELS_PATH as FORWARD_GUIDANCE_LABELS_PATH
 
 from core.nervous_system.contracts.quality import LineageRef
-from signals.catalysts.nervous_system_adapter import publish_catalyst_states
+from signals.catalysts.nervous_system_adapter import (
+    hindsight_evidence_fields,
+    publish_catalyst_states,
+)
 
 if TYPE_CHECKING:
     from core.nervous_system.persistence.uow import UnitOfWork
@@ -35,6 +38,61 @@ def _series(news: pd.DataFrame, column: str, default: object = "") -> pd.Series:
     if column in news.columns:
         return news[column]
     return pd.Series([default] * len(news), index=news.index)
+
+
+def _missing_scalar(value: object) -> bool:
+    if value is None or value is pd.NaT or value is pd.NA:
+        return True
+    try:
+        result = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(result, bool) and result
+
+
+def _strict_causal_timestamp(value: object) -> object:
+    """Keep invalid/naive explicit metadata visible to the adapter.
+
+    ``pd.to_datetime(..., utc=True)`` silently localizes naive values.  Causal
+    observation and availability fields cannot make that assumption, so an
+    invalid scalar is returned unchanged for the adapter to quarantine.
+    """
+
+    if _missing_scalar(value):
+        return pd.NaT
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return value
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        return value
+    return timestamp.tz_convert("UTC")
+
+
+def _strict_causal_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    return pd.Series(
+        [_strict_causal_timestamp(value) for value in _series(frame, column, pd.NaT)],
+        index=frame.index,
+        dtype=object,
+    )
+
+
+def _fill_missing_values(primary: pd.Series, fallback: pd.Series) -> pd.Series:
+    return pd.Series(
+        [
+            fallback_value if _missing_scalar(value) else value
+            for value, fallback_value in zip(primary, fallback)
+        ],
+        index=primary.index,
+        dtype=object,
+    )
+
+
+def _hindsight_markers(frame: pd.DataFrame) -> list[dict[str, object] | None]:
+    return [
+        (evidence := hindsight_evidence_fields(row.to_dict())) or None
+        for _, row in frame.iterrows()
+    ]
 
 
 def _read(path: Path | str) -> pd.DataFrame:
@@ -63,18 +121,14 @@ def news_to_catalysts(news: pd.DataFrame) -> pd.DataFrame:
     source = news["source"].astype(str) if "source" in news.columns else pd.Series([""] * len(news), index=news.index)
     is_sec = source.str.startswith("sec")
     record_ids = _series(news, "record_id")
-    source_record_ids = (
-        _series(news, "source_record_id")
-        if "source_record_id" in news.columns
-        else record_ids
-    )
+    source_record_ids = _series(news, "source_record_id", "")
     source_record_ids = source_record_ids.astype(object)
     source_record_ids = source_record_ids.where(
-        source_record_ids.astype(str).str.strip().ne(""), record_ids
+        source_record_ids.astype(str).str.strip().ne(""), ""
     )
     timestamp = pd.to_datetime(_series(news, "timestamp", pd.NaT), utc=True, errors="coerce")
-    event_time = pd.to_datetime(_series(news, "event_time", pd.NaT), utc=True, errors="coerce")
-    event_time = event_time.fillna(timestamp)
+    event_time = _strict_causal_series(news, "event_time")
+    event_time = _fill_missing_values(event_time, timestamp)
     out = pd.DataFrame(
         {
             "catalyst_id": record_ids,
@@ -82,9 +136,9 @@ def news_to_catalysts(news: pd.DataFrame) -> pd.DataFrame:
             "ticker": _clean_ticker(_series(news, "ticker")),
             "timestamp": timestamp,
             "event_time": event_time,
-            "published_at": pd.to_datetime(_series(news, "published_at", pd.NaT), utc=True, errors="coerce"),
-            "observed_at": pd.to_datetime(_series(news, "observed_at", pd.NaT), utc=True, errors="coerce"),
-            "available_at": pd.to_datetime(_series(news, "available_at", pd.NaT), utc=True, errors="coerce"),
+            "published_at": _strict_causal_series(news, "published_at"),
+            "observed_at": _strict_causal_series(news, "observed_at"),
+            "available_at": _strict_causal_series(news, "available_at"),
             "source_record_id": source_record_ids,
             "source_artifact_hash": _series(news, "source_artifact_hash", None),
             "timestamp_semantics_version": _series(
@@ -100,9 +154,12 @@ def news_to_catalysts(news: pd.DataFrame) -> pd.DataFrame:
             "impact_role": _series(news, "impact_role", "unknown"),
             "relation_confidence": _series(news, "relation_confidence", np.nan),
             "is_direct_catalyst": _series(news, "is_direct_catalyst", np.nan),
+            "hindsight_evidence": _hindsight_markers(news),
         }
     )
-    return out.dropna(subset=["timestamp"]).reset_index(drop=True)
+    # Keep malformed source rows so the adapter can quarantine them with
+    # their original evidence instead of silently losing the source record.
+    return out.reset_index(drop=True)
 
 
 def scheduled_events_to_catalysts(events: pd.DataFrame, *, default_kind: str) -> pd.DataFrame:
@@ -112,14 +169,18 @@ def scheduled_events_to_catalysts(events: pd.DataFrame, *, default_kind: str) ->
     title = _series(events, "title") if "title" in events.columns else _series(events, "event_type", "")
     event_type = _series(events, "event_type", "").astype(str).str.lower()
     timestamp = pd.to_datetime(_series(events, "timestamp", pd.NaT), utc=True, errors="coerce")
-    event_time = pd.to_datetime(_series(events, "event_time", pd.NaT), utc=True, errors="coerce").fillna(timestamp)
+    event_time = _fill_missing_values(_strict_causal_series(events, "event_time"), timestamp)
     source = _series(events, "source", default_kind)
     has_ticker = ticker.astype(str).str.strip().ne("") & ticker.astype(str).str.lower().ne("nan")
+    event_identity_values = []
+    for t, ts, et in zip(ticker, event_time, event_type):
+        try:
+            time_key = pd.Timestamp(ts).isoformat()
+        except (TypeError, ValueError):
+            time_key = str(ts)
+        event_identity_values.append(f"{default_kind}:{str(t).upper()}:{time_key}:{et}")
     generated_source_ids = pd.Series(
-        [
-            f"{default_kind}:{str(t).upper()}:{pd.Timestamp(ts).isoformat()}:{et}"
-            for t, ts, et in zip(ticker, event_time, event_type)
-        ],
+        event_identity_values,
         index=events.index,
     )
     source_record_ids = _series(events, "source_record_id") if "source_record_id" in events.columns else generated_source_ids
@@ -128,17 +189,14 @@ def scheduled_events_to_catalysts(events: pd.DataFrame, *, default_kind: str) ->
     )
     out = pd.DataFrame(
         {
-            "catalyst_id": [
-                f"{default_kind}:{str(t).upper()}:{pd.Timestamp(ts).isoformat()}:{et}"
-                for t, ts, et in zip(ticker, event_time, event_type)
-            ],
+            "catalyst_id": event_identity_values,
             "record_id": "",
             "ticker": _clean_ticker(pd.Series(ticker, index=events.index)).replace("NAN", ""),
             "timestamp": timestamp,
             "event_time": event_time,
-            "published_at": pd.to_datetime(_series(events, "published_at", pd.NaT), utc=True, errors="coerce"),
-            "observed_at": pd.to_datetime(_series(events, "observed_at", pd.NaT), utc=True, errors="coerce"),
-            "available_at": pd.to_datetime(_series(events, "available_at", pd.NaT), utc=True, errors="coerce"),
+            "published_at": _strict_causal_series(events, "published_at"),
+            "observed_at": _strict_causal_series(events, "observed_at"),
+            "available_at": _strict_causal_series(events, "available_at"),
             "source_record_id": source_record_ids,
             "source_artifact_hash": _series(events, "source_artifact_hash", None),
             "timestamp_semantics_version": _series(
@@ -154,9 +212,12 @@ def scheduled_events_to_catalysts(events: pd.DataFrame, *, default_kind: str) ->
             "impact_role": np.where(event_type.eq("earnings"), "earnings_event", "event_risk"),
             "relation_confidence": 1.0,
             "is_direct_catalyst": np.where(has_ticker, 1.0, 0.0),
+            "hindsight_evidence": _hindsight_markers(events),
         }
     )
-    return out.dropna(subset=["timestamp"]).reset_index(drop=True)
+    # Keep malformed scheduled rows so the adapter can quarantine them with
+    # their original evidence instead of silently losing the source record.
+    return out.reset_index(drop=True)
 
 
 def build_catalyst_records(

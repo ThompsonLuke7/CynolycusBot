@@ -180,6 +180,7 @@ class CatalystEvent(StateEnvelope):
     source: str
     headline: str | None = None
     channel: str
+    raw_score: FiniteFloat | None = None
     relation_confidence: Probability | None = None
     is_direct: bool | None = None
 
