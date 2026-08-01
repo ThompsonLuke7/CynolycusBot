@@ -25,7 +25,11 @@ from signals.catalysts.nervous_system_adapter import (
     normalize_catalyst_records,
     publish_catalyst_states,
 )
-from signals.events.forward_guidance.features.build_matrix import LABEL_COLUMNS, POST_EVENT_FEATURE_COLUMNS
+from signals.events.forward_guidance.features.build_matrix import (
+    FORWARD_GUIDANCE_ARTIFACT_FIELDS,
+    LABEL_COLUMNS,
+    POST_EVENT_FEATURE_COLUMNS,
+)
 from signals.events.forward_guidance.features.nlp import (
     extract_forward_sections,
     extract_structured_guidance_features,
@@ -41,9 +45,10 @@ SOURCE = LineageRef(
     record_locator="wire-feed:record:1",
 )
 
-_ACTUAL_FORWARD_GUIDANCE_EXTRACTOR_FIELDS = tuple(
+_ACTUAL_FORWARD_GUIDANCE_ARTIFACT_FIELDS = tuple(
     sorted(
-        set(extract_forward_sections("").keys())
+        set(FORWARD_GUIDANCE_ARTIFACT_FIELDS)
+        | set(extract_forward_sections("").keys())
         | set(extract_structured_guidance_features("").keys())
         | {
             "alt_finbert_negative",
@@ -556,11 +561,11 @@ def test_actual_forward_guidance_alias_matrix_is_quarantined() -> None:
     "field_name",
     tuple(
         alias
-        for emitted in _ACTUAL_FORWARD_GUIDANCE_EXTRACTOR_FIELDS
+        for emitted in _ACTUAL_FORWARD_GUIDANCE_ARTIFACT_FIELDS
         for alias in (emitted, emitted.upper().replace("_", "-"))
     ),
 )
-def test_every_actual_forward_guidance_extractor_output_and_alias_is_quarantined(
+def test_every_actual_forward_guidance_artifact_output_and_alias_is_quarantined(
     field_name: str,
 ) -> None:
     result = normalize_catalyst_record(

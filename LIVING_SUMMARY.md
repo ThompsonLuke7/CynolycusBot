@@ -1123,3 +1123,10 @@ Forward guidance `7`, DB-free core `191 passed/35 skipped`, seed/locator `4`, co
 {2026-08-01 12:55 EDT} {agent: Codex} {nervous system Task 11 round 4 controller verification}
 Disposable publication passed twice; full PostgreSQL nervous-system passed `226`, focused Task 11 `127`, forward guidance `7`, and relevant signals `154` with one unchanged timing test deselected.
 Compileall/diff-check passed; persistent `cynolycus` was untouched. Round 4 is ready for commit and fresh review.
+{2026-08-01 13:11 EDT} {agent: Codex} {nervous system Task 11 correction round 5}
+Added a test-only complete aggregate-builder drift guard; deliberate non-prefix mutation RED `1 failed`, then GREEN focused Task 11 `169`, forward guidance `8`, and DB-free core `191 passed/35 skipped`.
+Compileall/diff-check passed; declarations were already complete, so no production, DB, plan/design/ledger, earnings/live, or commit action was needed.
+
+{2026-08-01 13:12 EDT} {agent: Codex} {nervous system Task 11 round 5 controller verification}
+Test-only final round passed focused Task 11 `169`, forward guidance `8`, and relevant signals `197` with one unchanged timing test deselected; compileall/diff-check passed.
+Round 4 production remains backed by consecutive dirty-DB publication passes and full PostgreSQL `226`; final test commit and review are next.

@@ -7,6 +7,8 @@ Run with:
 from __future__ import annotations
 
 import gzip
+import sys
+from types import ModuleType
 
 import numpy as np
 import pandas as pd
@@ -14,9 +16,27 @@ import pandas as pd
 from signals.events.forward_guidance.data.schema import EarningsEvent
 from signals.events.forward_guidance.data.discover_events import _parse_yfinance_earnings_dates, dedupe_events
 from signals.events.forward_guidance.data.sec_client import decompress_response_bytes
-from signals.events.forward_guidance.features.build_matrix import FORWARD_GUIDANCE_ARTIFACT_FIELDS
-from signals.events.forward_guidance.features.market_context import compute_forward_labels, compute_market_context
-from signals.events.forward_guidance.features.nlp import extract_forward_sections, extract_structured_guidance_features
+import signals.events.forward_guidance.features.build_matrix as build_matrix_module
+from signals.events.forward_guidance.features.build_matrix import (
+    FORWARD_GUIDANCE_ARTIFACT_FIELDS,
+    FORWARD_GUIDANCE_ARTIFACT_PREFIXES,
+    IDENTITY_COLUMNS,
+    build_feature_row,
+)
+from signals.events.forward_guidance.features.market_context import (
+    MARKET_CONTEXT_FEATURE_COLUMNS,
+    compute_forward_labels,
+    compute_market_context,
+)
+from signals.events.forward_guidance.features.nlp import (
+    ALT_FINBERT_OUTPUT_FIELDS,
+    FINBERT_OUTPUT_FIELDS,
+    FORWARD_SECTION_OUTPUT_FIELDS,
+    STRUCTURED_GUIDANCE_OUTPUT_FIELDS,
+    extract_forward_sections,
+    extract_structured_guidance_features,
+    score_alt_finbert,
+)
 from signals.events.forward_guidance.models.train import walk_forward_splits
 from signals.events.forward_guidance.utils.dates import reaction_session
 
@@ -105,6 +125,102 @@ def test_market_context_producer_output_is_fully_covered_by_artifact_schema() ->
 
     assert output_fields == expected_fields
     assert output_fields <= FORWARD_GUIDANCE_ARTIFACT_FIELDS
+
+
+def test_complete_feature_builder_surface_is_covered_by_artifact_schema(monkeypatch) -> None:
+    text = """
+    Financial Outlook
+
+    We are raising full year revenue and EPS guidance because AI demand and
+    backlog remain strong, margins are expanding, and management is confident.
+
+    Question-and-Answer
+
+    An analyst asked about orders, uncertainty, capital expenditure, and hiring.
+    """
+    event = EarningsEvent(
+        ticker="NVDA",
+        earnings_date="2025-12-31",
+        report_time="BMO",
+        sector_etf="XLK",
+    )
+
+    fake_transformers = ModuleType("transformers")
+
+    def fake_pipeline(*_args, **_kwargs):
+        def classify(chunks):
+            labels = ("positive", "negative", "neutral")
+            return [
+                {"label": labels[index % len(labels)], "score": 0.75}
+                for index, _chunk in enumerate(chunks)
+            ]
+
+        return classify
+
+    fake_transformers.pipeline = fake_pipeline
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setattr(
+        build_matrix_module,
+        "read_event_text",
+        lambda _event, kind: text if kind == "guidance_section" else "",
+    )
+    monkeypatch.setattr(
+        build_matrix_module,
+        "read_json",
+        lambda _path, default=None: {
+            "reported_eps": 1.25,
+            "guidance": {"revenue_growth": 0.18},
+        },
+    )
+    monkeypatch.setattr(build_matrix_module, "load_event_market_window", lambda _event: {})
+    monkeypatch.setattr(
+        build_matrix_module,
+        "embed_sentence_transformer",
+        lambda *_args, **_kwargs: np.asarray([0.25, -0.5], dtype=np.float32),
+    )
+    feature_row, label_row = build_feature_row(
+        event,
+        generate_embeddings=True,
+        generate_finbert=True,
+    )
+    section_output = extract_forward_sections(text)
+    structured_output = extract_structured_guidance_features(text)
+    alternate_finbert_output = score_alt_finbert(text)
+
+    assert set(section_output) == set(FORWARD_SECTION_OUTPUT_FIELDS)
+    assert set(structured_output) == set(STRUCTURED_GUIDANCE_OUTPUT_FIELDS)
+    assert set(alternate_finbert_output) == set(ALT_FINBERT_OUTPUT_FIELDS)
+    assert set(FINBERT_OUTPUT_FIELDS) <= set(feature_row)
+    assert set(MARKET_CONTEXT_FEATURE_COLUMNS) <= set(feature_row)
+
+    aggregate_output_fields = (
+        set(feature_row)
+        | set(label_row)
+        | set(section_output)
+        | set(alternate_finbert_output)
+    )
+    artifact_output_fields = aggregate_output_fields - (set(IDENTITY_COLUMNS) | {"metadata"})
+    uncovered = sorted(
+        field
+        for field in artifact_output_fields
+        if field not in FORWARD_GUIDANCE_ARTIFACT_FIELDS
+        and not field.startswith(FORWARD_GUIDANCE_ARTIFACT_PREFIXES)
+    )
+
+    assert {
+        "alt_finbert_tone_score",
+        "emb_minilm_0000",
+        "finbert_tone_score",
+        "forward_guidance",
+        "fwd_ret_60d",
+        "guidance_reaction_disagreement_score",
+        "guidance_strength_score",
+        "metric_guidance_revenue_growth",
+        "post_er_move_pct",
+        "qa",
+        "target",
+    } <= artifact_output_fields
+    assert uncovered == []
 
 
 def test_walk_forward_splits_are_ordered() -> None:
