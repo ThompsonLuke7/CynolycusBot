@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 import math
+from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from core.nervous_system.contracts.base import content_hash
@@ -60,11 +64,14 @@ def _snapshot(**updates: object) -> dict[str, object]:
         "put_wall": 625.0,
         "nearest_magnet": 640.0,
         "magnet": 640.0,
+        "next_magnet_below": 635.0,
+        "vega_below": 630.0,
         "gamma_flip": 638.0,
         "air_gap_above_score": 0.35,
         "air_gap_below_score": 0.55,
         "total_option_oi": 125_000.0,
         "total_option_volume": 18_000.0,
+        "avg_dollar_volume_20d": 75_000_000.0,
         "liquidity_pass_reason": "adv",
         "pct_to_call_wall": 0.015625,
         "pct_to_put_wall": -0.0234375,
@@ -265,16 +272,178 @@ def test_dealer_state_identity_versions_and_lineage_are_deterministic() -> None:
     }
 
 
-@pytest.mark.parametrize("field", ["spot", "dealer_bias", "total_gex"])
-def test_nonfinite_numeric_inputs_are_rejected(field: str) -> None:
+def test_required_spot_null_marker_is_rejected() -> None:
     with pytest.raises(ValueError, match="finite"):
         adapt_dealer_state(
-            _snapshot(**{field: math.nan}),
+            _snapshot(spot=np.float64(np.nan), spot_price=np.float64(np.nan)),
             None,
             captured_at=CAPTURED_AT,
             valid_until=VALID_UNTIL,
             lineage=LINEAGE,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "null_value"),
+    [
+        ("next_magnet_below", np.float64(np.nan)),
+        ("vega_below", np.float64(np.nan)),
+        ("avg_dollar_volume_20d", np.float64(np.nan)),
+        ("total_gex", pd.NA),
+        ("call_wall", np.float64(np.nan)),
+    ],
+)
+def test_actual_parquet_optional_null_markers_are_absent(
+    field: str, null_value: object
+) -> None:
+    state = adapt_dealer_state(
+        _snapshot(**{field: null_value}),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert field not in state.metrics
+    if field == "total_gex":
+        assert state.total_gex is None
+    if field == "call_wall":
+        assert state.call_wall is None
+
+
+def test_nested_optional_producer_null_markers_are_absent() -> None:
+    state = adapt_dealer_state(
+        _snapshot(
+            per_dte_levels={
+                "daily_week": {
+                    "next_magnet_below": np.float64(np.nan),
+                    "vega_below": pd.NA,
+                    "observation_time": pd.NaT,
+                }
+            }
+        ),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert "per_dte_levels" not in state.metrics
+
+
+@pytest.mark.parametrize(
+    "quality_updates",
+    [
+        {"stale_days": np.float64(np.nan)},
+        {"print_sparse": pd.NA},
+        {"print_count": np.float64(np.nan), "expected_prints": 100},
+        {"print_coverage": np.float64(np.nan)},
+    ],
+)
+def test_null_quality_evidence_is_omitted(
+    quality_updates: dict[str, object]
+) -> None:
+    state = adapt_dealer_state(
+        _snapshot(**quality_updates),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    codes = {issue.code for issue in state.data_quality.issues}
+    assert "STALE_OPTION_DATA" not in codes
+    assert "PRINT_SPARSE_OPTION_DATA" not in codes
+    null_fields = {
+        name for name, value in quality_updates.items() if bool(pd.isna(value))
+    }
+    assert null_fields.isdisjoint(state.metrics)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"next_magnet_below": np.inf},
+        {"avg_dollar_volume_20d": -np.inf},
+        {"per_dte_levels": {"daily_week": {"vega_below": np.inf}}},
+    ],
+)
+def test_present_optional_infinities_still_fail(updates: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        adapt_dealer_state(
+            _snapshot(**updates),
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+def test_bounded_local_parquet_replay_adapts_eligible_rows() -> None:
+    worktree_root = Path(__file__).resolve().parents[3]
+    data_roots = [
+        worktree_root / "Data" / "dealer_positioning" / "historical_snapshots",
+        worktree_root.parents[1]
+        / "Data"
+        / "dealer_positioning"
+        / "historical_snapshots",
+    ]
+    paths = sorted(
+        path
+        for root in data_roots
+        if root.exists()
+        for path in root.glob("*/dealer_level_summary.parquet")
+        if path.stat().st_size > 0
+    )
+    if not paths:
+        pytest.skip("local dealer summary parquet is unavailable")
+
+    frame = pd.read_parquet(paths[-1]).head(256)
+    adapted = 0
+    failures: list[str] = []
+    for index, series in frame.iterrows():
+        row = series.to_dict()
+        symbol = row.get("symbol")
+        scope = row.get("scope")
+        spot = row.get("spot")
+        captured_at = pd.Timestamp(row.get("captured_at"))
+        eligible = (
+            isinstance(symbol, str)
+            and bool(symbol.strip())
+            and scope in {"daily_week", "through_month", "two_months"}
+            and not pd.isna(spot)
+            and math.isfinite(float(spot))
+            and float(spot) > 0
+            and captured_at.tzinfo is not None
+        )
+        if not eligible:
+            continue
+        lineage = (
+            LineageRef(
+                source_id="dealer-local-replay",
+                content_hash=sha256(f"{paths[-1]}:{index}".encode()).hexdigest(),
+                record_locator=f"{paths[-1].name}:{index}",
+            ),
+        )
+        try:
+            state = adapt_dealer_state(
+                row,
+                None,
+                captured_at=captured_at.to_pydatetime(),
+                valid_until=(captured_at + timedelta(days=7)).to_pydatetime(),
+                lineage=lineage,
+            )
+        except ValueError as exc:
+            failures.append(f"{index}:{symbol}:{scope}:{exc}")
+            continue
+
+        null_columns = {name for name, value in row.items() if pd.isna(value)}
+        assert null_columns.isdisjoint(state.metrics)
+        assert all(math.isfinite(value) for value in state.metrics.values())
+        adapted += 1
+
+    assert adapted > 0
+    assert failures == []
 
 
 def test_naive_or_conflicting_capture_timestamps_are_rejected() -> None:
@@ -552,6 +721,65 @@ def test_join_uses_latest_explicit_evidence_availability() -> None:
     )
 
     assert state.available_at == LEVELS_AVAILABLE_AT
+
+
+@pytest.mark.parametrize(
+    "dynamics_updates",
+    [
+        {"symbol": "QQQ"},
+        {"snapshot_date": "2026-07-31"},
+        {"captured_at": (CAPTURED_AT + timedelta(minutes=1)).isoformat()},
+        {"scope": "through_month"},
+    ],
+)
+def test_join_rejects_dynamics_from_a_different_selected_capture(
+    dynamics_updates: dict[str, object]
+) -> None:
+    with pytest.raises(
+        ValueError, match="dynamics.*(ticker|snapshot_date|captured_at|scope)"
+    ):
+        dealer_adapter.adapt_dealer_state_with_ranking(
+            _snapshot(),
+            _dynamics(**dynamics_updates),
+            _ranking(),
+            captured_at=CAPTURED_AT,
+            ranking_available_at=RANKING_AVAILABLE_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+            ranking_lineage=RANKING_LINEAGE,
+        )
+
+
+def test_join_binds_missing_dynamics_scope_to_selected_raw_scope() -> None:
+    dynamics = _dynamics()
+    dynamics.pop("scope")
+
+    state = dealer_adapter.adapt_dealer_state_with_ranking(
+        _snapshot(scope="daily_week"),
+        dynamics,
+        _ranking(),
+        captured_at=CAPTURED_AT,
+        ranking_available_at=RANKING_AVAILABLE_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+        ranking_lineage=RANKING_LINEAGE,
+    )
+
+    assert state.metrics["selected_scope_daily_week"] == 1.0
+
+
+def test_join_rejects_pre_capture_dynamics_availability_before_max_merge() -> None:
+    with pytest.raises(ValueError, match="dynamics available_at.*precede"):
+        dealer_adapter.adapt_dealer_state_with_ranking(
+            _snapshot(),
+            _dynamics(available_at=CAPTURED_AT - timedelta(seconds=1)),
+            _ranking(),
+            captured_at=CAPTURED_AT,
+            ranking_available_at=RANKING_AVAILABLE_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+            ranking_lineage=RANKING_LINEAGE,
+        )
 
 
 @pytest.mark.parametrize(

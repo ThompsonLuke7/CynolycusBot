@@ -11,6 +11,8 @@ from numbers import Number, Real
 import re
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+import pandas as pd
+
 from core.nervous_system.contracts.enums import DataQualitySeverity, DealerRegime, StateType
 from core.nervous_system.contracts.quality import (
     DataQualityIssue,
@@ -76,10 +78,23 @@ _NON_METRIC_FIELDS = frozenset(
 )
 
 
+def _is_missing(value: object) -> bool:
+    if value is None or value is pd.NaT or value is pd.NA:
+        return True
+    try:
+        result = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    try:
+        return bool(result)
+    except (TypeError, ValueError):
+        return False
+
+
 def _timestamp(value: object, *, field_name: str) -> datetime:
     """Parse only timestamps carrying an explicit timezone."""
 
-    if value is None:
+    if _is_missing(value):
         raise ValueError(f"{field_name} must be an explicit timezone-aware timestamp")
     if hasattr(value, "to_pydatetime") and not isinstance(value, datetime):
         try:
@@ -116,6 +131,8 @@ def _finite(value: object, *, field_name: str) -> float:
 
 
 def _reject_nonfinite(value: object, *, path: str) -> None:
+    if _is_missing(value):
+        return
     if isinstance(value, Mapping):
         for key, nested in value.items():
             _reject_nonfinite(nested, path=f"{path}.{key}")
@@ -124,7 +141,7 @@ def _reject_nonfinite(value: object, *, path: str) -> None:
         for index, nested in enumerate(value):
             _reject_nonfinite(nested, path=f"{path}[{index}]")
         return
-    if value is None or isinstance(value, (bool, str, bytes, date, datetime)):
+    if isinstance(value, (bool, str, bytes, date, datetime)):
         return
     if isinstance(value, (Real, Decimal, Number)):
         try:
@@ -193,7 +210,7 @@ def _alias_value(
 ) -> float | None:
     values: list[float] = []
     for name in names:
-        if name not in row or row[name] is None:
+        if name not in row or _is_missing(row[name]):
             continue
         values.append(_finite(row[name], field_name=field_name))
     if not values:
@@ -215,7 +232,7 @@ def _required_alias_value(
 def _ticker(row: Mapping[str, object]) -> str:
     values: list[str] = []
     for name in ("symbol", "ticker"):
-        if name not in row or row[name] is None:
+        if name not in row or _is_missing(row[name]):
             continue
         if not isinstance(row[name], str):
             raise ValueError(f"{name} must be a non-empty ticker string")
@@ -249,6 +266,8 @@ def _selected_scope(
 
 def _snapshot_date(row: Mapping[str, object], *, field_name: str) -> date:
     value = row.get("snapshot_date")
+    if _is_missing(value):
+        raise ValueError(f"{field_name} must contain snapshot_date")
     if hasattr(value, "to_pydatetime") and not isinstance(value, datetime):
         try:
             value = value.to_pydatetime()
@@ -268,7 +287,9 @@ def _snapshot_date(row: Mapping[str, object], *, field_name: str) -> date:
 
 def _dealer_regime(snapshot: Mapping[str, object]) -> DealerRegime:
     evidence: list[DealerRegime] = []
-    if "dealer_direction" in snapshot and snapshot["dealer_direction"] is not None:
+    if "dealer_direction" in snapshot and not _is_missing(
+        snapshot["dealer_direction"]
+    ):
         direction = snapshot["dealer_direction"]
         if not isinstance(direction, str) or direction not in _DIRECTION_REGIMES:
             names = ", ".join(_DIRECTION_REGIMES)
@@ -276,7 +297,7 @@ def _dealer_regime(snapshot: Mapping[str, object]) -> DealerRegime:
         evidence.append(_DIRECTION_REGIMES[direction])
 
     for field_name in ("dealer_regime", "regime"):
-        if field_name not in snapshot or snapshot[field_name] is None:
+        if field_name not in snapshot or _is_missing(snapshot[field_name]):
             continue
         value = snapshot[field_name]
         try:
@@ -297,7 +318,7 @@ def _dealer_regime(snapshot: Mapping[str, object]) -> DealerRegime:
 def _check_capture_metadata(
     row: Mapping[str, object], *, captured_at: datetime, field_name: str
 ) -> None:
-    if "captured_at" not in row or row["captured_at"] is None:
+    if "captured_at" not in row or _is_missing(row["captured_at"]):
         return
     row_captured_at = _timestamp(row["captured_at"], field_name="captured_at")
     if row_captured_at != captured_at:
@@ -307,7 +328,7 @@ def _check_capture_metadata(
 def _numeric_metrics(row: Mapping[str, object]) -> dict[str, float]:
     metrics: dict[str, float] = {}
     for name, value in row.items():
-        if name in _NON_METRIC_FIELDS or value is None or isinstance(value, bool):
+        if name in _NON_METRIC_FIELDS or _is_missing(value) or isinstance(value, bool):
             continue
         if isinstance(value, (str, bytes, date, datetime, Mapping, list, tuple, set, frozenset)):
             continue
@@ -334,7 +355,7 @@ def _source_number(
     values: list[float] = []
     for row in rows:
         for name in names:
-            if name in row and row[name] is not None:
+            if name in row and not _is_missing(row[name]):
                 values.append(_finite(row[name], field_name=field_name))
     if not values:
         return None
@@ -349,7 +370,7 @@ def _source_bool(
     values: list[bool] = []
     for row in rows:
         for name in names:
-            if name not in row or row[name] is None:
+            if name not in row or _is_missing(row[name]):
                 continue
             if not isinstance(row[name], bool):
                 raise ValueError(f"{field_name} must be an explicit boolean")
@@ -537,7 +558,9 @@ def adapt_dealer_state(
 
     available_at = captured_at_utc
     if dynamics_row is not None:
-        if "available_at" not in dynamics_row or dynamics_row["available_at"] is None:
+        if "available_at" not in dynamics_row or _is_missing(
+            dynamics_row["available_at"]
+        ):
             raise ValueError("dynamics must contain explicit available_at")
         available_at = _timestamp(dynamics_row["available_at"], field_name="available_at")
         if available_at < captured_at_utc:
@@ -665,14 +688,14 @@ def adapt_dealer_state_with_ranking(
     )
     if ranking_available_at_utc < captured_at_utc:
         raise ValueError("ranking_available_at cannot precede captured_at")
-    if "available_at" in ranking_row and ranking_row["available_at"] is not None:
+    if "available_at" in ranking_row and not _is_missing(ranking_row["available_at"]):
         row_available_at = _timestamp(
             ranking_row["available_at"], field_name="ranking available_at"
         )
         if row_available_at != ranking_available_at_utc:
             raise ValueError("ranking available_at conflicts with ranking_available_at")
 
-    if "captured_at" not in ranking_row or ranking_row["captured_at"] is None:
+    if "captured_at" not in ranking_row or _is_missing(ranking_row["captured_at"]):
         raise ValueError("ranking must contain captured_at")
     ranking_captured_at = _timestamp(
         ranking_row["captured_at"], field_name="ranking captured_at"
@@ -705,22 +728,57 @@ def adapt_dealer_state_with_ranking(
     if raw_regime is not DealerRegime.UNKNOWN and raw_regime is not ranking_regime:
         raise ValueError("ranking dealer regime conflicts with snapshot dealer regime")
 
+    selected_scope = _selected_scope(snapshot_row, None)
+    dynamics_available_at: datetime | None = None
+    if dynamics_row is not None:
+        try:
+            dynamics_ticker = _ticker(dynamics_row)
+        except ValueError as exc:
+            raise ValueError(f"dynamics ticker is invalid: {exc}") from exc
+        if dynamics_ticker != snapshot_ticker:
+            raise ValueError("dynamics ticker conflicts with snapshot ticker")
+        if _snapshot_date(dynamics_row, field_name="dynamics") != _snapshot_date(
+            snapshot_row, field_name="snapshot"
+        ):
+            raise ValueError(
+                "dynamics snapshot_date conflicts with snapshot snapshot_date"
+            )
+        if "captured_at" not in dynamics_row or _is_missing(
+            dynamics_row["captured_at"]
+        ):
+            raise ValueError("dynamics must contain captured_at")
+        dynamics_captured_at = _timestamp(
+            dynamics_row["captured_at"], field_name="dynamics captured_at"
+        )
+        if dynamics_captured_at != captured_at_utc:
+            raise ValueError("dynamics captured_at conflicts with captured_at")
+        if "scope" in dynamics_row and not _is_missing(dynamics_row["scope"]):
+            dynamics_scope = dynamics_row["scope"]
+            if dynamics_scope != selected_scope:
+                raise ValueError("dynamics scope conflicts with snapshot scope")
+        if "available_at" not in dynamics_row or _is_missing(
+            dynamics_row["available_at"]
+        ):
+            raise ValueError("dynamics must contain explicit available_at")
+        dynamics_available_at = _timestamp(
+            dynamics_row["available_at"], field_name="dynamics available_at"
+        )
+        if dynamics_available_at < captured_at_utc:
+            raise ValueError("dynamics available_at cannot precede captured_at")
+
     normalized_snapshot = dict(snapshot_row)
     for field_name in ("dealer_direction", "dealer_regime", "regime"):
-        if field_name in ranking_row and ranking_row[field_name] is not None:
+        if field_name in ranking_row and not _is_missing(ranking_row[field_name]):
             normalized_snapshot[field_name] = ranking_row[field_name]
 
     normalized_dynamics = dict(dynamics_row or {})
     if dynamics_row is None:
-        normalized_dynamics["scope"] = _selected_scope(snapshot_row, None)
+        normalized_dynamics["scope"] = selected_scope
         normalized_dynamics["captured_at"] = captured_at_utc
         evidence_available_at = captured_at_utc
     else:
-        if "available_at" not in dynamics_row or dynamics_row["available_at"] is None:
-            raise ValueError("dynamics must contain explicit available_at")
-        evidence_available_at = _timestamp(
-            dynamics_row["available_at"], field_name="available_at"
-        )
+        normalized_dynamics["scope"] = selected_scope
+        evidence_available_at = dynamics_available_at
     normalized_dynamics["available_at"] = max(
         evidence_available_at, ranking_available_at_utc
     )

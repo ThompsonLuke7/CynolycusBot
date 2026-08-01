@@ -14,6 +14,52 @@ from core.nervous_system.contracts.states import PortfolioState
 
 UTC = timezone.utc
 CAPTURED_AT = datetime(2026, 7, 30, 20, 5, tzinfo=UTC)
+_SECRET_API_KEY = "AKIA_PORTFOLIO_DO_NOT_LEAK_7f3d"
+_SECRET_TOKEN = "broker-token-round3-secret-91ac"
+_SECRET_PASSWORD = "database-password-round3-secret-45be"
+_SECRET_DSN = (
+    "postgresql+psycopg://portfolio_user:"
+    f"{_SECRET_PASSWORD}@db.internal/nervous_system"
+)
+_SECRET_URL = (
+    "https://paper-api.alpaca.markets/v2/orders?"
+    f"api_key={_SECRET_API_KEY}&token={_SECRET_TOKEN}"
+)
+_SECRET_FRAGMENTS = (
+    _SECRET_API_KEY,
+    _SECRET_TOKEN,
+    _SECRET_PASSWORD,
+    _SECRET_DSN,
+    _SECRET_URL,
+)
+
+
+class _CredentialBearingError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__(
+            {
+                "api_key": _SECRET_API_KEY,
+                "nested": [
+                    {"dsn": _SECRET_DSN},
+                    {"url": _SECRET_URL, "token": _SECRET_TOKEN},
+                ],
+            }
+        )
+        self.render_attempts = 0
+
+    def __str__(self) -> str:
+        self.render_attempts += 1
+        return f"api_key={_SECRET_API_KEY} url={_SECRET_URL}"
+
+    def __repr__(self) -> str:
+        self.render_attempts += 1
+        return f"_CredentialBearingError({_SECRET_DSN!r})"
+
+
+def _assert_secret_free(*values: object) -> None:
+    rendered = json.dumps(values, sort_keys=True)
+    for secret in _SECRET_FRAGMENTS:
+        assert secret not in rendered
 
 
 def _raw_snapshot() -> dict[str, object]:
@@ -132,12 +178,13 @@ def test_portfolio_adapter_does_not_call_a_broker_or_infer_underlying_ownership(
     assert positions["AAPL260821C00195000"].ownership_status == "UNASSIGNED"
 
 
-def test_portfolio_adapter_warns_when_open_orders_were_not_observed() -> None:
+def test_portfolio_adapter_does_not_republish_legacy_open_order_error_text() -> None:
     raw = _raw_snapshot()
     raw.pop("open_orders")
     raw["open_orders_observation"] = {
         "status": "FAILED",
-        "error": "RuntimeError: orders unavailable",
+        "error": _SECRET_URL,
+        "context": {"api_key": _SECRET_API_KEY, "nested": [_SECRET_DSN]},
     }
 
     state = adapt_broker_portfolio_snapshot(raw, strategy_ownership={})
@@ -146,6 +193,8 @@ def test_portfolio_adapter_warns_when_open_orders_were_not_observed() -> None:
     issues = {issue.code: issue for issue in state.data_quality.issues}
     assert issues["OPEN_ORDERS_NOT_OBSERVED"].severity.value == "WARNING"
     assert "FAILED" in issues["OPEN_ORDERS_NOT_OBSERVED"].message
+    assert "OPEN_ORDERS_READ_FAILED" in issues["OPEN_ORDERS_NOT_OBSERVED"].message
+    _assert_secret_free(state.model_dump(mode="json"))
 
 
 @pytest.mark.parametrize(
@@ -363,10 +412,10 @@ def test_snapshot_unsupported_open_orders_remain_durable_but_are_not_staged(
 
     row = json.loads(path.read_text())
     assert result["publication_status"] == "FAILED"
-    assert "UNSUPPORTED" in result["publication_error"]
+    assert result["publication_error"] == "OPEN_ORDERS_READ_UNSUPPORTED"
     assert row["open_orders_observation"] == {
         "status": "UNSUPPORTED",
-        "error": "client does not provide get_orders",
+        "error_code": "OPEN_ORDERS_READ_UNSUPPORTED",
     }
     assert "open_orders" not in row
     assert client.calls == ["get_account", "get_positions"]
@@ -386,7 +435,8 @@ def test_snapshot_failed_open_order_read_remains_durable_but_is_not_staged(
     events: list[tuple[str, object]] = []
     _record_fsync(monkeypatch, events)
     uow = _RecordingUow(events, path)
-    client = _Client(orders_error=RuntimeError("orders unavailable"))
+    orders_error = _CredentialBearingError()
+    client = _Client(orders_error=orders_error)
 
     result = capture_snapshot(
         client=client,
@@ -398,10 +448,12 @@ def test_snapshot_failed_open_order_read_remains_durable_but_is_not_staged(
 
     row = json.loads(path.read_text())
     assert result["publication_status"] == "FAILED"
-    assert "orders unavailable" in result["publication_error"]
+    assert result["publication_error"] == "OPEN_ORDERS_READ_FAILED"
+    assert result["publication_exception_type"] == "RuntimeError"
     assert row["open_orders_observation"] == {
         "status": "FAILED",
-        "error": "RuntimeError: orders unavailable",
+        "error_code": "OPEN_ORDERS_READ_FAILED",
+        "exception_type": "RuntimeError",
     }
     assert "open_orders" not in row
     assert client.calls == [
@@ -415,6 +467,13 @@ def test_snapshot_failed_open_order_read_remains_durable_but_is_not_staged(
     assert "OPEN_ORDERS_NOT_OBSERVED" in {
         issue.code for issue in local_state.data_quality.issues
     }
+    _assert_secret_free(
+        result,
+        row,
+        local_state.model_dump(mode="json"),
+        path.read_text(),
+    )
+    assert orders_error.render_attempts == 0
 
 
 def test_snapshot_rejects_naive_now_before_broker_file_or_uow_side_effects(tmp_path) -> None:
@@ -459,9 +518,11 @@ def test_snapshot_default_now_is_utc_and_observes_open_orders(tmp_path) -> None:
 
 
 def test_snapshot_returns_publication_failure_after_local_snapshot_is_durable(tmp_path) -> None:
+    publication_error = _CredentialBearingError()
+
     class FailingStates:
         def insert_states_idempotently(self, states):
-            raise RuntimeError("postgres unavailable")
+            raise publication_error
 
     class FailingUow:
         states = FailingStates()
@@ -475,6 +536,10 @@ def test_snapshot_returns_publication_failure_after_local_snapshot_is_durable(tm
     )
 
     assert result["publication_status"] == "FAILED"
-    assert "postgres unavailable" in result["publication_error"]
+    assert result["publication_error"] == "PORTFOLIO_STATE_PUBLICATION_FAILED"
+    assert result["publication_exception_type"] == "RuntimeError"
     assert result["publication_status"] != "STALE_SUCCESS"
-    assert (tmp_path / "broker_equity_20260730_paper.jsonl").exists()
+    path = tmp_path / "broker_equity_20260730_paper.jsonl"
+    assert path.exists()
+    _assert_secret_free(result, json.loads(path.read_text()), path.read_text())
+    assert publication_error.render_attempts == 0

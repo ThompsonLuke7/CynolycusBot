@@ -41,6 +41,13 @@ _PORTFOLIO_FEATURE_VERSION = "broker-portfolio@1"
 _PORTFOLIO_CONFIG_VERSION = "broker-portfolio@1:validity-24h"
 _PORTFOLIO_VALIDITY = timedelta(hours=24)
 _OCC_TAIL = re.compile(r"^\d{6}[CP]\d{8}$")
+_OPEN_ORDER_ERROR_CODES = {
+    "FAILED": "OPEN_ORDERS_READ_FAILED",
+    "NOT_OBSERVED": "OPEN_ORDERS_NOT_OBSERVED",
+    "UNAVAILABLE": "OPEN_ORDERS_READ_UNAVAILABLE",
+    "UNSUPPORTED": "OPEN_ORDERS_READ_UNSUPPORTED",
+}
+_PORTFOLIO_PUBLICATION_ERROR = "PORTFOLIO_STATE_PUBLICATION_FAILED"
 
 
 def _json_scalar(value: Any) -> Any:
@@ -148,38 +155,59 @@ def _open_orders_observation(
     if evidence is None:
         if has_orders:
             return _open_order_ids(raw), "OBSERVED", None
-        return (), "NOT_OBSERVED", "snapshot has no open-order observation evidence"
+        return (), "NOT_OBSERVED", _OPEN_ORDER_ERROR_CODES["NOT_OBSERVED"]
     if not isinstance(evidence, Mapping):
         raise ValueError("open_orders_observation must be a mapping")
     status = str(evidence.get("status") or "").strip().upper()
     if status not in {"OBSERVED", "UNAVAILABLE", "UNSUPPORTED", "FAILED", "NOT_OBSERVED"}:
         raise ValueError(f"open_orders_observation has unsupported status {status!r}")
-    error_value = evidence.get("error")
-    error = str(error_value).strip() if error_value is not None else None
     if status == "OBSERVED":
         if not has_orders:
             raise ValueError("observed open-order evidence must include open_orders")
-        return _open_order_ids(raw), status, error
+        return _open_order_ids(raw), status, None
     if has_orders:
         raise ValueError(f"open_orders must be absent when observation status is {status}")
-    return (), status, error
+    return (), status, _OPEN_ORDER_ERROR_CODES[status]
 
 
-def _observation_failure(status: str, error: str) -> dict[str, Any]:
-    return {"open_orders_observation": {"status": status, "error": error}}
+def _safe_exception_type(exc: Exception) -> str:
+    for exception_type in (
+        TimeoutError,
+        PermissionError,
+        ConnectionError,
+        ValueError,
+        TypeError,
+        RuntimeError,
+        OSError,
+    ):
+        if isinstance(exc, exception_type):
+            return exception_type.__name__
+    return "Exception"
+
+
+def _observation_failure(
+    status: str,
+    *,
+    exception: Exception | None = None,
+) -> dict[str, Any]:
+    evidence = {
+        "status": status,
+        "error_code": _OPEN_ORDER_ERROR_CODES[status],
+    }
+    if exception is not None:
+        evidence["exception_type"] = _safe_exception_type(exception)
+    return {"open_orders_observation": evidence}
 
 
 def _capture_open_orders(client: Any) -> dict[str, Any]:
     try:
         get_orders = getattr(client, "get_orders")
     except AttributeError:
-        return _observation_failure("UNSUPPORTED", "client does not provide get_orders")
+        return _observation_failure("UNSUPPORTED")
     except Exception as exc:
-        detail = str(exc).strip()
-        error = type(exc).__name__ + (f": {detail}" if detail else "")
-        return _observation_failure("FAILED", error)
+        return _observation_failure("FAILED", exception=exc)
     if not callable(get_orders):
-        return _observation_failure("UNSUPPORTED", "client does not provide get_orders")
+        return _observation_failure("UNSUPPORTED")
     try:
         values = get_orders(status="open")
         if not isinstance(values, (list, tuple)):
@@ -193,9 +221,7 @@ def _capture_open_orders(client: Any) -> dict[str, Any]:
                 raise ValueError(f"open order {index} has no id")
             orders.append({"id": identifier})
     except Exception as exc:
-        detail = str(exc).strip()
-        error = type(exc).__name__ + (f": {detail}" if detail else "")
-        return _observation_failure("FAILED", error)
+        return _observation_failure("FAILED", exception=exc)
     return {
         "open_orders": sorted(orders, key=lambda order: order["id"]),
         "open_orders_observation": {"status": "OBSERVED"},
@@ -284,7 +310,7 @@ def adapt_broker_portfolio_snapshot(
         )
 
     positions_tuple = tuple(sorted(positions, key=lambda item: (item.symbol, item.broker_position_id)))
-    open_order_ids, open_orders_status, open_orders_error = _open_orders_observation(raw)
+    open_order_ids, open_orders_status, open_orders_error_code = _open_orders_observation(raw)
     source_hash = hashlib.sha256(_canonical_json(raw).encode("utf-8")).hexdigest()
     lineage_id = _lineage_id(
         source_hash=source_hash,
@@ -305,13 +331,13 @@ def adapt_broker_portfolio_snapshot(
             )
         )
     if open_orders_status != "OBSERVED":
-        detail = f": {open_orders_error}" if open_orders_error else ""
+        detail = f"; {open_orders_error_code}" if open_orders_error_code else ""
         quality_issues.append(
             DataQualityIssue(
                 code="OPEN_ORDERS_NOT_OBSERVED",
                 severity=DataQualitySeverity.WARNING,
                 component=_PORTFOLIO_PRODUCER,
-                message=f"open orders were not observed ({open_orders_status}){detail}",
+                message=f"open orders were not observed ({open_orders_status}{detail})",
                 fallback_used="open_order_ids left empty",
             )
         )
@@ -460,16 +486,15 @@ def capture_snapshot(
         return result
     open_orders_status = record["open_orders_observation"]["status"]
     if open_orders_status != "OBSERVED":
-        observation_error = record["open_orders_observation"].get("error")
-        detail = f": {observation_error}" if observation_error else ""
+        observation = record["open_orders_observation"]
         result.update(
             {
                 "publication_status": "FAILED",
-                "publication_error": (
-                    f"open-order observation {open_orders_status}{detail}"
-                ),
+                "publication_error": observation["error_code"],
             }
         )
+        if "exception_type" in observation:
+            result["publication_exception_type"] = observation["exception_type"]
         return result
     try:
         state = adapt_broker_portfolio_snapshot(
@@ -481,7 +506,8 @@ def capture_snapshot(
         result.update(
             {
                 "publication_status": "FAILED",
-                "publication_error": f"{type(exc).__name__}: {exc}",
+                "publication_error": _PORTFOLIO_PUBLICATION_ERROR,
+                "publication_exception_type": _safe_exception_type(exc),
             }
         )
     else:
