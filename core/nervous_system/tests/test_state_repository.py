@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from threading import Barrier, Event
 from uuid import UUID, uuid4
 
 import pytest
@@ -289,6 +291,81 @@ def test_save_context_snapshot_persists_validated_payload(pg_session):
     saved = StateRepository(pg_session).save_context_snapshot(snapshot)
     assert saved == snapshot
     assert pg_session.get(ContextSnapshotRow, snapshot.snapshot_id).content_hash == snapshot.content_hash
+
+
+@pytest.mark.postgres
+def test_concurrent_context_snapshot_insert_is_atomic_and_idempotent(
+    postgres_engine,
+    session_factory,
+):
+    snapshot = ContextSnapshot.from_states(
+        snapshot_id=uuid4(),
+        decision_time=DECISION_TIME,
+        strategy_id="concurrent-snapshot",
+        ticker="AMD",
+        states=(),
+        freshness_profile="concurrent@1",
+    )
+    start = Barrier(2)
+    pre_read = Barrier(2)
+    insert_started = Event()
+
+    def before_cursor_execute(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ):
+        normalized = statement.lstrip().upper()
+        if normalized.startswith("INSERT") and "CONTEXT_SNAPSHOTS" in normalized:
+            insert_started.set()
+
+    def after_cursor_execute(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ):
+        normalized = statement.lstrip().upper()
+        if (
+            normalized.startswith("SELECT")
+            and "CONTEXT_SNAPSHOTS" in normalized
+            and not insert_started.is_set()
+        ):
+            pre_read.wait(timeout=5)
+
+    def persist_once() -> tuple[str, bool]:
+        with session_factory() as session:
+            start.wait(timeout=5)
+            saved = StateRepository(session).save_context_snapshot_idempotently(snapshot)
+            caller_owned_transaction = session.in_transaction()
+            session.commit()
+            return saved.content_hash, caller_owned_transaction
+
+    event.listen(postgres_engine, "before_cursor_execute", before_cursor_execute)
+    event.listen(postgres_engine, "after_cursor_execute", after_cursor_execute)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = tuple(executor.map(lambda _index: persist_once(), range(2)))
+    finally:
+        event.remove(postgres_engine, "before_cursor_execute", before_cursor_execute)
+        event.remove(postgres_engine, "after_cursor_execute", after_cursor_execute)
+
+    assert results == (
+        (snapshot.content_hash, True),
+        (snapshot.content_hash, True),
+    )
+    with session_factory() as session:
+        rows = session.scalars(
+            select(ContextSnapshotRow).where(
+                ContextSnapshotRow.snapshot_id == snapshot.snapshot_id
+            )
+        ).all()
+    assert len(rows) == 1
 
 
 def _theme(*, state_id: UUID, theme_id: str) -> ThemeState:

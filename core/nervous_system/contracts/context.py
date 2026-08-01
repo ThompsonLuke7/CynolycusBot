@@ -182,6 +182,7 @@ _DISPATCH = {
 }
 
 _SINGLETON_TYPES = frozenset({MarketState, TickerState, DealerState, PortfolioState, ReadinessState})
+_BAR_BOUND_STATE_TYPES = (MarketState, SectorState, ThemeMembership, ThemeState, TickerState)
 
 
 class ContextSnapshot(ContractModel):
@@ -307,6 +308,19 @@ class ContextSnapshot(ContractModel):
 
     @model_validator(mode="after")
     def validate_hash_references(self) -> ContextSnapshot:
+        if self.uses_extended_evidence:
+            for field_name in ("strategy_id", "ticker", "freshness_profile"):
+                value = getattr(self, field_name)
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"{field_name} must be a non-empty string")
+        if self.decision_bar is not None:
+            if self.decision_bar > self.decision_time:
+                raise ValueError("decision_bar must not be after decision_time")
+            for state in _sorted_embedded_states(self):
+                if isinstance(state, _BAR_BOUND_STATE_TYPES) and state.as_of > self.decision_bar:
+                    raise ValueError(
+                        f"bar-bound state {state.state_id} as_of is after decision_bar"
+                    )
         if self.freshness_profile_hash and (
             len(self.freshness_profile_hash) != 64
             or re.fullmatch(r"[0-9a-fA-F]{64}", self.freshness_profile_hash) is None

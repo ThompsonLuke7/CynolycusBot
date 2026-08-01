@@ -328,6 +328,108 @@ def test_snapshot_rejects_naive_decision_time_as_validation_error():
         )
 
 
+@pytest.mark.parametrize("field_name", ("strategy_id", "ticker", "freshness_profile"))
+def test_extended_snapshot_requires_non_empty_identity_fields(field_name):
+    values = {
+        "strategy_id": "meta_ranker",
+        "ticker": "AMD",
+        "freshness_profile": "test@1",
+    }
+    values[field_name] = "   "
+
+    with pytest.raises(ValueError, match=field_name):
+        ContextSnapshot.from_states(
+            snapshot_id=uuid4(),
+            decision_time=DECISION_TIME,
+            decision_bar=DECISION_TIME - timedelta(minutes=20),
+            freshness_profile_hash="a" * 64,
+            states=(),
+            **values,
+        )
+
+
+def test_extended_snapshot_rejects_decision_bar_after_decision_time_on_both_boundaries():
+    with pytest.raises(ValueError, match="decision_bar"):
+        ContextSnapshot.from_states(
+            snapshot_id=uuid4(),
+            decision_time=DECISION_TIME,
+            decision_bar=DECISION_TIME + timedelta(seconds=1),
+            strategy_id="meta_ranker",
+            ticker="AMD",
+            states=(),
+            freshness_profile="test@1",
+            freshness_profile_hash="a" * 64,
+        )
+
+    snapshot = ContextSnapshot.from_states(
+        snapshot_id=uuid4(),
+        decision_time=DECISION_TIME,
+        decision_bar=DECISION_TIME - timedelta(minutes=20),
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(),
+        freshness_profile="test@1",
+        freshness_profile_hash="a" * 64,
+    )
+    with pytest.raises(ValidationError, match="decision_bar"):
+        snapshot.model_copy(update={"decision_bar": DECISION_TIME + timedelta(seconds=1)})
+
+
+def _after_decision_bar(state: StateEnvelope) -> StateEnvelope:
+    as_of = DECISION_TIME - timedelta(minutes=10)
+    available_at = DECISION_TIME - timedelta(minutes=5)
+    updates: dict[str, Any] = {
+        "as_of": as_of,
+        "available_at": available_at,
+        "generated_at": available_at,
+        "valid_until": DECISION_TIME + timedelta(hours=1),
+        "source_window_start": as_of - timedelta(minutes=5),
+        "source_window_end": as_of,
+    }
+    if isinstance(state, TickerState):
+        updates["selected_bar"] = as_of
+    return state.model_copy(update=updates)
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        market_state(),
+        sector_state(),
+        theme_state(),
+        theme_membership("semiconductors", "AMD"),
+        ticker_state(),
+    ),
+    ids=("market", "sector", "theme", "theme-membership", "ticker"),
+)
+def test_extended_snapshot_rejects_bar_bound_embedded_state_after_decision_bar(state):
+    with pytest.raises(ValueError, match="decision_bar"):
+        ContextSnapshot.from_states(
+            snapshot_id=uuid4(),
+            decision_time=DECISION_TIME,
+            decision_bar=DECISION_TIME - timedelta(minutes=20),
+            strategy_id="meta_ranker",
+            ticker="AMD",
+            states=(_after_decision_bar(state),),
+            freshness_profile="test@1",
+            freshness_profile_hash="a" * 64,
+        )
+
+
+def test_legacy_snapshot_without_decision_bar_remains_backward_compatible():
+    snapshot = ContextSnapshot.from_states(
+        snapshot_id=uuid4(),
+        decision_time=DECISION_TIME,
+        decision_bar=None,
+        strategy_id="",
+        ticker="",
+        states=(),
+        freshness_profile="",
+    )
+    assert snapshot.decision_bar is None
+    assert snapshot.uses_extended_evidence is False
+
+
 def test_snapshot_normalizes_non_utc_decision_time_before_hashing():
     state = market_state(
         state_id=UUID("00000000-0000-0000-0000-000000000013")

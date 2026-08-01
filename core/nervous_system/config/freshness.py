@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import time, timedelta
 import hashlib
 import json
 from types import MappingProxyType
@@ -34,6 +34,9 @@ class FreshnessRule:
 class SnapshotProfile:
     profile_id: str
     rules: tuple[FreshnessRule, ...]
+    dealer_allowed: bool = True
+    dealer_capture_after_et: time | None = None
+    market_session_lag: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile_id, str) or not self.profile_id.strip():
@@ -48,6 +51,19 @@ class SnapshotProfile:
         state_types = [rule.state_type for rule in normalized_rules]
         if len(set(state_types)) != len(state_types):
             raise ValueError("snapshot profile cannot repeat a state_type")
+        if type(self.dealer_allowed) is not bool:
+            raise TypeError("dealer_allowed must be a bool")
+        if self.dealer_capture_after_et is not None:
+            if not isinstance(self.dealer_capture_after_et, time):
+                raise TypeError("dealer_capture_after_et must be a time or None")
+            if self.dealer_capture_after_et.tzinfo is not None:
+                raise ValueError("dealer_capture_after_et must be a naive ET wall-clock time")
+            if not self.dealer_allowed:
+                raise ValueError("dealer_capture_after_et requires dealer_allowed=True")
+        if type(self.market_session_lag) is not int:
+            raise TypeError("market_session_lag must be an int")
+        if self.market_session_lag < 0:
+            raise ValueError("market_session_lag must be non-negative")
         object.__setattr__(self, "rules", normalized_rules)
 
     @property
@@ -64,11 +80,20 @@ def canonical_profile_payload(profile: SnapshotProfile) -> dict[str, object]:
 
     return {
         "profile_id": profile.profile_id,
+        "policy": {
+            "dealer_allowed": profile.dealer_allowed,
+            "dealer_capture_after_et": (
+                profile.dealer_capture_after_et.isoformat(timespec="microseconds")
+                if profile.dealer_capture_after_et is not None
+                else None
+            ),
+            "market_session_lag": profile.market_session_lag,
+        },
         "rules": [
             {
                 "state_type": rule.state_type.value,
                 "required": rule.required,
-                "max_age_seconds": int(rule.max_age.total_seconds()),
+                "max_age_microseconds": rule.max_age // timedelta(microseconds=1),
                 "fallback": rule.fallback.value,
             }
             for rule in profile.rules
@@ -180,10 +205,16 @@ _OPTIONAL_RULES = (
 META_4H_1420_PROFILE = SnapshotProfile(
     profile_id="meta_4h_1420@1",
     rules=_REQUIRED_RULES + _OPTIONAL_RULES,
+    dealer_allowed=False,
+    dealer_capture_after_et=None,
+    market_session_lag=1,
 )
 META_4H_1620_PROFILE = SnapshotProfile(
     profile_id="meta_4h_1620@1",
     rules=_REQUIRED_RULES + _OPTIONAL_RULES,
+    dealer_allowed=True,
+    dealer_capture_after_et=time(14, 20),
+    market_session_lag=1,
 )
 
 # Public aliases keep the registry discoverable without making callers depend

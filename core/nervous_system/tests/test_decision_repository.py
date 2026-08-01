@@ -7,7 +7,12 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
+from core.nervous_system.config.freshness import FreshnessRule, SnapshotProfile
+from core.nervous_system.context.snapshot_builder import SnapshotBuilder
+from core.nervous_system.contracts.base import content_hash
 from core.nervous_system.contracts.decisions import DecisionOutcome, DecisionRecord
+from core.nervous_system.contracts.enums import MissingStateAction, StateType
+from core.nervous_system.persistence.models import ContextSnapshot as ContextSnapshotRow
 from core.nervous_system.persistence.models import DecisionRecord as DecisionRecordRow
 from core.nervous_system.persistence.models import OutboxEvent
 from core.nervous_system.persistence.repositories.decision import (
@@ -15,6 +20,7 @@ from core.nervous_system.persistence.repositories.decision import (
     DecisionRepository,
     _record_from_row,
 )
+from core.nervous_system.persistence.repositories.state import StateRepository
 from core.nervous_system.persistence.uow import UnitOfWork
 
 
@@ -116,6 +122,68 @@ def test_uncommitted_uow_rolls_back_complete_chain(session_factory, complete_dec
                 DecisionRecordRow.decision_record_id == chain.record.decision_record_id
             )
         ) is None
+
+
+@pytest.mark.postgres
+def test_save_chain_reuses_snapshot_already_persisted_by_builder(
+    session_factory,
+    complete_decision_chain,
+):
+    chain = complete_decision_chain
+    profile = SnapshotProfile(
+        profile_id="decision-chain-test@1",
+        rules=(
+            FreshnessRule(
+                StateType.TICKER,
+                False,
+                timedelta(hours=1),
+                MissingStateAction.WARN,
+            ),
+        ),
+    )
+
+    with session_factory() as session:
+        snapshot = SnapshotBuilder(StateRepository(session)).build(
+            strategy_id=chain.intent.strategy_id,
+            entity_id=chain.intent.ticker,
+            decision_time=chain.snapshot.decision_time,
+            decision_bar=chain.snapshot.decision_time - timedelta(minutes=20),
+            profile=profile,
+        )
+        intent = chain.intent.model_copy(update={"snapshot_id": snapshot.snapshot_id})
+        policy = chain.policy_decision.model_copy(
+            update={"snapshot_id": snapshot.snapshot_id}
+        )
+        record = chain.record.model_copy(
+            update={
+                "snapshot_id": snapshot.snapshot_id,
+                "snapshot_hash": snapshot.content_hash,
+                "intent_hash": content_hash(intent, exclude={"intent_id"}),
+                "policy_hash": content_hash(policy, exclude={"policy_decision_id"}),
+            }
+        )
+        persisted_chain = CompleteDecisionChain(
+            snapshot=snapshot,
+            intent=intent,
+            policy_decision=policy,
+            record=record,
+            order_requests=chain.order_requests,
+        )
+
+        DecisionRepository(session).save_chain(persisted_chain)
+        session.commit()
+
+    with session_factory() as session:
+        assert session.scalar(
+            select(ContextSnapshotRow.snapshot_id).where(
+                ContextSnapshotRow.snapshot_id == snapshot.snapshot_id
+            )
+        ) == snapshot.snapshot_id
+        assert session.scalar(
+            select(DecisionRecordRow.decision_record_id).where(
+                DecisionRecordRow.decision_record_id == record.decision_record_id
+            )
+        ) == record.decision_record_id
 
 
 @pytest.mark.postgres

@@ -16,7 +16,6 @@ from core.nervous_system.contracts.intent import TradeIntent
 from core.nervous_system.contracts.orders import OrderRequest
 from core.nervous_system.contracts.policy import PolicyDecision
 from core.nervous_system.persistence.models import (
-    ContextSnapshot as ContextSnapshotRow,
     DecisionOutcome as DecisionOutcomeRow,
     DecisionRecord as DecisionRecordRow,
     OrderLeg,
@@ -25,6 +24,7 @@ from core.nervous_system.persistence.models import (
     PolicyModifier as PolicyModifierRow,
     TradeIntent as TradeIntentRow,
 )
+from core.nervous_system.persistence.repositories.state import StateRepository
 
 
 def _hash_without_identity(contract: Any, identity_field: str) -> str:
@@ -234,19 +234,7 @@ class DecisionRepository:
             record=chain.record,
             order_requests=chain.order_requests,
         )
-        self._session.add(
-            ContextSnapshotRow(
-                snapshot_id=chain.snapshot.snapshot_id,
-                decision_time=chain.snapshot.decision_time,
-                strategy_id=chain.snapshot.strategy_id,
-                ticker=chain.snapshot.ticker,
-                freshness_profile=chain.snapshot.freshness_profile,
-                content_hash=chain.snapshot.content_hash,
-                payload=chain.snapshot.model_dump(mode="json"),
-                created_at=chain.snapshot.decision_time,
-            )
-        )
-        self._session.flush()
+        StateRepository(self._session).save_context_snapshot_idempotently(chain.snapshot)
         self.save_trade_intent(chain.intent)
         self.save_policy_decision(chain.policy_decision)
         self.save_decision_record(chain.record)

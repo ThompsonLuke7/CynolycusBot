@@ -1170,3 +1170,7 @@ Report written with RED/GREEN evidence, policy-value and bar-bound classificatio
 {2026-08-01 16:30 EDT} {agent: Codex} {nervous system Task 13 correction round 1}
 Closed controller concerns with TDD: bar-bound types are explicit, optional context covers memberships/events/pressure/dealer, sector/theme/catalyst relevance is exact, and session-safe MVP freshness defaults are versioned.
 Correction RED `5 failed/5 passed`; focused GREEN `10 passed`; full disposable-PostgreSQL core `262 passed`; compileall/diff-check clean; no commit or persistent/live path access.
+
+{2026-08-01 17:00 EDT} {agent: Codex} {nervous system Task 13 formal correction round 1}
+Atomic concurrent snapshots, decision-chain reuse, explicit version ties, effective membership windows, exact prior-session market policy, metadata hashing, and extended snapshot validation are TDD-covered.
+Focused `30`, affected `66`, and disposable-PostgreSQL core `388` passed; compileall/diff-check clean; no commit or persistent/live path access.

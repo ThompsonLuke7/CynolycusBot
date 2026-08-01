@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 from collections.abc import Sequence
+import json
 from zoneinfo import ZoneInfo
 
 from core.calendar.us_market_calendar import is_trading_day, prev_trading_day
@@ -92,12 +93,29 @@ def decision_session(decision_time: datetime) -> str:
 
 
 def _profile_boundary(profile: SnapshotProfile, decision_time: datetime) -> datetime | None:
-    if profile.profile_id not in {"meta_4h_1420@1", "meta_4h_1620@1"}:
+    if profile.dealer_capture_after_et is None:
         return None
     et = _aware(decision_time, "decision_time").astimezone(_ET)
     if not is_trading_day(et.date()):
         return None
-    return datetime.combine(et.date(), time(14, 20), tzinfo=_ET).astimezone(_UTC)
+    return datetime.combine(
+        et.date(),
+        profile.dealer_capture_after_et,
+        tzinfo=_ET,
+    ).astimezone(_UTC)
+
+
+def _expected_market_session(
+    profile: SnapshotProfile,
+    decision_time: datetime,
+) -> str | None:
+    if profile.market_session_lag == 0:
+        return None
+    et_date = _aware(decision_time, "decision_time").astimezone(_ET).date()
+    session_date = et_date if is_trading_day(et_date) else prev_trading_day(et_date)
+    for _ in range(profile.market_session_lag):
+        session_date = prev_trading_day(session_date)
+    return session_date.isoformat()
 
 
 def _expected_entities(
@@ -144,20 +162,27 @@ def _entity_matches(
 
 
 def producer_version(candidate: StateEnvelope) -> str:
-    """Read the versioned producer discriminator used by the tie-break.
+    """Return one persisted, explicit version discriminator for tie-breaking."""
 
-    The reviewed StateEnvelope contract calls this field ``producer``.  A
-    future envelope may expose the more explicit ``producer_version`` name;
-    supporting both keeps the selector aligned with the causal contract while
-    preserving the existing state schema.
-    """
-
-    value = getattr(candidate, "producer_version", None)
-    if value is None:
-        value = candidate.producer
-    if not isinstance(value, str) or not value:
-        raise ValueError("producer version must be a non-empty string")
-    return value
+    string_parts = (
+        candidate.producer,
+        candidate.model_version,
+        candidate.feature_version,
+        candidate.config_version,
+    )
+    if any(not isinstance(value, str) or not value.strip() for value in string_parts):
+        raise ValueError("producer and state versions must be non-empty strings")
+    return json.dumps(
+        (
+            candidate.producer,
+            f"{candidate.schema_version:020d}",
+            candidate.model_version,
+            candidate.feature_version,
+            candidate.config_version,
+        ),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def candidate_tie_key(candidate: StateEnvelope) -> tuple[datetime, datetime, str, str]:
@@ -218,13 +243,13 @@ def _dealer_boundary_reason(
 ) -> str | None:
     if candidate.state_type is not StateType.DEALER:
         return None
+    if not profile.dealer_allowed:
+        return "DEALER_NOT_ALLOWED"
     boundary = _profile_boundary(profile, decision_time)
     if boundary is None:
         return None
-    if profile.profile_id == "meta_4h_1420@1":
-        return "DEALER_NOT_ELIGIBLE_AT_1420"
     if _aware(candidate.as_of, "state.as_of") <= boundary:
-        return "DEALER_CAPTURE_NOT_POST_1420"
+        return "DEALER_CAPTURE_NOT_POST_BOUNDARY"
     return None
 
 
@@ -242,10 +267,10 @@ def _status_for_rejections(
         return "STALE", "STALE"
     if "FUTURE_BAR" in rejection_codes:
         return "MISSING", "FUTURE_BAR"
-    if "DEALER_NOT_ELIGIBLE_AT_1420" in rejection_codes:
-        return "MISSING", "DEALER_NOT_ELIGIBLE_AT_1420"
-    if "DEALER_CAPTURE_NOT_POST_1420" in rejection_codes:
-        return "MISSING", "DEALER_CAPTURE_NOT_POST_1420"
+    if "DEALER_NOT_ALLOWED" in rejection_codes:
+        return "MISSING", "DEALER_NOT_ALLOWED"
+    if "DEALER_CAPTURE_NOT_POST_BOUNDARY" in rejection_codes:
+        return "MISSING", "DEALER_CAPTURE_NOT_POST_BOUNDARY"
     reason = "MISSING_REQUIRED_STATE" if rule.required else "OPTIONAL_STATE_MISSING"
     return "MISSING", reason
 
@@ -267,10 +292,26 @@ def _candidate_rejection_reason(
 ) -> str | None:
     if not _entity_matches(candidate, rule, entity_id=entity_id, scope=scope):
         return "WRONG_ENTITY"
+    expected_market_session = _expected_market_session(profile, decision_time_utc)
+    if (
+        rule.state_type is StateType.MARKET
+        and expected_market_session is not None
+        and _aware(candidate.as_of, "state.as_of").astimezone(_ET).date().isoformat()
+        != expected_market_session
+    ):
+        return "MARKET_SESSION_MISMATCH"
     if rule.state_type is StateType.THEME and str(
         getattr(candidate, "theme_id", candidate.entity_id)
     ) not in selected_theme_ids:
         return "THEME_NOT_IN_TICKER_MEMBERSHIPS"
+    if isinstance(candidate, ThemeMembership):
+        if decision_time_utc < _aware(candidate.effective_from, "state.effective_from"):
+            return "MEMBERSHIP_NOT_YET_EFFECTIVE"
+        if candidate.effective_until is not None and decision_time_utc >= _aware(
+            candidate.effective_until,
+            "state.effective_until",
+        ):
+            return "MEMBERSHIP_EFFECTIVE_EXPIRED"
     if rule.state_type in _BAR_BOUND_TYPES and _aware(candidate.as_of, "state.as_of") > decision_bar_utc:
         return "FUTURE_BAR"
     if _aware(candidate.available_at, "state.available_at") > decision_time_utc:

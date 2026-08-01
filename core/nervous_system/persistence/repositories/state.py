@@ -628,9 +628,37 @@ class StateRepository:
     def save_context_snapshot_idempotently(self, snapshot: ContextSnapshot) -> ContextSnapshot:
         """Persist a snapshot or return the identical existing snapshot."""
 
+        if snapshot.content_hash != snapshot.computed_content_hash():
+            raise ValueError("snapshot content_hash does not match content")
+
+        if _is_postgresql(self._session):
+            statement = (
+                postgres_insert(ContextSnapshotRow)
+                .values(
+                    snapshot_id=snapshot.snapshot_id,
+                    decision_time=snapshot.decision_time,
+                    strategy_id=snapshot.strategy_id,
+                    ticker=snapshot.ticker,
+                    freshness_profile=snapshot.freshness_profile,
+                    content_hash=snapshot.content_hash,
+                    payload=snapshot.model_dump(mode="json"),
+                    created_at=snapshot.decision_time,
+                )
+                .on_conflict_do_nothing(index_elements=[ContextSnapshotRow.snapshot_id])
+                .returning(ContextSnapshotRow.snapshot_id)
+            )
+            if self._session.execute(statement).scalar_one_or_none() is not None:
+                return snapshot
+        else:
+            existing = self.get_context_snapshot(snapshot.snapshot_id)
+            if existing is None:
+                return self.save_context_snapshot(snapshot)
+
         existing = self.get_context_snapshot(snapshot.snapshot_id)
-        if existing is not None:
-            if existing.content_hash != snapshot.content_hash:
-                raise ValueError("snapshot identity already exists with different content")
-            return existing
-        return self.save_context_snapshot(snapshot)
+        if existing is None:
+            raise RuntimeError(
+                "snapshot conflict was reported but the existing row could not be loaded"
+            )
+        if existing.content_hash != snapshot.content_hash:
+            raise ValueError("snapshot identity already exists with different content")
+        return existing
