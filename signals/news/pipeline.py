@@ -32,6 +32,7 @@ from signals.news.schema import (
     add_observation_metadata,
     empty_news_frame,
     records_from_frame,
+    parquet_safe_causal_metadata,
 )
 from signals.news.sources import (
     enrich_sec_8k_ex99_text,
@@ -124,7 +125,10 @@ def collect_company_news(
         raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True, errors="coerce")
         start_ts = pd.Timestamp(start, tz="UTC")
         end_ts = pd.Timestamp(end, tz="UTC") + pd.Timedelta(days=1)
-        raw = raw.loc[raw["timestamp"].between(start_ts, end_ts)].copy()
+        timestamp_mask = raw["timestamp"].between(start_ts, end_ts)
+        # Preserve invalid explicit occurrences for adapter quarantine rather
+        # than turning them into absent rows during collection filtering.
+        raw = raw.loc[timestamp_mask | raw["timestamp"].isna()].copy()
     if merge_with_existing and Path(output_path).exists():
         existing = pd.read_parquet(output_path)
         if not existing.empty:
@@ -133,7 +137,7 @@ def collect_company_news(
             raw = pd.concat([existing, raw], ignore_index=True, sort=False)
     out = deduplicate_news(raw)
     out = classify_source_quality(classify_catalyst_types(enrich_earnings_catalyst_fields(classify_news_relations(out))))
-    out.to_parquet(output_path, index=False)
+    parquet_safe_causal_metadata(out).to_parquet(output_path, index=False)
     return out
 
 
@@ -168,7 +172,7 @@ def collect_news_from_csv(
             )
         )
     )
-    out.to_parquet(output_path, index=False)
+    parquet_safe_causal_metadata(out).to_parquet(output_path, index=False)
     return out
 
 

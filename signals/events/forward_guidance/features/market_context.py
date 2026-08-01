@@ -10,6 +10,14 @@ import pandas as pd
 
 from signals.events.forward_guidance.data.schema import EarningsEvent
 
+POST_EVENT_FEATURE_COLUMNS = frozenset({
+    "post_er_gap_pct",
+    "post_er_move_pct",
+    "intraday_reversal",
+    "bad_initial_reaction_flag",
+    "technical_stabilization_flag",
+})
+
 
 def _ensure_timestamp(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()

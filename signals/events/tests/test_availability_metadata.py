@@ -186,3 +186,11 @@ def test_scheduled_schema_preserves_hindsight_evidence_for_adapter_quarantine() 
 
     assert result.event is None
     assert result.quarantine_code == "HINDSIGHT_EARNINGS_EVIDENCE"
+
+
+def test_event_frame_retains_missing_required_rows_for_quarantine() -> None:
+    out = events_from_frame(
+        pd.DataFrame([{"timestamp": "2026-08-13T13:30:00Z", "title": "Missing type"}])
+    )
+    assert len(out) == 1
+    assert out.iloc[0]["ingestion_quarantine_code"] == "MISSING_REQUIRED_EVENT_FIELD"

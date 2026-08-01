@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Any
+from datetime import datetime
 
 import pandas as pd
 
@@ -117,12 +119,11 @@ class NewsRecord:
 
     @property
     def record_id(self) -> str:
-        source_key = (
-            self.source_record_id
-            or self.source_id
-            or text_fingerprint(self.timestamp_utc.isoformat(), self.url, self.headline)
+        source_key = self.source_record_id or self.source_id or text_fingerprint(
+            self.timestamp_utc.isoformat(), self.url, self.headline
         )
-        return text_fingerprint(self.clean_ticker, source_key)
+        revision = text_fingerprint(self.headline, self.summary, self.body, self.url)
+        return text_fingerprint(self.clean_ticker, self.source, source_key, revision)
 
     def to_record(self) -> dict[str, Any]:
         timestamp = self.timestamp_utc
@@ -224,6 +225,24 @@ def add_observation_metadata(
     return out
 
 
+def parquet_safe_causal_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """Serialize mixed valid/raw causal metadata without localizing naive values."""
+    out = df.copy()
+    for column in ("timestamp", "event_time", "published_at", "observed_at", "available_at"):
+        if column not in out.columns:
+            continue
+        out[column] = [
+            value.isoformat() if isinstance(value, (pd.Timestamp, datetime)) else value
+            for value in out[column]
+        ]
+    if "raw_ingestion_fields" in out.columns:
+        out["raw_ingestion_fields"] = [
+            json.dumps(value, sort_keys=True, default=str) if isinstance(value, Mapping) else value
+            for value in out["raw_ingestion_fields"]
+        ]
+    return out
+
+
 def records_from_frame(
     df: pd.DataFrame,
     *,
@@ -239,7 +258,36 @@ def records_from_frame(
         timestamp = _first_present(row, ("timestamp", "datetime", "published_at", "time_published"))
         published_at = _first_present(row, ("published_at", "time_published"))
         headline = _first_present(row, ("headline", "title"))
-        if not ticker or not timestamp or not headline:
+        timestamp_invalid = False
+        if timestamp is not None:
+            try:
+                pd.Timestamp(timestamp)
+            except (TypeError, ValueError):
+                timestamp_invalid = True
+        if not ticker or not timestamp or not headline or timestamp_invalid:
+            raw = row.to_dict()
+            rows.append({
+                "record_id": str(raw.get("record_id") or f"news:row:{len(rows)}"),
+                "ticker": str(ticker or "").upper().strip(),
+                "timestamp": timestamp,
+                "event_time": raw.get("event_time", timestamp),
+                "published_at": raw.get("published_at"),
+                "observed_at": raw.get("observed_at", observed_at or collection_time),
+                "available_at": raw.get("available_at"),
+                "source_record_id": str(raw.get("source_record_id") or "").strip(),
+                "source": str(raw.get("source") or source),
+                "headline": headline or "",
+                "summary": raw.get("summary", ""), "body": raw.get("body", ""),
+                "url": raw.get("url", ""),
+                "ingestion_quarantine_code": (
+                    "INVALID_EVENT_TIME" if timestamp_invalid else "MISSING_REQUIRED_NEWS_FIELD"
+                ),
+                "ingestion_quarantine_message": (
+                    "explicit timestamp/occurrence is invalid"
+                    if timestamp_invalid else "ticker, timestamp, and headline are required"
+                ),
+                "raw_ingestion_fields": raw,
+            })
             continue
         row_observed = _first_present(row, ("observed_at", "collection_time", "captured_at"))
         row_available = _first_present(row, ("available_at",))

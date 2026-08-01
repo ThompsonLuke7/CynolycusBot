@@ -36,6 +36,8 @@ from core.nervous_system.persistence.repositories.registry import (
     SourceArtifactRecord,
 )
 from core.nervous_system.persistence.uow import UnitOfWork as NervousSystemUnitOfWork
+from signals.events.forward_guidance.features.build_matrix import LABEL_COLUMNS
+from signals.events.forward_guidance.features.market_context import POST_EVENT_FEATURE_COLUMNS
 
 
 UTC = timezone.utc
@@ -74,17 +76,33 @@ _NON_IDENTITY_FIELDS = _RUNTIME_FIELDS | frozenset(
         "collection_time",
         "captured_at",
         "record_id",
+        "catalyst_id",
+        "local_id",
     }
 )
 _HINDSIGHT_FIELD_PATTERNS = (
     re.compile(r"(?:^|_)hindsight(?:_|$)"),
     re.compile(r"(?:^|_)(?:forward_return|forward_returns|fwd_ret|fwd_return)(?:_|$)"),
+    re.compile(r"(?:^|_)(?:fwd|forward|post|post_er|post_event|post_earnings)(?:_|$).*(?:ret|return|move|gap|excess|runup|drawdown|stabiliz)"),
+    re.compile(r"(?:^|_)(?:max|min)_(?:runup|drawdown)(?:_|$)"),
+    re.compile(r"(?:^|_)(?:technical_)?stabilization(?:_|$)"),
     re.compile(r"(?:^|_)(?:actual|realized|realised|result|results|label|target)(?:_|$)"),
     re.compile(r"(?:^|_)(?:beat|miss)(?:_|$)"),
     re.compile(r"(?:^|_)(?:post_event|postevent|post_result|post_earnings)(?:_|$)"),
     re.compile(r"(?:^|_)drawdown(?:_|$)"),
     re.compile(r"(?:^|_)guidance(?:_|$).*(?:strength|result|actual|realized|realised|score|return)"),
 )
+_HINDSIGHT_EXACT_FIELDS = frozenset(
+    {
+        "fwd_ret_5d", "fwd_ret_20d", "fwd_ret_60d",
+        "fwd_60d_excess_ret_vs_spy", "fwd_60d_excess_ret_vs_sector",
+        "max_runup", "max_drawdown", "target",
+        "post_er_move_pct", "post_er_gap_pct", "technical_stabilization_flag",
+    }
+)
+_HINDSIGHT_EXACT_FIELDS |= frozenset(LABEL_COLUMNS) | frozenset(POST_EVENT_FEATURE_COLUMNS) | {
+    "guidance_reaction_disagreement_score",
+}
 _HINDSIGHT_META_FIELDS = frozenset(
     {
         "source_record_id",
@@ -252,7 +270,7 @@ def _validated_lineage(source_artifact: LineageRef) -> LineageRef:
         raise AdapterIssue("MISSING_SOURCE_LINEAGE", "source artifact record_locator is required")
     return source_artifact.model_copy(
         update={
-            "source_id": source_artifact.source_id.strip(),
+            "source_id": source_artifact.source_id.strip().lower(),
             "content_hash": source_artifact.content_hash.lower(),
             "record_locator": source_artifact.record_locator.strip(),
         }
@@ -372,10 +390,22 @@ def hindsight_evidence_fields(row: Mapping[str, object]) -> dict[str, object]:
 
     evidence: dict[str, object] = {}
     for key, value in row.items():
-        if _missing(value) or _hindsight_field_name(key) in _HINDSIGHT_META_FIELDS:
-            continue
         normalized = _hindsight_field_name(key)
-        if any(pattern.search(normalized) for pattern in _HINDSIGHT_FIELD_PATTERNS):
+        # News enrichment emits zero-valued earnings scores for ordinary
+        # non-earnings rows as compatibility columns; those are not result
+        # evidence unless the row is an earnings artifact.
+        event_kind = _hindsight_field_name(
+            _first(row, ("event_type", "type", "catalyst_kind")) or ""
+        )
+        if (
+            normalized in {"earnings_beat_miss_score", "earnings_guidance_score", "earnings_language_score"}
+            and not any(token in event_kind for token in ("earning", "result"))
+            and value in (0, 0.0, "0", "0.0")
+        ):
+            continue
+        if _missing(value) or normalized in _HINDSIGHT_META_FIELDS:
+            continue
+        if normalized in _HINDSIGHT_EXACT_FIELDS or any(pattern.search(normalized) for pattern in _HINDSIGHT_FIELD_PATTERNS):
             evidence[str(key)] = value
     return evidence
 
@@ -436,6 +466,12 @@ def normalize_catalyst_record(
     warnings: list[str] = []
     try:
         lineage = _validated_lineage(source_artifact)
+        ingestion_code = _first(row, ("ingestion_quarantine_code",))
+        if ingestion_code is not None:
+            return _quarantine(
+                str(ingestion_code),
+                str(_first(row, ("ingestion_quarantine_message",)) or "source row failed ingestion validation"),
+            )
         if _is_hindsight_row(row):
             return _quarantine(
                 "HINDSIGHT_EARNINGS_EVIDENCE",
@@ -611,7 +647,7 @@ def _batch_lineage(
     participates.
     """
 
-    if source_artifact.record_locator != "catalyst_records:batch":
+    if not re.search(r"(?:^|:)batch$", source_artifact.record_locator.strip(), re.IGNORECASE):
         return source_artifact
     explicit = _first(row, ("record_locator", "source_record_locator"))
     source_record_id = _first(row, ("source_record_id", "source_id", "id"))
@@ -619,7 +655,9 @@ def _batch_lineage(
     if fallback_identity is None:
         logical_key = _source_logical_key(row, source_artifact=source_artifact)
         fallback_identity = hashlib.sha256(logical_key.encode("utf-8")).hexdigest()[:32]
-    locator = str(explicit or f"catalyst_records:row:{fallback_identity}").strip()
+    # A batch marker is not a per-row lineage identity.  Expand it uniformly,
+    # and never retain filesystem/path fragments supplied by a producer.
+    locator = f"{source_artifact.record_locator.rsplit(':', 1)[0]}:row:{str(fallback_identity).strip()}"
     return source_artifact.model_copy(update={"record_locator": locator})
 
 
@@ -627,10 +665,11 @@ def _normalize_catalyst_records_with_rows(
     rows: Iterable[Mapping[str, object]],
     *,
     source_artifact: LineageRef,
+    retain_duplicates: bool = False,
 ) -> tuple[_NormalizedRow, ...]:
     """Normalize a batch, converging identical revisions and retaining conflicts."""
 
-    lineage = _validated_lineage(source_artifact)
+    lineage = source_artifact
     normalized: list[_NormalizedRow] = []
     by_event_id: dict[UUID, int] = {}
     by_logical_key: dict[str, set[UUID]] = {}
@@ -642,15 +681,15 @@ def _normalize_catalyst_records_with_rows(
             normalized.append(_NormalizedRow(row=row, lineage=row_lineage, result=result))
             continue
         if event.event_id in by_event_id:
+            if retain_duplicates:
+                normalized.append(_NormalizedRow(row=row, lineage=row_lineage, result=result))
+                continue
             existing_index = by_event_id[event.event_id]
             existing = normalized[existing_index]
             merged_warnings = tuple(
                 dict.fromkeys(existing.result.warnings + result.warnings)
             )
-            normalized[existing_index] = replace(
-                existing,
-                result=replace(existing.result, warnings=merged_warnings),
-            )
+            normalized[existing_index] = replace(existing, result=replace(existing.result, warnings=merged_warnings))
             continue
         key = _logical_key_for_result(row, row_lineage)
         prior_ids = by_logical_key.setdefault(key, set())
@@ -685,11 +724,12 @@ def normalize_catalyst_records(
     *,
     source_artifact: LineageRef,
 ) -> tuple[CatalystAdapterResult, ...]:
+    lineage = _validated_lineage(source_artifact)
     return tuple(
         normalized.result
         for normalized in _normalize_catalyst_records_with_rows(
             rows,
-            source_artifact=source_artifact,
+            source_artifact=lineage,
         )
     )
 
@@ -936,9 +976,31 @@ def _publish_registry_evidence(
                 )
             )
 
-    inserted = registry.insert_import_items_if_absent(items)
+    # A caller may submit the same logical row more than once in one batch.
+    # Keep attempted-row accounting separate from the unique persistence
+    # identities so one import item/quarantine/edge is saved per identity.
+    unique_items: dict[tuple[UUID, str, str, str], ImportItemRecord] = {}
+    for item in items:
+        identity = (
+            item.source_id,
+            item.record_locator,
+            item.importer_version,
+            item.normalized_hash,
+        )
+        unique_items.setdefault(identity, item)
+    persisted_items = tuple(unique_items.values())
+    inserted = registry.insert_import_items_if_absent(persisted_items)
     quarantine_records = []
+    unique_quarantines: dict[tuple[UUID, str, str, str], tuple[ImportItemRecord, CatalystAdapterResult, Mapping[str, object], LineageRef]] = {}
     for item, result, row, lineage in quarantined_items:
+        identity = (
+            item.source_id,
+            item.record_locator,
+            item.importer_version,
+            item.normalized_hash,
+        )
+        unique_quarantines.setdefault(identity, (item, result, row, lineage))
+    for item, result, row, lineage in unique_quarantines.values():
         identity = (
             item.source_id,
             item.record_locator,
@@ -962,16 +1024,30 @@ def _publish_registry_evidence(
     registry.save_import_quarantines(quarantine_records)
     save_edges = getattr(registry, "save_lineage_edges", None)
     if save_edges is not None:
-        save_edges([edge for identity, edge in lineage_edges if identity in inserted])
+        unique_edges = {identity: edge for identity, edge in lineage_edges}
+        save_edges([edge for identity, edge in unique_edges.items() if identity in inserted])
+    inserted_imported = sum(
+        1 for item in persisted_items
+        if item.status == "IMPORTED" and (
+            item.source_id, item.record_locator, item.importer_version, item.normalized_hash
+        ) in inserted
+    )
+    inserted_quarantined = sum(
+        1 for item in persisted_items
+        if item.status == "QUARANTINED" and (
+            item.source_id, item.record_locator, item.importer_version, item.normalized_hash
+        ) in inserted
+    )
     registry.finish_import_run(
         import_run.import_run_id,
         finished_at=datetime.now(UTC),
         status="COMPLETED",
         counts={
+            "attempted": len(normalized),
             "parsed": len(normalized),
-            "imported": sum(item.status == "IMPORTED" for item in items),
-            "quarantined": sum(item.status == "QUARANTINED" for item in items),
-            "duplicates": len(items) - len(inserted),
+            "imported": inserted_imported,
+            "quarantined": inserted_quarantined,
+            "duplicates": len(normalized) - len(inserted),
         },
     )
 
@@ -987,13 +1063,19 @@ def publish_catalyst_states(
 ) -> tuple[CatalystAdapterResult, ...]:
     """Validate and publish through the caller-owned UOW without committing."""
 
+    source_artifact = _validated_lineage(source_artifact)
     materialized_rows = tuple(rows)
     normalized = _normalize_catalyst_records_with_rows(
         materialized_rows,
         source_artifact=source_artifact,
+        retain_duplicates=True,
     )
     results = tuple(item.result for item in normalized)
-    events = tuple(result.event for result in results if result.event is not None)
+    events_by_id: dict[UUID, CatalystEvent] = {}
+    for result in results:
+        if result.event is not None:
+            events_by_id.setdefault(result.event.event_id, result.event)
+    events = tuple(events_by_id.values())
     states: list[CatalystEvent | CatalystPressure] = list(events)
     if decision_time is not None:
         decision = _decision_time(decision_time, field_name="decision_time")

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from uuid import NAMESPACE_URL, uuid5
 
 from core.nervous_system.contracts.quality import LineageRef
 import pandas as pd
@@ -22,6 +23,9 @@ from signals.catalysts.nervous_system_adapter import (
     normalize_catalyst_records,
     publish_catalyst_states,
 )
+from signals.events.forward_guidance.features.build_matrix import LABEL_COLUMNS, POST_EVENT_FEATURE_COLUMNS
+from signals.events.collectors import collect_macro_events
+from signals.news.pipeline import collect_news_from_csv
 
 
 UTC = timezone.utc
@@ -487,6 +491,101 @@ def test_pre_event_calendar_metadata_is_not_hindsight_evidence() -> None:
     assert result.event is not None
 
 
+def test_actual_forward_guidance_alias_matrix_is_quarantined() -> None:
+    base = {
+        "source": "forward-guidance",
+        "source_record_id": "actual-alias-matrix",
+        "ticker": "ABC",
+        "event_type": "earnings",
+        "event_time": _time(20, 0),
+        "observed_at": _time(14, 0),
+        "available_at": _time(14, 0),
+    }
+    aliases = set(LABEL_COLUMNS) | set(POST_EVENT_FEATURE_COLUMNS) | {
+        "realized_return",
+        "actual_result",
+        "result_score",
+        "drawdown_60d",
+    }
+    for field_name in sorted(aliases):
+        result = normalize_catalyst_record(
+            dict(base, event_type="calendar", **{field_name: 0.25}),
+            source_artifact=SOURCE,
+        )
+        assert result.event is None, field_name
+        assert result.quarantine_code == "HINDSIGHT_EARNINGS_EVIDENCE", field_name
+
+
+def test_source_lineage_identity_normalizes_logical_feed_variants() -> None:
+    row = {
+        "source": "wire",
+        "source_record_id": "identity-1",
+        "ticker": "ABC",
+        "event_type": "company_news",
+        "event_time": _time(13),
+        "observed_at": _time(13, 1),
+        "available_at": _time(13, 1),
+        "headline": "Stable identity",
+    }
+    first = normalize_catalyst_record(
+        row,
+        source_artifact=SOURCE.model_copy(update={"source_id": " Feed-X ", "content_hash": "A" * 64}),
+    )
+    second = normalize_catalyst_record(
+        row,
+        source_artifact=SOURCE.model_copy(update={"source_id": "feed-x", "content_hash": "a" * 64}),
+    )
+    assert first.event is not None and second.event is not None
+    assert first.event.event_id == second.event.event_id
+    assert first.event.state_id == second.event.state_id
+    assert first.event.lineage_ids == second.event.lineage_ids
+
+
+def test_explicit_invalid_occurrence_is_not_treated_as_missing() -> None:
+    result = normalize_catalyst_record(
+        {
+            "source": "calendar",
+            "source_record_id": "invalid-occurrence",
+            "event_type": "cpi",
+            "event_time": "not-a-time",
+            "observed_at": _time(14, 0),
+            "available_at": _time(14, 0),
+        },
+        source_artifact=SOURCE,
+    )
+    assert result.event is None
+    assert result.quarantine_code == "INVALID_EVENT_TIME"
+
+
+def test_batch_lineage_expands_any_batch_locator() -> None:
+    source = SOURCE.model_copy(update={"record_locator": "task11:postgres:batch"})
+    results = normalize_catalyst_records(
+        [
+            {
+                "source": "wire",
+                "source_record_id": "row-a",
+                "ticker": "ABC",
+                "event_type": "company_news",
+                "event_time": _time(13),
+                "observed_at": _time(13, 3),
+                "available_at": _time(13, 3),
+            },
+            {
+                "source": "wire",
+                "source_record_id": "row-b",
+                "ticker": "XYZ",
+                "event_type": "company_news",
+                "event_time": _time(13),
+                "observed_at": _time(13, 3),
+                "available_at": _time(13, 3),
+            },
+        ],
+        source_artifact=source,
+    )
+    assert results[0].event is not None and results[1].event is not None
+    assert results[0].event.lineage_ids != results[1].event.lineage_ids
+
+
 def test_news_pipeline_carries_hindsight_fields_to_adapter_quarantine() -> None:
     normalized = news_to_catalysts(
         pd.DataFrame(
@@ -710,6 +809,10 @@ def test_publication_registers_source_import_items_and_quarantines_in_caller_uow
     assert quarantine.raw_text
     assert uow.commits == 0
     assert uow.rollbacks == 0
+    assert uow.registry.runs[-1].status == "COMPLETED"
+    assert uow.registry.runs[-1].counts == {
+        "attempted": 2, "parsed": 2, "imported": 1, "quarantined": 1, "duplicates": 0
+    }
 
     publish_catalyst_states(
         (valid, quarantined),
@@ -719,6 +822,132 @@ def test_publication_registers_source_import_items_and_quarantines_in_caller_uow
     assert len(uow.registry.items) == 2
     assert len(uow.registry.quarantines) == 1
     assert len(uow.registry.edges) == 1
+    assert uow.registry.runs[-1].counts == {
+        "attempted": 2, "parsed": 2, "imported": 0, "quarantined": 0, "duplicates": 2
+    }
+
+
+def test_registry_accounting_deduplicates_same_batch_quarantine_identity() -> None:
+    bad = {
+        "source": "wire",
+        "source_record_id": "same-bad",
+        "ticker": "ABC",
+        "event_type": "company_news",
+        "event_time": _time(13),
+        "observed_at": "2026-07-30 13:03:00",
+        "available_at": _time(13, 3),
+        "headline": "bad row",
+    }
+    uow = _RecordingUow()
+
+    publish_catalyst_states((bad, dict(bad)), unit_of_work=uow, source_artifact=SOURCE)
+    run = uow.registry.runs[-1]
+
+    assert len(uow.registry.items) == 1
+    assert len(uow.registry.quarantines) == 1
+    assert len(uow.registry.edges) == 0
+    assert run.counts == {
+        "attempted": 2,
+        "parsed": 2,
+        "imported": 0,
+        "quarantined": 1,
+        "duplicates": 1,
+    }
+
+    publish_catalyst_states((bad,), unit_of_work=uow, source_artifact=SOURCE)
+    assert len(uow.registry.items) == 1
+    assert len(uow.registry.quarantines) == 1
+    assert uow.registry.runs[-1].counts == {
+        "attempted": 1,
+        "parsed": 1,
+        "imported": 0,
+        "quarantined": 0,
+        "duplicates": 1,
+    }
+
+
+def test_registry_converges_normalized_logical_feed_lineage_across_calls() -> None:
+    row = {
+        "source": "wire",
+        "source_record_id": "converge-1",
+        "ticker": "ABC",
+        "event_type": "company_news",
+        "event_time": _time(13),
+        "observed_at": _time(13, 3),
+        "available_at": _time(13, 3),
+        "headline": "Convergence",
+    }
+    first_lineage = LineageRef(
+        source_id="  FEED-X  ", content_hash="A" * 64, record_locator="  feed-x:row:1  "
+    )
+    second_lineage = LineageRef(
+        source_id="feed-x", content_hash="a" * 64, record_locator="feed-x:row:1"
+    )
+    uow = _RecordingUow()
+
+    publish_catalyst_states((row,), unit_of_work=uow, source_artifact=first_lineage)
+    second = publish_catalyst_states((row,), unit_of_work=uow, source_artifact=second_lineage)
+
+    assert len(uow.registry.artifacts) == 1
+    artifact = uow.registry.artifacts[0]
+    assert artifact.uri == "feed-x"
+    assert artifact.sha256 == "a" * 64
+    assert artifact.source_id == uuid5(NAMESPACE_URL, "catalyst-source:feed-x:" + "a" * 64)
+    assert artifact.metadata["record_locator"] == "feed-x:row:1"
+    assert len(uow.registry.items) == 1
+    assert len(uow.registry.edges) == 1
+    assert uow.registry.items[0].source_id == artifact.source_id
+    assert uow.registry.edges[0].source_id == artifact.source_id
+    assert second[0].event is not None
+    assert uow.registry.runs[-1].counts == {
+        "attempted": 1,
+        "parsed": 1,
+        "imported": 0,
+        "quarantined": 0,
+        "duplicates": 1,
+    }
+
+
+def test_catalyst_id_only_change_does_not_change_event_or_state_identity() -> None:
+    row = {
+        "source": "wire",
+        "source_record_id": "stable-source-id",
+        "ticker": "ABC",
+        "event_type": "company_news",
+        "event_time": _time(13),
+        "observed_at": _time(13, 3),
+        "available_at": _time(13, 3),
+        "headline": "stable identity",
+    }
+    first = normalize_catalyst_record(dict(row, catalyst_id="local-a"), source_artifact=SOURCE).event
+    second = normalize_catalyst_record(dict(row, catalyst_id="local-b"), source_artifact=SOURCE).event
+
+    assert first is not None and second is not None
+    assert first.event_id == second.event_id
+    assert first.state_id == second.state_id
+
+
+def test_downstream_news_label_stage_keeps_provider_and_revision_identities(tmp_path) -> None:
+    from signals.news.pipeline import label_news_forward_returns
+
+    frame = pd.DataFrame(
+        [
+            {"source": "provider-a", "source_record_id": "same-id", "ticker": "ABC", "timestamp": "2026-07-30T13:00:00Z", "headline": "same"},
+            {"source": "provider-b", "source_record_id": "same-id", "ticker": "ABC", "timestamp": "2026-07-30T13:00:00Z", "headline": "same"},
+            {"source": "provider-a", "source_record_id": "same-id", "ticker": "ABC", "timestamp": "2026-07-30T13:00:00Z", "headline": "revised"},
+        ]
+    )
+    news_path = tmp_path / "news.parquet"
+    labels_path = tmp_path / "labels.parquet"
+    records = __import__("signals.news.schema", fromlist=["records_from_frame"]).records_from_frame(frame)
+    records.to_parquet(news_path, index=False)
+    bars = pd.DataFrame(
+        {"ticker": ["ABC"] * 3, "timestamp": pd.date_range("2026-07-30 14:00", periods=3, freq="h", tz="UTC"), "close": [100.0, 101.0, 102.0]}
+    )
+
+    out = label_news_forward_returns(news_path, bars, bars_per_day=1, output_path=labels_path, incremental=False)
+    assert len(out) == 3
+    assert len(set(out["record_id"])) == 3
 
 
 def test_no_uow_publication_returns_quarantine_results_without_database_access() -> None:
@@ -753,6 +982,62 @@ def test_no_uow_publication_returns_quarantine_results_without_database_access()
     assert result[1].quarantine_code == "NAIVE_OBSERVED_AT"
 
 
+def test_collector_parquet_round_trip_preserves_malformed_rows_for_both_publish_modes(tmp_path) -> None:
+    news_input = tmp_path / "news.csv"
+    news_path = tmp_path / "news.parquet"
+    pd.DataFrame(
+        [
+            {
+                "source": "provider-a",
+                "source_record_id": "news-valid",
+                "ticker": "ABC",
+                "timestamp": "2026-07-30T13:00:00Z",
+                "observed_at": "2026-07-30T13:03:00Z",
+                "available_at": "2026-07-30T13:03:00Z",
+                "headline": "valid",
+            },
+            {
+                "source": "provider-a",
+                "source_record_id": "news-missing",
+                "ticker": "ABC",
+                "timestamp": "2026-07-30T13:01:00Z",
+                "observed_at": "2026-07-30 13:03:00",
+            },
+        ]
+    ).to_csv(news_input, index=False)
+    news = collect_news_from_csv(news_input, output_path=news_path)
+    news_round_trip = pd.read_parquet(news_path)
+    news_records = news_to_catalysts(news_round_trip)
+
+    event_input = tmp_path / "events.csv"
+    event_path = tmp_path / "events.parquet"
+    pd.DataFrame(
+        [
+            {"event_type": "cpi", "timestamp": "2026-08-13T13:30:00Z", "observed_at": "2026-07-30T14:00:00Z", "title": "CPI"},
+            {"event_type": "fomc", "timestamp": "not-a-time", "observed_at": "2026-07-30 14:00:00", "title": "FOMC"},
+            {"event_type": "cpi", "timestamp": "2026-08-13T14:30:00Z", "observed_at": "2026-07-30 14:00:00", "title": "CPI naive metadata"},
+        ]
+    ).to_csv(event_input, index=False)
+    events = collect_macro_events(event_input, output_path=event_path)
+    event_round_trip = pd.read_parquet(event_path)
+    event_records = scheduled_events_to_catalysts(event_round_trip, default_kind="scheduled_event")
+
+    combined = pd.concat([news_records, event_records], ignore_index=True, sort=False)
+    no_uow = publish_catalyst_states(combined.to_dict(orient="records"), source_artifact=SOURCE)
+    recording = _RecordingUow()
+    with_uow = publish_catalyst_states(
+        combined.to_dict(orient="records"), unit_of_work=recording, source_artifact=SOURCE
+    )
+
+    assert len(no_uow) == len(with_uow) == 5
+    assert {result.quarantine_code for result in no_uow if result.event is None} >= {
+        "MISSING_REQUIRED_NEWS_FIELD", "INVALID_EVENT_TIME", "NAIVE_OBSERVED_AT"
+    }
+    assert len(recording.registry.quarantines) == 3
+    assert all(quarantine.raw_text for quarantine in recording.registry.quarantines)
+    assert recording.commits == recording.rollbacks == 0
+
+
 class _RecordingStates:
     def __init__(self) -> None:
         self.saved = []
@@ -772,6 +1057,9 @@ class _RecordingRegistry:
         self.seen = set()
 
     def save_source_artifact(self, artifact):
+        for existing in self.artifacts:
+            if existing.source_id == artifact.source_id:
+                return existing
         self.artifacts.append(artifact)
         return artifact
 
@@ -810,7 +1098,17 @@ class _RecordingRegistry:
         self.edges.extend(edges)
 
     def finish_import_run(self, import_run_id, *, finished_at, status, counts):
-        return next(run for run in self.runs if run.import_run_id == import_run_id)
+        run = next(run for run in self.runs if run.import_run_id == import_run_id)
+        index = self.runs.index(run)
+        self.runs[index] = run.__class__(
+            import_run_id=run.import_run_id,
+            importer_version=run.importer_version,
+            started_at=run.started_at,
+            finished_at=finished_at,
+            status=status,
+            counts=counts,
+        )
+        return self.runs[index]
 
 
 class _RecordingUow:

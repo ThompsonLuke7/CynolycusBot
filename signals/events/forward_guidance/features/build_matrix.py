@@ -18,7 +18,11 @@ from signals.events.forward_guidance.config import (
 from signals.events.forward_guidance.data.ingest_events import load_events, read_event_text
 from signals.events.forward_guidance.data.market_data import load_event_market_window
 from signals.events.forward_guidance.data.schema import EarningsEvent, event_from_record
-from signals.events.forward_guidance.features.market_context import compute_forward_labels, compute_market_context
+from signals.events.forward_guidance.features.market_context import (
+    POST_EVENT_FEATURE_COLUMNS,
+    compute_forward_labels,
+    compute_market_context,
+)
 from signals.events.forward_guidance.features.nlp import (
     DEFAULT_SENTENCE_MODEL,
     embedding_feature_dict,
@@ -57,6 +61,8 @@ LABEL_COLUMNS = {
     "max_drawdown",
     "target",
 }
+
+POST_EVENT_FEATURE_COLUMNS = POST_EVENT_FEATURE_COLUMNS | {"guidance_reaction_disagreement_score"}
 
 
 def _metrics_for_event(event: EarningsEvent) -> dict[str, object]:

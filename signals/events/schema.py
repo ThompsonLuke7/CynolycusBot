@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from datetime import datetime
 from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Any
@@ -189,7 +191,22 @@ def events_from_frame(
     rows = []
     for _, row in df.iterrows():
         timestamp_value = _first_present(row, ("timestamp", "date", "event_time"))
-        if timestamp_value is None:
+        if timestamp_value is None or not _first_present(row, ("event_type", "type")):
+            raw = row.to_dict()
+            rows.append({
+                "event_type": str(_first_present(row, ("event_type", "type")) or ""),
+                "timestamp": timestamp_value,
+                "event_time": raw.get("event_time", timestamp_value),
+                "observed_at": raw.get("observed_at", observed_at or collection_time),
+                "available_at": raw.get("available_at"),
+                "title": str(_first_present(row, ("title", "headline")) or ""),
+                "source": str(_first_present(row, ("source",)) or "manual"),
+                "ticker": _first_present(row, ("ticker", "symbol")),
+                "source_record_id": str(_first_present(row, ("source_record_id", "source_id", "id")) or ""),
+                "ingestion_quarantine_code": "MISSING_REQUIRED_EVENT_FIELD",
+                "ingestion_quarantine_message": "event_type and timestamp are required",
+                "raw_ingestion_fields": raw,
+            })
             continue
         try:
             rows.append(
@@ -254,3 +271,19 @@ def events_from_frame(
         ["_sort_timestamp", "event_type", "ticker"],
         na_position="last",
     ).drop(columns=["_sort_timestamp"]).reset_index(drop=True)
+
+
+def parquet_safe_causal_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for column in ("timestamp", "event_time", "published_at", "observed_at", "available_at"):
+        if column in out.columns:
+            out[column] = [
+                value.isoformat() if isinstance(value, (pd.Timestamp, datetime)) else value
+                for value in out[column]
+            ]
+    if "raw_ingestion_fields" in out.columns:
+        out["raw_ingestion_fields"] = [
+            json.dumps(value, sort_keys=True, default=str) if isinstance(value, Mapping) else value
+            for value in out["raw_ingestion_fields"]
+        ]
+    return out

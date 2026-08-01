@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from signals.events.config import EARNINGS_EVENTS_PATH, MACRO_EVENTS_PATH, ensure_data_dirs
-from signals.events.schema import events_from_frame
+from signals.events.schema import events_from_frame, parquet_safe_causal_metadata
 
 
 def collect_macro_events(
@@ -32,7 +32,7 @@ def collect_macro_events(
     else:
         df = pd.read_csv(input_csv)
     out = events_from_frame(df, observed_at=batch_observed_at)
-    out.to_parquet(output_path, index=False)
+    parquet_safe_causal_metadata(out).to_parquet(output_path, index=False)
     return out
 
 
@@ -84,8 +84,8 @@ def collect_earnings_dates(
             )
             if column in df.columns
         ]
-        out = events_from_frame(df[keep].dropna(subset=["timestamp"]), observed_at=batch_observed_at)
-    out.to_parquet(output_path, index=False)
+        out = events_from_frame(df[keep], observed_at=batch_observed_at)
+    parquet_safe_causal_metadata(out).to_parquet(output_path, index=False)
     return out
 
 

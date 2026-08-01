@@ -1,5 +1,15 @@
 # Living Summary
 
+{2026-08-01 06:30 EDT} {agent: Codex} {Task 11 correction round 2 dirty-DB isolation}
+Tokenized the PostgreSQL test lineage/config, captured exact run IDs, and scoped persisted assertions to this invocation; no production changes. Local PostgreSQL was unreachable; controller must run the test twice consecutively.
+
+{2026-08-01 05:45 ET} {agent: Codex} {Task 11 correction round 2 supplementary completion}
+Deduplicated registry identity persistence/counts and quarantine/edge side effects; added collector-Parquet E2E, downstream news identity, catalyst_id, and expanded PostgreSQL assertions. Signal/forward suites `84 passed`, DB-free core `191 passed/35 skipped`, compileall/diff-check/cross-seed passed; exact PostgreSQL URL unavailable, controller rerun remains next.
+
+{2026-08-01 06:04 EDT} {agent: Codex} {Task 11 correction round 2 superseding handoff}
+Added exact five-result, canonical source UUID, event/edge/payload lineage, and complete ImportItem hash/status/type/target assertions; TDD registry convergence is GREEN. Focused `59`, forward guidance `6`, DB-free core `191 passed/35 skipped`; compile/diff clean.
+Earnings-calendar failed alone twice at its existing `<4s` threshold (4.54s/4.51s) with no changed-path overlap. Controller next: PostgreSQL/full-signals execution and commit; PostgreSQL was not run here.
+
 {2026-08-01 01:57 EDT} {agent: Codex} {Task 10 correction round 1/5}
 Hardened path/time-independent theme state identity, feature-causal availability, raw-label semantic IDs, strict history timestamps, schema-less warnings, and legacy THEME membership reads with PostgreSQL coverage. Focused/full theme and full nervous-system suites pass; next commit correction.
 {2026-08-01 02:23 EDT} {agent: Codex} {Task 10 correction round 2/5}
@@ -1085,3 +1095,15 @@ Changes are staged, but the requested commit remains blocked by the shared Git `
 {2026-08-01 04:59 EDT} {agent: Codex} {nervous system Task 11 correction round 1 controller verification}
 Superseding the nested-sandbox limitation: disposable PostgreSQL is healthy; targeted publication/round-trip `12 passed`, full nervous-system `226 passed`, and full signals `68 passed` with compileall/diff-check clean.
 Only `cynolycus_nervous_system_test` was used; persistent data was untouched. Correction commit and fresh re-review are next.
+
+{2026-08-01 05:20 EDT} {agent: Codex} {nervous system Task 11 correction round 2}
+Closed alias-wide hindsight bypass, malformed-row retention/Parquet safety, normalized batch lineage, provider/revision news identity, local-ID exclusion, and inserted-identity registry counts; focused `53`, full signals `74`, forward-guidance `6`, DB-free core `191` passed.
+Required disposable PostgreSQL was unavailable at 127.0.0.1:55432; report has exact RED/GREEN evidence and no plan/design/ledger edits. Controller rerun plus commit remains next.
+
+{2026-08-01 06:00 ET} {agent: Codex} {nervous system Task 11 final bounded correction}
+Preserved one result per attempted catalyst row while deduplicating persisted state/registry identities; normalized logical feed identity and centralized actual forward-guidance post-event schema; strengthened exact PostgreSQL locators/counts.
+Focused Task 11 `58 passed`, forward guidance `6`, DB-free core `191 passed/35 skipped`, hash seeds/compileall/diff-check passed; full signals had one unrelated timing-sensitive earnings-calendar failure. PostgreSQL and commit remain controller-owned.
+
+{2026-08-01 06:19 EDT} {agent: Codex} {nervous system Task 11 controller verification}
+Disposable-PostgreSQL publication passed twice consecutively and full nervous-system passed `226`; focused Task 11 passed `59`, forward guidance `6`, and the signal surface passed `85` with one unchanged timing test deselected.
+Compileall/diff-check passed; persistent `cynolycus` was untouched. Correction round 2 is ready for commit and fresh LUNA review.

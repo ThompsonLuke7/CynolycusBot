@@ -273,6 +273,32 @@ def test_news_record_id_uses_stable_source_record_id_when_present() -> None:
     assert first.record_id == rerun.record_id
 
 
+def test_news_record_id_contains_provider_namespace_and_revision() -> None:
+    common = {
+        "ticker": "ABC",
+        "timestamp": "2026-07-30T13:01:00Z",
+        "headline": "Same provider identifier",
+        "source_record_id": "shared-1",
+    }
+    first = NewsRecord(**common, source="provider-a", summary="v1")
+    other_provider = NewsRecord(**common, source="provider-b", summary="v1")
+    revision = NewsRecord(**common, source="provider-a", summary="v2")
+    assert first.record_id != other_provider.record_id
+    assert first.record_id != revision.record_id
+    assert first.record_id == NewsRecord(**common, source="provider-a", summary="v1").record_id
+
+
+def test_news_frame_retains_missing_required_rows_for_quarantine() -> None:
+    out = records_from_frame(
+        pd.DataFrame(
+            [{"ticker": "ABC", "timestamp": "2026-07-30T13:01:00Z"}]
+        ),
+        observed_at="2026-07-30T13:03:00Z",
+    )
+    assert len(out) == 1
+    assert out.iloc[0]["ingestion_quarantine_code"] == "MISSING_REQUIRED_NEWS_FIELD"
+
+
 def test_news_pipeline_does_not_promote_local_record_id_to_source_record_id() -> None:
     out = news_to_catalysts(
         pd.DataFrame(

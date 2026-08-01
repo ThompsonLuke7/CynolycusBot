@@ -18,6 +18,7 @@ from signals.catalysts.config import (
 )
 from signals.events.config import EARNINGS_EVENTS_PATH, EVENT_FEATURES_PATH, MACRO_EVENTS_PATH
 from signals.news.config import NEWS_FEATURE_MATRIX_PATH, NEWS_RECORDS_PATH, NEWS_SCORES_PATH
+from signals.news.schema import parquet_safe_causal_metadata
 from signals.events.forward_guidance.config import FEATURES_PATH as FORWARD_GUIDANCE_FEATURES_PATH
 from signals.events.forward_guidance.config import LABELS_PATH as FORWARD_GUIDANCE_LABELS_PATH
 
@@ -127,8 +128,9 @@ def news_to_catalysts(news: pd.DataFrame) -> pd.DataFrame:
         source_record_ids.astype(str).str.strip().ne(""), ""
     )
     timestamp = pd.to_datetime(_series(news, "timestamp", pd.NaT), utc=True, errors="coerce")
+    raw_timestamp = _strict_causal_series(news, "timestamp")
     event_time = _strict_causal_series(news, "event_time")
-    event_time = _fill_missing_values(event_time, timestamp)
+    event_time = _fill_missing_values(event_time, raw_timestamp)
     out = pd.DataFrame(
         {
             "catalyst_id": record_ids,
@@ -155,6 +157,8 @@ def news_to_catalysts(news: pd.DataFrame) -> pd.DataFrame:
             "relation_confidence": _series(news, "relation_confidence", np.nan),
             "is_direct_catalyst": _series(news, "is_direct_catalyst", np.nan),
             "hindsight_evidence": _hindsight_markers(news),
+            "ingestion_quarantine_code": _series(news, "ingestion_quarantine_code", None),
+            "ingestion_quarantine_message": _series(news, "ingestion_quarantine_message", None),
         }
     )
     # Keep malformed source rows so the adapter can quarantine them with
@@ -213,6 +217,8 @@ def scheduled_events_to_catalysts(events: pd.DataFrame, *, default_kind: str) ->
             "relation_confidence": 1.0,
             "is_direct_catalyst": np.where(has_ticker, 1.0, 0.0),
             "hindsight_evidence": _hindsight_markers(events),
+            "ingestion_quarantine_code": _series(events, "ingestion_quarantine_code", None),
+            "ingestion_quarantine_message": _series(events, "ingestion_quarantine_message", None),
         }
     )
     # Keep malformed scheduled rows so the adapter can quarantine them with
@@ -245,7 +251,7 @@ def build_catalyst_records(
     out = pd.concat([f for f in frames if not f.empty], ignore_index=True) if any(not f.empty for f in frames) else pd.DataFrame()
     if not out.empty:
         out = out.sort_values(["timestamp", "ticker", "event_type"]).reset_index(drop=True)
-    out.to_parquet(output_path, index=False)
+    parquet_safe_causal_metadata(out).to_parquet(output_path, index=False)
     if unit_of_work is not None:
         if source_artifact is None:
             raise ValueError(
@@ -274,6 +280,14 @@ def build_catalyst_scores(
         out.to_parquet(output_path, index=False)
         return out
     news_scores = _read(news_scores_path)
+    # Safe Parquet serialization stores mixed legacy timestamps as strings;
+    # normalize only this ordinary join key when reloading downstream.
+    if "timestamp" in catalysts.columns:
+        catalysts = catalysts.copy()
+        catalysts["timestamp"] = pd.to_datetime(catalysts["timestamp"], utc=True, errors="coerce")
+    if "timestamp" in news_scores.columns:
+        news_scores = news_scores.copy()
+        news_scores["timestamp"] = pd.to_datetime(news_scores["timestamp"], utc=True, errors="coerce")
     # Explicitly exclude quarantined/post-result legacy evidence if an older
     # Parquet artifact still contains it.
     hindsight_mask = pd.Series(False, index=catalysts.index)
