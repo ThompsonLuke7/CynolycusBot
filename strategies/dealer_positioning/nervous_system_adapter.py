@@ -72,7 +72,7 @@ _KNOWN_NUMERIC_FIELDS = frozenset(
     wall_change_1d wall_change_1d_gap_days wall_change_3d
     wall_change_3d_gap_days gex_concentration_change gamma_flip_velocity
     distance_to_call_wall_atr distance_to_put_wall_atr level_stability_days
-    oi_change_by_dte volume_to_prior_oi iv_skew_change
+    oi_change_by_dte volume_to_prior_oi iv_skew_25d iv_skew_change
     near_level_option_volume_share prior_gap_days third_gap_days atr_14d
     scope_count scope_weight_sum dealer_swing_potential_score
     dealer_direction_bias dealer_change_intensity_score
@@ -187,8 +187,10 @@ def _timestamp(value: object, *, field_name: str) -> datetime:
 
 def _finite(value: object, *, field_name: str) -> float:
     if (
-        isinstance(value, (bool, bytes, date, datetime))
+        isinstance(value, (bool, str, bytes, date, datetime))
+        or pd.api.types.is_bool(value)
         or not pd.api.types.is_scalar(value)
+        or not isinstance(value, Number)
     ):
         raise ValueError(f"{field_name} must be a finite numeric value")
     try:
@@ -346,7 +348,11 @@ def _selected_scope(
     if not isinstance(raw_scope, str) or raw_scope not in _SCOPE_WEIGHTS:
         names = ", ".join(_SCOPE_WEIGHTS)
         raise ValueError(f"snapshot scope must be exactly one of: {names}")
-    if dynamics is not None:
+    if (
+        dynamics is not None
+        and "scope" in dynamics
+        and not _is_missing(dynamics["scope"])
+    ):
         dynamics_scope = dynamics.get("scope")
         if not isinstance(dynamics_scope, str) or dynamics_scope not in _SCOPE_WEIGHTS:
             names = ", ".join(_SCOPE_WEIGHTS)
@@ -354,6 +360,32 @@ def _selected_scope(
         if dynamics_scope != raw_scope:
             raise ValueError("dynamics scope conflicts with snapshot scope")
     return raw_scope
+
+
+def _validate_dynamics_identity(
+    snapshot: Mapping[str, object],
+    dynamics: Mapping[str, object],
+    *,
+    captured_at: datetime,
+) -> str:
+    snapshot_ticker = _ticker(snapshot)
+    try:
+        dynamics_ticker = _ticker(dynamics)
+    except ValueError as exc:
+        raise ValueError(f"dynamics ticker is invalid: {exc}") from exc
+    if dynamics_ticker != snapshot_ticker:
+        raise ValueError("dynamics ticker conflicts with snapshot ticker")
+    if _snapshot_date(dynamics, field_name="dynamics") != _snapshot_date(
+        snapshot, field_name="snapshot"
+    ):
+        raise ValueError("dynamics snapshot_date conflicts with snapshot snapshot_date")
+    _check_capture_metadata(
+        dynamics,
+        captured_at=captured_at,
+        field_name="dynamics",
+        required=True,
+    )
+    return _selected_scope(snapshot, dynamics)
 
 
 def _snapshot_date(row: Mapping[str, object], *, field_name: str) -> date:
@@ -470,7 +502,11 @@ def _source_number(
 
 
 def _source_bool(
-    rows: tuple[Mapping[str, object], ...], names: tuple[str, ...], *, field_name: str
+    rows: tuple[Mapping[str, object], ...],
+    names: tuple[str, ...],
+    *,
+    field_name: str,
+    combine_any: bool = False,
 ) -> bool | None:
     values: list[bool] = []
     for row in rows:
@@ -482,6 +518,8 @@ def _source_bool(
             values.append(row[name])
     if not values:
         return None
+    if combine_any:
+        return any(values)
     if any(value != values[0] for value in values[1:]):
         raise ValueError(f"conflicting {field_name} values")
     return values[0]
@@ -519,6 +557,7 @@ def _quality_issues(
         rows,
         ("stale", "is_stale", "option_data_stale", "data_stale", "prior_gap_stale", "third_gap_stale"),
         field_name="stale flag",
+        combine_any=True,
     )
     if stale_flag:
         add_once("STALE_OPTION_DATA", "option evidence is marked stale")
@@ -671,6 +710,12 @@ def adapt_dealer_state(
     snapshot_day = _snapshot_date(snapshot_row, field_name="snapshot")
     if snapshot_day > captured_at_utc.date():
         raise ValueError("snapshot snapshot_date cannot be after captured_at")
+    if dynamics_row is not None:
+        _validate_dynamics_identity(
+            snapshot_row,
+            dynamics_row,
+            captured_at=captured_at_utc,
+        )
 
     available_at = captured_at_utc
     if dynamics_row is not None:
@@ -681,7 +726,6 @@ def adapt_dealer_state(
         available_at = _timestamp(dynamics_row["available_at"], field_name="available_at")
         if available_at < captured_at_utc:
             raise ValueError("dynamics available_at cannot precede captured_at")
-        _check_capture_metadata(dynamics_row, captured_at=captured_at_utc, field_name="dynamics")
     if valid_until_utc <= available_at:
         raise ValueError("valid_until must be exclusive and after available_at")
 
@@ -889,6 +933,8 @@ def adapt_dealer_state_with_ranking(
 
     normalized_dynamics = dict(dynamics_row or {})
     if dynamics_row is None:
+        normalized_dynamics["symbol"] = snapshot_ticker
+        normalized_dynamics["snapshot_date"] = snapshot_row["snapshot_date"]
         normalized_dynamics["scope"] = selected_scope
         normalized_dynamics["captured_at"] = captured_at_utc
         evidence_available_at = captured_at_utc

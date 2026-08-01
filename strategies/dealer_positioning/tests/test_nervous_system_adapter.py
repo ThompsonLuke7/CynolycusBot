@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from hashlib import sha256
 import json
 import math
@@ -17,6 +18,9 @@ from core.nervous_system.contracts.enums import DataQualitySeverity, DealerRegim
 from core.nervous_system.contracts.quality import LineageRef
 from strategies.dealer_positioning import nervous_system_adapter as dealer_adapter
 from strategies.dealer_positioning.nervous_system_adapter import adapt_dealer_state
+from strategies.dealer_positioning.scripts.build_level_dynamics import (
+    compute_summary_dynamics,
+)
 
 
 UTC = timezone.utc
@@ -40,6 +44,35 @@ RANKING_LINEAGE = (
 )
 LOCAL_REPLAY_PATH_ENV = "CYNOLYCUS_DEALER_REPLAY_PATH"
 LOCAL_REPLAY_EXPECTED_ROWS_ENV = "CYNOLYCUS_DEALER_REPLAY_EXPECTED_ROWS"
+EXPECTED_DYNAMICS_NUMERIC_FIELDS = frozenset(
+    {
+        "spot",
+        "call_wall",
+        "put_wall",
+        "gamma_flip",
+        "nearest_magnet",
+        "gex_concentration_index",
+        "total_option_oi",
+        "total_option_volume",
+        "prior_gap_days",
+        "third_gap_days",
+        "wall_change_1d",
+        "wall_change_1d_gap_days",
+        "wall_change_3d",
+        "wall_change_3d_gap_days",
+        "gex_concentration_change",
+        "gamma_flip_velocity",
+        "oi_change_by_dte",
+        "volume_to_prior_oi",
+        "level_stability_days",
+        "atr_14d",
+        "distance_to_call_wall_atr",
+        "distance_to_put_wall_atr",
+        "iv_skew_25d",
+        "iv_skew_change",
+        "near_level_option_volume_share",
+    }
+)
 
 
 def _snapshot(**updates: object) -> dict[str, object]:
@@ -136,6 +169,81 @@ def _ranking(**updates: object) -> dict[str, object]:
     }
     row.update(updates)
     return row
+
+
+@pytest.fixture(scope="module")
+def actual_dynamics_output() -> pd.DataFrame:
+    prior_at = CAPTURED_AT - timedelta(days=1)
+    summary = pd.DataFrame(
+        [
+            {
+                "captured_at": prior_at,
+                "snapshot_date": "2026-07-29",
+                "symbol": "SPY",
+                "scope": "daily_week",
+                "spot": 639.0,
+                "call_wall": 649.0,
+                "put_wall": 624.0,
+                "gamma_flip": 637.0,
+                "nearest_magnet": 639.0,
+                "gex_concentration_index": 0.50,
+                "total_option_oi": 124_000.0,
+                "total_option_volume": 17_000.0,
+            },
+            {
+                "captured_at": CAPTURED_AT,
+                "snapshot_date": "2026-07-30",
+                "symbol": "SPY",
+                "scope": "daily_week",
+                "spot": 640.0,
+                "call_wall": 650.0,
+                "put_wall": 625.0,
+                "gamma_flip": 638.0,
+                "nearest_magnet": 640.0,
+                "gex_concentration_index": 0.55,
+                "total_option_oi": 125_000.0,
+                "total_option_volume": 18_000.0,
+            },
+        ]
+    )
+    summary["captured_at"] = pd.to_datetime(summary["captured_at"], utc=True)
+    summary["snapshot_date"] = pd.to_datetime(summary["snapshot_date"])
+
+    ladder_rows: list[dict[str, object]] = []
+    for captured_at, snapshot_date, spot in (
+        (prior_at, "2026-07-29", 639.0),
+        (CAPTURED_AT, "2026-07-30", 640.0),
+    ):
+        for strike, call_oi, put_oi in (
+            (625.0, 100.0, 300.0),
+            (650.0, 300.0, 100.0),
+        ):
+            ladder_rows.append(
+                {
+                    "captured_at": captured_at,
+                    "snapshot_date": snapshot_date,
+                    "symbol": "SPY",
+                    "scope": "daily_week",
+                    "spot": spot,
+                    "strike": strike,
+                    "call_oi": call_oi,
+                    "put_oi": put_oi,
+                    "call_volume": 10.0,
+                    "put_volume": 8.0,
+                    "call_iv": 0.30,
+                    "put_iv": 0.35,
+                    "call_delta": 0.25,
+                    "put_delta": -0.25,
+                }
+            )
+    ladder = pd.DataFrame(ladder_rows)
+    ladder["captured_at"] = pd.to_datetime(ladder["captured_at"], utc=True)
+    ladder["snapshot_date"] = pd.to_datetime(ladder["snapshot_date"])
+    atr_lookup = {
+        ("SPY", pd.Timestamp("2026-07-29")): 2.0,
+        ("SPY", pd.Timestamp("2026-07-30")): 2.0,
+    }
+    return compute_summary_dynamics(summary, ladder, atr_lookup=atr_lookup)
 
 
 def _snapshot_at(state, decision_time: datetime) -> ContextSnapshot:
@@ -396,6 +504,47 @@ def test_actual_parquet_optional_null_markers_are_absent(
         assert state.call_wall is None
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "635.0",
+        b"635.0",
+        True,
+        np.bool_(True),
+        pd.array([True], dtype="boolean")[0],
+    ],
+    ids=["numeric-string", "bytes", "python-bool", "numpy-bool", "pandas-bool"],
+)
+def test_known_numeric_fields_reject_non_numeric_scalar_types(value: object) -> None:
+    with pytest.raises(ValueError, match="next_magnet_below"):
+        adapt_dealer_state(
+            _snapshot(next_magnet_below=value),
+            None,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [1, 1.5, np.int64(2), np.float64(2.5), Decimal("3.5")],
+    ids=["python-int", "python-float", "numpy-int", "numpy-float", "decimal"],
+)
+def test_known_numeric_fields_accept_genuine_finite_numeric_scalars(
+    value: object,
+) -> None:
+    state = adapt_dealer_state(
+        _snapshot(next_magnet_below=value),
+        None,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert state.metrics["next_magnet_below"] == float(value)
+
+
 def test_nested_optional_producer_null_markers_are_absent() -> None:
     state = adapt_dealer_state(
         _snapshot(
@@ -539,6 +688,81 @@ def test_present_malformed_dynamics_numeric_evidence_fails_closed(
         )
 
 
+def test_actual_dynamics_compute_numeric_surface_is_fully_declared(
+    actual_dynamics_output: pd.DataFrame,
+) -> None:
+    actual_numeric_fields = frozenset(
+        actual_dynamics_output.select_dtypes(include="number").columns
+    )
+
+    assert actual_numeric_fields == EXPECTED_DYNAMICS_NUMERIC_FIELDS
+    assert actual_numeric_fields <= dealer_adapter._KNOWN_NUMERIC_FIELDS
+    assert "iv_skew_25d" in actual_numeric_fields
+
+
+def test_actual_dynamics_independent_stale_horizons_warn_if_either_is_stale(
+    actual_dynamics_output: pd.DataFrame,
+) -> None:
+    row = actual_dynamics_output.iloc[-1].to_dict()
+    assert row["prior_gap_stale"] is False
+    assert row["third_gap_stale"] is True
+
+    state = adapt_dealer_state(
+        _snapshot(),
+        row,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert "STALE_OPTION_DATA" in {
+        issue.code for issue in state.data_quality.issues
+    }
+
+
+@pytest.mark.parametrize("field", sorted(EXPECTED_DYNAMICS_NUMERIC_FIELDS))
+def test_every_actual_dynamics_numeric_field_rejects_malformed_schema_drift(
+    actual_dynamics_output: pd.DataFrame,
+    field: str,
+) -> None:
+    row = actual_dynamics_output.iloc[-1].to_dict()
+    row[field] = "1.25"
+
+    with pytest.raises(ValueError, match=field):
+        adapt_dealer_state(
+            _snapshot(),
+            row,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+@pytest.mark.parametrize("field", sorted(EXPECTED_DYNAMICS_NUMERIC_FIELDS))
+def test_every_actual_dynamics_optional_numeric_null_is_omitted(
+    actual_dynamics_output: pd.DataFrame,
+    field: str,
+) -> None:
+    row = actual_dynamics_output.iloc[-1].to_dict()
+    row[field] = np.float64(np.nan)
+
+    state = adapt_dealer_state(
+        _snapshot(),
+        row,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    snapshot_value = _snapshot().get(field)
+    if isinstance(snapshot_value, (int, float)) and not isinstance(
+        snapshot_value, bool
+    ):
+        assert state.metrics[field] == float(snapshot_value)
+    else:
+        assert field not in state.metrics
+
+
 @pytest.mark.parametrize(
     ("field", "malformed_value"),
     [
@@ -590,6 +814,7 @@ def test_declared_categorical_and_expiration_payloads_are_not_metrics() -> None:
 
 
 def _replay_dealer_parquet(path: Path, *, expected_rows: int) -> int:
+    assert expected_rows > 0, "expected_rows must be positive"
     assert path.is_file(), f"explicit dealer replay path does not exist: {path}"
     frame = pd.read_parquet(path)
     assert len(frame) == expected_rows
@@ -663,6 +888,14 @@ def test_explicit_parquet_fixture_replays_exact_row_count(tmp_path: Path) -> Non
     assert _replay_dealer_parquet(path, expected_rows=3) == 3
 
 
+def test_replay_rejects_zero_expected_rows_and_empty_parquet(tmp_path: Path) -> None:
+    path = tmp_path / "empty_dealer_level_summary.parquet"
+    pd.DataFrame().to_parquet(path, index=False)
+
+    with pytest.raises(AssertionError, match="expected_rows must be positive"):
+        _replay_dealer_parquet(path, expected_rows=0)
+
+
 def test_explicit_opt_in_local_parquet_replay() -> None:
     path_value = os.environ.get(LOCAL_REPLAY_PATH_ENV)
     if path_value is None:
@@ -712,6 +945,81 @@ def test_dynamics_availability_must_be_explicit_and_timezone_aware() -> None:
             valid_until=VALID_UNTIL,
             lineage=LINEAGE,
         )
+
+
+@pytest.mark.parametrize(
+    "dynamics_updates",
+    [
+        {"symbol": "QQQ"},
+        {"snapshot_date": "2026-07-31"},
+        {"captured_at": (CAPTURED_AT + timedelta(minutes=1)).isoformat()},
+        {"scope": "through_month"},
+    ],
+)
+def test_direct_adapter_rejects_dynamics_from_a_different_selected_capture(
+    dynamics_updates: dict[str, object]
+) -> None:
+    with pytest.raises(
+        ValueError, match="dynamics.*(ticker|snapshot_date|captured_at|scope)"
+    ):
+        adapt_dealer_state(
+            _snapshot(),
+            _dynamics(**dynamics_updates),
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+@pytest.mark.parametrize("field", ["symbol", "snapshot_date", "captured_at"])
+def test_direct_adapter_requires_dynamics_identity_fields(field: str) -> None:
+    dynamics = _dynamics()
+    dynamics.pop(field)
+
+    with pytest.raises(ValueError, match=f"dynamics.*{field}|dynamics.*ticker"):
+        adapt_dealer_state(
+            _snapshot(),
+            dynamics,
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "null_value"),
+    [("symbol", pd.NA), ("snapshot_date", pd.NaT), ("captured_at", pd.NaT)],
+)
+def test_direct_adapter_rejects_null_dynamics_identity_fields(
+    field: str, null_value: object
+) -> None:
+    with pytest.raises(ValueError, match=f"dynamics.*{field}|dynamics.*ticker"):
+        adapt_dealer_state(
+            _snapshot(),
+            _dynamics(**{field: null_value}),
+            captured_at=CAPTURED_AT,
+            valid_until=VALID_UNTIL,
+            lineage=LINEAGE,
+        )
+
+
+@pytest.mark.parametrize("scope_value", [None, pd.NA])
+def test_direct_adapter_binds_absent_dynamics_scope_to_selected_raw_scope(
+    scope_value: object,
+) -> None:
+    dynamics = _dynamics(scope=scope_value)
+    if scope_value is None:
+        dynamics.pop("scope")
+
+    state = adapt_dealer_state(
+        _snapshot(scope="daily_week"),
+        dynamics,
+        captured_at=CAPTURED_AT,
+        valid_until=VALID_UNTIL,
+        lineage=LINEAGE,
+    )
+
+    assert state.metrics["selected_scope_daily_week"] == 1.0
 
 
 @pytest.mark.parametrize(
