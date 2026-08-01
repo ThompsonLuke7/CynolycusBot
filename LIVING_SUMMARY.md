@@ -1178,3 +1178,7 @@ Focused `30`, affected `66`, and disposable-PostgreSQL core `388` passed; compil
 {2026-08-01 17:14 EDT} {agent: Codex} {nervous system Task 13 correction round 2}
 Extended snapshot evidence now requires a decision bar at construction and deserialization; original no-evidence legacy snapshots remain compatible.
 RED `10 failed`; affected/focused `86` and disposable-PostgreSQL core `398` passed; compileall/diff-check clean; no commit or persistent/live access.
+
+{2026-08-01 17:17 EDT} {agent: Codex} {nervous system Task 13 completion}
+Task 13 passed both final LUNA review domains with zero Critical/Important/Minor findings; causal snapshots are versioned, atomic, session-correct, and future-append invariant.
+Final head `64bf7b3`; focused/affected `96`, final regression `10`, and disposable-PostgreSQL core `398` passed. Next is Task 14 Meta intent parity.
