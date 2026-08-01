@@ -64,6 +64,7 @@ _FEATURE_OUTPUT_COLUMNS = [
     "taxonomy_version",
     *THEME_FEATURE_COLUMNS,
 ]
+_FEATURE_EVIDENCE_KEY = ["date", "ticker", "taxonomy_version"]
 
 
 def _taxonomy_from_memberships(memberships: pd.DataFrame) -> str:
@@ -104,24 +105,78 @@ def _taxonomy_from_memberships(memberships: pd.DataFrame) -> str:
     return column_taxonomy
 
 
-def _validated_existing_features(path: Path) -> pd.DataFrame:
-    existing = pd.read_parquet(path)
+def _validated_feature_evidence(
+    features: pd.DataFrame,
+    *,
+    source: str,
+) -> pd.DataFrame:
     required = {"ticker", "date", "taxonomy_version"}
-    missing = sorted(required - set(existing.columns))
+    missing = sorted(required - set(features.columns))
     if missing:
-        raise ValueError(f"existing theme features missing columns: {missing}")
-    if existing.empty:
-        return existing
-    if existing["taxonomy_version"].isna().any():
-        raise ValueError("existing theme features contain missing taxonomy_version")
-    existing = existing.copy()
-    existing["taxonomy_version"] = existing["taxonomy_version"].map(
-        lambda value: str(value).strip()
+        raise ValueError(f"{source} theme features missing columns: {missing}")
+    if features.empty:
+        return features.copy()
+
+    validated = features.copy()
+    if validated["taxonomy_version"].isna().any():
+        raise ValueError(f"{source} theme features contain missing taxonomy_version")
+    if not validated["taxonomy_version"].map(
+        lambda value: isinstance(value, str)
+    ).all():
+        raise ValueError(f"{source} theme features contain invalid taxonomy_version")
+    if not validated["taxonomy_version"].map(
+        lambda value: bool(value) and value == value.strip()
+    ).all():
+        raise ValueError(
+            f"{source} theme features contain empty or non-canonical taxonomy_version"
+        )
+
+    if validated["ticker"].isna().any():
+        raise ValueError(f"{source} theme features contain missing ticker")
+    if not validated["ticker"].map(lambda value: isinstance(value, str)).all():
+        raise ValueError(f"{source} theme features contain invalid ticker")
+    if not validated["ticker"].map(
+        lambda value: bool(value) and value == value.strip()
+    ).all():
+        raise ValueError(
+            f"{source} theme features contain empty or non-canonical ticker"
+        )
+
+    dates = pd.to_datetime(validated["date"], errors="raise")
+    if dates.isna().any():
+        raise ValueError(f"{source} theme features contain missing date")
+    if dates.dt.tz is not None:
+        raise ValueError(
+            f"{source} theme feature dates must be timezone-naive represented dates"
+        )
+    normalized_dates = dates.dt.normalize()
+    if not dates.equals(normalized_dates):
+        raise ValueError(
+            f"{source} theme feature dates must be normalized represented dates"
+        )
+    validated["date"] = normalized_dates
+
+    duplicate_rows = validated.duplicated(_FEATURE_EVIDENCE_KEY, keep=False)
+    if not duplicate_rows.any():
+        return validated
+
+    for key, group in validated.loc[duplicate_rows].groupby(
+        _FEATURE_EVIDENCE_KEY,
+        dropna=False,
+        sort=False,
+    ):
+        if len(group.drop_duplicates()) != 1:
+            raise ValueError(
+                f"conflicting duplicate {source} theme feature evidence "
+                f"for (date, ticker, taxonomy_version)={key!r}"
+            )
+    return validated.drop_duplicates(_FEATURE_EVIDENCE_KEY, keep="first").reset_index(
+        drop=True
     )
-    if (existing["taxonomy_version"] == "").any():
-        raise ValueError("existing theme features contain empty taxonomy_version")
-    existing["date"] = pd.to_datetime(existing["date"], errors="raise").dt.normalize()
-    return existing
+
+
+def _validated_existing_features(path: Path) -> pd.DataFrame:
+    return _validated_feature_evidence(pd.read_parquet(path), source="existing")
 
 
 # ── price helpers ─────────────────────────────────────────────────────────────
@@ -213,7 +268,9 @@ def build_meta_features(
         logger.warning("No memberships — cannot build meta features")
         empty = pd.DataFrame(columns=_FEATURE_OUTPUT_COLUMNS)
         empty.attrs["taxonomy_version"] = taxonomy_version
-        if not TICKER_THEME_FEATURES_PATH.exists():
+        if TICKER_THEME_FEATURES_PATH.exists():
+            _validated_existing_features(TICKER_THEME_FEATURES_PATH)
+        else:
             empty.to_parquet(TICKER_THEME_FEATURES_PATH, index=False)
         return empty
 
@@ -370,7 +427,10 @@ def build_meta_features(
             }
         )
 
-    out = pd.DataFrame(rows, columns=_FEATURE_OUTPUT_COLUMNS)
+    out = _validated_feature_evidence(
+        pd.DataFrame(rows, columns=_FEATURE_OUTPUT_COLUMNS),
+        source="current",
+    )
 
     # Replace only the current date/taxonomy evidence. A revised taxonomy on
     # the same represented date remains separate historical evidence.

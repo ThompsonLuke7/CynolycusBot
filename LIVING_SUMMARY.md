@@ -1056,3 +1056,7 @@ Focused adapter `21 passed`; full market-regime `42 passed, 1 skipped`; core ner
 {2026-08-01 00:55 EDT} {agent: Codex} {nervous system Task 9 correction round 1}
 Added named/versioned warm-up publication filtering, deterministic lineage-based state identity with atomic PostgreSQL reruns, strict lineage/Boolean validation, and caller-owned transactions; Parquet behavior is unchanged.
 Focused adapter `32 passed`; full market-regime `53 passed, 1 skipped`; targeted PostgreSQL `8 passed`; full nervous-system `221 passed`; final commit/report follow after diff verification.
+
+{2026-08-01 03:06 EDT} {agent: Codex} {nervous system Task 10 correction round 4}
+Empty Step 9 runs now fail closed on invalid existing feature evidence, while exact-key conflicts reject without mutation and field-identical duplicates deduplicate deterministically on nonempty serialization.
+Focused `40 passed`; full themes `68 passed, 2 warnings`; disposable-PostgreSQL nervous system `223 passed`; compileall/diff-check clean. Report appended; correction commit follows.

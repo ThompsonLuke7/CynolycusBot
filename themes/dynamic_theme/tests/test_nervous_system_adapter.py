@@ -168,6 +168,76 @@ def test_step9_empty_output_persists_taxonomy_schema(monkeypatch, tmp_path):
     assert list(persisted.columns) == list(out.columns)
 
 
+def test_step9_empty_run_rejects_legacy_feature_artifact_without_mutation(
+    monkeypatch,
+    tmp_path,
+):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+    legacy = _features_frame().drop(columns=["taxonomy_version"])
+    legacy.to_parquet(features_path, index=False)
+    before = features_path.read_bytes()
+    memberships = pd.DataFrame(
+        columns=["ticker", "theme", "membership_score", "date"]
+    )
+    memberships.attrs["taxonomy_version"] = "taxonomy-v1"
+
+    with pytest.raises(ValueError, match="missing columns.*taxonomy_version"):
+        step09.build_meta_features(
+            memberships_df=memberships,
+            as_of=pd.Timestamp(AS_OF),
+        )
+
+    assert features_path.read_bytes() == before
+
+
+def test_step9_empty_run_preserves_valid_revisioned_feature_artifact(
+    monkeypatch,
+    tmp_path,
+):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+    step09.build_meta_features(
+        memberships_df=_membership_frame(taxonomy_version="taxonomy-v2"),
+        as_of=pd.Timestamp(AS_OF),
+    )
+    step09.build_meta_features(
+        memberships_df=_membership_frame(taxonomy_version="taxonomy-v1"),
+        as_of=pd.Timestamp(AS_OF),
+    )
+    before = features_path.read_bytes()
+    memberships = pd.DataFrame(
+        columns=["ticker", "theme", "membership_score", "date"]
+    )
+    memberships.attrs["taxonomy_version"] = "taxonomy-v3"
+
+    out = step09.build_meta_features(
+        memberships_df=memberships,
+        as_of=pd.Timestamp(AS_OF),
+    )
+
+    assert out.empty
+    assert list(out.columns) == [
+        "ticker",
+        "date",
+        "taxonomy_version",
+        "primary_theme",
+        "primary_theme_rank",
+        "theme_heat_score",
+        "theme_breadth",
+        "theme_acceleration",
+        "theme_strength",
+        "membership_score",
+        "parent_theme_heat",
+        "related_theme_heat",
+        "related_theme_rank",
+        "theme_age_days",
+        "theme_newness_score",
+    ]
+    assert out.attrs["taxonomy_version"] == "taxonomy-v3"
+    assert features_path.read_bytes() == before
+    persisted = pd.read_parquet(features_path)
+    assert set(persisted["taxonomy_version"]) == {"taxonomy-v1", "taxonomy-v2"}
+
+
 def test_step9_preserves_same_date_taxonomy_revisions(monkeypatch, tmp_path):
     features_path = _configure_step09(monkeypatch, tmp_path)
 
@@ -183,6 +253,99 @@ def test_step9_preserves_same_date_taxonomy_revisions(monkeypatch, tmp_path):
     persisted = pd.read_parquet(features_path)
     assert set(persisted["taxonomy_version"]) == {"taxonomy-v1", "taxonomy-v2"}
     assert len(persisted) == 4
+
+
+def test_step9_rejects_conflicting_existing_duplicate_evidence_without_mutation(
+    monkeypatch,
+    tmp_path,
+):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+    step09.build_meta_features(
+        memberships_df=_membership_frame(taxonomy_version="taxonomy-v1"),
+        as_of=pd.Timestamp(AS_OF),
+    )
+    persisted = pd.read_parquet(features_path)
+    conflicting = persisted.iloc[[0]].copy()
+    conflicting["membership_score"] = conflicting["membership_score"] + 0.01
+    pd.concat([persisted, conflicting], ignore_index=True).to_parquet(
+        features_path,
+        index=False,
+    )
+    before = features_path.read_bytes()
+
+    with pytest.raises(
+        ValueError,
+        match="conflicting duplicate existing theme feature evidence",
+    ):
+        step09.build_meta_features(
+            memberships_df=_membership_frame(taxonomy_version="taxonomy-v1"),
+            as_of=pd.Timestamp(AS_OF),
+        )
+
+    assert features_path.read_bytes() == before
+
+
+def test_step9_deduplicates_identical_existing_evidence_before_revision_append(
+    monkeypatch,
+    tmp_path,
+):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+    step09.build_meta_features(
+        memberships_df=_membership_frame(taxonomy_version="taxonomy-v1"),
+        as_of=pd.Timestamp(AS_OF),
+    )
+    persisted = pd.read_parquet(features_path)
+    pd.concat([persisted, persisted.iloc[[0]]], ignore_index=True).to_parquet(
+        features_path,
+        index=False,
+    )
+
+    step09.build_meta_features(
+        memberships_df=_membership_frame(taxonomy_version="taxonomy-v2"),
+        as_of=pd.Timestamp(AS_OF),
+    )
+
+    revised = pd.read_parquet(features_path)
+    key = ["date", "ticker", "taxonomy_version"]
+    assert len(revised) == 4
+    assert not revised.duplicated(key).any()
+    assert set(revised["taxonomy_version"]) == {"taxonomy-v1", "taxonomy-v2"}
+
+
+def test_step9_rejects_conflicting_incoming_duplicate_evidence_before_write(
+    monkeypatch,
+    tmp_path,
+):
+    features_path = _configure_step09(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        step09,
+        "get_primary_theme",
+        lambda memberships: pd.DataFrame(
+            [
+                {
+                    "ticker": "AAA",
+                    "primary_theme": "alpha_theme",
+                    "membership_score": 0.82,
+                },
+                {
+                    "ticker": "AAA",
+                    "primary_theme": "alpha_theme",
+                    "membership_score": 0.61,
+                },
+            ]
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="conflicting duplicate current theme feature evidence",
+    ):
+        step09.build_meta_features(
+            memberships_df=_membership_frame(taxonomy_version="taxonomy-v1"),
+            as_of=pd.Timestamp(AS_OF),
+        )
+
+    assert not features_path.exists()
 
 
 def test_step9_rejects_missing_or_conflicting_membership_taxonomy(

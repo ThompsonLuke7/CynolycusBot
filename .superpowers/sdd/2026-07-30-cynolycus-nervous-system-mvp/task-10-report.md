@@ -518,3 +518,93 @@ EXIT_CODE=0 for both commands
   database, or unrelated clustering/model behavior was modified.
 - The full theme suite retains only the two pre-existing pandas
   `FutureWarning`s in `step05_claude_labeling.py`.
+
+## Correction round 4/5
+
+### RED evidence
+
+The empty-run artifact and exact-key duplicate regressions were added before
+production changes:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q -k 'step9_empty_run or step9_rejects_conflicting_existing_duplicate or step9_deduplicates_identical_existing or step9_rejects_conflicting_incoming'
+4 failed, 1 passed, 35 deselected
+EXIT_CODE=1
+```
+
+The failures proved that an empty run did not inspect a legacy feature
+artifact, conflicting existing and current `(date, ticker, taxonomy_version)`
+rows did not fail closed, and an identical existing duplicate survived a
+same-date taxonomy-revision append. The valid revisioned-artifact preservation
+control passed before implementation.
+
+### GREEN evidence
+
+- Every empty Step 9 run now reads and validates an existing feature artifact
+  before returning. Missing, null, blank, non-canonical, or conflicting
+  identity evidence raises without writing; a valid revisioned artifact is
+  preserved byte-for-byte. With no artifact, Step 9 still writes the exact
+  empty taxonomy-bearing schema and returns the current taxonomy in attrs.
+- Current and existing feature rows are validated before evidence filtering or
+  replacement. Conflicting duplicate exact keys raise with the offending key;
+  rows whose every persisted field is identical are deterministically reduced
+  to their first occurrence before a nonempty run is serialized.
+- Conflict regressions verify no artifact mutation. The current-row conflict
+  regression verifies no artifact is created. Existing same-date v1/v2
+  revision preservation and exact publication selection remain covered.
+
+Focused Task 10 suite:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests/test_nervous_system_adapter.py -q
+40 passed
+EXIT_CODE=0
+```
+
+Full theme suite:
+
+```text
+./.venv/bin/python -m pytest themes/dynamic_theme/tests -q
+68 passed, 2 warnings
+EXIT_CODE=0
+```
+
+The first sandboxed PostgreSQL invocation was unable to open localhost and
+ended `191 passed, 1 failed, 31 errors`; every failure/error was an initial
+`psycopg2.OperationalError` connection denial. The exact command was rerun
+outside that network sandbox against only the requested disposable database:
+
+```text
+NERVOUS_SYSTEM_TEST_DATABASE_URL='postgresql://cynolycus:cynolycus_dev_only@127.0.0.1:55432/cynolycus_nervous_system_test' ./.venv/bin/python -m pytest core/nervous_system/tests -q
+223 passed
+EXIT_CODE=0
+```
+
+Compilation and diff checks:
+
+```text
+./.venv/bin/python -m compileall -q themes/dynamic_theme core/nervous_system
+git diff --check
+EXIT_CODE=0 for both commands
+```
+
+### Correction files
+
+- `themes/dynamic_theme/stages/step09_meta_features.py`
+- `themes/dynamic_theme/tests/test_nervous_system_adapter.py`
+
+### Self-review and concerns
+
+- Direct review found no remaining Critical, Important, or Minor issue against
+  either round-4 finding or prior Task 10 closures. The requested code-review
+  skill's subagent capability was unavailable, so its scope, architecture,
+  testing, compatibility, and production-readiness checklist was applied
+  directly to the complete diff.
+- Empty runs deliberately never rewrite an existing valid artifact. Identical
+  duplicates are validated as field-identical but remain byte-preserved on an
+  empty run; the next nonempty serialization deterministically removes them.
+- The two warnings are the pre-existing pandas `FutureWarning`s in
+  `step05_claude_labeling.py`. The initial PostgreSQL failure was isolated to
+  sandbox network denial; the unrestricted disposable-database run passed.
+- No pipeline publication, state identity, lineage, raw-label joins, UOW,
+  Task 8/9, plan/ledger, or persistent `cynolycus` behavior was changed.
