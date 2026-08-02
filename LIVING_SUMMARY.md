@@ -1186,3 +1186,15 @@ Final head `64bf7b3`; focused/affected `96`, final regression `10`, and disposab
 {2026-08-01 17:32 EDT} {agent: Codex} {nervous system Task 14 Meta intent parity}
 Added exact-bar pure Meta ranking, deterministic UUIDv5 trade intents, finite score components/config/idempotency contract defaults, and strict selected-bar reference pricing; no order/live path touched.
 Task 14 focused `7`, affected Meta excluding the known artifact `38`, contracts `42`, adapter `23` passed; full Meta is `39 passed/1 unchanged manifest failure`; report saved, no commit.
+
+{2026-08-02 01:10 EDT} {agent: Codex} {nervous system execution status}
+Tasks 1–13 are reviewed complete (58 branch commits; 33,254 insertions); Task 14 initial head `c5c6eff` passed focused tests but review found 8 Important issues, so it remains incomplete.
+High usage came from LUNA implementation/review/fix cycles—especially five rounds each on Tasks 11 and 12—not a separate Superpowers charge; next step is a leaner Task 14 correction gate.
+
+{2026-08-02 01:10 EDT} {agent: Codex} {nervous system Task 14 completion}
+Lean one-wave correction and one scoped LUNA review closed all eight Task 14 Important findings; final code head `50862a3`, with Meta/mixed/contracts `96`, affected Meta `75`, and contracts/base `71` passing.
+Exact-bar ranking/intents are strict and deterministic; next is Task 15 policy engine under the same lean gate.
+
+{2026-08-02 02:22 ET} {agent: Claude} {nervous system Task 15 policy engine}
+Implemented the pure deterministic policy engine (fixed rule order 1-9, UUIDv5 identity, Decimal money, production-live denied in every mode, exits narrowly operable); focused `66`, full nervous-system on disposable PostgreSQL `379`.
+Scoped review closed three fail-open paths (unobserved open orders, unknown position market value, missing executability gate); duplicate-key matching stays inert until Task 17's gateway constraint. Next: Task 16 portfolio exposure.
