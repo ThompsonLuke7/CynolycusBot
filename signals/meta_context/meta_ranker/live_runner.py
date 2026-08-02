@@ -25,10 +25,12 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from decimal import Decimal
 import json
 import logging
 import math
 from datetime import datetime, timezone
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -42,10 +44,6 @@ from core.live_signal_audit import (
     build_signal_audit,
 )
 from signals.meta_context.meta_ranker.score import score_frame
-from signals.meta_context.meta_ranker.nervous_system_adapter import (
-    MetaIntentConfig,
-    build_trade_intents,
-)
 from core.live_4h_exec import (
     ExecPolicy,
     build_mixed_plan,
@@ -87,13 +85,63 @@ class MetaRankingConfig:
     booster_loader: Callable[[str], tuple[Any, list[str]]] | None = None
 
     def __post_init__(self) -> None:
-        if self.top_k <= 0:
+        if type(self.top_k) is not int or self.top_k <= 0:
             raise ValueError("top_k must be positive")
+        for field_name in ("liquidity_floor", "combo_floor"):
+            value = getattr(self, field_name)
+            if isinstance(value, (bool, str, bytes)) or not isinstance(value, (Real, Decimal)):
+                raise TypeError(f"{field_name} must be a finite numeric value")
+            normalized = float(value)
+            if not math.isfinite(normalized) or not 0.0 <= normalized <= 1.0:
+                raise ValueError(f"{field_name} must be finite and within [0, 1]")
+            object.__setattr__(self, field_name, normalized)
         object.__setattr__(
             self,
             "blacklist",
-            frozenset(str(ticker).strip().upper() for ticker in self.blacklist if str(ticker).strip()),
+            _canonical_ticker_set(self.blacklist, field_name="blacklist"),
         )
+
+
+@dataclass(frozen=True)
+class MetaRankingResult:
+    """Immutable operational result for the runner; ranking remains a DataFrame API."""
+
+    ranked: pd.DataFrame
+    scored_count: int
+    eligible_count: int
+    decision_bar: pd.Timestamp
+
+
+def _canonical_ticker(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a ticker string")
+    ticker = value.strip().upper()
+    if not ticker:
+        raise ValueError(f"{field_name} must be non-empty")
+    return ticker
+
+
+def _canonical_ticker_set(value: object, *, field_name: str) -> frozenset[str]:
+    if isinstance(value, (str, bytes)):
+        raise TypeError(f"{field_name} must be an iterable of ticker strings")
+    try:
+        tickers = [_canonical_ticker(item, field_name=field_name) for item in value]  # type: ignore[union-attr]
+    except TypeError as exc:
+        raise TypeError(f"{field_name} must be an iterable of ticker strings") from exc
+    return frozenset(tickers)
+
+
+def _normalize_timestamp_series(values: pd.Series, *, field_name: str) -> pd.Series:
+    normalized: list[pd.Timestamp] = []
+    for value in values.tolist():
+        try:
+            timestamp = pd.Timestamp(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} contains an invalid timestamp") from exc
+        if pd.isna(timestamp) or timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError(f"{field_name} must contain only timezone-aware timestamps")
+        normalized.append(timestamp.tz_convert("UTC"))
+    return pd.Series(normalized, index=values.index, name=values.name)
 
 
 def _decision_timestamp(value: datetime | pd.Timestamp, *, field_name: str) -> pd.Timestamp:
@@ -103,12 +151,12 @@ def _decision_timestamp(value: datetime | pd.Timestamp, *, field_name: str) -> p
     return timestamp.tz_convert("UTC")
 
 
-def rank_meta_candidates(
+def rank_meta_candidates_with_diagnostics(
     feature_matrix: pd.DataFrame,
     *,
     bar: pd.Timestamp,
     config: MetaRankingConfig,
-) -> pd.DataFrame:
+) -> MetaRankingResult:
     """Score and rank exactly one supplied Meta decision bar.
 
     The model boundary remains ``score_frame``; all selection behavior below
@@ -124,26 +172,45 @@ def rank_meta_candidates(
         raise KeyError("feature_matrix requires a timestamp column")
 
     decision_bar = _decision_timestamp(bar, field_name="bar")
-    timestamps = pd.to_datetime(feature_matrix["timestamp"], utc=True)
+    timestamps = _normalize_timestamp_series(feature_matrix["timestamp"], field_name="feature_matrix timestamps")
     selected_mask = timestamps == decision_bar
     if not bool(selected_mask.any()):
         raise ValueError(f"feature_matrix has no rows for exact decision bar {decision_bar.isoformat()}")
 
     selected = feature_matrix.loc[selected_mask].copy()
     selected["timestamp"] = timestamps.loc[selected_mask]
+    selected["ticker"] = selected["ticker"].map(
+        lambda value: _canonical_ticker(value, field_name="feature_matrix ticker")
+    )
+    if selected["ticker"].duplicated().any():
+        raise ValueError("duplicate canonical ticker in selected ranking bar")
     scored = score_frame(selected, booster_loader=config.booster_loader)
 
     n0 = len(scored)
-    eligible = scored[scored["s_combo"] >= config.combo_floor]
+    finite_combo = pd.to_numeric(scored["s_combo"], errors="coerce").map(math.isfinite)
+    eligible = scored.loc[finite_combo & (scored["s_combo"] >= config.combo_floor)]
     if "dollar_vol_pctile_252" in eligible.columns:
         eligible = eligible[eligible["dollar_vol_pctile_252"].fillna(0) >= config.liquidity_floor]
     if config.blacklist:
-        eligible = eligible[~eligible["ticker"].str.upper().isin(config.blacklist)]
-    ranked = eligible.sort_values("s_combo", ascending=False).head(config.top_k)
-    ranked.attrs["scored_count"] = n0
-    ranked.attrs["eligible_count"] = len(eligible)
-    ranked.attrs["decision_bar"] = decision_bar
-    return ranked
+        eligible = eligible[~eligible["ticker"].isin(config.blacklist)]
+    ranked = eligible.sort_values("s_combo", ascending=False, kind="stable").head(config.top_k)
+    return MetaRankingResult(
+        ranked=ranked,
+        scored_count=n0,
+        eligible_count=len(eligible),
+        decision_bar=decision_bar,
+    )
+
+
+def rank_meta_candidates(
+    feature_matrix: pd.DataFrame,
+    *,
+    bar: pd.Timestamp,
+    config: MetaRankingConfig,
+) -> pd.DataFrame:
+    """Public DataFrame ranking interface retained for existing callers."""
+
+    return rank_meta_candidates_with_diagnostics(feature_matrix, bar=bar, config=config).ranked
 
 
 def _load_blacklist() -> set[str]:
@@ -186,7 +253,7 @@ def _ref_price(ticker: str, *, decision_bar: datetime | pd.Timestamp) -> float:
             raise ValueError(f"{ticker} reference Parquet has no timestamp column")
     if "close" not in b.columns:
         raise ValueError(f"{ticker} reference Parquet has no close column")
-    timestamps = pd.to_datetime(b["timestamp"], utc=True, errors="coerce")
+    timestamps = _normalize_timestamp_series(b["timestamp"], field_name=f"{ticker} reference-bar timestamps")
     matches = b.loc[timestamps == selected_bar]
     if len(matches) == 0:
         raise ValueError(f"{ticker} reference Parquet has no exact decision-bar match")
@@ -205,6 +272,16 @@ def _latest_full_bar(df: pd.DataFrame) -> pd.Timestamp:
     counts = df.groupby("timestamp").size()
     full = counts[counts >= max(MIN_FULL_BAR, int(0.25 * counts.max()))].index
     return full.max()
+
+
+def validate_latest_full_bar(df: pd.DataFrame) -> pd.Timestamp:
+    """Return the latest full bar and fail closed if the data is from the future."""
+
+    bar = _latest_full_bar(df)
+    now = pd.Timestamp(datetime.now(timezone.utc)).tz_convert("UTC")
+    if bar > now:
+        raise ValueError(f"latest full bar {bar.isoformat()} is in the future")
+    return bar
 
 
 def _signal_audits(top: pd.DataFrame, *, bar: pd.Timestamp, entry_ok: dict[str, bool]) -> dict[str, dict]:
@@ -296,8 +373,8 @@ def main():
 
     # --- score + select ---
     df = pd.read_parquet(args.matrix).reset_index()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    bar = _latest_full_bar(df)
+    df["timestamp"] = _normalize_timestamp_series(df["timestamp"], field_name="feature-matrix timestamps")
+    bar = validate_latest_full_bar(df)
     staleness = (datetime.now(timezone.utc) - bar.to_pydatetime()).total_seconds() / 86400.0
     print(f"latest full bar: {bar}  ({staleness:.1f} days old)")
     if staleness > args.max_staleness_days and not args.allow_stale:
@@ -315,9 +392,10 @@ def main():
         combo_floor=args.combo_floor,
         blacklist=frozenset(blacklist),
     )
-    top = rank_meta_candidates(df, bar=bar, config=ranking_config)
-    n0 = int(top.attrs.get("scored_count", len(top)))
-    eligible_count = int(top.attrs.get("eligible_count", len(top)))
+    ranking_result = rank_meta_candidates_with_diagnostics(df, bar=bar, config=ranking_config)
+    top = ranking_result.ranked
+    n0 = ranking_result.scored_count
+    eligible_count = ranking_result.eligible_count
     targets = list(top["ticker"])
     # Quality gate is applied to NEW ENTRIES only (held names exit via horizon/grace,
     # not a quality dip). A combo top-K name is bought only if its s_quality clears
@@ -438,7 +516,12 @@ def main():
             continue
         if not entry_ok.get(t, False):
             continue
-        qty = shares_for_notional(_ref_price(t, decision_bar=bar), args.target_notional)
+        try:
+            entry_price = _ref_price(t, decision_bar=bar)
+        except Exception as exc:  # noqa: BLE001 - isolate one bad data lookup from the plan
+            logger.warning("equity entry %s dropped: exact selected-bar price unavailable (%s)", t, exc)
+            continue
+        qty = shares_for_notional(entry_price, args.target_notional)
         plan.append((t, "buy", qty, "entry"))
         order_audits[t] = build_equity_order_audit(
             signal_audit=signal_audits.get(t),
@@ -446,14 +529,20 @@ def main():
             side="buy",
             qty=qty,
             reason="entry",
-            reference_price=_ref_price(t, decision_bar=bar),
+            reference_price=entry_price,
         )
         new_managed[t] = {"qty": qty, "runs_held": 0, "bars_out": 0, "trimmed": False, "entry_bar": str(bar)}
 
     print(f"\n--- order plan ({len(plan)} orders) ---")
     for sym, side, qty, reason in plan:
-        px = _ref_price(sym, decision_bar=bar)
-        print(f"  {side.upper():4} {qty:>4} {sym:<6} (~${qty*px:,.0f} @ {px:.2f})  [{reason}]")
+        if side == "sell":
+            px = pos_info.get(sym, {}).get("current")
+        else:
+            px = order_audits.get(sym, {}).get("reference_price")
+        if isinstance(px, (Real, Decimal)) and not isinstance(px, bool) and math.isfinite(float(px)) and float(px) > 0:
+            print(f"  {side.upper():4} {qty:>4} {sym:<6} (~${qty*float(px):,.0f} @ {float(px):.2f})  [{reason}]")
+        else:
+            print(f"  {side.upper():4} {qty:>4} {sym:<6} (mark unavailable)  [{reason}]")
     if not plan:
         print("  (nothing to do — positions within policy)")
 
@@ -472,10 +561,17 @@ def _run_options(args, client, targets, state, managed, pos_info, bar, entry_ok=
                         stop_loss=args.stop_loss, trail_stop=args.trail_stop,
                         target_notional=args.target_notional,
                         roll_trading_days=args.roll_trading_days)
+    def _safe_entry_ref_price(ticker: str) -> float | None:
+        try:
+            return _ref_price(ticker, decision_bar=bar)
+        except Exception as exc:  # noqa: BLE001 - isolate one bad data lookup from managed exits
+            logger.warning("options entry %s dropped: exact selected-bar price unavailable (%s)", ticker, exc)
+            return None
+
     res = build_mixed_plan(
         client, targets=targets, managed=managed, pos_info=pos_info, bar=bar,
         signal_audits=signal_audits, policy=policy, route_fn=route_option_or_shares,
-        ref_price_fn=lambda ticker: _ref_price(ticker, decision_bar=bar),
+        ref_price_fn=_safe_entry_ref_price,
         entry_ok=entry_ok, gate_reason="quality_gated",
     )
     _execute(

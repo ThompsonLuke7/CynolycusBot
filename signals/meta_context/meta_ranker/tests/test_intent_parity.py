@@ -4,11 +4,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
+import math
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pandas as pd
 import pytest
 
+import signals.meta_context.meta_ranker.live_runner as live_runner
+from core.nervous_system.contracts.intent import TradeIntent
 from core.nervous_system.contracts.base import content_hash
 from core.nervous_system.contracts.enums import DecisionKind, Direction, InstrumentFamily
 from signals.meta_context.meta_ranker.live_runner import (
@@ -90,6 +93,54 @@ def test_rank_meta_candidates_matches_frozen_exact_bar_selection_and_ties() -> N
         assert row["s_quality"] == pytest.approx(quality)
 
 
+def test_rank_meta_candidates_uses_input_order_for_equal_score_at_top_k_cutoff() -> None:
+    ranked = rank_meta_candidates(
+        meta_rows(),
+        bar=DECISION_BAR,
+        config=_ranking_config(top_k=2),
+    )
+
+    assert ranked["ticker"].tolist() == ["HELD", "AAA"]
+
+
+def test_rank_meta_candidates_rejects_duplicate_canonical_tickers() -> None:
+    frame = meta_rows()
+    frame.loc[0, "ticker"] = " aaa "
+    frame.loc[1, "ticker"] = "AAA"
+
+    with pytest.raises(ValueError, match="duplicate|ticker"):
+        rank_meta_candidates(frame, bar=DECISION_BAR, config=_ranking_config())
+
+
+@pytest.mark.parametrize(
+    "bad_config",
+    [
+        {"top_k": True},
+        {"top_k": "2"},
+        {"top_k": 2.0},
+        {"liquidity_floor": True},
+        {"liquidity_floor": "0.5"},
+        {"liquidity_floor": math.inf},
+        {"combo_floor": -0.01},
+        {"combo_floor": 1.01},
+    ],
+)
+def test_meta_ranking_config_is_strict(bad_config: dict[str, object]) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        _ranking_config(**bad_config)
+
+
+def test_meta_ranking_config_canonicalizes_immutable_tickers() -> None:
+    config = MetaRankingConfig(
+        blacklist=[" aaa ", "BBB"],
+        booster_loader=fixture_booster_loader,
+    )
+
+    assert config.blacklist == frozenset({"AAA", "BBB"})
+    with pytest.raises((AttributeError, TypeError)):
+        config.blacklist.add("CCC")  # type: ignore[attr-defined]
+
+
 def test_rank_meta_candidates_requires_the_supplied_bar_and_never_uses_latest() -> None:
     later = rank_meta_candidates(
         meta_rows(),
@@ -105,6 +156,47 @@ def test_rank_meta_candidates_requires_the_supplied_bar_and_never_uses_latest() 
             bar=DECISION_BAR + pd.Timedelta(hours=8),
             config=_ranking_config(),
         )
+
+
+@pytest.mark.parametrize(
+    ("frame", "bar"),
+    [
+        (meta_rows().assign(timestamp=lambda df: df["timestamp"].dt.tz_localize(None)), DECISION_BAR),
+        (meta_rows(), DECISION_BAR.tz_localize(None)),
+    ],
+)
+def test_rank_meta_candidates_rejects_naive_bar_timestamps_before_normalization(frame, bar) -> None:
+    with pytest.raises(ValueError, match="timezone-aware|naive"):
+        rank_meta_candidates(frame, bar=bar, config=_ranking_config())
+
+
+def test_rank_meta_candidates_omits_nan_and_positive_infinite_scores_without_changing_valid_baseline() -> None:
+    ranked = _ranked()
+
+    assert ranked["ticker"].tolist() == ["HELD", "AAA", "BBB", "MISS"]
+    for ticker, (combo, upside, quality) in EXPECTED_COMPONENTS.items():
+        row = ranked.loc[ranked["ticker"] == ticker].iloc[0]
+        assert row["s_combo"] == pytest.approx(combo)
+        assert row["s_upside"] == pytest.approx(upside)
+        assert row["s_quality"] == pytest.approx(quality)
+    assert {"NFIN", "PINF"}.isdisjoint(ranked["ticker"])
+
+
+def test_rank_meta_candidates_returns_explicit_immutable_diagnostics_without_attrs() -> None:
+    result = live_runner.rank_meta_candidates_with_diagnostics(
+        meta_rows(),
+        bar=DECISION_BAR,
+        config=_ranking_config(),
+    )
+
+    assert isinstance(result, live_runner.MetaRankingResult)
+    assert result.ranked["ticker"].tolist() == EXPECTED_TICKERS
+    assert result.scored_count == 8
+    assert result.eligible_count == 4
+    assert result.decision_bar == DECISION_BAR
+    assert result.ranked.attrs == {}
+    with pytest.raises((AttributeError, TypeError)):
+        result.scored_count = 99  # type: ignore[misc]
 
 
 def test_build_trade_intents_preserves_quality_gate_for_new_names_and_held_names() -> None:
@@ -148,6 +240,86 @@ def test_build_trade_intents_preserves_quality_gate_for_new_names_and_held_names
     assert intent.reason_codes
     assert intent.idempotency_key
     assert intent.intent_id == uuid5(NAMESPACE_URL, intent.idempotency_key)
+
+
+def test_build_trade_intents_canonicalizes_snapshot_keys_and_rejects_case_collisions() -> None:
+    ranked = _ranked()
+    snapshot = UUID(int=1)
+    intents = build_trade_intents(
+        ranked,
+        decision_time=DECISION_TIME,
+        decision_bar=DECISION_BAR.to_pydatetime(),
+        snapshot_id_by_ticker={" miss ": snapshot, **{ticker: UUID(int=index + 10) for index, ticker in enumerate(("HELD", "AAA", "BBB"))}},
+        config=_intent_config(),
+    )
+    assert intents[0].snapshot_id == snapshot
+
+    with pytest.raises(ValueError, match="collision|duplicate|snapshot"):
+        build_trade_intents(
+            ranked,
+            decision_time=DECISION_TIME,
+            decision_bar=DECISION_BAR.to_pydatetime(),
+            snapshot_id_by_ticker={"MISS": UUID(int=1), " miss ": UUID(int=2)},
+            config=_intent_config(),
+        )
+
+
+@pytest.mark.parametrize("snapshot_value", [None, str(UUID(int=1)), 1])
+def test_build_trade_intents_rejects_non_uuid_snapshot_values(snapshot_value) -> None:
+    snapshots = {ticker: UUID(int=index + 1) for index, ticker in enumerate(EXPECTED_TICKERS)}
+    snapshots["MISS"] = snapshot_value
+    with pytest.raises((TypeError, ValueError)):
+        build_trade_intents(
+            _ranked(),
+            decision_time=DECISION_TIME,
+            decision_bar=DECISION_BAR.to_pydatetime(),
+            snapshot_id_by_ticker=snapshots,
+            config=_intent_config(),
+        )
+
+
+def test_build_trade_intents_rejects_duplicate_canonical_ranked_tickers() -> None:
+    ranked = _ranked()
+    ranked.loc[ranked.index[0], "ticker"] = " miss "
+
+    with pytest.raises(ValueError, match="duplicate|ticker"):
+        build_trade_intents(
+            ranked,
+            decision_time=DECISION_TIME,
+            decision_bar=DECISION_BAR.to_pydatetime(),
+            snapshot_id_by_ticker={ticker: UUID(int=index + 1) for index, ticker in enumerate(EXPECTED_TICKERS)},
+            config=_intent_config(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("quality_floor", True),
+        ("quality_floor", "0.4"),
+        ("quality_floor", math.nan),
+        ("requested_notional", True),
+        ("requested_notional", "5000"),
+        ("requested_notional", math.inf),
+        ("model_version", ""),
+        ("feature_version", "  "),
+        ("config_version", "UNKNOWN"),
+        ("instrument_preferences", ()),
+        ("instrument_preferences", (InstrumentFamily.EQUITY, InstrumentFamily.EQUITY)),
+        ("instrument_preferences", ("EQUITY",)),
+    ],
+)
+def test_meta_intent_config_is_strict(field: str, value: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        _intent_config(**{field: value})
+
+
+def test_meta_intent_config_canonicalizes_immutable_held_tickers() -> None:
+    config = MetaIntentConfig(held_tickers=[" aaa ", "BBB"])
+
+    assert config.held_tickers == frozenset({"AAA", "BBB"})
+    with pytest.raises((AttributeError, TypeError)):
+        config.held_tickers.add("CCC")  # type: ignore[attr-defined]
 
 
 def test_build_trade_intents_is_byte_identical_on_rebuild_and_uses_canonical_uuidv5_key() -> None:
@@ -194,6 +366,27 @@ def test_missing_model_feature_keeps_existing_fail_closed_manifest_behavior() ->
         rank_meta_candidates(frame, bar=DECISION_BAR, config=_ranking_config())
 
 
+def test_build_trade_intents_rejects_naive_ranked_rows_and_decision_times() -> None:
+    naive_ranked = _ranked().assign(timestamp=lambda df: df["timestamp"].dt.tz_localize(None))
+    with pytest.raises(ValueError, match="timezone-aware|naive"):
+        build_trade_intents(
+            naive_ranked,
+            decision_time=DECISION_TIME,
+            decision_bar=DECISION_BAR.to_pydatetime(),
+            snapshot_id_by_ticker={ticker: UUID(int=index + 1) for index, ticker in enumerate(EXPECTED_TICKERS)},
+            config=_intent_config(),
+        )
+
+    with pytest.raises(ValueError, match="timezone-aware|naive"):
+        build_trade_intents(
+            _ranked(),
+            decision_time=DECISION_TIME.replace(tzinfo=None),
+            decision_bar=DECISION_BAR.to_pydatetime(),
+            snapshot_id_by_ticker={ticker: UUID(int=index + 1) for index, ticker in enumerate(EXPECTED_TICKERS)},
+            config=_intent_config(),
+        )
+
+
 def test_nonfinite_combo_is_omitted_by_existing_selection_comparison() -> None:
     ranked = _ranked()
     assert "NFIN" not in ranked["ticker"].tolist()
@@ -232,3 +425,26 @@ def test_compatibility_reference_price_requires_exact_selected_bar(tmp_path, mon
     nonfinite.to_parquet(bars)
     with pytest.raises(ValueError, match="finite"):
         _ref_price("AAA", decision_bar=DECISION_BAR)
+
+
+def test_ref_price_rejects_naive_parquet_timestamps(tmp_path, monkeypatch) -> None:
+    bars = tmp_path / "AAA.parquet"
+    pd.DataFrame({"timestamp": [DECISION_BAR.tz_localize(None)], "close": [101.0]}).to_parquet(bars)
+    monkeypatch.setattr("signals.meta_context.meta_ranker.live_runner.BARS_4H", tmp_path)
+
+    with pytest.raises(ValueError, match="timezone-aware|naive"):
+        _ref_price("AAA", decision_bar=DECISION_BAR)
+
+
+def test_runner_rejects_future_latest_full_bar(monkeypatch) -> None:
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return DECISION_BAR.to_pydatetime() - pd.Timedelta(hours=1)
+
+    monkeypatch.setattr(live_runner, "datetime", FixedDateTime)
+    monkeypatch.setattr(live_runner, "MIN_FULL_BAR", 1)
+    with pytest.raises(ValueError, match="future"):
+        live_runner.validate_latest_full_bar(
+            pd.DataFrame({"timestamp": [DECISION_BAR, DECISION_BAR + pd.Timedelta(hours=4)]})
+        )

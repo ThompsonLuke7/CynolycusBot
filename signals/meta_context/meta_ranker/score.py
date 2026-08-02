@@ -36,6 +36,19 @@ ID_COLS = ["timestamp", "ticker", "theme"]
 BoosterLoader = Callable[[str], tuple[Any, list[str]]]
 
 
+def _normalize_timestamp_series(values: pd.Series, *, field_name: str) -> pd.Series:
+    normalized: list[pd.Timestamp] = []
+    for value in values.tolist():
+        try:
+            timestamp = pd.Timestamp(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} contains an invalid timestamp") from exc
+        if pd.isna(timestamp) or timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError(f"{field_name} must contain only timezone-aware timestamps")
+        normalized.append(timestamp.tz_convert("UTC"))
+    return pd.Series(normalized, index=values.index, name=values.name)
+
+
 def _load_booster(label: str) -> tuple[xgb.Booster, list[str]]:
     mdir = MODELS_DIR / label
     feats = json.loads((mdir / "meta.json").read_text())["feature_names"]
@@ -52,6 +65,9 @@ def score_frame(
 ) -> pd.DataFrame:
     """Add per-label score columns (s_<label>) to a meta-ranker matrix frame."""
     out = df.copy()
+    if "timestamp" not in out.columns:
+        raise KeyError("matrix requires a timestamp column")
+    out["timestamp"] = _normalize_timestamp_series(out["timestamp"], field_name="feature-matrix timestamps")
     load_booster = booster_loader or _load_booster
     for label in labels:
         bst, feats = load_booster(label)
@@ -61,8 +77,16 @@ def score_frame(
         dm = xgb.DMatrix(out[feats].astype("float32").values, feature_names=feats)
         out[f"s_{label}"] = bst.predict(dm)
     if set(labels) == set(LABELS):
-        ru = out.groupby("timestamp")["s_upside"].rank(pct=True)
-        rq = out.groupby("timestamp")["s_quality"].rank(pct=True)
+        ranks: dict[str, pd.Series] = {}
+        for label in LABELS:
+            score_col = f"s_{label}"
+            finite = np.isfinite(out[score_col].to_numpy(dtype=float))
+            valid = out.loc[finite, ["timestamp", score_col]]
+            ranks[label] = valid.groupby("timestamp")[score_col].rank(pct=True)
+        ru = pd.Series(np.nan, index=out.index, dtype=float)
+        rq = pd.Series(np.nan, index=out.index, dtype=float)
+        ru.loc[ranks["upside"].index] = ranks["upside"]
+        rq.loc[ranks["quality"].index] = ranks["quality"]
         out["s_combo"] = (ru + rq) / 2.0
     return out
 
@@ -89,7 +113,7 @@ def main():
     args = ap.parse_args()
 
     df = pd.read_parquet(args.matrix).reset_index()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df["timestamp"] = _normalize_timestamp_series(df["timestamp"], field_name="feature-matrix timestamps")
     if args.latest_only:
         # Skip degenerate edge bars (a handful of rows) — take the latest fully-populated bar.
         counts = df.groupby("timestamp").size()

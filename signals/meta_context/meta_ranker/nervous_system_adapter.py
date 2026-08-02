@@ -59,22 +59,61 @@ class MetaIntentConfig:
     reason_codes: tuple[str, ...] = ("META_TOP_K", "META_LONG_ENTRY")
 
     def __post_init__(self) -> None:
-        if not self.strategy_id.strip():
-            raise ValueError("strategy_id must be non-empty")
-        if not math.isfinite(float(self.quality_floor)):
-            raise ValueError("quality_floor must be finite")
-        notional = Decimal(str(self.requested_notional))
-        if notional.is_nan() or notional.is_finite() is False or notional < 0:
+        for field_name in ("strategy_id", "model_version", "feature_version", "config_version"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise TypeError(f"{field_name} must be non-empty text")
+        if self.config_version.strip().upper() == "UNKNOWN":
+            raise ValueError("config_version must not be UNKNOWN")
+        if isinstance(self.quality_floor, (bool, str, bytes)) or not isinstance(self.quality_floor, (Real, Decimal)):
+            raise TypeError("quality_floor must be a finite numeric value")
+        quality_floor = float(self.quality_floor)
+        if not math.isfinite(quality_floor) or not 0.0 <= quality_floor <= 1.0:
+            raise ValueError("quality_floor must be finite and within [0, 1]")
+        if isinstance(self.requested_notional, (bool, str, bytes)) or not isinstance(
+            self.requested_notional, (Real, Decimal)
+        ):
+            raise TypeError("requested_notional must be a finite numeric value")
+        try:
+            notional = Decimal(str(self.requested_notional))
+        except (ArithmeticError, ValueError) as exc:
+            raise ValueError("requested_notional must be a finite non-negative amount") from exc
+        if notional.is_nan() or not notional.is_finite() or notional < 0:
             raise ValueError("requested_notional must be a finite non-negative amount")
+        if not self.instrument_preferences:
+            raise ValueError("instrument_preferences must be non-empty")
+        preferences = tuple(self.instrument_preferences)
+        if any(not isinstance(item, InstrumentFamily) for item in preferences):
+            raise TypeError("instrument_preferences must contain InstrumentFamily values")
+        if len(set(preferences)) != len(preferences):
+            raise ValueError("instrument_preferences must contain unique values")
+        object.__setattr__(self, "quality_floor", quality_floor)
         for field_name in ("model_version", "feature_version", "config_version"):
-            if not str(getattr(self, field_name)).strip():
-                raise ValueError(f"{field_name} must be non-empty")
+            object.__setattr__(self, field_name, getattr(self, field_name).strip())
         object.__setattr__(
             self,
             "held_tickers",
-            frozenset(str(ticker).strip().upper() for ticker in self.held_tickers if str(ticker).strip()),
+            _canonical_ticker_set(self.held_tickers, field_name="held_tickers"),
         )
         object.__setattr__(self, "requested_notional", notional)
+
+
+def _canonical_ticker(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a ticker string")
+    ticker = value.strip().upper()
+    if not ticker:
+        raise ValueError(f"{field_name} must be non-empty")
+    return ticker
+
+
+def _canonical_ticker_set(value: object, *, field_name: str) -> frozenset[str]:
+    if isinstance(value, (str, bytes)):
+        raise TypeError(f"{field_name} must be an iterable of ticker strings")
+    try:
+        return frozenset(_canonical_ticker(item, field_name=field_name) for item in value)  # type: ignore[union-attr]
+    except TypeError as exc:
+        raise TypeError(f"{field_name} must be an iterable of ticker strings") from exc
 
 _NON_METRIC_FIELDS = frozenset(
     {
@@ -154,6 +193,13 @@ def _timestamp(value: object, *, field_name: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
     return parsed.astimezone(UTC)
+
+
+def _timestamp_series(values: pd.Series, *, field_name: str) -> pd.Series:
+    normalized: list[datetime] = []
+    for value in values.tolist():
+        normalized.append(_timestamp(value, field_name=field_name))
+    return pd.Series(normalized, index=values.index, name=values.name)
 
 
 def _finite(value: object, *, field_name: str) -> float:
@@ -377,6 +423,20 @@ def _intent_idempotency_key(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _canonical_snapshot_mapping(snapshot_id_by_ticker: Mapping[str, UUID]) -> dict[str, UUID]:
+    if not isinstance(snapshot_id_by_ticker, Mapping):
+        raise TypeError("snapshot_id_by_ticker must be a mapping")
+    canonical: dict[str, UUID] = {}
+    for key, snapshot_id in snapshot_id_by_ticker.items():
+        ticker = _canonical_ticker(key, field_name="snapshot ticker")
+        if ticker in canonical:
+            raise ValueError(f"case-colliding snapshot keys for {ticker}")
+        if not isinstance(snapshot_id, UUID):
+            raise TypeError(f"snapshot ID for {ticker} must be a UUID")
+        canonical[ticker] = snapshot_id
+    return canonical
+
+
 def build_trade_intents(
     ranked: pd.DataFrame,
     *,
@@ -400,13 +460,20 @@ def build_trade_intents(
     decision_bar_utc = _timestamp(decision_bar, field_name="decision_bar")
     if decision_bar_utc > decision_time_utc:
         raise ValueError("decision_bar must not be after decision_time")
-    row_timestamps = pd.to_datetime(ranked["timestamp"], utc=True, errors="coerce")
-    if row_timestamps.isna().any() or not bool(row_timestamps.eq(pd.Timestamp(decision_bar_utc)).all()):
+    row_timestamps = _timestamp_series(ranked["timestamp"], field_name="ranked row timestamps")
+    if not bool(row_timestamps.eq(pd.Timestamp(decision_bar_utc)).all()):
         raise ValueError("ranked rows must all match the exact decision bar")
+    snapshot_ids = _canonical_snapshot_mapping(snapshot_id_by_ticker)
+
+    canonical_tickers = [
+        _canonical_ticker(value, field_name="ranked ticker")
+        for value in ranked["ticker"].tolist()
+    ]
+    if len(set(canonical_tickers)) != len(canonical_tickers):
+        raise ValueError("duplicate canonical ticker in ranked intent rows")
 
     intents: list[TradeIntent] = []
-    for row in ranked.to_dict(orient="records"):
-        ticker = _ticker(row.get("ticker"), field_name="ranked ticker")
+    for row, ticker in zip(ranked.to_dict(orient="records"), canonical_tickers):
         quality = _finite(row.get("s_quality"), field_name=f"{ticker} s_quality")
         if ticker in config.held_tickers or quality < config.quality_floor:
             continue
@@ -419,7 +486,7 @@ def build_trade_intents(
         if reference_price <= 0:
             raise ValueError(f"{ticker} selected-bar close must be positive")
         try:
-            snapshot_id = snapshot_id_by_ticker[ticker]
+            snapshot_id = snapshot_ids[ticker]
         except KeyError as exc:
             raise KeyError(f"missing context snapshot ID for {ticker}") from exc
 

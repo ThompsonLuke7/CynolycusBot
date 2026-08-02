@@ -75,5 +75,40 @@ def test_mixed_manage_and_entry(monkeypatch):
     assert "EQOLD" not in nm
 
 
+def test_failed_entry_price_does_not_block_other_entry_or_managed_exit(monkeypatch):
+    monkeypatch.setattr(
+        lr,
+        "_ref_price",
+        lambda ticker, **_: (_ for _ in ()).throw(ValueError("missing exact bar"))
+        if ticker == "BADENTRY" else 50.0,
+    )
+
+    def fake_route(client, ticker, px, **_):
+        return "equity", None, "underlying_lt_10"
+
+    monkeypatch.setattr(lr, "route_option_or_shares", fake_route)
+    captured = {}
+    monkeypatch.setattr(lr, "_execute", lambda *a, **k: captured.update(plan=a[2], new_managed=a[4]))
+
+    lr._run_options(
+        _args(),
+        object(),
+        ["BADENTRY", "GOODENTRY"],
+        {},
+        {"HELD": {"route": "equity", "symbol": "HELD", "runs_held": 0, "bars_out": 0, "trimmed": False}},
+        {
+            "HELD": {"qty": 10, "avg_entry": 50.0, "current": 65.0},
+        },
+        "2026-07-02T18:00:00Z",
+        entry_ok={"BADENTRY": True, "GOODENTRY": True},
+        signal_audits={},
+    )
+
+    symbols = [item[0] for item in captured["plan"]]
+    assert "HELD" in symbols
+    assert "GOODENTRY" in symbols
+    assert "BADENTRY" not in symbols
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

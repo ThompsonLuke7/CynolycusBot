@@ -87,6 +87,15 @@ def meta_rows() -> pd.DataFrame:
                 "required_feature": 7.0,
             },
             {
+                "timestamp": DECISION_BAR,
+                "ticker": "PINF",
+                "close": 808.0,
+                "dollar_vol_pctile_252": 0.95,
+                "up": 0.2,
+                "qual": 0.05,
+                "required_feature": 8.0,
+            },
+            {
                 "timestamp": LATER_BAR,
                 "ticker": "AAA",
                 "close": 999.0,
@@ -110,10 +119,15 @@ class FixtureBooster:
         if hasattr(values, "toarray"):
             values = values.toarray()
         values = np.asarray(values)[:, 0 if self.label == "upside" else 1].astype(float)
-        if self.label == "quality" and len(values) > 6:
-            # Current score_frame preserves a NaN model output; ranking then
-            # omits it when the combo floor comparison is applied.
-            values[6] = np.nan
+        if len(values) > 6:
+            # These invalid outputs must not change the percentile baseline of
+            # the valid rows.  They are deliberately at the end of the fixture.
+            if self.label == "quality":
+                values[6] = np.nan
+            if len(values) > 7:
+                values[7] = np.inf
+        if self.label == "upside" and len(values) > 7:
+            values[7] = np.inf
         return values
 
 

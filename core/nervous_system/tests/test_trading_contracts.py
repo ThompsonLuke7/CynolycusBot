@@ -262,8 +262,42 @@ def test_uncalibrated_meta_intent_keeps_probability_null_and_copy_revalidates():
     intent = _intent()
 
     assert intent.raw_probability is None
+    assert intent.score_components == {}
+    with pytest.raises(TypeError):
+        intent.score_components["s_combo"] = 0.9
     with pytest.raises(ValidationError):
         intent.model_copy(update={"raw_probability": 1.01})
+
+
+def test_trade_intent_accepts_task14_fields_only_as_a_complete_new_format():
+    intent = _intent(
+        snapshot_id=uuid4(),
+        score_components={"s_combo": 0.9, "s_quality": 0.8},
+        config_version="meta-intent@task14",
+        idempotency_key="a" * 64,
+    )
+
+    assert intent.score_components == {"s_combo": 0.9, "s_quality": 0.8}
+    with pytest.raises(TypeError):
+        intent.score_components["s_upside"] = 0.7
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"score_components": {"s_combo": "0.9"}},
+        {"score_components": {"s_combo": True}},
+        {"score_components": {"s_combo": float("inf")}},
+        {"score_components": {"s_combo": 0.9}, "config_version": "UNKNOWN", "idempotency_key": "a" * 64},
+        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": "A" * 64},
+        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": "a" * 63},
+        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": ""},
+        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": "a" * 64, "snapshot_id": None},
+    ],
+)
+def test_trade_intent_rejects_partial_or_invalid_task14_fields(updates):
+    with pytest.raises(ValidationError):
+        _intent(**updates)
 
 
 def test_failed_decision_record_is_typed_without_complete_chain_links():
