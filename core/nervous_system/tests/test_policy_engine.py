@@ -24,6 +24,7 @@ from core.nervous_system.config.policy import (
 from core.nervous_system.contracts.base import content_hash
 from core.nervous_system.contracts.context import ContextSnapshot
 from core.nervous_system.contracts.enums import (
+    AssetClass,
     DataQualitySeverity,
     DealerRegime,
     DecisionKind,
@@ -43,6 +44,7 @@ from core.nervous_system.contracts.quality import DataQualityIssue, DataQualityS
 from core.nervous_system.contracts.states import (
     DealerState,
     MarketState,
+    PortfolioPosition,
     PortfolioState,
     ReadinessState,
     StateContract,
@@ -54,6 +56,7 @@ from core.nervous_system.policy.engine import (
     ExecutionBasis,
     evaluate_policy,
     execution_basis,
+    is_executable,
 )
 from core.nervous_system.policy.reason_codes import ReasonCode, describe
 
@@ -182,6 +185,8 @@ def portfolio_state(
     buying_power: float = 250_000.0,
     day_pl: float | None = -100.0,
     open_order_ids: tuple[str, ...] = (),
+    positions: tuple[PortfolioPosition, ...] = (),
+    open_orders_observed: bool = True,
     state_id: UUID | None = None,
 ) -> PortfolioState:
     payload = _envelope(
@@ -191,6 +196,19 @@ def portfolio_state(
         as_of=datetime(2026, 7, 30, 18, 15, tzinfo=UTC),
         available_at=datetime(2026, 7, 30, 18, 16, tzinfo=UTC),
     )
+    if not open_orders_observed:
+        # Mirrors core/broker_equity_snapshot.py when the open-orders read fails.
+        payload["data_quality"] = DataQualitySummary(
+            issues=(
+                DataQualityIssue(
+                    code="OPEN_ORDERS_NOT_OBSERVED",
+                    severity=DataQualitySeverity.WARNING,
+                    component="broker.portfolio",
+                    message="open orders were not observed (FAILED)",
+                    fallback_used="open_order_ids left empty",
+                ),
+            )
+        )
     payload.update(
         {
             "account_alias": account_alias,
@@ -199,10 +217,26 @@ def portfolio_state(
             "buying_power": buying_power,
             "day_pl": day_pl,
             "open_order_ids": open_order_ids,
+            "positions": positions,
             "broker_observed_at": datetime(2026, 7, 30, 18, 15, tzinfo=UTC),
         }
     )
     return PortfolioState(**payload)
+
+
+def position(
+    *,
+    symbol: str = "NVDA",
+    market_value: float | None = 1_000.0,
+) -> PortfolioPosition:
+    return PortfolioPosition(
+        broker_position_id=f"pos-{symbol}",
+        symbol=symbol,
+        underlying=symbol,
+        asset_class=AssetClass.EQUITY,
+        quantity=10.0,
+        market_value=market_value,
+    )
 
 
 def readiness_state(
@@ -554,6 +588,118 @@ def test_duplicate_idempotency_key_vetoes_second_entry() -> None:
 
     assert second.action is PolicyAction.REJECT
     assert ReasonCode.BROKER_DUPLICATE_IDEMPOTENCY_KEY.value in second.hard_vetoes
+
+
+def test_unobserved_open_orders_veto_entry_but_not_exit() -> None:
+    """An empty open-order tuple must not be read as "no duplicate exists"."""
+
+    snapshot = build_snapshot(
+        states=(
+            market_state(),
+            ticker_state(),
+            portfolio_state(open_orders_observed=False),
+            readiness_state(),
+        )
+    )
+    entry = evaluate_policy(
+        build_intent(snapshot=snapshot), snapshot, build_config()
+    )
+    exit_decision = evaluate_policy(
+        build_intent(snapshot=snapshot, decision_kind=DecisionKind.EXIT),
+        snapshot,
+        build_config(),
+    )
+
+    assert entry.action is PolicyAction.REJECT
+    assert ReasonCode.BROKER_OPEN_ORDERS_NOT_OBSERVED.value in entry.hard_vetoes
+    assert exit_decision.action is PolicyAction.EXIT
+
+
+def test_position_without_market_value_vetoes_entry() -> None:
+    """Unknown exposure must fail closed, not be counted as zero."""
+
+    snapshot = build_snapshot(
+        states=(
+            market_state(),
+            ticker_state(),
+            portfolio_state(
+                positions=(position(market_value=None), position(symbol="AVGO"))
+            ),
+            readiness_state(),
+        )
+    )
+    intent = build_intent(snapshot=snapshot)
+
+    decision = evaluate_policy(intent, snapshot, build_config())
+
+    assert decision.action is PolicyAction.REJECT
+    assert ReasonCode.PORTFOLIO_EXPOSURE_UNKNOWN.value in decision.hard_vetoes
+
+
+def test_known_positions_count_toward_the_gross_notional_limit() -> None:
+    snapshot = build_snapshot(
+        states=(
+            market_state(),
+            ticker_state(),
+            portfolio_state(
+                positions=(
+                    position(symbol="NVDA", market_value=-100_000.0),
+                    position(symbol="AVGO", market_value=49_500.0),
+                )
+            ),
+            readiness_state(),
+        )
+    )
+    intent = build_intent(snapshot=snapshot, position_size_requested=Decimal("1000.00"))
+
+    decision = evaluate_policy(intent, snapshot, build_config())
+
+    # |-100000| + 49500 + 1000 = 150500 > 150000
+    assert decision.action is PolicyAction.REJECT
+    assert ReasonCode.PORTFOLIO_MAX_GROSS_NOTIONAL_BREACH.value in decision.hard_vetoes
+
+
+def test_is_executable_gates_off_mode_and_vetoed_decisions() -> None:
+    snapshot = build_snapshot()
+    intent = build_intent(snapshot=snapshot)
+
+    approved = evaluate_policy(intent, snapshot, build_config())
+    off = evaluate_policy(intent, snapshot, build_config(mode=PolicyMode.OFF))
+    rejected = evaluate_policy(
+        intent,
+        snapshot,
+        build_config(environment=RuntimeEnvironment.PRODUCTION_LIVE),
+    )
+    exit_decision = evaluate_policy(
+        build_intent(snapshot=snapshot, decision_kind=DecisionKind.EXIT),
+        snapshot,
+        build_config(),
+    )
+
+    assert is_executable(approved) is True
+    assert is_executable(exit_decision) is True
+    # OFF carries a DEFER action and a full baseline budget, so action alone
+    # is not a safe gate.
+    assert off.final_risk_budget == intent.position_size_requested
+    assert is_executable(off) is False
+    assert is_executable(rejected) is False
+
+
+def test_off_mode_is_never_executable_even_carrying_an_approve_action() -> None:
+    """The mode gate must hold independently of the recorded action."""
+
+    snapshot = build_snapshot()
+    approved = evaluate_policy(
+        build_intent(snapshot=snapshot), snapshot, build_config()
+    )
+    assert is_executable(approved) is True
+
+    smuggled = approved.model_copy(update={"mode": PolicyMode.OFF})
+
+    assert smuggled.action is PolicyAction.APPROVE
+    assert smuggled.hard_vetoes == ()
+    assert execution_basis(smuggled) is ExecutionBasis.AUDIT_ONLY
+    assert is_executable(smuggled) is False
 
 
 def test_readiness_gate_failure_vetoes_entry() -> None:

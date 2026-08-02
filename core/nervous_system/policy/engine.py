@@ -54,6 +54,11 @@ class ExecutionBasis(str, Enum):
     POLICY_FINAL = "POLICY_FINAL"
 
 
+_EXECUTABLE_ACTIONS = frozenset(
+    {PolicyAction.APPROVE, PolicyAction.APPROVE_REDUCED, PolicyAction.EXIT}
+)
+
+
 def execution_basis(decision: PolicyDecision) -> ExecutionBasis:
     """Derive the execution basis from the mode recorded on the decision."""
 
@@ -62,6 +67,21 @@ def execution_basis(decision: PolicyDecision) -> ExecutionBasis:
     if decision.mode is PolicyMode.SHADOW:
         return ExecutionBasis.BASELINE_INTENT
     return ExecutionBasis.POLICY_FINAL
+
+
+def is_executable(decision: PolicyDecision) -> bool:
+    """Whether orchestration may submit anything for this decision.
+
+    Orchestration must gate on this rather than on ``action`` alone: an OFF
+    decision records a baseline that was never evaluated against the hard
+    rules, so it is audit-only regardless of the action it carries.
+    """
+
+    return (
+        execution_basis(decision) is not ExecutionBasis.AUDIT_ONLY
+        and decision.action in _EXECUTABLE_ACTIONS
+        and not decision.hard_vetoes
+    )
 
 
 def evaluate_policy(
@@ -291,4 +311,5 @@ __all__ = [
     "ExecutionBasis",
     "evaluate_policy",
     "execution_basis",
+    "is_executable",
 ]

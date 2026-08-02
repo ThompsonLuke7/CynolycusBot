@@ -45,11 +45,13 @@ class ReasonCode(str, Enum):
     BROKER_PORTFOLIO_STATE_MISSING = "BROKER_PORTFOLIO_STATE_MISSING"
     BROKER_ACCOUNT_IDENTITY_MISMATCH = "BROKER_ACCOUNT_IDENTITY_MISMATCH"
     BROKER_DUPLICATE_IDEMPOTENCY_KEY = "BROKER_DUPLICATE_IDEMPOTENCY_KEY"
+    BROKER_OPEN_ORDERS_NOT_OBSERVED = "BROKER_OPEN_ORDERS_NOT_OBSERVED"
     BROKER_INSUFFICIENT_BUYING_POWER = "BROKER_INSUFFICIENT_BUYING_POWER"
 
     # 6 hard portfolio limits
     PORTFOLIO_MAX_DAILY_LOSS_BREACH = "PORTFOLIO_MAX_DAILY_LOSS_BREACH"
     PORTFOLIO_MAX_GROSS_NOTIONAL_BREACH = "PORTFOLIO_MAX_GROSS_NOTIONAL_BREACH"
+    PORTFOLIO_EXPOSURE_UNKNOWN = "PORTFOLIO_EXPOSURE_UNKNOWN"
 
     # 7 liquidity and data-quality limits
     DATA_QUALITY_BLOCKING = "DATA_QUALITY_BLOCKING"
@@ -145,6 +147,10 @@ _DETAIL: Mapping[ReasonCode, str] = MappingProxyType(
         ReasonCode.BROKER_DUPLICATE_IDEMPOTENCY_KEY: (
             "An open broker order already carries this intent idempotency key."
         ),
+        ReasonCode.BROKER_OPEN_ORDERS_NOT_OBSERVED: (
+            "Open orders could not be observed, so a duplicate or conflicting "
+            "order cannot be ruled out before a new entry."
+        ),
         ReasonCode.BROKER_INSUFFICIENT_BUYING_POWER: (
             "Observed buying power is below the requested risk budget."
         ),
@@ -153,6 +159,10 @@ _DETAIL: Mapping[ReasonCode, str] = MappingProxyType(
         ),
         ReasonCode.PORTFOLIO_MAX_GROSS_NOTIONAL_BREACH: (
             "The proposed entry would exceed the configured gross notional limit."
+        ),
+        ReasonCode.PORTFOLIO_EXPOSURE_UNKNOWN: (
+            "An open position carries no market value, so gross exposure cannot "
+            "be established and the limit cannot be enforced."
         ),
         ReasonCode.DATA_QUALITY_BLOCKING: (
             "A context state carries a data-quality issue at a blocking severity."

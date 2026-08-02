@@ -33,6 +33,10 @@ _SEVERITY_ORDER = (
     DataQualitySeverity.ERROR,
     DataQualitySeverity.CRITICAL,
 )
+# Emitted by the broker portfolio producer (``core/broker_equity_snapshot.py``)
+# when the open-orders read failed, was unsupported, or was never attempted.
+_OPEN_ORDERS_NOT_OBSERVED_CODE = "OPEN_ORDERS_NOT_OBSERVED"
+
 _DEGRADED_SNAPSHOT_STATUSES = {
     "STALE": ReasonCode.SNAPSHOT_REQUIRED_STATE_STALE,
     "MISSING": ReasonCode.SNAPSHOT_REQUIRED_STATE_MISSING,
@@ -139,10 +143,18 @@ def broker_vetoes(
     # relaxed for risk-reducing exits.
     if intent.idempotency_key and intent.idempotency_key in portfolio.open_order_ids:
         vetoes.append(ReasonCode.BROKER_DUPLICATE_IDEMPOTENCY_KEY)
-    if not is_risk_reducing(intent) and _decimal(
-        portfolio.buying_power
-    ) < intent.position_size_requested:
-        vetoes.append(ReasonCode.BROKER_INSUFFICIENT_BUYING_POWER)
+    if not is_risk_reducing(intent):
+        # An empty open-order tuple is ambiguous: it means either "no open
+        # orders" or "open orders could not be read".  Only the producer's
+        # evidence distinguishes them, so an unobserved read fails closed for
+        # new entries rather than silently claiming no duplicate exists.
+        if any(
+            issue.code == _OPEN_ORDERS_NOT_OBSERVED_CODE
+            for issue in portfolio.data_quality.issues
+        ):
+            vetoes.append(ReasonCode.BROKER_OPEN_ORDERS_NOT_OBSERVED)
+        if _decimal(portfolio.buying_power) < intent.position_size_requested:
+            vetoes.append(ReasonCode.BROKER_INSUFFICIENT_BUYING_POWER)
     return tuple(vetoes)
 
 
@@ -163,12 +175,13 @@ def portfolio_limit_vetoes(
     vetoes: list[ReasonCode] = []
     if portfolio.day_pl is not None and _decimal(portfolio.day_pl) <= -config.max_daily_loss:
         vetoes.append(ReasonCode.PORTFOLIO_MAX_DAILY_LOSS_BREACH)
+    # A position with no market value cannot be counted, and skipping it would
+    # understate gross exposure and let the limit approve a breaching entry.
+    if any(position.market_value is None for position in portfolio.positions):
+        vetoes.append(ReasonCode.PORTFOLIO_EXPOSURE_UNKNOWN)
+        return tuple(vetoes)
     gross = sum(
-        (
-            abs(_decimal(position.market_value))
-            for position in portfolio.positions
-            if position.market_value is not None
-        ),
+        (abs(_decimal(position.market_value)) for position in portfolio.positions),
         Decimal("0"),
     )
     if gross + intent.position_size_requested > config.max_gross_notional:
