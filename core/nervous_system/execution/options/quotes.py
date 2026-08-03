@@ -17,6 +17,7 @@ from pydantic import Field, model_validator
 
 from core.nervous_system.contracts.base import (
     ContractModel,
+    FiniteDecimal,
     NonNegativeDecimal,
     PositiveDecimal,
     UtcDatetime,
@@ -91,6 +92,9 @@ class OptionQuote(ContractModel):
     ask_size: NonNegativeInt | None = None
     open_interest: NonNegativeInt | None = None
     volume: NonNegativeInt | None = None
+    # Supplied by the quote source when available.  Never imputed: selection
+    # scores an absent delta as unknown rather than assuming one.
+    delta: FiniteDecimal | None = None
     # Trade-print evidence, kept strictly apart from the bid/ask mark.
     last_trade_price: NonNegativeDecimal | None = None
     last_trade_at: UtcDatetime | None = None
