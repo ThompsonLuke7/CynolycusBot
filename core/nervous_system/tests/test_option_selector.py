@@ -429,6 +429,38 @@ def test_selected_structure_always_lies_inside_policy_permission(allowed) -> Non
         assert InstrumentFamily.EQUITY in allowed
 
 
+def test_preference_order_is_honoured_not_globally_optimised() -> None:
+    """Meta's default list starts with equity; a fit chain must not override it.
+
+    Scoring every permitted family and taking the global best would silently
+    escalate a strategy past its own conservative first choice.
+    """
+
+    selection = run(
+        preferences=(InstrumentFamily.EQUITY, InstrumentFamily.SINGLE_OPTION),
+        allowed=frozenset(
+            {InstrumentFamily.EQUITY, InstrumentFamily.SINGLE_OPTION}
+        ),
+    )
+
+    assert selection.outcome is SelectionOutcome.SELECTED_EQUITY_FALLBACK
+    assert selection.legs == ()
+
+
+def test_a_later_preference_is_used_only_when_the_earlier_one_fails() -> None:
+    poor = portfolio_state().model_copy(update={"cash": 0.0})
+    selection = run(
+        preferences=(InstrumentFamily.SINGLE_OPTION, InstrumentFamily.EQUITY),
+        allowed=frozenset(
+            {InstrumentFamily.EQUITY, InstrumentFamily.SINGLE_OPTION}
+        ),
+        portfolio=poor,
+    )
+
+    assert selection.outcome is SelectionOutcome.SELECTED_OPTION
+    assert selection.structure is InstrumentFamily.SINGLE_OPTION
+
+
 def test_equity_fallback_when_no_option_is_eligible() -> None:
     selection = run(
         chain=(),

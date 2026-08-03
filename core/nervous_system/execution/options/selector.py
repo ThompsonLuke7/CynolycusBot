@@ -233,10 +233,34 @@ def select_instrument(
     )
     rejected.extend(quote_rejections)
 
-    best: _Candidate | None = None
+    # The preference list is ordered, not a set: the first permitted family
+    # that yields a valid candidate wins.  Searching every family and taking
+    # the globally best score would silently escalate past a strategy's
+    # conservative first choice, which for Meta is plain equity.
     for family in permitted:
         if family is InstrumentFamily.EQUITY:
-            continue
+            equity = _equity_fallback(
+                intent=intent,
+                snapshot=snapshot,
+                permitted=permitted,
+                budget=budget,
+                config=config,
+            )
+            if isinstance(equity, RejectedInstrument):
+                rejected.append(equity)
+                continue
+            if equity is None:
+                continue
+            symbol, side, quantity = equity
+            return finish(
+                outcome=SelectionOutcome.SELECTED_EQUITY_FALLBACK,
+                equity_symbol=symbol,
+                equity_side=side,
+                quantity=quantity,
+                max_loss=budget,
+                collateral=budget,
+            )
+
         candidates, family_rejections = _candidates_for(
             family,
             eligible=eligible,
@@ -246,45 +270,24 @@ def select_instrument(
             config=config,
         )
         rejected.extend(family_rejections)
+        best: _Candidate | None = None
         for candidate in candidates:
             if best is None or _sort_key(candidate) < _sort_key(best):
                 best = candidate
+        if best is not None:
+            return finish(
+                outcome=SelectionOutcome.SELECTED_OPTION,
+                structure=best.structure,
+                legs=best.legs,
+                quantity=best.quantity,
+                quote_snapshot_at=best.quote_snapshot_at,
+                estimated_net_price=best.net_price,
+                max_loss=best.profile.max_loss,
+                collateral=best.profile.collateral,
+                score=best.score,
+            )
 
-    if best is not None:
-        return finish(
-            outcome=SelectionOutcome.SELECTED_OPTION,
-            structure=best.structure,
-            legs=best.legs,
-            quantity=best.quantity,
-            quote_snapshot_at=best.quote_snapshot_at,
-            estimated_net_price=best.net_price,
-            max_loss=best.profile.max_loss,
-            collateral=best.profile.collateral,
-            score=best.score,
-        )
-
-    equity = _equity_fallback(
-        intent=intent,
-        snapshot=snapshot,
-        permitted=permitted,
-        budget=budget,
-        config=config,
-    )
-    if isinstance(equity, RejectedInstrument):
-        rejected.append(equity)
-        return finish(outcome=SelectionOutcome.NO_ELIGIBLE_INSTRUMENT)
-    if equity is None:
-        return finish(outcome=SelectionOutcome.NO_ELIGIBLE_INSTRUMENT)
-
-    symbol, side, quantity = equity
-    return finish(
-        outcome=SelectionOutcome.SELECTED_EQUITY_FALLBACK,
-        equity_symbol=symbol,
-        equity_side=side,
-        quantity=quantity,
-        max_loss=budget,
-        collateral=budget,
-    )
+    return finish(outcome=SelectionOutcome.NO_ELIGIBLE_INSTRUMENT)
 
 
 class _Candidate:
