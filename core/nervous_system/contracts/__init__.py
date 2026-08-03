@@ -30,9 +30,11 @@ from .enums import (
     ModifierOperation,
     OptionType,
     OrderSide,
+    OwnershipStatus,
     PolicyAction,
     PolicyMode,
     PositionIntent,
+    ReconciliationStatus,
     RuntimeEnvironment,
     StateType,
     SubmissionAttemptStatus,
@@ -61,6 +63,14 @@ from .states import (
     ThemeMembership,
     ThemeState,
     TickerState,
+)
+from .portfolio import (
+    ExposureLimitResult,
+    ExposureReport,
+    ImmutableDecimalMap,
+    OwnershipRecord,
+    PortfolioReconciliation,
+    ReconciliationLine,
 )
 from .decisions import DecisionOutcome, DecisionRecord, HashedDecisionArtifact
 from .execution import ExecutionEvent, ExecutionReport
@@ -135,4 +145,12 @@ __all__ = [
     "DecisionRecord",
     "HashedDecisionArtifact",
     "DecisionOutcome",
+    "ExposureLimitResult",
+    "ExposureReport",
+    "ImmutableDecimalMap",
+    "OwnershipRecord",
+    "OwnershipStatus",
+    "PortfolioReconciliation",
+    "ReconciliationLine",
+    "ReconciliationStatus",
 ]

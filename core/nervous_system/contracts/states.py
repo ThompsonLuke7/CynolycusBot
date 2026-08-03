@@ -235,6 +235,10 @@ class PortfolioPosition(ContractModel):
     market_value: FiniteFloat | None = None
     strategy_id: str | None = None
     ownership_status: str = "UNKNOWN"
+    # Per-contract option Greeks when the broker or quote source supplies them.
+    # Absent Greeks are never imputed; exposure treats them as unknown.
+    greeks: ImmutableFloatMap = Field(default_factory=dict)
+    contract_multiplier: FiniteFloat | None = None
 
 
 class PortfolioState(StateEnvelope):

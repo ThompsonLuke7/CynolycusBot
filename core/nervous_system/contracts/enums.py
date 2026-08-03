@@ -162,6 +162,20 @@ class InstrumentFamily(str, Enum):
     ROLL = "ROLL"
 
 
+class OwnershipStatus(str, Enum):
+    ASSIGNED = "ASSIGNED"
+    UNASSIGNED = "UNASSIGNED"
+    CLOSED = "CLOSED"
+
+
+class ReconciliationStatus(str, Enum):
+    MATCHED = "MATCHED"
+    PARTIAL = "PARTIAL"
+    UNASSIGNED = "UNASSIGNED"
+    ORPHANED_OWNERSHIP = "ORPHANED_OWNERSHIP"
+    QUANTITY_MISMATCH = "QUANTITY_MISMATCH"
+
+
 class MissingStateAction(str, Enum):
     REJECT = "REJECT"
     WARN = "WARN"
