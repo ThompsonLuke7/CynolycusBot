@@ -448,6 +448,25 @@ def test_malformed_payloads_raise_contract_errors(payload, match) -> None:
         adapter(client).find_by_client_order_id("c")
 
 
+def test_contract_validation_failures_stay_inside_the_typed_error_boundary() -> None:
+    """Alpaca can report a filled quantity before the average price settles.
+
+    That must surface as BrokerContractError, not a pydantic ValidationError,
+    or it slips past every caller handling BrokerError.
+    """
+
+    from core.nervous_system.execution.broker import BrokerError
+
+    client = FakeClient(
+        get_order_by_client_order_id=order_payload(
+            status="partially_filled", filled_qty="5", filled_avg_price=None
+        )
+    )
+    with pytest.raises(BrokerContractError) as caught:
+        adapter(client).find_by_client_order_id("c")
+    assert isinstance(caught.value, BrokerError)
+
+
 def test_naive_timestamps_are_refused() -> None:
     client = FakeClient(
         get_order_by_client_order_id=order_payload(submitted_at="2026-08-02T18:29:00")

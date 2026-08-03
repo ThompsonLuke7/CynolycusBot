@@ -14,6 +14,8 @@ from typing import Any
 from urllib.parse import urlparse
 import urllib.error
 
+from pydantic import ValidationError
+
 from core.nervous_system.contracts.enums import (
     AssetClass,
     DebitCredit,
@@ -42,6 +44,8 @@ from .broker import (
 PAPER_HOSTS = frozenset({"paper-api.alpaca.markets"})
 PAPER_ACCOUNT_ALIASES = frozenset({"paper"})
 CLIENT_ORDER_ID_LENGTH = 48
+# The broker caps this list; it is for reporting, never for reconciliation.
+ORDER_LIST_LIMIT = 500
 
 _SECRET_KEY_HINTS = ("key", "secret", "token", "password", "authorization", "apca")
 _SIDE_MAP = {OrderSide.BUY: "buy", OrderSide.SELL: "sell"}
@@ -76,6 +80,22 @@ def sanitize(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
     return value
+
+
+def _build(factory: Any, **fields: Any) -> Any:
+    """Construct a broker contract, keeping the typed-error boundary intact.
+
+    A malformed broker payload must surface as ``BrokerContractError``; letting
+    a pydantic ``ValidationError`` escape would slip past every caller that
+    handles ``BrokerError``.
+    """
+
+    try:
+        return factory(**fields)
+    except ValidationError as exc:
+        raise BrokerContractError(
+            f"{factory.__name__} payload failed validation: {exc.error_count()} error(s)"
+        ) from exc
 
 
 def _decimal(value: Any, field: str) -> Decimal:
@@ -147,7 +167,8 @@ class AlpacaPaperAdapter:
         payload = self._call(self._client.get_account)
         if not isinstance(payload, Mapping):
             raise BrokerContractError("account response is not an object")
-        return BrokerAccount(
+        return _build(
+            BrokerAccount,
             account_id=str(payload.get("id", "")),
             account_alias=self._account_alias,
             status=str(payload.get("status", "UNKNOWN")),
@@ -166,7 +187,8 @@ class AlpacaPaperAdapter:
             raise BrokerContractError("positions response is not a list")
         observed_at = self._now()
         return tuple(
-            BrokerPosition(
+            _build(
+                BrokerPosition,
                 symbol=str(item.get("symbol", "")),
                 # Alpaca reports "us_option"/"us_equity", so match on the
                 # substring: a prefix check would silently class every option
@@ -188,7 +210,16 @@ class AlpacaPaperAdapter:
         )
 
     def orders(self, *, status: str = "all") -> tuple[BrokerOrder, ...]:
-        payload = self._call(lambda: self._client.get_orders(status=status))
+        """List orders for reporting only.
+
+        The broker caps and paginates this list, so an absent order here is
+        never evidence that it does not exist. Reconciliation must use
+        ``find_by_client_order_id``, which is an exact lookup.
+        """
+
+        payload = self._call(
+            lambda: self._client.get_orders(status=status, limit=ORDER_LIST_LIMIT)
+        )
         if payload is None:
             return ()
         if not isinstance(payload, Sequence) or isinstance(payload, (str, bytes)):
@@ -332,7 +363,8 @@ class AlpacaPaperAdapter:
             )
             for leg in legs_payload
         )
-        return BrokerOrder(
+        return _build(
+            BrokerOrder,
             broker_order_id=broker_order_id,
             client_order_id=str(payload.get("client_order_id", "")),
             status=status,
@@ -405,6 +437,7 @@ class AlpacaPaperAdapter:
 
 __all__ = [
     "CLIENT_ORDER_ID_LENGTH",
+    "ORDER_LIST_LIMIT",
     "PAPER_ACCOUNT_ALIASES",
     "PAPER_HOSTS",
     "AlpacaPaperAdapter",
