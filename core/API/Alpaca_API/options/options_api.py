@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Mapping
 
 from ..core.config import AlpacaConfig, _profile_env_value, _read_env_file, _split_env_file_profile
@@ -82,6 +85,16 @@ class AlpacaOptionsClient:
         strike_int = int(round(float(strike) * 1000))
         return f"{u}{exp}{cp}{strike_int:08d}"
 
+    def _redact(self, text: Any) -> Any:
+        """Strip API credentials out of anything that may reach a log or raise."""
+
+        if not isinstance(text, str):
+            return text
+        for secret in (self._key, self._secret):
+            if secret:
+                text = text.replace(secret, "***redacted***")
+        return text
+
     def _request(
         self,
         method: str,
@@ -113,7 +126,9 @@ class AlpacaOptionsClient:
         # retried or it can double-submit a live order. 429 means the
         # request was rejected before any processing, so it is always safe
         # to retry regardless of method.
-        is_post = method.upper() == "POST"
+        # PATCH carries the same hazard: a replace whose response was lost may
+        # already have been applied, so it is never retried either.
+        is_post = method.upper() in {"POST", "PATCH"}
         backoffs = (0.5, 1.0, 2.0)
         for attempt in range(len(backoffs) + 1):
             try:
@@ -137,7 +152,11 @@ class AlpacaOptionsClient:
                         body = ""
                     if body:
                         raise urllib.error.HTTPError(
-                            exc.url, exc.code, f"{exc.reason}: {body}", exc.headers, None
+                            self._redact(exc.url),
+                            exc.code,
+                            self._redact(f"{exc.reason}: {body}"),
+                            exc.headers,
+                            None,
                         ) from exc
                     raise
                 retry_after = exc.headers.get("Retry-After") if exc.headers else None
@@ -290,9 +309,14 @@ class AlpacaOptionsClient:
         limit_price: float | None = None,
         stop_price: float | None = None,
         position_intent: str | None = None,
+        client_order_id: str | None = None,
     ) -> Any:
         """
         POST /v2/orders.
+
+        ``client_order_id`` is optional and omitted from the payload unless a
+        caller supplies one, so existing call sites are unaffected. Supplying
+        it makes the submission idempotent at the broker.
         """
         url = f"{self._trading_base}/v2/orders"
         payload = {
@@ -308,6 +332,8 @@ class AlpacaOptionsClient:
             payload["stop_price"] = float(stop_price)
         if position_intent is not None:
             payload["position_intent"] = position_intent
+        if client_order_id is not None:
+            payload["client_order_id"] = str(client_order_id)
         return self._request("POST", url, json_body=payload)
 
     def submit_option_order(
@@ -321,6 +347,7 @@ class AlpacaOptionsClient:
         limit_price: float | None = None,
         stop_price: float | None = None,
         position_intent: str | None = None,
+        client_order_id: str | None = None,
     ) -> Any:
         """
         POST /v2/orders with an option symbol.
@@ -339,4 +366,111 @@ class AlpacaOptionsClient:
             limit_price=limit_price,
             stop_price=stop_price,
             position_intent=position_intent,
+            client_order_id=client_order_id,
         )
+
+    def submit_multileg_order(
+        self,
+        *,
+        legs: "Sequence[Mapping[str, Any]]",
+        qty: int,
+        order_type: str,
+        time_in_force: str,
+        limit_price: float | Decimal | None,
+        client_order_id: str,
+    ) -> Any:
+        """
+        POST /v2/orders with ``order_class="mleg"``.
+
+        A multi-leg request omits the parent ``symbol`` and ``side``; each leg
+        carries its own ``symbol``, ``ratio_qty``, ``side``, and
+        ``position_intent``. ``limit_price`` is positive for a net debit and
+        negative for a net credit.
+        """
+        if not legs:
+            raise ValueError("a multi-leg order requires at least one leg")
+        if len(legs) > 4:
+            raise ValueError("a multi-leg order accepts at most four legs")
+        parent_qty = int(qty)
+        if parent_qty <= 0:
+            raise ValueError("qty must be a positive whole number of contracts")
+        if order_type not in {"market", "limit"}:
+            raise ValueError(f"unsupported multi-leg order type: {order_type!r}")
+        if order_type == "limit" and limit_price is None:
+            raise ValueError("a limit multi-leg order requires limit_price")
+        if order_type == "market" and limit_price is not None:
+            raise ValueError("a market multi-leg order cannot carry limit_price")
+        if not str(client_order_id).strip():
+            raise ValueError("client_order_id is required for multi-leg orders")
+
+        normalized: list[dict[str, Any]] = []
+        for index, leg in enumerate(legs, start=1):
+            ratio = int(leg["ratio_qty"])
+            if ratio <= 0:
+                raise ValueError(f"leg {index} ratio_qty must be positive")
+            normalized.append(
+                {
+                    "symbol": str(leg["symbol"]),
+                    "ratio_qty": ratio,
+                    "side": str(leg["side"]),
+                    "position_intent": str(leg["position_intent"]),
+                }
+            )
+        divisor = 0
+        for leg in normalized:
+            divisor = math.gcd(divisor, int(leg["ratio_qty"]))
+        if divisor > 1:
+            # Alpaca requires reduced ratios (greatest common divisor of one).
+            for leg in normalized:
+                leg["ratio_qty"] = int(leg["ratio_qty"]) // divisor
+
+        payload: dict[str, Any] = {
+            "order_class": "mleg",
+            "qty": parent_qty,
+            "type": order_type,
+            "time_in_force": time_in_force,
+            "client_order_id": str(client_order_id),
+            "legs": normalized,
+        }
+        if limit_price is not None:
+            payload["limit_price"] = str(limit_price)
+        url = f"{self._trading_base}/v2/orders"
+        return self._request("POST", url, json_body=payload)
+
+    def get_order_by_client_order_id(self, client_order_id: str) -> Any:
+        """
+        GET /v2/orders:by_client_order_id?client_order_id=...
+
+        Returns ``None`` when the broker has no such order. This is the
+        documented lookup; never scan the order list to find one.
+        """
+        cid = str(client_order_id).strip()
+        if not cid:
+            raise ValueError("client_order_id is required")
+        url = f"{self._trading_base}/v2/orders:by_client_order_id"
+        try:
+            return self._request("GET", url, params={"client_order_id": cid})
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return None
+            raise
+
+    def replace_order(self, order_id: str, payload: Mapping[str, Any]) -> Any:
+        """
+        PATCH /v2/orders/{order_id}
+
+        Supports ``qty``, ``limit_price``, ``stop_price``, ``time_in_force``,
+        and a new ``client_order_id``. A structural change is a new linked
+        order request, never a PATCH.
+        """
+        oid = str(order_id).strip()
+        if not oid:
+            raise ValueError("order_id is required")
+        allowed = {"qty", "limit_price", "stop_price", "time_in_force", "client_order_id"}
+        unsupported = sorted(set(payload) - allowed)
+        if unsupported:
+            raise ValueError(f"replace does not support fields: {unsupported}")
+        if not payload:
+            raise ValueError("replace requires at least one field")
+        url = f"{self._trading_base}/v2/orders/{oid}"
+        return self._request("PATCH", url, json_body=dict(payload))
