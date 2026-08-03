@@ -154,7 +154,14 @@ def build_structure(
     quantity: int,
     closing: bool = False,
 ) -> tuple[OptionLeg, ...]:
-    """Build the deterministic leg tuple for one approved structure."""
+    """Build the deterministic leg tuple for one approved structure.
+
+    Leg ``ratio`` is the per-structure template ratio, following the
+    ``OrderRequest`` convention that total contracts are
+    ``parent_quantity * ratio``.  ``quantity`` is validated and becomes the
+    parent quantity; it is deliberately not multiplied into the ratios, or the
+    structure count would be applied twice downstream.
+    """
 
     template = STRUCTURE_TEMPLATES.get(structure)
     if template is None:
@@ -187,7 +194,7 @@ def build_structure(
                 strike=quote.strike,
                 expiration=quote.expiration,
                 side=side,
-                ratio=spec.ratio * quantity,
+                ratio=spec.ratio,
                 position_intent=intent,
                 quote_at=quote.quote_at,
                 bid=quote.bid,

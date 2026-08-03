@@ -226,7 +226,8 @@ def test_single_option_builds_one_long_leg() -> None:
     assert len(legs) == 1
     assert legs[0].side is OrderSide.BUY
     assert legs[0].position_intent is PositionIntent.BUY_TO_OPEN
-    assert legs[0].ratio == 2
+    # Per-structure ratio; the 2 is the parent quantity, not baked into ratio.
+    assert legs[0].ratio == 1
 
 
 def test_vertical_builds_long_and_short_legs_in_order() -> None:
@@ -252,7 +253,29 @@ def test_butterfly_body_carries_ratio_two() -> None:
         },
         quantity=3,
     )
-    assert [leg.ratio for leg in legs] == [3, 6, 3]
+    # Ratios stay per-structure regardless of quantity, matching the
+    # OrderRequest parent_quantity x ratio convention.
+    assert [leg.ratio for leg in legs] == [1, 2, 1]
+
+
+def test_quantity_is_not_multiplied_into_leg_ratios() -> None:
+    """Baking quantity into ratio would scale intrinsic value but not the
+
+    net debit, overstating max_profit by the structure count.
+    """
+
+    contracts = {LegRole.LONG_LEG: call("200"), LegRole.SHORT_LEG: call("210")}
+    single = build_structure(
+        InstrumentFamily.VERTICAL, selected_contracts=contracts, quantity=1
+    )
+    triple = build_structure(
+        InstrumentFamily.VERTICAL, selected_contracts=contracts, quantity=3
+    )
+    assert [leg.ratio for leg in single] == [leg.ratio for leg in triple] == [1, 1]
+
+    profile = validate_structure(triple, net_price=D("3.00"), quantity=3)
+    assert profile.max_profit == D("2100.00")
+    assert profile.max_loss == D("900.00")
 
 
 def test_iron_condor_legs_are_put_put_call_call() -> None:
