@@ -79,36 +79,63 @@ fi
 
 LOCK_FILE="$REPO_ROOT/Data/runtime/live_data_jobs.lock"
 OWNS_LOCK=0
+PARENT_OWNS_LOCK=0
 clear_owned_lock() {
   if [ "$OWNS_LOCK" = "1" ]; then
     : > "$LOCK_FILE"
   fi
 }
 trap clear_owned_lock EXIT
-if command -v flock >/dev/null 2>&1; then
+
+# combined_server acquires this same lock in `heavy_job_guard` and THEN launches
+# this script as a child, so our own parent is the holder. That must be detected
+# BEFORE waiting on the lock, not after: on 2026-07-30 both stale-stamp catch-ups
+# blocked the full 90-minute `READINESS_LOCK_WAIT_SECONDS` on their own parent, began
+# ~95 minutes late, and were killed mid-feature-build (the second one at 2,875 of
+# 2,888 tickers) with the stamp still stale — a third consecutive dark day for
+# every 4H entry. The check below already existed but sat in the timeout branch,
+# which is exactly too late to be useful.
+#
+# Two factors must agree before we skip locking: our parent's PID, and the lock
+# file naming that same PID as the combined-server holder.
+if grep -q "^combined-server-data-readiness pid=${PPID} " "$LOCK_FILE" 2>/dev/null; then
+  PARENT_OWNS_LOCK=1
+  {
+    echo ""
+    echo "[$(ts)] nightly_data_readiness.sh proceeding under parent's heavy-job lock (combined-server pid=${PPID})"
+  } >> "$LOG_FILE" 2>&1
+elif command -v flock >/dev/null 2>&1; then
   # Append mode matters: a losing contender must not truncate the current
-  # owner's metadata.  The combined-server wrapper already owns this same lock;
-  # detect that exact parent and rely on its lock instead of self-deadlocking.
+  # owner's metadata.
   exec 9>>"$LOCK_FILE"
   # Wait rather than bail: this job now runs in the evening, right behind
   # nightly_market_data.sh, whose runtime varies by an hour or more. Failing
   # instantly on a still-held lock would silently leave the stamp stale, which
   # blocks every 4H entry the following session.
   if ! flock -w "${READINESS_LOCK_WAIT_SECONDS:-5400}" 9; then
-    if grep -q "^combined-server-data-readiness pid=${PPID} " "$LOCK_FILE" 2>/dev/null; then
-      PARENT_OWNS_LOCK=1
-    else
-      {
-        echo ""
-        echo "[$(ts)] nightly_data_readiness.sh skipped: another heavy data job is already running"
-      } >> "$LOG_FILE" 2>&1
-      exit 75
-    fi
-  else
-    OWNS_LOCK=1
-    printf 'nightly_data_readiness pid=%s started=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_FILE"
+    {
+      echo ""
+      echo "[$(ts)] nightly_data_readiness.sh skipped: another heavy data job is already running"
+    } >> "$LOG_FILE" 2>&1
+    exit 75
   fi
+  OWNS_LOCK=1
+  printf 'nightly_data_readiness pid=%s started=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_FILE"
 fi
+
+# Durable record of how far a run got, rewritten after every stage. Without it a
+# killed run leaves no trace of its progress at all: on 2026-07-30 stages 1-3
+# succeeded twice and nobody could tell from any artifact, because only the
+# final all-or-nothing stamp is written on success. Consumed by nothing that
+# gates trading — the per-ticker check in core/live_readiness.py does that — this
+# exists so the next person can see what completed.
+PROGRESS_FILE="$REPO_ROOT/Data/readiness/last_run_progress.json"
+record_stage() {
+  local stage="$1" rc="$2"
+  mkdir -p "$(dirname "$PROGRESS_FILE")"
+  printf '{"stage": "%s", "exit_code": %s, "at_utc": "%s", "pid": %s}\n' \
+    "$stage" "$rc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" > "$PROGRESS_FILE"
+}
 
 run_timed() {
   local label="$1"
@@ -118,6 +145,7 @@ run_timed() {
   timeout --signal=TERM --kill-after=60s "${seconds}s" "$@"
   local rc=$?
   echo "[$(ts)] $label exit=$rc"
+  record_stage "$label" "$rc"
   return "$rc"
 }
 
@@ -156,12 +184,17 @@ run_timed() {
 
   if [ "$STATUS" -eq 0 ]; then
     echo "[$(ts)] 4/5 rebuild HTF 4H feature matrix (features_4h.parquet)"
-  # --force is REQUIRED: without it build_all_features_4h() skips when the
-  # combined parquet (and per-ticker parquets) already exist, so the matrix
-  # froze and HTF Swing scored a 3-week-old bar. Forcing rebuilds both the
-  # per-ticker features and the combined matrix off the freshly caught-up bars.
+  # --refresh-stale, not --force. Plain (no flag) skips entirely when the combined
+  # parquet exists, which froze the matrix and had HTF Swing scoring a 3-week-old
+  # bar. --force fixed that but rebuilt all ~2,900 tickers every run, so a run
+  # killed part-way lost everything: on 2026-07-30 two consecutive catch-ups died
+  # inside this stage (the second at 2,875/2,888) and each restarted from zero,
+  # keeping the 4H entry gate shut for a third session. --refresh-stale rebuilds
+  # only tickers whose features are older than their bars and always rewrites the
+  # combined parquet, so it stays correct AND resumes. Use --force by hand after
+  # feature-code changes, which leave mtimes untouched.
     run_timed "4/5 build-features" "${READINESS_FEATURES_TIMEOUT_SECONDS:-7200}" \
-      "$PYTHON" -u -m strategies.momentum_expansion.main --build-features --force
+      "$PYTHON" -u -m strategies.momentum_expansion.main --build-features --refresh-stale
     STATUS=$?
   fi
 

@@ -277,9 +277,24 @@ def build_mixed_plan(
                                              "signal_audit": sa.get(t)}
                 continue
             shares = shares_for_notional(px, policy.target_notional)
+            # Record the contract that was REJECTED, not just the reason string.
+            # Without occ/strike/expiry/delta there is no way to tell an
+            # genuinely illiquid chain from a bad strike pick after the fact
+            # (2026-07-28 CRWV: `illiquid_option(oi=85,vol=8)` was unexplainable
+            # from the log alone). `order` is None when selection never got far
+            # enough to name a contract (price floor, no contracts, no greeks).
+            rejected = order or {}
             out.contract_selection[t] = {"action": "equity", "reason": reason, "ref_price": px,
                                          "shares": shares,
-                                         "dealer_gate": (order or {}).get("dealer_gate"),
+                                         "occ": rejected.get("occ"),
+                                         "strike": rejected.get("strike"),
+                                         "expiry": rejected.get("expiry"),
+                                         "delta": rejected.get("delta"),
+                                         "open_interest": rejected.get("open_interest"),
+                                         "volume": rejected.get("volume"),
+                                         "liquidity_source": rejected.get("liquidity_source"),
+                                         "band_size": rejected.get("band_size"),
+                                         "dealer_gate": rejected.get("dealer_gate"),
                                          "signal_audit": sa.get(t)}
             out.plan.append((t, "buy", shares, "entry", "equity"))
             out.order_audits[t] = build_equity_order_audit(
@@ -746,7 +761,16 @@ def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
         (rec.get("order_symbol"), rec.get("side"), rec.get("qty"), "pending_open", rec.get("route", "option"))
         for rec in eligible
     ]
-    _kept, readiness_skipped, readiness_reason = filter_entry_orders_for_readiness(readiness_plan)
+    # These records carry their ticker explicitly, so the per-ticker gate does not
+    # have to infer it from an OCC root.
+    _kept, readiness_skipped, readiness_reason = filter_entry_orders_for_readiness(
+        readiness_plan,
+        symbol_tickers={
+            str(rec.get("order_symbol")): str(rec.get("ticker"))
+            for rec in eligible
+            if rec.get("order_symbol") and rec.get("ticker")
+        },
+    )
     if readiness_skipped:
         logger.warning(
             "%s pending-open: readiness gate skipped %d entries (%s)",

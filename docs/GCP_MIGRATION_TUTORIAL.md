@@ -378,7 +378,7 @@ Items 4–9 total **~1.1 GB / ~2,800 files** — 1.5% of the bytes, but they inc
 |---|---|---|
 | `.venv/` | 8.6 GB | regenerable, platform-specific |
 | `.git/` | 5.1 GB | already on GitHub |
-| `__pycache__/`, `*.py`, `*.pyc` | ~315 files | source belongs in git, not a bucket |
+| `__pycache__/`, `*.py`, `*.pyc` | ~315 files | source belongs in git, not a bucket — **but see §2.7b: 4 gitignored Colab scripts break this assumption and exist nowhere else** |
 | `strategies/momentum_expansion/data/training_export/training_matrix_4h.parquet` | 1.15 GB | **verified byte-identical** to `data/processed/training_matrix_4h.parquet` (same size, same md5 over first 200 MB) |
 | `.../training_export_ablation/ablation_colab_bundle.tgz` | 1.04 GB | it is a tar of `training_matrix_4h_with_regime.parquet`, which uploads uncompressed in the same directory |
 | `Data/runtime/live_data_jobs.lock`, `startup_queue.json` | ~1 KB | live process state; meaningless and misleading in a bucket |
@@ -484,7 +484,64 @@ gcloud storage cp gs://cynolycusbot-data/Data/shared/bars/SOME_FILE.parquet /tmp
 python3 -c "import pandas as pd; d=pd.read_parquet('/tmp/readback.parquet'); print(d.shape); print(d.head())"
 ```
 
-Only after that succeeds, delete **one local directory at a time**, checking the relevant module still starts between each. Regenerable derived matrices go first; raw sources and trained models go last, or never.
+Read-back passed 2026-07-30 on `Data/shared/bars/1d/A.parquet` (1,505 × 9, sane OHLCV).
+
+#### 2.7a Full-bucket audit — measured 2026-07-30
+
+A read-back proves *one* object is retrievable. It does not prove the upload was complete, so a per-file comparison was run (`gcloud storage ls -r --long` over the whole bucket vs. a local walk applying the same exclusion regexes):
+
+```
+LOCAL   108,369 objects   74,252,571,283 bytes
+BUCKET  141,340 objects   78,776,932,997 bytes   (gcloud storage du -s)
+```
+
+| Finding | Count | Verdict |
+|---|---|---|
+| Present, byte-size identical | 95,372 | ✅ |
+| **Size differs** (local grew after upload) | 12,966 | ⚠️ stale in bucket — re-sync |
+| **Missing** from bucket | 31 | ⚠️ created after upload — re-sync |
+| **Extra** in bucket | 33,002 / 4.54 GB | ⚠️ duplicate prefix — delete |
+
+None of this is upload failure. Every one of the 141,340 objects carries a write timestamp of either `2026-07-28` (33,002 — the §2.3 practice run) or `2026-07-30T04:07–04:08Z` (108,338 — the real upload). The bucket is an accurate snapshot of **00:07 ET on 2026-07-30**; the live system has been writing ever since. The 12,966 drifted files are the nightly bar refresh (`Data/shared/bars` 9,172), the momentum feature rebuild (2,850), and the swing rebuild (918); local is larger in 12,961 of them. The 31 missing are files created after 04:07Z (today's swing session audits, today's daily report).
+
+**⚠️ The 4.54 GB "extra" is the prefix collision.** The §2.3 practice upload put `Data/options_history` at the bucket root as `options_history/`, so it is stored twice. Harmless but pointless — delete the top-level copy, **not** the one under `Data/`:
+
+```bash
+gcloud storage ls gs://cynolycusbot-data/options_history/ | head   # confirm what you're about to remove
+gcloud storage rm --recursive gs://cynolycusbot-data/options_history/
+```
+
+**The "Observability" tab lies about size.** It plots `storage.googleapis.com/storage/total_bytes`, which GCS samples **once per day**. On 2026-07-30 it read 4.33 GB — the practice upload alone, sampled before the bulk transfer landed. Trust `gcloud storage du -s` or the bucket details header, never the Observability chart, for "did my upload finish."
+
+#### 2.7b Re-sync, then verify, then delete
+
+Because of the drift above, **re-run the §2.4 rsync commands immediately before deleting anything.** rsync is incremental — it will move only the ~13k changed/missing files, not 72 GB. Then gate each deletion on:
+
+```bash
+python3 scripts/verify_gcs_backup.py strategies/multi_ticker_swing/data/training_export
+```
+
+It walks the directory, applies the same exclusion rules the upload used, compares every file to the bucket by name and byte size, and exits non-zero if anything is missing, differs, or falls into the trap below.
+
+⚠️ **The `*.py` exclusion is only safe if the source is actually in git.** §2.3b excluded `*.py` on the reasoning that "source belongs in git, not a bucket." That is false for **4 unique files** — Colab training scripts sitting in gitignored export directories, so they are in neither git nor the bucket and the local disk is their only copy on earth:
+
+| File | Also gitignored via |
+|---|---|
+| `strategies/multi_ticker_swing/data/training_export/{colab_competition,swing_train_colab,oof_ranker_colab}.py` | `.gitignore:238` |
+| `Data/processed/spy/training_export/{colab_competition,spy_daytrader_train_colab}.py` | `.gitignore:227` |
+
+(The two `colab_competition.py` copies are identical to each other — `eea9fbb` — but **differ** from the tracked momentum-expansion copy, so that one is not a substitute.) The first of these directories is delete candidate #1.
+
+**Rescue (done 2026-07-30): put them in git, not the bucket.** The equivalent momentum scripts at `strategies/momentum_expansion/data/training_export/*.py` are tracked normally — that directory has no ignore rule — so git is the established home for Colab trainers. Re-inclusion via `!` negation does **not** work here (git cannot re-include a file whose parent directory is excluded, and both `Data/**` and `.../training_export/` exclude the parents), so force-add is the correct mechanism. Once tracked, `.gitignore` no longer applies to them:
+
+```bash
+git add -f strategies/multi_ticker_swing/data/training_export/{colab_competition,oof_ranker_colab,swing_train_colab}.py \
+           Data/processed/spy/training_export/{colab_competition,spy_daytrader_train_colab}.py
+git commit -m "Track Colab training scripts that existed only on local disk"
+git push          # not backed up until this succeeds
+```
+
+⚠️ **Staged is not backed up.** A `git add`-ed file still lives only on this disk. `verify_gcs_backup.py` checks HEAD (via `git ls-tree`), not the index, and reports `STAGED BUT NOT COMMITTED` as a hard failure for exactly this reason.
 
 ⚠️ **Never `rm -rf` a directory without checking for tracked files first.** `Data/` alone holds 4,591 git-tracked files (§ Your starting state); deleting it would gut the working tree and show 4,591 deletions in `git status`. For each candidate:
 
@@ -494,19 +551,61 @@ git clean -nXd <dir>            # otherwise: dry-run deleting ONLY gitignored fi
 git clean -fXd <dir>            # ...then for real
 ```
 
-Safest first deletions — checked 2026-07-29, all regenerable and already in the bucket:
+Delete **one directory at a time**, checking the relevant module still starts between each. Regenerable derived matrices go first; raw sources and trained models go last, or never.
 
-| Candidate | Size | Tracked files | Method |
-|---|---|---|---|
-| `strategies/multi_ticker_swing/data/training_export/` | 2.0 GB | 0 | plain `rm -rf` |
-| `Data/options_history/trades/` | 3.6 GB | 0 | plain `rm -rf` (and per the 2026-07 retraction, unfit for the study it was collected for) |
-| `theme_expansion/outputs/` | 300 MB | 0 | plain `rm -rf` |
-| `strategies/momentum_expansion/data/training_export/` | 1.2 GB | **2** | `git clean -fXd` only — a plain `rm -rf` would delete tracked files |
+Safest first deletions — re-checked 2026-07-30 against the bucket:
+
+| Candidate | Size | Verifier | Live readers? | Method |
+|---|---|---|---|---|
+| `Data/options_history/trades/` | 3.6 GB | ✅ 10,192/10,192 match | none — only `research/options_lab/chain_cache.py` | plain `rm -rf` (and per the 2026-07 retraction, unfit for the study it was collected for) |
+| `theme_expansion/outputs/` | 300 MB | ✅ 17/17 match | none — only `scripts/sweep_multiticker_swing_risk_profiles.py` + `scripts/capstone/`; absent from both nightly scripts and `combined_server` | plain `rm -rf` |
+| `strategies/multi_ticker_swing/data/training_export/` | 2.0 GB | ✅ after the 2026-07-30 rescue commit | ⚠️ **YES** — see below | **delete one file, not the directory** |
+| `strategies/momentum_expansion/data/training_export/` | 1.2 GB | ✅ (1.15 GB of it is the excluded duplicate) | none | `git clean -fXd` only — 2 tracked `.py` here |
+
+🛑 **Corrected 2026-07-30 — do NOT `git clean -fXd` the multi_ticker_swing export directory.** The earlier instruction would have broken live trading. That directory holds two very differently-sized files:
+
+| File | Size | Read by |
+|---|---|---|
+| `bar_location_context_features.parquet` | **2.09 GB** | offline only — `backtest/build_competition_test_matrix.py`, written by `models/export_for_colab.py` |
+| `daily_context_features.parquet` | 25.5 MB | **LIVE** — `live/feature_builder.py:555` builds `DailyContextLookup` from it for `RankerSwingScanner.compute_latest_full()` |
+
+The whole directory is gitignored, so `git clean -fXd` would take *both* — and the live swing ranker would lose its as-of daily context. All the space is in the first file anyway, so delete only that:
+
+```bash
+python3 scripts/verify_gcs_backup.py strategies/multi_ticker_swing/data/training_export   # must exit 0
+rm -f strategies/multi_ticker_swing/data/training_export/bar_location_context_features.parquet
+```
+
+This is precisely the gap `verify_gcs_backup.py` disclaims in its all-clear message: it proves a copy exists in the bucket, **not** that nothing local still reads the path. Always grep for readers before deleting.
+
+> The 1.15 GB `training_export/training_matrix_4h.parquet` is excluded from upload as a duplicate of `data/processed/training_matrix_4h.parquet`. The 2026-07-29 note verified only the first 200 MB; **full-file md5 now confirms identity** (`3ed708deceb55eadadca81dce54e5c47` both). Deleting the export copy is safe as long as the `processed/` copy stays.
+
+> **There is no space emergency.** `df -h /` on 2026-07-30: 1007 GB total, 96 GB used, **860 GB available (11%)**. Phase 2's framing as "reclaim your disk" was written against a smaller volume. Deleting all 74 GB buys 8% of a disk that is 89% empty, so prefer the conservative subset above over aggressive deletion.
+
+#### 2.7c Where deletion stops — measured 2026-07-30
+
+Executed: `Data/options_history/trades` (3.6 GB), `theme_expansion/outputs` (300 MB), `bar_location_context_features.parquet` (2.09 GB). Disk went 96 GB → 91 GB used, **866 GB free**. Remaining trees: `strategies` 49 GB, `signals` 11 GB, `Data` 6.9 GB.
+
+**Only 2.2 GB of the remaining 67 GB is safely deletable today**, and both are verified-redundant files the upload already skipped:
+
+| File | Size | Why redundant |
+|---|---|---|
+| `strategies/momentum_expansion/data/training_export/training_matrix_4h.parquet` | 1.15 GB | full-file md5 identical to the `processed/` copy, which is in the bucket |
+| `.../training_export_ablation/ablation_colab_bundle.tgz` | 1.04 GB | `tar -tzvf` confirms its 4 members all exist uncompressed in the same directory (parquet + manifest in the bucket, both `.py` in git) |
+
+**Everything else must stay, for two distinct reasons:**
+
+1. **Nightly regeneration.** `strategies/momentum_expansion/data/processed/features_4h.parquet` (4.07 GB) is rebuilt every night by `scripts/nightly_data_readiness.sh` step 4/5 (`--build-features --refresh-stale`, 7200 s timeout). Deleting it does not save space — it returns within a day — and it forces a cold rebuild of the exact step that has been getting killed at ~99% (see LIVING_SUMMARY 2026-07-30). Same for `signals/news/data/processed/news_embeddings.parquet` (1.87 GB, nightly `--stage incremental`).
+2. **Egress makes re-download cost real money.** `features_30m.parquet` (9.31 GB) and `training_matrix.parquet` (7.2 GB) are genuinely offline-only — `strategies/multi_ticker_swing/main.py:168` lists them as pipeline artifacts, and the live path computes features through `live/feature_builder.py` instead. But pulling 16.5 GB back out of GCS costs ~$0.12/GB ≈ **$2 plus the download time**, to free 1.6% of a disk that is 90% empty. Bad trade. Delete these only if you actually need the space.
+
+> **The bucket is a point-in-time backup, not a live mirror.** Files the nightly pipeline rewrites (`features_4h`, `news_records`, `news_embeddings`, `Data/shared/bars`) drift out of sync within 24 h — that is exactly the 12,966-file drift §2.7a measured. Re-run the §2.4 rsync on a schedule if you want the bucket current; automating it is a natural first Cloud Run Job in Phase 5.
+
+**The real blocker on deleting the bulk is that `combined_server.py` still runs locally and reads these paths directly.** Local deletion beyond the list above is not a Phase 2 task — it becomes possible only once the code reads from GCS, which is Phase 4/8. Do not force it here.
 
 ✅ **Checkpoint 2**
 
-- Console bucket shows ~72 GB across ~108k objects
-- `df -h /` shows meaningfully more free space
+- `gcloud storage du -s gs://cynolycusbot-data` shows ~73 GiB (the Observability tab will lag a day)
+- `scripts/verify_gcs_backup.py` exits 0 for every directory you intend to delete
 - Lifecycle and versioning both visible on their tabs
 - Billing still near $0
 
@@ -1079,26 +1178,44 @@ Docker deliberately not installed — Cloud Build handles image builds.
 TODO: gcloud auth login + gcloud auth application-default login
 ```
 
-**Phase 1 — Project & budget** · ☐ not started
+**Phase 1 — Project & budget** · ✅ **complete** (verified 2026-07-30)
 ```
-Dev project ID (exact, from Console):
-Prod project ID:
-Billing account:
-Budget amount / thresholds:
+Dev project ID (exact, from Console):  cynolycusbot-dev   (473199336957) — gcloud active project
+Prod project ID:                       cynolycusbot       (806989645664)
+Billing account:                       (linked — bucket + APIs are live)
+Budget amount / thresholds:            CONFIRM IN CONSOLE — §1.4 says do not skip
 ```
 
-**Phase 2 — Cloud Storage** · ☐ not started
+**Phase 2 — Cloud Storage** · ✅ **complete 2026-07-30**
 ```
-Bucket name (exact):
-GB uploaded:
-Local GB reclaimed:
-Read-back verified (y/n):
+Bucket name (exact):   cynolycusbot-data   (US-EAST5, uniform access, public access prevented)
+Protection:            object versioning ENABLED; soft-delete 7 days;
+                       lifecycle = Nearline@45d / Coldline@180d on
+                       strategies|research|backtests|theme_expansion,
+                       + delete noncurrent versions @90d / >3 newer
+Uploaded:              108,338 objects @ 2026-07-30T04:07-04:08Z (the §2.4 run)
+                     +  33,002 objects @ 2026-07-28 (the §2.3 practice run, DUPLICATE)
+                     = 141,340 objects / 78,776,932,997 bytes (73.4 GiB)
+Read-back verified:    y — Data/shared/bars/1d/A.parquet, 1505x9, sane OHLCV
+Full audit:            y — see §2.7a. 31 missing + 12,966 stale (both = post-upload
+                       drift, fixed by re-running rsync); 4.54 GB duplicate prefix
+                       `options_history/` to delete.
+Duplicate prefix:      deleted — `options_history/` (33,002 objs / 4.54 GB) removed 2026-07-30
+Re-sync after drift:   done — Data/shared/bars back to 9,885/9,885 byte-matched
+Local GB reclaimed:    5.9 GB (96G -> 91G used, 866G free). Stops here by design — see
+                       §2.7c: only 2.2 GB more is safely deletable, the rest is either
+                       rebuilt nightly or costs egress to retrieve, and combined_server
+                       still reads these paths locally until Phase 4/8.
 ```
 
 **Phase 3 — Secret Manager** · ☐ not started
 ```
 Secrets created:
-Service account email:
+alpaca-paper-key-id		
+alpaca-paper-secret
+finnhub-key
+tiingo-key
+Service account email: cynolycus-runtime@cynolycusbot-dev.iam.gserviceaccount.com
 ```
 
 **Phase 4 — GitHub connect & first deploy** · ☐ not started
@@ -1138,7 +1255,10 @@ Live authorization decision:
 
 | Date | Symptom | Cause | Fix |
 |---|---|---|---|
-| | | | |
+| 2026-07-30 | Observability tab showed **4.33 GB** after a 72 GB upload | `storage/total_bytes` is a **once-daily** Cloud Monitoring sample; it still reflected the §2.3 practice upload | Use `gcloud storage du -s` (returned 73.4 GiB) or the bucket details header; ignore the Observability chart for completeness checks |
+| 2026-07-30 | Bucket held 33,002 objects / 4.54 GB more than the manifest | §2.3's practice run wrote `Data/options_history` to the bucket **root** as `options_history/`, storing it twice | `gcloud storage rm --recursive gs://cynolycusbot-data/options_history/` (keep `Data/options_history/`) |
+| 2026-07-30 | 12,966 objects size-mismatched, 31 absent | Not upload failure — the bucket is a 00:07 ET snapshot and the live system kept writing (nightly bars, feature rebuilds, session audits) | Re-run the §2.4 rsync right before any deletion; it is incremental |
+| 2026-07-30 | 4 Colab training scripts were in neither git nor the bucket | §2.3b excluded `*.py` assuming "source belongs in git", but these live in **gitignored** export dirs | Rescue before deleting; `scripts/verify_gcs_backup.py` now hard-fails on this class |
 
 ---
 

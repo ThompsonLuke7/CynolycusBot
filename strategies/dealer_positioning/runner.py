@@ -24,6 +24,23 @@ _RTH_START = _time(9, 30)
 _RTH_END = _time(16, 0)
 EventSink = Callable[[str, dict[str, Any]], None]
 
+#: Schwab's response when the refresh token has expired or been revoked. This is
+#: a dead end, not a transient error: renewal is an interactive browser login, so
+#: retrying cannot possibly succeed and the cached client in schwab_client.py
+#: would not pick up a new token in this process anyway.
+_DEAD_CREDENTIAL_MARKERS = (
+    "invalid_grant",
+    "unsupported_token_type",
+    "refresh token is invalid",
+    "refresh token is expired",
+    "refresh token is revoked",
+)
+
+
+def _is_dead_credential(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _DEAD_CREDENTIAL_MARKERS)
+
 
 class DealerPositioningRunner:
     def __init__(
@@ -48,6 +65,12 @@ class DealerPositioningRunner:
         self._last_candle: dict[str, PriceCandle] = {}
         self._poll_count = 0
         self._last_expiration_finalize_date = None
+        #: Set once the Schwab credential is known dead. Polling then stops for
+        #: the life of the process instead of reissuing a request that cannot
+        #: succeed — on 2026-07-30 this loop logged 535 identical failures across
+        #: five symbols in under two hours and buried everything else on the
+        #: console. Recovery is a re-auth plus a restart, by design.
+        self._auth_dead_reason: str | None = None
 
     @property
     def stream_symbols(self) -> list[str]:
@@ -72,6 +95,9 @@ class DealerPositioningRunner:
     def start(self) -> None:
         if self._data_client is None:
             self._data_client = SchwabDealerDataClient(self.config)
+        # Cheap file read. An already-expired token is knowable before the first
+        # request, so there is no reason to discover it from a failed poll.
+        self._halt_early_if_token_already_expired()
         self._emit("session_started", self.snapshot())
         while not self._stop.is_set():
             started = time.monotonic()
@@ -91,15 +117,77 @@ class DealerPositioningRunner:
                 )
                 self._stop.wait(sleep_seconds)
                 continue
-            for symbol in self.config.symbols:
-                try:
-                    self._poll_symbol(symbol)
-                except Exception as exc:
-                    logger.warning("[%s] dealer poll failed: %s", symbol, exc)
-                    self._emit("poll_error", {"symbol": symbol, "error": str(exc)})
+            if self._auth_dead_reason is None:
+                for symbol in self.config.symbols:
+                    try:
+                        self._poll_symbol(symbol)
+                    except Exception as exc:
+                        if _is_dead_credential(exc):
+                            self._halt_polling_for_dead_credential(symbol, exc)
+                            break
+                        logger.warning("[%s] dealer poll failed: %s", symbol, exc)
+                        self._emit("poll_error", {"symbol": symbol, "error": str(exc)})
             elapsed = time.monotonic() - started
             self._stop.wait(max(1.0, float(self.config.poll_seconds) - elapsed))
         self._emit("session_ended", self.snapshot())
+
+    def _halt_early_if_token_already_expired(self) -> None:
+        """Skip polling entirely when the refresh token is known to be dead."""
+        try:
+            from core.schwab_token_status import REAUTH_COMMAND, schwab_token_status
+
+            status = schwab_token_status()
+        except Exception:  # noqa: BLE001 - an unreadable status must not block startup
+            return
+        if not status.expired:
+            return
+        self._auth_dead_reason = status.message
+        logger.error(
+            "Schwab credential is already expired at dealer startup — polling disabled "
+            "for this process (0 requests will be attempted). %s Fix with: %s, then "
+            "restart the server.",
+            status.message, REAUTH_COMMAND,
+        )
+        self._emit(
+            "auth_halted",
+            {
+                "symbol": None,
+                "error": "refresh_token_expired_at_startup",
+                "detail": status.message,
+                "reauth_command": REAUTH_COMMAND,
+                "halted_at_utc": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    def _halt_polling_for_dead_credential(self, symbol: str, exc: BaseException) -> None:
+        """Record the failure once, then stop polling until re-auth + restart."""
+        reason = str(exc)
+        self._auth_dead_reason = reason
+        try:
+            from core.schwab_token_status import REAUTH_COMMAND, schwab_token_status
+
+            status = schwab_token_status()
+            detail = status.message
+            command = REAUTH_COMMAND
+        except Exception:  # noqa: BLE001 - never let the status read mask the real error
+            detail = reason
+            command = "core/API/Schwab_API/schwab_client.py --reauth"
+
+        logger.error(
+            "[%s] Schwab credential is dead — dealer polling HALTED for this process "
+            "(no further attempts will be made). %s Fix with: %s, then restart the server.",
+            symbol, detail, command,
+        )
+        self._emit(
+            "auth_halted",
+            {
+                "symbol": symbol,
+                "error": reason,
+                "detail": detail,
+                "reauth_command": command,
+                "halted_at_utc": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
     def stop(self) -> None:
         self._stop.set()

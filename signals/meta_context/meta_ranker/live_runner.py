@@ -404,7 +404,13 @@ def _execute(
         # submit_pending_open_entries. See core.live_4h_exec.execute_plan for why
         # the reverse order silently discarded every after-close entry.
         plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
-        plan, skipped, reason = filter_entry_orders_for_readiness(plan, new_managed=new_managed)
+        # No per-ticker fallback here: this module scores meta_ranker_matrix.parquet
+        # (readiness stage 5), not the shared 4H bar cache, so current bars are not
+        # evidence that *this* module's input is current. Momentum and HTF build
+        # their features from bars at decision time and do take the fallback.
+        plan, skipped, reason = filter_entry_orders_for_readiness(
+            plan, new_managed=new_managed, per_ticker_fallback=False
+        )
         if skipped:
             print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
         if plan:

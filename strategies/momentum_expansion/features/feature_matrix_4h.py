@@ -918,21 +918,56 @@ def _add_earnings_features_4h(combined: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _per_ticker_is_current(per_path: Path, ticker: str) -> bool:
+    """Has this ticker's feature parquet been built since its bars last changed?
+
+    Compares mtimes rather than contents: the bar catch-up rewrites
+    ``<ticker>.parquet`` whenever it appends, so a features file newer than its
+    bars was built from exactly those bars.
+    """
+    if not per_path.exists():
+        return False
+    bars_path = RAW_4H_DIR / f"{ticker}.parquet"
+    if not bars_path.exists():
+        # No bars to be stale against; whatever exists is all we can have.
+        return True
+    try:
+        return per_path.stat().st_mtime_ns >= bars_path.stat().st_mtime_ns
+    except OSError:
+        return False
+
+
 def build_all_features_4h(
     *,
     tickers: Iterable[str],
     out_path: Path = FEATURES_COMBINED,
     force: bool = False,
+    refresh_stale: bool = False,
 ) -> pd.DataFrame | None:
     """
     Build 4H features for every ticker that has cached 4H data, persist
     per-ticker parquets, and combine into one (timestamp, ticker)
     MultiIndex parquet.
+
+    Three modes:
+
+    * default — reuse any existing per-ticker parquet, and short-circuit
+      entirely if the combined parquet exists.
+    * ``refresh_stale`` — rebuild only tickers whose features are older than
+      their bars, then always rewrite the combined parquet. This is what the
+      nightly readiness job wants: it picks up new bars without discarding work,
+      so a run killed at ticker 2,875 of 2,888 resumes there instead of at zero.
+      (On 2026-07-30 two consecutive catch-ups were killed inside this stage and
+      each restarted from nothing, leaving the 4H entry gate shut for a third
+      session.)
+    * ``force`` — rebuild every ticker unconditionally. Needed when the *feature
+      code* changes, since that leaves mtimes untouched and is invisible to
+      ``refresh_stale``.
     """
     PROCESSED_FEAT_DIR.mkdir(parents=True, exist_ok=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if out_path.exists() and not force:
+    if out_path.exists() and not force and not refresh_stale:
         logger.info("Features already exist at %s. Use force=True to rebuild.", out_path)
         return pd.read_parquet(out_path)
 
@@ -942,9 +977,16 @@ def build_all_features_4h(
     meta_lookup = meta.set_index("ticker").to_dict(orient="index") if not meta.empty else {}
     frames: list[pd.DataFrame] = []
     tickers = list(tickers)
+    reused = 0
     for i, t in enumerate(tickers, 1):
         per_path = PROCESSED_FEAT_DIR / f"{t}_features.parquet"
-        if per_path.exists() and not force:
+        reuse = (
+            _per_ticker_is_current(per_path, t)
+            if refresh_stale and not force
+            else (per_path.exists() and not force)
+        )
+        if reuse:
+            reused += 1
             df_feat = pd.read_parquet(per_path)
             ticker_meta = _metadata_for_ticker(
                 ticker=t,
@@ -993,6 +1035,12 @@ def build_all_features_4h(
         frames.append(feats)
         if i % 25 == 0:
             logger.info("(%d/%d) features built for %s", i, len(tickers), t)
+
+    if refresh_stale:
+        logger.info(
+            "4H features: %d/%d tickers reused (already current with their bars), %d rebuilt",
+            reused, len(tickers), len(tickers) - reused,
+        )
 
     if not frames:
         logger.error("No features built.")
