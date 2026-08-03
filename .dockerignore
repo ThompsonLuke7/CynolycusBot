@@ -1,0 +1,15 @@
+.venv/
+.git/
+Data/
+logs/
+local_artifacts/
+backtests/
+reports/
+**/__pycache__/
+**/*.parquet
+**/*.pyc
+**/*.joblib
+*.tgz
+.env
+.pytest_cache/
+.worktrees/

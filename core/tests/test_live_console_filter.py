@@ -1,0 +1,143 @@
+"""Tests for the live-server console filter.
+
+The filter's contract is asymmetric on purpose: dropping a *useful* line is a
+real failure, showing an extra noisy one is not. These tests pin the lines that
+must always survive alongside the noise that must not.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+_MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts/live_console_filter.py"
+_spec = importlib.util.spec_from_file_location("live_console_filter", _MODULE_PATH)
+live_console_filter = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(live_console_filter)
+
+ConsoleFilter = live_console_filter.ConsoleFilter
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+@pytest.fixture()
+def clock():
+    return FakeClock()
+
+
+@pytest.fixture()
+def filt(clock):
+    return ConsoleFilter(window=300.0, clock=clock)
+
+
+NOISE = [
+    '2026-07-30 11:21:07,301 INFO [httpx] HTTP Request: POST https://api.schwabapi.com/v1/oauth/token "HTTP/1.1 400 Bad Request"',
+    "2026-07-30 20:44:03,557 INFO [alpaca.data.live.websocket] subscribed to bars: ['A', 'AA', 'AAL']",
+    "2026-07-30 20:44:06,055 INFO [UI.nightly_scheduler] Nightly scheduler armed: next run 2026-07-31T16:45-04:00",
+    "2026-07-30 09:44:32,490 INFO [__main__] Memory keeper: RSS=1958 MB (gc+malloc_trim done)",
+    "2026-07-30 11:22:58,582 INFO [strategies.multi_ticker_swing.live.runner] Swing stream heartbeat: raw=70533 accepted=70533",
+    '127.0.0.1 - - [30/Jul/2026 20:44:26] "POST /api/start HTTP/1.1" 200 -',
+    "2026-07-30 09:37:33,348 INFO [strategies.momentum_expansion.features.live_feature_panel_4h] live feature panel: 200/2768 tickers built",
+    "2026-07-30 20:45:06,999 INFO [schwab.auth] Loading token from file /home/luket/schwab_token.json",
+]
+
+MUST_SURVIVE = [
+    "2026-07-30 20:44:00 [supervisor] starting combined_server (fast_fails=0)",
+    "  Schwab token:            EXPIRED — re-auth needed",
+    "============================================================",
+    "  Hub (overview):          http://127.0.0.1:8764",
+    "2026-07-30 11:25:01,934 INFO [strategies.multi_ticker_swing.live.runner] [ZS] buy limit order submitted limit=6.95 attempt=1/3",
+    "2026-07-30 11:25:21,313 WARNING [strategies.multi_ticker_swing.live.runner] [ZS] buy order not verified; skipping local position open",
+    "2026-07-30 09:44:15,245 INFO [__main__] momentum top-10: ['PLSE', 'MPTI']",
+    "pending-open flush: submitted 0 / skipped 0",
+    "2026-07-30 09:01:43,458 WARNING [__main__] Data readiness: stamp will NOT authorize entries",
+]
+
+
+@pytest.mark.parametrize("line", NOISE)
+def test_known_noise_is_dropped(filt, line):
+    assert filt(line) is None
+
+
+@pytest.mark.parametrize("line", MUST_SURVIVE)
+def test_operationally_important_lines_survive(filt, line):
+    assert filt(line) is not None
+
+
+def test_first_repeat_is_always_shown(filt):
+    line = "2026-07-30 09:31:50,184 WARNING [strategies.dealer_positioning.runner] [SPY] dealer poll failed: unsupported_token_type"
+    assert filt(line) is not None, "the first occurrence must never be hidden"
+
+
+def test_identical_repeats_collapse_and_report_a_count(filt, clock):
+    def poll(ticker: str) -> str:
+        return (
+            f"2026-07-30 09:31:50,184 WARNING [strategies.dealer_positioning.runner] "
+            f"[{ticker}] dealer poll failed: unsupported_token_type"
+        )
+
+    assert filt(poll("SPY")) is not None
+
+    # The same warning across all five underlyings is one message, not five.
+    for _ in range(107):
+        for ticker in ("SPY", "QQQ", "SLV", "IWM", "GLD"):
+            assert filt(poll(ticker)) is None
+
+    clock.advance(301)
+    out = filt(poll("SPY"))
+    assert out is not None
+    assert "[+535 identical suppressed in the last ~5m]" in out
+
+
+def test_distinct_messages_do_not_collapse_into_each_other(filt):
+    a = "2026-07-30 10:00:00,000 WARNING [mod.a] disk is full"
+    b = "2026-07-30 10:00:00,000 WARNING [mod.b] disk is full"
+    c = "2026-07-30 10:00:00,000 WARNING [mod.a] network is down"
+
+    assert filt(a) is not None
+    assert filt(b) is not None, "different logger is a different message"
+    assert filt(c) is not None, "different text is a different message"
+
+
+def test_numbers_do_not_defeat_collapsing(filt, clock):
+    first = "2026-07-30 10:00:00,000 WARNING [mod] retry 1 of 500 failed after 12ms"
+    second = "2026-07-30 10:00:05,000 WARNING [mod] retry 2 of 500 failed after 97ms"
+
+    assert filt(first) is not None
+    assert filt(second) is None
+
+
+def test_model_version_warning_block_collapses_to_one_notice(filt):
+    block = [
+        "[20:44:40] WARNING: /__w/xgboost/xgboost/src/collective/../data/../common/error_msg.h:83: If you are loading",
+        "configuration generated by an older version of XGBoost, please export the model by calling",
+        "`Booster.save_model` from that version first, then load it back in current version. See:",
+        "    https://xgboost.readthedocs.io/en/stable/tutorials/saving_model.html",
+        "for more details about differences between saving model and serializing.",
+        "sklearn/base.py:376: InconsistentVersionWarning: Trying to unpickle estimator IsotonicRegression",
+        "  warnings.warn(",
+    ]
+    emitted = [out for out in (filt(line) for line in block) if out is not None]
+
+    assert emitted == [live_console_filter.MODEL_WARNING_NOTICE]
+
+
+def test_unrecognised_lines_pass_through_unchanged(filt):
+    line = "[live] Prefilled 50,000 bars for SPY (cap=50,000)."
+    assert filt(line) == line
+
+
+def test_filter_never_raises_on_odd_input(filt):
+    for line in ("", "\n", "   ", "\x00binary\xff", "a" * 10_000):
+        filt(line)  # must not raise

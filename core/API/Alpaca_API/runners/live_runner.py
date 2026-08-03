@@ -6,6 +6,7 @@ import queue as queue_mod
 import signal
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -15,6 +16,7 @@ import pandas as pd
 from alpaca.data.enums import DataFeed
 
 from core.live_signal_audit import append_jsonl, build_signal_audit
+from .decision_latency import DecisionLatency
 from ..market_data.bar_aggregator import OhlcvAggregator
 from ..market_data.bar_buffer import BarRingBuffer
 from ..market_data.fetch_intraday import fetch_intraday
@@ -105,7 +107,9 @@ class LiveBarProcessor:
         tz_name: str = "America/New_York",
         session_open: str = "09:30",
         session_close: str = "16:00",
+        latency: "DecisionLatency | None" = None,
     ) -> None:
+        self._latency = latency
         self._interval_minutes = interval_minutes
         self._buffer_size = None if buffer_size is None or int(buffer_size) <= 0 else int(buffer_size)
         self._agg_label = agg_label
@@ -163,11 +167,18 @@ class LiveBarProcessor:
         agg = self._get_aggregator(symbol)
 
         buffer.append(bar)
+        if self._latency is not None:
+            self._latency.on_1m_bar(symbol, bar)
         if self._on_1m is not None:
             self._on_1m(symbol, bar, buffer)
 
         closed, _current = agg.update(bar)
         if closed and self._on_15m_close is not None:
+            # `bar` is the first bar of the *next* bucket — the arrival that
+            # rolled this one over. Recording it is how we measure whether a
+            # gap in the 1-minute feed is what defers the close.
+            if self._latency is not None:
+                self._latency.on_bucket_closed(symbol, closed, bar)
             self._on_15m_close(symbol, closed, buffer)
         if (
             self._regular_hours_only
@@ -723,6 +734,16 @@ def _make_1m_handler(
     return _handler
 
 
+@contextmanager
+def _timed(latency: DecisionLatency | None, name: str):
+    """Time a stage when instrumentation is on, otherwise do nothing at all."""
+    if latency is None:
+        yield
+        return
+    with latency.stage(name):
+        yield
+
+
 def _make_15m_handler(
     *,
     inference: LiveInferenceEngine,
@@ -734,8 +755,10 @@ def _make_15m_handler(
     signal_audit_log: Path | None = None,
     option_mark_capture: OptionMarkCapture | None = None,
     replay_decision_log: Path | None = None,
+    latency: DecisionLatency | None = None,
 ) -> Callable[[str, dict, BarRingBuffer], None]:
     def _handler(symbol: str, bar15: dict, buffer: BarRingBuffer) -> None:
+        handler_start = time.time()
         if print_15m:
             ts = _format_ts_local(bar15.get("timestamp"), tz=print_tz)
             print(
@@ -743,8 +766,14 @@ def _make_15m_handler(
                 f"l={bar15.get('low')} c={bar15.get('close')} v={bar15.get('volume')}"
             )
         if order_policies is not None and symbol in order_policies:
-            order_policies[symbol].on_interval_bar(closed_bar=bar15)
-        action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
+            with _timed(latency, "on_interval_bar"):
+                order_policies[symbol].on_interval_bar(closed_bar=bar15)
+        with _timed(latency, "inference"):
+            action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
+        if action is None and latency is not None:
+            # A bucket that produces no action still consumed the same pipeline;
+            # dropping it here would bias the record toward acting bars only.
+            latency.emit(symbol, bar15, handler_start=handler_start)
         if action is not None:
             raw_action = float(action)
             raw_pos = _action_to_position(raw_action)
@@ -822,11 +851,12 @@ def _make_15m_handler(
                         underlying=symbol, bar=policy_bar,
                         policy_state=order_policies[symbol].snapshot_state(), phase="pre_decision_policy",
                     )
-                result = order_policies[symbol].on_decision(
-                    action=float(raw_action if _use_meta_direct_execution(inference) else exec_pos),
-                    closed_bar=policy_bar,
-                    update_bar_state=False,
-                )
+                with _timed(latency, "order_policy"):
+                    result = order_policies[symbol].on_decision(
+                        action=float(raw_action if _use_meta_direct_execution(inference) else exec_pos),
+                        closed_bar=policy_bar,
+                        update_bar_state=False,
+                    )
                 if option_mark_capture is not None:
                     option_mark_capture.capture_active(
                         underlying=symbol, bar=policy_bar,
@@ -846,6 +876,8 @@ def _make_15m_handler(
                 event = str(result.get("event", "unknown"))
                 if event not in {"hold", "no_change", "intent_update"}:
                     print(f"{symbol} order_policy event={event} details={result}")
+            if latency is not None:
+                latency.emit(symbol, bar15, handler_start=handler_start)
     return _handler
 
 
@@ -2602,6 +2634,24 @@ def main() -> None:
         if (args.print_1m or order_policies is not None)
         else None
     )
+    # Per-stage decision latency. Written next to the other run artifacts so a
+    # session's timings live with the decisions they explain. See
+    # decision_latency.py for why this exists (2026-07-30 unexplained 2-20 min
+    # lag between bar close and decision).
+    _signal_audit_path = (
+        Path(args.signal_audit_log) if str(args.signal_audit_log or "").strip() else None
+    )
+    decision_latency = DecisionLatency(
+        log_path=(
+            _signal_audit_path.parent / "decision-latency.jsonl"
+            if _signal_audit_path is not None
+            else None
+        ),
+        interval_minutes=int(args.interval),
+    )
+    if decision_latency.enabled:
+        print(f"[live] decision latency log: {_signal_audit_path.parent / 'decision-latency.jsonl'}")
+
     on_15m = _make_15m_handler(
         inference=inference,
         interval_minutes=int(args.interval),
@@ -2609,9 +2659,10 @@ def main() -> None:
         print_tz=args.tz or "America/New_York",
         execution_latches=execution_latches,
         order_policies=order_policies,
-        signal_audit_log=Path(args.signal_audit_log) if str(args.signal_audit_log or "").strip() else None,
+        signal_audit_log=_signal_audit_path,
         option_mark_capture=option_mark_capture,
         replay_decision_log=replay_decision_log,
+        latency=decision_latency,
     )
 
     processor = LiveBarProcessor(
@@ -2624,6 +2675,7 @@ def main() -> None:
         tz_name=args.tz or "America/New_York",
         session_open=args.session_open,
         session_close=args.session_close,
+        latency=decision_latency,
     )
     print(
         f"[live] RTH-only live bar filter enabled: "

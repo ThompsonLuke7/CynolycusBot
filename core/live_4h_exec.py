@@ -277,9 +277,24 @@ def build_mixed_plan(
                                              "signal_audit": sa.get(t)}
                 continue
             shares = shares_for_notional(px, policy.target_notional)
+            # Record the contract that was REJECTED, not just the reason string.
+            # Without occ/strike/expiry/delta there is no way to tell an
+            # genuinely illiquid chain from a bad strike pick after the fact
+            # (2026-07-28 CRWV: `illiquid_option(oi=85,vol=8)` was unexplainable
+            # from the log alone). `order` is None when selection never got far
+            # enough to name a contract (price floor, no contracts, no greeks).
+            rejected = order or {}
             out.contract_selection[t] = {"action": "equity", "reason": reason, "ref_price": px,
                                          "shares": shares,
-                                         "dealer_gate": (order or {}).get("dealer_gate"),
+                                         "occ": rejected.get("occ"),
+                                         "strike": rejected.get("strike"),
+                                         "expiry": rejected.get("expiry"),
+                                         "delta": rejected.get("delta"),
+                                         "open_interest": rejected.get("open_interest"),
+                                         "volume": rejected.get("volume"),
+                                         "liquidity_source": rejected.get("liquidity_source"),
+                                         "band_size": rejected.get("band_size"),
+                                         "dealer_gate": rejected.get("dealer_gate"),
                                          "signal_audit": sa.get(t)}
             out.plan.append((t, "buy", shares, "entry", "equity"))
             out.order_audits[t] = build_equity_order_audit(
@@ -379,12 +394,22 @@ def execute_plan(
     failed: set[str] = set()
     if not (submit and plan):
         return failed
+    # Order matters. Defer BEFORE gating on readiness: an after-close entry is
+    # not being submitted now, it is being *recorded* for the next open, and
+    # submit_pending_open_entries re-runs the readiness gate at flush time. Doing
+    # readiness first strips the buys (and pops them from new_managed) before
+    # defer_entries_if_market_closed can see any reason=="entry" item, so the
+    # intent is destroyed rather than queued — the whole 18:00-UTC signal stream
+    # is silently discarded whenever the stamp happens to be stale at ~16:20 ET,
+    # even if the overnight refresh fixes the data hours later. Observed
+    # 2026-07-29: every after-close entry vanished with no pending-open queue
+    # written. When the market is open, defer_entries_if_market_closed returns
+    # the plan unchanged, so live-session behaviour is identical to before.
+    plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
     plan, skipped, reason = filter_entry_orders_for_readiness(plan, new_managed=new_managed)
     if skipped:
         print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
         failed.update(skipped)
-    # After the close, queue entries for the next open instead of erroring on them.
-    plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
     if not plan:
         return failed
     plan = _reverify_buys_not_held(client, plan, new_managed)
@@ -736,7 +761,16 @@ def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
         (rec.get("order_symbol"), rec.get("side"), rec.get("qty"), "pending_open", rec.get("route", "option"))
         for rec in eligible
     ]
-    _kept, readiness_skipped, readiness_reason = filter_entry_orders_for_readiness(readiness_plan)
+    # These records carry their ticker explicitly, so the per-ticker gate does not
+    # have to infer it from an OCC root.
+    _kept, readiness_skipped, readiness_reason = filter_entry_orders_for_readiness(
+        readiness_plan,
+        symbol_tickers={
+            str(rec.get("order_symbol")): str(rec.get("ticker"))
+            for rec in eligible
+            if rec.get("order_symbol") and rec.get("ticker")
+        },
+    )
     if readiness_skipped:
         logger.warning(
             "%s pending-open: readiness gate skipped %d entries (%s)",

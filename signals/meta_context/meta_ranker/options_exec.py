@@ -96,6 +96,74 @@ def _latest_quote(client: AlpacaOptionsClient, occ: str) -> tuple[float, float] 
     return (bid, ask) if bid > 0 and ask > 0 else None
 
 
+def _as_float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# Optionability gate: names that aren't good option candidates trade shares
+# instead. Liquidity is judged by open interest + volume only (no spread gate).
+ROUTE_PRICE_FLOOR = 10.0      # underlying < $10 -> shares
+ROUTE_MIN_OPEN_INTEREST = 500  # selected contract OI < 500 -> shares
+ROUTE_MIN_VOLUME = 100         # selected contract daily volume < 100 -> shares
+
+# A candidate whose snapshot carries no two-sided quote costs one extra quote
+# request. Walking the whole delta band on a name with no quotes at all would
+# fire one per strike, so stop after a handful and report no_quote.
+_MAX_QUOTE_ATTEMPTS = 5
+
+
+def _rank_candidates(
+    ticker: str,
+    exp_str: str,
+    in_range: list[tuple[str, float, dict]],
+    by_symbol: dict[str, dict],
+    min_open_interest: int,
+    min_volume: int,
+) -> list[dict]:
+    """Order the delta band by tradability: liquid first, then deepest OI.
+
+    Picking the single delta-closest strike and gating THAT one contract on
+    liquidity rejects names whose chain is plainly liquid — the delta-closest
+    strike is often an odd number nobody trades while a round strike a dollar
+    away, still inside the delta band, carries orders of magnitude more open
+    interest. CRWV on 2026-07-28 is the worked example: ref $66.51 selected a
+    strike with oi=85 and routed to shares, while the 70 strike (same August
+    expiry, same delta band) held >3,000 contracts. The band is the risk
+    control; within it, prefer the strike that can actually be traded.
+
+    Ranking is (passes floors, open interest desc, delta proximity). Two
+    consequences worth stating:
+      * When nothing in the band clears the floors the winner is the DEEPEST-OI
+        strike, not the delta-closest one, so the caller's reject reason reports
+        the band's liquidity ceiling — evidence the name is genuinely not
+        optionable, rather than a statement about one arbitrary strike.
+      * When the chain is unavailable every `oi` is None, the first two keys go
+        flat, and the order degrades to the delta-closest pick this function
+        replaced.
+    """
+    scored: list[dict] = []
+    for occ, dlt, snap in in_range:
+        strike = _contract_strike(by_symbol[occ])
+        # contract_liquidity caches the whole expiry, so the band costs one fetch.
+        liq = contract_liquidity(ticker, expiry=exp_str, strike=strike, option_type="C")
+        oi = liq.open_interest if liq is not None else None
+        vol = liq.volume if liq is not None else None
+        scored.append({
+            "occ": occ, "delta": dlt, "snap": snap, "strike": strike,
+            "open_interest": oi, "volume": vol,
+            "liquidity_source": liq.source if liq is not None else "unavailable",
+            "passes": (oi is not None and vol is not None
+                       and oi >= min_open_interest and vol >= min_volume),
+        })
+    scored.sort(key=lambda c: (
+        not c["passes"], -(c["open_interest"] or 0), abs(c["delta"] - _DELTA_TGT),
+    ))
+    return scored
+
+
 def select_option(
     client: AlpacaOptionsClient,
     ticker: str,
@@ -104,8 +172,15 @@ def select_option(
     *,
     roll_trading_days: int = 5,
     now_et: datetime | None = None,
+    min_open_interest: int = ROUTE_MIN_OPEN_INTEREST,
+    min_volume: int = ROUTE_MIN_VOLUME,
 ) -> tuple[dict | None, str]:
-    """Pick a delta-filtered monthly call for `ticker`, sized to `per_name_usd`."""
+    """Pick the most tradable monthly call inside the delta band, sized to `per_name_usd`.
+
+    The liquidity floors are passed in only to RANK the band (see
+    `_rank_candidates`); enforcement stays in `route_option_or_shares` so
+    selection and gating remain separate concerns.
+    """
     now_et = now_et or datetime.now(_ET)
     want_exp = target_monthly_expiry(now_et.date(), roll_trading_days)
     exp_str = want_exp.isoformat()
@@ -145,58 +220,50 @@ def select_option(
     in_range = [c for c in cands if _DELTA_LO <= c[1] <= _DELTA_HI]
     if not in_range:
         return None, "delta_filter_failed(out_of_range)"
-    occ, dlt, sel_snap = min(in_range, key=lambda x: abs(x[1] - _DELTA_TGT))
 
-    # Prefer the snapshot's own quote (saves a second API call / 429s); fall back
-    # to a fresh quote fetch only if the snapshot lacks a two-sided quote.
-    lq = sel_snap.get("latestQuote") or {}
-    bid = _as_float(lq.get("bp", lq.get("bid_price")))
-    ask = _as_float(lq.get("ap", lq.get("ask_price")))
-    if not (bid > 0 and ask > 0):
-        quote = _latest_quote(client, occ)
-        if quote is None:
-            return None, "no_quote"
-        bid, ask = quote
-    mid = (bid + ask) / 2.0
-    # Spread is reported for the audit only — it is NOT a gate. Liquidity is
-    # judged by open interest + volume (see route_option_or_shares); a wide %%
-    # spread on a cheap contract (e.g. 0.50/1.00) is normal and not disqualifying.
-    spread = (ask - bid) / mid if mid > 0 else 1.0
     # Alpaca's option snapshot carries no open interest or daily volume, so
-    # reading them off `sel_snap` always yielded 0 and force-routed every name to
-    # shares. Schwab's chain has both. `None` here means UNKNOWN, not zero — the
+    # reading them off the snapshot always yielded 0 and force-routed every name
+    # to shares. Schwab's chain has both. `None` means UNKNOWN, not zero — the
     # routing gate must be able to tell those apart.
-    strike_value = _contract_strike(by_symbol[occ])
-    liq = contract_liquidity(ticker, expiry=exp_str, strike=strike_value, option_type="C")
-    oi = liq.open_interest if liq is not None else None
-    vol = liq.volume if liq is not None else None
-    contracts_n = int(math.floor(per_name_usd / (mid * 100.0)))
-    if contracts_n < 1:
-        return None, "budget_lt_1_contract"
-    return (
-        {
-            "ticker": ticker, "occ": occ, "contracts": contracts_n, "mid": mid,
-            "limit": round(ask, 2), "delta": dlt, "expiry": exp_str,
-            "strike": strike_value, "notional": contracts_n * mid * 100.0,
-            "open_interest": oi, "volume": vol, "spread": spread,
-            "liquidity_source": liq.source if liq is not None else "unavailable",
-        },
-        "ok",
+    ranked = _rank_candidates(
+        ticker, exp_str, in_range, by_symbol, min_open_interest, min_volume,
     )
 
-
-def _as_float(value) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-# Optionability gate: names that aren't good option candidates trade shares
-# instead. Liquidity is judged by open interest + volume only (no spread gate).
-ROUTE_PRICE_FLOOR = 10.0      # underlying < $10 -> shares
-ROUTE_MIN_OPEN_INTEREST = 500  # selected contract OI < 500 -> shares
-ROUTE_MIN_VOLUME = 100         # selected contract daily volume < 100 -> shares
+    attempts = 0
+    for cand in ranked:
+        # Prefer the snapshot's own quote (saves a second API call / 429s); fall
+        # back to a fresh quote fetch only if the snapshot lacks a two-sided one.
+        lq = cand["snap"].get("latestQuote") or {}
+        bid = _as_float(lq.get("bp", lq.get("bid_price")))
+        ask = _as_float(lq.get("ap", lq.get("ask_price")))
+        if not (bid > 0 and ask > 0):
+            attempts += 1
+            if attempts > _MAX_QUOTE_ATTEMPTS:
+                break
+            quote = _latest_quote(client, cand["occ"])
+            if quote is None:
+                continue  # unquotable strike — try the next-best in the band
+            bid, ask = quote
+        mid = (bid + ask) / 2.0
+        # Spread is reported for the audit only — it is NOT a gate. Liquidity is
+        # judged by open interest + volume (see route_option_or_shares); a wide %
+        # spread on a cheap contract (e.g. 0.50/1.00) is normal, not disqualifying.
+        spread = (ask - bid) / mid if mid > 0 else 1.0
+        contracts_n = int(math.floor(per_name_usd / (mid * 100.0)))
+        if contracts_n < 1:
+            return None, "budget_lt_1_contract"
+        return (
+            {
+                "ticker": ticker, "occ": cand["occ"], "contracts": contracts_n, "mid": mid,
+                "limit": round(ask, 2), "delta": cand["delta"], "expiry": exp_str,
+                "strike": cand["strike"], "notional": contracts_n * mid * 100.0,
+                "open_interest": cand["open_interest"], "volume": cand["volume"],
+                "spread": spread, "liquidity_source": cand["liquidity_source"],
+                "band_size": len(ranked),
+            },
+            "ok",
+        )
+    return None, "no_quote"
 
 
 def route_option_or_shares(
@@ -231,6 +298,10 @@ def route_option_or_shares(
     order, reason = select_option(
         client, ticker, current_price, 1e12,
         roll_trading_days=roll_trading_days, now_et=now_et,
+        # Same floors used to rank the delta band, so the contract that comes
+        # back is the best one this gate would accept — not a thin strike that
+        # was never going to pass.
+        min_open_interest=min_open_interest, min_volume=min_volume,
     )
     if order is None:
         return "equity", None, f"no_option({reason})"

@@ -79,6 +79,11 @@ def main() -> int:
                    help="One-shot: score active universe and emit alerts")
     p.add_argument("--tickers", nargs="*", default=None)
     p.add_argument("--force", action="store_true")
+    p.add_argument("--refresh-stale", action="store_true",
+                   help="Features only: rebuild tickers whose features are older than "
+                        "their bars and reuse the rest, then rewrite the combined "
+                        "parquet. Resumable — prefer this over --force for scheduled "
+                        "refreshes; use --force after feature-code changes.")
     args = p.parse_args()
     _setup_logging(args.log)
 
@@ -110,7 +115,9 @@ def main() -> int:
         fetch_universe_bars(tickers=candidate_tickers, force=args.force)
 
     if args.build_features:
-        build_all_features_4h(tickers=candidate_tickers, force=args.force)
+        build_all_features_4h(
+            tickers=candidate_tickers, force=args.force, refresh_stale=args.refresh_stale
+        )
 
     if args.build_labels:
         build_all_labels_4h(tickers=candidate_tickers, force=args.force)

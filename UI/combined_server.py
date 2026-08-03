@@ -842,6 +842,29 @@ def run_combined(
         print("  Data readiness:          startup check (catch-up only if stamp is stale)")
 
     # ------------------------------------------------------------------
+    # 5a1a. Schwab refresh-token expiry. Purely a file read — no network, no
+    #       credentials, no mutation — but it is the only advance warning of an
+    #       outage that nothing unattended can fix: renewal is an interactive
+    #       browser login. On 2026-07-30 an overnight expiry produced 535
+    #       consecutive invalid_grant failures and lost a full day of dealer
+    #       chain capture, with the deadline knowable from the token file all
+    #       along.
+    # ------------------------------------------------------------------
+    try:
+        from core.schwab_token_status import banner_line, schwab_token_status
+
+        _schwab = schwab_token_status()
+        if _schwab.severity == "error":
+            logger.error("Schwab auth: %s", _schwab.message)
+        elif _schwab.severity == "warning":
+            logger.warning("Schwab auth: %s", _schwab.message)
+        else:
+            logger.info("Schwab auth: %s", _schwab.message)
+        print(banner_line(_schwab))
+    except Exception as exc:  # noqa: BLE001 - never let a status read block boot
+        logger.warning("Schwab auth: token status check failed (%s)", exc)
+
+    # ------------------------------------------------------------------
     # 5a1b. Actions queued for the next startup (see core/startup_queue.py).
     # ------------------------------------------------------------------
     if startup_queue_enabled:

@@ -134,3 +134,59 @@ def test_flush_empty_queue_is_safe(tmp_path):
     res = submit_pending_open_entries(_Client(), "htf", targets=["X"],
                                       equity_tif_fn=lambda: "day", ledger_root=str(tmp_path))
     assert res == {"submitted": {}, "skipped": [], "count": 0}
+
+
+def test_stale_readiness_after_close_queues_entries_instead_of_discarding(monkeypatch, tmp_path):
+    """A stale stamp at ~16:20 ET must not destroy the after-close signal stream.
+
+    Regression for 2026-07-29, when execute_plan ran the readiness gate BEFORE
+    defer_entries_if_market_closed. The gate stripped every buy and popped it
+    from new_managed, so the deferral step saw no reason=="entry" item and wrote
+    no pending-open queue: all 28 after-close entries across Meta/HTF/Momentum
+    were silently discarded rather than held for the next open. Submission is
+    still gated -- submit_pending_open_entries re-runs the readiness check at
+    flush time (covered by the test above).
+    """
+    monkeypatch.setattr("core.calendar.is_market_open_now", lambda now=None: False)
+    # Stale stamp: the real gate strips every buy and prunes new_managed.
+    monkeypatch.setattr(
+        ex,
+        "filter_entry_orders_for_readiness",
+        lambda plan, **kwargs: (
+            [p for p in plan if str(p[1]).lower() != "buy"],
+            {"AAA", "BBB"},
+            "readiness stamp predates latest session",
+        ),
+    )
+    # execute_plan has no ledger_root hook; redirect the queue at its source.
+    monkeypatch.setattr(ex, "pending_open_path",
+                        lambda module, ledger_root="Data/inference": tmp_path / module / "pending_open_entries.json")
+
+    plan = [
+        ("AAA", "buy", 100, "entry", "equity"),
+        ("BBB", "buy", 50, "entry", "equity"),
+        ("OLD", "sell", 100, "horizon", "equity"),
+    ]
+    new_managed = {
+        "AAA": {"route": "equity", "symbol": "AAA", "runs_held": 0},
+        "BBB": {"route": "equity", "symbol": "BBB", "runs_held": 0},
+    }
+
+    client = _Client()
+    ex.execute_plan(
+        client,
+        plan=plan,
+        new_managed=new_managed,
+        limits={},
+        submit=True,
+        equity_tif_fn=lambda: "day",
+        module="meta_ranker",
+        bar="2026-07-29 18:00:00+00:00",
+    )
+
+    queue = tmp_path / "meta_ranker" / "pending_open_entries.json"
+    assert queue.exists(), "after-close entries must be queued, not discarded"
+    queued = {e["order_symbol"] for e in json.loads(queue.read_text())["entries"]}
+    assert queued == {"AAA", "BBB"}
+    # Nothing was bought after hours, and the exit still went out.
+    assert ("buy", "AAA") not in client.sent and ("buy", "BBB") not in client.sent

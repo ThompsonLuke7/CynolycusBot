@@ -24,10 +24,18 @@
 #   DATA_READINESS_TIME=22:15 scripts/run_live_server.sh  # evening full shared-data refresh
 #   NIGHTLY_TIME=16:45 scripts/run_live_server.sh  # post-refresher collection/enrichment
 #   DEALER_RANKER_TIME=15:40 scripts/run_live_server.sh  # override near-close dealer run
+#   VERBOSE=1 scripts/run_live_server.sh       # unfiltered console mirror
+#   QUIET=1 scripts/run_live_server.sh         # no console mirror at all
 #   (any extra args are passed straight through to combined_server)
 #
 # Stop: Ctrl-C (stops the watchdog and the server together), or kill this script.
 # Logs: logs/live_server/server_YYYYMMDD.log  and  .../watchdog_YYYYMMDD.log
+#       The log file is always complete; only the terminal mirror is filtered.
+#
+# PREFERRED START: `systemctl --user start cynolycus-live` — see
+# scripts/systemd/README.md. Started from a terminal, this whole supervisor dies
+# with the terminal (and with the WSL VM), which is exactly what happened on
+# 2026-07-29 and twice on 2026-07-30.
 #
 set -uo pipefail
 
@@ -143,10 +151,25 @@ while true; do
   # Mirror the server log to this terminal while it runs (set QUIET=1 to skip).
   # `tail --pid` self-exits the moment the server process ends, so the loop
   # never hangs on it.
+  # The console mirror is filtered (see scripts/live_console_filter.py): the log
+  # file keeps every byte, the terminal keeps the parts a human can act on. A
+  # 2026-07-30 session mirrored 535 identical dealer-poll warnings, 535 httpx
+  # lines and a 939-symbol subscription dump to the terminal, which is how an
+  # expired Schwab token went unnoticed for an entire session.
+  #   QUIET=1    no console mirror at all
+  #   VERBOSE=1  mirror everything, unfiltered (the old behaviour)
   TAIL_PID=""
   if [ "${QUIET:-0}" != "1" ]; then
-    tail -n 0 -F --pid="$SERVER_PID" "$SERVER_LOG" &
-    TAIL_PID=$!
+    if [ "${VERBOSE:-0}" != "1" ] && [ -f "$REPO_ROOT/scripts/live_console_filter.py" ]; then
+      # `$!` is the last element of the pipeline (the filter); `tail --pid` exits
+      # on its own when the server dies, closing the pipe and ending the filter.
+      tail -n 0 -F --pid="$SERVER_PID" "$SERVER_LOG" \
+        | "$PYTHON" -u "$REPO_ROOT/scripts/live_console_filter.py" &
+      TAIL_PID=$!
+    else
+      tail -n 0 -F --pid="$SERVER_PID" "$SERVER_LOG" &
+      TAIL_PID=$!
+    fi
   fi
   wait "$SERVER_PID"
   rc=$?

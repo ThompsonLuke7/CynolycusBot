@@ -1,0 +1,56 @@
+# Supervised live-trading server, run by systemd instead of a terminal.
+#
+# WHY: run_live_server.sh already restarts combined_server when it exits, but it
+# cannot restart *itself*. Started from a VS Code terminal it is a child of that
+# terminal's session, so it dies when the terminal closes, when VS Code exits,
+# and when the WSL VM goes down — the last of which killed the stack three times
+# across 2026-07-29/30, each time with the supervisor's restart ladder never
+# firing because the supervisor died alongside the thing it supervises.
+#
+# systemd is PID 1 in this distro (/etc/wsl.conf has systemd=true), so a unit
+# here is outside every terminal's process tree and starts automatically when
+# the VM boots.
+#
+# Installed by scripts/systemd/install.sh — @REPO_ROOT@ is substituted there.
+# Do not edit the installed copy; edit this template and re-run the installer.
+
+[Unit]
+Description=CynolycusBot supervised live trading server
+Documentation=file://@REPO_ROOT@/scripts/systemd/README.md
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting. systemd's default rate limit (5 starts / 10s) would
+# leave the server dark until someone noticed; a trading server that stops
+# restarting overnight is silently dark at the next open. This key only takes
+# effect in [Unit] — in [Service] it is parsed and ignored.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+ExecStart=/bin/bash @REPO_ROOT@/scripts/run_live_server.sh
+
+# The supervisor's own console mirror is redundant under systemd: everything it
+# would print is already in logs/live_server/server_YYYYMMDD.log, and mirroring
+# it again would duplicate the entire log into the journal.
+Environment=QUIET=1
+Environment=PYTHONUNBUFFERED=1
+
+# Restart the supervisor itself if it ever exits, for any reason. The inner
+# crash-loop backoff still governs combined_server restarts; this only catches
+# the case the inner loop structurally cannot: the supervisor process dying.
+Restart=always
+RestartSec=15s
+
+# run_live_server.sh traps INT/TERM and stops the watchdog, crash logger and
+# server itself, so let it do that before systemd reaps the group.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=90
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cynolycus-live
+
+[Install]
+WantedBy=default.target
