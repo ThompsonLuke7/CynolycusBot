@@ -1214,3 +1214,7 @@ Scoped review caught the ordered preference list being ignored, which silently g
 {2026-08-03 00:11 ET} {agent: Claude} {nervous system Task 19 Alpaca paper broker}
 Extended the live options client backward-compatibly (client_order_id, mleg multi-leg, by-client-order-id lookup, PATCH replace, PATCH now never retried, credential redaction) and added a paper-only AlpacaPaperAdapter with typed broker errors; client `27`, adapter `45`, full nervous-system `639`, repo-wide failures unchanged.
 Tests caught option positions being mislabelled EQUITY (`us_option` vs a prefix check); review caught a pydantic error escaping the typed boundary. No order is submitted here - the gateway is Task 21. Next: Task 20 execution journal.
+
+{2026-08-03 16:47 ET} {agent: Claude} {nervous system Task 20 execution journal}
+Implemented the always-on journal: local create-exclusive install via os.link (not os.replace), GCS if_generation_match=0 with no write-path listing, recursive pre-hash redaction, per-order hash chains, and a composite sink reporting DURABLE/IDEMPOTENT/DEGRADED/FAILED/CONFLICT; journal `55`, full nervous-system `694`, repo-wide failures unchanged.
+Review caught ET timestamps failing their own hash check (probe skipped coercion) and DEGRADED wrongly counted as non-durable, which would have halted trading on an optional-sink hiccup. Next: Task 21 idempotent execution gateway.
