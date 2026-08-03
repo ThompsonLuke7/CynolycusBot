@@ -1206,3 +1206,7 @@ Scoped review closed three defects: WARNING-severity gaps breaching the known-ex
 {2026-08-02 23:07 ET} {agent: Claude} {nervous system Task 17 option structures}
 Implemented exact-Decimal expiry payoff with analytic tail bounds, OCC/quote validation keeping marks apart from trade prints, and coverage rules for all approved structures; focused `120`, full nervous-system `551`, repo-wide failures unchanged.
 Scoped review caught leg ratios being multiplied by quantity, which overstated a 3-lot vertical's max_profit 3.86x; ratios are now per-structure. Next: Task 18 deterministic option selection.
+
+{2026-08-02 23:36 ET} {agent: Claude} {nervous system Task 18 option selection}
+Implemented deterministic instrument selection: chain fitness on marks not trade prints, full-suite candidate enumeration, five named non-probability score components, and explicit equity/no-instrument fallback; selector `43`, options `161`, full nervous-system `594`.
+Scoped review caught the ordered preference list being ignored, which silently gave an option to intents that asked for equity first; mutation testing also caught a policy-permission hole where a forbidden structure could still be selected. Next: Task 19 Alpaca paper broker interface.
