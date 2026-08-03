@@ -13,7 +13,11 @@ WORKDIR /app
 
 # Dependency layer first so code edits don't retrigger a 10-minute rebuild.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# CPU-only torch: the default wheel pulls ~2.5 GB of CUDA libraries Cloud Run cannot use.
+# Installed before requirements.txt so the unpinned `torch` line resolves as already satisfied,
+# which keeps requirements.txt GPU-capable for local development.
+RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu torch \
+ && pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 ENV PYTHONUNBUFFERED=1
