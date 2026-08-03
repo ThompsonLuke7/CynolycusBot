@@ -1198,3 +1198,7 @@ Exact-bar ranking/intents are strict and deterministic; next is Task 15 policy e
 {2026-08-02 02:22 ET} {agent: Claude} {nervous system Task 15 policy engine}
 Implemented the pure deterministic policy engine (fixed rule order 1-9, UUIDv5 identity, Decimal money, production-live denied in every mode, exits narrowly operable); focused `66`, full nervous-system on disposable PostgreSQL `379`.
 Scoped review closed three fail-open paths (unobserved open orders, unknown position market value, missing executability gate); duplicate-key matching stays inert until Task 17's gateway constraint. Next: Task 16 portfolio exposure.
+
+{2026-08-02 22:46 ET} {agent: Claude} {nervous system Task 16 portfolio exposure}
+Implemented canonical exposure (gross/net/symbol/sector/weighted-theme/factor-overlap/Greeks), fill-backed ownership, and broker reconciliation; focused `52`, full nervous-system on disposable PostgreSQL `431`, repo-wide failure set unchanged (11 pre-existing, stash-verified).
+Scoped review closed three defects: WARNING-severity gaps breaching the known-exposure limit, short ownership floored to zero, and multi-leg fills attributed to one leg. Next: Task 17 execution gateway.
