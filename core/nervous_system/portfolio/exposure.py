@@ -68,7 +68,14 @@ def calculate_exposure(
     combined = _combine(existing, proposed)
     quantum = config.money_quantum
 
-    limit_results = _evaluate_limits(combined, config, unknown=bool(issues))
+    # Only ERROR/CRITICAL evidence means exposure is genuinely unmeasurable.  A
+    # WARNING (an unmapped sector, say) is reported but must not breach the
+    # known-exposure limit, or every ticker outside the curated map would be
+    # blocked for a benign gap.
+    quality = DataQualitySummary(issues=tuple(issues))
+    limit_results = _evaluate_limits(
+        combined, config, unknown=not quality.is_usable
+    )
 
     incremental: dict[str, Decimal] = {}
     if proposed is not None:
@@ -100,7 +107,7 @@ def calculate_exposure(
         option_greeks=_quantize_map(existing.greeks, quantum),
         proposed_incremental_exposure=incremental,
         limit_results=limit_results,
-        quality=DataQualitySummary(issues=tuple(issues)),
+        quality=quality,
         config_version=config.config_version,
     )
 

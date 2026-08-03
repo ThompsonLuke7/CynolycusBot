@@ -234,18 +234,95 @@ def test_ownership_requires_an_explicit_strategy() -> None:
 
 def test_net_owned_quantity_never_goes_negative_from_overclosing() -> None:
     records = (
-        _record(quantity=Decimal("100"), suffix="open"),
-        _record(quantity=Decimal("-40"), suffix="trim"),
-        _record(quantity=Decimal("-80"), suffix="overclose"),
+        _record(quantity=Decimal("100"), suffix="open", minutes=0),
+        _record(quantity=Decimal("-40"), suffix="trim", minutes=5),
+        _record(quantity=Decimal("-80"), suffix="overclose", minutes=10),
     )
 
     assert net_owned_quantity(records) == Decimal("0")
 
 
+def test_genuine_short_ownership_is_preserved_not_floored() -> None:
+    """A short position's negative ownership is real, not an over-close."""
+
+    opened = _record(quantity=Decimal("-100"), suffix="short_open", minutes=0)
+    assert net_owned_quantity((opened,)) == Decimal("-100")
+
+    covered = _record(quantity=Decimal("40"), suffix="short_cover", minutes=5)
+    assert net_owned_quantity((opened, covered)) == Decimal("-60")
+    # Order of the sequence must not matter; effective_at decides direction.
+    assert net_owned_quantity((covered, opened)) == Decimal("-60")
+
+
+def test_over_covering_a_short_does_not_flip_it_long() -> None:
+    records = (
+        _record(quantity=Decimal("-100"), suffix="short_open", minutes=0),
+        _record(quantity=Decimal("150"), suffix="over_cover", minutes=5),
+    )
+
+    assert net_owned_quantity(records) == Decimal("0")
+
+
+def test_multi_leg_orders_are_refused_rather_than_attributed_to_one_leg() -> None:
+    from datetime import date
+
+    from core.nervous_system.contracts.enums import OptionType, PositionIntent
+    from core.nervous_system.contracts.orders import OptionLeg
+
+    def leg(strike: str, side: OrderSide, intent: PositionIntent) -> OptionLeg:
+        return OptionLeg(
+            symbol=f"AMD261218C00{strike}000",
+            underlying="AMD",
+            option_type=OptionType.CALL,
+            strike=Decimal(strike),
+            expiration=date(2026, 12, 18),
+            side=side,
+            ratio=1,
+            position_intent=intent,
+            quote_at=NOW,
+            bid=Decimal("5.00"),
+            ask=Decimal("5.10"),
+        )
+
+    order = OrderRequest.create(
+        order_request_id=uuid5(NAMESPACE_URL, "ownership-test/vertical"),
+        decision_id=DECISION_ID,
+        policy_decision_id=uuid5(NAMESPACE_URL, "ownership-test/policy"),
+        environment=RuntimeEnvironment.QA_PAPER,
+        account_alias="paper",
+        decision_kind=DecisionKind.ENTRY,
+        risk_reducing=False,
+        instrument_family=InstrumentFamily.VERTICAL,
+        legs=(
+            leg("200", OrderSide.BUY, PositionIntent.BUY_TO_OPEN),
+            leg("210", OrderSide.SELL, PositionIntent.SELL_TO_OPEN),
+        ),
+        parent_quantity=Decimal("5"),
+        debit_credit=DebitCredit.DEBIT,
+        net_limit_price=Decimal("3.00"),
+        maximum_loss=Decimal("1500"),
+        buying_power_required=Decimal("1500"),
+        time_in_force="day",
+        order_type="limit",
+        idempotency_key="d" * 64,
+        created_at=NOW,
+        expires_at=NOW + timedelta(minutes=20),
+    )
+    event = build_event(
+        order=order,
+        status=ExecutionStatus.FILLED,
+        filled_quantity=Decimal("5"),
+        average_fill_price=Decimal("3.00"),
+    )
+
+    with pytest.raises(OwnershipError, match="per-leg ownership"):
+        assign_fill_ownership(event, order, strategy_id="meta_ranker")
+
+
 def test_net_owned_quantity_sums_deterministically() -> None:
     records = (
-        _record(quantity=Decimal("100"), suffix="open"),
-        _record(quantity=Decimal("-40"), suffix="trim"),
+        _record(quantity=Decimal("100"), suffix="open", minutes=0),
+        _record(quantity=Decimal("-40"), suffix="trim", minutes=5),
     )
 
     assert net_owned_quantity(records) == Decimal("60")
@@ -259,6 +336,7 @@ def _record(
     key: str = "paper:AMD",
     strategy_id: str | None = "meta_ranker",
     status: OwnershipStatus = OwnershipStatus.ASSIGNED,
+    minutes: int = 0,
 ) -> OwnershipRecord:
     assigned = status is not OwnershipStatus.UNASSIGNED
     return OwnershipRecord(
@@ -270,7 +348,7 @@ def _record(
         order_request_id=uuid5(NAMESPACE_URL, "ownership-test/order") if assigned else None,
         source_fill_id=uuid5(NAMESPACE_URL, f"ownership-test/fill/{suffix}") if assigned else None,
         quantity=quantity,
-        effective_at=NOW,
+        effective_at=NOW + timedelta(minutes=minutes),
         ownership_status=status,
     )
 

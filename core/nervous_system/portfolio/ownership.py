@@ -78,6 +78,13 @@ def assign_fill_ownership(
         raise OwnershipError("ownership requires an explicit strategy_id")
     if fill.order_request_id != order_request.order_request_id:
         raise OwnershipError("execution event belongs to another order")
+    if len(order_request.legs) > 1:
+        # Each leg of a spread is its own broker position, so one record cannot
+        # represent the fill.  Attributing the parent quantity to the first leg
+        # would over-attribute that leg and leave the others unassigned.
+        raise OwnershipError(
+            "multi-leg orders require per-leg ownership records"
+        )
     if fill.status not in _FILL_STATUSES or fill.filled_quantity <= _ZERO:
         raise OwnershipError(
             "ownership requires a broker-confirmed fill with positive quantity"
@@ -114,21 +121,28 @@ def assign_fill_ownership(
 
 
 def net_owned_quantity(records: Iterable[OwnershipRecord]) -> Decimal:
-    """Net attributed quantity, floored at zero.
+    """Net attributed quantity, clamped so it can never flip direction.
 
-    Over-closing is a reconciliation signal, not negative ownership: the system
-    can never claim to own less than nothing of a long position.
+    The earliest fill establishes the direction of the position.  Later fills
+    reduce it toward zero, but over-closing is a reconciliation signal rather
+    than a reversal: a long can never become negative, and a short position's
+    genuine negative ownership is preserved rather than floored away.
     """
 
-    total = sum(
-        (
-            record.quantity
-            for record in records
-            if record.ownership_status is OwnershipStatus.ASSIGNED
-        ),
-        _ZERO,
+    assigned = [
+        record
+        for record in records
+        if record.ownership_status is OwnershipStatus.ASSIGNED
+    ]
+    if not assigned:
+        return _ZERO
+    total = sum((record.quantity for record in assigned), _ZERO)
+    opening = min(
+        assigned, key=lambda record: (record.effective_at, str(record.ownership_id))
     )
-    return total if total > _ZERO else _ZERO
+    if opening.quantity >= _ZERO:
+        return total if total > _ZERO else _ZERO
+    return total if total < _ZERO else _ZERO
 
 
 __all__ = [

@@ -307,6 +307,35 @@ def test_unmapped_ticker_goes_to_the_unallocated_sector_bucket() -> None:
     assert any(
         issue.code == "SECTOR_UNMAPPED" for issue in report.quality.issues
     )
+    # A sector gap is a reportable warning, not unmeasurable exposure: it must
+    # not breach the known-exposure limit and block the entry.
+    assert report.has_unknown_exposure is False
+    known = next(
+        result for result in report.limit_results if result.limit_id == "exposure.known"
+    )
+    assert known.breached is False
+
+
+def test_only_error_severity_evidence_breaches_the_known_exposure_limit() -> None:
+    warning_only = run(
+        portfolio_state(
+            positions=(equity_position(symbol="ZZZZ", quantity=10.0, market_value=5_000.0),)
+        )
+    )
+    error_present = run(
+        portfolio_state(positions=(option_position(greeks={}),))
+    )
+
+    def known(report):
+        return next(
+            result
+            for result in report.limit_results
+            if result.limit_id == "exposure.known"
+        )
+
+    assert known(warning_only).breached is False
+    assert known(error_present).breached is True
+    assert known(error_present).reason_code == "PORTFOLIO_EXPOSURE_UNKNOWN"
 
 
 def test_theme_weights_are_normalised_and_never_double_count() -> None:
