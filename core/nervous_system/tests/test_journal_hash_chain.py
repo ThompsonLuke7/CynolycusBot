@@ -241,6 +241,45 @@ def test_redaction_is_recursive_through_lists_and_maps() -> None:
     assert cleaned["outer"][1]["nested"]["keep"] == 1
 
 
+def test_a_non_utc_timestamp_is_normalised_before_hashing() -> None:
+    """This project works in ET, so an ET-aware event must just work.
+
+    Hashing the pre-coercion value would make the record fail its own hash
+    check with a misleading error.
+    """
+
+    from datetime import datetime, timezone
+
+    eastern = timezone(timedelta(hours=-4))
+    record = event(
+        event_time=datetime(2026, 8, 2, 14, 30, 15, 123456, tzinfo=eastern),
+        observed_at=datetime(2026, 8, 2, 14, 30, 15, 128456, tzinfo=eastern),
+    )
+
+    assert record.event_time.tzinfo == timezone.utc
+    assert record.event_time.hour == 18
+    assert record.event_hash == record.computed_event_hash()
+    # The object path uses the normalised UTC instant, not the local wall clock.
+    assert "/2026/08/02/paper/20260802T183015123456Z_" in record.object_name
+
+
+def test_the_same_instant_in_two_zones_produces_one_identity() -> None:
+    from datetime import datetime, timezone
+
+    eastern = timezone(timedelta(hours=-4))
+    utc_form = event(
+        event_time=datetime(2026, 8, 2, 18, 30, 15, 123456, tzinfo=timezone.utc),
+        observed_at=datetime(2026, 8, 2, 18, 30, 15, 128456, tzinfo=timezone.utc),
+    )
+    et_form = event(
+        event_time=datetime(2026, 8, 2, 14, 30, 15, 123456, tzinfo=eastern),
+        observed_at=datetime(2026, 8, 2, 14, 30, 15, 128456, tzinfo=eastern),
+    )
+
+    assert utc_form.object_name == et_form.object_name
+    assert utc_form.event_hash == et_form.event_hash
+
+
 def test_production_live_events_are_refused() -> None:
     with pytest.raises(ValueError, match="PRODUCTION_LIVE"):
         event(environment=RuntimeEnvironment.PRODUCTION_LIVE)

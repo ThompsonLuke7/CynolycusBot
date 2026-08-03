@@ -101,7 +101,9 @@ def test_a_failed_optional_sink_is_degraded_but_durable(tmp_path: Path) -> None:
     result = composite.write(event())
 
     assert result.status is CompositeStatus.DEGRADED
-    assert result.is_durable is False
+    # Every required sink succeeded, so the evidence is durable where it must
+    # be; the optional failure is reported, not treated as a loss.
+    assert result.is_durable is True
     assert any("optional BrokenSink" in failure for failure in result.failures)
     assert len(result.receipts) == 1
 
@@ -140,6 +142,9 @@ def test_an_ephemeral_local_failure_does_not_block_a_cloud_run_write() -> None:
     result = composite.write(event())
 
     assert result.status is CompositeStatus.DEGRADED
+    assert result.is_durable is True, (
+        "an ephemeral local sink failing must not block a Cloud Run entry"
+    )
     assert any(
         receipt.backend is JournalBackend.GCS for receipt in result.receipts
     )

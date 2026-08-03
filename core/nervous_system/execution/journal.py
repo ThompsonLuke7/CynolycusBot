@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Annotated, Any, Protocol, runtime_checkable
 from uuid import UUID
 
-from pydantic import AfterValidator, Field, model_validator
+from pydantic import AfterValidator, Field, TypeAdapter, model_validator
 
 from core.nervous_system.contracts.base import (
     ContractModel,
@@ -64,6 +64,8 @@ _SECRET_HINTS = (
 # Order identifiers legitimately contain "order" and are not credentials.
 _SECRET_EXEMPT = ("order",)
 REDACTED = "***redacted***"
+
+_UTC_DATETIME_ADAPTER = TypeAdapter(UtcDatetime)
 
 
 class JournalError(Exception):
@@ -202,6 +204,13 @@ class ExecutionJournalEvent(ContractModel):
 
         fields = dict(fields)
         fields["payload"] = redact(fields.get("payload") or {})
+        # model_construct skips field coercion, so normalise the timestamps
+        # first. A caller passing an ET-aware time (as this project does
+        # everywhere) would otherwise hash the ET form while the validated
+        # model hashes UTC, and fail with a misleading hash mismatch.
+        for name in ("event_time", "observed_at"):
+            if fields.get(name) is not None:
+                fields[name] = _UTC_DATETIME_ADAPTER.validate_python(fields[name])
         probe = cls.model_construct(**fields, event_hash="0" * 64)
         return cls(**fields, event_hash=probe.computed_event_hash())
 
@@ -427,7 +436,18 @@ class CompositeJournalResult(ContractModel):
 
     @property
     def is_durable(self) -> bool:
-        return self.status in {CompositeStatus.DURABLE, CompositeStatus.IDEMPOTENT}
+        """Whether every *required* sink holds this event.
+
+        DEGRADED qualifies: an optional sink failed, but the evidence is
+        durable where it must be. Excluding it would let an ephemeral local
+        disk on Cloud Run halt trading even though GCS accepted the record.
+        """
+
+        return self.status in {
+            CompositeStatus.DURABLE,
+            CompositeStatus.IDEMPOTENT,
+            CompositeStatus.DEGRADED,
+        }
 
 
 class CompositeExecutionJournal:
