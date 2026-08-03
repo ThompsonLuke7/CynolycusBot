@@ -1210,3 +1210,7 @@ Scoped review caught leg ratios being multiplied by quantity, which overstated a
 {2026-08-02 23:36 ET} {agent: Claude} {nervous system Task 18 option selection}
 Implemented deterministic instrument selection: chain fitness on marks not trade prints, full-suite candidate enumeration, five named non-probability score components, and explicit equity/no-instrument fallback; selector `43`, options `161`, full nervous-system `594`.
 Scoped review caught the ordered preference list being ignored, which silently gave an option to intents that asked for equity first; mutation testing also caught a policy-permission hole where a forbidden structure could still be selected. Next: Task 19 Alpaca paper broker interface.
+
+{2026-08-03 00:11 ET} {agent: Claude} {nervous system Task 19 Alpaca paper broker}
+Extended the live options client backward-compatibly (client_order_id, mleg multi-leg, by-client-order-id lookup, PATCH replace, PATCH now never retried, credential redaction) and added a paper-only AlpacaPaperAdapter with typed broker errors; client `27`, adapter `45`, full nervous-system `639`, repo-wide failures unchanged.
+Tests caught option positions being mislabelled EQUITY (`us_option` vs a prefix check); review caught a pydantic error escaping the typed boundary. No order is submitted here - the gateway is Task 21. Next: Task 20 execution journal.
