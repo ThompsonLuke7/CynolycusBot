@@ -1202,3 +1202,7 @@ Scoped review closed three fail-open paths (unobserved open orders, unknown posi
 {2026-08-02 22:46 ET} {agent: Claude} {nervous system Task 16 portfolio exposure}
 Implemented canonical exposure (gross/net/symbol/sector/weighted-theme/factor-overlap/Greeks), fill-backed ownership, and broker reconciliation; focused `52`, full nervous-system on disposable PostgreSQL `431`, repo-wide failure set unchanged (11 pre-existing, stash-verified).
 Scoped review closed three defects: WARNING-severity gaps breaching the known-exposure limit, short ownership floored to zero, and multi-leg fills attributed to one leg. Next: Task 17 execution gateway.
+
+{2026-08-02 23:07 ET} {agent: Claude} {nervous system Task 17 option structures}
+Implemented exact-Decimal expiry payoff with analytic tail bounds, OCC/quote validation keeping marks apart from trade prints, and coverage rules for all approved structures; focused `120`, full nervous-system `551`, repo-wide failures unchanged.
+Scoped review caught leg ratios being multiplied by quantity, which overstated a 3-lot vertical's max_profit 3.86x; ratios are now per-structure. Next: Task 18 deterministic option selection.
