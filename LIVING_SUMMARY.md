@@ -1218,3 +1218,7 @@ Tests caught option positions being mislabelled EQUITY (`us_option` vs a prefix 
 {2026-08-03 16:47 ET} {agent: Claude} {nervous system Task 20 execution journal}
 Implemented the always-on journal: local create-exclusive install via os.link (not os.replace), GCS if_generation_match=0 with no write-path listing, recursive pre-hash redaction, per-order hash chains, and a composite sink reporting DURABLE/IDEMPOTENT/DEGRADED/FAILED/CONFLICT; journal `55`, full nervous-system `694`, repo-wide failures unchanged.
 Review caught ET timestamps failing their own hash check (probe skipped coercion) and DEGRADED wrongly counted as non-durable, which would have halted trading on an optional-sink hiccup. Next: Task 21 idempotent execution gateway.
+
+{2026-08-03 21:23 ET} {agent: Claude} {nervous system Task 21 execution gateway}
+Implemented the idempotent gateway (deterministic 48-char client order ID, durable reservation and INTENT_TO_SUBMIT before any POST, never-retry with client-ID resolution, lease plus fencing token, fail-operational exits capped to held quantity), broker reconciliation, and pending intents; gateway `87`, full nervous-system `781`, repo-wide failures unchanged.
+Mutation testing caught the exit exposure guard being unit-tested but not wired, which let an oversized exit reach the broker; review caught crashed in-flight attempts never resolving on restart. Next: Task 22 outbox, jobs, and decision orchestration.
