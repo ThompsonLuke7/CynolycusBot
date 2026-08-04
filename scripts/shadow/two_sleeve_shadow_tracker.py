@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -160,6 +161,63 @@ def load_bars(ticker: str) -> pd.DataFrame | None:
     b = pd.read_parquet(p, columns=["timestamp", "close", "high", "low"])
     b["timestamp"] = pd.to_datetime(b["timestamp"], utc=True)
     return b.drop_duplicates("timestamp").set_index("timestamp").sort_index()
+
+
+def resolve_underlying_entry_price(pos: dict) -> tuple[float | None, str]:
+    """Underlying price at entry, for a managed position of either route.
+
+    `evaluate_exit` walks the UNDERLYING's 4H bars, so entry_price must be an
+    underlying price. For equity-routed positions `entry_avg_price` already is
+    one. For option-routed positions it is the OPTION PREMIUM, and feeding that
+    to a bar walk compares a $2-30 premium against a $15-530 share price: every
+    option position clears the harvest sleeve's +7% target on its very first bar
+    (observed 2026-08-03: WDC +1599%, BE +915%, MLTX +831%, CIFR +701%, FCEL
+    +652%, BLZE +588% implied on bar one). The option audit carries the real
+    underlying price at order time, so prefer that; momentum also stamps the
+    signal bar's close. Returns (price, source) with price None when unresolvable.
+    """
+    route = str(pos.get("route") or "").strip().lower()
+    audit = pos.get("order_audit") or {}
+    signal_extra = ((pos.get("signal_audit") or {}).get("extra") or {})
+    if route == "option":
+        candidates = [
+            (audit.get("underlying_price"), "order_audit.underlying_price"),
+            (signal_extra.get("bar_close"), "signal_audit.extra.bar_close"),
+        ]
+    else:
+        candidates = [
+            (pos.get("entry_avg_price"), "entry_avg_price"),
+            (audit.get("reference_price"), "order_audit.reference_price"),
+            (signal_extra.get("bar_close"), "signal_audit.extra.bar_close"),
+        ]
+    for raw, source in candidates:
+        if raw is None:
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(val) and val > 0:
+            return val, source
+    return None, "unresolved"
+
+
+def entry_price_is_plausible(entry_price: float, bars: pd.DataFrame,
+                             entry_ts: pd.Timestamp, tol: float = 0.5) -> bool:
+    """True when `entry_price` is on the same scale as the underlying bar at entry.
+
+    A backstop for resolve_underlying_entry_price: any future route or audit-schema
+    change that reintroduces a premium-vs-share mix-up shows up here as an
+    order-of-magnitude gap rather than as silently fabricated +7% target exits.
+    Tolerance is deliberately loose (±50%) — it catches scale errors, not slippage.
+    """
+    prior = bars[bars.index <= entry_ts]
+    if prior.empty:
+        return True  # no reference bar; evaluate_exit will simply find no path
+    ref = float(prior["close"].iloc[-1])
+    if not math.isfinite(ref) or ref <= 0:
+        return True
+    return abs(entry_price / ref - 1.0) <= tol
 
 
 def latest_snapshot_dir() -> Path | None:
@@ -354,22 +412,30 @@ def run_module(module: str, cfg: dict) -> None:
             # A position opened THIS cycle by the real runner doesn't get
             # `entry_avg_price` until its next management pass (that field is
             # only backfilled from the broker's avg_entry on already-held
-            # positions — see core/live_4h_exec.py's build_mixed_plan). Fall
-            # back to the order-time reference price, else skip and retry once
-            # the runner's next cycle fills it in — never crash the whole
-            # module's shadow run over one freshly-opened ticker.
-            raw_entry_price = pos.get("entry_avg_price")
+            # positions — see core/live_4h_exec.py's build_mixed_plan). The
+            # resolver falls back to the order-time reference price, and for
+            # option-routed positions reads the underlying price rather than the
+            # premium; skip and retry once the runner's next cycle fills it in —
+            # never crash the whole module's shadow run over one ticker.
+            raw_entry_price, price_source = resolve_underlying_entry_price(pos)
             if raw_entry_price is None:
-                raw_entry_price = (pos.get("order_audit") or {}).get("reference_price")
-            if raw_entry_price is None:
-                print(f"  [{ticker}] no entry_avg_price yet (position opened this cycle, "
-                      f"not yet priced) — will retry next run")
+                print(f"  [{ticker}] no underlying entry price yet (route="
+                      f"{pos.get('route')}, position opened this cycle) — will retry next run")
+                continue
+            entry_price = float(raw_entry_price)
+            entry_bars = load_bars(ticker)
+            if entry_bars is not None and not entry_price_is_plausible(entry_price, entry_bars, entry_ts):
+                ref = entry_bars[entry_bars.index <= entry_ts]["close"].iloc[-1]
+                print(f"  [{ticker}] SKIP: entry price {entry_price:.4f} from {price_source} is off "
+                      f"the underlying scale (bar close {ref:.4f}) — refusing to fabricate an exit")
                 continue
             is_tail = (fval >= cfg["split_thresh"]) == cfg["split_positive"]
             policy = TAIL_POLICY if is_tail else HARVEST_POLICY
-            entry_price = float(raw_entry_price)
             record = {
                 "ticker": ticker, "entry_bar": pos["entry_bar"], "entry_price": entry_price,
+                # Always an UNDERLYING price (see resolve_underlying_entry_price);
+                # recorded so a future audit can tell premium from share price.
+                "entry_price_source": price_source,
                 "sleeve": "tail" if is_tail else "harvest", "policy": policy["name"],
                 "split_feature": cfg["split_feature"], "split_value": fval,
                 "split_thresh": cfg["split_thresh"], "real_route": pos.get("route"),
@@ -415,6 +481,9 @@ def run_module(module: str, cfg: dict) -> None:
             "policy": pos["policy"], "exit_ts": str(result["exit_ts"]),
             "bars_held": result["bars_held"], "exit_reason": result["reason"],
             "underlying_ret": underlying_ret,
+            "entry_price": entry_price,
+            "entry_price_source": pos.get("entry_price_source", "legacy_unknown"),
+            "real_route": pos.get("real_route"),
             "shadow_opened_at": pos.get("shadow_opened_at"),
             "replayed": _is_replayed(pos.get("shadow_opened_at"), result["exit_ts"]),
         }

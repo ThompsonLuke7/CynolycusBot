@@ -15,6 +15,8 @@ Feature categories:
 """
 from __future__ import annotations
 
+import ctypes
+import gc
 import logging
 from pathlib import Path
 from typing import Iterable
@@ -842,20 +844,73 @@ REGIME_FEATURE_COLUMNS_4H: list[str] = [
 # Pipeline orchestrator
 # ---------------------------------------------------------------------------
 
+_XSEC_RANK_SPECS = {
+    "ret_5": "xsec_ret_5_rank",
+    "ret_20": "xsec_ret_20_rank",
+    "rs_spy_20": "xsec_rs_spy_20_rank",
+    "rvol_20": "xsec_rvol_20_rank",
+    "dollar_vol_surge_20": "xsec_dollar_vol_surge_20_rank",
+    "atr_expand_14_60": "xsec_atr_expand_rank",
+    "atr_pct_14": "xsec_atr_pct_rank",
+}
+
+# Columns whose PRECISION changes a ranking, so they must stay float64 through
+# the combine. A cross-sectional rank is a comparison: two tickers whose ret_5
+# differs in the 8th decimal are distinct in float64 but exactly tied in
+# float32, and `rank(pct=True)` then averages the tie and moves both percentiles
+# by ~1/n. Measured on a 60-ticker sample that was 8 rows in 180,299 — tiny, but
+# it is a live model input, and holding 8 of 119 columns at full width costs
+# ~250 MB against the ~4.5 GB the downcast saves.
+_PRECISION_SENSITIVE_COLS = frozenset(_XSEC_RANK_SPECS) | {"dist_to_52w_high_atr"}
+
+
+def _downcast_for_combine(df: pd.DataFrame) -> pd.DataFrame:
+    """Halve a per-ticker frame's width before it joins the combined matrix.
+
+    Applied as each frame is produced, NOT in a pass over the assembled list.
+    A per-ticker frame is ~119 separate small column blocks, so freeing the
+    float64 originals returns them to glibc's free list rather than to the OS:
+    a post-hoc downcast pass measurably grew RSS from 8.0 GB to the 14 GB cap
+    (2026-08-03) instead of shrinking it. Converting at the source means the
+    float64 copy is transient and accumulation tops out at ~5.1 GB instead of
+    ~8.0 GB, and the combined parquet lands at 2.9 GB instead of 4.4 GB.
+
+    Measured honestly, this shifts the ceiling rather than removing it: the
+    float64 build was OOM-killed above a 16 GB cap, the float32 build completes
+    at a 15.74 GiB peak. The concat + sort tail, not the accumulation, is what
+    now dominates — see the note above the concat.
+
+    Rank sources keep full precision — see _PRECISION_SENSITIVE_COLS.
+    """
+    cast = {
+        c: "float32"
+        for c in df.select_dtypes("float64").columns
+        if c not in _PRECISION_SENSITIVE_COLS
+    }
+    return df.astype(cast) if cast else df
+
+
+def _release_freed_heap() -> None:
+    """Return freed small-block memory to the OS.
+
+    pandas builds the per-ticker frames out of many sub-mmap-threshold column
+    blocks, which glibc parks in its arenas on free. Without an explicit trim
+    the ~4.5 GB of released frames stays resident and is still counted against
+    the cgroup limit while the sort allocates its own copy.
+    """
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:  # pragma: no cover - non-glibc platforms
+        pass
+
+
 def _add_cross_sectional_features(combined: pd.DataFrame) -> pd.DataFrame:
     """Add same-timestamp ranks across the active ticker universe."""
     if combined.empty or not isinstance(combined.index, pd.MultiIndex):
         return combined
     ts_level = combined.index.names[0]
-    rank_specs = {
-        "ret_5": "xsec_ret_5_rank",
-        "ret_20": "xsec_ret_20_rank",
-        "rs_spy_20": "xsec_rs_spy_20_rank",
-        "rvol_20": "xsec_rvol_20_rank",
-        "dollar_vol_surge_20": "xsec_dollar_vol_surge_20_rank",
-        "atr_expand_14_60": "xsec_atr_expand_rank",
-        "atr_pct_14": "xsec_atr_pct_rank",
-    }
+    rank_specs = _XSEC_RANK_SPECS
     for source, target in rank_specs.items():
         if source in combined.columns:
             combined[target] = combined.groupby(level=ts_level)[source].rank(pct=True)
@@ -902,20 +957,39 @@ def _add_earnings_features_4h(combined: pd.DataFrame) -> pd.DataFrame:
         logger.warning("earnings_calendar unavailable (%s) — skipping earnings features", exc)
         return combined
 
-    idx_names = list(combined.index.names)
-    flat = combined.reset_index()
-    ts_col = idx_names[0] if idx_names and idx_names[0] in flat.columns else "timestamp"
-    flat["__date"] = pd.to_datetime(flat[ts_col], utc=True, errors="coerce").dt.tz_convert(None).dt.normalize()
-    flat = add_earnings_features(
-        flat, date_col="__date", ticker_col="ticker",
+    added = ["days_to_earnings", "days_since_earnings", "is_pre_earnings_3d", "is_post_earnings_3d", "earnings_in_fwd_window"]
+
+    # These five features are a pure function of (calendar date, ticker), and a 4H
+    # matrix carries ~6 bars per ticker-day, so resolve them on the DEDUPLICATED
+    # (date, ticker) pairs and broadcast back onto the full index. Running
+    # add_earnings_features over every row instead cost two whole-frame copies of
+    # an ~8.5 GB matrix (reset_index here, then its own `out = df.copy()`), which
+    # is what drove the 2026-07-31 rebuild past 24 GB of swap and livelocked the VM.
+    ts_level = combined.index.names[0]
+    dates = pd.to_datetime(combined.index.get_level_values(ts_level), utc=True, errors="coerce")
+    dates = dates.tz_convert(None).normalize()
+    tickers = combined.index.get_level_values("ticker")
+
+    spine = pd.DataFrame({"__date": dates, "ticker": tickers})
+    pairs = add_earnings_features(
+        spine.drop_duplicates(ignore_index=True),
+        date_col="__date", ticker_col="ticker",
         fwd_window_days=_EARNINGS_FWD_WINDOW_DAYS,
     )
-    flat = flat.drop(columns="__date")
-    out = flat.set_index(idx_names).sort_index()
-    added = ["days_to_earnings", "days_since_earnings", "is_pre_earnings_3d", "is_post_earnings_3d", "earnings_in_fwd_window"]
-    cov = out["days_to_earnings"].notna().mean() if "days_to_earnings" in out.columns else 0.0
-    logger.info("Added earnings features %s (days_to_earnings coverage %.1f%%)", added, 100 * cov)
-    return out
+    lut = pairs.set_index(["__date", "ticker"])[added]
+    resolved = lut.reindex(pd.MultiIndex.from_arrays([spine["__date"], spine["ticker"]]))
+    # One 5-column block insert, not five single-column ones: each separate
+    # assignment fragments the block manager, and consolidating a frame this wide
+    # is itself a full copy.
+    combined[added] = resolved[added].to_numpy()
+
+    cov = combined["days_to_earnings"].notna().mean() if "days_to_earnings" in combined.columns else 0.0
+    logger.info(
+        "Added earnings features %s on %d unique (date, ticker) pairs for %d rows "
+        "(days_to_earnings coverage %.1f%%)",
+        added, len(pairs), len(combined), 100 * cov,
+    )
+    return combined
 
 
 def _per_ticker_is_current(per_path: Path, ticker: str) -> bool:
@@ -1001,7 +1075,8 @@ def build_all_features_4h(
             if "low_price_flag" not in df_feat.columns and "close" in df_feat.columns:
                 df_feat["low_price_flag"] = (df_feat["close"] < 5.0).astype(float)
             df_feat["ticker"] = t
-            frames.append(df_feat)
+            frames.append(_downcast_for_combine(df_feat))
+            del df_feat
             continue
 
         try:
@@ -1032,7 +1107,8 @@ def build_all_features_4h(
             continue
         feats.to_parquet(per_path)
         feats["ticker"] = t
-        frames.append(feats)
+        frames.append(_downcast_for_combine(feats))
+        del feats
         if i % 25 == 0:
             logger.info("(%d/%d) features built for %s", i, len(tickers), t)
 
@@ -1046,10 +1122,35 @@ def build_all_features_4h(
         logger.error("No features built.")
         return None
 
+    # Memory discipline from here down: the combined matrix is ~8.5 GB in RAM
+    # (3,088 tickers x ~3,000 4H bars x 119 float64 cols) on a 19 GB box, so every
+    # avoidable whole-frame copy is a livelock. On 2026-07-31 this tail held four
+    # copies at once (concat result + reset_index + add_earnings_features' internal
+    # .copy() + set_index) and exhausted all 24 GB of swap, taking the VM down and
+    # blanking the session. Drop the per-ticker frames the instant concat is done,
+    # and promote `ticker` to an index level in place rather than round-tripping
+    # through a flat reset_index frame.
+    # This concat + the sort below are now the memory ceiling of the whole job:
+    # a full 2,886-ticker run peaks at 15.74 GiB here (2026-08-03) against ~5.1 GB
+    # of accumulated input. pd.concat must hold every input alive while it
+    # materialises the output, the sort then allocates a second full copy, and
+    # the input heap is thousands of small per-column blocks that glibc will not
+    # hand back however hard we trim. Getting materially below this needs an
+    # out-of-core combine, not another local tweak.
+    #
+    # The trim after clearing is still load-bearing rather than hygiene: it is
+    # what keeps the released frames from being counted twice against the cgroup
+    # limit while the sort runs.
     combined = pd.concat(frames, axis=0)
-    combined = combined.reset_index().rename(columns={"index": "timestamp"})
-    ts_col = "timestamp" if "timestamp" in combined.columns else combined.columns[0]
-    combined = combined.set_index([ts_col, "ticker"]).sort_index()
+    frames.clear()
+    del frames
+    _release_freed_heap()
+    # Every per-ticker parquet carries a 'timestamp' index, but the old
+    # reset_index path tolerated an unnamed one; keep that tolerance explicit
+    # rather than letting it surface as a None level deep in the earnings join.
+    if combined.index.name is None:
+        combined.index.name = "timestamp"
+    combined = combined.set_index("ticker", append=True).sort_index()
     combined = _add_cross_sectional_features(combined)
     combined = _add_earnings_features_4h(combined)
     combined.to_parquet(out_path)

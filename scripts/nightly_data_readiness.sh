@@ -149,6 +149,33 @@ run_timed() {
   return "$rc"
 }
 
+# Run a stage inside a memory-capped cgroup so a runaway allocation kills the
+# STAGE instead of the machine. On 2026-07-31 the 4H feature build reached
+# 17.5 GB RSS on a 19 GB box, drank all 24 GB of swap and drove PSI to 99% —
+# the kernel OOM killer never fired because everything was swapping rather than
+# failing to allocate, so the whole VM livelocked and the session went dark.
+# A cgroup limit converts that unbounded thrash into a clean non-zero exit,
+# which leaves the stamp stale (one dark session) instead of taking the box
+# down (which also kills the live server and every other job).
+#
+# MemorySwapMax=0 is the load-bearing half: without it the cgroup just swaps to
+# the same standstill. Degrades to an uncapped run if systemd --user isn't up.
+#
+# Built as a command PREFIX rather than a wrapper function because run_timed
+# execs `timeout`, which resolves a real binary and cannot call a shell function.
+# The 18G default is measured, not guessed: a full 2,886-ticker rebuild peaked at
+# 15.74 GiB on 2026-08-03 (accumulation tops out ~5 GB; the spike is pd.concat's
+# unavoidable 2x plus the sort's copy, on top of an input heap glibc will not
+# return). That is a tight fit on a 19 GB box — it holds while nothing else heavy
+# runs, which is true in the pre-open window this job owns. Lowering the peak
+# properly means an out-of-core combine; until then, do not schedule anything
+# large alongside stage 4.
+MEM_CAP=()
+if command -v systemd-run >/dev/null 2>&1 && systemctl --user is-system-running >/dev/null 2>&1; then
+  MEM_CAP=(systemd-run --user --scope --quiet --collect
+           -p MemoryMax="${READINESS_FEATURES_MEMORY_MAX:-18G}" -p MemorySwapMax=0 --)
+fi
+
 {
   echo ""
   echo "================================================================"
@@ -193,7 +220,11 @@ run_timed() {
   # only tickers whose features are older than their bars and always rewrites the
   # combined parquet, so it stays correct AND resumes. Use --force by hand after
   # feature-code changes, which leave mtimes untouched.
+    if [ "${#MEM_CAP[@]}" -eq 0 ]; then
+      echo "[$(ts)] NOTE: systemd --user unavailable; 4/5 runs without a memory cap"
+    fi
     run_timed "4/5 build-features" "${READINESS_FEATURES_TIMEOUT_SECONDS:-7200}" \
+      "${MEM_CAP[@]}" \
       "$PYTHON" -u -m strategies.momentum_expansion.main --build-features --refresh-stale
     STATUS=$?
   fi

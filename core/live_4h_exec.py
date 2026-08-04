@@ -26,6 +26,15 @@ from core.live_readiness import filter_entry_orders_for_readiness
 
 logger = logging.getLogger(__name__)
 
+# Where realized-PnL ledgers and the pending-order queues live. A module-level
+# constant rather than a literal default so the test suite can redirect ALL of
+# them at once (see conftest.py). Before that, core/tests/test_live_4h_exec_*.py
+# called execute_plan(module="dealer_ranker") without a ledger_root and every
+# pytest run appended fake "AAA" fills to the REAL
+# Data/inference/dealer_ranker/closed_trades.jsonl — 38 of its 41 rows were test
+# fixtures by 2026-08-03, against 3 genuine trades.
+DEFAULT_LEDGER_ROOT = "Data/inference"
+
 
 @dataclass(frozen=True)
 class ExecPolicy:
@@ -367,6 +376,7 @@ def execute_plan(
     pos_lookup: dict | None = None,
     bar: Any = None,
     persist_managed: Callable[[], None] | None = None,
+    ledger_root: str | None = None,
 ) -> set[str]:
     """Submit a mixed plan (paper/live). Each order routes per its 5th tuple element.
 
@@ -405,7 +415,12 @@ def execute_plan(
     # 2026-07-29: every after-close entry vanished with no pending-open queue
     # written. When the market is open, defer_entries_if_market_closed returns
     # the plan unchanged, so live-session behaviour is identical to before.
-    plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
+    plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits,
+                                         ledger_root=ledger_root)
+    # Exits are deferred separately and AFTER entries: the entry queue prunes
+    # new_managed (nothing was placed), while a deferred exit must leave managed
+    # state exactly as it is — the position is still held, only the order waits.
+    plan = defer_exits_if_opg_unavailable(module, bar, plan, limits, ledger_root=ledger_root)
     plan, skipped, reason = filter_entry_orders_for_readiness(plan, new_managed=new_managed)
     if skipped:
         print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
@@ -437,7 +452,8 @@ def execute_plan(
             if module and str(side).strip().lower() == "sell":
                 es = exit_context.get(sym, (None, None))[1] if exit_context else None
                 record_exit_realized_pnl(client, module=module, item=item, resp=resp,
-                                         entry_state=es, pos_lookup=pos_lookup, bar=bar)
+                                         entry_state=es, pos_lookup=pos_lookup, bar=bar,
+                                         ledger_root=ledger_root)
         except Exception as exc:  # noqa: BLE001
             print(f"  FAIL {side} {qty} {sym}: {exc}")
             failed.add(sym)
@@ -582,7 +598,7 @@ def poll_exit_fill_price(client, resp, *, timeout_s: float = 4.0, poll_s: float 
 
 
 def record_exit_realized_pnl(client, *, module, item, resp, entry_state, pos_lookup, bar,
-                             ledger_root: str = "Data/inference") -> None:
+                             ledger_root: str | None = None) -> None:
     """Append a realized-PnL row for a filled SELL (exit or trim). Never raises.
 
     Cost basis is the broker's average entry (from `pos_lookup`), so this is a
@@ -628,7 +644,7 @@ def record_exit_realized_pnl(client, *, module, item, resp, entry_state, pos_loo
             "runs_held": es.get("runs_held"),
             "order_id": str((resp or {}).get("id", "")) or None,
         }
-        out = Path(ledger_root) / str(module) / "closed_trades.jsonl"
+        out = Path(ledger_root or DEFAULT_LEDGER_ROOT) / str(module) / "closed_trades.jsonl"
         out.parent.mkdir(parents=True, exist_ok=True)
         with out.open("a") as fh:
             fh.write(json.dumps(rec, default=str) + "\n")
@@ -664,9 +680,135 @@ def drop_failed_entry(new_managed: dict | None, sym: str) -> None:
 # a pre-open flush re-rank them against the fresh top-K and submit at the next open
 # (the "next_open" fill validated by backtest_exits.py, ~0.17%/trade erosion).
 
-def pending_open_path(module: str, ledger_root: str = "Data/inference"):
+def pending_open_path(module: str, ledger_root: str | None = None):
     from pathlib import Path
-    return Path(ledger_root) / str(module) / "pending_open_entries.json"
+    return Path(ledger_root or DEFAULT_LEDGER_ROOT) / str(module) / "pending_open_entries.json"
+
+
+def pending_exit_path(module: str, ledger_root: str | None = None):
+    from pathlib import Path
+    return Path(ledger_root or DEFAULT_LEDGER_ROOT) / str(module) / "pending_exit_orders.json"
+
+
+# Alpaca only ACCEPTS an 'opg' order between 19:00 and 09:28 ET. equity_order_tif()
+# returns 'opg' whenever the market is closed, which covers 16:00-19:00 ET too —
+# and the 4H runners fire at ~16:20-16:35 ET, squarely inside that dead zone. So
+# every after-close EQUITY exit is submitted with a TIF the broker refuses:
+#   HTTP 403 {"code":40310000,"message":"opg orders must be submitted after
+#             7:00pm and before 9:28am"}
+# Observed 2026-08-03 on the Meta CRWV take_profit_+30% sell. Entries already
+# survive this via the pending-open queue; exits had no equivalent path, so they
+# just failed and were restored to managed state to fail again the next run.
+_OPG_WINDOW_OPEN_HOUR, _OPG_WINDOW_OPEN_MINUTE = 19, 0
+_OPG_WINDOW_CLOSE_HOUR, _OPG_WINDOW_CLOSE_MINUTE = 9, 28
+
+
+def opg_window_is_open(now=None) -> bool:
+    """True when the broker will accept an 'opg' order (19:00-09:28 ET)."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    local = now.astimezone(et)
+    minutes = local.hour * 60 + local.minute
+    return (minutes >= _OPG_WINDOW_OPEN_HOUR * 60 + _OPG_WINDOW_OPEN_MINUTE
+            or minutes < _OPG_WINDOW_CLOSE_HOUR * 60 + _OPG_WINDOW_CLOSE_MINUTE)
+
+
+def defer_exits_if_opg_unavailable(module, bar, plan, limits, *, now=None,
+                                   ledger_root: str | None = None) -> list:
+    """Queue EQUITY exits the broker would reject, instead of failing them.
+
+    Only bites when the market is closed AND we are outside the OPG submission
+    window; in every other state the plan is returned unchanged. Unlike the entry
+    path this NEVER touches managed state — the position is still held, so it must
+    stay tracked; only the order is postponed. Option exits are left alone: they
+    are day orders on a day-only instrument and do not hit the OPG restriction.
+    """
+    if not module:
+        return plan
+    try:
+        from core.calendar import is_market_open_now
+        if is_market_open_now(now) or opg_window_is_open(now):
+            return plan
+    except Exception:
+        return plan  # fail safe: if we can't tell, behave as before (submit)
+    import json
+    kept, deferred = [], []
+    for item in plan:
+        sym = item[0]
+        side = str(item[1]).strip().lower()
+        reason = item[3] if len(item) > 3 else ""
+        route = item[4] if len(item) > 4 else "option"
+        if side == "sell" and route != "option":
+            deferred.append({
+                "order_symbol": sym, "side": item[1], "qty": item[2], "route": route,
+                "limit": (limits or {}).get(sym), "reason": reason, "bar": str(bar),
+            })
+        else:
+            kept.append(item)
+    if deferred:
+        out = pending_exit_path(module, ledger_root)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        by_sym = {}
+        if out.exists():
+            try:
+                by_sym = {e["order_symbol"]: e for e in json.loads(out.read_text()).get("entries", [])}
+            except Exception:
+                by_sym = {}
+        for e in deferred:
+            by_sym[e["order_symbol"]] = e  # newest wins
+        out.write_text(json.dumps({"updated": now_utc_iso(), "entries": list(by_sym.values())},
+                                  default=str, indent=1))
+        logger.info("%s: outside the OPG window — deferred %d equity exits to next open -> %s",
+                    module, len(deferred), out)
+        print(f"\n{module}: deferred {len(deferred)} equity exit(s) to next open "
+              f"(outside the 19:00-09:28 ET OPG window)")
+    return kept
+
+
+def submit_pending_exit_orders(client, module, *, equity_tif_fn, pos_lookup=None,
+                               ledger_root: str | None = None) -> dict:
+    """Pre-open flush of queued exits. Skips anything no longer held. Clears the queue.
+
+    Deliberately does NOT re-rank: an exit decision was already made on its own
+    bar (take-profit, horizon, dropped_out) and is not conditional on today's
+    top-K the way a deferred entry is.
+    """
+    import json
+    out = pending_exit_path(module, ledger_root)
+    if not out.exists():
+        return {"submitted": [], "skipped": [], "count": 0}
+    try:
+        entries = json.loads(out.read_text()).get("entries", [])
+    except Exception:
+        entries = []
+    pos_lookup = pos_lookup or {}
+    submitted, skipped = [], []
+    for rec in entries:
+        sym = rec.get("order_symbol")
+        held = pos_lookup.get(sym, {}).get("qty", 0)
+        if held <= 0:
+            skipped.append({**rec, "skip": "not_held"})
+            continue
+        qty = min(int(rec.get("qty") or 0), int(held))
+        if qty <= 0:
+            skipped.append({**rec, "skip": "zero_qty"})
+            continue
+        try:
+            resp = client.submit_order(symbol=sym, qty=qty, side=rec.get("side", "sell"),
+                                       order_type="market", time_in_force=equity_tif_fn())
+            submitted.append({**rec, "qty": qty, "order_id": resp.get("id", "")})
+            print(f"  OK deferred-exit sell {qty} {sym}  id={resp.get('id', '?')}")
+        except Exception as exc:  # noqa: BLE001
+            skipped.append({**rec, "skip": f"submit_failed: {exc}"})
+            print(f"  FAIL deferred-exit sell {qty} {sym}: {exc}")
+    out.write_text(json.dumps({"updated": now_utc_iso(), "entries": [],
+                               "last_flush": {"submitted": submitted, "skipped": skipped}},
+                              default=str, indent=1))
+    return {"submitted": submitted, "skipped": skipped, "count": len(submitted)}
 
 
 def _managed_key_for_symbol(new_managed: dict | None, sym: str) -> str | None:
@@ -681,7 +823,7 @@ def _managed_key_for_symbol(new_managed: dict | None, sym: str) -> str | None:
 
 
 def defer_entries_if_market_closed(module, bar, plan, new_managed, limits, *,
-                                   now=None, ledger_root: str = "Data/inference") -> list:
+                                   now=None, ledger_root: str | None = None) -> list:
     """When the US equity market is CLOSED, pull ENTRY orders out of the plan into a
     per-module pending-open queue (they'd be rejected after hours) and prune them
     from new_managed (nothing was placed). Exits stay in the plan. Returns the plan
@@ -731,7 +873,7 @@ def defer_entries_if_market_closed(module, bar, plan, new_managed, limits, *,
 
 
 def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
-                                pos_lookup=None, ledger_root: str = "Data/inference") -> dict:
+                                pos_lookup=None, ledger_root: str | None = None) -> dict:
     """Pre-open flush: submit queued after-close entries that are STILL in the current
     top-K (re-rank) and not already held, as normal day orders. Clears the queue.
     Returns {"submitted": {ticker: managed_dict}, "skipped": [...], "count": n}; never

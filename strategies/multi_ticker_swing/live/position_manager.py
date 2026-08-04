@@ -80,6 +80,33 @@ _OPTION_PROFIT_TRAIL_GIVEBACK_PCT = 0.25
 _OPTION_TAKE_PROFIT_PCT = 3.00
 _RESTORED_UNKNOWN_MAX_LOSS_PCT = -0.35
 
+# Exits whose entire purpose is to LOCK IN PROFIT. They are discretionary: the
+# position is not in trouble, we are just choosing to stop riding it. Everything
+# not listed here (sl, expiry, restored-unknown, worthless, option-value exits)
+# is mandatory and must never be delayed or vetoed by the two guards below.
+_DISCRETIONARY_PROFIT_EXITS = frozenset({
+    "trail", "deferred_trail_failed", "deferred_trail_timeout", "no_progress",
+})
+
+# We hold an OPTION but the trail is measured on the UNDERLYING, and the two can
+# disagree completely. CALM on 2026-08-03: the underlying trail fired with the
+# short still +3.56% in our favour, but the put had decayed from 4.54 to 2.20, so
+# a "profit-protecting" exit realized -6.38% (-$345) and gave back $3,335 of
+# unrealized gain. When the leg we actually own is not in profit, a profit-taking
+# trail has nothing to protect — hold and let the hard stop or the option-value
+# exit make the risk decision instead.
+_TRAIL_REQUIRES_OPTION_PROFIT = True
+_TRAIL_OPTION_PROFIT_FLOOR_PCT = 0.0
+
+# CALM's exit also crossed a bid 2.23 / ask 4.12 quote — a spread 59.5% of mid.
+# Entries have had a spread gate since inception (_MAX_ENTRY_SPREAD_PCT_MID in
+# runner.py); exits had none, so a discretionary exit would pay any spread the
+# book quoted. Deferral is bounded: after _MAX_EXIT_SPREAD_DEFERRALS bars the
+# exit goes through regardless, because a permanently wide book must never trap
+# a position.
+_MAX_EXIT_SPREAD_PCT_MID = 0.35
+_MAX_EXIT_SPREAD_DEFERRALS = 12  # 5m bars ≈ 1 hour
+
 # The broker account is shared across every live module. Each one persists its
 # OWN managed-position state precisely so a sibling never has to guess at
 # another module's book -- so broker reconciliation must exclude anything a
@@ -568,6 +595,7 @@ class SwingPositionManager:
         self._last_close_failure_wall: dict[str, float] = {}
         self._pending_close_orders: dict[str, dict[str, Any]] = {}
         self._assigned_flatten_last_attempt: dict[str, float] = {}  # symbol → wall time
+        self._exit_spread_deferrals: dict[str, int] = {}  # ticker → consecutive wide-spread skips
         self._deferred_trail_cache = self._load_deferred_trail_cache()
         self._worthless_close_abandoned = self._load_worthless_close_abandoned()
         self._position_state_cache = self._load_open_position_state_cache()
@@ -1098,12 +1126,18 @@ class SwingPositionManager:
         if pos.deferred_trail_active:
             reason = pos.update(bar, allow_trail_exit=False)
             if reason:
+                if self._gate_discretionary_exit(pos, reason):
+                    self._persist_open_position_state()
+                    return
                 self._close_position(pos, reason, bar)
                 return
 
             was_deferred = pos.deferred_trail_active
             deferred_reason = pos.deferred_trail_decision(bar)
             if deferred_reason:
+                if self._gate_discretionary_exit(pos, deferred_reason):
+                    self._persist_open_position_state()
+                    return
                 self._close_position(pos, deferred_reason, bar)
                 return
             if was_deferred and not pos.deferred_trail_active:
@@ -1118,6 +1152,9 @@ class SwingPositionManager:
 
         reason = pos.update(bar)
         if reason:
+            if self._gate_discretionary_exit(pos, reason):
+                self._persist_open_position_state()
+                return
             if reason == "trail" and _should_defer_trail_exit(bar):
                 pos.mark_deferred_trail(bar)
                 self._persist_deferred_trail_cache()
@@ -1140,6 +1177,102 @@ class SwingPositionManager:
             self._close_position(pos, reason, bar)
             return
         self._persist_open_position_state()
+
+    @staticmethod
+    def option_leg_gain_pct(pos: SwingPosition) -> float | None:
+        """Current gain on the OPTION we actually hold, or None if unpriced.
+
+        `option_last_price` is refreshed every bar by _option_value_exit_reason ->
+        update_option_value, which runs before the underlying exit checks.
+        """
+        entry = _as_float(pos.option_entry_price)
+        last = _as_float(pos.option_last_price)
+        if not math.isfinite(entry) or entry <= 0.0:
+            return None
+        if not math.isfinite(last) or last <= 0.0:
+            return None
+        return (last - entry) / entry
+
+    def _veto_profit_exit_on_losing_option(self, pos: SwingPosition, reason: str) -> bool:
+        """True when a profit-protecting exit should be held back.
+
+        Only applies to _DISCRETIONARY_PROFIT_EXITS. An unpriced option leg never
+        vetoes (we cannot prove the exit is wrong, so the exit wins).
+        """
+        if not _TRAIL_REQUIRES_OPTION_PROFIT or reason not in _DISCRETIONARY_PROFIT_EXITS:
+            return False
+        gain = self.option_leg_gain_pct(pos)
+        if gain is None or gain > _TRAIL_OPTION_PROFIT_FLOOR_PCT:
+            return False
+        logger.info(
+            "[%s] HOLD %s: underlying trail fired but the option leg is %+.2f%% "
+            "(entry=%.2f last=%.2f) — no profit to protect",
+            pos.ticker, reason, gain * 100.0,
+            _as_float(pos.option_entry_price), _as_float(pos.option_last_price),
+        )
+        self._emit("profit_exit_vetoed_option_at_loss", {
+            **pos.to_dict(),
+            "reason": reason,
+            "option_gain_pct": float(gain),
+            "floor_pct": _TRAIL_OPTION_PROFIT_FLOOR_PCT,
+        })
+        return True
+
+    def _gate_discretionary_exit(self, pos: SwingPosition, reason: str) -> bool:
+        """True when a profit-protecting exit must not be submitted on this bar.
+
+        Single choke point for both guards so every discretionary-exit path gets
+        the same treatment. Mandatory exits fall straight through.
+        """
+        if reason not in _DISCRETIONARY_PROFIT_EXITS:
+            self._exit_spread_deferrals.pop(pos.ticker, None)
+            return False
+        if self._veto_profit_exit_on_losing_option(pos, reason):
+            return True
+        return self._defer_exit_on_wide_spread(pos, reason)
+
+    def _defer_exit_on_wide_spread(self, pos: SwingPosition, reason: str) -> bool:
+        """True when a discretionary exit should wait for a tighter book.
+
+        Bounded by _MAX_EXIT_SPREAD_DEFERRALS so a permanently wide quote cannot
+        strand the position.
+        """
+        if reason not in _DISCRETIONARY_PROFIT_EXITS:
+            self._exit_spread_deferrals.pop(pos.ticker, None)
+            return False
+        symbol = str(pos.option_symbol).strip().upper()
+        if not symbol:
+            return False
+        quote_meta = self._get_contract_quote_context(symbol=symbol)
+        spread_pct = _as_float((quote_meta or {}).get("spread_pct_mid"))
+        if not math.isfinite(spread_pct) or spread_pct <= _MAX_EXIT_SPREAD_PCT_MID:
+            self._exit_spread_deferrals.pop(pos.ticker, None)
+            return False
+        count = self._exit_spread_deferrals.get(pos.ticker, 0) + 1
+        if count > _MAX_EXIT_SPREAD_DEFERRALS:
+            logger.info(
+                "[%s] exit spread gate exhausted after %d bars (spread=%.1f%% of mid) "
+                "— submitting %s anyway", pos.ticker, count - 1, spread_pct * 100.0, reason,
+            )
+            self._exit_spread_deferrals.pop(pos.ticker, None)
+            self._emit("exit_spread_gate_exhausted", {
+                **pos.to_dict(), "reason": reason,
+                "spread_pct_mid": spread_pct, "max_spread_pct_mid": _MAX_EXIT_SPREAD_PCT_MID,
+                "deferrals": count - 1,
+            })
+            return False
+        self._exit_spread_deferrals[pos.ticker] = count
+        logger.info(
+            "[%s] DEFER %s: option spread %.1f%% of mid > %.1f%% cap (defer %d/%d)",
+            pos.ticker, reason, spread_pct * 100.0, _MAX_EXIT_SPREAD_PCT_MID * 100.0,
+            count, _MAX_EXIT_SPREAD_DEFERRALS,
+        )
+        self._emit("exit_deferred_wide_spread", {
+            **pos.to_dict(), "reason": reason,
+            "spread_pct_mid": spread_pct, "max_spread_pct_mid": _MAX_EXIT_SPREAD_PCT_MID,
+            "close_quote": quote_meta, "deferrals": count,
+        })
+        return True
 
     def _option_value_exit_reason(self, pos: SwingPosition) -> str | None:
         if not _OPTION_VALUE_EXIT_ENABLED:
@@ -1338,6 +1471,7 @@ class SwingPositionManager:
         self._emit("position_closed", payload)
         self._last_close_failure_wall.pop(pos.ticker, None)
         self._pending_close_orders.pop(pos.ticker, None)
+        self._exit_spread_deferrals.pop(pos.ticker, None)
         self._remove_deferred_trail_cache(pos)
         del self._positions[pos.ticker]
         self._persist_open_position_state()
@@ -1368,6 +1502,7 @@ class SwingPositionManager:
             "order_response": _safe_response((close_result or {}).get("response")),
             "verification": (close_result or {}).get("verification"),
         })
+        self._exit_spread_deferrals.pop(pos.ticker, None)
         self._positions.pop(pos.ticker, None)
         self._persist_open_position_state()
 

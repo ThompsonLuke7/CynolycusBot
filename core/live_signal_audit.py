@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -166,9 +167,23 @@ def build_option_order_audit(
 
 
 def append_jsonl(path: str | Path | None, payload: dict[str, Any]) -> None:
+    """Append one JSON record, durably.
+
+    The fsync is not optional bookkeeping. Without it, ext4 delayed allocation
+    journals the new file SIZE but not the data blocks, so an unclean host kill
+    leaves the record as a run of NUL bytes — a hole in the file that no reader
+    can parse. That is exactly what happened to
+    Data/inference/momentum_expansion/live_signal_audit.jsonl on 2026-07-24
+    (found 2026-08-03): 223 NUL bytes where one order_plan record had been, on a
+    box with a known WSL2 crash history. These are live trading audit logs, and
+    a few hundred appends a day makes the sync cost irrelevant next to losing a
+    record of what the system decided.
+    """
     if path is None:
         return
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(json_safe(payload), default=str, separators=(",", ":")) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())

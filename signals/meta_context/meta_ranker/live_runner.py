@@ -47,6 +47,7 @@ from core.live_4h_exec import (
     exit_action as _shared_exit_action,
     record_exit_realized_pnl,
     shares_for_notional,
+    submit_pending_exit_orders,
     submit_pending_open_entries,
 )
 from core.live_readiness import filter_entry_orders_for_readiness
@@ -271,6 +272,13 @@ def main():
     # (re-rank against the freshly-scored `targets`), then exit — no position mgmt.
     if getattr(args, "flush_pending_open", False):
         if args.submit:
+            # Exits first: a queued exit is an already-made decision on a position
+            # we still hold, and flushing it before entries frees the buying power
+            # the queued entries are about to use.
+            ex = submit_pending_exit_orders(client, AUDIT_MODULE,
+                                            equity_tif_fn=equity_order_tif, pos_lookup=pos_info)
+            if ex["count"] or ex["skipped"]:
+                print(f"pending-exit flush: submitted {ex['count']} / skipped {len(ex['skipped'])}")
             res = submit_pending_open_entries(client, AUDIT_MODULE, targets,
                                               equity_tif_fn=equity_order_tif, pos_lookup=pos_info)
             managed.update(res["submitted"])
