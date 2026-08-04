@@ -535,3 +535,110 @@ def test_finishing_records_counts_and_requires_the_token(operations) -> None:
     stored = operations.get_job(record.job_run_id)
     assert stored.status == "SUCCEEDED"
     assert stored.counts == {"matrix": {"rows": 10}}
+
+
+# --------------------------------------------------------------------------
+# Live data-script exit contracts
+# --------------------------------------------------------------------------
+
+
+def test_catchup_reports_a_systemic_failure(monkeypatch, tmp_path) -> None:
+    """Zero exit used to mean "the process ended", not "the bars are there"."""
+
+    import scripts.catchup_shared_bars as catchup
+
+    monkeypatch.setattr(catchup, "STATUS", tmp_path / "status.txt")
+    monkeypatch.setattr(
+        catchup, "_one", lambda t, end, want_1d: (t, 0, 0, "api exploded")
+    )
+
+    code = catchup.main(
+        ["--tickers", "AMD", "NVDA", "AVGO", "JPM", "--workers", "1"]
+    )
+
+    assert code == 1, "an all-errors run must not report success"
+
+
+def test_catchup_tolerates_a_few_delistings(monkeypatch, tmp_path) -> None:
+    import scripts.catchup_shared_bars as catchup
+
+    monkeypatch.setattr(catchup, "STATUS", tmp_path / "status.txt")
+    calls = {"n": 0}
+
+    def one(ticker, end, want_1d):
+        calls["n"] += 1
+        # One failure out of twenty is under the default 10% tolerance.
+        err = "delisted" if ticker == "DEAD" else None
+        return ticker, 1, 1, err
+
+    monkeypatch.setattr(catchup, "_one", one)
+    tickers = [f"T{i}" for i in range(19)] + ["DEAD"]
+
+    code = catchup.main(["--tickers", *tickers, "--workers", "1"])
+
+    assert code == 0, "normal delistings must not block the loop"
+
+
+def test_catchup_reports_an_empty_universe(monkeypatch, tmp_path) -> None:
+    """Fetching nothing at all is a failure, not a quiet success."""
+
+    import scripts.catchup_shared_bars as catchup
+
+    universe = tmp_path / "universe.csv"
+    universe.write_text("ticker\n")
+    monkeypatch.setattr(catchup, "STATUS", tmp_path / "status.txt")
+    monkeypatch.setattr(catchup, "_one", lambda t, end, want_1d: (t, 1, 1, None))
+
+    assert catchup.main(["--universe", str(universe), "--workers", "1"]) == 1
+
+
+def test_the_matrix_job_returns_zero_for_a_genuine_no_op(monkeypatch) -> None:
+    """Already current is success; failing to incorporate new bars is not."""
+
+    import pandas as pd
+
+    import signals.meta_context.meta_ranker.update_meta_matrix as job
+
+    current = pd.Timestamp("2026-08-03T18:00:00Z")
+    frame = pd.DataFrame(
+        {"timestamp": [current], "ticker": ["AMD"], "close": [1.0]}
+    ).set_index(["timestamp", "ticker"])
+    monkeypatch.setattr(job.pd, "read_parquet", lambda *a, **kw: frame)
+    monkeypatch.setattr(job, "_latest_reference_bar_timestamp", lambda: current)
+
+    assert job.main(["--matrix", "unused.parquet"]) == 0
+
+
+def test_a_rebuild_that_incorporated_nothing_is_reported() -> None:
+    """A completed rebuild still behind its inputs is a failure, not success."""
+
+    import pandas as pd
+
+    from signals.meta_context.meta_ranker.update_meta_matrix import (
+        rebuild_staleness_reason,
+    )
+
+    old = pd.Timestamp("2026-08-03T14:00:00Z")
+    new_bar = pd.Timestamp("2026-08-03T18:00:00Z")
+
+    assert rebuild_staleness_reason(
+        new_max_ts=old, latest_reference_ts=new_bar, previous_max_ts=old
+    ), "a matrix behind its inputs must be reported"
+    # Advanced, but still short of the newest bar: only the behind-inputs check
+    # catches this, so it pins that rule specifically.
+    partial = pd.Timestamp("2026-08-03T16:00:00Z")
+    assert rebuild_staleness_reason(
+        new_max_ts=partial, latest_reference_ts=new_bar, previous_max_ts=old
+    ), "a partial catch-up is still behind its inputs"
+    assert (
+        rebuild_staleness_reason(
+            new_max_ts=new_bar, latest_reference_ts=new_bar, previous_max_ts=old
+        )
+        is None
+    ), "a rebuild that caught up is healthy"
+    assert (
+        rebuild_staleness_reason(
+            new_max_ts=old, latest_reference_ts=None, previous_max_ts=old
+        )
+        is None
+    ), "no reference bars means nothing to be behind"

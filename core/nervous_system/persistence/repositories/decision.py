@@ -203,6 +203,12 @@ class DecisionRepository:
             )
         self._session.flush()
 
+    def get_decision_record(self, decision_record_id: UUID) -> DecisionRecord | None:
+        """Load one record, or None. Used to make replanning converge."""
+
+        row = self._session.get(DecisionRecordRow, decision_record_id)
+        return _record_from_row(row) if row is not None else None
+
     def save_decision_record(self, record: DecisionRecord) -> None:
         failure_reason = record.failure_message if record.status == "FAILED" else None
         self._session.add(

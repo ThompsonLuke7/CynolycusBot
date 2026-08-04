@@ -236,3 +236,158 @@ def test_the_stage_order_is_fixed() -> None:
         "INSTRUMENT_CANDIDATES",
         "INSTRUMENT_SELECTION",
     )
+
+
+# --------------------------------------------------------------------------
+# The atomic planning transaction (real PostgreSQL)
+# --------------------------------------------------------------------------
+
+
+def _chain_pieces():
+    """Build a self-consistent snapshot/intent/policy set with a fresh identity.
+
+    The disposable database keeps committed rows between runs, so a fixed
+    intent id would make the second run converge on an existing decision and
+    mask what these tests are checking.
+    """
+
+    import uuid as _uuid
+
+    from core.nervous_system.policy.engine import evaluate_policy
+    from core.nervous_system.tests.test_policy_engine import build_config
+
+    snapshot = build_snapshot()
+    intent = build_intent(snapshot=snapshot, intent_id=_uuid.uuid4())
+    policy = evaluate_policy(intent, snapshot, build_config())
+    return snapshot, intent, policy
+
+
+def test_planning_persists_the_whole_chain_and_one_outbox_event(
+    session_factory, pg_session
+) -> None:
+    from sqlalchemy import text
+
+    from core.nervous_system.persistence.uow import UnitOfWork
+
+    snapshot, intent, policy = _chain_pieces()
+    assert policy.action is PolicyAction.APPROVE
+
+    gateway = RecordingGateway()
+    coord = DecisionCoordinator(
+        environment=RuntimeEnvironment.QA_PAPER,
+        unit_of_work_factory=lambda: UnitOfWork(session_factory),
+        clock=clock(NOW),
+        gateway_factory=lambda: gateway,
+    )
+
+    outcome = coord.process_intent(
+        intent,
+        policy_mode=PolicyMode.ENFORCE,
+        submit=False,
+        snapshot=snapshot,
+        policy_decision=policy,
+    )
+
+    assert outcome.decision is not None, "a dry run still persists the full chain"
+    assert outcome.decision.status == "COMPLETE"
+    assert outcome.submitted is False
+    assert gateway.submits == [], "planning must not reach the gateway"
+
+    with UnitOfWork(session_factory) as uow:
+        stored = uow.session.execute(
+            text(
+                "SELECT status FROM nervous_system.decision_records "
+                "WHERE decision_record_id = :id"
+            ),
+            {"id": str(outcome.decision.decision_record_id)},
+        ).first()
+        events = uow.session.execute(
+            text(
+                "SELECT count(*) FROM nervous_system.outbox_events "
+                "WHERE aggregate_id = :id"
+            ),
+            {"id": str(outcome.decision.decision_record_id)},
+        ).scalar()
+    assert stored is not None and stored[0] == "COMPLETE"
+    assert events == 1, "the decision and its outbox event commit together"
+
+
+def test_replanning_the_same_intent_converges(session_factory) -> None:
+    """A retry after a crash must return the existing decision, not explode.
+
+    The chain is inserted with plain writes, so without a convergence check a
+    replay raises a unique-key violation and the intent is stuck forever.
+    """
+
+    from sqlalchemy import text
+
+    from core.nervous_system.persistence.uow import UnitOfWork
+
+    snapshot, intent, policy = _chain_pieces()
+    coord = DecisionCoordinator(
+        environment=RuntimeEnvironment.QA_PAPER,
+        unit_of_work_factory=lambda: UnitOfWork(session_factory),
+        clock=clock(NOW),
+    )
+    kwargs = dict(
+        policy_mode=PolicyMode.ENFORCE,
+        submit=False,
+        snapshot=snapshot,
+        policy_decision=policy,
+    )
+
+    first = coord.process_intent(intent, **kwargs)
+    second = coord.process_intent(intent, **kwargs)
+
+    assert first.decision is not None and second.decision is not None
+    assert first.decision.decision_record_id == second.decision.decision_record_id
+
+    with UnitOfWork(session_factory) as uow:
+        decisions = uow.session.execute(
+            text(
+                "SELECT count(*) FROM nervous_system.decision_records "
+                "WHERE decision_record_id = :id"
+            ),
+            {"id": str(first.decision.decision_record_id)},
+        ).scalar()
+    assert decisions == 1, "one logical decision, one row"
+
+
+def test_an_early_failure_records_no_dangling_lineage(session_factory) -> None:
+    import uuid as _uuid
+
+    from core.nervous_system.persistence.uow import UnitOfWork
+
+    # A unique message keeps this independent of anything already in the
+    # disposable database, while still exercising convergence within the run.
+    message = f"market state unavailable {_uuid.uuid4()}"
+    coord = DecisionCoordinator(
+        environment=RuntimeEnvironment.QA_PAPER,
+        unit_of_work_factory=lambda: UnitOfWork(session_factory),
+        clock=clock(NOW),
+    )
+
+    record = coord.record_failure(
+        failure_stage="SNAPSHOT",
+        failure_code="REQUIRED_STATE_MISSING",
+        failure_message=message,
+    )
+
+    assert record.status == "FAILED"
+    assert record.snapshot_id is None
+    assert record.intent_id is None
+    assert record.policy_decision_id is None
+
+    with UnitOfWork(session_factory) as uow:
+        stored = uow.decisions.get_decision_record(record.decision_record_id)
+    assert stored is not None
+    assert stored.failure_stage == "SNAPSHOT"
+
+    # Retrying the same failure converges rather than colliding on the
+    # unique content hash.
+    again = coord.record_failure(
+        failure_stage="SNAPSHOT",
+        failure_code="REQUIRED_STATE_MISSING",
+        failure_message=message,
+    )
+    assert again.decision_record_id == record.decision_record_id

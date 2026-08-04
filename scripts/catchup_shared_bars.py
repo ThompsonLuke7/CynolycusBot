@@ -11,6 +11,8 @@ Writes a progress line to /tmp/catchup_bars_status.txt every 25 tickers.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import argparse
 import datetime as dt
 import sys
@@ -43,12 +45,20 @@ def _one(ticker: str, end: str, do_1d: bool) -> tuple[str, int, int, str]:
     return ticker, n1, n4, err
 
 
-def main():
+def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--universe", default=str(UNIVERSE))
     ap.add_argument("--tickers", nargs="*", default=None)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--no-1d", action="store_true")
+    ap.add_argument(
+        "--max-error-rate",
+        type=float,
+        default=0.10,
+        help="Exit non-zero when more than this fraction of tickers error. A few "
+             "delistings are normal; a systemic API failure is not, and returning "
+             "zero for it let the 4H loop trade on bars that were never fetched.",
+    )
     # Fetch through NOW minus a delay buffer. Two reasons:
     #   * A date-only end ("2026-06-23") parses to 00:00 UTC — the START of today —
     #     so today's RTH bars (13:30-20:00 UTC) are excluded and a same-day catch-up
@@ -63,7 +73,7 @@ def main():
                     help="Only refresh is_eligible names (the tradeable set). Much faster "
                          "for a same-day pre-close catch-up; the full universe is backfilled "
                          "by the nightly readiness job.")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.tickers:
         tickers = [t.upper() for t in args.tickers]
@@ -89,8 +99,28 @@ def main():
                 msg = f"{done}/{len(tickers)} done, {errs} errors, {time.time()-t0:.0f}s elapsed"
                 STATUS.write_text(msg + "\n")
                 print(msg, flush=True)
-    print(f"\nDONE: {done} tickers, {errs} errors in {time.time()-t0:.0f}s")
+    elapsed = time.time() - t0
+    print(f"\nDONE: {done} tickers, {errs} errors in {elapsed:.0f}s")
+
+    # A zero exit here used to mean "the process ended", not "the bars are
+    # there". The 4H loop now depends on this status, so a systemic failure
+    # must be reported rather than swallowed.
+    attempted = len(tickers)
+    rate = (errs / attempted) if attempted else 0.0
+    STATUS.write_text(
+        f"{done}/{attempted} done, {errs} errors, {elapsed:.0f}s elapsed\n"
+    )
+    if attempted == 0:
+        print("  ! no tickers were attempted", flush=True)
+        return 1
+    if rate > args.max_error_rate:
+        print(
+            f"  ! error rate {rate:.1%} exceeds the {args.max_error_rate:.1%} limit",
+            flush=True,
+        )
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

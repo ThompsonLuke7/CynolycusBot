@@ -16,6 +16,8 @@ Output: overwrites meta_ranker_matrix.parquet (rolling window) with new bars app
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import argparse
 import logging
 import warnings
@@ -74,6 +76,31 @@ def _load_context() -> dict[str, pd.DataFrame]:
     return ctx
 
 
+def rebuild_staleness_reason(
+    *,
+    new_max_ts,
+    latest_reference_ts,
+    previous_max_ts,
+) -> str | None:
+    """Return why a completed rebuild should be reported as failed, or None.
+
+    Exit zero used to be returned even when the rebuild incorporated nothing,
+    so a stale matrix looked like a healthy run and the 4H runner scored it.
+    """
+
+    if latest_reference_ts is None:
+        return None
+    if new_max_ts < latest_reference_ts:
+        return (
+            f"matrix max ts {new_max_ts} is behind the newest input bar "
+            f"{latest_reference_ts}: the rebuild did not incorporate available data"
+        )
+    if previous_max_ts is not None and new_max_ts == previous_max_ts \
+            and latest_reference_ts > previous_max_ts:
+        return "matrix did not advance despite newer input bars"
+    return None
+
+
 def _latest_reference_bar_timestamp() -> pd.Timestamp | None:
     latest: list[pd.Timestamp] = []
     for ticker in REFERENCE_BAR_TICKERS:
@@ -95,13 +122,13 @@ def _load_1d_for_panel(ticker: str) -> pd.DataFrame | None:
     return None if b is None else b.set_index("timestamp")
 
 
-def main():
+def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("--tickers", nargs="*", default=None)
     ap.add_argument("--matrix", default=str(MATRIX))
     ap.add_argument("--roll-days", type=int, default=ROLL_DAYS)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     existing = pd.read_parquet(args.matrix).reset_index()
     existing["timestamp"] = pd.to_datetime(existing["timestamp"], utc=True)
@@ -114,7 +141,9 @@ def main():
             "no new reference-market 4H bar to add "
             f"(matrix={max_ts}, latest reference={latest_reference_ts})."
         )
-        return
+        # A genuine no-op: the matrix already covers the newest bar. This is
+        # success, unlike a rebuild that failed to incorporate available data.
+        return 0
 
     if args.tickers:
         tickers = [t.upper() for t in args.tickers]
@@ -202,9 +231,23 @@ def main():
     combined = combined[combined["timestamp"] >= cutoff].sort_values(["timestamp", "ticker"])
     combined = combined.set_index(["timestamp", "ticker"])
     _atomic_to_parquet(combined, args.matrix)
+    new_max_ts = combined.index.get_level_values("timestamp").max()
     print(f"\nwrote {len(combined):,} rows (rolling {args.roll_days}d) -> {args.matrix}")
-    print(f"  new max ts: {combined.index.get_level_values('timestamp').max()}")
+    print(f"  new max ts: {new_max_ts}")
+
+    # A zero exit used to be returned even when the rebuild incorporated
+    # nothing, so a stale matrix looked like a healthy run and the 4H runner
+    # scored it anyway. Report a no-op that left input bars unincorporated.
+    stale = rebuild_staleness_reason(
+        new_max_ts=new_max_ts,
+        latest_reference_ts=latest_reference_ts,
+        previous_max_ts=max_ts,
+    )
+    if stale is not None:
+        print(f"  ! {stale}", flush=True)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

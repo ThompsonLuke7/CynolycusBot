@@ -15,8 +15,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from core.nervous_system.contracts.base import content_hash
 from core.nervous_system.contracts.decisions import (
     DecisionRecord,
     HashedDecisionArtifact,
@@ -28,6 +29,8 @@ from core.nervous_system.contracts.enums import (
 )
 from core.nervous_system.contracts.intent import TradeIntent
 
+from .events import AggregateType, EventType
+
 
 class CoordinatorRefusal(str, Enum):
     PRODUCTION_LIVE = "PRODUCTION_LIVE_DISABLED"
@@ -37,6 +40,9 @@ class CoordinatorRefusal(str, Enum):
     NO_ELIGIBLE_INSTRUMENT = "NO_ELIGIBLE_INSTRUMENT"
     STAGE_FAILED = "STAGE_FAILED"
 
+
+# uuid5(NAMESPACE_URL, "https://cynolycus.local/nervous-system/decision-record@1")
+_DECISION_NAMESPACE = uuid5(NAMESPACE_URL, "cynolycus/nervous-system/decision-record@1")
 
 STAGES = (
     "RAW_STRATEGY_OUTPUT",
@@ -54,6 +60,73 @@ class PlanningOutcome:
     detail: str | None = None
     execution_result: Any = None
     gateway_invoked: bool = False
+
+
+def build_decision_record(
+    *,
+    decision_record_id: UUID,
+    decision_time: datetime,
+    snapshot: Any,
+    intent: TradeIntent,
+    policy_decision: Any,
+    artifacts: Mapping[str, HashedDecisionArtifact],
+    order_requests: Sequence[Any] = (),
+    source_manifest_hash: str,
+    config_hash: str,
+) -> DecisionRecord:
+    """Assemble the complete record, deriving every lineage hash from content."""
+
+    return DecisionRecord(
+        decision_record_id=decision_record_id,
+        decision_time=decision_time,
+        status="COMPLETE",
+        snapshot_id=snapshot.snapshot_id,
+        intent_id=intent.intent_id,
+        policy_decision_id=policy_decision.policy_decision_id,
+        order_request_ids=tuple(item.order_request_id for item in order_requests),
+        source_manifest_hash=source_manifest_hash,
+        snapshot_hash=snapshot.content_hash,
+        intent_hash=content_hash(intent, exclude={"intent_id"}),
+        policy_hash=content_hash(policy_decision, exclude={"policy_decision_id"}),
+        raw_strategy_output=artifacts["RAW_STRATEGY_OUTPUT"],
+        exposure_report=artifacts["EXPOSURE_REPORT"],
+        instrument_candidates=artifacts["INSTRUMENT_CANDIDATES"],
+        instrument_selection=artifacts["INSTRUMENT_SELECTION"],
+        order_hashes=tuple(item.request_hash for item in order_requests),
+        config_hash=config_hash,
+    )
+
+
+def failed_decision_record(
+    *,
+    decision_record_id: UUID,
+    decision_time: datetime,
+    failure_stage: str,
+    failure_code: str,
+    failure_message: str,
+    source_manifest_hash: str | None = None,
+) -> DecisionRecord:
+    """Record an early failure durably without inventing lineage.
+
+    A failure before a snapshot or policy exists must not manufacture IDs for
+    rows that were never written, so every link stays null.
+    """
+
+    return DecisionRecord(
+        decision_record_id=decision_record_id,
+        decision_time=decision_time,
+        status="FAILED",
+        snapshot_id=None,
+        intent_id=None,
+        policy_decision_id=None,
+        source_manifest_hash=source_manifest_hash,
+        snapshot_hash=None,
+        intent_hash=None,
+        policy_hash=None,
+        failure_stage=failure_stage,
+        failure_code=failure_code,
+        failure_message=failure_message,
+    )
 
 
 def not_run(stage: str, reason: str) -> HashedDecisionArtifact:
@@ -197,11 +270,23 @@ class DecisionCoordinator:
             "INSTRUMENT_SELECTION", 1, {"status": "RUN"}
         )
 
+        # Everything planned. Persist the whole chain and its outbox event in
+        # one transaction, before the broker is considered.
+        decision = None
+        if snapshot is not None and policy_decision is not None:
+            decision = self._persist_planning(
+                snapshot=snapshot,
+                intent=intent,
+                policy_decision=policy_decision,
+                artifacts=artifacts,
+                order_requests=(order_request,) if order_request is not None else (),
+            )
+
         if not allowed:
             # Dry run: the full planning chain is real and durable, and the
             # gateway is simply never reached.
             return PlanningOutcome(
-                decision=None,
+                decision=decision,
                 submitted=False,
                 refusal=CoordinatorRefusal.DRY_RUN,
                 detail="planning complete; submission not requested",
@@ -209,18 +294,123 @@ class DecisionCoordinator:
 
         if order_request is None:
             return PlanningOutcome(
-                decision=None,
+                decision=decision,
                 refusal=CoordinatorRefusal.NO_ELIGIBLE_INSTRUMENT,
                 detail="no order request to submit",
             )
 
         gateway = self._build_gateway()
-        result = gateway.submit(decision=self._decision_stub(intent), request=order_request)
+        result = gateway.submit(decision=decision, request=order_request)
         return PlanningOutcome(
-            decision=None,
+            decision=decision,
             submitted=True,
             execution_result=result,
             gateway_invoked=True,
+        )
+
+    def _persist_planning(
+        self,
+        *,
+        snapshot: Any,
+        intent: TradeIntent,
+        policy_decision: Any,
+        artifacts: Mapping[str, HashedDecisionArtifact],
+        order_requests: Sequence[Any],
+    ) -> DecisionRecord:
+        """Commit snapshot, intent, policy, artifacts, orders, and outbox once.
+
+        The broker is never called from inside this transaction: a broker call
+        holding a database transaction open would make a slow or hung request
+        block every other writer, and a rollback would erase the record that
+        the call happened.
+        """
+
+        from core.nervous_system.persistence.repositories.decision import (
+            CompleteDecisionChain,
+        )
+
+        decision_id = self._decision_id(intent, policy_decision)
+        record = build_decision_record(
+            decision_record_id=decision_id,
+            decision_time=intent.created_at,
+            snapshot=snapshot,
+            intent=intent,
+            policy_decision=policy_decision,
+            artifacts=artifacts,
+            order_requests=order_requests,
+            source_manifest_hash=snapshot.content_hash,
+            config_hash=policy_decision.config_version.encode("utf-8").hex().ljust(64, "0")[:64],
+        )
+        chain = CompleteDecisionChain(
+            snapshot=snapshot,
+            intent=intent,
+            policy_decision=policy_decision,
+            record=record,
+            order_requests=tuple(order_requests),
+        )
+        with self._uow_factory() as uow:
+            # Replanning the same intent and policy must converge, not explode
+            # on a unique key. A crash between the commit and the caller's
+            # return would otherwise leave the retry permanently stuck.
+            existing = uow.decisions.get_decision_record(decision_id)
+            if existing is not None:
+                uow.commit()
+                return existing
+            uow.decisions.save_chain(chain)
+            uow.operations.enqueue(
+                event_type=EventType.DECISION_RECORDED.value,
+                aggregate_type=AggregateType.DECISION.value,
+                aggregate_id=str(record.decision_record_id),
+                payload={
+                    "intent_id": str(intent.intent_id),
+                    "policy_action": policy_decision.action.value,
+                    "order_request_ids": [
+                        str(item.order_request_id) for item in order_requests
+                    ],
+                },
+                created_at=self._clock(),
+            )
+            uow.commit()
+        return record
+
+    def record_failure(
+        self,
+        *,
+        failure_stage: str,
+        failure_code: str,
+        failure_message: str,
+        decision_time: datetime | None = None,
+    ) -> DecisionRecord:
+        """Persist a durable FAILED record for a failure before planning."""
+
+        when = decision_time or self._clock()
+        # Identity is derived from content so that retrying the same failure
+        # converges. The decision_records content hash is unique, so a random
+        # ID would collide on a replay instead of returning the existing row.
+        record = failed_decision_record(
+            decision_record_id=uuid5(
+                _DECISION_NAMESPACE,
+                f"failed|{failure_stage}|{failure_code}|{failure_message}|{when.isoformat()}",
+            ),
+            decision_time=when,
+            failure_stage=failure_stage,
+            failure_code=failure_code,
+            failure_message=failure_message,
+        )
+        with self._uow_factory() as uow:
+            existing = uow.decisions.get_decision_record(record.decision_record_id)
+            if existing is not None:
+                uow.commit()
+                return existing
+            uow.decisions.save_decision_record(record)
+            uow.commit()
+        return record
+
+    @staticmethod
+    def _decision_id(intent: TradeIntent, policy_decision: Any) -> UUID:
+        return uuid5(
+            _DECISION_NAMESPACE,
+            f"{intent.intent_id}|{policy_decision.policy_decision_id}",
         )
 
     def _build_gateway(self) -> Any:
@@ -231,16 +421,13 @@ class DecisionCoordinator:
         self.gateway_constructions += 1
         return self._gateway_factory()
 
-    @staticmethod
-    def _decision_stub(intent: TradeIntent) -> Any:
-        return intent
-
-
 __all__ = [
     "STAGES",
     "CoordinatorRefusal",
     "DecisionCoordinator",
     "PlanningOutcome",
+    "build_decision_record",
     "downstream_not_run",
+    "failed_decision_record",
     "not_run",
 ]
