@@ -1230,3 +1230,7 @@ Governed run_4h_loop.py: it previously ran the live runner even after failed bar
 {2026-08-03 22:33 ET} {agent: Claude} {nervous system Task 22 carried-forward items}
 Completed the atomic planning transaction (chain plus outbox event in one commit, broker never inside it) with convergent replanning and content-addressed failure records, and closed the two zero-exit seams: catchup now fails above a 10% ticker error rate, and the matrix job fails when a rebuild leaves input bars unincorporated.
 Outbox/coordinator `47`, full nervous-system `828`, repo-wide failures unchanged. Still deferred to Task 23: the combined-server/dashboard submit paths and the flock-based job guard. Next: Task 23 Meta Ranker gateway cutover.
+
+{2026-08-04 00:55 ET} {agent: Claude} {nervous system Task 23 increment 1}
+Removed the Meta live-trading route entirely: the runner rejects --live and is pinned to PAPER, the dashboard lost live_env_file/set_live//api/set-live and defaults to read-only, and combined_server pins Meta passes to live=False and rejects --meta-ranker-live at startup; only Meta wiring changed.
+Added AST no-bypass tests that also pin an inventory of the eight remaining direct submit sites, which must shrink to zero. No-bypass `11`, nervous-system `778 passed/61 skipped` (PostgreSQL was down, so DB tests skipped), repo-wide failures unchanged. Next: increment 2, TradeIntent mapping and gateway routing in live_runner.py.
