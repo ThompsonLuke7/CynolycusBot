@@ -332,6 +332,15 @@ class ExecutionGateway:
                 # Already settled: return what happened, never send again.
                 uow.commit()
                 return self._result_for_resolved(attempt)
+            if attempt.status in {
+                SubmissionAttemptStatus.SUBMITTING,
+                SubmissionAttemptStatus.AMBIGUOUS,
+            }:
+                # A previous run reached the broker and did not finish. Resolve
+                # it by asking about the deterministic client order ID rather
+                # than leaving it stuck or sending again.
+                uow.commit()
+                return self._recover_in_flight(request, attempt, client_order_id)
             claimed = uow.executions.claim_submission(
                 submission_attempt_id=attempt.submission_attempt_id,
                 owner=self._worker_id,
@@ -754,6 +763,68 @@ class ExecutionGateway:
                 "response": dict(order.raw),
             },
             postgres_persistence_status=postgres_status,
+        )
+
+    def _recover_in_flight(
+        self,
+        request: OrderRequest,
+        attempt: Any,
+        client_order_id: str,
+    ) -> ExecutionResult:
+        """Settle an attempt whose previous run died around the broker call."""
+
+        try:
+            found = self._broker.find_by_client_order_id(client_order_id)
+        except BrokerError as exc:
+            return ExecutionResult(
+                outcome=ExecutionOutcome.AMBIGUOUS,
+                order_request_id=request.order_request_id,
+                client_order_id=client_order_id,
+                submission_attempt_id=attempt.submission_attempt_id,
+                reason_code="RECOVERY_LOOKUP_UNAVAILABLE",
+                detail=str(exc),
+            )
+
+        if found is not None:
+            with self._open_uow() as uow:
+                uow.executions.transition_attempt(
+                    submission_attempt_id=attempt.submission_attempt_id,
+                    expected=attempt.status,
+                    target=SubmissionAttemptStatus.ACCEPTED,
+                    broker_order_id=found.broker_order_id,
+                    resolved_at=self._clock(),
+                )
+                uow.commit()
+            return ExecutionResult(
+                outcome=ExecutionOutcome.SUBMITTED,
+                order_request_id=request.order_request_id,
+                client_order_id=client_order_id,
+                submission_attempt_id=attempt.submission_attempt_id,
+                broker_order_id=found.broker_order_id,
+                status=found.status,
+                reason_code="RECOVERED_BY_CLIENT_ORDER_ID",
+            )
+
+        # The broker positively reports no such order, so nothing landed. This
+        # attempt is closed rather than re-POSTed: a fresh decision must decide
+        # whether the trade is still wanted, since the crash may have been
+        # minutes ago and the request may no longer be appropriate.
+        with self._open_uow() as uow:
+            uow.executions.transition_attempt(
+                submission_attempt_id=attempt.submission_attempt_id,
+                expected=attempt.status,
+                target=SubmissionAttemptStatus.REJECTED,
+                error_code="CRASHED_BEFORE_BROKER_CONFIRMATION",
+                resolved_at=self._clock(),
+            )
+            uow.commit()
+        return ExecutionResult(
+            outcome=ExecutionOutcome.REJECTED,
+            order_request_id=request.order_request_id,
+            client_order_id=client_order_id,
+            submission_attempt_id=attempt.submission_attempt_id,
+            reason_code="CRASHED_BEFORE_BROKER_CONFIRMATION",
+            detail="no broker order exists for this client order ID",
         )
 
     def _result_for_resolved(self, attempt: Any) -> ExecutionResult:

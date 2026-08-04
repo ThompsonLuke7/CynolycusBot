@@ -288,6 +288,82 @@ def test_a_lost_response_journal_is_ambiguous_not_a_rejection(uow_factory) -> No
     assert _attempt(uow_factory, request).status is SubmissionAttemptStatus.AMBIGUOUS
 
 
+class CrashingBroker(FakeBroker):
+    """Dies mid-call, the way a killed process would."""
+
+    def submit(self, request):
+        self.submit_calls.append(request)
+        raise KeyboardInterrupt("process killed during the broker call")
+
+
+def _crash_mid_submit(uow_factory, request) -> None:
+    try:
+        gateway_for(uow_factory, broker=CrashingBroker()).submit(
+            decision=decision_record(), request=request
+        )
+    except KeyboardInterrupt:
+        pass
+
+
+def test_a_crash_during_the_broker_call_leaves_the_attempt_in_flight(
+    uow_factory,
+) -> None:
+    request = order_request()
+    _crash_mid_submit(uow_factory, request)
+
+    assert _attempt(uow_factory, request).status is SubmissionAttemptStatus.SUBMITTING
+
+
+def test_restart_resolves_an_in_flight_attempt_by_client_order_id(
+    uow_factory,
+) -> None:
+    """The order landed; restart must find it, not resubmit or stall."""
+
+    request = order_request()
+    _crash_mid_submit(uow_factory, request)
+    broker = FakeBroker(lookup_result=broker_order(request))
+
+    result = gateway_for(uow_factory, broker=broker, worker_id="restart").submit(
+        decision=decision_record(), request=request
+    )
+
+    assert result.outcome is ExecutionOutcome.SUBMITTED
+    assert result.reason_code == "RECOVERED_BY_CLIENT_ORDER_ID"
+    assert broker.lookup_calls == [expected_client_order_id(request)]
+    assert broker.submit_calls == [], "recovery must never resend"
+    assert _attempt(uow_factory, request).status is SubmissionAttemptStatus.ACCEPTED
+
+
+def test_restart_closes_an_attempt_the_broker_never_received(uow_factory) -> None:
+    request = order_request()
+    _crash_mid_submit(uow_factory, request)
+    broker = FakeBroker()
+
+    result = gateway_for(uow_factory, broker=broker, worker_id="restart").submit(
+        decision=decision_record(), request=request
+    )
+
+    assert result.outcome is ExecutionOutcome.REJECTED
+    assert result.reason_code == "CRASHED_BEFORE_BROKER_CONFIRMATION"
+    assert broker.submit_calls == [], "a fresh decision must authorise any new attempt"
+    assert _attempt(uow_factory, request).status is SubmissionAttemptStatus.REJECTED
+
+
+def test_restart_stays_ambiguous_when_the_broker_cannot_be_asked(uow_factory) -> None:
+    request = order_request()
+    _crash_mid_submit(uow_factory, request)
+    broker = FakeBroker(lookup_result=BrokerUnavailable("broker down"))
+
+    result = gateway_for(uow_factory, broker=broker, worker_id="restart").submit(
+        decision=decision_record(), request=request
+    )
+
+    assert result.outcome is ExecutionOutcome.AMBIGUOUS
+    assert result.reason_code == "RECOVERY_LOOKUP_UNAVAILABLE"
+    assert broker.submit_calls == []
+    assert _attempt(uow_factory, request).status is SubmissionAttemptStatus.SUBMITTING
+
+
 def test_a_crash_after_reservation_does_not_resubmit_on_restart(uow_factory) -> None:
     """Restart finds the resolved attempt and returns it instead of sending."""
 
