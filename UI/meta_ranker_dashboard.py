@@ -55,16 +55,16 @@ def _json_safe(o: Any) -> Any:
 
 
 class MetaRankerDashboardApp:
-    def __init__(self, *, env_file: str = ".env#PAPER", live_env_file: str | None = None,
-                 mode: str = "equity", submit: bool = True, top_k: int = 10) -> None:
+    def __init__(self, *, env_file: str = ".env#PAPER",
+                 mode: str = "equity", submit: bool = False, top_k: int = 10) -> None:
+        # Paper only. The live env toggle was removed: the governed Meta path
+        # has no live route, and a dashboard button must not be able to create
+        # one. ``submit`` now defaults to False so the page is read-only unless
+        # a caller explicitly opts in.
         self.paper_env_file = env_file
-        # When set, the LIVE toggle routes the loop + account view to this
-        # real-money env. Off by default.
-        self.live_env_file = live_env_file
         self.mode = mode
-        self.submit = submit  # always submit on the selected account (no dry-run)
+        self.submit = submit
         self.top_k = top_k
-        self._live = False
         self._client = AlpacaOptionsClient(env_file=self.env_file)
         # (ts, result, matrix_mtime) — re-read the 65 MB matrix only when the
         # file actually changes, not on every 5 s poll.
@@ -77,16 +77,7 @@ class MetaRankerDashboardApp:
 
     @property
     def env_file(self) -> str:
-        return self.live_env_file if (self._live and self.live_env_file) else self.paper_env_file
-
-    def set_live(self, live: bool) -> dict:
-        want = bool(live) and bool(self.live_env_file)
-        if want != self._live:
-            self._live = want
-            self._client = AlpacaOptionsClient(env_file=self.env_file)
-            self._scan_cache = None
-            self._broker_cache = None
-        return {"live": self._live, "available": bool(self.live_env_file)}
+        return self.paper_env_file
 
     # ---- data ----
     def _scan(self) -> dict:
@@ -193,8 +184,7 @@ class MetaRankerDashboardApp:
         return {
             "ts": datetime.now(timezone.utc).isoformat(),
             "config": {"env": self.env_file, "mode": self.mode, "submit": self.submit,
-                       "top_k": self.top_k, "live": self._live,
-                       "live_available": bool(self.live_env_file)},
+                       "top_k": self.top_k, "live": False, "live_available": False},
             "scan": self._scan(),
             "account": account,
             "performance": module_performance(
@@ -214,10 +204,10 @@ class MetaRankerDashboardApp:
 
         def _go():
             argv = [sys.executable, str(LOOP), "--mode", self.mode,
-                    "--top-k", str(self.top_k), "--submit",
+                    "--top-k", str(self.top_k),
                     "--skip-bars", "--skip-feeds", "--skip-matrix"]
-            if self._live:
-                argv.append("--live")
+            if self.submit:
+                argv.append("--submit")
             try:
                 subprocess.run(argv, cwd=str(REPO), env={**os.environ, "PYTHONPATH": str(REPO)})
             except Exception as exc:  # noqa: BLE001
@@ -228,7 +218,7 @@ class MetaRankerDashboardApp:
                 self._loop_running = False
 
         threading.Thread(target=_go, daemon=True, name="meta-ranker-manual-loop").start()
-        return {"started": True, "live": self._live}
+        return {"started": True, "live": False, "submit": self.submit}
 
 
 _PAGE = """<!doctype html><html><head><meta charset=utf-8><title>Meta Ranker</title>
@@ -273,7 +263,6 @@ document.getElementById('scan').innerHTML='<tr><th>#</th><th class=t>ticker</th>
 document.getElementById('pos').innerHTML='<tr><th class=t>symbol</th><th>qty</th><th>entry</th><th>current</th><th>mkt val</th><th>unreal P/L</th><th>%</th></tr>'+
 (a.positions||[]).map(p=>{let c=p.upl>=0?'pos':'neg';return '<tr><td class=t>'+p.symbol+'</td><td>'+f(p.qty,0)+'</td><td>'+f(p.avg_entry)+'</td><td>'+f(p.current)+'</td><td>$'+f(p.mv,0)+'</td><td class='+c+'>$'+f(p.upl,0)+'</td><td class='+c+'>'+p.upl_pct+'%</td></tr>'}).join('');
 document.getElementById('hist').innerHTML=(s.history||[]).map(h=>h.ts+' — '+(h.mode||'equity')+' — '+(h.orders||0)+' orders').join('<br>')||'none yet';}
-async function setLive(v){await fetch('/api/set-live',{method:'POST',body:JSON.stringify({live:v})});tick();}
 async function runLoop(){document.getElementById('msg').textContent='launching...';
 let r=await(await fetch('/api/run-loop',{method:'POST',body:JSON.stringify({})})).json();
 document.getElementById('msg').textContent=r.started?('running ('+(r.live?'real money':'paper')+')'):('skipped: '+r.reason);}
@@ -316,12 +305,6 @@ class MetaRankerHandler(BaseHTTPRequestHandler):
             self._send(b'{"error":"not_found"}', status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self):  # noqa: N802
-        if self.path.startswith("/api/set-live"):
-            length = int(self.headers.get("Content-Length", "0") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}") if length else {}
-            res = self._app().set_live(bool(payload.get("live")))
-            self._send(json.dumps(res).encode("utf-8"))
-            return
         if self.path.startswith("/api/run-loop"):
             length = int(self.headers.get("Content-Length", "0") or 0)
             _ = self.rfile.read(length) if length else b""

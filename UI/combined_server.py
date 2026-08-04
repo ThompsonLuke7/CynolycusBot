@@ -304,7 +304,7 @@ def _build_symbol_union(env_file: str) -> list[str]:
     return sorted(combined)
 
 
-def _run_meta_ranker_loop(*, mode: str, submit: bool, live: bool, flush: bool = False) -> None:
+def _run_meta_ranker_loop(*, mode: str, submit: bool, live: bool = False, flush: bool = False) -> None:
     """Fire one Meta Ranker 4H pass — RUNNER ONLY (read matrix -> score -> trade).
 
     The shared bars + Meta matrix are kept fresh out-of-band by nightly/pre-open
@@ -331,7 +331,10 @@ def _run_meta_ranker_loop(*, mode: str, submit: bool, live: bool, flush: bool = 
     if submit:
         argv.append("--submit")
     if live:
-        argv.append("--live")
+        # The governed Meta path is paper-only. Rather than forwarding a flag
+        # the runner now rejects, refuse here so the pass never launches.
+        logger.error("Meta Ranker live mode is not supported; refusing to launch")
+        return
     logger.info("Meta Ranker %s: launching %s", "pre-open flush" if flush else "loop", " ".join(argv))
     env = {**os.environ, "PYTHONPATH": str(repo_root)}
     subprocess.run(argv, cwd=str(repo_root), env=env)
@@ -937,20 +940,20 @@ def run_combined(
     from UI.meta_ranker_dashboard import MetaRankerDashboardApp, make_server as _make_meta_server
 
     meta_app = MetaRankerDashboardApp(
-        env_file=meta_env, live_env_file=live_env_file, mode=meta_ranker_mode, submit=True,
+        env_file=meta_env, mode=meta_ranker_mode, submit=False,
     )
     meta_server = _make_meta_server(host, port_meta, meta_app)
     meta_thread = threading.Thread(target=meta_server.serve_forever, daemon=True, name="meta-ranker-http")
     meta_thread.start()
     logger.info("Meta Ranker dashboard at http://%s:%d", host, port_meta)
     print(f"  Meta Ranker dashboard:   http://{host}:{port_meta}/  "
-          f"({meta_ranker_mode}/{'LIVE' if meta_ranker_live else 'paper'}/SUBMIT)")
+          f"({meta_ranker_mode}/paper/read-only)")
 
     meta_schedulers: list = []
     if meta_ranker_times:
         from UI.nightly_scheduler import NightlyScheduler, parse_hhmm
 
-        _tag = f"{meta_ranker_mode}/{'LIVE' if meta_ranker_live else 'paper'}/SUBMIT"
+        _tag = f"{meta_ranker_mode}/paper/SUBMIT"
         fired_times: list[str] = []
         for raw in str(meta_ranker_times).split(","):
             hhmm = raw.strip()
@@ -963,7 +966,7 @@ def run_combined(
                 continue
             sched = NightlyScheduler(
                 lambda: _run_meta_ranker_loop(
-                    mode=meta_ranker_mode, submit=True, live=meta_ranker_live),
+                    mode=meta_ranker_mode, submit=True, live=False),
                 hour=mh, minute=mm, stop_event=stop_evt,
                 name=f"meta-ranker-scheduler-{hhmm}",
             )
@@ -1089,7 +1092,7 @@ def run_combined(
     if meta_ranker_times:
         flush_schedulers += _schedule_loop(
             "09:35",
-            lambda: _run_meta_ranker_loop(mode=meta_ranker_mode, submit=True, live=meta_ranker_live, flush=True),
+            lambda: _run_meta_ranker_loop(mode=meta_ranker_mode, submit=True, live=False, flush=True),
             label="Meta pre-open flush", tag=_tag,
         )
     if htf_times:
@@ -1290,6 +1293,8 @@ def main() -> None:
     parser.add_argument("--meta-ranker-mode", choices=["equity", "options"], default="options",
                         help="Meta Ranker order type (default options).")
     parser.add_argument("--meta-ranker-live", action="store_true",
+                        # Rejected at startup; kept so an old invocation is not
+                        # silently ignored.
                         help="Run the scheduled Meta Ranker loop against the LIVE account (default paper).")
     parser.add_argument(
         "--htf-times", default="14:25,16:25",
@@ -1360,6 +1365,16 @@ def main() -> None:
              "button's paper-default account routing.",
     )
     args = parser.parse_args()
+
+    if args.meta_ranker_live:
+        # The Meta path is governed and paper-only. Failing at startup is
+        # safer than booting with a flag the runner will refuse anyway.
+        print(
+            "ERROR: --meta-ranker-live is not supported; the Meta Ranker path "
+            "is paper-only in this MVP.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     run_combined(
         host=args.host,

@@ -7,7 +7,7 @@ an equal-weight long-only target portfolio.
 
 SAFETY (read before running live):
   * DRY-RUN by default. Orders are only submitted with --submit.
-  * PAPER account by default (.env#PAPER). --live is required to target the live account.
+  * PAPER account only. --live is rejected: the governed path has no live route.
   * Scoped holdings: this runner ONLY ever sells symbols it previously bought (tracked in
     live_state.json). It never touches positions opened by other strategies sharing the account.
   * Staleness guard: refuses to trade if the matrix's latest bar is older than
@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 import json
 import logging
+import sys
 import math
 from datetime import datetime, timezone
 from numbers import Real
@@ -327,7 +328,7 @@ def _exit_action(gain, runs_held, bars_out, trimmed, args) -> tuple[str, str]:
     return _shared_exit_action(gain, runs_held, bars_out, trimmed, policy)
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description="Meta Ranker long-only equity live runner (paper by default).")
     ap.add_argument("--matrix", default=str(DEFAULT_MATRIX))
     ap.add_argument("--mode", choices=["equity", "options"], default="equity",
@@ -361,12 +362,24 @@ def main():
     ap.add_argument("--allow-stale", action="store_true")
     ap.add_argument("--signal-audit-log", default=str(DEFAULT_AUDIT_LOG),
                     help="Append-only JSONL path for signal/order audit events; set empty to disable.")
-    ap.add_argument("--live", action="store_true", help="Target the LIVE account (default: paper).")
+    # Kept only so an old invocation fails loudly instead of being ignored.
+    ap.add_argument("--live", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--submit", action="store_true", help="Actually place orders (default: dry-run).")
     ap.add_argument("--flush-pending-open", action="store_true", help="Pre-open: submit after-close queued entries still in the top-K (re-rank), then exit.")
     args = ap.parse_args()
 
-    profile = "LIVE" if args.live else "PAPER"
+    if args.live:
+        # The governed Meta path is paper-only. Accepting this flag would
+        # route real money around every environment check the nervous system
+        # performs, so it fails loudly rather than being silently ignored.
+        print(
+            "ERROR: --live is not accepted by the Meta Ranker runner; "
+            "live trading is not enabled in this MVP.",
+            file=sys.stderr,
+        )
+        return 2
+
+    profile = "PAPER"
     env_file = f".env#{profile}"
     run_mode = "SUBMIT" if args.submit else "DRY-RUN"
     print(f"=== Meta Ranker {args.mode} runner | account={profile} | mode={run_mode} | top_k={args.top_k} ===")
@@ -697,4 +710,4 @@ def _now() -> str:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
