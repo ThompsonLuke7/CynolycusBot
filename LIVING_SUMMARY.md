@@ -1222,3 +1222,7 @@ Review caught ET timestamps failing their own hash check (probe skipped coercion
 {2026-08-03 21:23 ET} {agent: Claude} {nervous system Task 21 execution gateway}
 Implemented the idempotent gateway (deterministic 48-char client order ID, durable reservation and INTENT_TO_SUBMIT before any POST, never-retry with client-ID resolution, lease plus fencing token, fail-operational exits capped to held quantity), broker reconciliation, and pending intents; gateway `87`, full nervous-system `781`, repo-wide failures unchanged.
 Mutation testing caught the exit exposure guard being unit-tested but not wired, which let an oversized exit reach the broker; review caught crashed in-flight attempts never resolving on restart. Next: Task 22 outbox, jobs, and decision orchestration.
+
+{2026-08-03 22:13 ET} {agent: Claude} {nervous system Task 22 outbox, jobs, orchestration}
+Added the fenced outbox dispatcher, durable PostgreSQL job leases with heartbeats and recovery events, fail-fast stage execution with output postconditions, and coordinator mode gating; outbox/loop `26`, coordinator `13`, full nervous-system `820`, repo-wide failures unchanged.
+Governed run_4h_loop.py: it previously ran the live runner even after failed bars/feeds/matrix and after a blocked guard, and accepted --live; review then caught my own matrix-path regression that would have stopped the loop trading entirely. Task 22 is partially complete: the coordinator's atomic planning transaction and the remaining unsafe seams are carried forward.
