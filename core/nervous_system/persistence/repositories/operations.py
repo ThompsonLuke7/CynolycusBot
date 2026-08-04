@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -15,7 +16,65 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from core.nervous_system.persistence.models import OutboxEvent as OutboxEventRow
+from core.nervous_system.persistence.models import (
+    JobEvent as JobEventRow,
+    JobRun as JobRunRow,
+    OutboxEvent as OutboxEventRow,
+)
+
+
+class JobStatus(str, Enum):
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+    NOT_RUN = "NOT_RUN"
+    RECOVERED = "RECOVERED"
+
+
+@dataclass(frozen=True)
+class JobRunRecord:
+    job_run_id: UUID
+    job_type: str
+    scheduled_for: datetime
+    config_hash: str
+    host: str
+    revision: str
+    status: str
+    started_at: datetime
+    finished_at: datetime | None
+    heartbeat_at: datetime | None
+    lease_owner: str | None
+    lease_until: datetime | None
+    lease_token: str | None
+    attempt_no: int
+    source_hashes: Mapping[str, Any]
+    counts: Mapping[str, Any]
+    output_ids: list[Any]
+    error: str | None
+
+
+def _job_record(row: JobRunRow) -> JobRunRecord:
+    return JobRunRecord(
+        job_run_id=row.job_run_id,
+        job_type=row.job_type,
+        scheduled_for=row.scheduled_for,
+        config_hash=row.config_hash,
+        host=row.host,
+        revision=row.revision,
+        status=row.status,
+        started_at=row.started_at,
+        finished_at=row.finished_at,
+        heartbeat_at=row.heartbeat_at,
+        lease_owner=row.lease_owner,
+        lease_until=row.lease_until,
+        lease_token=row.lease_token,
+        attempt_no=row.attempt_no or 0,
+        source_hashes=dict(row.source_hashes or {}),
+        counts=dict(row.counts or {}),
+        output_ids=list(row.output_ids or []),
+        error=row.error,
+    )
 
 
 @dataclass(frozen=True)
@@ -198,6 +257,192 @@ class OperationsRepository:
             lease_seconds=lease_seconds,
             limit=limit,
         )
+
+    # -- job runs -----------------------------------------------------------
+
+    def claim_job(
+        self,
+        *,
+        job_type: str,
+        scheduled_for: datetime,
+        config_hash: str,
+        owner: str,
+        lease_token: str,
+        now: datetime,
+        lease_seconds: int,
+        host: str,
+        revision: str,
+    ) -> tuple[JobRunRecord, bool]:
+        """Take the lease for one scheduled slot, or report who holds it.
+
+        ``(job_type, scheduled_for, config_hash)`` is unique, so the same slot
+        can never run twice concurrently. A file lock cannot give this
+        guarantee across hosts; the database can.
+        """
+
+        _aware(scheduled_for, "scheduled_for")
+        _aware(now, "now")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        lease_until = now + timedelta(seconds=lease_seconds)
+
+        existing = self._session.execute(
+            select(JobRunRow).where(
+                JobRunRow.job_type == job_type,
+                JobRunRow.scheduled_for == scheduled_for,
+                JobRunRow.config_hash == config_hash,
+            )
+        ).scalars().first()
+
+        if existing is None:
+            row = JobRunRow(
+                job_run_id=uuid4(),
+                job_type=job_type,
+                scheduled_for=scheduled_for,
+                config_hash=config_hash,
+                host=host,
+                revision=revision,
+                status=JobStatus.RUNNING.value,
+                started_at=now,
+                heartbeat_at=now,
+                lease_owner=owner,
+                lease_until=lease_until,
+                lease_token=lease_token,
+                attempt_no=1,
+            )
+            self._session.add(row)
+            self._session.flush()
+            self._append_job_event(row.job_run_id, JobStatus.RUNNING.value, now, {"claim": "new"})
+            return _job_record(row), True
+
+        if existing.status in {JobStatus.SUCCEEDED.value}:
+            return _job_record(existing), False
+
+        lease_live = (
+            existing.lease_until is not None
+            and existing.lease_until > now
+            and existing.lease_owner != owner
+        )
+        if lease_live:
+            return _job_record(existing), False
+
+        if existing.lease_until is not None and existing.lease_until <= now:
+            # A previous holder died. Record the takeover rather than silently
+            # overwriting the row.
+            self._append_job_event(
+                existing.job_run_id,
+                JobStatus.RECOVERED.value,
+                now,
+                {
+                    "previous_owner": existing.lease_owner,
+                    "expired_at": existing.lease_until.isoformat(),
+                },
+            )
+        existing.status = JobStatus.RUNNING.value
+        existing.host = host
+        existing.revision = revision
+        existing.lease_owner = owner
+        existing.lease_until = lease_until
+        existing.lease_token = lease_token
+        existing.heartbeat_at = now
+        existing.attempt_no = (existing.attempt_no or 0) + 1
+        self._session.flush()
+        return _job_record(existing), True
+
+    def heartbeat_job(
+        self,
+        job_run_id: UUID,
+        *,
+        lease_token: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> bool:
+        """Extend a lease only while this worker still owns it."""
+
+        _aware(now, "now")
+        result = self._session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.job_run_id == job_run_id,
+                JobRunRow.lease_token == lease_token,
+                JobRunRow.status == JobStatus.RUNNING.value,
+            )
+            .values(
+                heartbeat_at=now,
+                lease_until=now + timedelta(seconds=lease_seconds),
+            )
+        )
+        self._session.flush()
+        return result.rowcount == 1
+
+    def finish_job(
+        self,
+        job_run_id: UUID,
+        *,
+        lease_token: str,
+        status: str,
+        finished_at: datetime,
+        source_hashes: Mapping[str, Any] | None = None,
+        counts: Mapping[str, Any] | None = None,
+        output_ids: list[Any] | None = None,
+        exception_summary: Mapping[str, Any] | None = None,
+        error: str | None = None,
+    ) -> bool:
+        _aware(finished_at, "finished_at")
+        values: dict[str, Any] = {
+            "status": status,
+            "finished_at": finished_at,
+            "source_hashes": dict(source_hashes or {}),
+            "counts": dict(counts or {}),
+            "output_ids": list(output_ids or []),
+        }
+        if exception_summary is not None:
+            values["exception_summary"] = dict(exception_summary)
+        if error is not None:
+            values["error"] = error
+            values["last_error"] = error
+        result = self._session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.job_run_id == job_run_id,
+                JobRunRow.lease_token == lease_token,
+            )
+            .values(**values)
+        )
+        self._session.flush()
+        if result.rowcount == 1:
+            self._append_job_event(job_run_id, status, finished_at, {})
+        return result.rowcount == 1
+
+    def get_job(self, job_run_id: UUID) -> JobRunRecord | None:
+        row = self._session.get(JobRunRow, job_run_id)
+        return _job_record(row) if row is not None else None
+
+    def job_events(self, job_run_id: UUID) -> tuple[tuple[str, datetime], ...]:
+        rows = self._session.execute(
+            select(JobEventRow)
+            .where(JobEventRow.job_run_id == job_run_id)
+            .order_by(JobEventRow.observed_at.asc())
+        ).scalars().all()
+        return tuple((row.status, row.observed_at) for row in rows)
+
+    def _append_job_event(
+        self,
+        job_run_id: UUID,
+        status: str,
+        observed_at: datetime,
+        payload: Mapping[str, Any],
+    ) -> None:
+        self._session.add(
+            JobEventRow(
+                job_event_id=uuid4(),
+                job_run_id=job_run_id,
+                status=status,
+                observed_at=observed_at,
+                payload=dict(payload),
+            )
+        )
+        self._session.flush()
 
     def renew_claim(
         self,
