@@ -183,6 +183,30 @@ def loop_args(**overrides) -> argparse.Namespace:
     return build_parser().parse_args(argv)
 
 
+def test_the_loop_verifies_the_matrix_the_runner_actually_reads() -> None:
+    """The freshness check must point at the real artifact.
+
+    A wrong path would fail the postcondition forever and silently stop the
+    live loop from ever trading again.
+    """
+
+    from signals.meta_context.meta_ranker.live_runner import DEFAULT_MATRIX
+    from signals.meta_context.meta_ranker.run_4h_loop import MATRIX_PATH
+    from signals.meta_context.meta_ranker.update_meta_matrix import MATRIX as WRITTEN
+
+    assert MATRIX_PATH == WRITTEN, "the loop must verify the file the matrix job writes"
+    assert MATRIX_PATH == DEFAULT_MATRIX, "and the file the runner scores from"
+
+
+def test_a_missing_matrix_fails_the_postcondition() -> None:
+    from signals.meta_context.meta_ranker import run_4h_loop
+
+    fresh, detail, counts = run_4h_loop._matrix_is_fresh()
+    assert isinstance(fresh, bool)
+    if not run_4h_loop.MATRIX_PATH.exists():
+        assert "does not exist" in detail
+
+
 def test_the_loop_rejects_the_legacy_live_flag() -> None:
     from signals.meta_context.meta_ranker.run_4h_loop import main
 

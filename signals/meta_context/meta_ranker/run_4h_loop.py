@@ -38,7 +38,9 @@ REPO = HERE.parents[2]
 PY = sys.executable
 
 # The matrix the runner scores from; the runner must not run if this is stale.
-MATRIX_PATH = REPO / "Data" / "meta_context" / "meta_matrix_4h.parquet"
+# This is the same file update_meta_matrix.py writes and live_runner.py reads
+# (both resolve it as HERE / "meta_ranker_matrix.parquet").
+MATRIX_PATH = HERE / "meta_ranker_matrix.parquet"
 MAX_MATRIX_AGE_SEC = 6 * 3600
 
 
