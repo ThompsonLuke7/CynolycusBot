@@ -1226,3 +1226,7 @@ Mutation testing caught the exit exposure guard being unit-tested but not wired,
 {2026-08-03 22:13 ET} {agent: Claude} {nervous system Task 22 outbox, jobs, orchestration}
 Added the fenced outbox dispatcher, durable PostgreSQL job leases with heartbeats and recovery events, fail-fast stage execution with output postconditions, and coordinator mode gating; outbox/loop `26`, coordinator `13`, full nervous-system `820`, repo-wide failures unchanged.
 Governed run_4h_loop.py: it previously ran the live runner even after failed bars/feeds/matrix and after a blocked guard, and accepted --live; review then caught my own matrix-path regression that would have stopped the loop trading entirely. Task 22 is partially complete: the coordinator's atomic planning transaction and the remaining unsafe seams are carried forward.
+
+{2026-08-03 22:33 ET} {agent: Claude} {nervous system Task 22 carried-forward items}
+Completed the atomic planning transaction (chain plus outbox event in one commit, broker never inside it) with convergent replanning and content-addressed failure records, and closed the two zero-exit seams: catchup now fails above a 10% ticker error rate, and the matrix job fails when a rebuild leaves input bars unincorporated.
+Outbox/coordinator `47`, full nervous-system `828`, repo-wide failures unchanged. Still deferred to Task 23: the combined-server/dashboard submit paths and the flock-based job guard. Next: Task 23 Meta Ranker gateway cutover.
