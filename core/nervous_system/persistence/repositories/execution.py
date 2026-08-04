@@ -4,13 +4,20 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
-from core.nervous_system.contracts.execution import ExecutionEvent, ExecutionReport
-from core.nervous_system.contracts.enums import RuntimeEnvironment
+from core.nervous_system.contracts.execution import (
+    ExecutionEvent,
+    ExecutionReport,
+    SubmissionAttemptRecord,
+)
+from core.nervous_system.contracts.enums import (
+    RuntimeEnvironment,
+    SubmissionAttemptStatus,
+)
 from core.nervous_system.contracts.orders import OrderRequest
 from core.nervous_system.persistence.models import (
     ExecutionEvent as ExecutionEventRow,
@@ -98,9 +105,250 @@ def _event_from_row(row: ExecutionEventRow) -> ExecutionEvent:
     return event
 
 
+class SubmissionConflict(ValueError):
+    """The same broker identity was reserved for different request content."""
+
+
+def _attempt_from_row(row: SubmissionAttempt) -> SubmissionAttemptRecord:
+    return SubmissionAttemptRecord(
+        submission_attempt_id=row.submission_attempt_id,
+        order_request_id=row.order_request_id,
+        attempt_no=row.attempt_no,
+        environment=RuntimeEnvironment(row.environment),
+        account_alias=row.account_alias,
+        client_order_id=row.client_order_id,
+        status=SubmissionAttemptStatus(row.status),
+        request_hash=str(row.payload.get("request_hash", "")),
+        reserved_at=row.reserved_at,
+        lease_owner=row.lease_owner,
+        lease_until=row.lease_until,
+        claim_token=row.claim_token,
+        journaled_at=row.journaled_at,
+        broker_called_at=row.broker_called_at,
+        resolved_at=row.resolved_at,
+        broker_order_id=row.broker_order_id,
+        error_code=row.error_code,
+        journal_event_id=row.journal_event_id,
+        journal_event_hash=row.journal_event_hash,
+        journal_backend=row.journal_backend,
+        journal_locator=row.journal_locator,
+    )
+
+
+# Only these transitions are legal; anything else is a backward or impossible
+# move and is refused rather than quietly applied.
+_LEGAL_TRANSITIONS: dict[SubmissionAttemptStatus, frozenset[SubmissionAttemptStatus]] = {
+    SubmissionAttemptStatus.RESERVED: frozenset(
+        {SubmissionAttemptStatus.JOURNALED, SubmissionAttemptStatus.REJECTED}
+    ),
+    SubmissionAttemptStatus.JOURNALED: frozenset(
+        {SubmissionAttemptStatus.SUBMITTING, SubmissionAttemptStatus.REJECTED}
+    ),
+    SubmissionAttemptStatus.SUBMITTING: frozenset(
+        {
+            SubmissionAttemptStatus.ACCEPTED,
+            SubmissionAttemptStatus.REJECTED,
+            SubmissionAttemptStatus.AMBIGUOUS,
+        }
+    ),
+    SubmissionAttemptStatus.AMBIGUOUS: frozenset(
+        {
+            SubmissionAttemptStatus.ACCEPTED,
+            SubmissionAttemptStatus.REJECTED,
+            SubmissionAttemptStatus.RECONCILIATION_REQUIRED,
+        }
+    ),
+    SubmissionAttemptStatus.ACCEPTED: frozenset(),
+    SubmissionAttemptStatus.REJECTED: frozenset(),
+    SubmissionAttemptStatus.RECONCILIATION_REQUIRED: frozenset(
+        {SubmissionAttemptStatus.ACCEPTED, SubmissionAttemptStatus.REJECTED}
+    ),
+}
+
+
+def is_legal_transition(
+    current: SubmissionAttemptStatus,
+    target: SubmissionAttemptStatus,
+) -> bool:
+    return target in _LEGAL_TRANSITIONS.get(current, frozenset())
+
+
 class ExecutionRepository:
     def __init__(self, session: Session):
         self._session = session
+
+    # -- submission attempts -------------------------------------------------
+
+    def reserve_or_load_attempt(
+        self,
+        *,
+        request: OrderRequest,
+        client_order_id: str,
+        reserved_at: datetime,
+        attempt_no: int = 1,
+        submission_attempt_id: UUID | None = None,
+    ) -> tuple[SubmissionAttemptRecord, bool]:
+        """Durably reserve one broker identity, or load the existing one.
+
+        Returns ``(attempt, created)``. The same content under the same broker
+        identity loads; different content is a hard conflict, because reusing a
+        client order ID for a different order is how a duplicate becomes
+        invisible.
+        """
+
+        existing = _one_or_none(
+            self._session.execute(
+                select(SubmissionAttempt).where(
+                    SubmissionAttempt.environment == request.environment.value,
+                    SubmissionAttempt.account_alias == request.account_alias,
+                    SubmissionAttempt.client_order_id == client_order_id,
+                )
+            )
+        )
+        if existing is not None:
+            record = _attempt_from_row(existing)
+            if record.request_hash != request.request_hash:
+                raise SubmissionConflict(
+                    f"client order ID {client_order_id} already reserved for "
+                    "different request content"
+                )
+            if record.order_request_id != request.order_request_id:
+                raise SubmissionConflict(
+                    f"client order ID {client_order_id} belongs to another order request"
+                )
+            return record, False
+
+        row = SubmissionAttempt(
+            submission_attempt_id=submission_attempt_id or uuid4(),
+            order_request_id=request.order_request_id,
+            attempt_no=attempt_no,
+            environment=request.environment.value,
+            account_alias=request.account_alias,
+            client_order_id=client_order_id,
+            status=SubmissionAttemptStatus.RESERVED.value,
+            reserved_at=reserved_at,
+            payload={"request_hash": request.request_hash},
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _attempt_from_row(row), True
+
+    def claim_submission(
+        self,
+        *,
+        submission_attempt_id: UUID,
+        owner: str,
+        claim_token: str,
+        lease_until: datetime,
+        now: datetime,
+    ) -> bool:
+        """Take the lease with a fencing token, or report that someone else holds it.
+
+        A unique constraint alone does not stop two workers POSTing, so
+        ownership of ``SUBMITTING`` is decided by this conditional update.
+        """
+
+        result = self._session.execute(
+            update(SubmissionAttempt)
+            .where(
+                SubmissionAttempt.submission_attempt_id == submission_attempt_id,
+                SubmissionAttempt.status.in_(
+                    (
+                        SubmissionAttemptStatus.RESERVED.value,
+                        SubmissionAttemptStatus.JOURNALED.value,
+                    )
+                ),
+                or_(
+                    SubmissionAttempt.lease_owner.is_(None),
+                    SubmissionAttempt.lease_until.is_(None),
+                    SubmissionAttempt.lease_until <= now,
+                    SubmissionAttempt.lease_owner == owner,
+                ),
+            )
+            .values(lease_owner=owner, lease_until=lease_until, claim_token=claim_token)
+        )
+        self._session.flush()
+        return bool(result.rowcount)
+
+    def transition_attempt(
+        self,
+        *,
+        submission_attempt_id: UUID,
+        expected: SubmissionAttemptStatus,
+        target: SubmissionAttemptStatus,
+        claim_token: str | None = None,
+        **updates: Any,
+    ) -> bool:
+        """Compare-and-set one legal status transition.
+
+        The claim token fences a stale worker: one that lost its lease cannot
+        move an attempt another worker now owns.
+        """
+
+        if not is_legal_transition(expected, target):
+            raise ValueError(
+                f"illegal submission transition {expected.value} -> {target.value}"
+            )
+        conditions = [
+            SubmissionAttempt.submission_attempt_id == submission_attempt_id,
+            SubmissionAttempt.status == expected.value,
+        ]
+        if claim_token is not None:
+            conditions.append(SubmissionAttempt.claim_token == claim_token)
+        result = self._session.execute(
+            update(SubmissionAttempt)
+            .where(*conditions)
+            .values(status=target.value, **updates)
+        )
+        self._session.flush()
+        return bool(result.rowcount)
+
+    def record_journal_receipt(
+        self,
+        *,
+        submission_attempt_id: UUID,
+        event_id: UUID,
+        event_hash: str,
+        backend: str,
+        locator: str,
+        journaled_at: datetime,
+    ) -> None:
+        self._session.execute(
+            update(SubmissionAttempt)
+            .where(SubmissionAttempt.submission_attempt_id == submission_attempt_id)
+            .values(
+                journal_event_id=event_id,
+                journal_event_hash=event_hash,
+                journal_backend=backend,
+                journal_locator=locator,
+                journaled_at=journaled_at,
+            )
+        )
+        self._session.flush()
+
+    def get_attempt(
+        self, submission_attempt_id: UUID
+    ) -> SubmissionAttemptRecord | None:
+        row = self._session.get(SubmissionAttempt, submission_attempt_id)
+        return _attempt_from_row(row) if row is not None else None
+
+    def find_attempt_by_client_order_id(
+        self,
+        *,
+        environment: RuntimeEnvironment,
+        account_alias: str,
+        client_order_id: str,
+    ) -> SubmissionAttemptRecord | None:
+        row = _one_or_none(
+            self._session.execute(
+                select(SubmissionAttempt).where(
+                    SubmissionAttempt.environment == environment.value,
+                    SubmissionAttempt.account_alias == account_alias,
+                    SubmissionAttempt.client_order_id == client_order_id,
+                )
+            )
+        )
+        return _attempt_from_row(row) if row is not None else None
 
     def append_execution_event(self, event: ExecutionEvent) -> None:
         if event.sequence_no == 1:

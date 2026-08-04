@@ -13,7 +13,7 @@ from .base import (
     _freeze_mapping,
     content_hash,
 )
-from .enums import ExecutionStatus
+from .enums import ExecutionStatus, RuntimeEnvironment, SubmissionAttemptStatus
 
 
 ImmutableStringMap = Annotated[dict[str, str], AfterValidator(_freeze_mapping)]
@@ -157,6 +157,40 @@ class ExecutionEvent(ContractModel):
         if self.event_hash != self.computed_event_hash():
             raise ValueError("event_hash does not match execution event content")
         return self
+
+
+class SubmissionAttemptRecord(ContractModel):
+    """Durable reservation for one broker submission of one order request."""
+
+    submission_attempt_id: UUID
+    order_request_id: UUID
+    attempt_no: PositiveSequence
+    environment: RuntimeEnvironment
+    account_alias: str
+    client_order_id: str
+    status: SubmissionAttemptStatus
+    request_hash: Sha256Hex
+    reserved_at: UtcDatetime
+    lease_owner: str | None = None
+    lease_until: UtcDatetime | None = None
+    claim_token: str | None = None
+    journaled_at: UtcDatetime | None = None
+    broker_called_at: UtcDatetime | None = None
+    resolved_at: UtcDatetime | None = None
+    broker_order_id: str | None = None
+    error_code: str | None = None
+    journal_event_id: UUID | None = None
+    journal_event_hash: Sha256Hex | None = None
+    journal_backend: str | None = None
+    journal_locator: str | None = None
+
+    @property
+    def is_resolved(self) -> bool:
+        return self.status in {
+            SubmissionAttemptStatus.ACCEPTED,
+            SubmissionAttemptStatus.REJECTED,
+            SubmissionAttemptStatus.RECONCILIATION_REQUIRED,
+        }
 
 
 class ExecutionReport(ContractModel):
