@@ -14,12 +14,19 @@ Reuses the swing runner's contract parsing helpers for consistency.
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import numpy as np
+from pydantic import ValidationError
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+from core.nervous_system.execution.options.quotes import (
+    OptionQuote,
+    QuoteError,
+    parse_occ_symbol,
+)
 from core.calendar import is_market_open_now
 from core.option_liquidity import contract_liquidity
 from strategies.dealer_positioning.gate import (
@@ -77,23 +84,82 @@ def target_monthly_expiry(ref_date: date, roll_trading_days: int = 5) -> date:
     raise ValueError(f"Could not determine monthly expiry after {ref_date}")
 
 
-def _latest_quote(client: AlpacaOptionsClient, occ: str) -> tuple[float, float] | None:
+def _quote_timestamp(payload: dict) -> datetime | None:
+    """Read the moment the market was observed, or nothing.
+
+    Deliberately never falls back to the current clock. An undated quote is
+    indistinguishable from a stale one, and stamping it with `now` would make a
+    stale market look fresh — the exact failure that invalidated the 2026-07
+    options study.
+    """
+
+    for key in ("t", "timestamp", "quote_at"):
+        raw = payload.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, datetime):
+            parsed = raw
+        else:
+            text = str(raw).strip()
+            if not text:
+                continue
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(text)
+            except ValueError:
+                continue
+        if parsed.tzinfo is None:
+            # A naive broker timestamp has no defined instant; refuse it rather
+            # than assume a zone.
+            continue
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _parse_two_sided(payload: dict) -> tuple[float, float, datetime] | None:
+    """Return a dated two-sided market, or nothing at all."""
+
+    if not isinstance(payload, dict):
+        return None
+    bid = _as_float(payload.get("bp", payload.get("bid_price")))
+    ask = _as_float(payload.get("ap", payload.get("ask_price")))
+    if not (bid > 0 and ask > 0):
+        return None
+    quote_at = _quote_timestamp(payload)
+    if quote_at is None:
+        return None
+    return bid, ask, quote_at
+
+
+def _latest_quote(
+    client: AlpacaOptionsClient, occ: str
+) -> tuple[tuple[float, float, datetime] | None, str]:
+    """Refetch one quote. Returns (quote, reason); reason is 'ok' on success.
+
+    "No two-sided market" and "a market we cannot date" are different failures
+    and are reported separately: the first is an untradeable contract, the
+    second is a data-integrity problem worth seeing in the audit trail.
+    """
+
     try:
         resp = client.get_option_quotes(symbols=occ)
     except Exception:
-        return None
+        return None, "no_quote"
     quotes = resp.get("quotes", resp) if isinstance(resp, dict) else None
     if not isinstance(quotes, dict):
-        return None
+        return None, "no_quote"
     q = quotes.get(occ) or (next(iter(quotes.values())) if quotes else None)
     if not isinstance(q, dict):
-        return None
-    bid, ask = q.get("bp", q.get("bid_price")), q.get("ap", q.get("ask_price"))
-    try:
-        bid, ask = float(bid), float(ask)
-    except (TypeError, ValueError):
-        return None
-    return (bid, ask) if bid > 0 and ask > 0 else None
+        return None, "no_quote"
+    bid = _as_float(q.get("bp", q.get("bid_price")))
+    ask = _as_float(q.get("ap", q.get("ask_price")))
+    if not (bid > 0 and ask > 0):
+        return None, "no_quote"
+    quote_at = _quote_timestamp(q)
+    if quote_at is None:
+        return None, "no_quote_timestamp"
+    return (bid, ask, quote_at), "ok"
 
 
 def select_option(
@@ -148,15 +214,23 @@ def select_option(
     occ, dlt, sel_snap = min(in_range, key=lambda x: abs(x[1] - _DELTA_TGT))
 
     # Prefer the snapshot's own quote (saves a second API call / 429s); fall back
-    # to a fresh quote fetch only if the snapshot lacks a two-sided quote.
+    # to a fresh quote fetch only if the snapshot lacks a dated two-sided quote.
     lq = sel_snap.get("latestQuote") or {}
-    bid = _as_float(lq.get("bp", lq.get("bid_price")))
-    ask = _as_float(lq.get("ap", lq.get("ask_price")))
-    if not (bid > 0 and ask > 0):
-        quote = _latest_quote(client, occ)
-        if quote is None:
-            return None, "no_quote"
-        bid, ask = quote
+    observed = _parse_two_sided(lq)
+    if observed is None:
+        snapshot_bid = _as_float(lq.get("bp", lq.get("bid_price")))
+        snapshot_ask = _as_float(lq.get("ap", lq.get("ask_price")))
+        if snapshot_bid > 0 and snapshot_ask > 0:
+            # The market itself was fine; only its timestamp was missing. That
+            # is a data problem, not an untradeable contract, so say so instead
+            # of burning a refetch that will not add a timestamp.
+            return None, "no_quote_timestamp"
+        observed, reason = _latest_quote(client, occ)
+        if observed is None:
+            return None, reason
+    bid, ask, quote_at = observed
+    if ask < bid:
+        return None, "crossed_quote"
     mid = (bid + ask) / 2.0
     # Spread is reported for the audit only — it is NOT a gate. Liquidity is
     # judged by open interest + volume (see route_option_or_shares); a wide %%
@@ -173,6 +247,21 @@ def select_option(
     contracts_n = int(math.floor(per_name_usd / (mid * 100.0)))
     if contracts_n < 1:
         return None, "budget_lt_1_contract"
+    try:
+        quote = _option_quote(
+            occ,
+            underlying=ticker.upper(),
+            bid=bid,
+            ask=ask,
+            quote_at=quote_at,
+            delta=dlt,
+            open_interest=oi,
+            volume=vol,
+        )
+    except (QuoteError, ValidationError) as exc:
+        # The governed path will not accept an instrument we cannot describe
+        # exactly, so neither does this one.
+        return None, f"invalid_quote({exc.__class__.__name__})"
     return (
         {
             "ticker": ticker, "occ": occ, "contracts": contracts_n, "mid": mid,
@@ -180,8 +269,44 @@ def select_option(
             "strike": strike_value, "notional": contracts_n * mid * 100.0,
             "open_interest": oi, "volume": vol, "spread": spread,
             "liquidity_source": liq.source if liq is not None else "unavailable",
+            # The validated mark. Everything above is the legacy audit view of
+            # the same numbers; this is what the governed path builds legs from.
+            "quote": quote,
         },
         "ok",
+    )
+
+
+def _option_quote(
+    occ: str,
+    *,
+    underlying: str,
+    bid: float,
+    ask: float,
+    quote_at: datetime,
+    delta: float | None,
+    open_interest: int | None,
+    volume: int | None,
+) -> OptionQuote:
+    """Build the contract-level mark, deriving identity from the OCC symbol.
+
+    `last_trade_price` is deliberately never populated: a trade print is not a
+    mark, and OptionQuote keeps the two strictly apart.
+    """
+
+    identity = parse_occ_symbol(occ)
+    return OptionQuote(
+        symbol=occ,
+        underlying=underlying,
+        option_type=identity.option_type,
+        strike=identity.strike,
+        expiration=identity.expiration,
+        quote_at=quote_at,
+        bid=Decimal(str(bid)),
+        ask=Decimal(str(ask)),
+        delta=None if delta is None else Decimal(str(delta)),
+        open_interest=open_interest,
+        volume=volume,
     )
 
 

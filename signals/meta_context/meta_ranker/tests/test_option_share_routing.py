@@ -28,9 +28,13 @@ class _FakeClient:
                                       "underlying_symbol": "ABC", "type": "call"}]}
 
     def get_option_snapshots(self, *_a, **_k):
+        # `t` is the observation time Alpaca sends with every quote. Without it
+        # a quote cannot be dated, and an undated quote is refused outright --
+        # see test_options_exec_quotes.py.
         return {"ABC260717C00010000": {
             "greeks": {"delta": self.delta},
-            "latestQuote": {"bp": self.bid, "ap": self.ask},
+            "latestQuote": {"bp": self.bid, "ap": self.ask,
+                            "t": "2026-07-06T19:59:58.123456Z"},
         }}
 
 
