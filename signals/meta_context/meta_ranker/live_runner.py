@@ -26,6 +26,7 @@ import argparse
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
+from hashlib import sha256
 import json
 import logging
 import sys
@@ -38,12 +39,14 @@ from typing import Any
 import pandas as pd
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+from core.nervous_system.contracts.enums import InstrumentFamily
 from core.live_signal_audit import (
     append_jsonl,
     build_equity_order_audit,
     build_option_order_audit,
     build_signal_audit,
 )
+from signals.meta_context.meta_ranker.nervous_system_adapter import MetaIntentConfig
 from signals.meta_context.meta_ranker.score import score_frame
 from core.live_4h_exec import (
     ExecPolicy,
@@ -111,6 +114,10 @@ class MetaRankingResult:
     scored_count: int
     eligible_count: int
     decision_bar: pd.Timestamp
+    # Every scored name on this bar, not just the eligible top-K. A held name
+    # that dropped out of the top-K still has a current score here, so its exit
+    # can be explained instead of recorded blind.
+    scored: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _canonical_ticker(value: object, *, field_name: str) -> str:
@@ -200,6 +207,7 @@ def rank_meta_candidates_with_diagnostics(
         scored_count=n0,
         eligible_count=len(eligible),
         decision_bar=decision_bar,
+        scored=scored,
     )
 
 
@@ -212,6 +220,107 @@ def rank_meta_candidates(
     """Public DataFrame ranking interface retained for existing callers."""
 
     return rank_meta_candidates_with_diagnostics(feature_matrix, bar=bar, config=config).ranked
+
+
+# --- governed-intent lineage -------------------------------------------------
+# The decision-relevant runner settings. A change to any of them is a change to
+# the policy that produced the decision, so it must change the recorded
+# config_version and therefore the intent identity.
+RUNNER_CONFIG_FIELDS = (
+    "mode", "top_k", "liquidity_floor", "combo_floor", "quality_floor",
+    "target_notional", "take_profit", "scale_frac", "horizon_bars",
+    "grace_bars", "stop_loss", "trail_stop", "roll_trading_days",
+)
+
+
+def _short_hash(payload: object) -> str:
+    encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    return sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def runner_config_version(args) -> str:
+    """Content-derived version of the settings that shaped this decision."""
+
+    return "meta-runner@" + _short_hash(
+        {name: getattr(args, name, None) for name in RUNNER_CONFIG_FIELDS}
+    )
+
+
+def model_version() -> str:
+    """Identify the deployed booster set by its on-disk content.
+
+    A constant here would keep reporting the same version after a retrain,
+    which is exactly the lineage error that makes a persisted decision
+    unreproducible.
+    """
+
+    models_dir = HERE / "models"
+    if not models_dir.exists():
+        return "meta-combo@absent"
+    entries = sorted(
+        (p.name, p.stat().st_size) for p in models_dir.rglob("*") if p.is_file()
+    )
+    return "meta-combo@" + _short_hash(entries)
+
+
+def feature_version(matrix_path: str | Path) -> str:
+    return "meta-matrix@" + Path(matrix_path).name
+
+
+# The scoring context carried onto a governed intent. Matches what
+# nervous_system_adapter persists, so an entry and an exit describe the same
+# three things. s_combo is already the combo rank-percentile; the ordinal rank
+# stays in the signal audit trail where it has always lived.
+INTENT_SCORE_FIELDS = ("s_combo", "s_upside", "s_quality")
+
+
+def scores_by_ticker(result: MetaRankingResult) -> dict[str, dict[str, float]]:
+    """Per-ticker scoring context for every scored name on the decision bar.
+
+    This reads the full scored frame rather than the eligible top-K, so a held
+    name that just dropped out of the ranking can still have its exit
+    explained instead of recorded blind.
+    """
+
+    out: dict[str, dict[str, float]] = {}
+    frame = result.scored
+    if frame is None or frame.empty:
+        return out
+    for _idx, row in frame.iterrows():
+        ticker = str(row["ticker"]).upper()
+        entry: dict[str, float] = {}
+        for name in INTENT_SCORE_FIELDS:
+            if name not in frame.columns:
+                continue
+            try:
+                numeric = float(row.get(name))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                entry[name] = numeric
+        if "s_combo" in entry:
+            out[ticker] = entry
+    return out
+
+
+def intent_config(args, *, held_tickers: frozenset[str] = frozenset()) -> MetaIntentConfig:
+    """Versioned metadata for every intent this pass produces."""
+
+    families = (
+        (InstrumentFamily.SINGLE_OPTION, InstrumentFamily.EQUITY)
+        if args.mode == "options"
+        else (InstrumentFamily.EQUITY,)
+    )
+    return MetaIntentConfig(
+        quality_floor=args.quality_floor,
+        held_tickers=held_tickers,
+        requested_notional=Decimal(str(args.target_notional)),
+        model_version=model_version(),
+        feature_version=feature_version(args.matrix),
+        config_version=runner_config_version(args),
+        instrument_preferences=families,
+        expected_holding_period=f"{args.horizon_bars}x4h",
+    )
 
 
 def _load_blacklist() -> set[str]:

@@ -80,6 +80,20 @@ class DecisionKind(str, Enum):
     EXIT = "EXIT"
 
 
+class SizeUnit(str, Enum):
+    """The unit `TradeIntent.position_size_requested` is denominated in.
+
+    An entry is a money budget because the policy engine sizes risk in dollars.
+    A reduction is a typed quantity because only an exact share or contract
+    count can close a position; a dollar figure cannot.
+    """
+
+    UNKNOWN = "UNKNOWN"
+    NOTIONAL_USD = "NOTIONAL_USD"
+    SHARES = "SHARES"
+    CONTRACTS = "CONTRACTS"
+
+
 class StateType(str, Enum):
     MARKET = "MARKET"
     SECTOR = "SECTOR"

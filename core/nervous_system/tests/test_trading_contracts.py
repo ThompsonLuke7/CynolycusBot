@@ -28,6 +28,7 @@ from core.nervous_system.contracts.enums import (
     PolicyMode,
     PositionIntent,
     RuntimeEnvironment,
+    SizeUnit,
 )
 from core.nervous_system.contracts.execution import ExecutionEvent, ExecutionReport
 from core.nervous_system.contracts.intent import TradeIntent
@@ -275,6 +276,7 @@ def test_trade_intent_accepts_task14_fields_only_as_a_complete_new_format():
         score_components={"s_combo": 0.9, "s_quality": 0.8},
         config_version="meta-intent@task14",
         idempotency_key="a" * 64,
+        position_size_unit=SizeUnit.NOTIONAL_USD,
     )
 
     assert intent.score_components == {"s_combo": 0.9, "s_quality": 0.8}
@@ -288,11 +290,13 @@ def test_trade_intent_accepts_task14_fields_only_as_a_complete_new_format():
         {"score_components": {"s_combo": "0.9"}},
         {"score_components": {"s_combo": True}},
         {"score_components": {"s_combo": float("inf")}},
-        {"score_components": {"s_combo": 0.9}, "config_version": "UNKNOWN", "idempotency_key": "a" * 64},
-        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": "A" * 64},
-        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": "a" * 63},
-        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": ""},
-        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": "a" * 64, "snapshot_id": None},
+        {"score_components": {"s_combo": 0.9}, "config_version": "UNKNOWN", "idempotency_key": "a" * 64, "position_size_unit": SizeUnit.NOTIONAL_USD},
+        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": "A" * 64, "position_size_unit": SizeUnit.NOTIONAL_USD},
+        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": "a" * 63, "position_size_unit": SizeUnit.NOTIONAL_USD},
+        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": "", "position_size_unit": SizeUnit.NOTIONAL_USD},
+        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": "a" * 64, "snapshot_id": None, "position_size_unit": SizeUnit.NOTIONAL_USD},
+        # A complete new-format intent that never says what its size means.
+        {"score_components": {"s_combo": 0.9}, "config_version": "meta@1", "idempotency_key": "a" * 64, "snapshot_id": uuid4()},
     ],
 )
 def test_trade_intent_rejects_partial_or_invalid_task14_fields(updates):

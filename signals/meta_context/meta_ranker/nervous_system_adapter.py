@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -20,10 +20,12 @@ from core.nervous_system.contracts.enums import (
     DecisionKind,
     Direction,
     InstrumentFamily,
+    SizeUnit,
     StateType,
     TickerSetup,
 )
 from core.nervous_system.contracts.intent import TradeIntent
+from core.nervous_system.execution.options.quotes import QuoteError, parse_occ_symbol
 from core.nervous_system.contracts.quality import (
     DataQualityIssue,
     DataQualitySummary,
@@ -528,9 +530,328 @@ def build_trade_intents(
                 score_components=score_components,
                 config_version=config.config_version,
                 idempotency_key=idempotency_key,
+                position_size_unit=SizeUnit.NOTIONAL_USD,
             )
         )
     return tuple(intents)
+
+
+# ---------------------------------------------------------------------------
+# Reductions: trims and full exits (Task 23)
+# ---------------------------------------------------------------------------
+
+# Stamped on a reduction whose name has left the scored universe, so an
+# unscored exit is visibly unscored rather than silently score-free.
+UNSCORED_REASON_CODE = "META_SCORE_UNAVAILABLE"
+
+_REDUCTION_UNITS = (SizeUnit.SHARES, SizeUnit.CONTRACTS)
+
+_REDUCTION_SCORE_FIELDS = ("s_combo", "s_upside", "s_quality")
+
+
+def underlying_for(symbol: str) -> str:
+    """Return the underlying ticker for an equity or OCC symbol.
+
+    An OCC symbol is an instrument, not a name. Persisting it as the intent's
+    ticker would break every join against ranking, exposure, and ownership.
+    """
+
+    candidate = _canonical_ticker(symbol, field_name="symbol")
+    try:
+        return parse_occ_symbol(candidate).root
+    except QuoteError:
+        return candidate
+
+
+def _reduction_idempotency_key(
+    *,
+    strategy_id: str,
+    decision_bar: datetime,
+    ticker: str,
+    decision_kind: DecisionKind,
+    quantity: Decimal,
+    unit: SizeUnit,
+    reason_codes: tuple[str, ...],
+    config_version: str,
+) -> str:
+    """Content-derived identity for one reduction.
+
+    Deliberately excludes the wall clock, the context snapshot, and any
+    position in the plan: a 4H pass that is retried minutes later, that rebuilt
+    its snapshot, or that ordered its plan differently is the *same* decision.
+    Minting a new identity for it would submit the same close twice.
+    """
+
+    material = {
+        "strategy_id": strategy_id,
+        "decision_bar": decision_bar.isoformat(),
+        "ticker": ticker,
+        "decision_kind": decision_kind.value,
+        "quantity": str(quantity),
+        "unit": unit.value,
+        "reason_codes": list(reason_codes),
+        "config_version": config_version,
+    }
+    canonical = json.dumps(material, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _reduction_scores(
+    scores: Mapping[str, object] | None, *, ticker: str
+) -> dict[str, float]:
+    """Score context for a reduction, or nothing at all.
+
+    A held name can leave the scored universe entirely — delisted, dropped from
+    the pool, or simply no longer ranked. The reduction still has to happen, so
+    an absent score is recorded as absent rather than fabricated.
+    """
+
+    if not scores:
+        return {}
+    if "s_combo" not in scores or _is_missing(scores["s_combo"]):
+        return {}
+    out: dict[str, float] = {}
+    for name in _REDUCTION_SCORE_FIELDS:
+        if name not in scores or _is_missing(scores[name]):
+            # An absent component is omitted, never imputed to zero: a missing
+            # upside score is not an upside score of nothing.
+            continue
+        out[name] = _finite(scores[name], field_name=f"{ticker} {name}")
+    return out
+
+
+def build_reduction_intent(
+    *,
+    decision_kind: DecisionKind,
+    ticker: str,
+    quantity: Decimal | int,
+    unit: SizeUnit,
+    reason_codes: tuple[str, ...],
+    scores: Mapping[str, object] | None,
+    decision_time: datetime,
+    decision_bar: datetime,
+    snapshot_id: UUID,
+    config: MetaIntentConfig,
+) -> TradeIntent:
+    """Build one deterministic Meta trim or full exit."""
+
+    if not isinstance(config, MetaIntentConfig):
+        raise TypeError("config must be a MetaIntentConfig")
+    if decision_kind not in (DecisionKind.EXIT, DecisionKind.ADJUSTMENT):
+        raise ValueError("a reduction must be an EXIT or an ADJUSTMENT")
+    if unit not in _REDUCTION_UNITS:
+        # A dollar figure cannot close a position exactly; only a typed
+        # quantity can.
+        raise ValueError(
+            "a reduction requires a typed quantity unit (SHARES or CONTRACTS); "
+            f"got {getattr(unit, 'value', unit)}"
+        )
+    if not isinstance(snapshot_id, UUID):
+        raise TypeError("snapshot_id must be a UUID")
+    name = underlying_for(ticker)
+    try:
+        size = Decimal(str(quantity))
+    except (ArithmeticError, ValueError) as exc:
+        raise ValueError(f"{name} reduction quantity must be a finite number") from exc
+    if not size.is_finite() or size <= 0:
+        raise ValueError(f"{name} reduction quantity must be positive and finite")
+    codes = tuple(str(code) for code in reason_codes)
+    if not codes:
+        raise ValueError("reason_codes must not be empty")
+
+    decision_time_utc = _timestamp(decision_time, field_name="decision_time")
+    decision_bar_utc = _timestamp(decision_bar, field_name="decision_bar")
+    if decision_bar_utc > decision_time_utc:
+        raise ValueError("decision_bar must not be after decision_time")
+
+    score_components = _reduction_scores(scores, ticker=name)
+    if not score_components and UNSCORED_REASON_CODE not in codes:
+        codes = codes + (UNSCORED_REASON_CODE,)
+
+    idempotency_key = _reduction_idempotency_key(
+        strategy_id=config.strategy_id,
+        decision_bar=decision_bar_utc,
+        ticker=name,
+        decision_kind=decision_kind,
+        quantity=size,
+        unit=unit,
+        reason_codes=codes,
+        config_version=config.config_version,
+    )
+    return TradeIntent(
+        intent_id=uuid5(NAMESPACE_URL, idempotency_key),
+        strategy_id=config.strategy_id,
+        ticker=name,
+        direction=Direction.LONG,
+        decision_kind=decision_kind,
+        raw_score=score_components.get("s_combo"),
+        # The Meta combo score is an uncalibrated ranking statistic. Presenting
+        # it as raw_probability would hand every consumer a P(win) that was
+        # never fitted.
+        raw_probability=None,
+        expected_return=None,
+        expected_holding_period=config.expected_holding_period,
+        snapshot_id=snapshot_id,
+        selected_bar=decision_bar_utc,
+        entry_window=config.entry_window,
+        preferred_entry=None,
+        invalidation=None,
+        target=None,
+        stop=None,
+        position_size_requested=size,
+        position_size_unit=unit,
+        instrument_preferences=config.instrument_preferences,
+        feature_timestamp=decision_bar_utc,
+        created_at=decision_time_utc,
+        model_version=config.model_version,
+        feature_version=config.feature_version,
+        reason_codes=codes,
+        score_components=score_components,
+        config_version=config.config_version,
+        idempotency_key=idempotency_key,
+    )
+
+
+def build_plan_intents(
+    plan: Sequence[Sequence[Any]],
+    *,
+    exit_context: Mapping[str, Any],
+    ticker_by_symbol: Mapping[str, str],
+    scores_by_ticker: Mapping[str, Mapping[str, object]],
+    decision_time: datetime,
+    decision_bar: datetime,
+    snapshot_id_by_ticker: Mapping[str, UUID],
+    config: MetaIntentConfig,
+    default_route: str = "equity",
+) -> tuple[TradeIntent, ...]:
+    """Map a whole Meta order plan to intents, preserving row order exactly.
+
+    Plan rows are ``(symbol, side, qty, reason[, route])`` as produced by the
+    equity path and by ``core.live_4h_exec.build_mixed_plan``. Full exits are
+    distinguished from trims by membership in ``exit_context``, which both
+    producers populate for full exits only — that is the existing structural
+    signal, and it is more reliable than pattern-matching the human-readable
+    ladder reason strings.
+    """
+
+    snapshot_ids = _canonical_snapshot_mapping(snapshot_id_by_ticker)
+    intents: list[TradeIntent] = []
+    for row in plan:
+        if len(row) < 4:
+            raise ValueError("plan rows must be (symbol, side, qty, reason[, route])")
+        symbol, side, quantity, reason = row[0], row[1], row[2], row[3]
+        route = row[4] if len(row) > 4 else default_route
+        name = ticker_by_symbol.get(symbol) or underlying_for(symbol)
+        try:
+            snapshot_id = snapshot_ids[name]
+        except KeyError as exc:
+            raise KeyError(f"missing context snapshot ID for {name}") from exc
+        scores = scores_by_ticker.get(name)
+        codes = (str(reason),)
+
+        if str(side).strip().lower() == "buy":
+            # Opening risk we cannot explain is never acceptable.
+            if not scores or _is_missing(scores.get("s_combo")):
+                raise ValueError(
+                    f"no Meta scores for {name} ({symbol}); refusing to open a "
+                    "position that cannot be explained"
+                )
+            intents.append(
+                _entry_intent_from_scores(
+                    ticker=name,
+                    scores=scores,
+                    reason_codes=codes,
+                    decision_time=decision_time,
+                    decision_bar=decision_bar,
+                    snapshot_id=snapshot_id,
+                    config=config,
+                )
+            )
+            continue
+
+        intents.append(
+            build_reduction_intent(
+                decision_kind=(
+                    DecisionKind.EXIT if symbol in exit_context else DecisionKind.ADJUSTMENT
+                ),
+                ticker=name,
+                quantity=quantity,
+                unit=SizeUnit.CONTRACTS if route == "option" else SizeUnit.SHARES,
+                reason_codes=codes,
+                scores=scores,
+                decision_time=decision_time,
+                decision_bar=decision_bar,
+                snapshot_id=snapshot_id,
+                config=config,
+            )
+        )
+    return tuple(intents)
+
+
+def _entry_intent_from_scores(
+    *,
+    ticker: str,
+    scores: Mapping[str, object],
+    reason_codes: tuple[str, ...],
+    decision_time: datetime,
+    decision_bar: datetime,
+    snapshot_id: UUID,
+    config: MetaIntentConfig,
+) -> TradeIntent:
+    """One ENTRY built from an already-selected plan row.
+
+    ``build_trade_intents`` remains the ranking-frame entry point; this shares
+    its identity scheme so an entry built either way is the same decision.
+    """
+
+    decision_time_utc = _timestamp(decision_time, field_name="decision_time")
+    decision_bar_utc = _timestamp(decision_bar, field_name="decision_bar")
+    if decision_bar_utc > decision_time_utc:
+        raise ValueError("decision_bar must not be after decision_time")
+    components = {
+        name: _finite(scores[name], field_name=f"{ticker} {name}")
+        for name in _REDUCTION_SCORE_FIELDS
+        if name in scores and not _is_missing(scores[name])
+    }
+    idempotency_key = _reduction_idempotency_key(
+        strategy_id=config.strategy_id,
+        decision_bar=decision_bar_utc,
+        ticker=ticker,
+        decision_kind=DecisionKind.ENTRY,
+        quantity=Decimal(str(config.requested_notional)),
+        unit=SizeUnit.NOTIONAL_USD,
+        reason_codes=reason_codes,
+        config_version=config.config_version,
+    )
+    return TradeIntent(
+        intent_id=uuid5(NAMESPACE_URL, idempotency_key),
+        strategy_id=config.strategy_id,
+        ticker=ticker,
+        direction=Direction.LONG,
+        decision_kind=DecisionKind.ENTRY,
+        raw_score=components["s_combo"],
+        raw_probability=None,
+        expected_return=None,
+        expected_holding_period=config.expected_holding_period,
+        snapshot_id=snapshot_id,
+        selected_bar=decision_bar_utc,
+        entry_window=config.entry_window,
+        preferred_entry=None,
+        invalidation=None,
+        target=None,
+        stop=None,
+        position_size_requested=Decimal(str(config.requested_notional)),
+        position_size_unit=SizeUnit.NOTIONAL_USD,
+        instrument_preferences=config.instrument_preferences,
+        feature_timestamp=decision_bar_utc,
+        created_at=decision_time_utc,
+        model_version=config.model_version,
+        feature_version=config.feature_version,
+        reason_codes=reason_codes,
+        score_components=components,
+        config_version=config.config_version,
+        idempotency_key=idempotency_key,
+    )
 
 
 def adapt_scored_ticker_state(
@@ -690,8 +1011,12 @@ def adapt_ticker_state(
 
 
 __all__ = [
+    "UNSCORED_REASON_CODE",
     "MetaIntentConfig",
     "adapt_scored_ticker_state",
     "adapt_ticker_state",
+    "build_plan_intents",
+    "build_reduction_intent",
     "build_trade_intents",
+    "underlying_for",
 ]

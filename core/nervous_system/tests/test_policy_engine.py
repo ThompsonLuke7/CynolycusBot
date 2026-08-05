@@ -35,6 +35,7 @@ from core.nervous_system.contracts.enums import (
     PolicyAction,
     PolicyMode,
     RuntimeEnvironment,
+    SizeUnit,
     StateType,
     ThemeRegime,
     TickerSetup,
@@ -310,8 +311,15 @@ def build_intent(
     idempotency_key: str = IDEMPOTENCY_KEY,
     intent_id: UUID | None = None,
     created_at: datetime | None = None,
+    position_size_unit: SizeUnit | None = None,
 ) -> TradeIntent:
     created = created_at or snapshot.decision_time
+    # Entries are a money budget; an exit is a typed quantity.
+    unit = position_size_unit or (
+        SizeUnit.SHARES
+        if decision_kind is DecisionKind.EXIT
+        else SizeUnit.NOTIONAL_USD
+    )
     return TradeIntent(
         intent_id=intent_id or uuid5(NAMESPACE_URL, "policy-test/intent"),
         strategy_id=STRATEGY,
@@ -330,6 +338,7 @@ def build_intent(
         target=Decimal("112.00"),
         stop=Decimal("94.00"),
         position_size_requested=position_size_requested,
+        position_size_unit=unit,
         instrument_preferences=instrument_preferences,
         feature_timestamp=DECISION_BAR,
         created_at=created,
@@ -866,6 +875,36 @@ def test_risk_reducing_exit_stays_operable_under_degraded_context() -> None:
     assert ReasonCode.EXIT_RISK_REDUCING_PERMITTED.value in decision.reason_codes
     assert decision.allowed_instruments == frozenset(intent.instrument_preferences)
     _assert_auditable_reasons(decision)
+
+
+def test_an_exit_share_count_is_never_treated_as_a_money_budget() -> None:
+    """``position_size_requested`` is a money budget for entries and a typed
+    quantity for exits. If any money rule ran on an exit, a 41-share close
+    would be reinterpreted as $41 and capped down to a partial close, leaving
+    the position open. The pass-through is the guarantee that cannot break.
+    """
+
+    snapshot = build_snapshot()
+    intent = build_intent(
+        snapshot=snapshot,
+        decision_kind=DecisionKind.EXIT,
+        position_size_requested=Decimal("41"),
+        position_size_unit=SizeUnit.SHARES,
+    )
+
+    decision = evaluate_policy(
+        intent,
+        snapshot,
+        # A cap far below the share count: a money rule would bite here.
+        build_config(
+            max_position_notional=Decimal("10.00"),
+            minimum_order_notional=Decimal("1.00"),
+        ),
+    )
+
+    assert decision.action is PolicyAction.EXIT
+    assert decision.final_risk_budget == Decimal("41")
+    assert decision.modifiers == ()
 
 
 def test_exit_still_blocked_by_environment_and_account_identity() -> None:

@@ -19,7 +19,7 @@ from .base import (
     Probability,
     UtcDatetime,
 )
-from .enums import DecisionKind, Direction, InstrumentFamily
+from .enums import DecisionKind, Direction, InstrumentFamily, SizeUnit
 
 
 def _validate_score_components_input(value: object) -> object:
@@ -51,7 +51,9 @@ class TradeIntent(ContractModel):
     ticker: str
     direction: Direction
     decision_kind: DecisionKind
-    raw_score: FiniteFloat
+    # Optional only for reductions: a held name can leave the scored universe
+    # entirely, and a risk-reducing action must not depend on a fresh opinion.
+    raw_score: FiniteFloat | None
     raw_probability: Probability | None
     expected_return: FiniteFloat | None
     expected_holding_period: str
@@ -74,6 +76,9 @@ class TradeIntent(ContractModel):
     score_components: StrictScoreComponents = Field(default_factory=dict, validate_default=True)
     config_version: str = "UNKNOWN"
     idempotency_key: str = ""
+    # An unlabelled size means dollars to the policy engine and shares to the
+    # exit ladder. New producers must say which.
+    position_size_unit: SizeUnit = SizeUnit.UNKNOWN
 
     @model_validator(mode="after")
     def validate_timing(self) -> TradeIntent:
@@ -82,12 +87,34 @@ class TradeIntent(ContractModel):
         legacy = self.score_components == {} and self.config_version == "UNKNOWN" and self.idempotency_key == ""
         if legacy:
             return self
-        if not self.score_components:
-            raise ValueError("new-format TradeIntent requires score_components")
+        # A reduction may be unscored (see raw_score); an entry may not.
+        if not self.score_components and self.decision_kind is DecisionKind.ENTRY:
+            raise ValueError("a new-format ENTRY requires score_components")
         if not self.config_version.strip() or self.config_version.upper() == "UNKNOWN":
             raise ValueError("new-format TradeIntent requires a non-UNKNOWN config_version")
         if re.fullmatch(r"[0-9a-f]{64}", self.idempotency_key) is None:
             raise ValueError("new-format TradeIntent requires a lowercase 64-hex idempotency_key")
+        if self.position_size_unit is SizeUnit.UNKNOWN:
+            raise ValueError("new-format TradeIntent requires an explicit position_size_unit")
         if self.snapshot_id is None:
             raise ValueError("new-format TradeIntent requires snapshot_id lineage")
+        return self
+
+    @model_validator(mode="after")
+    def validate_entry_is_explained(self) -> TradeIntent:
+        # Opening risk always requires a score. Only a reduction may proceed
+        # without one.
+        if self.decision_kind is DecisionKind.ENTRY and self.raw_score is None:
+            raise ValueError("an ENTRY requires a raw_score")
+        return self
+
+    @model_validator(mode="after")
+    def validate_exit_size_unit(self) -> TradeIntent:
+        # A dollar figure cannot close a position exactly, so an exit that is
+        # denominated in money would always round to a residual holding.
+        if (
+            self.decision_kind is DecisionKind.EXIT
+            and self.position_size_unit is SizeUnit.NOTIONAL_USD
+        ):
+            raise ValueError("an EXIT requires a typed quantity unit, not NOTIONAL_USD")
         return self
