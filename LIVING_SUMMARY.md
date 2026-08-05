@@ -1234,3 +1234,7 @@ Outbox/coordinator `47`, full nervous-system `828`, repo-wide failures unchanged
 {2026-08-04 00:55 ET} {agent: Claude} {nervous system Task 23 increment 1}
 Removed the Meta live-trading route entirely: the runner rejects --live and is pinned to PAPER, the dashboard lost live_env_file/set_live//api/set-live and defaults to read-only, and combined_server pins Meta passes to live=False and rejects --meta-ranker-live at startup; only Meta wiring changed.
 Added AST no-bypass tests that also pin an inventory of the eight remaining direct submit sites, which must shrink to zero. No-bypass `11`, nervous-system `778 passed/61 skipped` (PostgreSQL was down, so DB tests skipped), repo-wide failures unchanged. Next: increment 2, TradeIntent mapping and gateway routing in live_runner.py.
+
+2026-08-04 21:12 ET Claude nervous-system/meta-ranker (Task 23 increment 2)
+Added SizeUnit + TradeIntent.position_size_unit (EXIT may not be money-denominated; raw_score/score_components optional for reductions only), and extended nervous_system_adapter with build_reduction_intent/build_plan_intents (exits->EXIT, trims->ADJUSTMENT, OCC->underlying, clock/snapshot-independent identity). Caught and reverted a duplicate intents.py that competed with Task 14's build_trade_intents.
+Verified 988 passed on the restarted disposable PostgreSQL; repo-wide failure set identical to a stashed baseline; 11 mutations caught after closing 2 survivors. Next: wire SnapshotBuilder+policy so the runner can emit intents through DecisionCoordinator -> ExecutionGateway.
