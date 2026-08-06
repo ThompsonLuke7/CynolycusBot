@@ -1254,3 +1254,7 @@ Verified 1125 passed, repo-wide failure set identical to a stashed baseline; 10 
 2026-08-05 22:30 ET Claude nervous-system/meta-ranker (Task 23 increment 4c)
 Added close_limit_ladder (mid -> bid rungs, market only after exhaustion, dedup on penny-rounding) and OrderRequest.net_limit_source, so a degraded close still tries a limit when its price has a named source and only falls to market when there is no price at all. Swing's own bid-anchored ladder left untouched.
 Verified 1200 passed/2 skipped incl. multi_ticker_swing; 8 mutations caught after closing 1 survivor. Task 23 remains incomplete: nothing is routed live yet (direct-submit inventory still live_runner=2, live_4h_exec=6).
+
+2026-08-05 22:35 ET Claude nervous-system/replay (Task 24 increment 1)
+Built the option source-fitness gate (contracts/replay.py + replay/fitness.py): runs before any P&L, defaults to unfit, enforces thresholds per option side, and encodes the 2026-07 retraction directly (trade prints/last prices/synthetic/ffill/interp and even MID are never fit marks; the +0.09 correlation case is a test).
+Verified 1090 passed; 12 mutations caught after closing 3 test-side survivors. Task 23 remains paused and incomplete (nothing routed live; direct-submit inventory live_runner=2, live_4h_exec=6). Next in 24: typed evidence provider, migration 0003, replay/outcome persistence, attribution.
