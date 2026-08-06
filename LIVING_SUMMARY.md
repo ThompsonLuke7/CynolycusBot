@@ -1258,3 +1258,7 @@ Verified 1200 passed/2 skipped incl. multi_ticker_swing; 8 mutations caught afte
 2026-08-05 22:35 ET Claude nervous-system/replay (Task 24 increment 1)
 Built the option source-fitness gate (contracts/replay.py + replay/fitness.py): runs before any P&L, defaults to unfit, enforces thresholds per option side, and encodes the 2026-07 retraction directly (trade prints/last prices/synthetic/ffill/interp and even MID are never fit marks; the +0.09 correlation case is a test).
 Verified 1090 passed; 12 mutations caught after closing 3 test-side survivors. Task 23 remains paused and incomplete (nothing routed live; direct-submit inventory live_runner=2, live_4h_exec=6). Next in 24: typed evidence provider, migration 0003, replay/outcome persistence, attribution.
+
+2026-08-05 22:50 ET Claude nervous-system/replay (Task 24 increment 2)
+Added the Observation contract and replay/evidence.py causal selector for non-state evidence (bars, quotes, fills, manifests), reusing the state selector's tie key rather than adding a second discipline: available_at <= decision_time < valid_until, bar-bound also clamped to as_of <= decision_bar, as_of never substituting for availability, mtime never inferred.
+Verified 1112 passed; 10 mutations caught. Remaining in 24: migration 0003, replay/outcome persistence, attribution decomposition, replay clock, live/replay parity. Task 23 still paused and incomplete (direct-submit inventory live_runner=2, live_4h_exec=6).
