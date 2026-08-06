@@ -1250,3 +1250,7 @@ Two contract findings now block option ORDER construction and need your call: (1
 2026-08-05 22:15 ET Claude nervous-system/meta-ranker (Task 23 increment 4b)
 Corrected the premise: Alpaca does accept single-leg option market sells; the swing position_manager already uses a bid-anchored limit ladder then an RTH-gated market fallback, so the historical rejections were after-hours market orders. Contract now expresses both: a market close may omit net_limit_price when every leg is closing, and a closing leg may omit bid/ask/quote_at when quote_degraded_reason is set (entries stay hard; degraded orders may not be limits).
 Verified 1125 passed, repo-wide failure set identical to a stashed baseline; 10 mutations caught after closing 2 survivors. Next: build option OrderRequests in MetaGatewayRouter reusing the swing ladder shape, then wire _execute.
+
+2026-08-05 22:30 ET Claude nervous-system/meta-ranker (Task 23 increment 4c)
+Added close_limit_ladder (mid -> bid rungs, market only after exhaustion, dedup on penny-rounding) and OrderRequest.net_limit_source, so a degraded close still tries a limit when its price has a named source and only falls to market when there is no price at all. Swing's own bid-anchored ladder left untouched.
+Verified 1200 passed/2 skipped incl. multi_ticker_swing; 8 mutations caught after closing 1 survivor. Task 23 remains incomplete: nothing is routed live yet (direct-submit inventory still live_runner=2, live_4h_exec=6).
