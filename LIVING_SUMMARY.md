@@ -1262,3 +1262,7 @@ Verified 1090 passed; 12 mutations caught after closing 3 test-side survivors. T
 2026-08-05 23:52 ET Claude nervous-system/replay (Task 24 increment 2)
 Added the Observation contract and replay/evidence.py causal selector for non-state evidence (bars, quotes, fills, manifests), reusing the state selector's tie key rather than adding a second discipline: available_at <= decision_time < valid_until, bar-bound also clamped to as_of <= decision_bar, as_of never substituting for availability, mtime never inferred.
 Verified 1112 passed; 10 mutations caught. Remaining in 24: migration 0003, replay/outcome persistence, attribution decomposition, replay clock, live/replay parity. Task 23 still paused and incomplete (direct-submit inventory live_runner=2, live_4h_exec=6).
+
+2026-08-05 23:57 ET Claude nervous-system/replay (Task 24 increment 3)
+Added migration 0003_replay_fitness (replay_runs, replay_decisions, source_fitness_reports) and extended decision_outcomes into append-only revisions: PENDING never zero, uq on (decision, horizon, revision) so an in-place rewrite is structurally impossible, option_pnl_eligible defaults false. Replay run identity includes the deterministic seed; replay_decisions enforces decision_bar <= decision_time.
+Verified 1113 passed incl. the real PostgreSQL 0003 upgrade/downgrade; 6 mutations caught. Remaining in 24: replay repository, evidence provider implementations, replay clock, attribution decomposition, live/replay parity. Task 23 still paused (direct-submit inventory live_runner=2, live_4h_exec=6).
