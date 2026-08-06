@@ -21,7 +21,13 @@ from .enums import (
     OptionType,
     OrderSide,
     PositionIntent,
+    QuoteAssurance,
     RuntimeEnvironment,
+)
+
+
+_CLOSING_INTENTS = frozenset(
+    {PositionIntent.BUY_TO_CLOSE, PositionIntent.SELL_TO_CLOSE}
 )
 
 
@@ -34,16 +40,27 @@ class OptionLeg(ContractModel):
     side: OrderSide
     ratio: Annotated[int, Field(gt=0)]
     position_intent: PositionIntent
-    quote_at: UtcDatetime
-    bid: NonNegativeDecimal
-    ask: NonNegativeDecimal
+    # Absent only on a degraded close: a position we are exiting must not be
+    # trapped by a failed quote fetch. An opening leg always carries a market.
+    quote_at: UtcDatetime | None = None
+    bid: NonNegativeDecimal | None = None
+    ask: NonNegativeDecimal | None = None
+    quote_degraded_reason: str | None = None
+
+    @property
+    def is_closing(self) -> bool:
+        return self.position_intent in _CLOSING_INTENTS
+
+    @property
+    def quote_assurance(self) -> QuoteAssurance:
+        return (
+            QuoteAssurance.DEGRADED
+            if self.quote_degraded_reason is not None
+            else QuoteAssurance.QUOTED
+        )
 
     @model_validator(mode="after")
     def validate_quote_and_intent(self) -> OptionLeg:
-        if self.ask < self.bid:
-            raise ValueError("option ask must not be below bid")
-        if self.expiration < self.quote_at.date():
-            raise ValueError("option expiration must not precede quote_at")
         expected_side = {
             PositionIntent.BUY_TO_OPEN: OrderSide.BUY,
             PositionIntent.BUY_TO_CLOSE: OrderSide.BUY,
@@ -52,6 +69,40 @@ class OptionLeg(ContractModel):
         }[self.position_intent]
         if self.side is not expected_side:
             raise ValueError("option side must agree with position_intent")
+
+        observed = (self.quote_at, self.bid, self.ask)
+        if any(part is None for part in observed) and not all(
+            part is None for part in observed
+        ):
+            # Either we have the whole observed market or none of it. A bid
+            # without an ask is a market nobody observed.
+            raise ValueError(
+                "an option leg needs bid, ask, and quote_at together, or none of them"
+            )
+
+        if all(part is None for part in observed):
+            if not self.is_closing:
+                raise ValueError(
+                    "an opening option leg requires an observed bid, ask, and quote_at"
+                )
+            if not (self.quote_degraded_reason or "").strip():
+                # An unpriced close with no explanation is indistinguishable
+                # from a bug, so silence is the one thing not allowed.
+                raise ValueError(
+                    "an unquoted closing leg requires a quote_degraded_reason"
+                )
+            return self
+
+        if self.quote_degraded_reason is not None:
+            # Mislabelling in the safe direction is still mislabelling: it
+            # would make the degraded-exit rate meaningless.
+            raise ValueError(
+                "a leg with an observed quote must not carry a degradation reason"
+            )
+        if self.ask < self.bid:
+            raise ValueError("option ask must not be below bid")
+        if self.expiration < self.quote_at.date():
+            raise ValueError("option expiration must not precede quote_at")
         return self
 
 
@@ -107,6 +158,18 @@ class OrderRequest(ContractModel):
     supersedes_order_request_id: UUID | None = None
     created_at: UtcDatetime
     expires_at: UtcDatetime
+
+    @property
+    def is_pure_close(self) -> bool:
+        """True when every option leg closes an existing position."""
+
+        return bool(self.legs) and all(leg.is_closing for leg in self.legs)
+
+    @property
+    def quote_assurance(self) -> QuoteAssurance:
+        if any(leg.quote_assurance is QuoteAssurance.DEGRADED for leg in self.legs):
+            return QuoteAssurance.DEGRADED
+        return QuoteAssurance.QUOTED
 
     def request_hash_material(self) -> _OrderRequestHashMaterial:
         return _OrderRequestHashMaterial(
@@ -253,10 +316,25 @@ class OrderRequest(ContractModel):
             raise ValueError("limit orders require a positive non-null net_limit_price")
         if self.order_type == "market" and self.net_limit_price is not None:
             raise ValueError("market orders require net_limit_price to be null")
-        if self.debit_credit is DebitCredit.CREDIT and (
-            self.net_limit_price is None or self.net_limit_price <= 0
+        if (
+            self.debit_credit is DebitCredit.CREDIT
+            and not self.is_pure_close
+            and (self.net_limit_price is None or self.net_limit_price <= 0)
         ):
+            # The rule exists so a credit *spread* states the credit it expects
+            # to collect. A market close states no price by definition, and
+            # Alpaca accepts single-leg option market sells during RTH -- the
+            # swing position manager already relies on that as its exit
+            # fallback when the limit ladder does not fill.
             raise ValueError("credit requests require a positive credit limit magnitude")
+        if (
+            self.quote_assurance is QuoteAssurance.DEGRADED
+            and self.order_type == "limit"
+        ):
+            # With no observed market there is no defensible limit price, and
+            # inventing one is the fabrication the degraded path exists to
+            # avoid.
+            raise ValueError("a degraded close cannot be priced as a limit order")
         if self.request_hash != self.computed_request_hash():
             raise ValueError("request_hash does not match order request content")
         return self

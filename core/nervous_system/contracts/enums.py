@@ -129,6 +129,20 @@ class PositionIntent(str, Enum):
     SELL_TO_CLOSE = "SELL_TO_CLOSE"
 
 
+class QuoteAssurance(str, Enum):
+    """Whether an order's legs carry the market they were priced against.
+
+    Entries are always QUOTED: opening risk we cannot price is never
+    acceptable. A close may be DEGRADED, because a position we are trying to
+    exit must not be trapped by a failed quote fetch — but the degradation is
+    recorded rather than hidden, so an unpriced close is never mistaken for a
+    priced one.
+    """
+
+    QUOTED = "QUOTED"
+    DEGRADED = "DEGRADED"
+
+
 class DebitCredit(str, Enum):
     DEBIT = "DEBIT"
     CREDIT = "CREDIT"
