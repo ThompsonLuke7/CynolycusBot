@@ -305,3 +305,82 @@ def test_an_equity_request_is_never_reported_as_a_pure_close() -> None:
 
     assert request.is_pure_close is False
     assert request.quote_assurance is QuoteAssurance.QUOTED
+
+
+# ---------------------------------------------------------------------------
+# A degraded close still tries a limit when it has a real price
+# ---------------------------------------------------------------------------
+
+
+def test_a_degraded_close_may_be_a_limit_when_its_price_has_a_named_source() -> None:
+    """Losing the bid/ask feed does not mean losing every price. A broker
+    position mark is a real observation, so the exit should still try to earn
+    price improvement before resorting to a market order.
+    """
+
+    request = _request(
+        legs=(_degraded_leg(),),
+        order_type="limit",
+        net_limit_price=Decimal("4.05"),
+        net_limit_source="broker_position_mark",
+    )
+
+    assert request.quote_assurance is QuoteAssurance.DEGRADED
+    assert request.order_type == "limit"
+    assert request.net_limit_price == Decimal("4.05")
+    assert request.net_limit_source == "broker_position_mark"
+
+
+def test_a_degraded_limit_without_a_named_source_is_refused() -> None:
+    """This is the line between a real fallback mark and an invented number.
+    An unsourced limit on an unquoted close is a fabrication.
+    """
+
+    with pytest.raises(ValidationError, match="source"):
+        _request(
+            legs=(_degraded_leg(),),
+            order_type="limit",
+            net_limit_price=Decimal("4.05"),
+        )
+
+
+def test_a_degraded_close_with_no_price_at_all_is_a_market_order() -> None:
+    request = _request(
+        legs=(_degraded_leg(),), order_type="market", net_limit_price=None
+    )
+
+    assert request.order_type == "market"
+    assert request.net_limit_price is None
+    assert request.net_limit_source is None
+
+
+def test_a_market_order_may_not_claim_a_limit_source() -> None:
+    """A market order has no price, so a price provenance on it is meaningless
+    and would pollute the audit trail.
+    """
+
+    with pytest.raises(ValidationError, match="source"):
+        _request(
+            legs=(_degraded_leg(),),
+            order_type="market",
+            net_limit_price=None,
+            net_limit_source="broker_position_mark",
+        )
+
+
+def test_the_limit_source_is_part_of_the_request_identity() -> None:
+    first = _request(
+        legs=(_degraded_leg(),),
+        order_type="limit",
+        net_limit_price=Decimal("4.05"),
+        net_limit_source="broker_position_mark",
+    )
+    second = _request(
+        legs=(_degraded_leg(),),
+        order_type="limit",
+        net_limit_price=Decimal("4.05"),
+        net_limit_source="last_known_mid",
+    )
+
+    assert first.request_hash != second.request_hash
+    assert first.request_hash == first.computed_request_hash()

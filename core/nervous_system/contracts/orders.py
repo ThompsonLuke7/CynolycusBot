@@ -121,6 +121,7 @@ class _OrderRequestHashMaterial(ContractModel):
     parent_quantity: PositiveDecimal
     debit_credit: DebitCredit
     net_limit_price: PositiveDecimal | None
+    net_limit_source: str | None
     maximum_loss: NonNegativeDecimal
     buying_power_required: NonNegativeDecimal
     time_in_force: str
@@ -148,6 +149,10 @@ class OrderRequest(ContractModel):
     parent_quantity: PositiveDecimal
     debit_credit: DebitCredit
     net_limit_price: PositiveDecimal | None
+    # Where a limit price came from when it did not come from an observed
+    # two-sided market. Required on a degraded close so a real fallback mark is
+    # distinguishable from an invented number.
+    net_limit_source: str | None = None
     maximum_loss: NonNegativeDecimal
     buying_power_required: NonNegativeDecimal
     time_in_force: str
@@ -187,6 +192,7 @@ class OrderRequest(ContractModel):
             parent_quantity=self.parent_quantity,
             debit_credit=self.debit_credit,
             net_limit_price=self.net_limit_price,
+            net_limit_source=self.net_limit_source,
             maximum_loss=self.maximum_loss,
             buying_power_required=self.buying_power_required,
             time_in_force=self.time_in_force,
@@ -229,6 +235,7 @@ class OrderRequest(ContractModel):
         legs: tuple[OptionLeg, ...] = (),
         quote_snapshot_id: UUID | None = None,
         supersedes_order_request_id: UUID | None = None,
+        net_limit_source: str | None = None,
     ) -> OrderRequest:
         material = _OrderRequestHashMaterial(
             decision_id=decision_id,
@@ -245,6 +252,7 @@ class OrderRequest(ContractModel):
             parent_quantity=parent_quantity,
             debit_credit=debit_credit,
             net_limit_price=net_limit_price,
+            net_limit_source=net_limit_source,
             maximum_loss=maximum_loss,
             buying_power_required=buying_power_required,
             time_in_force=time_in_force,
@@ -271,6 +279,7 @@ class OrderRequest(ContractModel):
             parent_quantity=parent_quantity,
             debit_credit=debit_credit,
             net_limit_price=net_limit_price,
+            net_limit_source=net_limit_source,
             maximum_loss=maximum_loss,
             buying_power_required=buying_power_required,
             time_in_force=time_in_force,
@@ -327,14 +336,22 @@ class OrderRequest(ContractModel):
             # swing position manager already relies on that as its exit
             # fallback when the limit ladder does not fill.
             raise ValueError("credit requests require a positive credit limit magnitude")
+        if self.order_type == "market" and self.net_limit_source is not None:
+            # A market order has no price, so a price provenance on it is
+            # meaningless and would pollute the audit trail.
+            raise ValueError("a market order must not name a limit price source")
         if (
             self.quote_assurance is QuoteAssurance.DEGRADED
             and self.order_type == "limit"
+            and not (self.net_limit_source or "").strip()
         ):
-            # With no observed market there is no defensible limit price, and
-            # inventing one is the fabrication the degraded path exists to
-            # avoid.
-            raise ValueError("a degraded close cannot be priced as a limit order")
+            # Losing the quote feed does not mean losing every price -- a
+            # broker position mark is still a real observation. But an
+            # unsourced limit on an unquoted close is an invented number, and
+            # that is the line this rule draws.
+            raise ValueError(
+                "a degraded close priced as a limit requires a net_limit_source"
+            )
         if self.request_hash != self.computed_request_hash():
             raise ValueError("request_hash does not match order request content")
         return self
