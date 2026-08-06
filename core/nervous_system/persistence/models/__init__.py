@@ -14,6 +14,7 @@ from .decision import (
 )
 from .execution import ExecutionEvent, OrderLeg, OrderRequest, SubmissionAttempt
 from .operations import Alert, JobEvent, JobRun, OutboxEvent, PortfolioOwnership
+from .replay import ReplayDecision, ReplayRun, SourceFitnessReport
 from .registry import (
     ConfigSnapshot,
     ImportItem,
@@ -45,6 +46,9 @@ __all__ = [
     "PolicyModifier",
     "PortfolioObservation",
     "PortfolioOwnership",
+    "ReplayDecision",
+    "ReplayRun",
+    "SourceFitnessReport",
     "SCHEMA",
     "SourceArtifact",
     "StateRecord",

@@ -7,7 +7,17 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import (
@@ -185,6 +195,63 @@ class DecisionOutcome(Base):
     horizon: Mapped[str] = mapped_column(String(64), nullable=False)
     payload: Mapped[dict[str, Any]] = jsonb_column()
     created_at: Mapped[datetime] = utc_timestamp()
+    replay_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            f"{SCHEMA}.replay_runs.replay_run_id",
+            name="fk_ns_decision_outcomes_replay_run",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    source_fitness_report_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            f"{SCHEMA}.source_fitness_reports.source_fitness_report_id",
+            name="fk_ns_decision_outcomes_source_fitness_report",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    horizon_kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="BARS"
+    )
+    target_window_start: Mapped[datetime | None] = utc_timestamp(nullable=True)
+    target_window_end: Mapped[datetime | None] = utc_timestamp(nullable=True)
+    mark_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    fill_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_observation_hashes: Mapped[dict[str, Any]] = jsonb_column(default="[]")
+    # Revisions append; they never update a prior outcome. A maturing horizon
+    # is PENDING, never zero -- a zero would read as a real flat result.
+    revision_number: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="PENDING"
+    )
+    option_pnl_eligible: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "decision_record_id",
+            "horizon",
+            "revision_number",
+            name="uq_ns_decision_outcomes_revision",
+        ),
+        CheckConstraint(
+            "revision_number > 0", name="ck_ns_decision_outcomes_revision_positive"
+        ),
+        CheckConstraint(
+            "status in ('PENDING', 'FINAL', 'SUPERSEDED', 'UNAVAILABLE')",
+            name="ck_ns_decision_outcomes_status",
+        ),
+        CheckConstraint(
+            "target_window_start is null or target_window_end is null "
+            "or target_window_start <= target_window_end",
+            name="ck_ns_decision_outcomes_target_window",
+        ),
+        {"schema": SCHEMA},
+    )
 
 
 __all__ = [

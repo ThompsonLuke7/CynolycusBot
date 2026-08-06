@@ -24,6 +24,9 @@ ALEMBIC_INI = REPO_ROOT / "core/nervous_system/persistence/alembic.ini"
 SCHEMA = "nervous_system"
 
 EXPECTED_TABLES = {
+    "replay_runs",
+    "replay_decisions",
+    "source_fitness_reports",
     "state_records",
     "context_snapshots",
     "trade_intents",
@@ -50,6 +53,9 @@ EXPECTED_TABLES = {
 }
 
 EXPECTED_PRIMARY_KEYS = {
+    "replay_runs": "replay_run_id",
+    "replay_decisions": "replay_decision_id",
+    "source_fitness_reports": "source_fitness_report_id",
     "state_records": "state_id",
     "context_snapshots": "snapshot_id",
     "trade_intents": "intent_id",
@@ -135,7 +141,25 @@ EXPECTED_TABLE_COLUMNS = {
     },
     "decision_outcomes": {
         "outcome_id", "decision_record_id", "evaluated_at", "horizon",
-        "payload", "created_at",
+        "payload", "created_at", "replay_run_id", "source_fitness_report_id",
+        "horizon_kind", "target_window_start", "target_window_end",
+        "mark_basis", "fill_basis", "source_observation_hashes",
+        "revision_number", "status", "option_pnl_eligible",
+    },
+    "replay_runs": {
+        "replay_run_id", "source_manifest_hash", "schedule_hash", "config_hash",
+        "model_hash", "deterministic_seed", "execution_assumptions", "status",
+        "limitations", "started_at", "completed_at", "created_at",
+    },
+    "replay_decisions": {
+        "replay_decision_id", "replay_run_id", "sequence_no",
+        "decision_record_id", "snapshot_hash", "decision_time", "decision_bar",
+        "lineage", "created_at",
+    },
+    "source_fitness_reports": {
+        "source_fitness_report_id", "replay_run_id", "status", "thresholds_hash",
+        "source", "feed", "tier", "side_metrics", "reason_codes", "warnings",
+        "evaluated_at", "created_at",
     },
     "order_requests": {
         "order_request_id", "decision_record_id", "policy_decision_id",
@@ -191,6 +215,12 @@ EXPECTED_TABLE_COLUMNS = {
 }
 
 EXPECTED_OPTIONAL_COLUMNS = {
+    "replay_runs": {"completed_at"},
+    "source_fitness_reports": {"replay_run_id"},
+    "decision_outcomes": {
+        "replay_run_id", "source_fitness_report_id", "target_window_start",
+        "target_window_end", "mark_basis", "fill_basis",
+    },
     "import_runs": {"finished_at"},
     "import_items": {"target_id"},
     "import_quarantine": {"raw_payload", "raw_text"},
@@ -229,7 +259,15 @@ UUID_COLUMNS = {
         "policy_decisions": {"policy_decision_id", "intent_id", "snapshot_id"},
         "policy_modifiers": {"modifier_id", "policy_decision_id"},
         "decision_records": {"decision_record_id", "snapshot_id", "intent_id", "policy_decision_id"},
-        "decision_outcomes": {"outcome_id", "decision_record_id"},
+        "decision_outcomes": {
+            "outcome_id", "decision_record_id", "replay_run_id",
+            "source_fitness_report_id",
+        },
+        "replay_runs": {"replay_run_id"},
+        "replay_decisions": {
+            "replay_decision_id", "replay_run_id", "decision_record_id",
+        },
+        "source_fitness_reports": {"source_fitness_report_id", "replay_run_id"},
         "order_requests": {"order_request_id", "decision_record_id", "policy_decision_id"},
         "order_legs": {"order_leg_id", "order_request_id"},
         "submission_attempts": {"submission_attempt_id", "order_request_id", "journal_event_id"},
@@ -257,7 +295,13 @@ TIMESTAMP_COLUMNS = {
         "trade_intents": {"decision_time", "created_at"},
         "policy_decisions": {"created_at"},
         "decision_records": {"decision_time", "created_at"},
-        "decision_outcomes": {"evaluated_at", "created_at"},
+        "decision_outcomes": {
+            "evaluated_at", "created_at", "target_window_start",
+            "target_window_end",
+        },
+        "replay_runs": {"started_at", "completed_at", "created_at"},
+        "replay_decisions": {"decision_time", "decision_bar", "created_at"},
+        "source_fitness_reports": {"evaluated_at", "created_at"},
         "order_requests": {"created_at", "expires_at"},
         "submission_attempts": {"reserved_at", "journaled_at", "broker_called_at", "resolved_at", "lease_until"},
         "execution_events": {"observed_at", "broker_event_at"},
@@ -285,7 +329,10 @@ JSONB_COLUMNS = {
         "policy_decisions": {"payload"},
         "policy_modifiers": {"payload"},
         "decision_records": {"payload"},
-        "decision_outcomes": {"payload"},
+        "decision_outcomes": {"payload", "source_observation_hashes"},
+        "replay_runs": {"execution_assumptions", "limitations"},
+        "replay_decisions": {"lineage"},
+        "source_fitness_reports": {"side_metrics", "reason_codes", "warnings"},
         "order_requests": {"payload"},
         "order_legs": {"payload"},
         "submission_attempts": {"payload"},
@@ -322,12 +369,17 @@ INTEGER_COLUMNS = {
         "job_runs": {"attempt_no"},
         "outbox_events": {"delivery_attempts"},
         "alerts": {"occurrence_count"},
+        "replay_decisions": {"sequence_no"},
+        "decision_outcomes": {"revision_number"},
     }.items()
     for column in columns
 }
 
-BIGINT_COLUMNS = {("source_artifacts", "byte_size")}
-BOOLEAN_COLUMNS = {("order_requests", "risk_reducing")}
+BIGINT_COLUMNS = {("source_artifacts", "byte_size"), ("replay_runs", "deterministic_seed")}
+BOOLEAN_COLUMNS = {
+    ("order_requests", "risk_reducing"),
+    ("decision_outcomes", "option_pnl_eligible"),
+}
 TEXT_COLUMNS = {
     ("import_quarantine", "error_message"),
     ("job_runs", "error"),
@@ -338,6 +390,29 @@ TEXT_COLUMNS = {
 }
 
 EXPECTED_UNIQUES = {
+    # Revisions append; they never update a prior outcome.
+    "uq_ns_decision_outcomes_revision": (
+        "decision_outcomes",
+        ("decision_record_id", "horizon", "revision_number"),
+    ),
+    "uq_ns_replay_runs_identity": (
+        "replay_runs",
+        (
+            "source_manifest_hash",
+            "schedule_hash",
+            "config_hash",
+            "model_hash",
+            "deterministic_seed",
+        ),
+    ),
+    "uq_ns_replay_decisions_sequence": (
+        "replay_decisions",
+        ("replay_run_id", "sequence_no"),
+    ),
+    "uq_ns_replay_decisions_identity": (
+        "replay_decisions",
+        ("replay_run_id", "decision_record_id"),
+    ),
     "uq_ns_source_artifacts_uri_sha256": ("source_artifacts", ("uri", "sha256")),
     "uq_ns_state_records_content_hash": ("state_records", ("content_hash",)),
     "uq_ns_config_snapshots_content_hash": ("config_snapshots", ("content_hash",)),
@@ -481,7 +556,7 @@ def _constraint_columns(table: Any, constraint_type: type) -> dict[str, tuple[st
     }
 
 
-def test_orm_metadata_registers_exactly_23_tables() -> None:
+def test_orm_metadata_registers_exactly_26_tables() -> None:
     """The model package must register only the approved domain tables."""
 
     assert importlib.util.find_spec("core.nervous_system.persistence.models.base") is not None
@@ -852,14 +927,27 @@ def test_alembic_revision_chain_and_table_partition() -> None:
     second = importlib.import_module(
         "core.nervous_system.persistence.migrations.versions.0002_decision_execution"
     )
+    third = importlib.import_module(
+        "core.nervous_system.persistence.migrations.versions.0003_replay_fitness"
+    )
     assert first.revision == "0001_state_registry"
     assert first.down_revision is None
     assert second.revision == "0002_decision_execution"
     assert second.down_revision == first.revision
-    assert set(first.TABLE_NAMES) | set(second.TABLE_NAMES) == EXPECTED_TABLES
-    assert set(first.TABLE_NAMES).isdisjoint(second.TABLE_NAMES)
+    assert third.revision == "0003_replay_fitness"
+    assert third.down_revision == second.revision
+    partitions = (
+        set(first.TABLE_NAMES),
+        set(second.TABLE_NAMES),
+        set(third.TABLE_NAMES),
+    )
+    assert set().union(*partitions) == EXPECTED_TABLES
+    for index, left in enumerate(partitions):
+        for right in partitions[index + 1 :]:
+            assert left.isdisjoint(right)
     assert len(first.TABLE_NAMES) == 9
     assert len(second.TABLE_NAMES) == 14
+    assert len(third.TABLE_NAMES) == 3
 
 
 def test_offline_upgrade_sql_has_public_version_and_dependency_order() -> None:
@@ -943,3 +1031,17 @@ def test_upgrade_inspect_downgrade_and_reupgrade_complete_schema(postgres_url: s
         assert set(inspect(engine).get_table_names(schema=SCHEMA)) == EXPECTED_TABLES
     finally:
         engine.dispose()
+
+
+def test_outcome_defaults_are_conservative() -> None:
+    """A maturing horizon is PENDING, never zero — a zero would read as a real
+    flat result. And option eligibility defaults to false, so an outcome is
+    only option-eligible once a fitness report has affirmatively said so.
+    """
+
+    outcomes = _table("decision_outcomes")
+
+    assert "PENDING" in str(outcomes.c.status.server_default.arg)
+    assert outcomes.c.revision_number.server_default.arg == "1"
+    eligible_default = str(outcomes.c.option_pnl_eligible.server_default.arg).lower()
+    assert "false" in eligible_default
