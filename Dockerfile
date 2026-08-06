@@ -21,3 +21,10 @@ RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/wh
 
 COPY . .
 ENV PYTHONUNBUFFERED=1
+
+# Cloud Run health-checks a service by connecting to $PORT; a container that starts
+# no listener is killed as failed. Without this the base image's default `python3`
+# REPL exits on EOF and every deploy times out. Placeholder only — Phase 6 replaces
+# it with the read-only dashboard entrypoint. Serves an empty dir, not the source tree.
+ENV PORT=8080
+CMD ["sh", "-c", "exec python -m http.server \"${PORT}\" --bind 0.0.0.0 --directory /tmp"]

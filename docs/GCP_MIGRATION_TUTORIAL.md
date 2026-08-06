@@ -722,6 +722,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 ENV PYTHONUNBUFFERED=1
+
+# Cloud Run kills any container that does not bind $PORT. Placeholder only —
+# Phase 6 swaps in the real entrypoint. See the correction in 4.6.
+ENV PORT=8080
+CMD ["sh", "-c", "exec python -m http.server \"${PORT}\" --bind 0.0.0.0 --directory /tmp"]
 ```
 
 And `.dockerignore` — **not optional**, it's what stops you shipping 86 GB to Cloud Build:
@@ -770,7 +775,11 @@ Commit and push both.
 
 ### 4.5 First deploy
 
-Complete the service form: name `hello-test`, region `us-central1`, **Require authentication** (never "Allow unauthenticated" yet), then **Create**.
+Complete the service form: name `hello-test`, region `us-east5`, **Require authentication** (never "Allow unauthenticated" yet), then **Create**.
+
+> **Region corrected 2026-08-05.** This said `us-central1`, but `gs://cynolycusbot-data` lives in **US-EAST5**. Cloud Run reads from a bucket in the same region are free; cross-region reads within the US are billed as network egress. `us-east5` (Columbus) is a valid Cloud Run region at Tier 1 pricing, same as `us-central1` — so matching costs nothing. Region cannot be changed after creation.
+
+The Console also now offers **Cloud Build** vs **Developer Connect** for the repository connection. Pick **Cloud Build** — Developer Connect additionally requires the Developer Connect API and Container Analysis API, while `cloudbuild.googleapis.com` is already enabled from §4.3.
 
 Watch the build stream in **Cloud Build → History**. The first build takes 10–20 minutes — TA-Lib compiles from source and torch is large. Subsequent builds reuse cached layers and are much faster.
 
@@ -779,6 +788,13 @@ If it fails, the log tells you which line of the Dockerfile broke. Read it top-d
 ### 4.6 Understand this, then delete it
 
 **A Cloud Run *service* must listen on `$PORT` (default 8080) and answer HTTP.** Cloud Run decides your container is healthy by connecting to that port. This is precisely why `UI/combined_server.py` can't be lifted into a service as-is — see Phase 8.
+
+> **Corrected 2026-08-05 — the §4.2 Dockerfile could never deploy.** It ends at `ENV PYTHONUNBUFFERED=1` with no `CMD`, so the container inherits `python:3.12-slim`'s default `python3` REPL, which reads stdin, hits EOF, and exits before binding anything. Three builds (08-03, 08-04, 08-05) failed identically — `Build SUCCESS; Push SUCCESS; Deploy FAILURE` — with *"The user-provided container failed to start and listen on the port defined provided by the PORT=8080 environment variable"* after a ~4-minute health-check timeout. The image was never the problem. §4.2 now ends with a placeholder listener:
+> ```dockerfile
+> ENV PORT=8080
+> CMD ["sh", "-c", "exec python -m http.server \"${PORT}\" --bind 0.0.0.0 --directory /tmp"]
+> ```
+> `--directory /tmp` matters: the default would serve `/app`, i.e. the whole source tree. `exec` matters too — without it `sh` stays PID 1 and swallows the SIGTERM Cloud Run sends to drain a revision. Phase 6 replaces this with the real read-only dashboard entrypoint.
 
 Then **Cloud Run → hello-test → Delete**.
 
