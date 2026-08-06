@@ -16,10 +16,18 @@ from __future__ import annotations
 from decimal import Decimal
 from enum import Enum
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from .base import ContractModel, FiniteDecimal, content_hash
+from .base import (
+    ContractModel,
+    FiniteDecimal,
+    PositiveSchemaVersion,
+    Sha256Hex,
+    UtcDatetime,
+    content_hash,
+)
 
 
 class MarkType(str, Enum):
@@ -42,6 +50,66 @@ FABRICATED_MARKS = frozenset(
     {MarkType.SYNTHETIC, MarkType.FORWARD_FILLED, MarkType.INTERPOLATED}
 )
 FIT_MARKS = frozenset({MarkType.QUOTE_BID_ASK})
+
+
+class ObservationKind(str, Enum):
+    """What kind of evidence an observation carries."""
+
+    STATE = "STATE"
+    BAR = "BAR"
+    OPTION_QUOTE = "OPTION_QUOTE"
+    BROKER_FILL = "BROKER_FILL"
+    SOURCE_MANIFEST = "SOURCE_MANIFEST"
+
+
+class Observation(ContractModel):
+    """One piece of replay evidence, with the time it became knowable.
+
+    ``as_of`` is business/event time; ``available_at`` is when we could first
+    have known it. They are separate fields on purpose: a bar stamped 16:00
+    that landed at 16:07 was not knowable at 16:03, and a replay that selects
+    on event time will quietly outperform reality.
+
+    ``available_at`` is always supplied by the producer and is never inferred
+    from a file mtime, which records when bytes were written rather than when
+    the information became available.
+    """
+
+    observation_id: UUID
+    kind: ObservationKind
+    instrument: str
+    as_of: UtcDatetime
+    available_at: UtcDatetime
+    valid_until: UtcDatetime
+    generated_at: UtcDatetime
+    artifact_hash: Sha256Hex
+    record_locator: str
+    provider: str
+    feed: str
+    tier: str
+    schema_version: PositiveSchemaVersion
+    producer: str
+    mark_type: MarkType | None = None
+    # Bar-bound evidence is additionally clamped to the decision bar. Intraday
+    # evidence such as an option quote is not: a quote observed after the bar
+    # closed is legitimate for a decision taken after that bar.
+    bar_bound: bool = False
+
+    @model_validator(mode="after")
+    def validate_window(self) -> Observation:
+        if self.valid_until <= self.available_at:
+            raise ValueError("valid_until must be after available_at")
+        for name in ("instrument", "record_locator", "provider", "feed", "tier", "producer"):
+            if not str(getattr(self, name)).strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        return self
+
+    def producer_version(self) -> str:
+        """Explicit version discriminator, mirroring the state selector."""
+
+        return "|".join(
+            (self.producer, f"{self.schema_version:020d}", self.provider, self.feed, self.tier)
+        )
 
 
 class SourceFitnessStatus(str, Enum):
@@ -134,6 +202,8 @@ class SourceFitnessReport(ContractModel):
 
 __all__ = [
     "FABRICATED_MARKS",
+    "Observation",
+    "ObservationKind",
     "FIT_MARKS",
     "TRADE_DERIVED_MARKS",
     "FitnessReason",
