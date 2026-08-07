@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import Field, model_validator
@@ -23,11 +23,17 @@ from pydantic import Field, model_validator
 from .base import (
     ContractModel,
     FiniteDecimal,
+    NonNegativeDecimal,
+    PositiveDecimal,
     PositiveSchemaVersion,
     Sha256Hex,
     UtcDatetime,
     content_hash,
 )
+from .enums import OrderSide
+
+
+PositiveInt = Annotated[int, Field(gt=0)]
 
 
 class MarkType(str, Enum):
@@ -110,6 +116,51 @@ class Observation(ContractModel):
         return "|".join(
             (self.producer, f"{self.schema_version:020d}", self.provider, self.feed, self.tier)
         )
+
+
+class AttributionStatus(str, Enum):
+    """Whether an outcome is settled.
+
+    PENDING is not zero. A maturing or still-open position has no result yet,
+    and a zero would read as a real flat result that drags every aggregate
+    built over it toward the middle.
+    """
+
+    PENDING = "PENDING"
+    FINAL = "FINAL"
+
+
+class FillFact(ContractModel):
+    """One confirmed broker fill. Requested quantity is not a fill."""
+
+    leg_symbol: str
+    side: OrderSide
+    quantity: PositiveDecimal
+    price: NonNegativeDecimal
+    filled_at: UtcDatetime
+    fees: NonNegativeDecimal = Decimal("0")
+    contract_multiplier: PositiveInt = 1
+
+    @property
+    def signed_cash(self) -> Decimal:
+        """Cash effect of the fill, before fees. Buying spends, selling receives."""
+
+        gross = self.quantity * self.price * self.contract_multiplier
+        return -gross if self.side is OrderSide.BUY else gross
+
+
+class OutcomeAttribution(ContractModel):
+    """A realized result split into parts that sum back to it exactly."""
+
+    status: AttributionStatus
+    realized_pnl: Decimal | None = None
+    underlying_movement: Decimal = Decimal("0")
+    slippage: Decimal = Decimal("0")
+    instrument_transformation: Decimal = Decimal("0")
+    fees: Decimal = Decimal("0")
+    filled_entry_quantity: Decimal = Decimal("0")
+    filled_exit_quantity: Decimal = Decimal("0")
+    excluded_fill_count: int = 0
 
 
 class SourceFitnessStatus(str, Enum):
@@ -202,6 +253,9 @@ class SourceFitnessReport(ContractModel):
 
 __all__ = [
     "FABRICATED_MARKS",
+    "AttributionStatus",
+    "FillFact",
+    "OutcomeAttribution",
     "Observation",
     "ObservationKind",
     "FIT_MARKS",
