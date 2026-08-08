@@ -8,7 +8,7 @@ whole nervous system exists to provide.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
@@ -22,8 +22,12 @@ from core.nervous_system.contracts.enums import (
     OrderSide,
     PolicyAction,
     PolicyMode,
+    OptionType,
+    PositionIntent,
+    QuoteAssurance,
     RuntimeEnvironment,
 )
+from core.nervous_system.execution.options.quotes import OptionQuote
 from core.nervous_system.contracts.orders import OrderRequest
 from signals.meta_context.meta_ranker.gateway_execution import (
     GovernedPathUnavailable,
@@ -354,27 +358,95 @@ def test_order_validity_is_anchored_to_the_decision_bar() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_an_option_row_is_refused_rather_than_submitted_ungoverned() -> None:
-    """options_exec drops the bid/ask it computes and never records a quote
-    timestamp, so an OptionLeg cannot be built yet. Falling back to the old
-    direct-submit path would defeat the cutover, so the row is refused.
-    """
+def _option_plan(side: str = "buy", reason: str = "entry") -> list[tuple]:
+    return [("AMD260821C00200000", side, 3, reason, "option")]
 
-    plan = [("AMD260821C00200000", "buy", 3, "entry", "option")]
-    rows = _router().route(
-        plan,
-        exit_context={},
-        ticker_by_symbol={"AMD260821C00200000": "AMD"},
-        scores_by_ticker={"AMD": {"s_combo": 0.97}},
-        decision_bar=BAR,
-        reference_prices={"AMD": 100.0},
-        position_keys={},
-        policy_mode=PolicyMode.ENFORCE,
-        submit=True,
+
+def _route_option(router, **updates: Any) -> tuple[Any, ...]:
+    payload: dict[str, Any] = {
+        "exit_context": {},
+        "ticker_by_symbol": {"AMD260821C00200000": "AMD"},
+        "scores_by_ticker": {"AMD": {"s_combo": 0.97}},
+        "decision_bar": BAR,
+        "reference_prices": {"AMD": 100.0},
+        "position_keys": {"AMD260821C00200000": "paper:AMD260821C00200000"},
+        "policy_mode": PolicyMode.ENFORCE,
+        "submit": True,
+        "quotes_by_symbol": {},
+        "quote_failures": {},
+    }
+    payload.update(updates)
+    plan = payload.pop("plan", None) or _option_plan()
+    return router.route(plan, **payload)
+
+
+def _option_quote() -> OptionQuote:
+    return OptionQuote(
+        symbol="AMD260821C00200000",
+        underlying="AMD",
+        option_type=OptionType.CALL,
+        strike=Decimal("200"),
+        expiration=date(2026, 8, 21),
+        quote_at=BAR - timedelta(minutes=1),
+        bid=Decimal("4.00"),
+        ask=Decimal("4.40"),
     )
 
-    assert rows[0].refusal is RouterRefusal.OPTION_ROUTE_NOT_GOVERNED
+
+def test_an_option_entry_without_a_quote_is_refused() -> None:
+    """Opening risk we cannot price is never acceptable, and the old code path
+    would have sent it straight to the broker.
+    """
+
+    rows = _route_option(_router())
+
+    assert rows[0].refusal is RouterRefusal.NO_OPTION_QUOTE_FOR_ENTRY
     assert rows[0].order_request is None
+
+
+def test_an_option_entry_with_a_quote_is_governed() -> None:
+    rows = _route_option(
+        _router(), quotes_by_symbol={"AMD260821C00200000": _option_quote()}
+    )
+
+    request = rows[0].order_request
+    assert request.instrument_family is InstrumentFamily.SINGLE_OPTION
+    assert request.legs[0].position_intent is PositionIntent.BUY_TO_OPEN
+    assert request.net_limit_price == Decimal("4.40")
+    assert rows[0].refusal is None
+
+
+def test_an_option_exit_survives_a_failed_quote_fetch() -> None:
+    """A close must not be trapped by a missing quote. It degrades to a market
+    order carrying the reason, rather than being blocked or invented.
+    """
+
+    rows = _route_option(
+        _router(),
+        plan=_option_plan(side="sell", reason="horizon"),
+        exit_context={"AMD260821C00200000": ("AMD", {})},
+        quotes_by_symbol={},
+        quote_failures={"AMD260821C00200000": "no_quote_timestamp"},
+    )
+
+    request = rows[0].order_request
+    assert request.order_type == "market"
+    assert request.quote_assurance is QuoteAssurance.DEGRADED
+    assert request.legs[0].quote_degraded_reason == "no_quote_timestamp"
+    assert request.risk_reducing is True
+
+
+def test_a_quoted_option_exit_walks_the_ladder_before_any_market_order() -> None:
+    rows = _route_option(
+        _router(),
+        plan=_option_plan(side="sell", reason="horizon"),
+        exit_context={"AMD260821C00200000": ("AMD", {})},
+        quotes_by_symbol={"AMD260821C00200000": _option_quote()},
+    )
+
+    request = rows[0].order_request
+    assert request.order_type == "limit"
+    assert request.net_limit_price == Decimal("4.20")  # the mid, top of the ladder
 
 
 # ---------------------------------------------------------------------------
@@ -465,3 +537,16 @@ def test_production_live_is_refused_before_any_database_or_broker_is_touched() -
 
     with pytest.raises(GovernedPathUnavailable, match="PRODUCTION_LIVE"):
         build_router(intent_config=_config(), environ=environ)
+
+
+def test_every_routed_row_invokes_the_callback_as_it_completes() -> None:
+    """The runner persists its managed state from this callback. Firing once at
+    the end instead of per row would leave a filled position missing from disk
+    if the process died mid-plan — the 2026-07-23 incident this protects.
+    """
+
+    seen: list[str] = []
+    rows = _route(_router(), on_row=lambda row: seen.append(row.symbol))
+
+    assert seen == [row.symbol for row in rows]
+    assert seen == ["MSFT", "AMD", "NVDA"]

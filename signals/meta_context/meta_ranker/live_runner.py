@@ -46,6 +46,8 @@ from core.live_signal_audit import (
     build_option_order_audit,
     build_signal_audit,
 )
+from core.nervous_system.contracts.enums import PolicyMode
+from signals.meta_context.meta_ranker.gateway_execution import build_router
 from signals.meta_context.meta_ranker.nervous_system_adapter import MetaIntentConfig
 from signals.meta_context.meta_ranker.score import score_frame
 from core.live_4h_exec import (
@@ -515,6 +517,11 @@ def main() -> int:
         blacklist=frozenset(blacklist),
     )
     ranking_result = rank_meta_candidates_with_diagnostics(df, bar=bar, config=ranking_config)
+    # Carried to the governed path: an intent cannot be built without the
+    # scores that justify it, and an entry cannot be sized without an exact
+    # decision-bar price. Passed explicitly rather than stashed on `args`.
+    meta_scores = scores_by_ticker(ranking_result)
+    reference_prices: dict[str, float] = {}
     top = ranking_result.ranked
     n0 = ranking_result.scored_count
     eligible_count = ranking_result.eligible_count
@@ -584,7 +591,9 @@ def main() -> int:
         return
 
     if args.mode == "options":
-        return _run_options(args, client, targets, state, managed, pos_info, bar, entry_ok, signal_audits)
+        return _run_options(args, client, targets, state, managed, pos_info, bar, entry_ok,
+                            signal_audits, meta_scores=meta_scores,
+                            reference_prices=reference_prices)
 
     # --- hold-based reconciliation (only ever SELL symbols we manage) ---
     plan: list[tuple[str, str, int, str]] = []  # (symbol, side, qty, reason)
@@ -643,6 +652,7 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001 - isolate one bad data lookup from the plan
             logger.warning("equity entry %s dropped: exact selected-bar price unavailable (%s)", t, exc)
             continue
+        reference_prices[t] = entry_price
         qty = shares_for_notional(entry_price, args.target_notional)
         plan.append((t, "buy", qty, "entry"))
         order_audits[t] = build_equity_order_audit(
@@ -672,12 +682,15 @@ def main() -> int:
         args, client, plan, state, new_managed, bar, targets,
         is_option=False, signal_audits=signal_audits, order_audits=order_audits,
         exit_context=exit_context, dropped=dropped, module="meta_ranker", pos_lookup=pos_info,
+        meta_scores=meta_scores, reference_prices=reference_prices,
     )
 
 
-def _run_options(args, client, targets, state, managed, pos_info, bar, entry_ok=None, signal_audits=None):
+def _run_options(args, client, targets, state, managed, pos_info, bar, entry_ok=None,
+                 signal_audits=None, meta_scores=None, reference_prices=None):
     """Options path: shared 4H route + hold-based exit engine (mixed option/share)."""
     signal_audits = signal_audits or {}
+    reference_prices = {} if reference_prices is None else reference_prices
     policy = ExecPolicy(take_profit=args.take_profit, scale_frac=args.scale_frac,
                         horizon_bars=args.horizon_bars, grace_bars=args.grace_bars,
                         stop_loss=args.stop_loss, trail_stop=args.trail_stop,
@@ -685,7 +698,9 @@ def _run_options(args, client, targets, state, managed, pos_info, bar, entry_ok=
                         roll_trading_days=args.roll_trading_days)
     def _safe_entry_ref_price(ticker: str) -> float | None:
         try:
-            return _ref_price(ticker, decision_bar=bar)
+            price = _ref_price(ticker, decision_bar=bar)
+            reference_prices[ticker] = price
+            return price
         except Exception as exc:  # noqa: BLE001 - isolate one bad data lookup from managed exits
             logger.warning("options entry %s dropped: exact selected-bar price unavailable (%s)", ticker, exc)
             return None
@@ -701,6 +716,7 @@ def _run_options(args, client, targets, state, managed, pos_info, bar, entry_ok=
         is_option=True, limits=res.limits, signal_audits=signal_audits,
         order_audits=res.order_audits, contract_selection=res.contract_selection,
         exit_context=res.exit_context, dropped=res.dropped, module="meta_ranker", pos_lookup=pos_info,
+        meta_scores=meta_scores, reference_prices=reference_prices,
     )
 
 
@@ -708,6 +724,7 @@ def _execute(
     args, client, plan, state, new_managed, bar, targets, *, is_option: bool,
     limits=None, signal_audits=None, order_audits=None, contract_selection=None,
     exit_context=None, dropped=None, module="meta_ranker", pos_lookup=None,
+    meta_scores=None, reference_prices=None,
 ):
     """Submit a market/limit order plan (paper/live) and persist managed state. Dry-run by default.
 
@@ -729,45 +746,15 @@ def _execute(
         if skipped:
             print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
         if plan:
-            print("\nsubmitting...")
-            for item in plan:
-                sym, side, qty = item[0], item[1], item[2]
-                # Per-order route: explicit 5th element (mixed options run) else the
-                # run-wide default from is_option (pure equity/options mode).
-                route = item[4] if len(item) > 4 else ("option" if is_option else "equity")
-                lim = limits.get(sym)
-                try:
-                    if route == "option":
-                        resp = client.submit_option_order(symbol=sym, qty=qty, side=side,
-                                                          order_type="limit" if lim else "market",
-                                                          time_in_force="day", limit_price=lim)
-                    else:
-                        resp = client.submit_order(symbol=sym, qty=qty, side=side,
-                                                   order_type="market", time_in_force=equity_order_tif())
-                    print(f"  OK {side} {qty} {sym}  id={resp.get('id', '?')}")
-                    if str(side).strip().lower() == "sell":
-                        es = exit_context.get(sym, (None, None))[1] if exit_context else None
-                        record_exit_realized_pnl(client, module=module, item=item, resp=resp,
-                                                 entry_state=es, pos_lookup=pos_lookup, bar=bar)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"  FAIL {side} {qty} {sym}: {exc}")
-                    if exit_context and sym in exit_context:
-                        tkr, st = exit_context[sym]
-                        new_managed[tkr] = st
-                        logger.warning(
-                            "_execute: exit submit failed for %s (%s) — restoring to managed state", tkr, sym,
-                        )
-                    else:
-                        drop_failed_entry(new_managed, sym)
-                finally:
-                    # Save after every fill, not just at the end of the plan, so a
-                    # sibling module's broker reconcile never finds a fresh
-                    # position missing from this module's on-disk managed state
-                    # (the 2026-07-23 IOT incident: Dealer Ranker's fresh buy was
-                    # adopted and defensively liquidated by Swing because it
-                    # wasn't yet persisted here).
-                    state["managed"] = new_managed
-                    _save_state(state)
+            print("\nsubmitting through the governed path...")
+            _submit_via_gateway(
+                args, plan, state, new_managed, bar, is_option=is_option,
+                limits=limits, exit_context=exit_context, module=module,
+                pos_lookup=pos_lookup, client=client,
+                contract_selection=contract_selection,
+                meta_scores=meta_scores or {},
+                reference_prices=reference_prices or {},
+            )
         state["managed"] = new_managed
         _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits, contract_selection, dropped)
         if plan:
@@ -787,6 +774,89 @@ def _execute(
     else:
         _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits, contract_selection, dropped)
         print("\n(dry-run: no orders submitted, state unchanged. Add --submit to execute.)")
+
+
+def _submit_via_gateway(
+    args, plan, state, new_managed, bar, *, is_option: bool, limits, exit_context,
+    module: str, pos_lookup, client, contract_selection=None,
+    meta_scores=None, reference_prices=None,
+) -> None:
+    """Submit one plan through DecisionCoordinator -> ExecutionGateway.
+
+    The runner no longer talks to a broker. If the governed path cannot be
+    built the submission stops: falling back to a direct broker call would
+    reintroduce exactly the bypass this cutover removes.
+
+    All of the existing per-order bookkeeping is preserved -- realized-PnL
+    recording on sells, restoring a failed exit's pre-exit state so a position
+    the broker never closed stays tracked, dropping a failed entry, and saving
+    state after every order rather than at the end of the plan.
+    """
+
+    exit_context = exit_context or {}
+    contract_selection = contract_selection or {}
+    router = build_router(intent_config=intent_config(args))
+
+    quotes_by_symbol = {}
+    for selection in contract_selection.values():
+        occ, quote = selection.get("occ"), selection.get("quote")
+        if occ and quote is not None:
+            quotes_by_symbol[occ] = quote
+
+    def _record(row) -> None:
+        symbol = row.symbol
+        if row.refusal is not None or not row.submitted:
+            detail = row.refusal.value if row.refusal is not None else "not submitted"
+            print(f"  REFUSED {row.side} {row.quantity} {symbol}: {detail}")
+            if symbol in exit_context:
+                ticker, previous = exit_context[symbol]
+                new_managed[ticker] = previous
+                logger.warning(
+                    "_execute: exit refused for %s (%s) — restoring to managed state",
+                    ticker, symbol,
+                )
+            else:
+                drop_failed_entry(new_managed, symbol)
+        else:
+            result = getattr(row.outcome, "execution_result", None)
+            broker_id = getattr(result, "broker_order_id", None) or "?"
+            print(f"  OK {row.side} {row.quantity} {symbol}  id={broker_id}")
+            if str(row.side).strip().lower() == "sell":
+                entry_state = exit_context.get(symbol, (None, None))[1]
+                item = (symbol, row.side, row.quantity,
+                        row.intent.reason_codes[0] if row.intent.reason_codes else "exit",
+                        "option" if is_option else "equity")
+                record_exit_realized_pnl(
+                    client, module=module, item=item,
+                    resp={"id": broker_id}, entry_state=entry_state,
+                    pos_lookup=pos_lookup, bar=bar,
+                )
+        # Saved after every order, not at the end of the plan: a sibling
+        # module's broker reconcile must never find a fresh position missing
+        # from this module's on-disk state (the 2026-07-23 IOT incident).
+        state["managed"] = new_managed
+        _save_state(state)
+
+    router.route(
+        plan,
+        exit_context=exit_context,
+        ticker_by_symbol={
+            selection["occ"]: ticker
+            for ticker, selection in contract_selection.items()
+            if selection.get("occ")
+        },
+        scores_by_ticker=meta_scores or {},
+        decision_bar=bar.to_pydatetime() if hasattr(bar, "to_pydatetime") else bar,
+        reference_prices=reference_prices or {},
+        position_keys={
+            symbol: f"paper:{symbol}" for symbol, *_ in ((p[0],) for p in plan)
+        },
+        policy_mode=PolicyMode.ENFORCE,
+        submit=True,
+        quotes_by_symbol=quotes_by_symbol,
+        quote_failures={},
+        on_row=_record,
+    )
 
 
 def _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits,

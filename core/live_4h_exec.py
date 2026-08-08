@@ -254,6 +254,10 @@ def build_mixed_plan(
                 "spread": order.get("spread"), "dealer_gate": order.get("dealer_gate"),
                 "contracts": contracts,
                 "signal_audit": sa.get(t),
+                # The validated two-sided mark select_option observed. The
+                # governed path builds the option leg from it; without it an
+                # entry cannot be priced and is refused.
+                "quote": order.get("quote"),
             }
             out.plan.append((occ, "buy", contracts, "entry", "option"))
             out.limits[occ] = order["limit"]

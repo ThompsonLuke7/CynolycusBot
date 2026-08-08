@@ -32,11 +32,14 @@ from core.nervous_system.contracts.enums import (
     InstrumentFamily,
     OrderSide,
     PolicyAction,
+    PositionIntent,
     PolicyMode,
     RuntimeEnvironment,
 )
 from core.nervous_system.contracts.intent import TradeIntent
-from core.nervous_system.contracts.orders import OrderRequest
+from core.nervous_system.contracts.orders import OptionLeg, OrderRequest
+from core.nervous_system.execution.options.close_ladder import close_limit_ladder
+from core.nervous_system.execution.options.quotes import parse_occ_symbol
 from core.nervous_system.execution.gateway import order_request_id_for
 from signals.meta_context.meta_ranker.nervous_system_adapter import (
     MetaIntentConfig,
@@ -50,7 +53,7 @@ class RouterRefusal(str, Enum):
     POLICY_VETO = "POLICY_VETO"
     NO_REFERENCE_PRICE = "NO_REFERENCE_PRICE"
     BELOW_ONE_SHARE = "BUDGET_BELOW_ONE_SHARE"
-    OPTION_ROUTE_NOT_GOVERNED = "OPTION_ROUTE_NOT_GOVERNED"
+    NO_OPTION_QUOTE_FOR_ENTRY = "NO_OPTION_QUOTE_FOR_ENTRY"
 
 
 _VETO_ACTIONS = frozenset({PolicyAction.REJECT, PolicyAction.DEFER})
@@ -137,6 +140,115 @@ def equity_order_request(
     )
 
 
+def option_order_request(
+    *,
+    decision_id: UUID,
+    policy_decision_id: UUID,
+    environment: RuntimeEnvironment,
+    account_alias: str,
+    decision_kind: DecisionKind,
+    symbol: str,
+    underlying: str,
+    side: OrderSide,
+    quantity: Decimal,
+    risk_reducing: bool,
+    broker_position_key: str | None,
+    quote: Any,
+    degraded_reason: str | None,
+    maximum_loss: Decimal,
+    buying_power_required: Decimal,
+    idempotency_key: str,
+    created_at: datetime,
+    expires_at: datetime,
+    ladder_attempts: int = 5,
+) -> OrderRequest:
+    """Build one single-leg option order.
+
+    Entries are hard: they always carry the two-sided market that was actually
+    observed, and the limit is the ask, because executable long-option cost is
+    the ask and paying the mid is an assumption nobody filled.
+
+    Exits are soft: a failed quote fetch must not trap a position we are trying
+    to leave. Without a quote the close becomes a market order carrying the
+    reason it is unpriced, rather than being blocked or priced from an invented
+    number.
+    """
+
+    if not isinstance(quantity, Decimal) or not quantity.is_finite() or quantity <= 0:
+        raise ValueError("option order quantity must be a positive finite Decimal")
+    opening = decision_kind is DecisionKind.ENTRY
+    if opening and quote is None:
+        raise ValueError("option_order_request: an opening order requires an observed quote")
+    if quote is None and not (degraded_reason or "").strip():
+        raise ValueError("option_order_request: an unquoted close requires a degraded reason")
+
+    identity = parse_occ_symbol(symbol)
+    position_intent = (
+        PositionIntent.BUY_TO_OPEN
+        if side is OrderSide.BUY and opening
+        else PositionIntent.SELL_TO_CLOSE
+        if side is OrderSide.SELL
+        else PositionIntent.BUY_TO_CLOSE
+    )
+    leg = OptionLeg(
+        symbol=symbol,
+        underlying=underlying,
+        option_type=identity.option_type,
+        strike=identity.strike,
+        expiration=identity.expiration,
+        side=side,
+        ratio=1,
+        position_intent=position_intent,
+        quote_at=None if quote is None else quote.quote_at,
+        bid=None if quote is None else quote.bid,
+        ask=None if quote is None else quote.ask,
+        quote_degraded_reason=None if quote is not None else degraded_reason,
+    )
+
+    if quote is None:
+        order_type: Any = "market"
+        limit_price = None
+        limit_source = None
+    elif opening:
+        order_type, limit_price, limit_source = "limit", quote.ask, None
+    else:
+        # Walk the mid down to the bid before any market fallback.
+        rungs = close_limit_ladder(
+            mid=quote.mid, bid=quote.bid, attempts=ladder_attempts
+        )
+        order_type, limit_price, limit_source = "limit", rungs[0], None
+
+    fields: dict[str, Any] = {
+        "decision_id": decision_id,
+        "policy_decision_id": policy_decision_id,
+        "environment": environment,
+        "account_alias": account_alias,
+        "decision_kind": decision_kind,
+        "risk_reducing": risk_reducing,
+        "broker_position_key": broker_position_key,
+        "instrument_family": InstrumentFamily.SINGLE_OPTION,
+        "legs": (leg,),
+        "parent_quantity": quantity,
+        "debit_credit": (
+            DebitCredit.DEBIT if side is OrderSide.BUY else DebitCredit.CREDIT
+        ),
+        "net_limit_price": limit_price,
+        "net_limit_source": limit_source,
+        "maximum_loss": maximum_loss,
+        "buying_power_required": buying_power_required,
+        "time_in_force": "day",
+        "order_type": order_type,
+        "idempotency_key": idempotency_key,
+        "created_at": created_at,
+        "expires_at": expires_at,
+    }
+    provisional = OrderRequest.create(order_request_id=UUID(int=0), **fields)
+    return OrderRequest.create(
+        order_request_id=order_request_id_for(decision_id, provisional.request_hash),
+        **fields,
+    )
+
+
 class MetaGatewayRouter:
     """Turn one Meta order plan into governed decisions."""
 
@@ -183,6 +295,9 @@ class MetaGatewayRouter:
         position_keys: Mapping[str, str],
         policy_mode: PolicyMode,
         submit: bool,
+        quotes_by_symbol: Mapping[str, Any] | None = None,
+        quote_failures: Mapping[str, str] | None = None,
+        on_row: Callable[[RoutedRow], None] | None = None,
     ) -> tuple[RoutedRow, ...]:
         """Plan and, where permitted, submit every row of one order plan."""
 
@@ -208,8 +323,7 @@ class MetaGatewayRouter:
 
         rows: list[RoutedRow] = []
         for plan_row, intent in zip(plan, intents):
-            rows.append(
-                self._route_one(
+            row = self._route_one(
                     plan_row,
                     intent=intent,
                     snapshot=snapshots[intent.ticker],
@@ -218,8 +332,15 @@ class MetaGatewayRouter:
                     policy_mode=policy_mode,
                     submit=submit,
                     decision_bar=decision_bar,
-                )
+                    quotes_by_symbol=quotes_by_symbol or {},
+                    quote_failures=quote_failures or {},
             )
+            rows.append(row)
+            if on_row is not None:
+                # Called after every row, not once at the end, so a caller can
+                # persist its own state per order. A crash mid-plan must not
+                # leave a filled position missing from on-disk state.
+                on_row(row)
         return tuple(rows)
 
     # -- internals ----------------------------------------------------------
@@ -257,6 +378,8 @@ class MetaGatewayRouter:
         policy_mode: PolicyMode,
         submit: bool,
         decision_bar: datetime,
+        quotes_by_symbol: Mapping[str, Any],
+        quote_failures: Mapping[str, str],
     ) -> RoutedRow:
         symbol, side, quantity = plan_row[0], str(plan_row[1]).lower(), plan_row[2]
         route = plan_row[4] if len(plan_row) > 4 else "equity"
@@ -272,12 +395,11 @@ class MetaGatewayRouter:
             # caller error, not a silent downgrade.
             return RoutedRow(**base, refusal=RouterRefusal.OFF_MODE_SUBMIT)
 
-        if route == "option":
-            # options_exec computes bid/ask but does not return them, and never
-            # records a quote timestamp, so an OptionLeg cannot be built. The
-            # old direct-submit path would bypass the gateway entirely, so the
-            # row is refused instead of quietly ungoverned.
-            return RoutedRow(**base, refusal=RouterRefusal.OPTION_ROUTE_NOT_GOVERNED)
+        is_option = route == "option"
+        quote = quotes_by_symbol.get(symbol)
+        if is_option and quote is None and intent.decision_kind is DecisionKind.ENTRY:
+            # Opening risk we cannot price is never acceptable.
+            return RoutedRow(**base, refusal=RouterRefusal.NO_OPTION_QUOTE_FOR_ENTRY)
 
         policy_decision = self._evaluate(intent, snapshot, self._policy_config)
         base["policy_action"] = policy_decision.action
@@ -303,32 +425,42 @@ class MetaGatewayRouter:
         if order_quantity <= 0:
             return RoutedRow(**base, refusal=RouterRefusal.BELOW_ONE_SHARE)
 
-        order_request = equity_order_request(
-            decision_id=self._decision_id(intent, policy_decision),
-            policy_decision_id=policy_decision.policy_decision_id,
-            environment=self._environment,
-            account_alias=self._account_alias,
-            decision_kind=intent.decision_kind,
-            symbol=symbol,
-            side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-            quantity=order_quantity,
-            risk_reducing=risk_reducing,
-            broker_position_key=position_keys.get(symbol) if risk_reducing else None,
-            maximum_loss=(
+        common: dict[str, Any] = {
+            "decision_id": self._decision_id(intent, policy_decision),
+            "policy_decision_id": policy_decision.policy_decision_id,
+            "environment": self._environment,
+            "account_alias": self._account_alias,
+            "decision_kind": intent.decision_kind,
+            "symbol": symbol,
+            "side": OrderSide.BUY if side == "buy" else OrderSide.SELL,
+            "quantity": order_quantity,
+            "risk_reducing": risk_reducing,
+            "broker_position_key": position_keys.get(symbol) if risk_reducing else None,
+            "maximum_loss": (
                 Decimal("0") if risk_reducing else policy_decision.final_risk_budget
             ),
-            buying_power_required=(
+            "buying_power_required": (
                 Decimal("0") if risk_reducing else policy_decision.final_risk_budget
             ),
-            idempotency_key=intent.idempotency_key,
+            "idempotency_key": intent.idempotency_key,
             # Anchored to the decision bar, not the wall clock. If the order's
             # timestamps moved with each attempt its content hash would move
             # too, and a retried 4H pass would mint a second client order ID
-            # for the same decision — a duplicate order. Anchoring also makes
+            # for the same decision -- a duplicate order. Anchoring also makes
             # the gateway's expiry check fail closed on a stale replay.
-            created_at=decision_bar,
-            expires_at=decision_bar + self._order_ttl,
-        )
+            "created_at": decision_bar,
+            "expires_at": decision_bar + self._order_ttl,
+        }
+        if is_option:
+            order_request = option_order_request(
+                underlying=intent.ticker,
+                quote=quote,
+                # A close with no quote still goes, carrying why it is unpriced.
+                degraded_reason=quote_failures.get(symbol, "no_quote"),
+                **common,
+            )
+        else:
+            order_request = equity_order_request(**common)
         base["order_request"] = order_request
 
         outcome = self._coordinator.process_intent(
@@ -454,4 +586,5 @@ __all__ = [
     "RouterRefusal",
     "build_router",
     "equity_order_request",
+    "option_order_request",
 ]

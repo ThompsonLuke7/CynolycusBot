@@ -146,7 +146,9 @@ def test_the_remaining_direct_submit_sites_are_known() -> None:
     """
 
     pending = {
-        REPO / "signals/meta_context/meta_ranker/live_runner.py": 2,
+        # live_runner reached zero: every order now goes through
+        # DecisionCoordinator -> ExecutionGateway.
+        REPO / "signals/meta_context/meta_ranker/live_runner.py": 0,
         REPO / "core/live_4h_exec.py": 6,
     }
     for path, expected in pending.items():
