@@ -60,6 +60,8 @@ from strategies.dealer_positioning.scripts.capture_historical_snapshots import (
     load_symbols,
 )
 from strategies.multi_ticker_swing.live.runner import (
+    _DELTA_HI,
+    _DELTA_LO,
     _contract_expiry,
     _contract_strike,
     _contract_symbol,
@@ -82,6 +84,64 @@ _ET = ZoneInfo("America/New_York")
 # of buying them.
 _MIN_OPEN_INTEREST = 500
 _MIN_VOLUME = 100
+# A candidate whose snapshot carries no two-sided quote costs one extra quote
+# request, so stop after a handful rather than walking a whole dead band.
+# Mirrors meta_ranker.options_exec._MAX_QUOTE_ATTEMPTS.
+_MAX_QUOTE_ATTEMPTS = 5
+
+
+def _rank_band_by_liquidity(
+    ticker: str,
+    exp_str: str,
+    band: list[dict],
+    current_price: float,
+    *,
+    option_type: str,
+    min_open_interest: int = _MIN_OPEN_INTEREST,
+    min_volume: int = _MIN_VOLUME,
+) -> list[dict]:
+    """Order the ±10% strike band by tradability: liquid first, then deepest OI.
+
+    Same reasoning as meta_ranker.options_exec._rank_candidates, which fixed the
+    identical defect on its delta band on 2026-07-28. Picking the single
+    nearest-ATM strike and then gating THAT contract rejects names whose chain
+    is plainly tradeable: the exact ATM strike is often an odd number nobody
+    trades while a round strike one increment away, still inside the band,
+    carries orders of magnitude more open interest. 2026-08-05 is this module's
+    worked example — all ten targets were rejected as `illiquid_option`, but
+    CGNX's ATM 70 strike (oi=886, vol=35) sat next to the 75 strike at
+    oi=1,246/vol=185, which clears both floors. The band is the risk control;
+    within it, prefer the strike that can actually be traded.
+
+    Ranking is (passes floors, open interest desc, ATM proximity). When nothing
+    in the band clears the floors the winner is the DEEPEST-OI strike, so the
+    caller's reject reason reports the band's liquidity ceiling — evidence the
+    name is genuinely not optionable rather than a fact about one arbitrary
+    strike. When the chain is unavailable every `oi` is None, the first two keys
+    go flat, and the order degrades to the nearest-ATM pick this replaces.
+    """
+    cp = "C" if option_type in ("call", "C") else "P"
+    scored: list[dict] = []
+    for contract in band:
+        strike = _contract_strike(contract)
+        # contract_liquidity caches the whole expiry, so the band costs one fetch.
+        liq = contract_liquidity(ticker, expiry=exp_str, strike=strike, option_type=cp)
+        oi = liq.open_interest if liq is not None else None
+        vol = liq.volume if liq is not None else None
+        scored.append({
+            "contract": contract,
+            "occ": _contract_symbol(contract),
+            "strike": strike,
+            "open_interest": oi,
+            "volume": vol,
+            "liquidity_source": liq.source if liq is not None else "unavailable",
+            "passes": (oi is not None and vol is not None
+                       and oi >= min_open_interest and vol >= min_volume),
+        })
+    scored.sort(key=lambda c: (
+        not c["passes"], -(c["open_interest"] or 0), abs((c["strike"] or 0.0) - current_price),
+    ))
+    return scored
 
 
 def _load_state() -> dict:
@@ -305,21 +365,38 @@ def _select_optionable_targets(
     side_mode: str,
     min_dte: int,
     max_dte: int,
-    scan_multiple: int = 5,
+    spot_map: dict[str, float] | None = None,
+    selection_cache: dict[tuple[str, str], tuple[dict | None, str]] | None = None,
+    scan_multiple: int = 10,
     now_et: datetime | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Walk the rank-sorted table and keep the best ``top_k`` names that
-    actually have a listed non-0DTE chain, instead of freezing on a fixed
-    top-K slice that can be entirely non-optionable (observed 7/17: 6/10
-    skipped; 7/20: 10/10 skipped -> zero orders placed for the whole day).
-    Rank priority is preserved; the scan is capped at ``top_k * scan_multiple``
-    candidates so a systemically non-optionable universe can't turn one pass
+    """Walk the rank-sorted table and keep the best ``top_k`` names that have a
+    contract this module can actually buy, instead of freezing on a fixed top-K
+    slice that can be entirely untradeable (7/17: 6/10 skipped; 7/20 and 8/03-05:
+    10/10 skipped -> zero orders for the whole day).
+
+    The screen is the full selector, not merely "a chain is listed". Listing was
+    never the binding constraint: on 2026-08-05 all ten targets had a listed
+    August chain and every one still failed the per-contract liquidity floors at
+    order time, after the top-K had already been frozen. Screening on the same
+    rule that later gates the order is what makes the scan converge.
+
+    This is the module's tradeable universe in practice. Measured on the 2026-08-05
+    chain capture, 390 of 737 ranked names hold at least one in-band strike
+    clearing the floors, so the scan has to be allowed to walk past the top of the
+    ranking: the ten best tradeable names that day sat at ranks 6-41, hence
+    ``scan_multiple`` of 10 rather than 5. Rank priority is preserved and the scan
+    is still capped so a systemically untradeable universe can't turn one pass
     into an unbounded number of API calls. Skipped tickers are returned so the
-    caller can record them in the signal-decision audit instead of the module
-    going silently idle.
+    caller can record them in the signal-decision audit.
+
+    Selections are memoized into ``selection_cache`` so the routing step reuses
+    this work instead of re-selecting every kept name.
     """
     top_k = max(1, int(top_k))
     scan_cap = top_k * max(1, int(scan_multiple))
+    spot_map = spot_map or {}
+    cache = selection_cache if selection_cache is not None else {}
     keep_idx: list[int] = []
     skipped: list[str] = []
     for scanned, (idx, row) in enumerate(rankings.iterrows()):
@@ -327,8 +404,22 @@ def _select_optionable_targets(
             break
         ticker = str(row["symbol"]).upper()
         opt_type = _side_for_ticker(ticker, side_mode=side_mode, top=rankings)
-        if _has_tradable_contracts(client, ticker, option_type=opt_type, min_dte=min_dte, max_dte=max_dte,
-                                   now_et=now_et):
+        px = _as_float(spot_map.get(ticker))
+        if not px or px <= 0:
+            # No spot means no strike band; fall back to the listing check so a
+            # missing snapshot can't silently empty the target list.
+            if _has_tradable_contracts(client, ticker, option_type=opt_type,
+                                       min_dte=min_dte, max_dte=max_dte, now_et=now_et):
+                keep_idx.append(idx)
+            else:
+                skipped.append(ticker)
+            continue
+        order, reason = _select_atm_option(
+            client, ticker, px, option_type=opt_type,
+            min_dte=min_dte, max_dte=max_dte, now_et=now_et,
+        )
+        cache[(ticker, opt_type)] = (order, reason)
+        if order is not None:
             keep_idx.append(idx)
         else:
             skipped.append(ticker)
@@ -384,51 +475,97 @@ def _select_atm_option(
         return None, f"no_non_0dte_{cp}_contracts"
     expiry = min(_contract_expiry(c) for c in tradable if _contract_expiry(c) is not None)
     same_exp = [c for c in tradable if _contract_expiry(c) == expiry]
-    best = min(same_exp, key=lambda c: abs(_contract_strike(c) - current_price))
-    occ = _contract_symbol(best)
-    strike = _contract_strike(best)
-    exp_str = expiry.isoformat() if isinstance(expiry, date) else str(best.get("expiration_date"))
+    # Re-apply the +/-10% band locally. The request already sends
+    # strike_price_gte/lte, but that was belt-only while selection was
+    # `min(abs(strike - spot))` and could not stray by construction. Ranking by
+    # open interest removes that safety: an unfiltered response would let a
+    # far-OTM strike with a huge OI pile win the band outright. The band is the
+    # risk control and has to be enforced where the choice is actually made.
+    in_band = [
+        c for c in same_exp
+        if _contract_strike(c) is not None
+        and current_price * 0.90 <= _contract_strike(c) <= current_price * 1.10
+    ]
+    same_exp = in_band or same_exp
+    exp_str = expiry.isoformat() if isinstance(expiry, date) else str(same_exp[0].get("expiration_date"))
 
-    snap = {}
+    # Snapshots for the whole expiry are one request, so ranking the band costs
+    # nothing extra beyond the (cached) Schwab chain fetch inside the ranker.
     try:
-        snaps = client.get_option_snapshots(ticker.upper(), expiration_date=exp_str, type=cp)
-        snap = (snaps or {}).get(occ) or {}
+        snaps = client.get_option_snapshots(ticker.upper(), expiration_date=exp_str, type=cp) or {}
     except Exception:
-        snap = {}
-    bid, ask = _quote_from_snapshot(snap)
-    if not (bid and ask and bid > 0 and ask > 0):
-        bid, ask = _latest_quote(client, occ)
-    if not (bid and ask and bid > 0 and ask > 0):
-        return None, "no_two_sided_quote"
-    # Alpaca's snapshot has neither field (see core.option_liquidity); Schwab's
-    # chain does. `None` means unknown and must not read as zero.
-    liq = contract_liquidity(ticker, expiry=exp_str, strike=strike, option_type=cp)
-    if liq is None:
+        snaps = {}
+
+    # Confine to the delta band BEFORE ranking by liquidity. The ±10% strike band
+    # is a poor risk control on its own: on a $60 name it spans roughly delta
+    # 0.25-0.75, and open interest piles up at round strikes far from the money
+    # (the call wall), so ranking by OI alone drags selection there. Measured on
+    # the 2026-08-05 capture, unconstrained band-ranking put 70% of picks outside
+    # [0.35, 0.60] with a 5th-percentile delta of 0.05 — far-OTM lottery tickets —
+    # against 13% for the nearest-ATM rule it replaces. The shared executor has
+    # always printed "delta 0.35-0.60" for this module; this makes that true.
+    # Constants are the swing runner's, the same ones Meta/HTF/Momentum use.
+    delta_pool = []
+    for contract in same_exp:
+        greeks = (snaps.get(_contract_symbol(contract)) or {}).get("greeks") or {}
+        delta = _as_float(greeks.get("delta"))
+        if delta is not None and _DELTA_LO <= abs(delta) <= _DELTA_HI:
+            delta_pool.append(contract)
+    # No usable greeks at all -> fall back to the strike band rather than
+    # reporting a name untradeable because the snapshot was thin.
+    candidates = delta_pool or same_exp
+
+    # Alpaca's snapshot carries neither OI nor volume (see core.option_liquidity);
+    # Schwab's chain does. `None` means unknown and must not read as zero.
+    ranked = _rank_band_by_liquidity(ticker, exp_str, candidates, current_price, option_type=cp)
+    if not ranked:
+        return None, f"no_non_0dte_{cp}_contracts"
+    if ranked[0]["liquidity_source"] == "unavailable":
         return None, "liquidity_unavailable(src=unavailable)"
-    open_interest, volume = liq.open_interest, liq.volume
-    if open_interest < _MIN_OPEN_INTEREST or volume < _MIN_VOLUME:
-        return None, f"illiquid_option(oi={open_interest},vol={volume})"
-    mid = (bid + ask) / 2.0
-    greeks = (snap or {}).get("greeks") or {}
-    dte = max(0, (expiry - now_et.date()).days) if isinstance(expiry, date) else None
-    return (
-        {
-            "ticker": ticker.upper(),
-            "occ": occ,
-            "mid": mid,
-            "limit": round(ask, 2),
-            "delta": _as_float(greeks.get("delta")),
-            "expiry": exp_str,
-            "strike": strike,
-            "open_interest": open_interest,
-            "volume": volume,
-            "spread": ((ask - bid) / mid) if mid > 0 else None,
-            "option_type": cp,
-            "selection_method": "nearest_atm_non_0dte",
-            "dte": dte,
-        },
-        "ok",
-    )
+    if not ranked[0]["passes"]:
+        # Deepest-OI strike in the band, so this reports the band's ceiling
+        # rather than whichever strike happened to sit nearest the money.
+        best = ranked[0]
+        return None, f"illiquid_option(oi={best['open_interest']},vol={best['volume']})"
+
+    quote_attempts = 0
+    for cand in ranked:
+        if not cand["passes"]:
+            break  # sorted liquid-first: nothing past here can qualify
+        occ, strike = cand["occ"], cand["strike"]
+        snap = snaps.get(occ) or {}
+        bid, ask = _quote_from_snapshot(snap)
+        if not (bid and ask and bid > 0 and ask > 0):
+            if quote_attempts >= _MAX_QUOTE_ATTEMPTS:
+                break
+            quote_attempts += 1
+            bid, ask = _latest_quote(client, occ)
+        if not (bid and ask and bid > 0 and ask > 0):
+            continue
+        mid = (bid + ask) / 2.0
+        greeks = (snap or {}).get("greeks") or {}
+        dte = max(0, (expiry - now_et.date()).days) if isinstance(expiry, date) else None
+        return (
+            {
+                "ticker": ticker.upper(),
+                "occ": occ,
+                "mid": mid,
+                "limit": round(ask, 2),
+                "delta": _as_float(greeks.get("delta")),
+                "expiry": exp_str,
+                "strike": strike,
+                "open_interest": cand["open_interest"],
+                "volume": cand["volume"],
+                "liquidity_source": cand["liquidity_source"],
+                "spread": ((ask - bid) / mid) if mid > 0 else None,
+                "option_type": cp,
+                "selection_method": "band_liquidity_ranked_non_0dte",
+                "atm_offset_pct": ((strike - current_price) / current_price) if current_price else None,
+                "dte": dte,
+            },
+            "ok",
+        )
+    return None, "no_two_sided_quote"
 
 
 def _side_for_ticker(ticker: str, *, side_mode: str, top: pd.DataFrame) -> str:
@@ -478,9 +615,13 @@ def main() -> int:
     rankings = _load_rankings(ranking_path)
     profile = "LIVE" if args.live else "PAPER"
     client = AlpacaOptionsClient(env_file=f".env#{profile}")
+    spot_map = _snapshot_spot_map()
+    # Shared by target screening and routing so each name is selected once.
+    selection_cache: dict[tuple[str, str], tuple[dict | None, str]] = {}
     top, skipped_not_optionable = _select_optionable_targets(
         client, rankings, top_k=args.top_k, side_mode=args.side_mode,
         min_dte=args.min_dte, max_dte=args.max_dte,
+        spot_map=spot_map, selection_cache=selection_cache,
     )
     targets = top["symbol"].astype(str).str.upper().tolist()
     bar = now_utc_iso()
@@ -492,18 +633,20 @@ def main() -> int:
     state = _load_state()
     managed = state.get("managed", {})
 
-    spot_map = _snapshot_spot_map()
-
     def _route(client_: AlpacaOptionsClient, ticker: str, px: float, **_kwargs) -> tuple[str, dict | None, str]:
         opt_type = _side_for_ticker(ticker, side_mode=args.side_mode, top=top)
-        order, reason = _select_atm_option(
-            client_,
-            ticker,
-            px,
-            option_type=opt_type,
-            min_dte=args.min_dte,
-            max_dte=args.max_dte,
-        )
+        cached = selection_cache.get((str(ticker).upper(), opt_type))
+        if cached is not None:
+            order, reason = cached
+        else:
+            order, reason = _select_atm_option(
+                client_,
+                ticker,
+                px,
+                option_type=opt_type,
+                min_dte=args.min_dte,
+                max_dte=args.max_dte,
+            )
         if order is None:
             return "skip", {"option_type": opt_type}, reason
         return "option", order, "ok"

@@ -35,11 +35,23 @@ class _Client:
     def __init__(self, *, reject=()):
         self.reject = set(reject)
         self.sent = []
+        self.option_orders = []
 
     def submit_order(self, *, symbol, qty, side, **k):
         self.sent.append((side, symbol, qty))
         if symbol in self.reject:
             raise RuntimeError("HTTP Error 403: Forbidden")
+        return {"id": f"{symbol}-{side}"}
+
+    # Options take a different broker endpoint; the flush must not send them
+    # down the equity market-order path.
+    def get_option_quotes(self, symbols, **k):
+        return {"quotes": {symbols: {"bp": 0.60, "ap": 0.70}}}
+
+    def submit_option_order(self, *, symbol, qty, side, order_type, **k):
+        self.option_orders.append((side, symbol, qty, order_type, k.get("limit_price")))
+        if symbol in self.reject:
+            raise RuntimeError("HTTP Error 422: Unprocessable Entity")
         return {"id": f"{symbol}-{side}"}
 
 
@@ -95,20 +107,47 @@ def test_dead_zone_queues_equity_exits(monkeypatch, tmp_path):
     assert rec["reason"] == "take_profit_+30%"
 
 
-def test_option_exits_and_entries_are_left_alone(monkeypatch, tmp_path):
-    """Options are day-only and never hit the OPG restriction; entries have their own queue."""
+def test_option_exits_are_deferred_too(monkeypatch, tmp_path):
+    """2026-08-05 CLSK: option exits DO get rejected after the close.
+
+    This test used to assert the opposite ("options never hit the OPG
+    restriction"). Options are day-only on an RTH-only instrument, so a market
+    sell after 16:00 returns 422 "options market orders are only allowed during
+    market hours". HTF's CLSK260821C00015000 stop_-39% failed exactly that way
+    at 16:25 and the call was carried overnight unstopped. Entries are still
+    left alone here — they have their own pending-open queue.
+    """
     monkeypatch.setattr("core.calendar.is_market_open_now", lambda now=None: False)
     plan = [
         ("CRWV", "sell", 12, "take_profit_+30%", "equity"),          # deferred
-        ("BBB260821C00050000", "sell", 10, "horizon", "option"),     # kept
+        ("BBB260821C00050000", "sell", 10, "stop_-39%", "option"),   # deferred
         ("AAA", "buy", 100, "entry", "equity"),                      # kept (entry path)
     ]
     out = defer_exits_if_opg_unavailable("meta_ranker", "bar", plan, {},
                                          now=_et(16, 20), ledger_root=str(tmp_path))
-    assert out == [
-        ("BBB260821C00050000", "sell", 10, "horizon", "option"),
-        ("AAA", "buy", 100, "entry", "equity"),
+    assert out == [("AAA", "buy", 100, "entry", "equity")]
+    queued = json.loads((tmp_path / "meta_ranker" / "pending_exit_orders.json").read_text())
+    assert {e["order_symbol"]: e["route"] for e in queued["entries"]} == {
+        "CRWV": "equity", "BBB260821C00050000": "option",
+    }
+
+
+def test_option_exits_defer_even_inside_the_opg_window(monkeypatch, tmp_path):
+    """The OPG window rescues equity exits; it does nothing for options.
+
+    At 22:00 ET an equity OPG sell is accepted by the broker and should go out
+    now. An option sell is still refused, so it must still be queued.
+    """
+    monkeypatch.setattr("core.calendar.is_market_open_now", lambda now=None: False)
+    plan = [
+        ("CRWV", "sell", 12, "take_profit_+30%", "equity"),          # kept: OPG works
+        ("BBB260821C00050000", "sell", 10, "stop_-39%", "option"),   # deferred
     ]
+    out = defer_exits_if_opg_unavailable("meta_ranker", "bar", plan, {},
+                                         now=_et(22, 0), ledger_root=str(tmp_path))
+    assert out == [("CRWV", "sell", 12, "take_profit_+30%", "equity")]
+    queued = json.loads((tmp_path / "meta_ranker" / "pending_exit_orders.json").read_text())
+    assert [e["order_symbol"] for e in queued["entries"]] == ["BBB260821C00050000"]
 
 
 def test_deferring_an_exit_never_touches_managed_state(monkeypatch, tmp_path):
@@ -162,6 +201,19 @@ def test_flush_submits_a_still_held_exit(tmp_path):
     # queue drained
     q = json.loads((tmp_path / "meta_ranker" / "pending_exit_orders.json").read_text())
     assert q["entries"] == []
+
+
+def test_flush_routes_an_option_exit_through_the_option_endpoint(tmp_path):
+    """A queued option exit must not be sent as an equity market order."""
+    _queue(tmp_path, [{"order_symbol": "CLSK260821C00015000", "side": "sell", "qty": 43,
+                       "route": "option", "reason": "stop_-39%"}])
+    c = _Client()
+    res = submit_pending_exit_orders(c, "meta_ranker", equity_tif_fn=lambda: "day",
+                                     pos_lookup={"CLSK260821C00015000": {"qty": 43}},
+                                     ledger_root=str(tmp_path))
+    assert res["count"] == 1
+    assert c.sent == []  # never touched the equity path
+    assert c.option_orders[0][:3] == ("sell", "CLSK260821C00015000", 43)
 
 
 def test_flush_skips_a_position_already_gone(tmp_path):

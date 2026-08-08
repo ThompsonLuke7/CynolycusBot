@@ -593,6 +593,7 @@ class SwingPositionManager:
         self._auto_flatten_assigned_equities = bool(auto_flatten_assigned_equities)
         self._positions: dict[str, SwingPosition] = {}   # ticker → position
         self._last_close_failure_wall: dict[str, float] = {}
+        self._close_pass_count: dict[str, int] = {}  # ticker → liquidation ladder passes so far
         self._pending_close_orders: dict[str, dict[str, Any]] = {}
         self._assigned_flatten_last_attempt: dict[str, float] = {}  # symbol → wall time
         self._exit_spread_deferrals: dict[str, int] = {}  # ticker → consecutive wide-spread skips
@@ -1470,6 +1471,7 @@ class SwingPositionManager:
             payload["option_realized_pct"] = None
         self._emit("position_closed", payload)
         self._last_close_failure_wall.pop(pos.ticker, None)
+        self._close_pass_count.pop(pos.ticker, None)
         self._pending_close_orders.pop(pos.ticker, None)
         self._exit_spread_deferrals.pop(pos.ticker, None)
         self._remove_deferred_trail_cache(pos)
@@ -1489,6 +1491,7 @@ class SwingPositionManager:
         self._worthless_close_abandoned.add(symbol)
         self._persist_worthless_close_abandoned()
         self._last_close_failure_wall.pop(pos.ticker, None)
+        self._close_pass_count.pop(pos.ticker, None)
         self._pending_close_orders.pop(pos.ticker, None)
         self._remove_deferred_trail_cache(pos)
         self._emit("position_close_abandoned", {
@@ -1683,21 +1686,48 @@ class SwingPositionManager:
         symbol = str(pos.option_symbol).strip().upper()
         qty = int(pos.qty)
         quote_meta = self._get_contract_quote_context(symbol=symbol)
-        base_limit = self._get_contract_price(symbol=symbol, mode="bid")
-        close_bid = base_limit
+        close_bid = self._get_contract_price(symbol=symbol, mode="bid")
+        # Anchor on the BID for ordinary exits (trail/take-profit) — resting at the
+        # bid is how they fill — but for a forced liquidation anchor on the MID and
+        # walk down across passes. Anchoring a liquidation on the bid is what sold
+        # 159 VALE260828C00015000 at $0.01 on 2026-08-05 into a 0.01 x 0.74 market:
+        # the bid ticking up from 0.00 to 0.01 became the FIRST rung, so a position
+        # the broker marked at $3,021 realized $159. A penny bid is a reason to be
+        # patient, not a price to hit.
+        liquidating = str(reason or "").strip().lower() in _LIQUIDATION_CLOSE_REASONS
+        base_limit = float("nan")
+        if liquidating:
+            for mode in ("mid", "mark"):
+                base_limit = self._get_contract_price(symbol=symbol, mode=mode)
+                if math.isfinite(base_limit) and base_limit > 0.0:
+                    source = mode
+                    break
+            else:
+                source = "fallback"
+        else:
+            base_limit, source = close_bid, "bid"
         if not math.isfinite(base_limit) or base_limit <= 0.0:
-            base_limit = self._get_contract_price(symbol=symbol, mode="mid")
+            for mode in ("bid", "mid", "mark"):
+                base_limit = self._get_contract_price(symbol=symbol, mode=mode)
+                if math.isfinite(base_limit) and base_limit > 0.0:
+                    source = mode
+                    break
         if not math.isfinite(base_limit) or base_limit <= 0.0:
-            base_limit = self._get_contract_price(symbol=symbol, mode="mark")
-        if not math.isfinite(base_limit) or base_limit <= 0.0:
-            base_limit = _OPTION_TICK
+            base_limit, source = _OPTION_TICK, "fallback"
+
+        # Passes are counted per ticker and cleared only when the position actually
+        # leaves the book, so the floor relaxes over successive 60s retries rather
+        # than inside one 15-second burst of rungs.
+        close_pass = self._close_pass_count.get(pos.ticker, 0) + 1
+        self._close_pass_count[pos.ticker] = close_pass
 
         logger.info(
-            "[%s] close order pricing symbol=%s source=%s base_limit=%.2f reason=%s",
+            "[%s] close order pricing symbol=%s source=%s base_limit=%.2f pass=%d reason=%s",
             pos.ticker,
             symbol,
-            "bid" if math.isfinite(close_bid) and close_bid > 0.0 else "fallback",
+            source,
             base_limit,
+            close_pass,
             reason,
         )
 
@@ -1707,6 +1737,7 @@ class SwingPositionManager:
             quote_meta=quote_meta,
             reason=reason,
             attempts=_CLOSE_ORDER_ATTEMPTS,
+            close_pass=close_pass,
         )
         last_result: dict[str, Any] | None = None
         for attempt, limit_price in enumerate(limit_prices, start=1):
@@ -2390,6 +2421,66 @@ def _is_option_tick(value: float) -> bool:
         return False
 
 
+# Floor as a fraction of the mid anchor, by liquidation pass. Passes are ~60s
+# apart (_CLOSE_FAILURE_RETRY_SECS), so the ladder spends about three minutes
+# above half the mid before it is allowed to touch the bid. Past the end of the
+# schedule the floor is the bid itself.
+_LIQUIDATION_FLOOR_BY_PASS = (0.85, 0.65, 0.50)
+# The one-cent rung is a capitulation for a contract with no book, not a price.
+# It needs BOTH a vanished bid and a spread wider than the mid itself, and only
+# after the floor schedule is exhausted.
+_PENNY_RUNG_MAX_BID = 0.02
+_PENNY_RUNG_MIN_SPREAD_PCT_MID = 1.0
+
+
+def _liquidation_close_ladder(
+    *,
+    base: float,
+    bid: float,
+    quote_meta: dict[str, Any] | None,
+    attempts: int,
+    close_pass: int,
+) -> list[float]:
+    """Descending sell limits for a forced exit, anchored on the mid.
+
+    `base` is the mid/mark anchor and `bid` the current bid (NaN when the book is
+    empty). Early passes refuse to price below a fraction of the anchor; the floor
+    relaxes each pass and only reaches the bid once the schedule is exhausted. See
+    _submit_close_order for why anchoring on the bid was wrong.
+    """
+    stage = max(1, int(close_pass))
+    has_bid = math.isfinite(bid) and bid > 0.0
+    if stage <= len(_LIQUIDATION_FLOOR_BY_PASS):
+        floor = base * _LIQUIDATION_FLOOR_BY_PASS[stage - 1]
+        # A bid above the scheduled floor is a real, better price — take it.
+        if has_bid and bid > floor:
+            floor = bid
+    else:
+        floor = bid if has_bid else _OPTION_TICK
+    floor = min(_round_option_limit(floor), base)
+
+    spread_pct_mid = _as_float((quote_meta or {}).get("spread_pct_mid"))
+    penny_allowed = (
+        stage > len(_LIQUIDATION_FLOOR_BY_PASS)
+        and (not has_bid or bid <= _PENNY_RUNG_MAX_BID)
+        and math.isfinite(spread_pct_mid)
+        and spread_pct_mid > _PENNY_RUNG_MIN_SPREAD_PCT_MID
+    )
+
+    rungs = max(1, attempts - (1 if penny_allowed else 0))
+    prices: list[float] = []
+    step = (base - floor) / (rungs - 1) if rungs > 1 else 0.0
+    for i in range(rungs):
+        rounded = _round_option_limit(base - step * i)
+        if rounded < floor:
+            rounded = floor
+        if rounded not in prices:
+            prices.append(rounded)
+    if penny_allowed and _OPTION_TICK not in prices:
+        prices.append(_OPTION_TICK)
+    return prices or [_OPTION_TICK]
+
+
 def _close_limit_ladder(
     *,
     base_limit: float,
@@ -2397,6 +2488,7 @@ def _close_limit_ladder(
     quote_meta: dict[str, Any] | None = None,
     reason: str,
     attempts: int,
+    close_pass: int = 1,
 ) -> list[float]:
     attempts = max(1, int(attempts))
     base = _round_option_limit(base_limit if math.isfinite(base_limit) and base_limit > 0 else _OPTION_TICK)
@@ -2405,34 +2497,10 @@ def _close_limit_ladder(
 
     prices: list[float] = []
     if str(reason or "").strip().lower() in _LIQUIDATION_CLOSE_REASONS:
-        anchor = bid if math.isfinite(bid) and bid > 0.0 else base
-        if anchor <= 0.25:
-            raw_prices = [
-                base,
-                anchor,
-                anchor * 0.75,
-                anchor * 0.50,
-                anchor * 0.25,
-                0.02,
-                _OPTION_TICK,
-            ]
-        else:
-            raw_prices = [
-                base,
-                anchor - 0.02,
-                anchor - 0.05,
-                anchor - 0.10,
-                anchor - 0.20,
-            ]
-        for price in raw_prices:
-            rounded = _round_option_limit(price)
-            if rounded not in prices:
-                prices.append(rounded)
-            if len(prices) >= attempts:
-                break
-        if anchor <= 0.25 and prices[-1] != _OPTION_TICK and len(prices) < attempts:
-            prices.append(_OPTION_TICK)
-        return prices
+        return _liquidation_close_ladder(
+            base=base, bid=bid, quote_meta=quote_meta,
+            attempts=attempts, close_pass=close_pass,
+        )
 
     anchor = bid if math.isfinite(bid) and bid > 0.0 else base
     if math.isfinite(spread) and spread > _OPTION_TICK:

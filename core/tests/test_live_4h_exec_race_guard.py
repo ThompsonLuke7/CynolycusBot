@@ -37,10 +37,21 @@ class _RaceClient:
         return self._submit(side, symbol)
 
 
+def _market_open(monkeypatch):
+    """Pin the session to RTH.
+
+    Without this the result depends on the wall clock: after the close,
+    defer_exits_if_opg_unavailable queues option sells for the next open (they
+    are refused with 422 out of hours) and nothing is submitted, so these
+    race-guard assertions would pass by day and fail by night.
+    """
+    monkeypatch.setattr("core.calendar.is_market_open_now", lambda now=None: True)
+
+
 def _bypass_entry_gates(monkeypatch):
     monkeypatch.setattr("core.live_4h_exec.filter_entry_orders_for_readiness",
                         lambda plan, new_managed=None: (plan, [], ""))
-    monkeypatch.setattr("core.calendar.is_market_open_now", lambda now=None: True)
+    _market_open(monkeypatch)
 
 
 def test_race_guard_drops_buy_already_held_by_another_module(monkeypatch):
@@ -72,8 +83,9 @@ def test_race_guard_leaves_unheld_buys_alone(monkeypatch):
     assert "GOOD" in new_managed
 
 
-def test_race_guard_ignores_sell_orders():
+def test_race_guard_ignores_sell_orders(monkeypatch):
     # Held-position lookups should never block exits -- only new entries.
+    _market_open(monkeypatch)
     c = _RaceClient(held_symbols={"AAA260724C00010000"})
     plan = [("AAA260724C00010000", "sell", 1, "horizon", "option")]
     execute_plan(
@@ -84,7 +96,9 @@ def test_race_guard_ignores_sell_orders():
     assert c.submitted == [("sell", "AAA260724C00010000")]
 
 
-def test_race_guard_skips_positions_lookup_when_plan_has_no_buys():
+def test_race_guard_skips_positions_lookup_when_plan_has_no_buys(monkeypatch):
+    _market_open(monkeypatch)
+
     class _NoPositionsMethodClient(_RaceClient):
         def get_positions(self):  # pragma: no cover - must never be called
             raise AssertionError("get_positions should not be called for a sell-only plan")

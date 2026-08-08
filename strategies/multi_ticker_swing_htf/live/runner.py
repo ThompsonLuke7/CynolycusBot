@@ -48,10 +48,12 @@ from core.live_4h_exec import (
     ExecPolicy,
     build_mixed_plan,
     defer_entries_if_market_closed,
+    defer_exits_if_opg_unavailable,
     drop_failed_entry,
     exit_action as _shared_exit_action,
     record_exit_realized_pnl,
     shares_for_notional,
+    submit_option_exit_with_ladder,
     submit_pending_exit_orders,
     submit_pending_open_entries,
 )
@@ -397,6 +399,12 @@ def _execute(
         # submit_pending_open_entries. See core.live_4h_exec.execute_plan for why
         # the reverse order silently discarded every after-close entry.
         plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
+        # Exits are deferred separately and AFTER entries — see
+        # core.live_4h_exec.execute_plan. Without this an after-close exit is
+        # submitted into a window the broker refuses (equity opg 403 / options
+        # 422) and just fails: on 2026-08-05 the 16:25 run lost both the AEVA
+        # take-profit and the CLSK stop_-39%, leaving the call unstopped overnight.
+        plan = defer_exits_if_opg_unavailable(module, bar, plan, limits)
         plan, skipped, reason = filter_entry_orders_for_readiness(plan, new_managed=new_managed)
         if skipped:
             print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
@@ -409,7 +417,11 @@ def _execute(
                 route = item[4] if len(item) > 4 else ("option" if is_option else "equity")
                 lim = limits.get(sym)
                 try:
-                    if route == "option":
+                    if route == "option" and str(side).strip().lower() == "sell" and not lim:
+                        # Exits must actually get out. A bare market sell is
+                        # rejected when the contract has no quote.
+                        resp = submit_option_exit_with_ladder(client, symbol=sym, qty=qty)
+                    elif route == "option":
                         resp = client.submit_option_order(symbol=sym, qty=qty, side=side,
                                                           order_type="limit" if lim else "market",
                                                           time_in_force="day", limit_price=lim)

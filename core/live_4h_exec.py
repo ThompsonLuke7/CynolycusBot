@@ -479,39 +479,74 @@ _EXIT_TICK = 0.01
 _EXIT_LADDER_PAUSE_S = 1.5
 
 
-def _option_bid(client, symbol: str) -> float | None:
-    """Current bid for one contract, or None when the book is empty."""
+def _option_quote(client, symbol: str) -> tuple[float | None, float | None]:
+    """(bid, mid) for one contract. Either is None when the book can't price it."""
     if not hasattr(client, "get_option_quotes"):
-        return None
+        return None, None
     try:
         resp = client.get_option_quotes(symbols=symbol)
     except Exception:  # noqa: BLE001
-        return None
+        return None, None
     quotes = resp.get("quotes", resp) if isinstance(resp, dict) else None
     if not isinstance(quotes, dict):
-        return None
+        return None, None
     quote = quotes.get(symbol) or (next(iter(quotes.values())) if quotes else None)
     if not isinstance(quote, dict):
+        return None, None
+
+    def _num(*keys):
+        for key in keys:
+            try:
+                val = float(quote.get(key))
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                return val
         return None
-    try:
-        bid = float(quote.get("bp", quote.get("bid_price")))
-    except (TypeError, ValueError):
-        return None
-    return bid if bid > 0 else None
+
+    bid = _num("bp", "bid_price", "bid")
+    ask = _num("ap", "ask_price", "ask")
+    mid = (bid + ask) / 2.0 if (bid and ask) else _num("mark_price", "mark", "lp", "last_price")
+    return bid, mid
 
 
-def _exit_limit_ladder(bid: float | None) -> list[float]:
-    """Descending sell limits, ending at the minimum tick.
+def _option_bid(client, symbol: str) -> float | None:
+    """Current bid for one contract, or None when the book is empty."""
+    return _option_quote(client, symbol)[0]
+
+
+def _exit_limit_ladder(bid: float | None, mid: float | None = None) -> list[float]:
+    """Descending sell limits, from the mid down to the bid.
 
     A market exit is rejected outright when the contract has no quote (Alpaca:
     "order has been rejected due to no available quote for symbol, please
     reenter with a limit"). That is exactly the state an expiring contract is in,
-    so the exit has to be priced. Walking down to one cent still gets the
-    position closed when the book is empty.
+    so the exit has to be priced.
+
+    Anchoring on the MID rather than the bid: the old ladder started at the bid
+    and walked to 0.4x the bid, so a collapsed bid priced the whole exit. On
+    2026-08-05 the swing module's equivalent bid-anchored ladder sold 159 VALE
+    calls at $0.01 into a 0.01 x 0.74 market, realizing $159 on a position the
+    broker marked at $3,021. The bid is the floor here, not the starting price.
+    One cent stays reachable only when there is no bid at all — a contract with
+    an empty book still has to be closable.
     """
-    if bid is None or bid <= _EXIT_TICK:
+    has_bid = bid is not None and bid > _EXIT_TICK
+    has_mid = mid is not None and mid > 0 and (not has_bid or mid >= bid)
+    top = mid if has_mid else bid
+    if top is None or top <= _EXIT_TICK:
         return [_EXIT_TICK]
-    rungs = [bid, round(bid * 0.7, 2), round(bid * 0.4, 2), _EXIT_TICK]
+    if has_bid:
+        # A sell limit below the bid still fills AT the bid, so the last rung is
+        # marketable rather than a giveaway. When the mid is unknown the bid is
+        # all we have: walk a bounded 20% under it to stay marketable, never the
+        # old 0.4x collapse.
+        floor = bid if has_mid else bid * 0.8
+    else:
+        floor = _EXIT_TICK
+    rungs = [top, top - (top - floor) * 0.5, floor]
+    if not has_bid:
+        rungs.append(_EXIT_TICK)
     out: list[float] = []
     for rung in rungs:
         rung = max(round(float(rung), 2), _EXIT_TICK)
@@ -540,7 +575,7 @@ def submit_option_exit_with_ladder(client, *, symbol: str, qty, sleep_fn=None):
                        symbol, market_exc)
         last_exc: Exception = market_exc
 
-    ladder = _exit_limit_ladder(_option_bid(client, symbol))
+    ladder = _exit_limit_ladder(*_option_quote(client, symbol))
     for attempt, limit_price in enumerate(ladder, start=1):
         try:
             resp = client.submit_option_order(
@@ -719,20 +754,31 @@ def opg_window_is_open(now=None) -> bool:
 
 def defer_exits_if_opg_unavailable(module, bar, plan, limits, *, now=None,
                                    ledger_root: str | None = None) -> list:
-    """Queue EQUITY exits the broker would reject, instead of failing them.
+    """Queue exits the broker would reject after the close, instead of failing them.
 
-    Only bites when the market is closed AND we are outside the OPG submission
-    window; in every other state the plan is returned unchanged. Unlike the entry
-    path this NEVER touches managed state — the position is still held, so it must
-    stay tracked; only the order is postponed. Option exits are left alone: they
-    are day orders on a day-only instrument and do not hit the OPG restriction.
+    Two different broker restrictions, so two different conditions:
+
+    * EQUITY sells use TIF 'opg' once the market is closed, and Alpaca only
+      accepts an OPG order between 19:00 and 09:28 ET. So they are deferred only
+      in the 16:00-19:00 dead zone; inside the OPG window the order is accepted
+      and queues at the broker for the open, which is strictly better.
+    * OPTION sells are market orders on an instrument that only trades in RTH:
+      ``422 options market orders are only allowed during market hours``. There
+      is no after-hours window that works, so they are deferred whenever the
+      market is closed. Observed 2026-08-05 on the HTF CLSK260821C00015000
+      stop_-39%, which failed at 16:25 and left the position unstopped overnight.
+
+    Unlike the entry path this NEVER touches managed state — the position is
+    still held, so it must stay tracked; only the order is postponed.
     """
     if not module:
         return plan
     try:
         from core.calendar import is_market_open_now
-        if is_market_open_now(now) or opg_window_is_open(now):
+        market_open = is_market_open_now(now)
+        if market_open:
             return plan
+        opg_open = opg_window_is_open(now)
     except Exception:
         return plan  # fail safe: if we can't tell, behave as before (submit)
     import json
@@ -742,7 +788,9 @@ def defer_exits_if_opg_unavailable(module, bar, plan, limits, *, now=None,
         side = str(item[1]).strip().lower()
         reason = item[3] if len(item) > 3 else ""
         route = item[4] if len(item) > 4 else "option"
-        if side == "sell" and route != "option":
+        is_option = route == "option"
+        rejectable = side == "sell" and (is_option or not opg_open)
+        if rejectable:
             deferred.append({
                 "order_symbol": sym, "side": item[1], "qty": item[2], "route": route,
                 "limit": (limits or {}).get(sym), "reason": reason, "bar": str(bar),
@@ -762,10 +810,11 @@ def defer_exits_if_opg_unavailable(module, bar, plan, limits, *, now=None,
             by_sym[e["order_symbol"]] = e  # newest wins
         out.write_text(json.dumps({"updated": now_utc_iso(), "entries": list(by_sym.values())},
                                   default=str, indent=1))
-        logger.info("%s: outside the OPG window — deferred %d equity exits to next open -> %s",
-                    module, len(deferred), out)
-        print(f"\n{module}: deferred {len(deferred)} equity exit(s) to next open "
-              f"(outside the 19:00-09:28 ET OPG window)")
+        n_opt = sum(1 for e in deferred if e["route"] == "option")
+        logger.info("%s: market closed — deferred %d exits to next open (%d option, %d equity) -> %s",
+                    module, len(deferred), n_opt, len(deferred) - n_opt, out)
+        print(f"\n{module}: deferred {len(deferred)} exit(s) to next open "
+              f"({n_opt} option, {len(deferred) - n_opt} equity)")
     return kept
 
 
@@ -798,8 +847,14 @@ def submit_pending_exit_orders(client, module, *, equity_tif_fn, pos_lookup=None
             skipped.append({**rec, "skip": "zero_qty"})
             continue
         try:
-            resp = client.submit_order(symbol=sym, qty=qty, side=rec.get("side", "sell"),
-                                       order_type="market", time_in_force=equity_tif_fn())
+            if rec.get("route") == "option":
+                # Options are day-only: this is the first moment since the exit
+                # decision that a two-sided book exists. Price it off the mid via
+                # the shared ladder rather than firing a bare market order.
+                resp = submit_option_exit_with_ladder(client, symbol=sym, qty=qty)
+            else:
+                resp = client.submit_order(symbol=sym, qty=qty, side=rec.get("side", "sell"),
+                                           order_type="market", time_in_force=equity_tif_fn())
             submitted.append({**rec, "qty": qty, "order_id": resp.get("id", "")})
             print(f"  OK deferred-exit sell {qty} {sym}  id={resp.get('id', '?')}")
         except Exception as exc:  # noqa: BLE001
