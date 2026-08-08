@@ -64,8 +64,11 @@ def postgres_engine(postgres_url: str):
     with engine.connect() as connection:
         version_row = connection.execute(
             text(
+                # Pinned to the current head: a database left at an earlier
+                # revision must still be upgraded, or new tables silently
+                # never appear.
                 "SELECT version_num FROM public.alembic_version "
-                "WHERE version_num = '0002_decision_execution'"
+                "WHERE version_num = '0003_replay_fitness'"
             )
         ).first()
     if version_row is None:
