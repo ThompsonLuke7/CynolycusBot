@@ -13,6 +13,7 @@ from .decision import (
     TradeIntent,
 )
 from .execution import ExecutionEvent, OrderLeg, OrderRequest, SubmissionAttempt
+from .observability import AlertEvent, ReconciliationItem, ReconciliationRun
 from .operations import Alert, JobEvent, JobRun, OutboxEvent, PortfolioOwnership
 from .replay import ReplayDecision, ReplayRun, SourceFitnessReport
 from .registry import (
@@ -27,6 +28,7 @@ from .state import ContextSnapshot, PortfolioObservation, StateRecord
 
 __all__ = [
     "Alert",
+    "AlertEvent",
     "Base",
     "ConfigSnapshot",
     "ContextSnapshot",
@@ -46,6 +48,8 @@ __all__ = [
     "PolicyModifier",
     "PortfolioObservation",
     "PortfolioOwnership",
+    "ReconciliationItem",
+    "ReconciliationRun",
     "ReplayDecision",
     "ReplayRun",
     "SourceFitnessReport",

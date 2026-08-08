@@ -24,6 +24,9 @@ ALEMBIC_INI = REPO_ROOT / "core/nervous_system/persistence/alembic.ini"
 SCHEMA = "nervous_system"
 
 EXPECTED_TABLES = {
+    "reconciliation_runs",
+    "reconciliation_items",
+    "alert_events",
     "replay_runs",
     "replay_decisions",
     "source_fitness_reports",
@@ -53,6 +56,9 @@ EXPECTED_TABLES = {
 }
 
 EXPECTED_PRIMARY_KEYS = {
+    "reconciliation_runs": "reconciliation_run_id",
+    "reconciliation_items": "reconciliation_item_id",
+    "alert_events": "alert_event_id",
     "replay_runs": "replay_run_id",
     "replay_decisions": "replay_decision_id",
     "source_fitness_reports": "source_fitness_report_id",
@@ -146,6 +152,19 @@ EXPECTED_TABLE_COLUMNS = {
         "mark_basis", "fill_basis", "source_observation_hashes",
         "revision_number", "status", "option_pnl_eligible",
     },
+    "reconciliation_runs": {
+        "reconciliation_run_id", "environment", "account_alias", "observed_at",
+        "status", "broker_position_count", "database_position_count",
+        "journal_event_count", "details", "created_at",
+    },
+    "reconciliation_items": {
+        "reconciliation_item_id", "reconciliation_run_id", "broker_position_key",
+        "discrepancy_code", "ownership_code", "related_ids", "details", "created_at",
+    },
+    "alert_events": {
+        "alert_event_id", "alert_id", "dedup_key", "code", "severity",
+        "component", "entity_id", "message", "observed_at", "details", "created_at",
+    },
     "replay_runs": {
         "replay_run_id", "source_manifest_hash", "schedule_hash", "config_hash",
         "model_hash", "deterministic_seed", "execution_assumptions", "status",
@@ -216,6 +235,8 @@ EXPECTED_TABLE_COLUMNS = {
 
 EXPECTED_OPTIONAL_COLUMNS = {
     "replay_runs": {"completed_at"},
+    "reconciliation_items": {"ownership_code"},
+    "alert_events": {"entity_id"},
     "source_fitness_reports": {"replay_run_id"},
     "decision_outcomes": {
         "replay_run_id", "source_fitness_report_id", "target_window_start",
@@ -264,6 +285,9 @@ UUID_COLUMNS = {
             "source_fitness_report_id",
         },
         "replay_runs": {"replay_run_id"},
+        "reconciliation_runs": {"reconciliation_run_id"},
+        "reconciliation_items": {"reconciliation_item_id", "reconciliation_run_id"},
+        "alert_events": {"alert_event_id", "alert_id"},
         "replay_decisions": {
             "replay_decision_id", "replay_run_id", "decision_record_id",
         },
@@ -300,6 +324,9 @@ TIMESTAMP_COLUMNS = {
             "target_window_end",
         },
         "replay_runs": {"started_at", "completed_at", "created_at"},
+        "reconciliation_runs": {"observed_at", "created_at"},
+        "reconciliation_items": {"created_at"},
+        "alert_events": {"observed_at", "created_at"},
         "replay_decisions": {"decision_time", "decision_bar", "created_at"},
         "source_fitness_reports": {"evaluated_at", "created_at"},
         "order_requests": {"created_at", "expires_at"},
@@ -331,6 +358,9 @@ JSONB_COLUMNS = {
         "decision_records": {"payload"},
         "decision_outcomes": {"payload", "source_observation_hashes"},
         "replay_runs": {"execution_assumptions", "limitations"},
+        "reconciliation_runs": {"details"},
+        "reconciliation_items": {"related_ids", "details"},
+        "alert_events": {"details"},
         "replay_decisions": {"lineage"},
         "source_fitness_reports": {"side_metrics", "reason_codes", "warnings"},
         "order_requests": {"payload"},
@@ -370,6 +400,9 @@ INTEGER_COLUMNS = {
         "outbox_events": {"delivery_attempts"},
         "alerts": {"occurrence_count"},
         "replay_decisions": {"sequence_no"},
+        "reconciliation_runs": {
+            "broker_position_count", "database_position_count", "journal_event_count",
+        },
         "decision_outcomes": {"revision_number"},
     }.items()
     for column in columns
@@ -387,6 +420,7 @@ TEXT_COLUMNS = {
     ("decision_records", "failure_reason"),
     ("outbox_events", "last_error"),
     ("alerts", "message"),
+    ("alert_events", "message"),
 }
 
 EXPECTED_UNIQUES = {
@@ -556,7 +590,7 @@ def _constraint_columns(table: Any, constraint_type: type) -> dict[str, tuple[st
     }
 
 
-def test_orm_metadata_registers_exactly_26_tables() -> None:
+def test_orm_metadata_registers_exactly_29_tables() -> None:
     """The model package must register only the approved domain tables."""
 
     assert importlib.util.find_spec("core.nervous_system.persistence.models.base") is not None
@@ -936,10 +970,14 @@ def test_alembic_revision_chain_and_table_partition() -> None:
     assert second.down_revision == first.revision
     assert third.revision == "0003_replay_fitness"
     assert third.down_revision == second.revision
+    fourth_tables = importlib.import_module(
+        "core.nervous_system.persistence.migrations.versions.0004_audit_observability"
+    ).TABLE_NAMES
     partitions = (
         set(first.TABLE_NAMES),
         set(second.TABLE_NAMES),
         set(third.TABLE_NAMES),
+        set(fourth_tables),
     )
     assert set().union(*partitions) == EXPECTED_TABLES
     for index, left in enumerate(partitions):
@@ -948,6 +986,12 @@ def test_alembic_revision_chain_and_table_partition() -> None:
     assert len(first.TABLE_NAMES) == 9
     assert len(second.TABLE_NAMES) == 14
     assert len(third.TABLE_NAMES) == 3
+    fourth = importlib.import_module(
+        "core.nervous_system.persistence.migrations.versions.0004_audit_observability"
+    )
+    assert fourth.revision == "0004_audit_observability"
+    assert fourth.down_revision == third.revision
+    assert len(fourth.TABLE_NAMES) == 3
 
 
 def test_offline_upgrade_sql_has_public_version_and_dependency_order() -> None:

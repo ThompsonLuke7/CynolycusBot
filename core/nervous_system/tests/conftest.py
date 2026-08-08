@@ -68,7 +68,7 @@ def postgres_engine(postgres_url: str):
                 # revision must still be upgraded, or new tables silently
                 # never appear.
                 "SELECT version_num FROM public.alembic_version "
-                "WHERE version_num = '0003_replay_fitness'"
+                "WHERE version_num = '0004_audit_observability'"
             )
         ).first()
     if version_row is None:
