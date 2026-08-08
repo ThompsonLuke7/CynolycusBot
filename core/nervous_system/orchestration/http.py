@@ -236,3 +236,61 @@ __all__ = [
     "HealthReport",
     "redact",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Local compatibility transport
+# ---------------------------------------------------------------------------
+
+
+def serve_audit(router: AuditRouter, *, host: str, port: int):
+    """A minimal GET-only HTTP server over the router.
+
+    Deliberately its own small server rather than a route grafted onto the
+    combined-server process: that process runs schedulers and long-lived
+    sockets, and an audit read must not be able to stall behind them or share
+    their lifecycle. The router is the same object the eventual request-driven
+    service will use, so the rules are written once.
+    """
+
+    import json as _json
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    class _Handler(BaseHTTPRequestHandler):
+        def _respond(self, method: str) -> None:
+            parsed = urlparse(self.path)
+            query = {
+                key: values[0] for key, values in parse_qs(parsed.query).items()
+            }
+            response = router.handle(
+                AuditRequest(method=method, path=parsed.path, query=query)
+            )
+            body = _json.dumps(response.body, default=str).encode("utf-8")
+            self.send_response(response.status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self._respond("GET")
+
+        def do_POST(self) -> None:  # noqa: N802
+            # Routed through the same handler rather than short-circuited here,
+            # so the read-only rule has exactly one implementation.
+            self._respond("POST")
+
+        do_PUT = do_POST
+        do_PATCH = do_POST
+        do_DELETE = do_POST
+
+        def log_message(self, *_args) -> None:
+            """Silence the default stderr access log: it prints raw paths, and
+            a query string is the easiest place for an identifier to leak into
+            a shared console."""
+
+    return ThreadingHTTPServer((host, port), _Handler)
+
+
+__all__ = __all__ + ["serve_audit"]

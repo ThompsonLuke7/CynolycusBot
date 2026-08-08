@@ -341,3 +341,41 @@ def test_every_timestamp_is_utc() -> None:
     response = _get(_router(), "/api/nervous-system/health")
 
     assert response.body["checked_at"].endswith("+00:00")
+
+
+# ---------------------------------------------------------------------------
+# The local compatibility transport
+# ---------------------------------------------------------------------------
+
+
+def test_the_transport_serves_reads_and_refuses_writes() -> None:
+    """End-to-end over a real socket, because the read-only rule is worth
+    proving at the edge a caller actually touches.
+    """
+
+    import json as _json
+    import threading
+    import urllib.error
+    import urllib.request
+
+    from core.nervous_system.orchestration.http import serve_audit
+
+    router = _router(decisions=[{"decision_record_id": "abc"}])
+    server = serve_audit(router, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{port}/api/nervous-system"
+        with urllib.request.urlopen(f"{base}/decisions", timeout=5) as response:
+            assert response.status == 200
+            assert _json.loads(response.read())["items"][0]["decision_record_id"] == "abc"
+
+        request = urllib.request.Request(f"{base}/decisions", method="POST", data=b"{}")
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(request, timeout=5)
+        assert refused.value.code == 405
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
