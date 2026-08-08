@@ -87,5 +87,9 @@ def test_start_all_skips_one_shot_4h_loops(monkeypatch):
     assert "meta" not in started
     assert "momentum" not in started
     skipped = {r["key"]: r for r in result["results"] if r.get("skipped")}
-    assert skipped["meta"]["reason"] == "scheduled_4h_loop"
+    # Momentum is skipped because its 4H pass is scheduled. Meta is absent for
+    # a stronger reason: it is no longer startable from the hub at all, since
+    # its execution is owned by the governed path. A "skipped" entry would
+    # imply the hub could start it under other circumstances.
     assert skipped["momentum"]["reason"] == "scheduled_4h_loop"
+    assert "meta" not in skipped

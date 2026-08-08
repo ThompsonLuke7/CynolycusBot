@@ -163,12 +163,23 @@ def _adapt_amethyst(s: dict) -> dict:
 
 
 def _adapt_meta(s: dict) -> dict:
+    """Meta is governed: it reports policy mode, not an account choice.
+
+    `policy_mode` says whether the policy is merely observing (SHADOW) or
+    actually enforcing, which is the thing an operator needs to see at a
+    glance. Production-live is a status, not an option.
+    """
+
     cfg = s.get("config") or {}
     acct = s.get("account") or {}
     state = "running" if _truthy(s.get("loop_running")) else "ready"
-    out = {"state": state, "detail": f"{cfg.get('mode', 'equity')} · {acct.get('n_positions', 0)} positions",
-           "live_available": bool(cfg.get("live_available")),
-           "account_type": "real money" if cfg.get("live") else "paper"}
+    policy_mode = str(cfg.get("policy_mode") or "SHADOW").upper()
+    out = {"state": state,
+           "detail": f"{cfg.get('mode', 'equity')} · {policy_mode} · "
+                     f"{acct.get('n_positions', 0)} positions",
+           "policy_mode": policy_mode,
+           "live_available": False,
+           "account_type": "paper (BLOCKED BY MVP POLICY for live)"}
     if not acct.get("error"):
         out["acct"] = {"equity": _f(acct.get("equity")),
                        "n_positions": acct.get("n_positions"),
@@ -253,8 +264,12 @@ class HubDashboardApp:
             _Dash("dealer_ranker", "Dealer Ranker", port_dealer_ranker, startable=True, stoppable=False,
                   tradeable=True, start_path="/api/run-loop", start_body=lambda live: {},
                   adapt=_adapt_dealer_ranker),
-            _Dash("meta", "Meta Ranker", port_meta, startable=True, stoppable=False, tradeable=True,
-                  start_path="/api/run-loop", start_body=lambda live: {}, adapt=_adapt_meta),
+            # Meta execution is owned by DecisionCoordinator -> ExecutionGateway.
+            # A hub button has no snapshot, no policy evaluation, and no audit
+            # record, so this panel shows state and cannot start or fund a run.
+            _Dash("meta", "Meta Ranker", port_meta, startable=False, stoppable=False,
+                  tradeable=False, start_path=None, start_body=lambda live: {},
+                  adapt=_adapt_meta),
         ]
         if port_intraday_structure is not None:
             self.dashboards.append(
@@ -353,7 +368,11 @@ class HubDashboardApp:
         d = self._by_key(key)
         if not d.startable or d.start_path is None:
             return {"key": key, "ok": False, "error": "not_startable"}
-        if d.key in ("meta", "momentum", "dealer_ranker"):  # set the account before firing the loop
+        if d.key == "meta":
+            # Defence in depth: the panel is already non-startable, and Meta
+            # has no account toggle to set.
+            return {"key": key, "ok": False, "error": "meta_execution_is_governed"}
+        if d.key in ("momentum", "dealer_ranker"):  # set the account before firing the loop
             try:
                 self._request(d.port, "/api/set-live", method="POST", body={"live": live},
                               timeout=_CONTROL_TIMEOUT)
