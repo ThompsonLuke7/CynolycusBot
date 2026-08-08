@@ -126,8 +126,48 @@ def pending(path: Path | str = DEFAULT_QUEUE_PATH) -> list[dict[str, Any]]:
 # execution
 # ---------------------------------------------------------------------------
 
-def _close_position(client, entry: dict[str, Any]) -> dict[str, Any]:
-    """Flatten one symbol. ``qty: "all"`` closes the whole position."""
+META_STATE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "signals/meta_context/meta_ranker/live_state.json"
+)
+
+
+def meta_owned_symbols(*, state_path: Path | None = None) -> set[str]:
+    """Symbols the Meta Ranker currently believes it manages.
+
+    Read defensively: a module that has never run owns nothing, and an
+    unreadable state file must not break the operator's queue.
+    """
+
+    path = state_path if state_path is not None else META_STATE_PATH
+    try:
+        managed = json.loads(Path(path).read_text()).get("managed", {})
+    except Exception:  # noqa: BLE001 - absent or corrupt state owns nothing
+        return set()
+    owned: set[str] = set()
+    for ticker, record in (managed or {}).items():
+        if not isinstance(record, dict):
+            continue
+        symbol = record.get("occ") if record.get("route") == "option" else record.get("symbol", ticker)
+        if symbol:
+            owned.add(str(symbol).strip().upper())
+    return owned
+
+
+def _close_position(
+    client, entry: dict[str, Any], *, owned_symbols: set[str] | None = None
+) -> dict[str, Any]:
+    """Flatten one symbol. ``qty: "all"`` closes the whole position.
+
+    This is a human escape hatch and it is deliberately never blocked, even
+    when a strategy owns the symbol: it is risk-reducing, explicitly authored,
+    and an operator reaching for it in an emergency must not be told no.
+
+    What it must not do is act invisibly. A close on strategy-owned inventory
+    is flagged in its record, so the strategy's own reconciliation and the
+    audit trail can see where the position went instead of the strategy
+    continuing to manage something that no longer exists.
+    """
     params = entry.get("params") or {}
     symbol = str(params.get("symbol") or "").strip().upper()
     if not symbol:
@@ -157,6 +197,7 @@ def _close_position(client, entry: dict[str, Any]) -> dict[str, Any]:
         "closed": True, "symbol": symbol, "side": side, "qty": order_qty,
         "held_before": held, "order_id": (resp or {}).get("id"),
         "order_status": (resp or {}).get("status"),
+        "strategy_owned": symbol in (owned_symbols or set()),
     }
 
 
@@ -227,7 +268,16 @@ def run_pending(
         changed = True
         try:
             if kind == KIND_CLOSE_POSITION:
-                result = _close_position(_client(account), entry)
+                owned = meta_owned_symbols()
+                result = _close_position(
+                    _client(account), entry, owned_symbols=owned
+                )
+                if result.get("strategy_owned"):
+                    logger.warning(
+                        "startup queue: closed %s, which the Meta Ranker still "
+                        "manages — its state will need reconciling",
+                        result.get("symbol"),
+                    )
             elif kind == KIND_DATA_READINESS:
                 if readiness_runner is None:
                     raise RuntimeError("no readiness runner supplied")

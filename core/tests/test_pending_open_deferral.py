@@ -127,7 +127,13 @@ def test_flush_blocks_all_eligible_entries_when_readiness_is_stale(monkeypatch, 
     skips = {s["ticker"]: s["skip"] for s in res["skipped"]}
     assert skips["DROP"] == "no_longer_top_k"
     assert skips["KEEP"].startswith("readiness:")
-    assert not (tmp_path / "meta_ranker" / "pending_open_entries.json").exists()
+    # KEEP was blocked by a transient gate, not finished, so it is retained:
+    # deleting it would discard a still-valid decision because the data around
+    # it was briefly not ready. DROP is genuinely terminal (the rank it
+    # depended on is gone) and does leave the queue.
+    queue = tmp_path / "meta_ranker" / "pending_open_entries.json"
+    retained = json.loads(queue.read_text())["entries"]
+    assert [entry["ticker"] for entry in retained] == ["KEEP"]
 
 
 def test_flush_empty_queue_is_safe(tmp_path):

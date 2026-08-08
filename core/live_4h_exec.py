@@ -493,17 +493,27 @@ def _exit_limit_ladder(bid: float | None) -> list[float]:
     return out
 
 
-def submit_option_exit_with_ladder(client, *, symbol: str, qty, sleep_fn=None):
+def submit_option_exit_with_ladder(client, *, symbol: str, qty, sleep_fn=None,
+                                   submit_fn=None):
     """Sell-to-close one option, falling back to a priced ladder.
 
     Tries the plain market exit first (fills best when there IS a book), then
     walks a descending limit ladder with a short pause between rungs. Raises the
     last error only if every rung fails, so a genuinely stuck position still
     surfaces instead of being silently dropped.
+
+    ``submit_fn`` replaces the direct broker call for callers that route through
+    the governed path; the ladder shape, quantities, and reasons are unchanged
+    either way. Callers that do not pass one keep the existing direct
+    behaviour.
     """
     import time as _time
 
     sleep_fn = sleep_fn or _time.sleep
+    if submit_fn is not None:
+        # The governed path owns its own laddering and market fallback, so the
+        # legacy retry loop below would duplicate orders.
+        return submit_fn(symbol=symbol, side="sell", qty=qty, route="option", limit=None)
     try:
         return client.submit_option_order(
             symbol=symbol, qty=qty, side="sell",
@@ -682,8 +692,16 @@ def defer_entries_if_market_closed(module, bar, plan, new_managed, limits, *,
         from core.calendar import is_market_open_now
         if is_market_open_now(now):
             return plan
-    except Exception:
-        return plan  # fail safe: if we can't tell, behave as before (submit)
+    except Exception:  # noqa: BLE001
+        # Fail closed for entries. "I could not tell whether the market is
+        # open" is not "the market is open"; treating it as open fires
+        # after-hours entries that will be rejected, and does so silently.
+        # Exits keep going below -- an unreadable calendar must never trap a
+        # position.
+        logger.warning(
+            "%s: market calendar unavailable — deferring entries, exits still go",
+            module,
+        )
     import json
     kept, deferred = [], []
     for item in plan:
@@ -720,11 +738,18 @@ def defer_entries_if_market_closed(module, bar, plan, new_managed, limits, *,
 
 
 def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
-                                pos_lookup=None, ledger_root: str = "Data/inference") -> dict:
+                                pos_lookup=None, ledger_root: str = "Data/inference",
+                                submit_fn=None) -> dict:
     """Pre-open flush: submit queued after-close entries that are STILL in the current
     top-K (re-rank) and not already held, as normal day orders. Clears the queue.
     Returns {"submitted": {ticker: managed_dict}, "skipped": [...], "count": n}; never
     raises on an individual order (records it as skipped instead).
+
+    ``submit_fn`` replaces the direct broker call for callers that route through
+    the governed path. It receives ``(symbol, side, qty, route, limit)`` and
+    returns the broker response. Callers that do not pass one keep the existing
+    direct behaviour unchanged, so modules still on the legacy path are not
+    affected by another module's cutover.
     """
     import json
     out = pending_open_path(module, ledger_root)
@@ -765,7 +790,10 @@ def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
             continue
         try:
             lim = rec.get("limit")
-            if route == "option":
+            if submit_fn is not None:
+                resp = submit_fn(symbol=sym, side=rec["side"], qty=rec["qty"],
+                                 route=route, limit=lim)
+            elif route == "option":
                 resp = client.submit_option_order(symbol=sym, qty=rec["qty"], side=rec["side"],
                           order_type="limit" if lim else "market", time_in_force="day", limit_price=lim)
             else:
@@ -777,10 +805,30 @@ def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
                 submitted[tkr] = dict(rec["managed"])
         except Exception as exc:  # noqa: BLE001
             skipped.append({**rec, "skip": f"submit_failed:{exc}"})
+
+    # A retained entry is never silently deleted: the queue is the only record
+    # that a decision is still waiting. Only entries that were submitted, or
+    # that are genuinely finished (the rank they depended on is gone, or the
+    # position is already held), leave the queue.
+    terminal_skips = ("no_longer_top_k", "already_held")
+    retained = [
+        {key: value for key, value in rec.items() if key != "skip"}
+        for rec in skipped
+        if not str(rec.get("skip", "")).startswith(terminal_skips)
+    ]
     try:
-        out.unlink()
-    except Exception:
-        pass
+        if retained:
+            out.write_text(
+                json.dumps(
+                    {"updated": now_utc_iso(), "entries": retained},
+                    default=str,
+                    indent=1,
+                )
+            )
+        else:
+            out.unlink()
+    except Exception:  # noqa: BLE001 - the flush result still stands
+        logger.warning("%s pending-open: could not rewrite the queue", module)
     logger.info("%s pending-open flush: submitted=%d skipped=%d", module, len(submitted), len(skipped))
     return {"submitted": submitted, "skipped": skipped, "count": len(submitted)}
 

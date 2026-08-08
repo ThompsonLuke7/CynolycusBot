@@ -580,8 +580,11 @@ def main() -> int:
     # (re-rank against the freshly-scored `targets`), then exit — no position mgmt.
     if getattr(args, "flush_pending_open", False):
         if args.submit:
-            res = submit_pending_open_entries(client, AUDIT_MODULE, targets,
-                                              equity_tif_fn=equity_order_tif, pos_lookup=pos_info)
+            res = submit_pending_open_entries(
+                client, AUDIT_MODULE, targets,
+                equity_tif_fn=equity_order_tif, pos_lookup=pos_info,
+                submit_fn=governed_submitter(args, bar=bar),
+            )
             managed.update(res["submitted"])
             state["managed"] = managed
             _save_state(state)
@@ -774,6 +777,42 @@ def _execute(
     else:
         _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits, contract_selection, dropped)
         print("\n(dry-run: no orders submitted, state unchanged. Add --submit to execute.)")
+
+
+def governed_submitter(args, *, bar, module: str = AUDIT_MODULE):
+    """A submit_fn for the shared 4H engine that routes through the gateway.
+
+    The shared engine is used by several modules; injecting a submitter lets
+    Meta be governed without changing anyone else's execution path. If the
+    governed path cannot be built this raises, so the caller records a skip
+    rather than silently falling back to a direct broker call.
+    """
+
+    router = build_router(intent_config=intent_config(args))
+    decision_bar = bar.to_pydatetime() if hasattr(bar, "to_pydatetime") else bar
+
+    def _submit(*, symbol, side, qty, route, limit=None):
+        rows = router.route(
+            [(symbol, side, qty, "pending_open", route)],
+            exit_context={},
+            ticker_by_symbol={},
+            scores_by_ticker={},
+            decision_bar=decision_bar,
+            reference_prices={},
+            position_keys={symbol: f"paper:{symbol}"},
+            policy_mode=PolicyMode.ENFORCE,
+            submit=True,
+            quotes_by_symbol={},
+            quote_failures={},
+        )
+        row = rows[0]
+        if row.refusal is not None or not row.submitted:
+            detail = row.refusal.value if row.refusal is not None else "not submitted"
+            raise RuntimeError(f"governed path refused {side} {qty} {symbol}: {detail}")
+        result = getattr(row.outcome, "execution_result", None)
+        return {"id": getattr(result, "broker_order_id", None) or "?"}
+
+    return _submit
 
 
 def _submit_via_gateway(
