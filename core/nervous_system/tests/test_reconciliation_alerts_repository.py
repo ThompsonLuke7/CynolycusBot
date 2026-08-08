@@ -309,3 +309,78 @@ def test_a_second_detector_blocks_while_the_first_holds_the_row(postgres_engine)
             cleanup.commit()
         finally:
             cleanup.close()
+
+
+def test_two_concurrent_detectors_do_not_lose_an_occurrence(postgres_engine) -> None:
+    """The lost-update case, which only real concurrency can show.
+
+    Both workers read the projection, both increment, both commit. Without the
+    row lock each reads count=1 and writes 2, and one occurrence disappears —
+    the alert under-reports how often a problem is actually happening, which is
+    exactly the signal an operator triages on. With the lock the second waits,
+    re-reads, and writes 3.
+    """
+
+    import threading
+
+    from sqlalchemy.orm import Session
+
+    code = f"LOST_{uuid4().hex[:8]}"
+    seed = Session(bind=postgres_engine)
+    try:
+        ObservabilityRepository(seed).record_alert(**_alert(code=code))
+        seed.commit()
+    finally:
+        seed.close()
+
+    ready = threading.Barrier(2, timeout=10)
+    errors: list[BaseException] = []
+
+    def _detect(offset: int) -> None:
+        session = Session(bind=postgres_engine)
+        try:
+            # Both threads arrive at the read at the same moment.
+            ready.wait()
+            ObservabilityRepository(session).record_alert(
+                **_alert(code=code, observed_at=NOW + timedelta(minutes=offset))
+            )
+            session.commit()
+        except BaseException as exc:  # noqa: BLE001 - surfaced below
+            errors.append(exc)
+            session.rollback()
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=_detect, args=(index,)) for index in (1, 2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    reader = Session(bind=postgres_engine)
+    try:
+        assert not errors, f"a detector failed: {errors[0]!r}"
+        from sqlalchemy import select
+
+        from core.nervous_system.persistence.models import Alert as AlertRow
+
+        alert = reader.execute(
+            select(AlertRow).where(AlertRow.code == code)
+        ).scalar_one()
+        assert alert.occurrence_count == 3, "an occurrence was lost"
+    finally:
+        reader.close()
+        cleanup = Session(bind=postgres_engine)
+        try:
+            from sqlalchemy import text
+
+            cleanup.execute(
+                text("delete from nervous_system.alert_events where code = :c"),
+                {"c": code},
+            )
+            cleanup.execute(
+                text("delete from nervous_system.alerts where code = :c"), {"c": code}
+            )
+            cleanup.commit()
+        finally:
+            cleanup.close()
