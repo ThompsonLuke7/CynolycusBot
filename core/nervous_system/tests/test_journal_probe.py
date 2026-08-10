@@ -16,8 +16,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from core.nervous_system.execution.journal_probe import (
     JournalProbeResult,
     probe_journal,
