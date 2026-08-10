@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -49,7 +50,10 @@ class AuditStore:
         self._session = session
         # Injected so the read path carries no hidden time of its own.
         self._clock = clock or (lambda: datetime.now(timezone.utc))
-        self._journal_probe = journal_probe or (lambda: True)
+        # Defaults to *unhealthy*, not healthy. An unwired probe that returns
+        # true occupies the slot where a real check would go and reports green
+        # while the journal — the outage-time evidence — may be unwritable.
+        self._journal_probe = journal_probe or (lambda: False)
 
     # -- lists --------------------------------------------------------------
 
@@ -188,4 +192,26 @@ class AuditStore:
         )
 
 
-__all__ = ["AuditStore"]
+def journal_probe_for(
+    settings: Any, *, client: Any = None
+) -> Callable[[], bool]:
+    """Build a probe for the journal this deployment actually uses."""
+
+    from core.nervous_system.execution.journal_probe import probe_journal
+
+    backend = getattr(settings, "journal_backend", None)
+    root = getattr(settings, "operational_root", None)
+    bucket = getattr(settings, "gcs_bucket", None)
+
+    def _probe() -> bool:
+        return probe_journal(
+            backend=str(backend),
+            root=None if root is None else Path(root) / "execution_journal",
+            client=client,
+            bucket=bucket,
+        ).ok
+
+    return _probe
+
+
+__all__ = ["AuditStore", "journal_probe_for"]

@@ -109,8 +109,9 @@ returns 503, so a degraded journal cannot hide inside a 200.
 
 ## Open items
 
-- `AuditStore.health()` probes the journal through an injectable callable that
-  currently defaults to true. Wire it to the real GCS/local journal.
-- The migration tutorial still says `us-central1` in 16 places while the bucket
-  and `hello-test` are in `us-east5`. The correction was applied in one section
-  only; the rest will mislead whoever follows it next.
+- The migration tutorial on `main` says `us-central1` in 16 places against 2
+  `us-east5`. The 2026-08-05 correction was applied to §4.5 only, so §2.4 still
+  reads "use `us-central1` everywhere" and the Phase 6/7/8 sections and gcloud
+  snippets still name it. Whoever follows the tutorial next will deploy split
+  across two regions and pay egress on every bucket read. Fix belongs on
+  `main` — this worktree'"'"'s copy is 136 lines behind it.

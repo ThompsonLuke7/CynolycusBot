@@ -230,3 +230,54 @@ def test_a_missing_timestamp_stays_none() -> None:
     from core.nervous_system.orchestration.read_models import _utc
 
     assert _utc(None) is None
+
+
+# ---------------------------------------------------------------------------
+# The journal probe is real, and defaults to unhealthy
+# ---------------------------------------------------------------------------
+
+
+def test_an_unwired_journal_probe_reports_unhealthy(store) -> None:
+    """A probe that defaults to true occupies the slot where a real check
+    belongs and reports green while the journal may be unwritable.
+    """
+
+    assert store.health().journal_ok is False
+
+
+def test_a_local_journal_probe_reads_the_real_directory(tmp_path, pg_session) -> None:
+    from core.nervous_system.orchestration.read_models import (
+        AuditStore,
+        journal_probe_for,
+    )
+
+    class _Settings:
+        journal_backend = "local"
+        operational_root = tmp_path
+        gcs_bucket = None
+
+    healthy = AuditStore(pg_session, journal_probe=journal_probe_for(_Settings()))
+
+    assert healthy.health().journal_ok is True
+
+
+def test_an_unwritable_journal_directory_reports_unhealthy(tmp_path, pg_session) -> None:
+    from core.nervous_system.orchestration.read_models import (
+        AuditStore,
+        journal_probe_for,
+    )
+
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0o500)
+
+    class _Settings:
+        journal_backend = "local"
+        operational_root = blocked
+        gcs_bucket = None
+
+    try:
+        store = AuditStore(pg_session, journal_probe=journal_probe_for(_Settings()))
+        assert store.health().journal_ok is False
+    finally:
+        blocked.chmod(0o700)
