@@ -25,6 +25,14 @@ def _env(**overrides: str) -> dict[str, str]:
         "CYNOLYCUS_EXECUTION_JOURNAL": "local",
         "CYNOLYCUS_EXECUTION_JOURNAL_BUCKET": "",
         "CYNOLYCUS_ACCOUNT_ALIAS": "paper",
+        # QA_PAPER additionally requires a real deployment identity (Task 26).
+        # Supplied here so tests that only switch the environment still build a
+        # complete configuration rather than failing on unrelated fields.
+        "CYNOLYCUS_GCP_PROJECT": "cynolycusbot-dev",
+        "CYNOLYCUS_CLOUD_SQL_INSTANCE": "cynolycusbot-dev:us-east5:cynolycus-qa",
+        "CYNOLYCUS_ALPACA_BASE_URL": "https://paper-api.alpaca.markets",
+        "CYNOLYCUS_ALPACA_ACCOUNT_ID": "PA123456",
+        "CYNOLYCUS_SECRET_BINDING": "projects/cynolycusbot-dev/secrets/alpaca-paper",
     }
     values.update(overrides)
     return values

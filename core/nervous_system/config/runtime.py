@@ -32,6 +32,21 @@ _OPERATIONAL_ROOT_NAME = "CYNOLYCUS_OPERATIONAL_ROOT"
 _JOURNAL_NAME = "CYNOLYCUS_EXECUTION_JOURNAL"
 _JOURNAL_BUCKET_NAME = "CYNOLYCUS_EXECUTION_JOURNAL_BUCKET"
 _ACCOUNT_ALIAS_NAME = "CYNOLYCUS_ACCOUNT_ALIAS"
+_GCP_PROJECT_NAME = "CYNOLYCUS_GCP_PROJECT"
+_CLOUD_SQL_INSTANCE_NAME = "CYNOLYCUS_CLOUD_SQL_INSTANCE"
+_ALPACA_BASE_URL_NAME = "CYNOLYCUS_ALPACA_BASE_URL"
+_ALPACA_ACCOUNT_ID_NAME = "CYNOLYCUS_ALPACA_ACCOUNT_ID"
+_SECRET_BINDING_NAME = "CYNOLYCUS_SECRET_BINDING"
+_SUBMIT_ENABLED_NAME = "CYNOLYCUS_SUBMIT_ENABLED"
+
+# The only endpoints that are paper by construction. Identity is never inferred
+# from the account alias: an alias called "paper" pointed at the live endpoint
+# would read as correct in every log line we produce.
+_PAPER_BASE_URLS = frozenset(
+    {"https://paper-api.alpaca.markets", "https://paper-api.alpaca.markets/"}
+)
+
+PRODUCTION_LIVE_VETO = "ENV_PRODUCTION_LIVE_DISABLED_MVP"
 
 _REQUIRED_ENV_NAMES = (
     _ENVIRONMENT_NAME,
@@ -173,6 +188,14 @@ class NervousSystemSettings(ContractModel):
     journal_backend: Literal["local", "gcs"]
     gcs_bucket: str | None = None
     account_alias: str
+    gcp_project: str | None = None
+    cloud_sql_instance: str | None = None
+    alpaca_base_url: str | None = None
+    alpaca_account_id: str | None = None
+    # A reference to a secret, never the secret. The binding is safe to print;
+    # what it points at never enters this process's configuration at all.
+    secret_binding: str | None = None
+    submit_enabled: bool = False
 
     def __init__(self, **data: Any) -> None:
         try:
@@ -260,7 +283,55 @@ class NervousSystemSettings(ContractModel):
             bucket = str(source[_JOURNAL_BUCKET_NAME]).strip()
             data["gcs_bucket"] = bucket or None
 
+        for key, name in (
+            ("gcp_project", _GCP_PROJECT_NAME),
+            ("cloud_sql_instance", _CLOUD_SQL_INSTANCE_NAME),
+            ("alpaca_base_url", _ALPACA_BASE_URL_NAME),
+            ("alpaca_account_id", _ALPACA_ACCOUNT_ID_NAME),
+            ("secret_binding", _SECRET_BINDING_NAME),
+        ):
+            if name in source:
+                value = str(source[name]).strip()
+                data[key] = value or None
+
+        # Fuzzy values resolve to off. A typo in a deployment variable must
+        # fail closed rather than quietly authorise submission.
+        data["submit_enabled"] = (
+            str(source.get(_SUBMIT_ENABLED_NAME, "")).strip().lower() == "true"
+        )
+
         return cls.model_validate(data)
+
+    def execution_veto(self) -> str | None:
+        """The stable code returned instead of executing, or None."""
+
+        if self.environment is RuntimeEnvironment.PRODUCTION_LIVE:
+            return PRODUCTION_LIVE_VETO
+        return None
+
+    def health_summary(self) -> dict[str, object]:
+        """What health may say about this configuration.
+
+        Deliberately specific: redaction that removes the useful part gets
+        bypassed by someone printing the raw settings instead. The Cloud SQL
+        instance name and the secret *binding* are both safe — neither is a
+        credential — while the DSN never appears in any form.
+        """
+
+        return {
+            "environment": self.environment.value,
+            "policy_mode": self.policy_mode.value,
+            "account_alias": self.account_alias,
+            "journal_backend": self.journal_backend,
+            "gcs_bucket": self.gcs_bucket,
+            "gcp_project": self.gcp_project,
+            "cloud_sql_instance": self.cloud_sql_instance,
+            "alpaca_base_url": self.alpaca_base_url,
+            "alpaca_account_id": self.alpaca_account_id,
+            "secret_binding": self.secret_binding,
+            "submit_enabled": self.submit_enabled,
+            "execution_veto": self.execution_veto(),
+        }
 
     @model_validator(mode="after")
     def validate_boundary(self) -> Self:
@@ -271,6 +342,11 @@ class NervousSystemSettings(ContractModel):
                 "database_url must use postgresql+psycopg and include a database name"
             ) from exc
 
+        # Two shapes are legitimate. Cloud Run reaches Cloud SQL over a Unix
+        # socket, where the host is a directory and the database name is the
+        # path; the scheduler VM cannot lift into Cloud Run and reaches the
+        # same instance over private-IP TCP. Accepting only one would be a
+        # rewrite the first time the other is needed.
         if parsed_url.drivername != "postgresql+psycopg" or not parsed_url.database:
             raise ValueError(
                 "database_url must use postgresql+psycopg and include a database name"
@@ -286,7 +362,24 @@ class NervousSystemSettings(ContractModel):
             self.environment is RuntimeEnvironment.QA_PAPER
             and self.journal_backend != "gcs"
         ):
+            # A local journal on ephemeral Cloud Run storage is no journal.
             raise ValueError("QA_PAPER requires the durable GCS journal")
+        if self.environment is RuntimeEnvironment.QA_PAPER:
+            if not (self.cloud_sql_instance or "").strip():
+                raise ValueError("QA_PAPER requires a Cloud SQL instance name")
+            if (self.alpaca_base_url or "").strip() not in _PAPER_BASE_URLS:
+                raise ValueError(
+                    "QA_PAPER requires the explicit Alpaca paper base URL"
+                )
+            if not (self.alpaca_account_id or "").strip():
+                raise ValueError("QA_PAPER requires an explicit account identity")
+            if not (self.secret_binding or "").strip():
+                raise ValueError("QA_PAPER requires a Secret Manager binding")
+        if self.environment is RuntimeEnvironment.PRODUCTION_LIVE:
+            # Parseable for read-only inspection and reconciliation, never
+            # executable. Refusing to parse would mean the only way to inspect
+            # a live account's history is to disable the guard itself.
+            object.__setattr__(self, "submit_enabled", False)
         if self.journal_backend == "gcs" and not self.gcs_bucket:
             raise ValueError(
                 "gcs journal requires CYNOLYCUS_EXECUTION_JOURNAL_BUCKET"
