@@ -44,6 +44,10 @@ def test_build_catalyst_records_handles_empty_inputs(tmp_path) -> None:
         news_path=empty_news_path,
         macro_path=empty_macro_path,
         earnings_path=empty_earnings_path,
+        # Absent, so the guidance source contributes nothing. Left at its global
+        # default this test read production forward-guidance and saw 550 rows.
+        guidance_features_path=tmp_path / "guidance_features.parquet",
+        guidance_labels_path=tmp_path / "guidance_labels.parquet",
         output_path=out_path,
     )
     assert out.empty

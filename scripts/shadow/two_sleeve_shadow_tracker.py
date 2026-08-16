@@ -158,7 +158,7 @@ def load_bars(ticker: str) -> pd.DataFrame | None:
     p = SHARED_BARS / f"{ticker}.parquet"
     if not p.exists():
         return None
-    b = pd.read_parquet(p, columns=["timestamp", "close", "high", "low"])
+    b = pd.read_parquet(p, columns=["timestamp", "open", "close", "high", "low"])
     b["timestamp"] = pd.to_datetime(b["timestamp"], utc=True)
     return b.drop_duplicates("timestamp").set_index("timestamp").sort_index()
 
@@ -305,7 +305,18 @@ def _save_json(path: Path, obj) -> None:
 def evaluate_exit(entry_price: float, bars: pd.DataFrame, entry_ts: pd.Timestamp,
                    policy: dict) -> dict | None:
     """Same exit mechanic as core.live_4h_exec / the backtest harness, walked
-    forward over actual bars since entry. Returns exit info or None if still open."""
+    forward over actual bars since entry. Returns exit info or None if still open.
+
+    Fills are gap-aware. A stop or target level can only be traded when the bar
+    actually traded THROUGH it; when the bar OPENS past the level the fill is the
+    open, which is worse than the level for a stop and better for a target.
+    Returning the level itself unconditionally (the behaviour through 2026-08-07)
+    made `underlying_ret` a restatement of the policy rather than a measurement:
+    all 256 `target` exits ever logged came back at exactly +0.07 and the single
+    `stop` at exactly -0.39, so every downstream sleeve comparison and both
+    spread-P&L estimates were constants. See research/daily_live_reports/
+    2026-08-07.md.
+    """
     path_bars = bars[bars.index > entry_ts]
     if path_bars.empty:
         return None
@@ -315,20 +326,25 @@ def evaluate_exit(entry_price: float, bars: pd.DataFrame, entry_ts: pd.Timestamp
     remaining = 1.0
     for n, (ts, row) in enumerate(path_bars.iterrows(), start=1):
         peak = max(peak, row["high"])
+        open_ret = row["open"] / entry_price - 1
         lo_ret = row["low"] / entry_price - 1
         hi_ret = row["high"] / entry_price - 1
+        # Stop is tested before target on the same bar: intrabar order is
+        # unknowable from OHLC, so assume the adverse leg came first.
         if policy["stop"] is not None and lo_ret <= -policy["stop"]:
+            exit_ret = min(-policy["stop"], open_ret)
             return dict(exit_ts=ts, bars_held=n, reason="stop",
-                        underlying_ret=realized + remaining * (-policy["stop"]))
+                        underlying_ret=realized + remaining * exit_ret)
         if policy["trail"] is not None and row["low"] <= peak * (1 - policy["trail"]):
-            exit_ret = peak * (1 - policy["trail"]) / entry_price - 1
+            exit_ret = min(peak * (1 - policy["trail"]) / entry_price - 1, open_ret)
             return dict(exit_ts=ts, bars_held=n, reason="trail",
                         underlying_ret=realized + remaining * exit_ret)
         if policy["target"] is not None and not trimmed and hi_ret >= policy["target"]:
+            exit_ret = max(policy["target"], open_ret)
             if policy["scale_frac"] >= 1.0:
                 return dict(exit_ts=ts, bars_held=n, reason="target",
-                            underlying_ret=policy["target"])
-            realized += policy["scale_frac"] * policy["target"]
+                            underlying_ret=realized + remaining * exit_ret)
+            realized += policy["scale_frac"] * exit_ret
             remaining = 1.0 - policy["scale_frac"]
             trimmed = True
         if policy["horizon"] is not None and n >= policy["horizon"]:

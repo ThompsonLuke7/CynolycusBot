@@ -15,6 +15,10 @@ from signals.catalysts.config import (
     ensure_dirs,
 )
 from signals.events.config import EARNINGS_EVENTS_PATH, EVENT_FEATURES_PATH, MACRO_EVENTS_PATH
+from signals.events.forward_guidance.config import (
+    FEATURES_PATH as GUIDANCE_FEATURES_PATH,
+    LABELS_PATH as GUIDANCE_LABELS_PATH,
+)
 from signals.news.config import NEWS_FEATURE_MATRIX_PATH, NEWS_RECORDS_PATH, NEWS_SCORES_PATH
 from signals.catalysts.earnings import build_earnings_result_catalysts
 
@@ -100,6 +104,8 @@ def build_catalyst_records(
     news_path: Path | str = NEWS_RECORDS_PATH,
     macro_path: Path | str = MACRO_EVENTS_PATH,
     earnings_path: Path | str = EARNINGS_EVENTS_PATH,
+    guidance_features_path: Path | str = GUIDANCE_FEATURES_PATH,
+    guidance_labels_path: Path | str = GUIDANCE_LABELS_PATH,
     output_path: Path | str = CATALYST_RECORDS_PATH,
 ) -> pd.DataFrame:
     ensure_dirs()
@@ -107,7 +113,12 @@ def build_catalyst_records(
         news_to_catalysts(_read(news_path)),
         scheduled_events_to_catalysts(_read(macro_path), default_kind="scheduled_event"),
         scheduled_events_to_catalysts(_read(earnings_path), default_kind="earnings"),
-        build_earnings_result_catalysts(),
+        # Injected like every other source: reading the global default here made
+        # callers that pass explicit paths silently pull in production guidance.
+        build_earnings_result_catalysts(
+            features_path=guidance_features_path,
+            labels_path=guidance_labels_path,
+        ),
     ]
     out = pd.concat([f for f in frames if not f.empty], ignore_index=True) if any(not f.empty for f in frames) else pd.DataFrame()
     if not out.empty:

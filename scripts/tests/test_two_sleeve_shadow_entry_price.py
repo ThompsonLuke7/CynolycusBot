@@ -23,7 +23,16 @@ from scripts.shadow.two_sleeve_shadow_tracker import (
 def _bars(closes, start="2026-08-03T14:00:00Z"):
     idx = pd.date_range(start, periods=len(closes), freq="4h", tz="UTC")
     return pd.DataFrame(
-        {"close": closes, "high": [c * 1.01 for c in closes], "low": [c * 0.99 for c in closes]},
+        {
+            # `open` is required since evaluate_exit became gap-aware: a level is
+            # only fillable when the bar traded through it, so the open decides
+            # the fill on a gap. Opening at the close keeps these fixtures
+            # gapless, which is what they are testing.
+            "open": list(closes),
+            "close": closes,
+            "high": [c * 1.01 for c in closes],
+            "low": [c * 0.99 for c in closes],
+        },
         index=idx,
     )
 
@@ -118,13 +127,25 @@ def test_missing_reference_bar_is_not_treated_as_implausible():
 # --- end-to-end: the fabricated exit is gone ----------------------------------
 
 def test_premium_entry_fabricates_an_immediate_target_exit():
-    """Documents the defect: the old code path books +7% on bar one."""
-    bars = _bars([532.49, 539.43 / 1.01])
+    """Documents the defect: a premium basis exits on bar one against share bars.
+
+    The exit still fires immediately — that is the scale error this guards. What
+    it no longer does is book the mishandled trade at a plausible-looking +7%:
+    since evaluate_exit became gap-aware, the exit bar opens ~1,582% above a
+    $31.75 basis and the recorded return says so. A number that absurd surfaces
+    the mix-up; +7% hid it (all 256 harvest exits logged through 2026-08-07 came
+    back at exactly the target for this reason).
+    """
+    exit_bar_open = 539.43 / 1.01
+    bars = _bars([532.49, exit_bar_open])
     result = evaluate_exit(31.75, bars, bars.index[0], HARVEST_POLICY)
     assert result is not None
     assert result["reason"] == "target"
     assert result["bars_held"] == 1
-    assert result["underlying_ret"] == pytest.approx(HARVEST_POLICY["target"])
+    # The entry bar is excluded from the walk, so the fill is the NEXT bar's
+    # open — gapped far past the target, so the open beats the +7% level.
+    assert result["underlying_ret"] == pytest.approx(exit_bar_open / 31.75 - 1)
+    assert result["underlying_ret"] > 1.0  # unmistakably not a real +7% trade
 
 
 def test_underlying_entry_does_not_exit_on_a_one_percent_bar():

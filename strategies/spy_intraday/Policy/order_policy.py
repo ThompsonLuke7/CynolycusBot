@@ -151,7 +151,17 @@ class OptionOrderPolicyConfig:
     option_exit_opposite_prob_long: float | None = 0.70
     option_exit_opposite_prob_short: float | None = 0.75
     option_exit_opposite_profit_pct: float = 0.25
+    # Order PRICING for closes. Stays "bid": a sell has to be marketable.
     option_exit_quote_mode: str = "bid"
+    # Mark used to DECIDE whether to exit — deliberately separate from the one
+    # above. Entries fill at/near the ask, so marking the decision at the bid made
+    # every position start life down the full spread: on 2026-08-14's SPY 0DTEs
+    # that was $0.01-0.04 on a $0.60-0.79 premium, i.e. -1.5% to -6% at the
+    # instant of the fill. Every option-value exit rule tests
+    # `current_profit_pct <= 0`, so the spread alone armed all of them and four
+    # of six round trips closed inside 35 seconds. The mid is the unbiased mark
+    # for deciding; selling still quotes the bid.
+    option_exit_decision_quote_mode: str = "mid"
     option_new_entry_cutoff_hhmm: str | None = "15:00"
     max_live_entry_lag_sec: float = 0.0
     use_wall_clock_entry_cutoff: bool = False
@@ -625,7 +635,8 @@ class OptionOrderPolicy:
         current_price = self._get_contract_price(
             symbol=symbol,
             logger=logger,
-            mode=str(self.cfg.option_exit_quote_mode or "bid"),
+            mode=str(self.cfg.option_exit_decision_quote_mode
+                     or self.cfg.option_exit_quote_mode or "mid"),
         )
         if not (math.isfinite(current_price) and current_price >= 0.0):
             return False
@@ -1174,7 +1185,14 @@ class OptionOrderPolicy:
                 if self._option_exit_best_seen_at.get(side) is None:
                     self._option_exit_best_seen_at[side] = local_ts
             else:
-                self._meta_side_bars_held[side] = max(0, int(self.cfg.meta_min_hold_bars))
+                # Start the counter at 0, not at meta_min_hold_bars. Seeding it
+                # at the threshold pre-satisfies the min-hold guard, so a
+                # position becomes exit-eligible the instant a reconcile
+                # observes it — including one we opened seconds earlier, since
+                # the policy's own prev_qty is still 0 until the fill registers.
+                # Costing min_hold_bars of observation on a genuinely adopted
+                # position is the cheap side of this trade-off.
+                self._meta_side_bars_held[side] = 0
                 self._meta_side_entry_signal_ts[side] = None
                 self._meta_side_soft_exit_count[side] = 0
                 self._reset_trail_state(side)
@@ -2845,8 +2863,16 @@ class OptionOrderPolicy:
         )
         tick = 0.01
         close_bid = float("nan")
+        open_ask = float("nan")
         if intent_key == "close":
             close_bid = self._get_contract_price(symbol=symbol, logger=logger, mode="bid")
+        else:
+            # The open ladder walks the limit UP a tick per attempt and had no
+            # ceiling, so it could pay through the offer to force a fill: on
+            # 2026-08-14 it chased SPY260814C00776000 from 0.74 to 0.79 (+6.8%)
+            # across five attempts, then the position was closed 28 seconds
+            # later. The ask is the whole book — paying above it buys nothing.
+            open_ask = self._get_contract_price(symbol=symbol, logger=logger, mode="ask")
 
         max_attempts = max(0, int(self.cfg.max_resubmit_attempts))
         attempts = max_attempts + 1
@@ -2855,6 +2881,8 @@ class OptionOrderPolicy:
             offset = (attempt - 1) * tick
             if intent_key == "open":
                 limit_price = base_limit + offset
+                if math.isfinite(open_ask) and open_ask > 0.0:
+                    limit_price = min(limit_price, open_ask)
             elif math.isfinite(close_bid) and close_bid > 0.0:
                 limit_price = base_limit if attempt == 1 else close_bid - (attempt - 2) * tick
             else:
@@ -3030,6 +3058,7 @@ class OptionOrderPolicy:
             ),
             "option_exit_opposite_profit_pct": float(self.cfg.option_exit_opposite_profit_pct),
             "option_exit_quote_mode": str(self.cfg.option_exit_quote_mode),
+            "option_exit_decision_quote_mode": str(self.cfg.option_exit_decision_quote_mode),
             "max_live_entry_lag_sec": float(self.cfg.max_live_entry_lag_sec),
             "atr": float(atr) if math.isfinite(atr) else None,
             "bars_interval": int(len(self._bars_interval)),
@@ -3537,8 +3566,30 @@ class OptionOrderPolicy:
                     local_ts=local_ts,
                 )
                 if option_exit_signal:
+                    # The option-value bracket used to run BEFORE `hold_ready` was
+                    # computed below, so meta_min_hold_bars — which exists to stop
+                    # exactly this — never applied to it. On 2026-08-14 four of six
+                    # SPY round trips lasted under 35 seconds (one lasted 2s),
+                    # every one of them a loser paying the spread twice.
+                    #
+                    # A real stop is never delayed; only the discretionary rules
+                    # (time decay, no-progress, trail giveback, opposite signal)
+                    # wait for the position to have actually been held. Those rules
+                    # all test `current_profit_pct <= 0`, which a fresh position
+                    # satisfies automatically because it is marked against the
+                    # bid it can sell into, so without this they are armed from
+                    # the instant of the fill.
+                    exit_reason = self._meta_side_reason.get(side_key) or ""
+                    hold_ready_now = bool(
+                        int(self._meta_side_bars_held.get(side_key, -1))
+                        >= max(0, int(self.cfg.meta_min_hold_bars))
+                    )
+                    if exit_reason == "option_stop_loss" or hold_ready_now:
+                        self._meta_side_soft_exit_count[side_key] = 0
+                        return 0
+                    self._meta_side_reason[side_key] = f"min_hold_blocks:{exit_reason}"
                     self._meta_side_soft_exit_count[side_key] = 0
-                    return 0
+                    return desired_qty
                 if self._option_value_exit_policy_enabled():
                     self._meta_side_reason[side_key] = "hold_option_value_bracket"
                     self._meta_side_soft_exit_count[side_key] = 0
@@ -4059,6 +4110,8 @@ class OptionOrderPolicy:
                 "short_contracts": int(self._short_contracts),
                 "open_long_symbol": self._long_symbol,
                 "open_short_symbol": self._short_symbol,
+                "long_decision_reason": self._meta_side_reason.get("long"),
+                "short_decision_reason": self._meta_side_reason.get("short"),
                 "target_long_contracts": int(target_long),
                 "target_short_contracts": int(target_short),
                 "meta_trailing_stop_enabled": bool(self.cfg.meta_trailing_stop_enabled),
@@ -4080,6 +4133,14 @@ class OptionOrderPolicy:
             "short_bars_held": int(self._meta_side_bars_held.get("short", -1)),
             "long_soft_exit_count": int(self._meta_side_soft_exit_count.get("long", 0)),
             "short_soft_exit_count": int(self._meta_side_soft_exit_count.get("short", 0)),
+            # WHY this decision happened. Previously only reachable via
+            # snapshot_state(), so the audit stream recorded that a position
+            # closed but never which rule closed it — on 2026-08-14 six SPY round
+            # trips (four under 35 seconds) could not be attributed to a rule from
+            # the logs at all. Attribution is the prerequisite for tuning any of
+            # the exit thresholds.
+            "long_decision_reason": self._meta_side_reason.get("long"),
+            "short_decision_reason": self._meta_side_reason.get("short"),
             "open_long_symbol": self._long_symbol,
             "open_short_symbol": self._short_symbol,
             "target_long_contracts": int(target_long),

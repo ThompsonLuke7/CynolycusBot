@@ -363,16 +363,41 @@ class SwingPosition:
         floor_profit = peak_profit * (1.0 - giveback_pct)
         return self.entry_price + self.direction * floor_profit
 
+    @property
+    def entry_price_is_synthetic(self) -> bool:
+        """True when `entry_price` is a restore-time mark, not a real entry.
+
+        A position rebuilt from a broker snapshot with no local state has no
+        recoverable underlying entry price, so `_restore_from_broker` stamps the
+        price at restore time. Any P&L derived from it measures "move since we
+        noticed the position", not "move since entry".
+        """
+        return bool(self.restored_from_broker) and str(self.restore_source or "") == "broker_snapshot"
+
     def to_dict(self) -> dict:
-        pnl_pct = self.direction * (self.last_price - self.entry_price) / self.entry_price if self.entry_price else 0.0
+        # Reporting a P&L off a synthetic basis fabricates a number: on
+        # 2026-08-07 UMC and TKR were both cut at an option-leg -45% while this
+        # field read exactly 0.00%, because entry_price had been stamped at the
+        # restore-time mark on the same bar. Unknown is reported as unknown; the
+        # broker's own unrealized figure is carried alongside as the real one.
+        synthetic = self.entry_price_is_synthetic
+        pnl_pct = (
+            None if synthetic or not self.entry_price
+            else self.direction * (self.last_price - self.entry_price) / self.entry_price
+        )
+        meta = self.option_entry_meta if isinstance(self.option_entry_meta, dict) else {}
+        broker_plpc = _finite_or_none(meta.get("broker_unrealized_plpc"))
         return {
             "ticker": self.ticker,
             "direction": int(self.direction),
             "entry_price": float(self.entry_price),
+            "entry_price_is_synthetic": synthetic,
             "entry_time": self.entry_time.astimezone(timezone.utc).isoformat() if self.entry_time else None,
             "last_price": float(self.last_price),
             "best_price": float(self.best_price),
-            "pnl_pct": float(pnl_pct),
+            "pnl_pct": None if pnl_pct is None else float(pnl_pct),
+            "pnl_pct_source": "restore_time_mark_unusable" if synthetic else "entry_price",
+            "broker_unrealized_plpc": broker_plpc,
             "sl_price": float(self.sl_price) if self.sl_price is not None else None,
             "trail_armed": bool(self.trail_armed),
             "trail_floor": float(tf) if (tf := self._trail_floor()) is not None else None,

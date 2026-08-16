@@ -13,6 +13,8 @@ import pandas as pd
 import pytest
 
 from strategies.dealer_positioning.live_ranked_options import (
+    ContractLookupError,
+    ScanUnevaluableError,
     _has_tradable_contracts,
     _select_optionable_targets,
 )
@@ -75,14 +77,61 @@ def test_has_tradable_contracts_false_when_not_tradable():
     )
 
 
-def test_has_tradable_contracts_returns_false_on_client_error():
-    class _RaisingClient:
-        def get_option_contracts(self, **_kwargs):
-            raise RuntimeError("boom")
+class _RaisingClient:
+    def __init__(self, exc: Exception | None = None) -> None:
+        self.exc = exc or RuntimeError("boom")
+        self.calls: list[str] = []
 
-    assert not _has_tradable_contracts(
-        _RaisingClient(), "XPO", option_type="call", min_dte=1, max_dte=21, now_et=_dt(_TODAY)
+    def get_option_contracts(self, *, underlying_symbol: str = "", **_kwargs):
+        self.calls.append(underlying_symbol)
+        raise self.exc
+
+
+def test_has_tradable_contracts_raises_on_client_error():
+    # "We could not read the chain" must not be reported as "this name lists no
+    # contracts" — a DNS outage on 2026-08-07 made every scanned name look
+    # non-optionable and the module placed zero orders for the session.
+    with pytest.raises(ContractLookupError):
+        _has_tradable_contracts(
+            _RaisingClient(), "XPO", option_type="call", min_dte=1, max_dte=21, now_et=_dt(_TODAY)
+        )
+
+
+def test_select_optionable_targets_aborts_when_lookups_fail_wholesale():
+    symbols = [f"T{i}" for i in range(50)]
+    client = _RaisingClient(OSError("[Errno -3] Temporary failure in name resolution"))
+    rankings = _rankings(symbols)
+
+    with pytest.raises(ScanUnevaluableError) as excinfo:
+        _select_optionable_targets(
+            client, rankings, top_k=3, side_mode="call", min_dte=1, max_dte=21,
+            scan_multiple=4, now_et=_dt(_TODAY),
+        )
+    # Still bounded by the scan cap — an outage must not turn one pass into an
+    # unbounded retry storm against the broker.
+    assert len(client.calls) == 12
+    assert "could not evaluate" in str(excinfo.value)
+
+
+def test_select_optionable_targets_tolerates_a_few_lookup_failures():
+    # Isolated failures are normal; only bulk failure invalidates the scan.
+    expiry = _TODAY + timedelta(days=7)
+    symbols = ["AAA", "BBB", "CCC", "DDD"]
+    chains = {s: [_contract(f"{s}260727C00010000", s, expiry)] for s in ("BBB", "CCC", "DDD")}
+
+    class _FlakyClient(_FakeClient):
+        def get_option_contracts(self, *, underlying_symbol: str, **kwargs):
+            if underlying_symbol.upper() == "AAA":
+                raise RuntimeError("transient")
+            return super().get_option_contracts(underlying_symbol=underlying_symbol, **kwargs)
+
+    top, skipped = _select_optionable_targets(
+        _FlakyClient(chains), _rankings(symbols), top_k=2, side_mode="call",
+        min_dte=1, max_dte=21, now_et=_dt(_TODAY),
     )
+    assert list(top["symbol"]) == ["BBB", "CCC"]
+    # AAA was never evaluated, so it is not evidence of non-optionability.
+    assert "AAA" not in skipped
 
 
 def _dt(d: date):

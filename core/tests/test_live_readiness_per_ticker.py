@@ -23,6 +23,20 @@ from core.live_readiness import (
 NOW = datetime(2026, 7, 30, 18, 20, tzinfo=timezone.utc)  # Thu 14:20 ET, a 4H run
 
 
+def current_bar() -> datetime:
+    """A bar timestamp that is current whenever the suite happens to run.
+
+    `ticker_data_status` judges freshness against the last COMPLETED trading
+    session, not an hours tolerance, and `filter_entry_orders_for_readiness`
+    has no `now` hook to pin it through — so a hard-coded "fresh" date silently
+    becomes stale as real time moves past it. Four tests here were written with
+    bars dated 2026-07-30 and started failing once that stopped being the prior
+    session. Tests that mean "this ticker's data is current" must say so
+    relative to now; tests that mean "stale" keep their fixed past dates.
+    """
+    return datetime.now(timezone.utc)
+
+
 @pytest.fixture()
 def bars(tmp_path):
     """A bar cache directory plus a helper to plant a ticker's last bar."""
@@ -138,7 +152,7 @@ def test_stale_stamp_but_current_bars_now_authorizes_entries(bars, stale_stamp):
     """The 2026-07-30 case: stage 1 finished, stages 4-5 were killed."""
     directory, write = bars
     for ticker in ("ULCC", "XRAY", "FRSH"):
-        write(ticker, datetime(2026, 7, 30, 14, 0, tzinfo=timezone.utc))
+        write(ticker, current_bar())
     plan = [
         ("ULCC", "buy", 100, "entry", "equity"),
         ("XRAY", "buy", 100, "entry", "equity"),
@@ -156,7 +170,7 @@ def test_stale_stamp_but_current_bars_now_authorizes_entries(bars, stale_stamp):
 
 def test_only_the_ticker_with_stale_data_is_blocked(bars, stale_stamp):
     directory, write = bars
-    write("ULCC", datetime(2026, 7, 30, 14, 0, tzinfo=timezone.utc))
+    write("ULCC", current_bar())
     write("MRO", datetime(2024, 11, 21, 19, 0, tzinfo=timezone.utc))
     plan = [
         ("ULCC", "buy", 100, "entry", "equity"),
@@ -201,7 +215,7 @@ def test_sells_are_never_blocked_by_stale_data(bars, stale_stamp):
 
 def test_option_orders_resolve_to_their_underlying(bars, stale_stamp):
     directory, write = bars
-    write("ZS", datetime(2026, 7, 30, 14, 0, tzinfo=timezone.utc))
+    write("ZS", current_bar())
     plan = [("ZS260821C00150000", "buy", 7, "entry", "option")]
 
     kept, skipped, _reason = filter_entry_orders_for_readiness(
@@ -215,7 +229,7 @@ def test_option_orders_resolve_to_their_underlying(bars, stale_stamp):
 def test_explicit_symbol_tickers_win_over_occ_parsing(bars, stale_stamp):
     """Callers that know the ticker should not depend on symbol-shape inference."""
     directory, write = bars
-    write("BRK.B", datetime(2026, 7, 30, 14, 0, tzinfo=timezone.utc))
+    write("BRK.B", current_bar())
     plan = [("BRKB260821C00150000", "buy", 1, "entry", "option")]
 
     kept, skipped, _ = filter_entry_orders_for_readiness(

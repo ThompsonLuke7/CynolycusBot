@@ -51,6 +51,7 @@ from core.live_4h_exec import (
     defer_exits_if_opg_unavailable,
     drop_failed_entry,
     exit_action as _shared_exit_action,
+    mark_entry_unconfirmed,
     record_exit_realized_pnl,
     shares_for_notional,
     submit_option_exit_with_ladder,
@@ -266,7 +267,8 @@ def main():
             # we still hold, and flushing it before entries frees the buying power
             # the queued entries are about to use.
             ex = submit_pending_exit_orders(client, AUDIT_MODULE,
-                                            equity_tif_fn=equity_order_tif, pos_lookup=pos_info)
+                                            equity_tif_fn=equity_order_tif, pos_lookup=pos_info,
+                                            managed=managed)
             if ex["count"] or ex["skipped"]:
                 print(f"pending-exit flush: submitted {ex['count']} / skipped {len(ex['skipped'])}")
             res = submit_pending_open_entries(client, AUDIT_MODULE, targets,
@@ -368,7 +370,7 @@ def _run_options(args, client, targets, state, managed, pos_info, bar, signal_au
     res = build_mixed_plan(
         client, targets=targets, managed=managed, pos_info=pos_info, bar=bar,
         signal_audits=signal_audits, policy=policy, route_fn=route_option_or_shares,
-        ref_price_fn=_ref_price,
+        ref_price_fn=_ref_price, module=AUDIT_MODULE,
     )
     _execute(
         args, client, res.plan, state, res.new_managed, bar, targets,
@@ -404,7 +406,13 @@ def _execute(
         # submitted into a window the broker refuses (equity opg 403 / options
         # 422) and just fails: on 2026-08-05 the 16:25 run lost both the AEVA
         # take-profit and the CLSK stop_-39%, leaving the call unstopped overnight.
-        plan = defer_exits_if_opg_unavailable(module, bar, plan, limits)
+        # new_managed/exit_context: build_mixed_plan already dropped the position
+        # when it planned the exit, and only a submit FAILURE puts it back — a
+        # deferred exit never reaches submission, so without this the position is
+        # held at the broker and claimed by nobody. That is what let Swing adopt
+        # HTF's VSH on 2026-08-11 while HTF's own deferred exit was still queued.
+        plan = defer_exits_if_opg_unavailable(module, bar, plan, limits,
+                                              new_managed=new_managed, exit_context=exit_context)
         plan, skipped, reason = filter_entry_orders_for_readiness(plan, new_managed=new_managed)
         if skipped:
             print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
@@ -429,6 +437,9 @@ def _execute(
                         resp = client.submit_order(symbol=sym, qty=qty, side=side,
                                                    order_type="market", time_in_force=equity_order_tif())
                     print(f"  OK {side} {qty} {sym}  id={resp.get('id', '?')}")
+                    if str(side).strip().lower() == "buy":
+                        # Accepted != filled. See core.live_4h_exec.mark_entry_unconfirmed.
+                        mark_entry_unconfirmed(new_managed, sym, resp)
                     if str(side).strip().lower() == "sell":
                         es = exit_context.get(sym, (None, None))[1] if exit_context else None
                         record_exit_realized_pnl(client, module=module, item=item, resp=resp,

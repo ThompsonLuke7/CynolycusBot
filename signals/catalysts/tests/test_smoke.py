@@ -48,7 +48,16 @@ def test_catalyst_records_scores_and_features(tmp_path) -> None:
     news_features.to_parquet(paths["news_features"], index=False)
     event_features.to_parquet(paths["event_features"], index=False)
 
-    records = build_catalyst_records(news_path=paths["news"], macro_path=paths["macro"], earnings_path=paths["earnings"], output_path=paths["records"])
+    records = build_catalyst_records(
+        news_path=paths["news"],
+        macro_path=paths["macro"],
+        earnings_path=paths["earnings"],
+        # Absent, so this fixture stays self-contained instead of mixing in
+        # whatever forward-guidance data happens to be on disk.
+        guidance_features_path=tmp_path / "guidance_features.parquet",
+        guidance_labels_path=tmp_path / "guidance_labels.parquet",
+        output_path=paths["records"],
+    )
     assert set(records["catalyst_kind"]) == {"news", "scheduled_event", "earnings"}
     cat_scores = build_catalyst_scores(catalyst_path=paths["records"], news_scores_path=paths["scores"], output_path=paths["cat_scores"])
     assert cat_scores["catalyst_score"].max() == 0.75

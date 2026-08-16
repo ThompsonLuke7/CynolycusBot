@@ -460,7 +460,8 @@ class MomentumLiveRunner:
                 # position we still hold, and flushing it before entries frees the
                 # buying power the queued entries are about to use.
                 ex = submit_pending_exit_orders(client, "momentum_expansion",
-                                                equity_tif_fn=equity_order_tif, pos_lookup=pos_info)
+                                                equity_tif_fn=equity_order_tif, pos_lookup=pos_info,
+                                                managed=managed)
                 if ex["count"] or ex["skipped"]:
                     print(f"pending-exit flush: submitted {ex['count']} / skipped {len(ex['skipped'])}")
                 r = submit_pending_open_entries(client, "momentum_expansion", targets,
@@ -478,6 +479,7 @@ class MomentumLiveRunner:
             bar=bar, signal_audits=signal_audits, policy=self.exec_policy,
             route_fn=route_option_or_shares, ref_price_fn=_ref_price_4h,
             entry_ok=entry_ok, gate_reason="no_entry_trigger",
+            module="momentum_expansion",
         )
         def _persist_managed() -> None:
             # Save after every fill, not just at the end of the plan, so a
