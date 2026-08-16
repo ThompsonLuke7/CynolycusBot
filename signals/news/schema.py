@@ -11,8 +11,6 @@ from datetime import datetime
 
 import pandas as pd
 
-from signals.catalysts.nervous_system_adapter import hindsight_evidence_fields
-
 
 TIMESTAMP_SEMANTICS_VERSION = "catalyst-time@1"
 
@@ -250,6 +248,14 @@ def records_from_frame(
     observed_at: Any | None = None,
     collection_time: Any | None = None,
 ) -> pd.DataFrame:
+    # Imported here, not at module scope. The catalyst adapter reaches
+    # signals.events.forward_guidance.features.build_matrix for two constants,
+    # and that module pulls in core.API.Alpaca_API.market_data -- ~0.85s of
+    # import work this module otherwise charges to every importer. That cost is
+    # paid per process, so signals.news.sources' spawn-based earnings fetch paid
+    # it three times over and blew its own timeout budget.
+    from signals.catalysts.nervous_system_adapter import hindsight_evidence_fields
+
     if df.empty:
         return empty_news_frame()
     rows = []

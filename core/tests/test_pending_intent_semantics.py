@@ -44,6 +44,24 @@ def readiness_ok(monkeypatch):
     )
 
 
+@pytest.fixture
+def readiness_blocked(monkeypatch):
+    """Block every entry at the readiness gate, explicitly.
+
+    Stubbed rather than left to the environment: before this the test relied on
+    Data/readiness/latest_success.json being ABSENT, so it passed in a bare
+    worktree and failed on a checkout that had actually run the pipeline —
+    which is a test that reports on its own filesystem, not on the code.
+    """
+
+    import core.live_4h_exec as engine
+
+    monkeypatch.setattr(
+        engine, "filter_entry_orders_for_readiness",
+        lambda plan, **_: ([], {row[0]: "stamp stale" for row in plan}, "stamp stale"),
+    )
+
+
 def _plan() -> list[tuple]:
     return [
         ("AMD", "buy", 10, "entry", "equity"),
@@ -186,7 +204,9 @@ def test_a_mixed_flush_retains_only_the_unfinished_entry(tmp_path, readiness_ok)
     assert [entry["order_symbol"] for entry in retained] == ["NVDA"]
 
 
-def test_a_readiness_failure_retains_the_entry_rather_than_deleting_it(tmp_path) -> None:
+def test_a_readiness_failure_retains_the_entry_rather_than_deleting_it(
+    tmp_path, readiness_blocked
+) -> None:
     """The decision is still valid; only the data around it is not ready yet.
     Deleting it would discard a decision because of a transient gate.
     """
