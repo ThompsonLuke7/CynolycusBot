@@ -607,10 +607,12 @@
 
     // Update trail floor price line
     if (pos) {
-      const pnlPct = (pos.pnl_pct * 100).toFixed(2);
-      const cls    = pos.pnl_pct >= 0 ? "pos" : "neg";
+      // pnl_pct is null when the entry price is a restore-time mark rather than
+      // a real entry — show it as unknown instead of a confident 0.00%.
+      const pnlKnown = pos.pnl_pct !== null && pos.pnl_pct !== undefined;
+      const cls    = !pnlKnown ? "muted" : (pos.pnl_pct >= 0 ? "pos" : "neg");
       const pnlEl  = document.getElementById(`chart-pnl-${ticker}`);
-      if (pnlEl) pnlEl.innerHTML = `<span class="${cls}">${pnlPct}%</span>`;
+      if (pnlEl) pnlEl.innerHTML = `<span class="${cls}">${fmtPct(pos.pnl_pct)}</span>`;
 
       const metaEl = document.getElementById(`chart-meta-${ticker}`);
       if (metaEl) {
@@ -790,11 +792,12 @@
     }
     empty.style.display = "none";
     body.innerHTML = positions.map(p => {
-      const cls = p.pnl_pct >= 0 ? "pos" : "neg";
+      const pnlKnown = p.pnl_pct !== null && p.pnl_pct !== undefined;
+      const cls = !pnlKnown ? "muted" : (p.pnl_pct >= 0 ? "pos" : "neg");
       return `<tr>
         <td><b>${p.ticker}</b></td>
         <td>${dirCell(p.direction)}</td>
-        <td>${fmtNum(p.entry_price)}</td>
+        <td>${fmtNum(p.entry_price)}${p.entry_price_is_synthetic ? ' <span class="muted" title="restore-time mark, not a real entry price">~</span>' : ''}</td>
         <td>${fmtNum(p.last_price)}</td>
         <td>${fmtNum(p.best_price)}</td>
         <td class="${cls}">${fmtPct(p.pnl_pct)}</td>

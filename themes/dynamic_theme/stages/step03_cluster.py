@@ -28,6 +28,7 @@ from themes.dynamic_theme.config import (
     ensure_outputs,
 )
 from themes.dynamic_theme.stages.step02_embed import load_embeddings_matrix
+from themes.dynamic_theme.sklearn_compat import load_hdbscan, load_umap
 
 logger = logging.getLogger(__name__)
 
@@ -49,15 +50,8 @@ def cluster_tickers(
     """
     ensure_outputs()
 
-    try:
-        import hdbscan as hdbscan_lib
-    except ImportError as exc:
-        raise ImportError("Install hdbscan: pip install hdbscan") from exc
-
-    try:
-        import umap
-    except ImportError as exc:
-        raise ImportError("Install umap-learn: pip install umap-learn") from exc
+    hdbscan_lib = load_hdbscan()
+    umap = load_umap()
 
     if embeddings_df is not None:
         tickers = embeddings_df["ticker"].astype(str).tolist()

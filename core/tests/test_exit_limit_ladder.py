@@ -56,22 +56,35 @@ def test_market_exit_is_still_preferred_when_it_works():
 
 
 def test_rejected_market_exit_reprices_as_a_limit():
+    """The client quotes 0.40 x 0.50, so the ladder opens at the 0.45 mid."""
     client = _Client(bid=0.40, accept_limit_at=0.40)
     resp = submit_option_exit_with_ladder(client, symbol="IOT260724C00036000", qty=1,
                                           sleep_fn=_no_sleep)
     assert resp == {"id": "limit-ok@0.4"}
     assert client.attempts[0] == ("market", None)
-    assert client.attempts[1] == ("limit", 0.40)
+    assert client.attempts[1] == ("limit", 0.45)
 
 
-def test_ladder_walks_down_and_pauses_between_rungs():
+def test_ladder_starts_at_the_mid_and_pauses_between_rungs():
+    client = _Client(bid=1.00, accept_limit_at=1.00)
     calls: list[float] = []
-    client = _Client(bid=1.00, accept_limit_at=0.40)
     submit_option_exit_with_ladder(client, symbol="X", qty=2, sleep_fn=calls.append)
     limits = [limit for kind, limit in client.attempts if kind == "limit"]
-    assert limits == [1.00, 0.70, 0.40]
+    assert limits == [1.05, 1.02, 1.00]  # mid -> halfway -> bid
     assert limits == sorted(limits, reverse=True)
     assert calls == [pytest.approx(1.5), pytest.approx(1.5)]
+
+
+def test_ladder_never_opens_below_the_bid():
+    """2026-08-05 VALE: a bid-anchored ladder made a penny bid the first rung.
+
+    The exit must open at the mid and treat the bid as a floor, so a collapsed
+    bid costs at most the last rung instead of pricing the whole exit.
+    """
+    rungs = _exit_limit_ladder(0.01, 0.375)  # bid 0.01, ask 0.74
+    assert rungs[0] == pytest.approx(0.38, abs=0.011)
+    assert rungs[0] > 0.01
+    assert rungs == sorted(rungs, reverse=True)
 
 
 def test_empty_book_falls_back_to_the_one_cent_rung():
@@ -90,13 +103,18 @@ def test_a_genuinely_stuck_exit_still_raises():
 
 
 @pytest.mark.parametrize(
-    "bid, expected",
+    "bid, mid, expected",
     [
-        (None, [0.01]),
-        (0.01, [0.01]),
-        (0.005, [0.01]),
-        (1.00, [1.00, 0.70, 0.40, 0.01]),
+        (None, None, [0.01]),
+        (0.01, None, [0.01]),
+        (0.005, None, [0.01]),
+        # Bid only (no ask to build a mid): stay marketable, bounded 20% under.
+        (1.00, None, [1.00, 0.90, 0.80]),
+        # Mid known: open at the mid, floor at the bid.
+        (1.00, 1.05, [1.05, 1.02, 1.00]),
+        # Empty book with a mark: still reaches a penny so nothing gets stuck.
+        (None, 0.40, [0.40, 0.21, 0.01]),
     ],
 )
-def test_ladder_shape(bid, expected):
-    assert _exit_limit_ladder(bid) == expected
+def test_ladder_shape(bid, mid, expected):
+    assert _exit_limit_ladder(bid, mid) == expected

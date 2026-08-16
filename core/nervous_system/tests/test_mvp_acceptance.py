@@ -38,7 +38,11 @@ BROKER_CLIENT = "core/API/Alpaca_API/options/options_api.py"
 # they are the post-MVP migration list, and pinning the counts means a new one
 # cannot appear unnoticed.
 LEGACY_DIRECT_SUBMIT = {
-    "core/live_4h_exec.py": 6,
+    # 9, not 6: main added an option ENTRY ladder (2 sites, Dealer Ranker only)
+    # and a pre-open exit flush (1 site) while this branch was open. See
+    # test_meta_no_bypass for the per-function breakdown and for which of these
+    # Meta can still reach (none).
+    "core/live_4h_exec.py": 9,
     "core/startup_queue.py": 1,
     "core/API/Alpaca_API/cli/options_cli.py": 1,
     "strategies/spy_intraday/Policy/order_policy.py": 3,

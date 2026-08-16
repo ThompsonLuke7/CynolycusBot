@@ -43,6 +43,7 @@ from themes.dynamic_theme.config import (
 from themes.dynamic_theme.stages.step02_embed import _clean_text
 from themes.dynamic_theme.stages.step04_cluster_summary import _top_keywords
 from themes.dynamic_theme.stages.step05_claude_labeling import _label_cluster, load_registry
+from themes.dynamic_theme.sklearn_compat import load_hdbscan, load_umap
 
 logger = logging.getLogger(__name__)
 
@@ -337,11 +338,8 @@ def cluster_residuals(embeddings: pd.DataFrame, assignments: pd.DataFrame) -> pd
     residual = embeddings[embeddings["ticker"].isin(residual_tickers)].copy()
     if len(residual) < MIN_PROVISIONAL_CLUSTER_SIZE:
         return pd.DataFrame(columns=["ticker", "provisional_cluster", "cluster_probability"])
-    try:
-        import hdbscan
-        import umap
-    except ImportError as exc:
-        raise ImportError("Install umap-learn and hdbscan for provisional theme clustering") from exc
+    hdbscan = load_hdbscan()
+    umap = load_umap()
 
     matrix = np.asarray(residual["embedding"].tolist(), dtype=np.float32)
     n_neighbors = min(15, max(2, len(residual) - 1))

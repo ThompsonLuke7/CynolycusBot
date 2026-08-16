@@ -80,6 +80,33 @@ _OPTION_PROFIT_TRAIL_GIVEBACK_PCT = 0.25
 _OPTION_TAKE_PROFIT_PCT = 3.00
 _RESTORED_UNKNOWN_MAX_LOSS_PCT = -0.35
 
+# Exits whose entire purpose is to LOCK IN PROFIT. They are discretionary: the
+# position is not in trouble, we are just choosing to stop riding it. Everything
+# not listed here (sl, expiry, restored-unknown, worthless, option-value exits)
+# is mandatory and must never be delayed or vetoed by the two guards below.
+_DISCRETIONARY_PROFIT_EXITS = frozenset({
+    "trail", "deferred_trail_failed", "deferred_trail_timeout", "no_progress",
+})
+
+# We hold an OPTION but the trail is measured on the UNDERLYING, and the two can
+# disagree completely. CALM on 2026-08-03: the underlying trail fired with the
+# short still +3.56% in our favour, but the put had decayed from 4.54 to 2.20, so
+# a "profit-protecting" exit realized -6.38% (-$345) and gave back $3,335 of
+# unrealized gain. When the leg we actually own is not in profit, a profit-taking
+# trail has nothing to protect — hold and let the hard stop or the option-value
+# exit make the risk decision instead.
+_TRAIL_REQUIRES_OPTION_PROFIT = True
+_TRAIL_OPTION_PROFIT_FLOOR_PCT = 0.0
+
+# CALM's exit also crossed a bid 2.23 / ask 4.12 quote — a spread 59.5% of mid.
+# Entries have had a spread gate since inception (_MAX_ENTRY_SPREAD_PCT_MID in
+# runner.py); exits had none, so a discretionary exit would pay any spread the
+# book quoted. Deferral is bounded: after _MAX_EXIT_SPREAD_DEFERRALS bars the
+# exit goes through regardless, because a permanently wide book must never trap
+# a position.
+_MAX_EXIT_SPREAD_PCT_MID = 0.35
+_MAX_EXIT_SPREAD_DEFERRALS = 12  # 5m bars ≈ 1 hour
+
 # The broker account is shared across every live module. Each one persists its
 # OWN managed-position state precisely so a sibling never has to guess at
 # another module's book -- so broker reconciliation must exclude anything a
@@ -336,16 +363,41 @@ class SwingPosition:
         floor_profit = peak_profit * (1.0 - giveback_pct)
         return self.entry_price + self.direction * floor_profit
 
+    @property
+    def entry_price_is_synthetic(self) -> bool:
+        """True when `entry_price` is a restore-time mark, not a real entry.
+
+        A position rebuilt from a broker snapshot with no local state has no
+        recoverable underlying entry price, so `_restore_from_broker` stamps the
+        price at restore time. Any P&L derived from it measures "move since we
+        noticed the position", not "move since entry".
+        """
+        return bool(self.restored_from_broker) and str(self.restore_source or "") == "broker_snapshot"
+
     def to_dict(self) -> dict:
-        pnl_pct = self.direction * (self.last_price - self.entry_price) / self.entry_price if self.entry_price else 0.0
+        # Reporting a P&L off a synthetic basis fabricates a number: on
+        # 2026-08-07 UMC and TKR were both cut at an option-leg -45% while this
+        # field read exactly 0.00%, because entry_price had been stamped at the
+        # restore-time mark on the same bar. Unknown is reported as unknown; the
+        # broker's own unrealized figure is carried alongside as the real one.
+        synthetic = self.entry_price_is_synthetic
+        pnl_pct = (
+            None if synthetic or not self.entry_price
+            else self.direction * (self.last_price - self.entry_price) / self.entry_price
+        )
+        meta = self.option_entry_meta if isinstance(self.option_entry_meta, dict) else {}
+        broker_plpc = _finite_or_none(meta.get("broker_unrealized_plpc"))
         return {
             "ticker": self.ticker,
             "direction": int(self.direction),
             "entry_price": float(self.entry_price),
+            "entry_price_is_synthetic": synthetic,
             "entry_time": self.entry_time.astimezone(timezone.utc).isoformat() if self.entry_time else None,
             "last_price": float(self.last_price),
             "best_price": float(self.best_price),
-            "pnl_pct": float(pnl_pct),
+            "pnl_pct": None if pnl_pct is None else float(pnl_pct),
+            "pnl_pct_source": "restore_time_mark_unusable" if synthetic else "entry_price",
+            "broker_unrealized_plpc": broker_plpc,
             "sl_price": float(self.sl_price) if self.sl_price is not None else None,
             "trail_armed": bool(self.trail_armed),
             "trail_floor": float(tf) if (tf := self._trail_floor()) is not None else None,
@@ -566,8 +618,10 @@ class SwingPositionManager:
         self._auto_flatten_assigned_equities = bool(auto_flatten_assigned_equities)
         self._positions: dict[str, SwingPosition] = {}   # ticker → position
         self._last_close_failure_wall: dict[str, float] = {}
+        self._close_pass_count: dict[str, int] = {}  # ticker → liquidation ladder passes so far
         self._pending_close_orders: dict[str, dict[str, Any]] = {}
         self._assigned_flatten_last_attempt: dict[str, float] = {}  # symbol → wall time
+        self._exit_spread_deferrals: dict[str, int] = {}  # ticker → consecutive wide-spread skips
         self._deferred_trail_cache = self._load_deferred_trail_cache()
         self._worthless_close_abandoned = self._load_worthless_close_abandoned()
         self._position_state_cache = self._load_open_position_state_cache()
@@ -1098,12 +1152,18 @@ class SwingPositionManager:
         if pos.deferred_trail_active:
             reason = pos.update(bar, allow_trail_exit=False)
             if reason:
+                if self._gate_discretionary_exit(pos, reason):
+                    self._persist_open_position_state()
+                    return
                 self._close_position(pos, reason, bar)
                 return
 
             was_deferred = pos.deferred_trail_active
             deferred_reason = pos.deferred_trail_decision(bar)
             if deferred_reason:
+                if self._gate_discretionary_exit(pos, deferred_reason):
+                    self._persist_open_position_state()
+                    return
                 self._close_position(pos, deferred_reason, bar)
                 return
             if was_deferred and not pos.deferred_trail_active:
@@ -1118,6 +1178,9 @@ class SwingPositionManager:
 
         reason = pos.update(bar)
         if reason:
+            if self._gate_discretionary_exit(pos, reason):
+                self._persist_open_position_state()
+                return
             if reason == "trail" and _should_defer_trail_exit(bar):
                 pos.mark_deferred_trail(bar)
                 self._persist_deferred_trail_cache()
@@ -1140,6 +1203,102 @@ class SwingPositionManager:
             self._close_position(pos, reason, bar)
             return
         self._persist_open_position_state()
+
+    @staticmethod
+    def option_leg_gain_pct(pos: SwingPosition) -> float | None:
+        """Current gain on the OPTION we actually hold, or None if unpriced.
+
+        `option_last_price` is refreshed every bar by _option_value_exit_reason ->
+        update_option_value, which runs before the underlying exit checks.
+        """
+        entry = _as_float(pos.option_entry_price)
+        last = _as_float(pos.option_last_price)
+        if not math.isfinite(entry) or entry <= 0.0:
+            return None
+        if not math.isfinite(last) or last <= 0.0:
+            return None
+        return (last - entry) / entry
+
+    def _veto_profit_exit_on_losing_option(self, pos: SwingPosition, reason: str) -> bool:
+        """True when a profit-protecting exit should be held back.
+
+        Only applies to _DISCRETIONARY_PROFIT_EXITS. An unpriced option leg never
+        vetoes (we cannot prove the exit is wrong, so the exit wins).
+        """
+        if not _TRAIL_REQUIRES_OPTION_PROFIT or reason not in _DISCRETIONARY_PROFIT_EXITS:
+            return False
+        gain = self.option_leg_gain_pct(pos)
+        if gain is None or gain > _TRAIL_OPTION_PROFIT_FLOOR_PCT:
+            return False
+        logger.info(
+            "[%s] HOLD %s: underlying trail fired but the option leg is %+.2f%% "
+            "(entry=%.2f last=%.2f) — no profit to protect",
+            pos.ticker, reason, gain * 100.0,
+            _as_float(pos.option_entry_price), _as_float(pos.option_last_price),
+        )
+        self._emit("profit_exit_vetoed_option_at_loss", {
+            **pos.to_dict(),
+            "reason": reason,
+            "option_gain_pct": float(gain),
+            "floor_pct": _TRAIL_OPTION_PROFIT_FLOOR_PCT,
+        })
+        return True
+
+    def _gate_discretionary_exit(self, pos: SwingPosition, reason: str) -> bool:
+        """True when a profit-protecting exit must not be submitted on this bar.
+
+        Single choke point for both guards so every discretionary-exit path gets
+        the same treatment. Mandatory exits fall straight through.
+        """
+        if reason not in _DISCRETIONARY_PROFIT_EXITS:
+            self._exit_spread_deferrals.pop(pos.ticker, None)
+            return False
+        if self._veto_profit_exit_on_losing_option(pos, reason):
+            return True
+        return self._defer_exit_on_wide_spread(pos, reason)
+
+    def _defer_exit_on_wide_spread(self, pos: SwingPosition, reason: str) -> bool:
+        """True when a discretionary exit should wait for a tighter book.
+
+        Bounded by _MAX_EXIT_SPREAD_DEFERRALS so a permanently wide quote cannot
+        strand the position.
+        """
+        if reason not in _DISCRETIONARY_PROFIT_EXITS:
+            self._exit_spread_deferrals.pop(pos.ticker, None)
+            return False
+        symbol = str(pos.option_symbol).strip().upper()
+        if not symbol:
+            return False
+        quote_meta = self._get_contract_quote_context(symbol=symbol)
+        spread_pct = _as_float((quote_meta or {}).get("spread_pct_mid"))
+        if not math.isfinite(spread_pct) or spread_pct <= _MAX_EXIT_SPREAD_PCT_MID:
+            self._exit_spread_deferrals.pop(pos.ticker, None)
+            return False
+        count = self._exit_spread_deferrals.get(pos.ticker, 0) + 1
+        if count > _MAX_EXIT_SPREAD_DEFERRALS:
+            logger.info(
+                "[%s] exit spread gate exhausted after %d bars (spread=%.1f%% of mid) "
+                "— submitting %s anyway", pos.ticker, count - 1, spread_pct * 100.0, reason,
+            )
+            self._exit_spread_deferrals.pop(pos.ticker, None)
+            self._emit("exit_spread_gate_exhausted", {
+                **pos.to_dict(), "reason": reason,
+                "spread_pct_mid": spread_pct, "max_spread_pct_mid": _MAX_EXIT_SPREAD_PCT_MID,
+                "deferrals": count - 1,
+            })
+            return False
+        self._exit_spread_deferrals[pos.ticker] = count
+        logger.info(
+            "[%s] DEFER %s: option spread %.1f%% of mid > %.1f%% cap (defer %d/%d)",
+            pos.ticker, reason, spread_pct * 100.0, _MAX_EXIT_SPREAD_PCT_MID * 100.0,
+            count, _MAX_EXIT_SPREAD_DEFERRALS,
+        )
+        self._emit("exit_deferred_wide_spread", {
+            **pos.to_dict(), "reason": reason,
+            "spread_pct_mid": spread_pct, "max_spread_pct_mid": _MAX_EXIT_SPREAD_PCT_MID,
+            "close_quote": quote_meta, "deferrals": count,
+        })
+        return True
 
     def _option_value_exit_reason(self, pos: SwingPosition) -> str | None:
         if not _OPTION_VALUE_EXIT_ENABLED:
@@ -1337,7 +1496,9 @@ class SwingPositionManager:
             payload["option_realized_pct"] = None
         self._emit("position_closed", payload)
         self._last_close_failure_wall.pop(pos.ticker, None)
+        self._close_pass_count.pop(pos.ticker, None)
         self._pending_close_orders.pop(pos.ticker, None)
+        self._exit_spread_deferrals.pop(pos.ticker, None)
         self._remove_deferred_trail_cache(pos)
         del self._positions[pos.ticker]
         self._persist_open_position_state()
@@ -1355,6 +1516,7 @@ class SwingPositionManager:
         self._worthless_close_abandoned.add(symbol)
         self._persist_worthless_close_abandoned()
         self._last_close_failure_wall.pop(pos.ticker, None)
+        self._close_pass_count.pop(pos.ticker, None)
         self._pending_close_orders.pop(pos.ticker, None)
         self._remove_deferred_trail_cache(pos)
         self._emit("position_close_abandoned", {
@@ -1368,6 +1530,7 @@ class SwingPositionManager:
             "order_response": _safe_response((close_result or {}).get("response")),
             "verification": (close_result or {}).get("verification"),
         })
+        self._exit_spread_deferrals.pop(pos.ticker, None)
         self._positions.pop(pos.ticker, None)
         self._persist_open_position_state()
 
@@ -1548,21 +1711,48 @@ class SwingPositionManager:
         symbol = str(pos.option_symbol).strip().upper()
         qty = int(pos.qty)
         quote_meta = self._get_contract_quote_context(symbol=symbol)
-        base_limit = self._get_contract_price(symbol=symbol, mode="bid")
-        close_bid = base_limit
+        close_bid = self._get_contract_price(symbol=symbol, mode="bid")
+        # Anchor on the BID for ordinary exits (trail/take-profit) — resting at the
+        # bid is how they fill — but for a forced liquidation anchor on the MID and
+        # walk down across passes. Anchoring a liquidation on the bid is what sold
+        # 159 VALE260828C00015000 at $0.01 on 2026-08-05 into a 0.01 x 0.74 market:
+        # the bid ticking up from 0.00 to 0.01 became the FIRST rung, so a position
+        # the broker marked at $3,021 realized $159. A penny bid is a reason to be
+        # patient, not a price to hit.
+        liquidating = str(reason or "").strip().lower() in _LIQUIDATION_CLOSE_REASONS
+        base_limit = float("nan")
+        if liquidating:
+            for mode in ("mid", "mark"):
+                base_limit = self._get_contract_price(symbol=symbol, mode=mode)
+                if math.isfinite(base_limit) and base_limit > 0.0:
+                    source = mode
+                    break
+            else:
+                source = "fallback"
+        else:
+            base_limit, source = close_bid, "bid"
         if not math.isfinite(base_limit) or base_limit <= 0.0:
-            base_limit = self._get_contract_price(symbol=symbol, mode="mid")
+            for mode in ("bid", "mid", "mark"):
+                base_limit = self._get_contract_price(symbol=symbol, mode=mode)
+                if math.isfinite(base_limit) and base_limit > 0.0:
+                    source = mode
+                    break
         if not math.isfinite(base_limit) or base_limit <= 0.0:
-            base_limit = self._get_contract_price(symbol=symbol, mode="mark")
-        if not math.isfinite(base_limit) or base_limit <= 0.0:
-            base_limit = _OPTION_TICK
+            base_limit, source = _OPTION_TICK, "fallback"
+
+        # Passes are counted per ticker and cleared only when the position actually
+        # leaves the book, so the floor relaxes over successive 60s retries rather
+        # than inside one 15-second burst of rungs.
+        close_pass = self._close_pass_count.get(pos.ticker, 0) + 1
+        self._close_pass_count[pos.ticker] = close_pass
 
         logger.info(
-            "[%s] close order pricing symbol=%s source=%s base_limit=%.2f reason=%s",
+            "[%s] close order pricing symbol=%s source=%s base_limit=%.2f pass=%d reason=%s",
             pos.ticker,
             symbol,
-            "bid" if math.isfinite(close_bid) and close_bid > 0.0 else "fallback",
+            source,
             base_limit,
+            close_pass,
             reason,
         )
 
@@ -1572,6 +1762,7 @@ class SwingPositionManager:
             quote_meta=quote_meta,
             reason=reason,
             attempts=_CLOSE_ORDER_ATTEMPTS,
+            close_pass=close_pass,
         )
         last_result: dict[str, Any] | None = None
         for attempt, limit_price in enumerate(limit_prices, start=1):
@@ -2255,6 +2446,66 @@ def _is_option_tick(value: float) -> bool:
         return False
 
 
+# Floor as a fraction of the mid anchor, by liquidation pass. Passes are ~60s
+# apart (_CLOSE_FAILURE_RETRY_SECS), so the ladder spends about three minutes
+# above half the mid before it is allowed to touch the bid. Past the end of the
+# schedule the floor is the bid itself.
+_LIQUIDATION_FLOOR_BY_PASS = (0.85, 0.65, 0.50)
+# The one-cent rung is a capitulation for a contract with no book, not a price.
+# It needs BOTH a vanished bid and a spread wider than the mid itself, and only
+# after the floor schedule is exhausted.
+_PENNY_RUNG_MAX_BID = 0.02
+_PENNY_RUNG_MIN_SPREAD_PCT_MID = 1.0
+
+
+def _liquidation_close_ladder(
+    *,
+    base: float,
+    bid: float,
+    quote_meta: dict[str, Any] | None,
+    attempts: int,
+    close_pass: int,
+) -> list[float]:
+    """Descending sell limits for a forced exit, anchored on the mid.
+
+    `base` is the mid/mark anchor and `bid` the current bid (NaN when the book is
+    empty). Early passes refuse to price below a fraction of the anchor; the floor
+    relaxes each pass and only reaches the bid once the schedule is exhausted. See
+    _submit_close_order for why anchoring on the bid was wrong.
+    """
+    stage = max(1, int(close_pass))
+    has_bid = math.isfinite(bid) and bid > 0.0
+    if stage <= len(_LIQUIDATION_FLOOR_BY_PASS):
+        floor = base * _LIQUIDATION_FLOOR_BY_PASS[stage - 1]
+        # A bid above the scheduled floor is a real, better price — take it.
+        if has_bid and bid > floor:
+            floor = bid
+    else:
+        floor = bid if has_bid else _OPTION_TICK
+    floor = min(_round_option_limit(floor), base)
+
+    spread_pct_mid = _as_float((quote_meta or {}).get("spread_pct_mid"))
+    penny_allowed = (
+        stage > len(_LIQUIDATION_FLOOR_BY_PASS)
+        and (not has_bid or bid <= _PENNY_RUNG_MAX_BID)
+        and math.isfinite(spread_pct_mid)
+        and spread_pct_mid > _PENNY_RUNG_MIN_SPREAD_PCT_MID
+    )
+
+    rungs = max(1, attempts - (1 if penny_allowed else 0))
+    prices: list[float] = []
+    step = (base - floor) / (rungs - 1) if rungs > 1 else 0.0
+    for i in range(rungs):
+        rounded = _round_option_limit(base - step * i)
+        if rounded < floor:
+            rounded = floor
+        if rounded not in prices:
+            prices.append(rounded)
+    if penny_allowed and _OPTION_TICK not in prices:
+        prices.append(_OPTION_TICK)
+    return prices or [_OPTION_TICK]
+
+
 def _close_limit_ladder(
     *,
     base_limit: float,
@@ -2262,6 +2513,7 @@ def _close_limit_ladder(
     quote_meta: dict[str, Any] | None = None,
     reason: str,
     attempts: int,
+    close_pass: int = 1,
 ) -> list[float]:
     attempts = max(1, int(attempts))
     base = _round_option_limit(base_limit if math.isfinite(base_limit) and base_limit > 0 else _OPTION_TICK)
@@ -2270,34 +2522,10 @@ def _close_limit_ladder(
 
     prices: list[float] = []
     if str(reason or "").strip().lower() in _LIQUIDATION_CLOSE_REASONS:
-        anchor = bid if math.isfinite(bid) and bid > 0.0 else base
-        if anchor <= 0.25:
-            raw_prices = [
-                base,
-                anchor,
-                anchor * 0.75,
-                anchor * 0.50,
-                anchor * 0.25,
-                0.02,
-                _OPTION_TICK,
-            ]
-        else:
-            raw_prices = [
-                base,
-                anchor - 0.02,
-                anchor - 0.05,
-                anchor - 0.10,
-                anchor - 0.20,
-            ]
-        for price in raw_prices:
-            rounded = _round_option_limit(price)
-            if rounded not in prices:
-                prices.append(rounded)
-            if len(prices) >= attempts:
-                break
-        if anchor <= 0.25 and prices[-1] != _OPTION_TICK and len(prices) < attempts:
-            prices.append(_OPTION_TICK)
-        return prices
+        return _liquidation_close_ladder(
+            base=base, bid=bid, quote_meta=quote_meta,
+            attempts=attempts, close_pass=close_pass,
+        )
 
     anchor = bid if math.isfinite(bid) and bid > 0.0 else base
     if math.isfinite(spread) and spread > _OPTION_TICK:

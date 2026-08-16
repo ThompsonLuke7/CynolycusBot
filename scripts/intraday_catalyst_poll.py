@@ -43,6 +43,8 @@ from signals.news.config import NEWS_RECORDS_PATH
 from signals.news.dedup import deduplicate_news
 from signals.news.live_scorer import CatalystScorer
 from signals.news.schema import empty_news_frame
+from signals.news.information_direction import add_information_direction
+from signals.news.ticker_relevance import filter_frame
 from signals.news.sources import (
     fetch_clinicaltrials_updates,
     fetch_fed_press_releases,
@@ -150,7 +152,28 @@ def poll_once(
         print("  all polled records already seen")
         return 0
 
+    # Google is queried as `"{ticker}" stock` and every hit is stamped with that
+    # ticker, so tickers colliding with finance vocabulary collect articles about
+    # something else entirely — RSI picking up Relative-Strength-Index pieces,
+    # GAP picking up "Shares Gap Up", FORM picking up "files Form 144", COO
+    # picking up officer-sale headlines. Drop those before they are scored.
+    new, off_topic = filter_frame(new)
+    if len(off_topic):
+        print(f"  dropped {len(off_topic)} off-topic record(s) "
+              f"(ticker named by query, article about something else)")
+        for _, r in off_topic.head(3).iterrows():
+            print(f"    [{r['ticker']}] {str(r['headline'])[:70]} "
+                  f"-> {r['ticker_relevance_reason'][:44]}")
+    if new.empty:
+        print("  all polled records were off-topic")
+        return 0
+
     new = classify_catalyst_types(new)
+    # Label-only: price recaps ("Shares Skyrocket", "Stock Price Up 10.5%")
+    # restate a move already in the price. Measured over 9,646 ticker-days they
+    # are a coin flip at +1d and -1.42% at +5d vs a -0.20% baseline. Nothing is
+    # dropped on this label yet — see signals/news/information_direction.py.
+    new = add_information_direction(new)
     print(f"  scoring {len(new):,} new records...")
     new["catalyst_score"] = scorer.score(new.to_dict(orient="records"))
     new["scored_at"] = pd.Timestamp.utcnow()
@@ -158,7 +181,7 @@ def poll_once(
     cols = [
         "record_id", "ticker", "timestamp", "headline", "source",
         "catalyst_family", "catalyst_subtype", "catalyst_score",
-        "scored_at", "content_hash",
+        "information_direction", "scored_at", "content_hash",
     ]
     new = new[[c for c in cols if c in new.columns]]
 

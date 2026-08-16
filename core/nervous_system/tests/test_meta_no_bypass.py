@@ -149,7 +149,21 @@ def test_the_remaining_direct_submit_sites_are_known() -> None:
         # live_runner reached zero: every order now goes through
         # DecisionCoordinator -> ExecutionGateway.
         REPO / "signals/meta_context/meta_ranker/live_runner.py": 0,
-        REPO / "core/live_4h_exec.py": 6,
+        # Shared 4H execution code, still reached directly by the five modules
+        # that have not cut over (HTF, Momentum, Swing, Dealer, SPY):
+        #   execute_plan                     2  (option, equity)
+        #   submit_option_entry_with_ladder  2  (market, then each ladder rung)
+        #   submit_option_exit_with_ladder   2  (market, then each ladder rung)
+        #   submit_pending_open_entries      2  (option, equity)
+        #   submit_pending_exit_orders       1  (equity; options go via the ladder)
+        # Meta reaches none of them: the three functions it calls
+        # (submit_pending_open_entries, submit_pending_exit_orders,
+        # submit_option_exit_with_ladder) each take a `submit_fn` that short-
+        # circuits the direct call, and Meta always passes the governed one.
+        # execute_plan and the entry ladder have no `submit_fn` because Meta
+        # calls neither -- it has its own _execute, and the entry ladder is
+        # Dealer Ranker only. They must grow one before those modules migrate.
+        REPO / "core/live_4h_exec.py": 9,
     }
     for path, expected in pending.items():
         actual = len(submit_calls(parse(path)))

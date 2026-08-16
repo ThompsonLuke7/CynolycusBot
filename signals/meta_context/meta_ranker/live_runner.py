@@ -54,10 +54,13 @@ from core.live_4h_exec import (
     ExecPolicy,
     build_mixed_plan,
     defer_entries_if_market_closed,
+    defer_exits_if_opg_unavailable,
     drop_failed_entry,
     exit_action as _shared_exit_action,
+    mark_entry_unconfirmed,
     record_exit_realized_pnl,
     shares_for_notional,
+    submit_pending_exit_orders,
     submit_pending_open_entries,
 )
 from core.live_readiness import filter_entry_orders_for_readiness
@@ -580,10 +583,21 @@ def main() -> int:
     # (re-rank against the freshly-scored `targets`), then exit — no position mgmt.
     if getattr(args, "flush_pending_open", False):
         if args.submit:
+            # One governed submitter for both flushes: the pre-open pass must
+            # not reach the broker any more directly than the 4H pass does.
+            submitter = governed_submitter(args, bar=bar)
+            # Exits first: a queued exit is an already-made decision on a position
+            # we still hold, and flushing it before entries frees the buying power
+            # the queued entries are about to use.
+            ex = submit_pending_exit_orders(client, AUDIT_MODULE,
+                                            equity_tif_fn=equity_order_tif, pos_lookup=pos_info,
+                                            managed=managed, submit_fn=submitter)
+            if ex["count"] or ex["skipped"]:
+                print(f"pending-exit flush: submitted {ex['count']} / skipped {len(ex['skipped'])}")
             res = submit_pending_open_entries(
                 client, AUDIT_MODULE, targets,
                 equity_tif_fn=equity_order_tif, pos_lookup=pos_info,
-                submit_fn=governed_submitter(args, bar=bar),
+                submit_fn=submitter,
             )
             managed.update(res["submitted"])
             state["managed"] = managed
@@ -713,6 +727,7 @@ def _run_options(args, client, targets, state, managed, pos_info, bar, entry_ok=
         signal_audits=signal_audits, policy=policy, route_fn=route_option_or_shares,
         ref_price_fn=_safe_entry_ref_price,
         entry_ok=entry_ok, gate_reason="quality_gated",
+        module="meta_ranker",
     )
     _execute(
         args, client, res.plan, state, res.new_managed, bar, targets,
@@ -745,7 +760,25 @@ def _execute(
         # submit_pending_open_entries. See core.live_4h_exec.execute_plan for why
         # the reverse order silently discarded every after-close entry.
         plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
-        plan, skipped, reason = filter_entry_orders_for_readiness(plan, new_managed=new_managed)
+        # Exits are deferred separately and AFTER entries — see
+        # core.live_4h_exec.execute_plan. Without this an after-close exit is
+        # submitted into a window the broker refuses (equity opg 403 / options
+        # 422) and just fails; the HTF 16:25 run lost both its exits that way on
+        # 2026-08-05, and Meta's CRWV take-profit hit the same 403 on 2026-08-03.
+        # new_managed/exit_context: build_mixed_plan already dropped the position
+        # when it planned the exit, and only a submit FAILURE puts it back — a
+        # deferred exit never reaches submission, so without this the position is
+        # held at the broker and claimed by nobody, and a sibling reconcile can
+        # adopt it (the 2026-08-11 VSH case; see defer_exits_if_opg_unavailable).
+        plan = defer_exits_if_opg_unavailable(module, bar, plan, limits,
+                                              new_managed=new_managed, exit_context=exit_context)
+        # No per-ticker fallback here: this module scores meta_ranker_matrix.parquet
+        # (readiness stage 5), not the shared 4H bar cache, so current bars are not
+        # evidence that *this* module's input is current. Momentum and HTF build
+        # their features from bars at decision time and do take the fallback.
+        plan, skipped, reason = filter_entry_orders_for_readiness(
+            plan, new_managed=new_managed, per_ticker_fallback=False
+        )
         if skipped:
             print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
         if plan:
@@ -791,10 +824,14 @@ def governed_submitter(args, *, bar, module: str = AUDIT_MODULE):
     router = build_router(intent_config=intent_config(args))
     decision_bar = bar.to_pydatetime() if hasattr(bar, "to_pydatetime") else bar
 
-    def _submit(*, symbol, side, qty, route, limit=None):
+    def _submit(*, symbol, side, qty, route, limit=None,
+                reason: str | None = None, full_exit: bool = False):
+        # `full_exit` is how the engine tells a close from a trim; the adapter
+        # reads it off exit_context membership, so an unnamed sell would be
+        # recorded as an ADJUSTMENT even when it closed the position.
         rows = router.route(
-            [(symbol, side, qty, "pending_open", route)],
-            exit_context={},
+            [(symbol, side, qty, reason or "pending_open", route)],
+            exit_context={symbol: (None, None)} if full_exit else {},
             ticker_by_symbol={},
             scores_by_ticker={},
             decision_bar=decision_bar,
@@ -860,6 +897,12 @@ def _submit_via_gateway(
             result = getattr(row.outcome, "execution_result", None)
             broker_id = getattr(result, "broker_order_id", None) or "?"
             print(f"  OK {row.side} {row.quantity} {symbol}  id={broker_id}")
+            if str(row.side).strip().lower() == "buy":
+                # The gateway confirms the broker ACCEPTED the order, not that it
+                # filled. See core.live_4h_exec.mark_entry_unconfirmed: an
+                # accepted-but-unfilled entry otherwise persists as a position
+                # the account does not hold.
+                mark_entry_unconfirmed(new_managed, symbol, {"id": broker_id})
             if str(row.side).strip().lower() == "sell":
                 entry_state = exit_context.get(symbol, (None, None))[1]
                 item = (symbol, row.side, row.quantity,

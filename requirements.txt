@@ -2,7 +2,7 @@ numpy>=2.2.6,<2.3
 pandas==2.3.2
 pyarrow
 pandas_ta==0.4.71b0
-scikit-learn>=1.5,<1.6
+scikit-learn>=1.6,<1.7
 scipy>=1.12,<1.14
 xgboost
 torch
@@ -17,6 +17,12 @@ TA-Lib
 numba
 praw
 lightgbm
+# Theme pipeline clustering. Pinned because both call scikit-learn's
+# check_array(ensure_all_finite=), added in 1.6 — unpinned, they drifted onto
+# releases the old <1.6 pin could not satisfy and killed the 2026-08-03 weekly
+# theme rebuild. Keep in step with the scikit-learn pin above.
+umap-learn==0.5.12
+hdbscan==0.8.44
 pytest
 pydantic>=2.11,<3
 SQLAlchemy>=2.0,<3
