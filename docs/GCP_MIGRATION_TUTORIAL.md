@@ -133,7 +133,28 @@ GitHub ──► Cloud Build ──► Artifact Registry ──► Cloud Run
                                                    └── model_bundles/
                                                         │
                                               Cloud Logging + Monitoring + Budget alerts
+
+
+                     ── added 2026-08-16: the nervous system (Phase 3B) ──
+
+Compute Engine VM ──► the trading loop: WebSocket + schedulers + order placement
+  (Phase 8)             │
+                        ├──► Cloud SQL Postgres 16  (db-f1-micro, us-east5)
+                        │      snapshots · intents · policy decisions · orders
+                        │      · fills · outcomes · reconciliation · alerts
+                        │           ▲
+                        │           └── read-only ── Cloud Run dashboards
+                        │
+                        └──► gs://cynolycusbot-execution-journal/   (its OWN bucket)
+                               append-only order journal — the outage backup
+                               for the durable record above
 ```
+
+Two things about this second block are load-bearing.
+
+**The database is not a second copy of the data lake.** §2.0 decided against Cloud SQL for feature matrices and that decision stands — 8-million-row parquet belongs in a bucket. This instance holds *operational* rows: roughly 20 Meta decisions a day and their orders and outcomes. That is the `UPDATE ... WHERE` workload the §1 table said a bucket is wrong for, and it is small enough for the cheapest tier.
+
+**The journal bucket is separate on purpose.** Retention policies apply to a whole bucket, not a prefix. Putting one on `cynolycusbot-data` would block overwrites on all ~108k objects and break the nightly rsync.
 
 ---
 
@@ -214,7 +235,13 @@ You can also skip this — the Console prompts you to enable an API the first ti
 
 ### 1.6 Pick your region and stick to it
 
-Use **`us-central1`** everywhere. It's one of only three regions qualifying for the Cloud Storage Always Free tier (with `us-east1`, `us-west1`) and is the standard-price reference region. Choosing it consistently means never thinking about regions again.
+Use **`us-east5`** everywhere.
+
+> **Corrected 2026-08-17.** This section said `us-central1` and 8 later steps repeated it, but `gs://cynolycusbot-data` was actually created in **US-EAST5**, and `hello-test` deployed there too. Following the old text would have put Cloud Run, Cloud SQL and the VM in one region and the bucket in another — and **every bucket read would then bill as network egress instead of being free**. Region cannot be changed after a resource is created, so this is expensive to discover late.
+
+What you give up by having landed on `us-east5`: it is **not** one of the three Always Free GCS regions (`us-central1`, `us-east1`, `us-west1`), so the 5 GB-month free allowance does not apply. At 72 GB that allowance was never going to matter — it is worth about **$0.10/month** at Standard prices. Not worth recreating a 108,000-object bucket over.
+
+What you keep: `us-east5` (Columbus) is a **Tier 1** region, so Cloud Run and Compute Engine cost exactly the same there as in `us-central1`. Same-region reads stay free. Matching the bucket costs nothing.
 
 ✅ **Checkpoint 1**
 
@@ -304,7 +331,7 @@ Not the 46.6% that single file implied — **that file was unusually float64-hea
 
 ### 2.1 The cost math
 
-Verified `us-central1` regional prices (2026-07-26):
+Verified `us-central1` regional prices (2026-07-26). **`us-east5` is a Tier 1 region and prices the same for Standard/Nearline/Coldline/Archive**, so the table holds; only the 5 GB-month Always Free allowance is us-central1/east1/west1-only (see §1.6). **[verify]** if a bill ever disagrees:
 
 | Class | $/GB-month | Min. duration | Retrieval fee | **72 GB uploaded costs** |
 |---|---|---|---|---|
@@ -329,7 +356,7 @@ Your entire 72 GB problem costs **about a coffee per year** in Coldline, or **$1
 |---|---|---|
 | Name | `cynolycusbot-data` (add a suffix if taken) | **Globally unique across all of GCP** — same namespace as every other customer |
 | Location type | **Region** | Cheaper than multi-region; you don't need geo-redundancy |
-| Location | `us-central1` | Free-tier eligible |
+| Location | `us-east5` | Matches the bucket that already exists — see §1.6 |
 | Storage class | **Standard** | Lifecycle rules will age things down in 2.5 |
 | Access control | **Uniform** | ⚠️ Important — see below |
 | Public access prevention | **Enabled** | Blocks accidental internet exposure |
@@ -678,6 +705,139 @@ Cloud Run *attaches* the service account to the workload — your code gets cred
 
 ---
 
+## Phase 3B — Cloud SQL and the nervous system (1–2 hrs · mostly Console)
+
+**Added 2026-08-16, after the `nervous-system-execution` branch merged to `main`.**
+
+Everything before this phase is infrastructure that touches no application code. This one does, and it is the phase that decides whether the Meta Ranker can place an order at all — so read §3B.0 before touching the Console.
+
+### 3B.0 What changed in the code, and what it means for your next run
+
+The Meta Ranker no longer calls the broker. Every order it places now goes:
+
+```
+scores → TradeIntent → policy decision → OrderRequest → journal → broker → outcome
+```
+
+`signals/meta_context/meta_ranker/live_runner.py` has **zero** direct broker submits, and a static test (`core/nervous_system/tests/test_meta_no_bypass.py`) fails the build if one reappears. The other five modules — HTF, Momentum, Swing, Dealer Ranker, SPY — are untouched and still submit directly. This is a **Meta cutover, not a repository-wide one**.
+
+> ⚠️ **Your next `--submit` run will fail until you configure the environment.** This is deliberate and it is the most important sentence in this phase.
+>
+> `build_router()` raises `GovernedPathUnavailable: the nervous-system environment is not configured; refusing to submit`. There is no fallback to the old direct-broker path, because a fallback is exactly the bypass the cutover removed. Confirmed against the current environment on 2026-08-17.
+>
+> What is affected: any Meta pass with `--submit`, and the pre-open flush. Dry-run passes are untouched — the whole block sits behind `if args.submit:`. The other five modules are unaffected.
+>
+> Two ways to clear it: configure §3B.1 below (recommended — it works entirely locally, no GCP), or run Meta dry-run until you do.
+
+### 3B.1 Run it locally first — no GCP required
+
+Do this before spending a cent. The governed path runs against the Docker Postgres you already have.
+
+```bash
+docker start nervous-system-execution-postgres-1
+```
+
+Add to `.env` (full documented list in `.env.example`):
+
+```
+CYNOLYCUS_ENVIRONMENT=development
+CYNOLYCUS_NERVOUS_SYSTEM_MODE=enforce
+CYNOLYCUS_DATABASE_URL=postgresql+psycopg://cynolycus:cynolycus_dev_only@127.0.0.1:55432/cynolycus
+CYNOLYCUS_OPERATIONAL_ROOT=Data/operational/nervous_system
+CYNOLYCUS_EXECUTION_JOURNAL=local
+CYNOLYCUS_ACCOUNT_ALIAS=paper
+CYNOLYCUS_SUBMIT_ENABLED=false
+```
+
+**The persistent `cynolycus` database is at revision `0002_decision_execution`; head is `0004_audit_observability`** (measured 2026-08-17). Tasks 24–27 added replay, fitness, audit and observability tables that `0002` does not have. Upgrade before the first governed run:
+
+```bash
+python -m scripts.cloud.nervous_system_db schema-status
+python -m scripts.cloud.nervous_system_db upgrade-schema
+```
+
+There is no downgrade, drop, or reset in that CLI, by design. The historical import already run on this database is not touched by an upgrade.
+
+Then walk it up in three steps, each of which answers a different question:
+
+| Step | Setting | Question it answers |
+|---|---|---|
+| 1 | Meta dry-run (no `--submit`) | Does the pass still score and plan normally? |
+| 2 | `--submit`, `CYNOLYCUS_SUBMIT_ENABLED=false` | Does the governed path build, decide, and record — without an order leaving? |
+| 3 | `--submit`, `CYNOLYCUS_SUBMIT_ENABLED=true` | Do paper orders actually place through the gateway? |
+
+Step 2 is the one worth sitting in for a few sessions. It writes the full decision record and stops at the broker boundary, so you can read what it *would* have done. `SUBMIT_ENABLED` only accepts the exact string `"true"` — deployment is not authorisation.
+
+> **You cannot reach a live account from here even by accident.** `core/nervous_system/execution/alpaca_adapter.py` hardcodes `PAPER_HOSTS = {"paper-api.alpaca.markets"}` and raises in its constructor on `PRODUCTION_LIVE`. That is a code-level constraint, not a configuration one.
+
+### 3B.2 Create the Cloud SQL instance — Console
+
+Only once §3B.1 is boring. **Console → SQL → Create instance → PostgreSQL.**
+
+| Field | Value | Why |
+|---|---|---|
+| Version | **PostgreSQL 16** | Matches `compose.nervous-system.yaml` (`postgres:16`). Same models, same migrations, both places — the cheapest bug prevention available |
+| Edition | Enterprise | Enterprise Plus is for HA you don't need yet |
+| Preset | **Development** | Sets sane low-cost defaults |
+| Machine | **`db-f1-micro`** shared-core | ~20 decisions/day. See sizing note below |
+| Storage | **10 GB SSD**, automatic increase ON | Single-digit GB/year |
+| Region | **`us-east5`**, single zone | Must match the bucket — §1.6 |
+| Backups | Automated ON, PITR ON | Ledger explains what happened; losing it defeats the purpose |
+| Public IP | **OFF** — private IP only | The VM and Cloud Run both reach it privately |
+
+**Sizing:** `UI/swing_audit` is ~351 MB over 99 days (~3.5 MB/day of verbose JSONL). The ledger is structured rows, not JSONL, and Meta produces at most ~20 decisions a day. Single-digit GB/year.
+
+> **Shared-core has no SLA and no committed-use discount.** Acceptable only because this build cannot execute against a live account. **Re-tiering to `db-g1-small` or `db-custom-1-3840` is a gate on enabling production-live**, not a later optimisation. A tier change is a restart, not a rebuild — so if `import-history` crawls on `f1-micro`, scale up for the import and back down after.
+
+### 3B.3 Create the journal bucket — Console
+
+**Console → Cloud Storage → Create.** Name `cynolycusbot-execution-journal`, region `us-east5`, Standard, Uniform access, versioning ON.
+
+Separate from `cynolycusbot-data`, and this is the load-bearing part: a retention policy applies to a **whole bucket**, so putting one on the data bucket would block overwrites on all ~108k objects and break the nightly rsync of `features_4h`, `news_embeddings` and `Data/shared/bars`.
+
+> **Do not lock the retention policy yet.** A locked policy can never be shortened or removed, and the bucket cannot be deleted until every object ages out. Set it unlocked, run a full QA-paper cycle, then lock it once the duration is settled.
+
+Standard class, no aging rules — Nearline's 30-day minimum duration is a trap for small append-only objects.
+
+### 3B.4 The DSN accepts two shapes — on purpose
+
+```
+socket (Cloud Run):  postgresql+psycopg://USER:PASS@/cynolycus?host=/cloudsql/PROJECT:us-east5:INSTANCE
+tcp    (the VM):     postgresql+psycopg://USER:PASS@10.20.30.40:5432/cynolycus
+```
+
+Cloud Run reaches Cloud SQL over a Unix socket. The Phase 8 VM — which holds the WebSocket and cannot lift into Cloud Run — reaches the same instance over private-IP TCP. Both validate. Supporting one now and the other later would be a rewrite.
+
+The DSN comes from the **environment, never a command-line argument**: a DSN on a command line lands in shell history, in `ps` output, and in any CI log that echoes its commands. Add the password to Secret Manager alongside the Phase 3 secrets.
+
+### 3B.5 Bring-up and checks
+
+Full command sequence: **`docs/nervous_system/OPERATIONS_RUNBOOK.md`**. Summary:
+
+```bash
+python -m scripts.cloud.nervous_system_db create-database --dry-run
+python -m scripts.cloud.nervous_system_db create-database
+python -m scripts.cloud.nervous_system_db upgrade-schema
+python -m scripts.cloud.nervous_system_db schema-status
+python -m scripts.cloud.nervous_system_db verify-counts
+python -m scripts.cloud.nervous_system_db verify-backup
+```
+
+`verify-backup` reports `UNVERIFIED` unless the Cloud SQL Admin API says otherwise. It never infers a backup from anything else: an unverified "probably backed up" is worse than a clear "unknown", because only one of them makes somebody go and look.
+
+The health endpoint separates **liveness** (process is up; answers without a database) from **readiness** (the system can do its job). A reachable-but-unready system returns **503**, so a degraded journal cannot hide inside a 200.
+
+✅ **Checkpoint 3B**
+
+- `schema-status` reports head `0004_audit_observability`, locally and in Cloud SQL
+- A Meta `--submit` pass with `SUBMIT_ENABLED=false` completes and writes decision rows
+- Journal bucket exists, versioning on, retention **unlocked**
+- `verify-backup` returns something other than `UNVERIFIED`
+
+📝 **Notes:**
+
+---
+
 ## Phase 4 — Connect GitHub and deploy (1 hour · 100% Console)
 
 Because your repo is already on GitHub, the Console gives you something better than the CLI flow: **push to `main` → automatic rebuild and redeploy.**
@@ -689,7 +849,7 @@ git push origin main
    ▼
 Cloud Build          builds the container in the cloud (no local Docker)
    ▼
-Artifact Registry    us-central1-docker.pkg.dev/PROJECT/...
+Artifact Registry    us-east5-docker.pkg.dev/PROJECT/...
    ▼
 Cloud Run revision   immutable, versioned, rollback-able
 ```
@@ -873,7 +1033,7 @@ Commit and push.
 
 **General:**
 - Job name: `nightly-pipeline`
-- Region: `us-central1`
+- Region: `us-east5`
 - Tasks: `1`
 
 Expand **"Containers, Connections, Security"**:
@@ -955,7 +1115,7 @@ Right call for three independent reasons: it's the `AGENTS.md` separation of con
 
 **Cloud Run → "Services" tab → "Deploy container" → continuous deploy from your repo**
 
-- Name: `cynolycus-dashboard` · Region `us-central1`
+- Name: `cynolycus-dashboard` · Region `us-east5`
 - **Authentication: Require authentication**
 - CPU `1` · Memory `2 GiB`
 - **Min instances `0`** · **Max instances `3`**
@@ -985,7 +1145,7 @@ They sign in with their Google account. You revoke by removing the principal. No
 
 Free tier: **2M requests, 180,000 vCPU-seconds, 360,000 GiB-seconds/month.** A few people checking a dashboard daily won't come close. Expect **$0.00**.
 
-Beyond free tier, roughly **$0.000024/vCPU-second and $0.0000025/GiB-second** in us-central1 **[verify]**.
+Beyond free tier, roughly **$0.000024/vCPU-second and $0.0000025/GiB-second** in us-east5 (Tier 1, same as us-central1) **[verify]**.
 
 ✅ **Checkpoint 6** — you open the URL signed in and see real data; a signed-out/incognito browser gets 403; one other person can open it.
 
@@ -1064,15 +1224,26 @@ A Cloud Run **service** is request-driven and can be evicted between requests �
 
 Recommendation: **VM first** — it makes the system reliable immediately, which is the actual pain — then migrate to worker pools once the data layer is proven.
 
-Console path: **Compute Engine → VM instances → Create instance**, `e2-standard-2`, `us-central1`, Debian 12. Then SSH **from the browser** (the SSH button in the Console — no key management needed).
+Console path: **Compute Engine → VM instances → Create instance**, `e2-standard-2`, `us-east5`, Debian 12. Then SSH **from the browser** (the SSH button in the Console — no key management needed).
+
+> **This is why Cloud Run alone was never going to be the answer**, and it is worth being explicit because it looks like the migration's whole point was Cloud Run. Cloud Run is right for the two shapes it was built for — scheduled Jobs (Phase 5) and the read-only dashboards other people open (Phase 6). It is wrong for a process that must hold one persistent WebSocket for a whole session. The split is: **Jobs and dashboards on Cloud Run, the trading loop on a VM, both reading the same Cloud SQL instance.** Nothing in Phases 0–7 is wasted by that.
+
+### 8.2b What the nervous system changes here
+
+Phase 3B moved Meta's order path onto a governed spine. Three consequences for this phase:
+
+- **Gate 4 below now has a mechanism.** "Decide which is authoritative" used to be a note-to-self. Orders now carry deterministic, content-derived IDs (UUIDv5) that exclude wall clock and snapshot, so a retried pass converges on the same order instead of minting a second one. That protects against *duplicate submission by one server*. It does **not** protect against two servers both running — that is still yours to enforce by shutting one off.
+- **The decision record survives the VM.** The whole reason for an independent Cloud SQL instance: on 2026-06-26 the combined server was OOM-killed at 09:36 ET (13.9 GB anon-RSS against a 16 GB cap) and nothing restarted it, so every afternoon loop silently did not run. A ledger colocated with the process that OOMs dies exactly when it is needed to explain what happened.
+- **Only Meta is governed.** HTF, Momentum, Swing, Dealer and SPY still submit directly from this VM. If you are reasoning about which orders are auditable, it is Meta's and only Meta's.
 
 ### 8.3 Non-negotiable gates before any live cloud trading
 
 1. **Paper mode only**, minimum two full weeks, fills compared against the local paper record.
 2. **Live Alpaca keys stay out of the cloud** until 1 is complete and the result is written in §12.
 3. **Exactly one instance may hold the Alpaca stream.** Two processes = exceeded stream limit = both degrade. This is a correctness constraint, not a cost one.
-4. **The cloud must not duplicate orders your local server is placing.** Decide explicitly which is authoritative and shut the other's order path off. Two live servers submitting the same signal is the worst outcome available here.
+4. **The cloud must not duplicate orders your local server is placing.** Decide explicitly which is authoritative and **shut the other's order path off before the new one submits** — not after, and not the same evening. Two servers submitting the same signal is the worst outcome available here, and idempotent order IDs do not save you from it because the two processes build different snapshots.
 5. Verify ET-timezone behavior of every scheduled fire across a DST boundary before trusting it.
+6. **The nervous system's own gates are separate and additional** — see `docs/nervous_system/MVP_ACCEPTANCE.md`. Still outstanding as of 2026-08-17: a shadow soak of ≥20 sessions and ≥100 eligible Meta intents (0 run), a controlled paper-submit subset, and option source-fitness measured against a real data entitlement. `scripts/validate_nervous_system_mvp.py` passes 19/19 suites and prints *"ALL SUITES PASSED. This is not acceptance."* — believe the second sentence.
 
 **Do not begin Phase 8 in the same session you finish Phase 7.**
 
@@ -1092,9 +1263,14 @@ Console path: **Compute Engine → VM instances → Create instance**, `e2-stand
 | Artifact Registry (~4 GB images) | ~$0.40 **[verify]** |
 | Cloud Logging | ~$0.00 (50 GiB free) |
 | **Phases 0–7 subtotal** | **≈ $5 – $10/month** |
+| *Phase 3B: Cloud SQL `db-f1-micro` + 10 GB SSD + backups* | *+$11 **[verify]*** |
+| *Phase 3B: journal bucket (single-digit GB, Standard)* | *+$0.05* |
 | *Phase 8: always-on `e2-standard-2`* | *+$49 **[verify]*** |
+| **Everything, running** | **≈ $65 – $70/month** |
 
-Your $300 trial credit covers roughly **3–5 months of the full stack including the VM**, or over a year of Phases 0–7.
+Your $300 trial credit covers roughly **4–5 months of everything including the VM and Cloud SQL**, or over a year of Phases 0–7 alone.
+
+The Cloud SQL line is the one people are tempted to delete. §2.0 correctly rejected Cloud SQL at **≈$129/mo** for *feature matrices* — that was a `db-custom` tier sized for 8-million-row tables. This is a different instance for a different job: ~20 operational rows a day on the cheapest shared-core tier. Running it on the Phase 8 VM instead would save the $11 and cost you the ledger in the exact failure it exists to explain (§8.2b).
 
 ---
 
@@ -1137,18 +1313,18 @@ gcloud storage rsync LOCAL gs://cynolycusbot-data/PATH --recursive --dry-run
 gcloud storage cp gs://cynolycusbot-data/PATH/file.parquet .
 
 # Run
-gcloud run jobs execute JOB --region=us-central1 --wait
-gcloud run services list --region=us-central1
-gcloud run revisions list --service=SVC --region=us-central1
-gcloud run services update-traffic SVC --to-revisions=REV=100 --region=us-central1
+gcloud run jobs execute JOB --region=us-east5 --wait
+gcloud run services list --region=us-east5
+gcloud run revisions list --service=SVC --region=us-east5
+gcloud run services update-traffic SVC --to-revisions=REV=100 --region=us-east5
 
 # Secrets
 gcloud secrets versions access latest --secret=NAME
 gcloud secrets versions add NAME --data-file=-        # rotate
 
 # Scheduler
-gcloud scheduler jobs run NAME --location=us-central1
-gcloud scheduler jobs pause NAME --location=us-central1
+gcloud scheduler jobs run NAME --location=us-east5
+gcloud scheduler jobs pause NAME --location=us-east5
 
 # Logs
 gcloud logging read 'severity>=ERROR' --freshness=1d --limit=50
@@ -1172,6 +1348,14 @@ gcloud storage buckets get-iam-policy gs://cynolycusbot-data
 | Date | Decision | Reason |
 |---|---|---|
 | 2026-07-26 | Region `us-central1` everywhere | Only us-central1/east1/west1 qualify for the GCS Always Free tier; standard-price reference region |
+| 2026-08-17 | ~~`us-central1`~~ → **`us-east5` everywhere** (§1.6) — **supersedes the row above** | The bucket was actually created in US-EAST5, so the 2026-07-26 decision never held in practice. 8 later steps still repeated `us-central1`; following them would have split the deployment across regions and billed every bucket read as egress. Cost of the correction: the 5 GB-month GCS free allowance, ≈$0.10/mo. us-east5 is Tier 1, so compute prices are identical |
+| 2026-08-16 | **Cloud SQL after all — for operational rows only** (§3B, new) | §2.0's rejection of Cloud SQL was about 8M-row feature matrices at ≈$129/mo and still stands. The nervous system needs `UPDATE ... WHERE` over ~20 decisions/day: `db-f1-micro` at ≈$11/mo. Postgres 16 to match `compose.nervous-system.yaml` exactly |
+| 2026-08-16 | **Journal gets its own bucket** (§3B.3) | Retention policies are bucket-wide, not per-prefix. On `cynolycusbot-data` one would block overwrites across ~108k objects and break the nightly rsync |
+| 2026-08-16 | **Retention left unlocked until a full QA cycle runs** (§3B.3) | A locked policy can never be shortened or removed, and blocks bucket deletion until every object ages out. Lock once the duration is settled, not before |
+| 2026-08-16 | **DSN supports socket AND private-IP TCP shapes** (§3B.4) | Cloud Run uses a Unix socket; the Phase 8 VM cannot lift into Cloud Run and needs TCP. Building one and adding the other later would be a rewrite |
+| 2026-08-16 | **Meta cutover only; the other five modules unchanged** (§3B.0) | One module on the governed spine is provable end-to-end. Migrating six at once means no working reference to compare against when something diverges |
+| 2026-08-16 | **No fallback when the governed path cannot build** (§3B.0) | A fallback to the direct broker call is exactly the bypass the cutover removed. Meta's `--submit` fails loudly instead — which is why the environment must be configured before the next submit run |
+| 2026-08-16 | **Trading loop on a VM, Jobs and dashboards on Cloud Run** (§8.2b) | Cloud Run services are request-driven and evictable; a persistent Alpaca WebSocket is neither. This is a split, not a reversal — Phases 0–7 stay as designed |
 | 2026-07-26 | Storage before compute | Reversible, ~$1/mo, solves the stated disk pain, touches no code |
 | 2026-07-26 | Live Alpaca keys excluded until Phase 8 | `AGENTS.md`: default to paper; live paths separated by credentials |
 | 2026-07-26 | Cloud dashboard read-only, no "Run" button | Prevents a viewer triggering orders; enables scale-to-zero |

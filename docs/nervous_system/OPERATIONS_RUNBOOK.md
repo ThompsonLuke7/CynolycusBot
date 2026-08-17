@@ -109,9 +109,17 @@ returns 503, so a degraded journal cannot hide inside a 200.
 
 ## Open items
 
-- The migration tutorial on `main` says `us-central1` in 16 places against 2
-  `us-east5`. The 2026-08-05 correction was applied to §4.5 only, so §2.4 still
-  reads "use `us-central1` everywhere" and the Phase 6/7/8 sections and gcloud
-  snippets still name it. Whoever follows the tutorial next will deploy split
-  across two regions and pay egress on every bucket read. Fix belongs on
-  `main` — this worktree'"'"'s copy is 136 lines behind it.
+- ~~The migration tutorial says `us-central1` in 16 places against 2
+  `us-east5`.~~ **Fixed 2026-08-17** on `main`: §1.6 now reads `us-east5`, every
+  operational reference and gcloud snippet follows it, and the two remaining
+  mentions are the superseded decision-log row and factual notes about which
+  regions carry the GCS free tier. `docs/GCP_MIGRATION_TUTORIAL.md` §3B now
+  covers Cloud SQL, the journal bucket and both DSN shapes, so this runbook and
+  the tutorial no longer disagree.
+- The persistent local `cynolycus` database is at `0002_decision_execution`;
+  head is `0004_audit_observability` (measured 2026-08-17). Run
+  `upgrade-schema` before the first governed pass — the replay, fitness, audit
+  and observability tables do not exist at `0002`.
+- Not yet run: the shadow soak (0 of ≥20 sessions), the controlled
+  paper-submit subset, and option source fitness against a real entitlement.
+  See `MVP_ACCEPTANCE.md`.
