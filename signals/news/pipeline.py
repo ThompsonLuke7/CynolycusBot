@@ -188,6 +188,32 @@ def classify_existing_news(
     return out
 
 
+def _as_utc_timestamps(values: pd.Series, *, label: str) -> pd.Series:
+    """Converge a causal-metadata column on tz-aware datetimes.
+
+    ``news_records.parquet`` persists these columns as ISO strings — see
+    ``schema.parquet_safe_causal_metadata``, which serializes them so naive
+    values are not silently localized. The embeddings artifact has always
+    stored real datetimes. The incremental append below concatenates the two,
+    and an unaligned pair yields an object column holding both ``str`` and
+    ``Timestamp``; pyarrow then infers int64 from the pandas metadata and
+    fails the write outright. Coerce here rather than at the write so the
+    mismatch cannot reach the parquet layer.
+
+    Unparseable values raise instead of becoming NaT: a timestamp that cannot
+    be read is a collection defect, and silently nulling it would drop the
+    record from every downstream time-windowed join without a trace.
+    """
+    converted = pd.to_datetime(values, utc=True, errors="coerce")
+    newly_null = int(converted.isna().sum() - pd.isna(values).sum())
+    if newly_null > 0:
+        raise ValueError(
+            f"{label}: {newly_null:,} timestamp value(s) are unparseable; "
+            "refusing to null them silently"
+        )
+    return converted
+
+
 def build_news_embeddings(
     news_path: Path | str = NEWS_RECORDS_PATH,
     *,
@@ -215,6 +241,7 @@ def build_news_embeddings(
         if col in news.columns:
             keep_cols.append(col)
     full = news[keep_cols].copy()
+    full["timestamp"] = _as_utc_timestamps(full["timestamp"], label="news_records")
     if "earnings_embedding_text" in news.columns:
         enriched_text = news["earnings_embedding_text"].fillna("").astype(str)
         full["text"] = np.where(enriched_text.str.len() > 0, enriched_text, full["text"].fillna("").astype(str))
@@ -228,6 +255,8 @@ def build_news_embeddings(
             prior = pd.read_parquet(output_path)
         except Exception:
             prior = pd.DataFrame()
+        if not prior.empty and "timestamp" in prior.columns:
+            prior["timestamp"] = _as_utc_timestamps(prior["timestamp"], label="news_embeddings")
         if not prior.empty and "record_id" in prior.columns:
             # Hash current text to compare against prior. If the embedded text
             # changed (e.g. body was filled in), re-embed.

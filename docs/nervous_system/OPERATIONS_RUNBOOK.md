@@ -59,10 +59,10 @@ export CYNOLYCUS_ALPACA_BASE_URL=https://paper-api.alpaca.markets
 export CYNOLYCUS_ALPACA_ACCOUNT_ID=PAXXXXXX
 export CYNOLYCUS_SECRET_BINDING=projects/PROJECT/secrets/alpaca-paper
 
-python -m scripts.cloud.nervous_system_db create-database --dry-run
-python -m scripts.cloud.nervous_system_db create-database
-python -m scripts.cloud.nervous_system_db upgrade-schema
-python -m scripts.cloud.nervous_system_db schema-status
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db create-database --dry-run
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db create-database
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db upgrade-schema
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db schema-status
 ```
 
 The DSN comes from the environment, never a command-line argument: a DSN on a
@@ -92,9 +92,9 @@ duration is a trap for small append-only objects.
 ## Checks
 
 ```
-python -m scripts.cloud.nervous_system_db schema-status
-python -m scripts.cloud.nervous_system_db verify-counts
-python -m scripts.cloud.nervous_system_db verify-backup
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db schema-status
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db verify-counts
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db verify-backup
 curl -s localhost:PORT/api/nervous-system/health | jq
 ```
 

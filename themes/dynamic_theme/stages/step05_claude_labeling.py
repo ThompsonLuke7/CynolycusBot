@@ -17,7 +17,11 @@ from typing import Any
 import pandas as pd
 
 from themes.dynamic_theme.client.claude_client import call_claude_json
-from themes.dynamic_theme.config import THEME_REGISTRY_PATH, ensure_outputs
+from themes.dynamic_theme.config import (
+    CLAUDE_LABEL_MAX_TOKENS,
+    THEME_REGISTRY_PATH,
+    ensure_outputs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +75,7 @@ def _label_cluster(summary: dict[str, Any], existing_names: list[str]) -> dict[s
         existing_names_json=json.dumps(sorted(existing_names)),
     )
     try:
-        result = call_claude_json(prompt)
+        result = call_claude_json(prompt, max_tokens=CLAUDE_LABEL_MAX_TOKENS)
         result["cluster_id"] = summary["cluster_id"]
         result["related_themes"] = result.get("related_themes") or []
         return result

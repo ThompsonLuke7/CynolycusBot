@@ -150,8 +150,13 @@ TOP_Q_STRENGTH = 0.75         # top-quartile cutoff for theme_strength
 CLAUDE_MODEL = "claude-sonnet-4-6"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-# Labeling: ~300 tokens per cluster is plenty
-CLAUDE_LABEL_MAX_TOKENS = 512
+# Labeling: the JSON itself is ~300 tokens, but "plenty" assumed the response
+# is JSON and nothing else. On ambiguous clusters the model reasons through the
+# tickers first, and at 512 the budget is gone before the JSON is emitted — the
+# response ends mid-sentence with no object to parse, and the cluster falls back
+# to an ephemeral `cluster_<id>` name. Same failure the relationship graph hit
+# below. Sized for a preamble plus the object.
+CLAUDE_LABEL_MAX_TOKENS = 2048
 # Relationship graph: ~85 themes × ~5 edges each is a large JSON array. At 8192
 # tokens the response truncated mid-object and the whole graph was discarded,
 # leaving stale edges that no longer matched the relabeled registry. Sonnet

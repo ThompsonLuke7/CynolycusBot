@@ -569,3 +569,101 @@ def test_database_healthcheck_returns_false_for_sqlalchemy_error() -> None:
 def test_database_healthcheck_propagates_non_sqlalchemy_errors() -> None:
     with pytest.raises(RuntimeError, match="unexpected"):
         database.database_healthcheck(_Engine(_Connection(RuntimeError("unexpected"))))
+
+
+# ---------------------------------------------------------------------------
+# Local .env fallback
+# ---------------------------------------------------------------------------
+#
+# `.env.example` ships the CYNOLYCUS_* names, which tells anyone reading it that
+# putting them in `.env` configures the system. It did not: from_env() read
+# os.environ only, so a populated `.env` produced the same "environment is not
+# configured" refusal as an empty one, with nothing pointing at the cause.
+#
+# The process environment stays authoritative -- Cloud Run and systemd inject
+# real variables and must always win over a file that happens to be in the
+# image. `.env` is a local-development convenience underneath it.
+
+
+def _write_env_file(tmp_path, values: dict[str, str]):
+    path = tmp_path / ".env"
+    path.write_text(
+        "\n".join(f"{key}={value}" for key, value in values.items()),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_populated_env_file_configures_the_system(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    for name in _env():
+        monkeypatch.delenv(name, raising=False)
+    _write_env_file(tmp_path, _env())
+
+    settings = NervousSystemSettings.from_env()
+
+    assert settings.environment is RuntimeEnvironment.DEVELOPMENT
+    assert settings.account_alias == "paper"
+
+
+def test_the_process_environment_wins_over_the_file(tmp_path, monkeypatch) -> None:
+    """Cloud Run and systemd inject real variables; a stray file must not
+    override a deployment's own configuration."""
+
+    monkeypatch.chdir(tmp_path)
+    for name in _env():
+        monkeypatch.delenv(name, raising=False)
+    _write_env_file(tmp_path, _env(CYNOLYCUS_ACCOUNT_ALIAS="paper"))
+    monkeypatch.setenv("CYNOLYCUS_ACCOUNT_ALIAS", "override")
+
+    assert NervousSystemSettings.from_env().account_alias == "override"
+
+
+def test_an_explicit_mapping_still_ignores_the_file(tmp_path, monkeypatch) -> None:
+    """Passing a mapping means "use exactly this". A caller that supplies its
+    own configuration must not silently absorb whatever `.env` holds -- the
+    same isolation the process-environment test above already pins down."""
+
+    monkeypatch.chdir(tmp_path)
+    _write_env_file(tmp_path, _env())
+
+    supplied = _env()
+    del supplied["CYNOLYCUS_DATABASE_URL"]
+
+    with pytest.raises(ValidationError) as exc_info:
+        NervousSystemSettings.from_env(supplied)
+
+    assert "CYNOLYCUS_DATABASE_URL" in str(exc_info.value)
+
+
+def test_a_missing_env_file_is_not_an_error(tmp_path, monkeypatch) -> None:
+    """Absence is the normal cloud case, and must fail with the usual missing
+    -variables message rather than a file error."""
+
+    monkeypatch.chdir(tmp_path)
+    for name in _env():
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(ValidationError) as exc_info:
+        NervousSystemSettings.from_env()
+
+    assert "CYNOLYCUS_ENVIRONMENT" in str(exc_info.value)
+
+
+def test_the_file_never_supplies_a_value_it_does_not_hold(tmp_path, monkeypatch) -> None:
+    """A partial `.env` reports exactly what is still missing, so the fix is
+    named rather than guessed at."""
+
+    monkeypatch.chdir(tmp_path)
+    for name in _env():
+        monkeypatch.delenv(name, raising=False)
+    partial = _env()
+    del partial["CYNOLYCUS_ACCOUNT_ALIAS"]
+    _write_env_file(tmp_path, partial)
+
+    with pytest.raises(ValidationError) as exc_info:
+        NervousSystemSettings.from_env()
+
+    message = str(exc_info.value)
+    assert "CYNOLYCUS_ACCOUNT_ALIAS" in message
+    assert "CYNOLYCUS_ENVIRONMENT" not in message

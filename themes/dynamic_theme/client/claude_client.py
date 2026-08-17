@@ -64,6 +64,47 @@ def call_claude(
     raise RuntimeError(f"Claude call failed after {retries} attempts") from last_exc
 
 
+def _extract_json_payload(text: str) -> str | None:
+    """Return the outermost JSON object/array embedded in ``text``.
+
+    Ambiguous clusters draw a reasoning preamble before the JSON ("Looking at
+    this cluster: - **CMPR** (Cimpress) ..."), which fence-stripping alone does
+    not handle. On 2026-08-17 that silently cost 12 of 186 clusters their
+    labels. Scanning for a balanced delimiter run — while ignoring braces and
+    brackets inside strings — recovers the payload without loosening what
+    counts as valid JSON.
+    """
+    starts = [i for i in (text.find("{"), text.find("[")) if i != -1]
+    if not starts:
+        return None
+    start = min(starts)
+    opener = text[start]
+    closer = "}" if opener == "{" else "]"
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
 def call_claude_json(
     prompt: str,
     *,
@@ -73,7 +114,10 @@ def call_claude_json(
 ) -> Any:
     """Call Claude and parse the response as JSON.
 
-    Strips markdown fences if Claude wraps the JSON in ```json ... ```.
+    Strips markdown fences if Claude wraps the JSON in ```json ... ```, and
+    falls back to extracting an embedded JSON payload when the response opens
+    with prose. A response carrying no parseable JSON still raises — callers
+    must not receive a silently degraded result.
     """
     raw = call_claude(prompt, model=model, max_tokens=max_tokens, retries=retries)
     text = raw.strip()
@@ -84,5 +128,11 @@ def call_claude_json(
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
+        payload = _extract_json_payload(text)
+        if payload is not None:
+            try:
+                return json.loads(payload)
+            except json.JSONDecodeError:
+                pass
         logger.error("Failed to parse Claude response as JSON: %s\nRaw: %s", exc, raw[:500])
         raise

@@ -58,6 +58,41 @@ _REQUIRED_ENV_NAMES = (
 )
 
 
+def _environment_with_env_file(path: str | os.PathLike = ".env") -> Mapping[str, str]:
+    """The process environment, backed by a local ``.env`` for absent names.
+
+    Only the CYNOLYCUS names are taken from the file. Everything else in a
+    developer's `.env` -- broker keys, data-vendor tokens -- is read by its own
+    owner through its own loader, and pulling all of it into this mapping would
+    widen what a misconfiguration here can expose.
+
+    Reuses the broker client's parser rather than adding a dotenv dependency or
+    a second dialect of the same file format.
+    """
+
+    env_path = Path(path)
+    if not env_path.exists():
+        return os.environ
+
+    from core.API.Alpaca_API.core.config import _read_env_file
+
+    try:
+        file_values = _read_env_file(env_path)
+    except OSError:
+        # An unreadable .env is not a configuration statement. Fall through to
+        # the process environment and let the usual missing-name error name
+        # what is absent.
+        return os.environ
+
+    merged = {
+        key: value
+        for key, value in file_values.items()
+        if key.startswith("CYNOLYCUS_") and str(value).strip()
+    }
+    merged.update(os.environ)
+    return merged
+
+
 def _missing_environment_error(names: list[str]) -> ValidationError:
     return ValidationError.from_exception_data(
         "NervousSystemSettings",
@@ -250,9 +285,22 @@ class NervousSystemSettings(ContractModel):
         cls,
         environ: Mapping[str, str] | None = None,
     ) -> Self:
-        """Build settings from exactly the documented CYNOLYCUS variables."""
+        """Build settings from exactly the documented CYNOLYCUS variables.
 
-        source: Mapping[str, str] = os.environ if environ is None else environ
+        With no argument the process environment is read, falling back to a
+        local ``.env`` for any name it does not define. The process environment
+        always wins: Cloud Run and systemd inject the real configuration, and a
+        file that happens to be in the image must never override a deployment.
+        `.env` is a development convenience underneath that, and `.env.example`
+        documents these names precisely because it is where they belong locally.
+
+        Passing a mapping means "use exactly this" and reads no file, so a
+        caller supplying its own configuration cannot silently absorb one.
+        """
+
+        source: Mapping[str, str] = (
+            _environment_with_env_file() if environ is None else environ
+        )
         missing = [
             name
             for name in _REQUIRED_ENV_NAMES

@@ -749,11 +749,13 @@ CYNOLYCUS_ACCOUNT_ALIAS=paper
 CYNOLYCUS_SUBMIT_ENABLED=false
 ```
 
+> **Use the venv interpreter, from the repo root.** `python` is not on PATH on this machine (Debian ships `python3`), and system `python3` has none of the dependencies — `sqlalchemy`, `pydantic`, `alembic` all live in `.venv`. Every command below is `PYTHONPATH=. .venv/bin/python -m ...`. Running it any other way gives `ModuleNotFoundError: No module named 'sqlalchemy'`, which looks like a missing install and is actually the wrong interpreter.
+
 **The persistent `cynolycus` database is at revision `0002_decision_execution`; head is `0004_audit_observability`** (measured 2026-08-17). Tasks 24–27 added replay, fitness, audit and observability tables that `0002` does not have. Upgrade before the first governed run:
 
 ```bash
-python -m scripts.cloud.nervous_system_db schema-status
-python -m scripts.cloud.nervous_system_db upgrade-schema
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db schema-status
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db upgrade-schema
 ```
 
 There is no downgrade, drop, or reset in that CLI, by design. The historical import already run on this database is not touched by an upgrade.
@@ -815,12 +817,12 @@ The DSN comes from the **environment, never a command-line argument**: a DSN on 
 Full command sequence: **`docs/nervous_system/OPERATIONS_RUNBOOK.md`**. Summary:
 
 ```bash
-python -m scripts.cloud.nervous_system_db create-database --dry-run
-python -m scripts.cloud.nervous_system_db create-database
-python -m scripts.cloud.nervous_system_db upgrade-schema
-python -m scripts.cloud.nervous_system_db schema-status
-python -m scripts.cloud.nervous_system_db verify-counts
-python -m scripts.cloud.nervous_system_db verify-backup
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db create-database --dry-run
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db create-database
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db upgrade-schema
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db schema-status
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db verify-counts
+PYTHONPATH=. .venv/bin/python -m scripts.cloud.nervous_system_db verify-backup
 ```
 
 `verify-backup` reports `UNVERIFIED` unless the Cloud SQL Admin API says otherwise. It never infers a backup from anything else: an unverified "probably backed up" is worse than a clear "unknown", because only one of them makes somebody go and look.
