@@ -764,11 +764,17 @@ Then walk it up in three steps, each of which answers a different question:
 
 | Step | Setting | Question it answers |
 |---|---|---|
-| 1 | Meta dry-run (no `--submit`) | Does the pass still score and plan normally? |
-| 2 | `--submit`, `CYNOLYCUS_SUBMIT_ENABLED=false` | Does the governed path build, decide, and record — without an order leaving? |
-| 3 | `--submit`, `CYNOLYCUS_SUBMIT_ENABLED=true` | Do paper orders actually place through the gateway? |
+| 1 | `MODE=off`, dry-run (no `--submit`) | Does the pass still score and plan normally? |
+| 2 | `MODE=off`, **with** `--submit` | Does the governed path build, decide, and record — without an order leaving? |
+| 3 | `MODE=enforce`, **with** `--submit` | Do paper orders actually place through the gateway? |
 
-Step 2 is the one worth sitting in for a few sessions. It writes the full decision record and stops at the broker boundary, so you can read what it *would* have done. `SUBMIT_ENABLED` only accepts the exact string `"true"` — deployment is not authorisation.
+> ⚠️ **`CYNOLYCUS_SUBMIT_ENABLED` is not the gate.** Earlier revisions of this section said it was; that was wrong. Verified 2026-08-17: `submit_enabled` is parsed, stored and reported in the health summary, and **read by no execution path**. Setting it to `false` protects nothing.
+>
+> Two things actually gate an order:
+> - **`--submit`** on the runner. Without it, planning completes and the gateway is never reached.
+> - **`CYNOLYCUS_NERVOUS_SYSTEM_MODE`**. `off` makes every policy decision `DEFER`, which the coordinator turns into `POLICY_VETO` before the broker is touched. `enforce` lets decisions act.
+>
+> So step 2 above — `MODE=off` *with* `--submit` — is the real "record everything, send nothing" position, and it is worth sitting in for a few sessions. Note the two are independent: the runner passes `policy_mode=ENFORCE` to `route()` while the policy config takes its mode from settings, so the settings mode is what stops orders today. That asymmetry is tracked as an open item; do not build a safety habit on it.
 
 > **You cannot reach a live account from here even by accident.** `core/nervous_system/execution/alpaca_adapter.py` hardcodes `PAPER_HOSTS = {"paper-api.alpaca.markets"}` and raises in its constructor on `PRODUCTION_LIVE`. That is a code-level constraint, not a configuration one.
 
@@ -832,7 +838,7 @@ The health endpoint separates **liveness** (process is up; answers without a dat
 ✅ **Checkpoint 3B**
 
 - `schema-status` reports head `0004_audit_observability`, locally and in Cloud SQL
-- A Meta `--submit` pass with `SUBMIT_ENABLED=false` completes and writes decision rows
+- A Meta `--submit` pass with `MODE=off` completes and writes decision rows without ordering
 - Journal bucket exists, versioning on, retention **unlocked**
 - `verify-backup` returns something other than `UNVERIFIED`
 

@@ -13,7 +13,7 @@ construction — it parses for read-only inspection and returns the stable veto
 | Storage | 10 GB SSD | See sizing below. |
 | Region | **`us-east5`** | `gs://cynolycusbot-data` is US-EAST5 and `hello-test` deployed there. Same-region reads are free; cross-region reads bill as egress. |
 | Journal | **Its own bucket**, us-east5, uniform access, versioning on, Standard | Retention policies are bucket-wide, not per-prefix. |
-| Submission | `CYNOLYCUS_SUBMIT_ENABLED` unset | Deployment is not authorisation. |
+| Submission | `CYNOLYCUS_NERVOUS_SYSTEM_MODE=off` until proven | The real gate, together with the runner’s `--submit`. `CYNOLYCUS_SUBMIT_ENABLED` is inert — parsed and reported, read by no execution path (verified 2026-08-17). |
 
 ### Sizing
 

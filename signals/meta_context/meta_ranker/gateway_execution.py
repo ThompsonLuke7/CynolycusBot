@@ -23,9 +23,12 @@ from decimal import Decimal
 from enum import Enum
 import math
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
+from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 from core.live_4h_exec import shares_for_notional
+from core.nervous_system.execution.alpaca_adapter import PAPER_HOSTS
 from core.nervous_system.contracts.enums import (
     DebitCredit,
     DecisionKind,
@@ -61,6 +64,11 @@ _VETO_ACTIONS = frozenset({PolicyAction.REJECT, PolicyAction.DEFER})
 # How long a planned order stays valid. Matches the MVP policy entry window, so
 # a queued order cannot be submitted against a stale decision.
 DEFAULT_ORDER_TTL = timedelta(minutes=20)
+
+# The profile the runner itself uses (live_runner: profile = "PAPER"). The
+# gateway reads the same one so a submission cannot land on a different account
+# than the pass was planned against.
+BROKER_ENV_FILE = ".env#PAPER"
 
 
 @dataclass(frozen=True)
@@ -559,16 +567,68 @@ def build_router(
     )
 
 
-def _build_gateway(settings: Any, session_factory: Any, clock: Callable[[], datetime]) -> Any:
-    """Construct the broker-facing gateway. Only ever called to submit."""
+def _build_gateway(
+    settings: Any,
+    session_factory: Any,
+    clock: Callable[[], datetime],
+    *,
+    broker_env_file: str = BROKER_ENV_FILE,
+) -> Any:
+    """Construct the broker-facing gateway. Only ever called to submit.
 
-    from core.nervous_system.execution.alpaca_adapter import AlpacaPaperAdapter
+    The broker client is built from the same ``.env#PAPER`` profile the runner
+    uses for its own account and position reads, so the gateway cannot end up
+    submitting to a different account than the one the pass was planned against.
+    """
+
+    from core.nervous_system.execution.alpaca_adapter import (
+        AlpacaPaperAdapter,
+        BrokerAuthenticationError,
+    )
     from core.nervous_system.execution.gateway import ExecutionGateway
     from core.nervous_system.execution.journal import LocalAtomicJournal
     from core.nervous_system.persistence.uow import UnitOfWork
 
+    if settings.environment is RuntimeEnvironment.PRODUCTION_LIVE:
+        # Before the client exists, so no credential is ever loaded for a live
+        # account even transiently.
+        raise BrokerAuthenticationError(
+            "PRODUCTION_LIVE is refused: the Meta path has no live route"
+        )
+
+    client = AlpacaOptionsClient(env_file=broker_env_file)
+
+    # The URL the client will actually post to, read off the client rather than
+    # taken from settings. The adapter's paper-host check is only worth
+    # anything if it validates the URL in use; validating a settings value
+    # while the client resolved a different one from its own env file would
+    # pass the check on a client pointed somewhere else entirely.
+    effective_url = str(getattr(client, "_trading_base", "") or "").rstrip("/")
+    configured = str(settings.alpaca_base_url or "").rstrip("/")
+    if configured and effective_url and configured != effective_url:
+        raise BrokerAuthenticationError(
+            "CYNOLYCUS_ALPACA_BASE_URL and the broker client's resolved URL "
+            f"disagree ({configured!r} vs {effective_url!r}); refusing to submit "
+            "against an account the configuration does not describe"
+        )
+
+    # DEVELOPMENT does not get the adapter's QA_PAPER host check, so this is the
+    # only thing between a mistyped base URL and a live account.
+    host = urlparse(effective_url).hostname or ""
+    if host.lower() not in PAPER_HOSTS:
+        raise BrokerAuthenticationError(
+            f"the broker client resolved to {host!r}, which is not a paper host; "
+            "the Meta path submits to paper only"
+        )
+
     return ExecutionGateway(
-        broker=AlpacaPaperAdapter(environment=settings.environment),
+        broker=AlpacaPaperAdapter(
+            client,
+            environment=settings.environment,
+            account_alias=settings.account_alias,
+            trading_base_url=effective_url,
+            clock=clock,
+        ),
         journal=LocalAtomicJournal(settings.operational_root / "execution_journal"),
         unit_of_work_factory=lambda: UnitOfWork(session_factory),
         environment=settings.environment,

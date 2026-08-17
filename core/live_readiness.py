@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
-from core.calendar import prev_trading_day
+from core.calendar import next_trading_day, prev_trading_day
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_READINESS_PATH = _REPO_ROOT / "Data/readiness/latest_success.json"
@@ -74,6 +74,7 @@ def readiness_status(
     path: Path | None = None,
     max_age_hours: float = DEFAULT_MAX_AGE_HOURS,
     now: datetime | None = None,
+    for_next_session: bool = False,
 ) -> tuple[bool, str, dict]:
     path = path or DEFAULT_READINESS_PATH
     if os.getenv("CYNOLYCUS_READINESS_REQUIRED", "1") == "0":
@@ -103,7 +104,18 @@ def readiness_status(
     # session's regular close.  Weekend/holiday stamps naturally satisfy the
     # preceding session threshold.
     now_et = now_utc.astimezone(_ET)
-    prior_session = prev_trading_day(now_et.date())
+    if for_next_session:
+        # The 22:15 job exists to authorize the NEXT session, but the consumer
+        # gate above asks whether the stamp is good RIGHT NOW. At 22:15 Monday
+        # prev_trading_day(Mon) is Friday, so a same-morning stamp satisfies
+        # "now" and the job skips — then Tuesday's gate advances the threshold
+        # to Monday 16:00 and that stamp is stale, so the session opens dark.
+        # Asking the question the job is actually for closes that gap: it
+        # skipped on 07-28, 08-05, 08-07, 08-10, 08-12, and 08-14.
+        target_session = next_trading_day(now_et.date())
+        prior_session = prev_trading_day(target_session)
+    else:
+        prior_session = prev_trading_day(now_et.date())
     required_after = datetime.combine(prior_session, time(16, 0), tzinfo=_ET).astimezone(timezone.utc)
     if completed_utc < required_after:
         return False, (
@@ -300,11 +312,20 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Read/write live data-readiness stamp.")
     ap.add_argument("--write-success", action="store_true")
     ap.add_argument("--job", default="nightly_data_readiness")
+    ap.add_argument(
+        "--for-next-session",
+        action="store_true",
+        help=(
+            "Evaluate the gate for the next trading session rather than now. "
+            "Use this as the skip test for jobs whose purpose is to authorize "
+            "tomorrow (e.g. the 22:15 readiness run)."
+        ),
+    )
     args = ap.parse_args()
     if args.write_success:
         print(json.dumps(write_readiness_success(job=args.job), indent=2, sort_keys=True))
     else:
-        ok, reason, payload = readiness_status()
+        ok, reason, payload = readiness_status(for_next_session=args.for_next_session)
         print(json.dumps({"ok": ok, "reason": reason, "payload": payload}, indent=2, sort_keys=True))
         raise SystemExit(0 if ok else 1)
 

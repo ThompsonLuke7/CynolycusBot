@@ -69,7 +69,14 @@ fi
 
 # Idempotency: an off-hours repair completed after the latest session already
 # satisfies the morning schedule. Avoid rebuilding a 4 GB feature cache twice.
-if [ "${FORCE_DATA_READINESS:-0}" != "1" ] && "$PYTHON" -m core.live_readiness >/dev/null 2>&1; then
+#
+# --for-next-session is load-bearing: this job runs at 22:15 to authorize the
+# NEXT session, so it must ask whether the stamp will still be good tomorrow,
+# not whether it is good now. Without it a same-day stamp satisfies the plain
+# gate (prev_trading_day at 22:15 Mon is Friday), the job skips, and Tuesday
+# opens on a stamp that has since gone stale — six times: 07-28, 08-05, 08-07,
+# 08-10, 08-12, 08-14.
+if [ "${FORCE_DATA_READINESS:-0}" != "1" ] && "$PYTHON" -m core.live_readiness --for-next-session >/dev/null 2>&1; then
   {
     echo ""
     echo "[$(ts)] nightly_data_readiness.sh skipped: current session is already ready"
