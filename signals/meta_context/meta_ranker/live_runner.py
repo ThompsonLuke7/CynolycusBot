@@ -23,7 +23,7 @@ Run:
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from hashlib import sha256
@@ -585,7 +585,9 @@ def main() -> int:
         if args.submit:
             # One governed submitter for both flushes: the pre-open pass must
             # not reach the broker any more directly than the 4H pass does.
-            submitter = governed_submitter(args, bar=bar)
+            # The scored frame goes with it — a queued entry still has to
+            # explain itself, and this pass has already re-scored every name.
+            submitter = governed_submitter(args, bar=bar, scores_by_ticker=meta_scores)
             # Exits first: a queued exit is an already-made decision on a position
             # we still hold, and flushing it before entries frees the buying power
             # the queued entries are about to use.
@@ -812,28 +814,39 @@ def _execute(
         print("\n(dry-run: no orders submitted, state unchanged. Add --submit to execute.)")
 
 
-def governed_submitter(args, *, bar, module: str = AUDIT_MODULE):
+def governed_submitter(args, *, bar, module: str = AUDIT_MODULE,
+                       scores_by_ticker: Mapping[str, Mapping[str, float]] | None = None):
     """A submit_fn for the shared 4H engine that routes through the gateway.
 
     The shared engine is used by several modules; injecting a submitter lets
     Meta be governed without changing anyone else's execution path. If the
     governed path cannot be built this raises, so the caller records a skip
     rather than silently falling back to a direct broker call.
+
+    ``scores_by_ticker`` is the decision bar's scored frame. Entries need it:
+    the adapter refuses to open a position it cannot explain, so a submitter
+    built without scores turns every queued entry into a skip. The pre-open
+    flush only submits names that are still in today's top-K, so today's scores
+    are the evidence the decision is actually being re-made on.
     """
 
     router = build_router(intent_config=intent_config(args))
     decision_bar = bar.to_pydatetime() if hasattr(bar, "to_pydatetime") else bar
+    scores = dict(scores_by_ticker or {})
 
     def _submit(*, symbol, side, qty, route, limit=None,
-                reason: str | None = None, full_exit: bool = False):
+                reason: str | None = None, full_exit: bool = False,
+                ticker: str | None = None):
         # `full_exit` is how the engine tells a close from a trim; the adapter
         # reads it off exit_context membership, so an unnamed sell would be
         # recorded as an ADJUSTMENT even when it closed the position.
         rows = router.route(
             [(symbol, side, qty, reason or "pending_open", route)],
             exit_context={symbol: (None, None)} if full_exit else {},
-            ticker_by_symbol={},
-            scores_by_ticker={},
+            # Queued records carry their ticker, so an OCC symbol is mapped
+            # rather than having its root inferred.
+            ticker_by_symbol={symbol: str(ticker).upper()} if ticker else {},
+            scores_by_ticker=scores,
             decision_bar=decision_bar,
             reference_prices={},
             position_keys={symbol: f"paper:{symbol}"},

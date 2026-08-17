@@ -1688,8 +1688,9 @@ def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
         try:
             lim = rec.get("limit")
             if submit_fn is not None:
+                # The record's own ticker, not an OCC root guessed downstream.
                 resp = submit_fn(symbol=sym, side=rec["side"], qty=rec["qty"],
-                                 route=route, limit=lim)
+                                 route=route, limit=lim, ticker=tkr)
             elif route == "option":
                 resp = client.submit_option_order(symbol=sym, qty=rec["qty"], side=rec["side"],
                           order_type="limit" if lim else "market", time_in_force="day", limit_price=lim)

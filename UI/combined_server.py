@@ -429,6 +429,80 @@ def _run_dealer_ranker_loop(*, submit: bool, live: bool, top_k: int, workers: in
     subprocess.run(argv, cwd=str(repo_root), env=env)
 
 
+def _run_risk_pass(*, submit: bool, live: bool, trailing_stop: bool = False,
+                   take_profit_trim: bool = False) -> None:
+    """Fire one between-bar risk pass across the 4H modules.
+
+    The 4H runners decide on their model's bar; this evaluates only the rules
+    that need no model — hard stop and expiry flatten — so a position cannot sit
+    unmanaged for four hours. See core/live_risk_pass.py for why that preserves
+    research/live parity, and why the trailing stop is opt-in.
+
+    Subprocess-isolated for the same reason the other loops are: a broker hiccup
+    must not take down the combined server.
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "live_risk_pass.py"
+    argv = [sys.executable, str(script)]
+    if submit:
+        argv.append("--submit")
+    if live:
+        argv.extend(["--live", "--i-understand-live"])
+    if trailing_stop:
+        argv.append("--trailing-stop")
+    if take_profit_trim:
+        argv.append("--take-profit-trim")
+    env = {**os.environ, "PYTHONPATH": str(repo_root)}
+    subprocess.run(argv, cwd=str(repo_root), env=env)
+
+
+class RiskPassSupervisor(threading.Thread):
+    """Daemon thread that runs the 4H risk pass on an interval during RTH.
+
+    Reuses UI.intraday_poller.is_market_hours (pure and unit-tested) for the
+    window, and waits in small chunks so shutdown stays immediate.
+    """
+
+    def __init__(self, *, interval: int = 300, stop_event: threading.Event,
+                 submit: bool = True, live: bool = False,
+                 trailing_stop: bool = False, take_profit_trim: bool = False,
+                 tz: str = "America/New_York",
+                 name: str = "risk-pass-supervisor") -> None:
+        super().__init__(daemon=True, name=name)
+        self._interval = max(60, int(interval))
+        self._stop = stop_event
+        self._submit = bool(submit)
+        self._live = bool(live)
+        self._trailing_stop = bool(trailing_stop)
+        self._take_profit_trim = bool(take_profit_trim)
+        self._tz_name = tz
+
+    def run(self) -> None:  # pragma: no cover - thread body, logic is in _tick
+        from UI.intraday_poller import _tz, is_market_hours
+
+        tz = _tz(self._tz_name)
+        while not self._stop.is_set():
+            try:
+                if is_market_hours(datetime.now(tz)):
+                    self._tick()
+            except Exception:
+                logger.exception("risk pass supervisor: tick failed; continuing")
+            # Wait the interval in short slices so a stop is honoured promptly.
+            waited = 0.0
+            while waited < self._interval and not self._stop.is_set():
+                self._stop.wait(min(5.0, self._interval - waited))
+                waited += 5.0
+
+    def _tick(self) -> None:
+        _run_risk_pass(submit=self._submit, live=self._live,
+                       trailing_stop=self._trailing_stop,
+                       take_profit_trim=self._take_profit_trim)
+
+
 def _assert_ports_free(host: str, ports: dict[str, int]) -> None:
     """Fail fast if any dashboard port is already bound.
 
@@ -487,6 +561,10 @@ def run_combined(
     data_refresher_feeds: bool = False,
     catalyst_poll: bool = True,
     catalyst_poll_interval: int = 300,
+    risk_pass: bool = True,
+    risk_pass_interval: int = 300,
+    risk_pass_trailing_stop: bool = False,
+    risk_pass_take_profit_trim: bool = False,
     port_meta: int = DEFAULT_PORT_META,
     port_momentum: int = DEFAULT_PORT_MOMENTUM,
     port_htf: int = DEFAULT_PORT_HTF,
@@ -943,6 +1021,35 @@ def run_combined(
         print(f"  Catalyst poller:         RTH every {catalyst_poll_interval}s ET (live news ledger)")
 
     # ------------------------------------------------------------------
+    # 5b-ii. Between-bar risk pass for the 4H modules. Their signals are 4H
+    #     because that is the bar the models were trained on, but a stop is not
+    #     a model output, so a position should not sit unmanaged between bars.
+    #     2026-08-14: Dealer Ranker's HPE/ZM got ONE stop test in their entire
+    #     life — 7 minutes before expiry, with no bid left — and expired for
+    #     -$9,594. Only the model-free rules run here (see core/live_risk_pass).
+    # ------------------------------------------------------------------
+    risk_pass_supervisor = None
+    if risk_pass:
+        risk_pass_supervisor = RiskPassSupervisor(
+            interval=risk_pass_interval,
+            stop_event=stop_evt,
+            submit=True,
+            live=False,
+            trailing_stop=risk_pass_trailing_stop,
+            take_profit_trim=risk_pass_take_profit_trim,
+        )
+        risk_pass_supervisor.start()
+        _rules = "stop+expiry"
+        if risk_pass_trailing_stop:
+            _rules += "+trail"
+        if risk_pass_take_profit_trim:
+            _rules += "+tp"
+        logger.info("4H risk pass scheduled 09:30-16:00 America/New_York every %ds (%s)",
+                    risk_pass_interval, _rules)
+        print(f"  4H risk pass:            RTH every {risk_pass_interval}s ET "
+              f"(paper/SUBMIT, {_rules})")
+
+    # ------------------------------------------------------------------
     # 5c. Meta Ranker 4H loop (long-only swing; equity or options). The 4H bar
     #     generates the signal and we act on it, so the loop fires after EACH RTH
     #     4H bar CLOSES. The shared bars are SIP (~15-min delay), so a bar is only
@@ -1306,6 +1413,30 @@ def main() -> None:
         help="Seconds between intraday catalyst polls during market hours (default 300).",
     )
     parser.add_argument(
+        "--no-risk-pass",
+        action="store_true",
+        help="Disable the between-bar risk pass for the 4H modules. Leaves every 4H "
+             "position unmanaged until its next scheduled run.",
+    )
+    parser.add_argument(
+        "--risk-pass-interval",
+        type=int,
+        default=300,
+        help="Seconds between 4H risk passes during market hours (default 300).",
+    )
+    parser.add_argument(
+        "--risk-pass-trailing-stop",
+        action="store_true",
+        help="OPT-IN: also evaluate the trailing stop between bars. It ratchets off the "
+             "observed peak, so a faster cadence triggers earlier than the 4H calibration "
+             "— backtest at this cadence before enabling.",
+    )
+    parser.add_argument(
+        "--risk-pass-take-profit-trim",
+        action="store_true",
+        help="OPT-IN: also evaluate the take-profit trim between bars. Same cadence caveat.",
+    )
+    parser.add_argument(
         "--meta-ranker-times",
         default="14:20,16:20",
         help="Comma-separated local ET HH:MM times to fire the Meta Ranker 4H loop — one per "
@@ -1420,6 +1551,10 @@ def main() -> None:
         data_refresher_feeds=bool(args.data_refresher_feeds),
         catalyst_poll=not args.no_catalyst_poll,
         catalyst_poll_interval=args.catalyst_poll_interval,
+        risk_pass=not args.no_risk_pass,
+        risk_pass_interval=args.risk_pass_interval,
+        risk_pass_trailing_stop=args.risk_pass_trailing_stop,
+        risk_pass_take_profit_trim=args.risk_pass_take_profit_trim,
         port_meta=args.port_meta,
         port_momentum=args.port_momentum,
         port_htf=args.port_htf,

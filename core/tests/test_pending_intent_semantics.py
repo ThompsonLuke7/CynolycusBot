@@ -256,8 +256,12 @@ def test_an_injected_submitter_replaces_the_direct_broker_call(tmp_path, readine
     )
 
     assert result["count"] == 1
+    # `ticker` is carried explicitly: the queued record knows it, and a governed
+    # submitter needs it to look up the name's scores and to map an OCC symbol
+    # without inferring the root.
     assert seen == [
-        {"symbol": "AMD", "side": "buy", "qty": 10, "route": "equity", "limit": None}
+        {"symbol": "AMD", "side": "buy", "qty": 10, "route": "equity",
+         "limit": None, "ticker": "AMD"}
     ]
 
 
