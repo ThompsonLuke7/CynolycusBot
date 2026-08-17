@@ -481,7 +481,9 @@ class RiskPassSupervisor(threading.Thread):
         self._take_profit_trim = bool(take_profit_trim)
         self._tz_name = tz
 
-    def run(self) -> None:  # pragma: no cover - thread body, logic is in _tick
+    def run(self) -> None:
+        from datetime import datetime
+
         from UI.intraday_poller import _tz, is_market_hours
 
         tz = _tz(self._tz_name)
