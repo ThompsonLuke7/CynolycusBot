@@ -83,6 +83,11 @@ class RoutedRow:
     order_request: OrderRequest | None = None
     outcome: Any = None
     refusal: RouterRefusal | None = None
+    # Which hard rules produced a POLICY_VETO. Without these the refusal is an
+    # unfalsifiable bucket: on 2026-08-18/19 the same POLICY_VETO was diagnosed
+    # as a Postgres outage and then as a missing portfolio state, and only the
+    # second was right. The reason codes make it a one-line read.
+    policy_vetoes: tuple[str, ...] = ()
 
     @property
     def submitted(self) -> bool:
@@ -412,7 +417,15 @@ class MetaGatewayRouter:
         policy_decision = self._evaluate(intent, snapshot, self._policy_config)
         base["policy_action"] = policy_decision.action
         if policy_decision.action in _VETO_ACTIONS:
-            return RoutedRow(**base, refusal=RouterRefusal.POLICY_VETO)
+            return RoutedRow(
+                **base,
+                refusal=RouterRefusal.POLICY_VETO,
+                # Diagnostic only: never let a missing attribute turn a clean
+                # refusal into an exception on the failure path.
+                policy_vetoes=tuple(
+                    str(code) for code in getattr(policy_decision, "hard_vetoes", ()) or ()
+                ),
+            )
 
         risk_reducing = intent.decision_kind is not DecisionKind.ENTRY
         if risk_reducing:
@@ -523,6 +536,7 @@ def build_router(
     from core.nervous_system.persistence.repositories.state import StateRepository
     from core.nervous_system.persistence.uow import UnitOfWork
     from core.nervous_system.policy.engine import evaluate_policy
+    from signals.market_regime.config import SECTOR_ETFS_LIST
 
     try:
         settings = NervousSystemSettings.from_env(environ)
@@ -556,7 +570,19 @@ def build_router(
             clock=tick,
             gateway_factory=lambda: _build_gateway(settings, session_factory, tick),
         ),
-        snapshot_builder=SnapshotBuilder(StateRepository(session_factory())),
+        snapshot_builder=SnapshotBuilder(
+            StateRepository(session_factory()),
+            # SnapshotEntityScope defaults sector_entity_ids to (), and an empty
+            # expected-entity set matches no candidate at all — so SECTOR, a
+            # REQUIRED rule, resolved MISSING on every snapshot no matter what
+            # the sector producer published. Nothing reads snapshot.sector_states;
+            # the rule is a freshness gate on the sector table, so the correct
+            # scope is the tracked sector universe rather than one ETF per
+            # ticker. Resolving per ticker would be worse than wrong here:
+            # sector_map.sector_etf_for returns None for anything outside a
+            # hand-curated large-cap map, which is most of what Meta trades.
+            sector_entity_ids=tuple(SECTOR_ETFS_LIST),
+        ),
         policy_evaluator=evaluate_policy,
         policy_config=policy_config,
         freshness_profile=get_snapshot_profile(policy_config.required_snapshot_profile),

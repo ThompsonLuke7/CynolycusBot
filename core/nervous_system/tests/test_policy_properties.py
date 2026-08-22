@@ -28,11 +28,13 @@ from core.nervous_system.contracts.enums import (
 from core.nervous_system.contracts.intent import TradeIntent
 from core.nervous_system.policy.engine import evaluate_policy
 from core.nervous_system.policy.reason_codes import ReasonCode
+from core.nervous_system.contracts.enums import StateType
 from core.nervous_system.tests.test_policy_engine import (
     build_config,
     build_intent,
     build_snapshot,
     dealer_state,
+    degraded_requirement,
     market_state,
     portfolio_state,
     readiness_state,
@@ -137,6 +139,9 @@ def test_adding_a_hard_veto_cannot_increase_final_size() -> None:
                 readiness_state(),
             ),
             stale_inputs=("MARKET",),
+            requirement_results=(
+                degraded_requirement(StateType.MARKET, required=True, status="STALE"),
+            ),
         )
         vetoed = evaluate_policy(
             build_intent(

@@ -286,6 +286,23 @@ def _state_values(state: StateEnvelope) -> dict[str, Any]:
     }
 
 
+# PostgreSQL's wire protocol caps a statement at 65535 bound parameters.
+# `_state_values` binds 16 per row, so a single INSERT tops out just above 4000
+# rows and any producer publishing a full table fails outright: the first
+# market-regime publication attempted 18,312 rows and raised
+# "number of parameters must be between 0 and 65535" before writing anything.
+# Batch well under the ceiling rather than at it, because the same limit applies
+# to the `IN (...)` recovery reads below, which bind one parameter per id.
+_PG_MAX_BIND_PARAMS = 65535
+_STATE_INSERT_COLUMNS = 16
+_STATE_INSERT_CHUNK = 2000
+_ID_LOOKUP_CHUNK = 10000
+
+
+def _chunked(items: Sequence[Any], size: int) -> "list[Sequence[Any]]":
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
 class StateRepository:
     def __init__(self, session: Session):
         self._session = session
@@ -381,21 +398,24 @@ class StateRepository:
                 resolved[state_id] = state_id
             return resolved
 
-        inserted = self._session.execute(
-            postgres_insert(StateRecord)
-            .values(values)
-            .on_conflict_do_nothing()
-            .returning(StateRecord.state_id)
-        ).all()
-        resolved = {row[0]: row[0] for row in inserted}
-        missing_ids = set(states_by_id) - set(resolved)
+        resolved = {}
+        for value_chunk in _chunked(values, _STATE_INSERT_CHUNK):
+            inserted = self._session.execute(
+                postgres_insert(StateRecord)
+                .values(list(value_chunk))
+                .on_conflict_do_nothing()
+                .returning(StateRecord.state_id)
+            ).all()
+            resolved.update({row[0]: row[0] for row in inserted})
+        missing_ids = sorted(set(states_by_id) - set(resolved), key=str)
         if missing_ids:
-            existing_rows = self._session.execute(
-                select(StateRecord).where(StateRecord.state_id.in_(missing_ids))
-            ).scalars().all()
-            for row in existing_rows:
-                _contract_from_payload(row)
-                resolved[row.state_id] = row.state_id
+            for id_chunk in _chunked(missing_ids, _ID_LOOKUP_CHUNK):
+                existing_rows = self._session.execute(
+                    select(StateRecord).where(StateRecord.state_id.in_(list(id_chunk)))
+                ).scalars().all()
+                for row in existing_rows:
+                    _contract_from_payload(row)
+                    resolved[row.state_id] = row.state_id
 
         # A content-hash conflict can only occur when an equivalent immutable
         # state was already published under another identity.  Resolve it
@@ -403,14 +423,20 @@ class StateRepository:
         # a new row because its hash and stable identity differ.
         unresolved_ids = set(states_by_id) - set(resolved)
         if unresolved_ids:
-            content_hashes = {
-                content_hash(states_by_id[state_id], exclude={"state_id"})
-                for state_id in unresolved_ids
-            }
-            existing_rows = self._session.execute(
-                select(StateRecord).where(StateRecord.content_hash.in_(content_hashes))
-            ).scalars().all()
-            by_hash = {row.content_hash: row for row in existing_rows}
+            content_hashes = sorted(
+                {
+                    content_hash(states_by_id[state_id], exclude={"state_id"})
+                    for state_id in unresolved_ids
+                }
+            )
+            by_hash = {}
+            for hash_chunk in _chunked(content_hashes, _ID_LOOKUP_CHUNK):
+                existing_rows = self._session.execute(
+                    select(StateRecord).where(
+                        StateRecord.content_hash.in_(list(hash_chunk))
+                    )
+                ).scalars().all()
+                by_hash.update({row.content_hash: row for row in existing_rows})
             for state_id in unresolved_ids:
                 state_hash = content_hash(states_by_id[state_id], exclude={"state_id"})
                 row = by_hash.get(state_hash)

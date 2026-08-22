@@ -22,7 +22,7 @@ from core.nervous_system.config.policy import (
     StructureRisk,
 )
 from core.nervous_system.contracts.base import content_hash
-from core.nervous_system.contracts.context import ContextSnapshot
+from core.nervous_system.contracts.context import ContextSnapshot, FreshnessResult
 from core.nervous_system.contracts.enums import (
     AssetClass,
     DataQualitySeverity,
@@ -276,6 +276,7 @@ def build_snapshot(
     freshness_profile: str = PROFILE,
     stale_inputs: tuple[str, ...] = (),
     missing_inputs: tuple[str, ...] = (),
+    requirement_results: tuple[FreshnessResult, ...] = (),
     valid: bool = True,
 ) -> ContextSnapshot:
     if states is None:
@@ -297,7 +298,35 @@ def build_snapshot(
         decision_session="2026-07-30",
         stale_inputs=stale_inputs,
         missing_inputs=missing_inputs,
+        requirement_results=requirement_results,
         valid=valid,
+    )
+
+
+def degraded_requirement(
+    state_type: StateType,
+    *,
+    required: bool,
+    status: str,
+) -> FreshnessResult:
+    """One evaluator verdict for a single freshness rule.
+
+    Tests must go through this rather than setting `stale_inputs` /
+    `missing_inputs` directly: those two fields are a report the evaluator fills
+    in for EVERY rule, so a test that sets them by hand cannot express the
+    required-vs-optional distinction that decides whether a degraded input is a
+    veto or a warning.
+    """
+
+    return FreshnessResult(
+        state_type=state_type,
+        entity_id=TICKER,
+        required=required,
+        status=status,
+        selected_state_id=None,
+        age_seconds=None,
+        max_age_seconds=3600.0,
+        reason_code=status,
     )
 
 
@@ -357,6 +386,12 @@ def build_config(**overrides: Any) -> PolicyConfig:
         mode=PolicyMode.ENFORCE,
         environment=RuntimeEnvironment.QA_PAPER,
         required_snapshot_profile=PROFILE,
+        # The shipped paper config disables the daily-loss and gross-exposure
+        # gates, but these tests exercise the rules themselves, so they keep the
+        # figures those rules used to carry. Tests that need a gate off say so
+        # explicitly.
+        max_daily_loss=Decimal("2000.00"),
+        max_gross_notional=Decimal("150000.00"),
     )
     return replace(base, **overrides) if overrides else base
 
@@ -428,7 +463,18 @@ def test_invalid_snapshot_vetoes_entry() -> None:
 
 
 def test_stale_and_missing_required_state_veto_entry() -> None:
-    snapshot = build_snapshot(stale_inputs=("MARKET",), missing_inputs=("THEME",))
+    # A required rule that the evaluator could not satisfy. `valid` is False
+    # because that is what `evaluate_requirements` does for a required rule, so
+    # the fixture matches a snapshot the builder could actually produce.
+    snapshot = build_snapshot(
+        stale_inputs=("MARKET",),
+        missing_inputs=("SECTOR",),
+        requirement_results=(
+            degraded_requirement(StateType.MARKET, required=True, status="STALE"),
+            degraded_requirement(StateType.SECTOR, required=True, status="MISSING"),
+        ),
+        valid=False,
+    )
     intent = build_intent(snapshot=snapshot)
 
     decision = evaluate_policy(intent, snapshot, build_config())
@@ -436,6 +482,40 @@ def test_stale_and_missing_required_state_veto_entry() -> None:
     assert decision.action is PolicyAction.REJECT
     assert ReasonCode.SNAPSHOT_REQUIRED_STATE_STALE.value in decision.hard_vetoes
     assert ReasonCode.SNAPSHOT_REQUIRED_STATE_MISSING.value in decision.hard_vetoes
+
+
+def test_stale_and_missing_optional_state_do_not_veto_entry() -> None:
+    """An optional input degrading is a warning, not a veto.
+
+    THEME and CATALYST_EVENT are declared `required=False,
+    MissingStateAction.WARN` in every shipped profile. The evaluator still lists
+    them in `stale_inputs` / `missing_inputs` because those fields report on all
+    rules, and `snapshot_vetoes` used to gate on the bare presence of either
+    list — so an absent THEME vetoed exactly as hard as an absent TICKER. On
+    2026-08-21 the live Meta snapshot was missing THEME, THEME_MEMBERSHIP,
+    CATALYST_PRESSURE and DEALER and carried a stale CATALYST_EVENT, all
+    optional, which meant publishing the three genuinely-missing required states
+    would not by itself have let a single order through.
+    """
+
+    snapshot = build_snapshot(
+        stale_inputs=("CATALYST_EVENT",),
+        missing_inputs=("THEME", "DEALER"),
+        requirement_results=(
+            degraded_requirement(StateType.CATALYST_EVENT, required=False, status="STALE"),
+            degraded_requirement(StateType.THEME, required=False, status="MISSING"),
+            degraded_requirement(StateType.DEALER, required=False, status="MISSING"),
+        ),
+        valid=True,
+    )
+    intent = build_intent(snapshot=snapshot)
+
+    decision = evaluate_policy(intent, snapshot, build_config())
+
+    assert ReasonCode.SNAPSHOT_REQUIRED_STATE_STALE.value not in decision.hard_vetoes
+    assert ReasonCode.SNAPSHOT_REQUIRED_STATE_MISSING.value not in decision.hard_vetoes
+    assert ReasonCode.SNAPSHOT_INVALID.value not in decision.hard_vetoes
+    assert decision.action is not PolicyAction.REJECT
 
 
 def test_snapshot_profile_mismatch_vetoes_entry() -> None:
@@ -832,7 +912,16 @@ def test_insufficient_buying_power_vetoes_entry() -> None:
 
 
 def test_hard_vetoes_accumulate_across_rules_in_order() -> None:
-    snapshot = build_snapshot(valid=True, stale_inputs=("MARKET",))
+    # `valid=True` isolates the ordering assertion to the stale-required-state
+    # veto: an INVALID snapshot would add SNAPSHOT_INVALID ahead of it and the
+    # test would no longer prove which rule contributed which code.
+    snapshot = build_snapshot(
+        valid=True,
+        stale_inputs=("MARKET",),
+        requirement_results=(
+            degraded_requirement(StateType.MARKET, required=True, status="STALE"),
+        ),
+    )
     intent = build_intent(
         snapshot=snapshot, instrument_preferences=(InstrumentFamily.CALENDAR,)
     )
@@ -1307,3 +1396,126 @@ def test_evaluator_rejects_foreign_uuid_namespace_collision() -> None:
 
     assert first.policy_decision_id != second.policy_decision_id
     assert uuid4() != first.policy_decision_id
+
+
+# --------------------------------------------------------------------------
+# The daily-loss circuit breaker is optional on paper, mandatory live.
+# --------------------------------------------------------------------------
+
+
+def test_daily_loss_breaker_is_disabled_when_no_limit_is_configured() -> None:
+    """A paper account must be allowed to show its real drawdown shape."""
+
+    snapshot = build_snapshot(
+        states=(
+            market_state(),
+            ticker_state(),
+            portfolio_state(day_pl=-250_000.0),
+            readiness_state(),
+        )
+    )
+    intent = build_intent(snapshot=snapshot)
+
+    # Same loss that trips the breaker in
+    # test_daily_loss_breach_and_liquidity_veto_entry, only far larger.
+    decision = evaluate_policy(intent, snapshot, build_config(max_daily_loss=None))
+
+    assert ReasonCode.PORTFOLIO_MAX_DAILY_LOSS_BREACH.value not in decision.hard_vetoes
+
+
+def test_the_shipped_paper_config_ships_with_the_breaker_off() -> None:
+    assert MVP_POLICY_CONFIG.max_daily_loss is None
+
+
+def test_production_live_may_not_disable_the_daily_loss_breaker() -> None:
+    """Live is real money: refuse to construct a config without the breaker."""
+
+    with pytest.raises(ValueError, match="max_daily_loss must be set for PRODUCTION_LIVE"):
+        replace(
+            MVP_POLICY_CONFIG,
+            environment=RuntimeEnvironment.PRODUCTION_LIVE,
+            max_daily_loss=None,
+        )
+
+
+# --------------------------------------------------------------------------
+# The gross-exposure ceiling is optional on paper, mandatory live.
+#
+# On paper the broker's own buying power is the real constraint, and it is
+# already enforced as BROKER_INSUFFICIENT_BUYING_POWER. A second hardcoded
+# ceiling only diverges from the account it is meant to describe: on
+# 2026-08-19 it sat at $150,000 against a $1,066,016 book and refused every
+# entry outright.
+# --------------------------------------------------------------------------
+
+
+def test_gross_exposure_gate_is_disabled_when_no_ceiling_is_configured() -> None:
+    snapshot = build_snapshot(
+        states=(
+            market_state(),
+            ticker_state(),
+            portfolio_state(
+                positions=(
+                    position(symbol="NVDA", market_value=-900_000.0),
+                    position(symbol="AVGO", market_value=500_000.0),
+                )
+            ),
+            readiness_state(),
+        )
+    )
+    intent = build_intent(snapshot=snapshot, position_size_requested=Decimal("5000.00"))
+
+    decision = evaluate_policy(intent, snapshot, build_config(max_gross_notional=None))
+
+    assert ReasonCode.PORTFOLIO_MAX_GROSS_NOTIONAL_BREACH.value not in decision.hard_vetoes
+
+
+def test_an_uncountable_position_is_harmless_when_the_gate_is_off() -> None:
+    """PORTFOLIO_EXPOSURE_UNKNOWN guards the ceiling; with no ceiling it must
+    not veto entries for a reason that no longer applies."""
+
+    snapshot = build_snapshot(
+        states=(
+            market_state(),
+            ticker_state(),
+            portfolio_state(positions=(position(symbol="NVDA", market_value=None),)),
+            readiness_state(),
+        )
+    )
+    intent = build_intent(snapshot=snapshot)
+
+    decision = evaluate_policy(intent, snapshot, build_config(max_gross_notional=None))
+
+    assert ReasonCode.PORTFOLIO_EXPOSURE_UNKNOWN.value not in decision.hard_vetoes
+
+
+def test_buying_power_still_binds_when_the_gross_gate_is_off() -> None:
+    """The paper account is meant to be constrained by its own buying power."""
+
+    snapshot = build_snapshot(
+        states=(
+            market_state(),
+            ticker_state(),
+            portfolio_state(buying_power=1_000.0),
+            readiness_state(),
+        )
+    )
+    intent = build_intent(snapshot=snapshot, position_size_requested=Decimal("5000.00"))
+
+    decision = evaluate_policy(intent, snapshot, build_config(max_gross_notional=None))
+
+    assert ReasonCode.BROKER_INSUFFICIENT_BUYING_POWER.value in decision.hard_vetoes
+
+
+def test_the_shipped_paper_config_ships_with_the_gross_gate_off() -> None:
+    assert MVP_POLICY_CONFIG.max_gross_notional is None
+
+
+def test_production_live_may_not_disable_the_gross_exposure_ceiling() -> None:
+    with pytest.raises(ValueError, match="max_gross_notional must be set for PRODUCTION_LIVE"):
+        replace(
+            MVP_POLICY_CONFIG,
+            environment=RuntimeEnvironment.PRODUCTION_LIVE,
+            max_daily_loss=Decimal("2000.00"),
+            max_gross_notional=None,
+        )

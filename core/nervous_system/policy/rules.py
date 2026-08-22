@@ -81,10 +81,16 @@ def snapshot_vetoes(
         vetoes.append(ReasonCode.SNAPSHOT_LINEAGE_MISMATCH)
     if snapshot.decision_time > intent.created_at:
         vetoes.append(ReasonCode.SNAPSHOT_DECISION_TIME_AFTER_INTENT)
-    if snapshot.stale_inputs:
-        vetoes.append(ReasonCode.SNAPSHOT_REQUIRED_STATE_STALE)
-    if snapshot.missing_inputs:
-        vetoes.append(ReasonCode.SNAPSHOT_REQUIRED_STATE_MISSING)
+    # `stale_inputs` / `missing_inputs` are a REPORT: the evaluator appends to
+    # them for every rule, required or not (context/requirements.py). Gating on
+    # them made a missing THEME or a stale CATALYST_EVENT — both declared
+    # `required=False, MissingStateAction.WARN` — veto as hard as a missing
+    # TICKER, which left `required=False` and the WARN action with no effect at
+    # all. Meta ran dark on 2026-08-20/21 partly on this: publishing the three
+    # genuinely-missing required states would still not have cleared the veto.
+    # The required-filtered loop below is the gate, and `snapshot.valid` (set
+    # only by a required rule, or by an explicit REJECT fallback) already covers
+    # "some required input was degraded" via SNAPSHOT_INVALID.
     for result in snapshot.requirement_results:
         if not result.required:
             continue
@@ -173,8 +179,19 @@ def portfolio_limit_vetoes(
         # Rule 5 already vetoed the missing broker fact; do not double-report.
         return ()
     vetoes: list[ReasonCode] = []
-    if portfolio.day_pl is not None and _decimal(portfolio.day_pl) <= -config.max_daily_loss:
+    if (
+        config.max_daily_loss is not None
+        and portfolio.day_pl is not None
+        and _decimal(portfolio.day_pl) <= -config.max_daily_loss
+    ):
         vetoes.append(ReasonCode.PORTFOLIO_MAX_DAILY_LOSS_BREACH)
+    if config.max_gross_notional is None:
+        # No ceiling to protect, so there is nothing for an uncountable position
+        # to endanger. PORTFOLIO_EXPOSURE_UNKNOWN exists only to stop an
+        # understated gross from approving a breaching entry; raising it with
+        # the gate switched off would veto every entry for a reason that no
+        # longer applies. Buying power still binds via rule 5.
+        return tuple(vetoes)
     # A position with no market value cannot be counted, and skipping it would
     # understate gross exposure and let the limit approve a breaching entry.
     if any(position.market_value is None for position in portfolio.positions):
