@@ -18,8 +18,10 @@ import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 
 from core.live_signal_audit import build_equity_order_audit, build_option_order_audit
@@ -64,6 +66,39 @@ class ExecPolicy:
     trail_stop: float | None = None   # full exit if value falls this fraction from its PEAK (ratchet); None disables. "Tail-rider" (id4) config: 2026-07-18 val-selected/test-frozen search across Momentum/HTF/Meta's own OOF top-10 streams (research/capstone/exit_policy_cross_module.csv) found this shape (stop 39%, no trail, take-profit 30%/scale 16%, horizon 53) beats the prior stop50/trail35/tp20/scale50/hz25 default on mean return per trade (2-2.5x, ~10-12% vs ~4-5%) with comparable-or-better win rate in every module, at the cost of ~2x hold time (~52 vs ~25 bars). Prior config's own backtest note (mean +7.04%/61% win/ret-per-bar 0.0088 @ trail 0.35) is superseded by that search; kept here for history. Shares-only backtest — no option-premium path modeled, so real option stop/trail behavior may differ; not yet paper-validated live.
     target_notional: float = 5000.0   # target $ per new entry; shares/contracts sized from this
     roll_trading_days: int = 15       # option monthly-roll buffer
+    # --- underlying-referenced option stop (2026-08-18) ---------------------
+    # OPTIONS ONLY. When set, an option's hard stop is measured against the
+    # UNDERLYING's price -- exit when it falls this many entry-ATRs below the
+    # entry price -- instead of against the contract premium. `stop_loss` above
+    # is then NOT applied to that option; it still governs equity, and still
+    # governs options whose underlying basis is unavailable (fail-safe).
+    #
+    # Why: `stop_loss=0.39` was selected on a SHARES-ONLY backtest (see this
+    # class's docstring) and then applied to premium, where a ~13% underlying
+    # move is a -39% premium move. The live ledger shows what that costs --
+    # across 42 option stops with resolvable 4H bars (2026-07-17..08-18), the
+    # MEDIAN underlying move at the moment the premium stop fired was -3.1%,
+    # and 18 of 42 fired while the underlying was down less than 2%. A 1.5xATR
+    # underlying stop would not have fired at all on 18 of those 42 (-$43,944
+    # realized); the underlying traded back above entry within 40 4H bars on 13
+    # of the 18. Worst case LITE (2026-08-12): underlying +0.04%, premium -97%.
+    # Full study: research/daily_live_reports/underlying_vs_premium_stop.md.
+    #
+    # NOT yet paper-validated -- this is the change under test from 2026-08-18.
+    # Set to None to restore pure premium-stop behavior.
+    underlying_stop_atr: float | None = 1.5
+    # Removing the premium stop removes the only thing that used to close a
+    # decaying option, so expiry must be handled explicitly or a call whose
+    # underlying holds above its ATR stop can be ridden into worthless. Full
+    # exit when the contract has this many calendar days to expiry or fewer.
+    # None disables, which is the live setting: `core.live_risk_pass` already
+    # flattens an option on its last tradable session
+    # (`expiring_before_next_session`), so the ride-to-expiry hole is covered
+    # without a second calendar rail. A DTE floor here would also fight Dealer
+    # Ranker, which deliberately buys near-dated weeklies and would enter and
+    # exit them on consecutive runs. Set an int only with evidence that theta on
+    # a held-through contract costs more than that churn.
+    min_dte_exit: int | None = None
 
 
 @dataclass
@@ -154,11 +189,87 @@ def _implausible_mark_move(route: str, prev_mark, new_mark,
     }
 
 
+# --- underlying basis for the option stop ---------------------------------------
+# All four 4H modules read the same shared 4H bar cache, so the basis is resolved
+# here once rather than threaded through four runners. `underlying_fn` on
+# build_mixed_plan overrides this for tests and for any module with its own feed.
+DEFAULT_BARS_4H_DIR = Path(__file__).resolve().parents[1] / "Data/shared/bars/4h"
+UNDERLYING_ATR_LEN = 14
+
+
+def _read_4h(ticker: str, bars_dir=None):
+    """Shared 4H bars for `ticker`, tz-aware and sorted. None when unavailable."""
+    path = Path(bars_dir or DEFAULT_BARS_4H_DIR) / f"{ticker}.parquet"
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_parquet(path)
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    if "timestamp" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+        df = df.set_index(pd.to_datetime(df["timestamp"], utc=True, errors="coerce"))
+    elif not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
+    df.columns = [c.lower() for c in df.columns]
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    return df if {"high", "low", "close"} <= set(df.columns) else None
+
+
+def underlying_basis(ticker: str, at=None, *, bars_dir=None,
+                     atr_len: int = UNDERLYING_ATR_LEN) -> tuple[float | None, float | None]:
+    """(close, ATR) for `ticker` from the shared 4H cache — at `at`, else latest.
+
+    Returns (None, None) whenever the basis cannot be established: no cache, too
+    short a history for the ATR window, a non-finite ATR, or a timestamp that
+    predates the file. Callers MUST treat that as "no underlying stop" and fall
+    back to the premium stop rather than trading on a half-known basis.
+
+    `at` selects the last bar at or before that timestamp, so backfilling an
+    already-open position reads the bar that existed at its entry — never a
+    later one.
+    """
+    df = _read_4h(ticker, bars_dir)
+    if df is None or len(df) < atr_len + 1:
+        return None, None
+    atr = (df["high"] - df["low"]).rolling(atr_len).mean()
+    if at is None:
+        i = len(df) - 1
+    else:
+        try:
+            ts = pd.Timestamp(at)
+        except Exception:
+            return None, None
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        i = df.index.searchsorted(ts, side="right") - 1
+        if i < 0:
+            return None, None
+    px, a = float(df["close"].iloc[i]), float(atr.iloc[i])
+    if not (np.isfinite(px) and np.isfinite(a)) or px <= 0 or a <= 0:
+        return None, None
+    return px, a
+
+
+def underlying_stop_level(policy: ExecPolicy, u_entry, u_atr) -> float | None:
+    """Price level below which a long-call position is stopped out, else None."""
+    if not policy.underlying_stop_atr or not u_entry or not u_atr:
+        return None
+    if u_entry <= 0 or u_atr <= 0:
+        return None
+    return float(u_entry) - float(policy.underlying_stop_atr) * float(u_atr)
+
+
 def exit_action(gain, runs_held, bars_out, trimmed, policy: ExecPolicy,
-                *, peak_gain=None) -> tuple[str, str]:
+                *, peak_gain=None, route: str = "equity",
+                u_entry=None, u_now=None, u_atr=None, dte=None) -> tuple[str, str]:
     """Decide what to do with a held position. Returns (action, reason).
 
-    Priority: (1) hard stop-loss (from entry), (2) trailing stop (ratchet from the
+    Priority: (1) hard stop-loss (underlying-referenced for options with a basis,
+    premium otherwise), (1b) option expiry guard, (2) trailing stop (ratchet from the
     peak — secures gains on the ride so a winner that rolls over exits before the
     full horizon; backtest: +ret/bar, same win rate), (3) take-profit scale-out,
     (4) time-horizon hard cap, (5) rank drop-out ONLY as an opt-in backstop (off by
@@ -167,10 +278,30 @@ def exit_action(gain, runs_held, bars_out, trimmed, policy: ExecPolicy,
 
     `peak_gain` is the highest gain seen since entry (build_mixed_plan tracks it);
     when absent the trailing stop is skipped.
+
+    `route`/`u_entry`/`u_now`/`u_atr`/`dte` carry the option's underlying basis.
+    They all default to absent, which reproduces the pre-2026-08-18 premium-stop
+    behavior exactly — so a caller that does not supply them is unaffected.
     """
-    # 1) hard stop-loss — protects against ride-to-zero, esp. leveraged option premium
-    if policy.stop_loss and gain is not None and gain <= -policy.stop_loss:
+    # 1) hard stop-loss. For an OPTION with a usable underlying basis this is
+    #    measured on the UNDERLYING (entry price - N x entry-ATR), not on the
+    #    contract premium — a -39% premium move is ~-13% of underlying and fires
+    #    on noise (see ExecPolicy.underlying_stop_atr for the live evidence).
+    #    Equity, and any option whose basis could not be established, keep the
+    #    premium stop: a half-known basis must never widen a stop silently.
+    u_stop = (underlying_stop_level(policy, u_entry, u_atr)
+              if route == "option" else None)
+    if u_stop is not None and u_now is not None:
+        if float(u_now) <= u_stop:
+            return "exit", f"underlying_stop_-{policy.underlying_stop_atr:g}atr"
+    elif policy.stop_loss and gain is not None and gain <= -policy.stop_loss:
         return "exit", f"stop_-{int(policy.stop_loss * 100)}%"
+    # 1b) expiry guard. The premium stop was also the only rule that closed a
+    #     decaying contract; with it off for options, a call whose underlying
+    #     holds above its ATR stop would otherwise be ridden into expiry.
+    if (route == "option" and policy.min_dte_exit is not None
+            and dte is not None and dte <= policy.min_dte_exit):
+        return "exit", f"expiry_dte<={policy.min_dte_exit}"
     # 2) trailing stop — exit if value gives back trail_stop of its PEAK (ratchet)
     if (policy.trail_stop and gain is not None and peak_gain is not None
             and peak_gain > 0 and (1 + gain) <= (1 + peak_gain) * (1 - policy.trail_stop)):
@@ -229,6 +360,15 @@ def _fmt_num(value, places: int = 2, missing: str = "n/a") -> str:
 # move threshold like IMPLAUSIBLE_EQUITY_BAR_MOVE — it compares two readings of
 # the SAME instant and only fires when they disagree about the present.
 STALE_OPTION_MARK_DIVERGENCE = 0.25
+# Widest a book may be, as a fraction of its own midpoint, before that midpoint
+# stops being evidence of anything. On a wide one-sided book the mid is an
+# arithmetic artifact, not a price: 2026-08-18 flagged EW260821C00092500 as
+# "broker 0.2 vs live mid 0.9950" and it filled at 0.20, and
+# APTV260821C00052500 as "broker 0.05 vs live mid 0.0800" and it filled at 0.05.
+# The broker mark was right both times, and 20 of the 21 APTV warnings had
+# suppressed a stop on the inflated midpoint. Tight books (the AAOI case this
+# guard was built for) are unaffected.
+STALE_OPTION_MARK_MAX_SPREAD_PCT_MID = 0.25
 
 
 def _corroborate_option_exit_mark(client, symbol: str, broker_mark, avg_entry):
@@ -257,12 +397,30 @@ def _corroborate_option_exit_mark(client, symbol: str, broker_mark, avg_entry):
         return None
     if entry <= 0 or mark <= 0:
         return None
-    _bid, mid = _option_quote(client, symbol)
+    bid, mid = _option_quote(client, symbol)
     try:
         mid = float(mid)
     except (TypeError, ValueError):
         return None
     if mid <= 0:
+        return None
+    # A midpoint is only a second opinion when there are two real sides to take
+    # the middle of. Without a bid the "mid" fell back to a mark/last print,
+    # which is the very thing being corroborated.
+    try:
+        bid = float(bid)
+    except (TypeError, ValueError):
+        return None
+    if bid <= 0:
+        return None
+    # spread = ask - bid = 2*(mid - bid), because mid is their midpoint.
+    spread_pct_mid = (2.0 * (mid - bid)) / mid
+    if spread_pct_mid > STALE_OPTION_MARK_MAX_SPREAD_PCT_MID:
+        logger.info(
+            "stale-mark check skipped for %s: book is %.0f%% of mid wide "
+            "(bid %.4f, mid %.4f) — the midpoint is not a tradeable price",
+            symbol, spread_pct_mid * 100.0, bid, mid,
+        )
         return None
     if abs(mark / mid - 1.0) <= STALE_OPTION_MARK_DIVERGENCE:
         return None
@@ -272,6 +430,50 @@ def _corroborate_option_exit_mark(client, symbol: str, broker_mark, avg_entry):
 def _size_key(route: str) -> str:
     """Managed-state key holding the position size for this route."""
     return "contracts" if route == "option" else "shares"
+
+
+def trim_quantity(scale_frac: float, held: int) -> int:
+    """Whole units to sell on a take-profit scale-out. Never silently zero.
+
+    ``int(scale_frac * held)`` floored is 0 for any option position smaller than
+    ``1/scale_frac`` contracts, which meant a winner simply never booked. Live on
+    2026-08-18: MRVL held 4 contracts against scale_frac 0.16, peaked at +131%,
+    fell to -15%, and never sold a single contract. On shares the bug is
+    invisible (0.16 x 100 = 16), which is why a shares-only backtest never saw it.
+
+    Returns ``held`` when the position cannot be split — a 1-contract position,
+    or a scale_frac of 1.0. The caller MUST treat that as a full take-profit exit
+    rather than a partial trim: selling the whole position and still marking it
+    ``trimmed`` would leave a phantom open position in state.
+    """
+    try:
+        held = int(held)
+    except (TypeError, ValueError):
+        return 0
+    if held <= 0:
+        return 0
+    return min(held, max(1, int(math.floor(float(scale_frac) * held))))
+
+
+def take_profit_reason(policy: ExecPolicy, *, full: bool) -> str:
+    """Ledger reason for a take-profit sell, distinguishing full from partial.
+
+    The two must not share a string. Every downstream reader (the trade library,
+    the daily report, the analysis scripts) infers "the position is still open"
+    from a ``take_profit_`` row, so a FULL take-profit exit wearing the trim's
+    reason would be counted as a still-open runner forever.
+    """
+    pct = int(policy.take_profit * 100)
+    return f"take_profit_full_+{pct}%" if full else f"take_profit_+{pct}%"
+
+
+def is_partial_trim(reason) -> bool:
+    """True when a ledger exit_reason denotes a PARTIAL scale-out.
+
+    Single source of truth for the distinction — see ``take_profit_reason``.
+    """
+    text = str(reason or "")
+    return text.startswith("take_profit") and not text.startswith("take_profit_full")
 
 
 def _apply_trim_to_size(st: dict, route: str, sold_qty) -> None:
@@ -319,15 +521,20 @@ def build_mixed_plan(
     verbose: bool = True,
     module: str | None = None,
     ledger_root: str | None = None,
+    underlying_fn: Callable[..., tuple] | None = None,
 ) -> MixedPlan:
     """Manage held positions + route new entries into one mixed option/share plan.
 
     `module`/`ledger_root` are only needed to settle exits that were accepted but
     never filled on a previous run (see mark_exit_unconfirmed). Without them the
     positions still resolve correctly; only the ledger row is skipped.
+
+    `underlying_fn(ticker, at=None) -> (close, atr)` supplies the basis for the
+    underlying-referenced option stop; it defaults to the shared 4H bar cache.
     """
     out = MixedPlan()
     sa = signal_audits or {}
+    ufn = underlying_fn or underlying_basis
 
     def _sell_audit(tkr, sym, qty, route):
         if route == "equity":
@@ -421,8 +628,39 @@ def build_mixed_plan(
             st["unrealized_gain"] = float(gain)
         if gain is not None:  # ratchet the peak so the trailing stop has a reference
             st["peak_gain"] = max(st.get("peak_gain", gain), gain)
+        # Underlying basis for the option stop. `u_entry`/`u_atr` are snapshotted
+        # at entry and never re-read afterward — re-deriving them each pass would
+        # let the stop drift with the price it is supposed to be anchored to.
+        # Positions opened before this rule existed are backfilled ONCE from the
+        # 4H bar at their own entry_bar, so the basis is still the one that was
+        # true at entry rather than today's.
+        u_entry = u_atr = u_now = None
+        if route == "option" and policy.underlying_stop_atr:
+            u_entry, u_atr = st.get("u_entry"), st.get("u_atr")
+            if u_entry is None or u_atr is None:
+                # Backfill ONLY against a recorded entry_bar. Falling through to
+                # `at=None` here would anchor the stop at TODAY's price, quietly
+                # re-basing a losing position to zero drawdown and creating a
+                # stop that can never fire. No entry_bar => no basis => the
+                # premium stop stands.
+                entry_bar = st.get("entry_bar")
+                u_entry, u_atr = ufn(tkr, entry_bar) if entry_bar else (None, None)
+                if u_entry is not None:
+                    st["u_entry"], st["u_atr"] = float(u_entry), float(u_atr)
+                    st["u_basis_source"] = "backfilled_from_entry_bar"
+                    logger.info("build_mixed_plan: backfilled underlying basis for %s "
+                                "(entry %.4f, ATR %.4f from %s)", tkr, u_entry, u_atr,
+                                st.get("entry_bar"))
+                else:
+                    logger.warning("build_mixed_plan: no underlying basis for %s (%s) — "
+                                   "option keeps the premium stop this pass", tkr, sym)
+            u_now, _ = ufn(tkr)
+            if u_now is not None:
+                st["u_last"] = float(u_now)
         action, reason = exit_action(gain, st["runs_held"], st["bars_out"], st.get("trimmed", False),
-                                     policy, peak_gain=st.get("peak_gain"))
+                                     policy, peak_gain=st.get("peak_gain"), route=route,
+                                     u_entry=u_entry, u_now=u_now, u_atr=u_atr,
+                                     dte=_option_dte(st.get("expiry"), bar))
         # An option exit is only as good as the mark that triggered it. Get a
         # second opinion before trading on it, and only for names already headed
         # for the door — see _corroborate_option_exit_mark for the AAOI case.
@@ -433,7 +671,9 @@ def build_mixed_plan(
                 new_gain, new_mark = corrected
                 new_action, new_reason = exit_action(
                     new_gain, st["runs_held"], st["bars_out"], st.get("trimmed", False),
-                    policy, peak_gain=st.get("peak_gain"))
+                    policy, peak_gain=st.get("peak_gain"), route=route,
+                    u_entry=u_entry, u_now=u_now, u_atr=u_atr,
+                    dte=_option_dte(st.get("expiry"), bar))
                 stale = {"symbol": sym, "broker_mark": float(info["current"]),
                          "quote_mid": new_mark, "broker_gain": gain,
                          "quote_gain": new_gain, "was": reason or action,
@@ -459,7 +699,17 @@ def build_mixed_plan(
             out.exit_context[sym] = (tkr, dict(st))
             continue
         if action == "trim":
-            q = int(math.floor(policy.scale_frac * held))
+            q = trim_quantity(policy.scale_frac, held)
+            if q >= held:
+                # Indivisible position (1 contract) or a scale_frac of 1.0: take
+                # the profit in full rather than booking nothing. Emitted as a
+                # real exit — distinct reason, exit_context set, dropped from
+                # new_managed — so no phantom "still open" position survives.
+                full_reason = take_profit_reason(policy, full=True)
+                out.plan.append((sym, "sell", held, full_reason, route))
+                out.order_audits[sym] = _sell_audit(tkr, sym, held, route)
+                out.exit_context[sym] = (tkr, dict(st))
+                continue
             if q >= 1:
                 out.plan.append((sym, "sell", q, reason, route))
                 out.order_audits[sym] = _sell_audit(tkr, sym, q, route)
@@ -531,10 +781,17 @@ def build_mixed_plan(
                 mid_price=order.get("mid"), delta=order.get("delta"),
                 dte=_option_dte(order.get("expiry"), bar), expiration=order.get("expiry"),
             )
+            # Anchor the underlying stop at entry. `px` is the same reference
+            # price the contract was selected against, so the stop is measured
+            # from the price the decision was actually made at.
+            u_px, u_atr_new = ufn(t)
             out.new_managed[t] = {"route": "option", "occ": occ, "contracts": contracts,
                                   "runs_held": 0, "bars_out": 0, "trimmed": False, "entry_bar": str(bar),
                                   "expiry": order.get("expiry"), "signal_audit": sa.get(t),
-                                  "order_audit": out.order_audits[occ]}
+                                  "order_audit": out.order_audits[occ],
+                                  "u_entry": float(px) if px else u_px,
+                                  "u_atr": u_atr_new,
+                                  "u_basis_source": "entry"}
             if verbose:
                 # Never format a possibly-None field bare. `_select_atm_option`
                 # deliberately falls back to the strike band when an expiry has
@@ -1550,7 +1807,24 @@ def submit_pending_exit_orders(client, module, *, equity_tif_fn, pos_lookup=None
         except Exception as exc:  # noqa: BLE001
             skipped.append({**rec, "skip": f"submit_failed: {exc}"})
             print(f"  FAIL deferred-exit sell {qty} {sym}: {exc}")
-    out.write_text(json.dumps({"updated": now_utc_iso(), "entries": [],
+    # An exit that FAILED to submit is still an open risk decision, so it stays
+    # queued for the next flush. Clearing the queue unconditionally is what lost
+    # meta_ranker's INDI sell on 2026-08-18: the submit raised on a dead
+    # nervous-system Postgres, the queue was wiped, and 1,475 shares stayed in
+    # the book with no pending exit and no retry. "not_held" and "zero_qty" ARE
+    # terminal — the position is already gone, so there is nothing left to sell.
+    retained = []
+    for rec in skipped:
+        if not str(rec.get("skip", "")).startswith("submit_failed"):
+            continue
+        kept_rec = {key: value for key, value in rec.items() if key != "skip"}
+        kept_rec["last_skip"] = str(rec.get("skip", ""))[:300]
+        kept_rec["attempts"] = int(rec.get("attempts", 0) or 0) + 1
+        retained.append(kept_rec)
+    if retained:
+        logger.warning("%s pending-exit: %d exit(s) failed to submit and stay queued: %s",
+                       module, len(retained), [r.get("order_symbol") for r in retained])
+    out.write_text(json.dumps({"updated": now_utc_iso(), "entries": retained,
                                "last_flush": {"submitted": submitted, "skipped": skipped}},
                               default=str, indent=1))
     return {"submitted": submitted, "skipped": skipped, "count": len(submitted)}
@@ -1568,29 +1842,41 @@ def _managed_key_for_symbol(new_managed: dict | None, sym: str) -> str | None:
 
 
 def defer_entries_if_market_closed(module, bar, plan, new_managed, limits, *,
-                                   now=None, ledger_root: str | None = None) -> list:
+                                   now=None, ledger_root: str | None = None,
+                                   force: bool = False,
+                                   reason: str = "market closed") -> list:
     """When the US equity market is CLOSED, pull ENTRY orders out of the plan into a
     per-module pending-open queue (they'd be rejected after hours) and prune them
     from new_managed (nothing was placed). Exits stay in the plan. Returns the plan
     to submit now — unchanged when the market is open or `module` is unset.
+
+    ``force`` queues regardless of the calendar, for a caller that has already
+    established the orders cannot be submitted on this pass for some other
+    reason — an unreachable governed path, say. Queueing is what turns "we
+    cannot submit right now" into a retry instead of a lost plan.
     """
     if not module:
         return plan
-    try:
-        from core.calendar import is_market_open_now
-        if is_market_open_now(now):
-            return plan
-    except Exception:  # noqa: BLE001
-        # Fail closed for entries. "I could not tell whether the market is
-        # open" is not "the market is open"; treating it as open fires
-        # after-hours entries that will be rejected, and does so silently.
-        # Exits keep going below -- an unreadable calendar must never trap a
-        # position.
-        logger.warning(
-            "%s: market calendar unavailable — deferring entries, exits still go",
-            module,
-        )
+    if force:
+        pass
+    else:
+        try:
+            from core.calendar import is_market_open_now
+            if is_market_open_now(now):
+                return plan
+        except Exception:  # noqa: BLE001
+            # Fail closed for entries. "I could not tell whether the market is
+            # open" is not "the market is open"; treating it as open fires
+            # after-hours entries that will be rejected, and does so silently.
+            # Exits keep going below -- an unreadable calendar must never trap a
+            # position.
+            logger.warning(
+                "%s: market calendar unavailable — deferring entries, exits still go",
+                module,
+            )
     import json
+    # The loop below binds `reason` per item, so hold the caller's label here.
+    defer_reason = reason
     kept, deferred = [], []
     for item in plan:
         sym = item[0]
@@ -1617,12 +1903,53 @@ def defer_entries_if_market_closed(module, bar, plan, new_managed, limits, *,
             except Exception:
                 by_sym = {}
         for e in deferred:
+            # Dedup on the TICKER, not the contract. Keying on order_symbol let
+            # one name accumulate a row per expiry cycle — HTF held both
+            # LPTH260821C00015000 (08-14 bar) and LPTH260918C00015000 (08-17
+            # bar) at once, two rows expressing the same one idea. The newest
+            # decision for a ticker supersedes any older one.
+            tkr_e = e.get("ticker")
+            if tkr_e:
+                for old_sym, old_e in list(by_sym.items()):
+                    if old_e.get("ticker") == tkr_e and old_sym != e["order_symbol"]:
+                        logger.info(
+                            "%s: superseding queued entry %s with newer %s for %s",
+                            module, old_sym, e["order_symbol"], tkr_e,
+                        )
+                        by_sym.pop(old_sym, None)
             by_sym[e["order_symbol"]] = e  # newest wins
         out.write_text(json.dumps({"updated": now_utc_iso(), "entries": list(by_sym.values())},
                                   default=str, indent=1))
-        logger.info("%s: market closed — deferred %d entries to next open -> %s",
-                    module, len(deferred), out)
+        logger.info("%s: %s — deferred %d entries to next open -> %s",
+                    module, defer_reason, len(deferred), out)
     return kept
+
+
+def pending_entry_bar_is_stale(bar, *, now=None) -> bool:
+    """True when a queued entry's decision bar predates the last trading session.
+
+    A deferred entry gets exactly one pre-open flush. If it is still queued the
+    session after that, the 4H bar it was ranked on is two or more sessions old
+    and acting on it is trading a stale signal. 2026-08-18 found
+    LPTH260821C00015000 still queued from the 08-14 bar — an option expiring that
+    same week, re-submitted every morning because a silent submit failure is not
+    a terminal skip. Unparseable or missing bars are NOT treated as stale: the
+    queue is the only record that a decision is waiting, and a parse bug must not
+    silently discard orders.
+    """
+    try:
+        stamp = pd.Timestamp(str(bar))
+        if stamp is pd.NaT:
+            return False
+        bar_date = stamp.date()
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        from core.calendar import prev_trading_day
+        today = (now or datetime.now(timezone.utc)).date()
+        return bar_date < prev_trading_day(today)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
@@ -1657,6 +1984,14 @@ def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
             skipped.append({**rec, "skip": "no_longer_top_k"}); continue
         if pos_lookup.get(sym, {}).get("qty", 0) > 0:
             skipped.append({**rec, "skip": "already_held"}); continue
+        if pending_entry_bar_is_stale(rec.get("bar")):
+            logger.warning(
+                "%s pending-open: EXPIRED %s %s x%s from bar %s — decision is "
+                "older than the last session, dropping (attempts=%s, last_skip=%s)",
+                module, rec.get("side"), sym, rec.get("qty"), rec.get("bar"),
+                rec.get("attempts", 0), rec.get("last_skip", "none"),
+            )
+            skipped.append({**rec, "skip": "stale_bar"}); continue
         eligible.append(rec)
 
     readiness_plan = [
@@ -1702,18 +2037,32 @@ def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
             if tkr and rec.get("managed"):
                 submitted[tkr] = dict(rec["managed"])
         except Exception as exc:  # noqa: BLE001
+            # A retained entry retries every morning, so a failure that is never
+            # logged loops forever invisibly. The deferred-EXIT flush has always
+            # printed its failures; this path did not, which is why 2026-08-18
+            # could not say why LPTH had been re-queued since 08-14.
+            logger.error("%s pending-open: FAILED %s %s x%s: %s",
+                         module, rec.get("side"), sym, rec.get("qty"), exc)
+            print(f"  FAIL pending-open {rec.get('side')} {rec.get('qty')} {sym}: {exc}")
             skipped.append({**rec, "skip": f"submit_failed:{exc}"})
 
     # A retained entry is never silently deleted: the queue is the only record
     # that a decision is still waiting. Only entries that were submitted, or
-    # that are genuinely finished (the rank they depended on is gone, or the
-    # position is already held), leave the queue.
-    terminal_skips = ("no_longer_top_k", "already_held")
-    retained = [
-        {key: value for key, value in rec.items() if key != "skip"}
-        for rec in skipped
-        if not str(rec.get("skip", "")).startswith(terminal_skips)
-    ]
+    # that are genuinely finished (the rank they depended on is gone, the
+    # position is already held, or the decision bar has aged out), leave the
+    # queue.
+    terminal_skips = ("no_longer_top_k", "already_held", "stale_bar")
+    retained = []
+    for rec in skipped:
+        if str(rec.get("skip", "")).startswith(terminal_skips):
+            continue
+        # Carry the reason forward instead of stripping it. Without this the
+        # requeued record is indistinguishable from a fresh one and the queue
+        # file holds no evidence of why it is still there.
+        kept_rec = {key: value for key, value in rec.items() if key != "skip"}
+        kept_rec["last_skip"] = str(rec.get("skip", ""))[:300]
+        kept_rec["attempts"] = int(rec.get("attempts", 0) or 0) + 1
+        retained.append(kept_rec)
     try:
         if retained:
             out.write_text(

@@ -47,9 +47,15 @@ from core.live_signal_audit import (
     build_signal_audit,
 )
 from core.nervous_system.contracts.enums import PolicyMode
-from signals.meta_context.meta_ranker.gateway_execution import build_router
+from signals.meta_context.meta_ranker.gateway_execution import (
+    GovernedPathUnavailable,
+    build_router,
+)
 from signals.meta_context.meta_ranker.nervous_system_adapter import MetaIntentConfig
 from signals.meta_context.meta_ranker.score import score_frame
+from signals.meta_context.meta_ranker.ticker_state_publication import (
+    publish_ticker_states,
+)
 from core.live_4h_exec import (
     ExecPolicy,
     build_mixed_plan,
@@ -579,6 +585,32 @@ def main() -> int:
           f"(sell {int(args.scale_frac*100)}%)  horizon {args.horizon_bars}b  grace {args.grace_bars}b")
     print(f"managed held: {sorted(managed)}")
 
+    # Publish this bar's TICKER states BEFORE anything can submit. `policy.rule.
+    # snapshot` requires one per name and `policy.rule.liquidity` reads its
+    # dollar_volume_20d metric, so without this every governed submission is
+    # refused for want of state — which is what happened on 2026-08-20/21.
+    #
+    # Held names are published alongside today's targets on purpose: the
+    # liquidity and snapshot rules gate EXITS too (broker_vetoes carries
+    # applies_to_risk_reducing=True), so publishing only the top-K would leave
+    # every exit vetoed while entries went through.
+    if args.submit:
+        publishable = sorted(set(targets) | {str(t).upper() for t in managed})
+        pub = publish_ticker_states(
+            ranking_result.scored,
+            tickers=publishable,
+            decision_bar=bar.to_pydatetime() if hasattr(bar, "to_pydatetime") else bar,
+            matrix_path=Path(args.matrix),
+        )
+        print(f"ticker states: {pub['status']} published={pub['published']}/{len(publishable)}")
+        skipped_states = pub.get("skipped") or {}
+        if skipped_states:
+            # Named, not counted: a name with no state will be refused by the
+            # governed path, and "which names" is the first question that asks.
+            preview = sorted(skipped_states)[:10]
+            print(f"  no ticker state for {len(skipped_states)}: {preview}"
+                  f"{' ...' if len(skipped_states) > len(preview) else ''}")
+
     # Pre-open flush: submit after-close-queued entries still in TODAY's top-K
     # (re-rank against the freshly-scored `targets`), then exit — no position mgmt.
     if getattr(args, "flush_pending_open", False):
@@ -785,14 +817,42 @@ def _execute(
             print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
         if plan:
             print("\nsubmitting through the governed path...")
-            _submit_via_gateway(
-                args, plan, state, new_managed, bar, is_option=is_option,
-                limits=limits, exit_context=exit_context, module=module,
-                pos_lookup=pos_lookup, client=client,
-                contract_selection=contract_selection,
-                meta_scores=meta_scores or {},
-                reference_prices=reference_prices or {},
-            )
+            try:
+                _submit_via_gateway(
+                    args, plan, state, new_managed, bar, is_option=is_option,
+                    limits=limits, exit_context=exit_context, module=module,
+                    pos_lookup=pos_lookup, client=client,
+                    contract_selection=contract_selection,
+                    meta_scores=meta_scores or {},
+                    reference_prices=reference_prices or {},
+                )
+            except GovernedPathUnavailable as exc:
+                # An unreachable governed path means "cannot submit now", never
+                # "lose the plan". On 2026-08-20 at 14:20 ET a refused Postgres
+                # connection propagated out of the gateway as SystemExit and
+                # took the process down mid-_execute, so the audit append, the
+                # managed-state save and the deferral files below all never
+                # ran: a 9-order plan vanished without leaving a single record
+                # that it had ever existed. Queue it instead, and let the
+                # pre-open flush retry against a governed path that is up.
+                #
+                # No direct-broker fallback: that is precisely the bypass the
+                # cutover to the governed path removed.
+                logger.error(
+                    "%s: governed path unavailable (%s) — queueing %d order(s) "
+                    "for the next flush instead of submitting",
+                    module, type(exc).__name__, len(plan),
+                )
+                print(f"\n  GOVERNED PATH UNAVAILABLE: queueing {len(plan)} order(s) "
+                      f"for the next flush — nothing was submitted")
+                plan = defer_entries_if_market_closed(
+                    module, bar, plan, new_managed, limits,
+                    force=True, reason="governed path unavailable",
+                )
+                plan = defer_exits_if_opg_unavailable(
+                    module, bar, plan, limits,
+                    new_managed=new_managed, exit_context=exit_context,
+                )
         state["managed"] = new_managed
         _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits, contract_selection, dropped)
         if plan:
@@ -833,6 +893,46 @@ def governed_submitter(args, *, bar, module: str = AUDIT_MODULE,
     router = build_router(intent_config=intent_config(args))
     decision_bar = bar.to_pydatetime() if hasattr(bar, "to_pydatetime") else bar
     scores = dict(scores_by_ticker or {})
+    quote_client: list = []  # lazily built; the flush may never need a quote
+
+    def _entry_quote(symbol: str, ticker: str | None) -> tuple[Any, str]:
+        """Observe the market for one option we are about to BUY.
+
+        An opening option order is refused without a quote
+        (``NO_OPTION_QUOTE_FOR_ENTRY``) because opening risk we cannot price is
+        never acceptable. This submitter used to pass an empty quote map, so the
+        refusal was unconditional: *every* option entry in the pre-open flush was
+        rejected regardless of the market. On 2026-08-19 that silently discarded
+        four queued Meta entries (P, CRDO, DUOT, SMTC) which had nothing wrong
+        with them. Exits are untouched — they are allowed to go unquoted.
+        """
+        from signals.meta_context.meta_ranker.nervous_system_adapter import underlying_for
+        from signals.meta_context.meta_ranker.options_exec import (
+            _latest_quote,
+            _option_quote,
+        )
+
+        if not quote_client:
+            from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+
+            quote_client.append(AlpacaOptionsClient())
+        observed, why = _latest_quote(quote_client[0], symbol)
+        if observed is None:
+            return None, why
+        bid, ask, quote_at = observed
+        try:
+            return _option_quote(
+                symbol,
+                underlying=str(ticker or "").upper() or underlying_for(symbol),
+                bid=bid,
+                ask=ask,
+                quote_at=quote_at,
+                delta=None,
+                open_interest=None,
+                volume=None,
+            ), "ok"
+        except Exception as exc:  # noqa: BLE001 - an undescribable contract is a skip
+            return None, f"invalid_quote({exc.__class__.__name__})"
 
     def _submit(*, symbol, side, qty, route, limit=None,
                 reason: str | None = None, full_exit: bool = False,
@@ -840,6 +940,14 @@ def governed_submitter(args, *, bar, module: str = AUDIT_MODULE,
         # `full_exit` is how the engine tells a close from a trim; the adapter
         # reads it off exit_context membership, so an unnamed sell would be
         # recorded as an ADJUSTMENT even when it closed the position.
+        quotes_by_symbol: dict = {}
+        quote_failures: dict = {}
+        if str(route) == "option" and str(side).lower() == "buy":
+            quote, why = _entry_quote(symbol, ticker)
+            if quote is not None:
+                quotes_by_symbol[symbol] = quote
+            else:
+                quote_failures[symbol] = why
         rows = router.route(
             [(symbol, side, qty, reason or "pending_open", route)],
             exit_context={symbol: (None, None)} if full_exit else {},
@@ -852,12 +960,16 @@ def governed_submitter(args, *, bar, module: str = AUDIT_MODULE,
             position_keys={symbol: f"paper:{symbol}"},
             policy_mode=PolicyMode.ENFORCE,
             submit=True,
-            quotes_by_symbol={},
-            quote_failures={},
+            quotes_by_symbol=quotes_by_symbol,
+            quote_failures=quote_failures,
         )
         row = rows[0]
         if row.refusal is not None or not row.submitted:
             detail = row.refusal.value if row.refusal is not None else "not submitted"
+            # Name the rules that refused, so the log says why rather than only
+            # that something did.
+            if getattr(row, "policy_vetoes", ()):
+                detail = f"{detail} ({', '.join(row.policy_vetoes)})"
             raise RuntimeError(f"governed path refused {side} {qty} {symbol}: {detail}")
         result = getattr(row.outcome, "execution_result", None)
         return {"id": getattr(result, "broker_order_id", None) or "?"}
@@ -896,6 +1008,8 @@ def _submit_via_gateway(
         symbol = row.symbol
         if row.refusal is not None or not row.submitted:
             detail = row.refusal.value if row.refusal is not None else "not submitted"
+            if getattr(row, "policy_vetoes", ()):
+                detail = f"{detail} ({', '.join(row.policy_vetoes)})"
             print(f"  REFUSED {row.side} {row.quantity} {symbol}: {detail}")
             if symbol in exit_context:
                 ticker, previous = exit_context[symbol]

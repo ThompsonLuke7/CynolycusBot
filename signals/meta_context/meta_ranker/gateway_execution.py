@@ -371,13 +371,26 @@ class MetaGatewayRouter:
             ticker = ticker_by_symbol.get(row[0]) or underlying_for(row[0])
             if ticker in snapshots:
                 continue
-            snapshots[ticker] = self._snapshots.build(
-                strategy_id=self._intent_config.strategy_id,
-                entity_id=ticker,
-                decision_time=now,
-                decision_bar=decision_bar,
-                profile=self._profile,
-            )
+            try:
+                snapshots[ticker] = self._snapshots.build(
+                    strategy_id=self._intent_config.strategy_id,
+                    entity_id=ticker,
+                    decision_time=now,
+                    decision_bar=decision_bar,
+                    profile=self._profile,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Snapshots are built for the WHOLE plan before the per-row loop
+                # starts, so an infrastructure fault here takes out every row and
+                # `on_row` — which exists so a crash mid-plan cannot leave a
+                # filled position missing from on-disk state — never fires at
+                # all. Re-raise as the one exception the runner is written to
+                # contain, so it queues the plan rather than dying with it. A
+                # state store that is down is an availability failure, not a bug
+                # in this row.
+                raise GovernedPathUnavailable(
+                    f"context snapshot unavailable for {ticker}: {type(exc).__name__}"
+                ) from exc
         return snapshots
 
     def _route_one(

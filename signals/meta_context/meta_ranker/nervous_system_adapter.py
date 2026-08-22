@@ -150,6 +150,12 @@ _NON_METRIC_FIELDS = frozenset(
         "meta_good",
         "meta_upside",
         "trade_quality",
+        # A label, despite the name: build_meta_ranker_matrix groups it with the
+        # forward columns (_mom_label_cols, label_cols) and trade_quality is
+        # literally W_ALPHA*fwd_max_alpha + W_PERSIST*trend_persistence. It does
+        # not carry an `fwd_` prefix, so _HINDSIGHT_PREFIXES does not catch it
+        # and it would otherwise be published into decision-time evidence.
+        "trend_persistence",
     }
 )
 _HINDSIGHT_PREFIXES = (
