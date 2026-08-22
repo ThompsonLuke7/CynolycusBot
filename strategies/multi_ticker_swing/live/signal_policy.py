@@ -31,7 +31,19 @@ class SignalPolicyConfig:
     min_bucket_avg_return: float = 0.0
     max_contracts_per_trade: int = 1
     max_option_breakeven_to_expected_move: float = 2.0
-    max_entry_spread_pct_mid: float = 0.18
+    # Measured over 492 filled option entries in UI/swing_audit (2026-05..08):
+    # the median quoted spread is 12.1% of mid and 63% of entries exceed 10%, so
+    # an 18% gate kept 87% of entries and avoided $1,809 of $22,025 in
+    # cumulative fill-versus-mid slippage — it was very nearly inert. Slippage is
+    # superlinear in the spread, concentrated in a wide-spread tail: mean $45 per
+    # entry against a median of $7, worst single entry $437. Modelled over the
+    # same sample, this gate keeps 49% of entries and avoids $15,000 (68%) of the
+    # slippage. 10% would avoid 81% but keep only 37%.
+    #
+    # Unlike a ladder change, the effect does not depend on fill-engine fidelity:
+    # a contract that is never bought cannot cost its spread, whether the fills
+    # are simulated or real.
+    max_entry_spread_pct_mid: float = 0.12
 
 
 @dataclass(frozen=True)

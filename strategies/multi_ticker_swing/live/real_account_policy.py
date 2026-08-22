@@ -28,7 +28,11 @@ class RealAccountPolicyConfig:
     max_open_premium: float = 700.0
     min_account_equity: float = 500.0
     min_cash_after_entry: float = 250.0
-    max_spread_pct_mid: float = 0.18
+    # Kept in step with signal_policy.max_entry_spread_pct_mid, which is the
+    # gate that is actually live (this policy is off by default:
+    # MULTITICKER_REAL_ACCOUNT_POLICY). A real account should never be laxer
+    # about crossing a spread than the paper one is.
+    max_spread_pct_mid: float = 0.12
     max_abs_theta: float = 20.0
     min_abs_delta: float = 0.35
     max_abs_delta: float = 0.65
