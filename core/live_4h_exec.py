@@ -728,11 +728,29 @@ def build_mixed_plan(
     if verbose:
         print("\n--- order routing (options if optionable, else shares; delta 0.35-0.60) ---")
     entry_ok = entry_ok or {}
+    exited_today = _tickers_exited_this_session(module, bar, ledger_root=ledger_root)
     for t in targets:
         if t in out.new_managed:
             continue
         if entry_ok and not entry_ok.get(t, False):
             out.contract_selection[t] = {"action": "skip", "reason": gate_reason, "signal_audit": sa.get(t)}
+            continue
+        # A name this module exited earlier in the same session is not a fresh
+        # idea. On 2026-08-21 the risk pass stopped HTF out of
+        # CRDO260918C00250000 at 13:50 for underlying_stop_-1.5atr (-43%,
+        # -$2,380) and the 14:25 4H run bought three contracts of the SAME
+        # contract at 17.00 — 7.6% above the stop fill, 35 minutes later. The
+        # stop rule and the ranking rule were not talking to each other. The
+        # signal is still recorded; only the re-entry is refused, and only for
+        # the rest of the session.
+        if t in exited_today:
+            out.contract_selection[t] = {
+                "action": "skip",
+                "reason": f"exited_this_session:{exited_today[t]}",
+                "signal_audit": sa.get(t),
+            }
+            if verbose:
+                print(f"  ! {t:<6} skip: exited this session ({exited_today[t]})")
             continue
         px = ref_price_fn(t)
         if not px or px <= 0:
@@ -1211,6 +1229,52 @@ def _now_et():
     from zoneinfo import ZoneInfo
 
     return datetime.now(ZoneInfo("America/New_York"))
+
+
+def _tickers_exited_this_session(module, bar, *, ledger_root: str | None = None) -> dict[str, str]:
+    """Tickers this module already closed during the decision bar's ET session.
+
+    Read from closed_trades.jsonl rather than from managed state, because the
+    exit that matters most here comes from live_risk_pass — a separate process
+    that closes a position between 4H runs, leaving no trace in the managed dict
+    the next run loads. Maps ticker -> exit_reason for the log line.
+
+    Failure is silent and empty: an unreadable ledger must not stop the module
+    from trading, only from knowing it already traded this name today.
+    """
+    if not module:
+        return {}
+    import json as _json
+
+    try:
+        path = Path(ledger_root or DEFAULT_LEDGER_ROOT) / str(module) / "closed_trades.jsonl"
+        if not path.exists():
+            return {}
+        session = pd.Timestamp(bar).tz_convert("UTC").tz_convert("America/New_York").date()
+    except Exception:  # noqa: BLE001
+        return {}
+
+    out: dict[str, str] = {}
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = _json.loads(line)
+                stamp = pd.Timestamp(row.get("ts"))
+                if stamp.tzinfo is None:
+                    stamp = stamp.tz_localize("UTC")
+                if stamp.tz_convert("America/New_York").date() != session:
+                    continue
+            except Exception:  # noqa: BLE001 - one unparseable row is not fatal
+                continue
+            ticker = str(row.get("ticker") or "").strip().upper()
+            if ticker:
+                out[ticker] = str(row.get("exit_reason") or "exit")
+    except Exception:  # noqa: BLE001
+        return {}
+    return out
 
 
 def _entry_limit_ladder(mid: float | None, ask: float | None,
