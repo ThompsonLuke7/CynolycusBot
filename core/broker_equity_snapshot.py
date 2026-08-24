@@ -48,6 +48,7 @@ _OPEN_ORDER_ERROR_CODES = {
     "UNSUPPORTED": "OPEN_ORDERS_READ_UNSUPPORTED",
 }
 _PORTFOLIO_PUBLICATION_ERROR = "PORTFOLIO_STATE_PUBLICATION_FAILED"
+_PORTFOLIO_STORE_UNAVAILABLE = "PORTFOLIO_STATE_STORE_UNAVAILABLE"
 
 
 def _json_scalar(value: Any) -> Any:
@@ -410,6 +411,83 @@ def snapshot_path(*, account_label: str, root: Path, now: datetime) -> Path:
     return root / f"broker_equity_{session}_{safe_label}.jsonl"
 
 
+# Alpaca prices an option position at the BID. Verified 2026-08-22 against live
+# quotes for all 12 open contracts: `current_price` matched the bid to within
+# two cents in 12 of 12 (SPGI 5.50 vs bid 5.48 / ask 8.75). Entries fill at or
+# above the mid, so every option position books the full bid-ask spread as an
+# unrealized loss the moment it opens, and on wide contracts that swamps the
+# move. On 2026-08-21 the eight fresh option positions marked -$8,582 at the bid
+# and -$4,304 at the mid, on a day when SPY closed -0.05% and SPGI's underlying
+# closed UP 0.25% while its 0.40-delta call showed -35%.
+#
+# The bid mark is kept — it is the honest liquidation value, and the exit ladder
+# does sell into the bid. The mid is recorded alongside it so the daily review
+# can stop attributing spread to performance, and so _implausible_mark_move has
+# a mark that does not jump by half a spread when liquidity thins.
+_OPTION_QUOTE_BATCH = 100
+
+
+def _option_quote_marks(client: Any, symbols: list[str]) -> dict[str, dict[str, float]]:
+    """Bid/ask/mid per option symbol. Never raises; missing quotes are omitted."""
+    marks: dict[str, dict[str, float]] = {}
+    for start in range(0, len(symbols), _OPTION_QUOTE_BATCH):
+        chunk = symbols[start : start + _OPTION_QUOTE_BATCH]
+        try:
+            response = client.get_option_quotes(symbols=",".join(chunk), limit=1)
+        except Exception:  # noqa: BLE001 - a quote outage must not cost the snapshot
+            continue
+        quotes = (response or {}).get("quotes") if isinstance(response, dict) else None
+        if not isinstance(quotes, dict):
+            continue
+        for symbol, value in quotes.items():
+            entry = value[-1] if isinstance(value, list) and value else value
+            if not isinstance(entry, dict):
+                continue
+            bid = _as_float(entry.get("bp") if "bp" in entry else entry.get("bid_price"))
+            ask = _as_float(entry.get("ap") if "ap" in entry else entry.get("ask_price"))
+            if bid is None or ask is None or bid <= 0.0 or ask <= 0.0 or ask < bid:
+                continue
+            mid = (bid + ask) / 2.0
+            marks[str(symbol)] = {
+                "bid": round(bid, 4),
+                "ask": round(ask, 4),
+                "mid_mark": round(mid, 4),
+                "spread_pct_mid": round((ask - bid) / mid, 6) if mid else None,
+            }
+    return marks
+
+
+def _apply_option_marks(record: dict[str, Any], marks: dict[str, dict[str, float]]) -> None:
+    """Attach mid marks to option rows and a portfolio-level bid-vs-mid total."""
+    understatement = 0.0
+    priced = 0
+    for row in record.get("positions", []):
+        if row.get("asset_class") != "us_option":
+            continue
+        quote = marks.get(row.get("symbol"))
+        if not quote:
+            continue
+        row.update(quote)
+        quantity = _as_float(row.get("qty"))
+        cost_basis = _as_float(row.get("cost_basis"))
+        if quantity is None:
+            continue
+        mid_value = quote["mid_mark"] * quantity * 100.0
+        row["mid_market_value"] = round(mid_value, 2)
+        if cost_basis is not None:
+            row["unrealized_pl_at_mid"] = round(mid_value - cost_basis, 2)
+        bid_value = _as_float(row.get("market_value"))
+        if bid_value is not None:
+            understatement += mid_value - bid_value
+            priced += 1
+    if priced:
+        # How far the account's own equity sits below a mid valuation, purely
+        # from where options are marked. Reported, never applied: the broker's
+        # equity figure stays the broker's.
+        record["option_bid_vs_mid_understatement"] = round(understatement, 2)
+        record["option_positions_priced_at_mid"] = priced
+
+
 def _position_record(position: dict[str, Any]) -> dict[str, Any]:
     out = {field: _json_scalar(position.get(field)) for field in _POSITION_FIELDS}
     market_value = _as_float(position.get("market_value"))
@@ -471,6 +549,15 @@ def capture_snapshot(
         "positions": [_position_record(position) for position in positions],
         **open_orders_evidence,
     }
+    option_symbols = sorted(
+        {
+            str(row.get("symbol"))
+            for row in record["positions"]
+            if row.get("asset_class") == "us_option" and row.get("symbol")
+        }
+    )
+    if option_symbols:
+        _apply_option_marks(record, _option_quote_marks(client, option_symbols))
     out = snapshot_path(account_label=account_label, root=root, now=captured)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("a", encoding="utf-8") as fh:
@@ -515,12 +602,78 @@ def capture_snapshot(
     return result
 
 
-def capture_from_env(*, env_file: str, account_label: str = "paper", root: Path = DEFAULT_ROOT) -> dict[str, Any]:
-    return capture_snapshot(
-        client=AlpacaOptionsClient(env_file=env_file),
-        account_label=account_label,
-        root=root,
-    )
+def capture_from_env(
+    *,
+    env_file: str,
+    account_label: str = "paper",
+    root: Path = DEFAULT_ROOT,
+    publish: bool = True,
+) -> dict[str, Any]:
+    """Capture a snapshot and publish the portfolio state the policy engine reads.
+
+    The local JSONL is the durable record and is written first, exactly as
+    before.  Publication is what was missing: ``capture_snapshot`` only stages a
+    ``PortfolioState`` when it is handed a unit of work, and this — the sole
+    production caller — never handed it one.  Nothing else writes that state, so
+    ``SnapshotBuilder`` always resolved ``portfolio_state=None`` and
+    ``policy.rule.broker`` vetoed every Meta order with
+    ``BROKER_PORTFOLIO_STATE_MISSING``.  That rule carries
+    ``applies_to_risk_reducing=True``, so it trapped exits as hard as entries
+    (AMLX and MRVL260821C00210000 sat queued from 2026-08-18 to 2026-08-19).
+
+    Publication failure never fails the capture: the JSONL is already on disk and
+    a missing state store must not cost us the mark record too.  The outcome is
+    reported in ``publication_status`` so the caller can log it.
+    """
+
+    client = AlpacaOptionsClient(env_file=env_file)
+    if not publish:
+        return capture_snapshot(client=client, account_label=account_label, root=root)
+
+    try:
+        from core.nervous_system.config.runtime import NervousSystemSettings
+        from core.nervous_system.persistence.database import (
+            create_database_engine,
+            create_session_factory,
+        )
+        from core.nervous_system.persistence.uow import UnitOfWork
+
+        # No argument: from_env() falls back to .env for names the process
+        # environment does not define. Passing os.environ explicitly opts OUT of
+        # that file read, which is why the server — which does not export the
+        # CYNOLYCUS_* names — failed with six "Field required" errors while a
+        # shell that had sourced .env worked fine.
+        settings = NervousSystemSettings.from_env()
+        session_factory = create_session_factory(create_database_engine(settings))
+    except Exception as exc:  # noqa: BLE001 - the mark record must still be kept
+        result = capture_snapshot(client=client, account_label=account_label, root=root)
+        result["publication_status"] = "FAILED"
+        result["publication_error"] = _PORTFOLIO_STORE_UNAVAILABLE
+        result["publication_exception_type"] = _safe_exception_type(exc)
+        return result
+
+    # `result` is captured outside the block so a failure opening the unit of
+    # work, or committing it, cannot cost us the local record — and so the
+    # fallback never appends a second JSONL line for the same capture.
+    result: dict[str, Any] | None = None
+    try:
+        with UnitOfWork(session_factory) as uow:
+            result = capture_snapshot(
+                client=client,
+                account_label=account_label,
+                root=root,
+                unit_of_work=uow,
+            )
+            if result.get("publication_status") == "STAGED":
+                uow.commit()
+                result["publication_status"] = "PUBLISHED"
+    except Exception as exc:  # noqa: BLE001 - the mark record must still be kept
+        if result is None:
+            result = capture_snapshot(client=client, account_label=account_label, root=root)
+        result["publication_status"] = "FAILED"
+        result.setdefault("publication_error", _PORTFOLIO_STORE_UNAVAILABLE)
+        result["publication_exception_type"] = _safe_exception_type(exc)
+    return result
 
 
 def main() -> None:
