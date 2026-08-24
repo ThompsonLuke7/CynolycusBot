@@ -19,6 +19,15 @@
 #
 # Logs go to signals/news/data/processed/nightly_cron.log
 #
+# STATUS / exit code: the wrapper's status is the FIRST failing stage that
+# something downstream actually depends on. Two stages are deliberately excluded
+# because a miss degrades rather than blocks — ticker discovery (the universe
+# simply does not gain names this run) and the earnings calendar (non-critical
+# to entry readiness). Both still log their own exit and a WARNING, so a
+# persistent failure stays greppable; they just do not turn an otherwise
+# complete nightly into a failed one, the way discovery's timeout did on
+# 2026-08-20.
+#
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -169,12 +178,26 @@ PYEOF
   #    Broad Alpaca market screen + catalyst-ledger discovery -> pending queue;
   #    releases names meeting the price/ADV/market-cap/history minimums and
   #    folds promoted tickers into shared_universe.csv.
+  #    NON-FATAL by design, like the market-regime stage in
+  #    nightly_data_readiness.sh: a night without discovery leaves the universe
+  #    exactly as it was, which every consumer already handles, whereas folding
+  #    it into STATUS fails the whole run for a stage nothing downstream waited
+  #    on. On 2026-08-20 it timed out at exit=124 and carried the wrapper to
+  #    "complete status=124" even though CBOE, dealer, FINRA, news, themes and
+  #    the earnings calendar had all since succeeded — which read as a failed
+  #    nightly and prompted a full manual re-run.
+  #
+  #    The timeout was also too tight to be a timeout: 3600s against runs that
+  #    took 49-62 minutes. 5400s leaves real headroom, and a stage that now
+  #    exceeds even that is genuinely stuck rather than merely slow.
   echo "[$(ts)] ticker discovery — broad screen + catalyst, promotion gate"
-  timeout --signal=TERM --kill-after=60s "${NIGHTLY_DISCOVERY_TIMEOUT_SECONDS:-3600}s" \
+  timeout --signal=TERM --kill-after=60s "${NIGHTLY_DISCOVERY_TIMEOUT_SECONDS:-5400}s" \
     "$PYTHON" -u -m scripts.nightly_ticker_discovery --rebuild-universe
   discovery_exit=$?
   echo "[$(ts)] ticker discovery exit=$discovery_exit"
-  [ "$discovery_exit" -ne 0 ] && STATUS="$discovery_exit"
+  if [ "$discovery_exit" -ne 0 ]; then
+    echo "[$(ts)] WARNING: ticker discovery failed (exit=$discovery_exit); continuing on the existing universe (non-fatal — no promotion this run)"
+  fi
 
   # 5) Catalyst news — collect headlines for the PRIORITY scope only (the names
   #    the live system actually trades/ranks: swing universe ∪ top-300 momentum).
@@ -264,6 +287,18 @@ PYEOF
   echo "[$(ts)] earnings calendar exit=$earnings_exit (non-critical to entry readiness)"
 
   echo "[$(ts)] nightly_market_data.sh complete status=$STATUS"
+
+  # 10) Completion stamp. The startup catch-up needs to know when this last
+  #     finished, and scraping the log for a phrase is not a contract. Written
+  #     last so it can only exist for a run that reached the end.
+  stamp_dir="$REPO_ROOT/Data/readiness"
+  mkdir -p "$stamp_dir"
+  printf '{\n  "completed_at_utc": "%s",\n  "job": "nightly_market_data",\n  "status": "%s",\n  "version": 1\n}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)" \
+    "$([ "$STATUS" -eq 0 ] && echo success || echo failed)" \
+    > "$stamp_dir/nightly_market_data_latest.json.tmp"
+  mv "$stamp_dir/nightly_market_data_latest.json.tmp" \
+     "$stamp_dir/nightly_market_data_latest.json"
 } >> "$LOG_FILE" 2>&1
 
 exit "$STATUS"
