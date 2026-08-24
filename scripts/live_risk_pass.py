@@ -127,8 +127,11 @@ def run_module(spec: ModuleSpec, *, client, pos_info: dict, cfg: RiskPassConfig,
             )
 
         # Only persist when this pass actually changed something. A read-only
-        # tick must not rewrite state the 4H runner owns.
-        if submit and (res.plan or res.settled):
+        # tick must not rewrite state the 4H runner owns. Clearing an entry's
+        # unconfirmed flag counts: it is the whole point of settling it here
+        # rather than waiting for the next 4H bar, and an in-place mutation that
+        # is never written back would settle nothing.
+        if submit and (res.plan or res.settled or res.confirmed_entries):
             state["managed"] = res.new_managed
             save_state(spec.state_path, state)
 
@@ -137,6 +140,7 @@ def run_module(spec: ModuleSpec, *, client, pos_info: dict, cfg: RiskPassConfig,
             "managed": len(managed),
             "orders": len(res.plan),
             "settled": len(res.settled),
+            "confirmed_entries": len(res.confirmed_entries),
             "anomalies": len(res.anomalies),
             "skipped_positions": len(res.skipped),
         }

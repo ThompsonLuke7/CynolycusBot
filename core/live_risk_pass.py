@@ -102,6 +102,9 @@ class RiskPlan:
     settled: dict[str, dict] = field(default_factory=dict)
     anomalies: dict[str, dict] = field(default_factory=dict)
     skipped: dict[str, str] = field(default_factory=dict)
+    # Entries the broker has now confirmed, so their unconfirmed flag was
+    # cleared. See the settle in evaluate_risk_exits.
+    confirmed_entries: dict[str, dict] = field(default_factory=dict)
 
 
 
@@ -209,6 +212,19 @@ def evaluate_risk_exits(
                     st.pop("exit_pending", None)
             out.new_managed[tkr] = st
             continue
+
+        # The broker reports the position, so an entry that execute_plan flagged
+        # unconfirmed has settled. mark_entry_unconfirmed is deliberate — an
+        # accepted-but-unfilled entry stays claimed rather than dropped, because
+        # a limit that fills later would otherwise become a position nobody owns
+        # (the 2026-07-23 IOT case) — but only build_mixed_plan ever cleared the
+        # flag, and for a 4H module "the next pass" can be twenty hours away.
+        # dealer_ranker's MRNA and NEM sat flagged from 08-20 15:52 to 08-21
+        # 15:52. This pass already reads broker positions every ~5 minutes, so
+        # it is the cheapest place to make the state honest.
+        if st.pop("pending_fill", None):
+            st.pop("entry_order_id", None)
+            out.confirmed_entries[tkr] = {"symbol": sym, "route": route, "qty": held}
 
         if isinstance(st.get("exit_pending"), dict):
             # An exit order is already resting against this position. Submitting
