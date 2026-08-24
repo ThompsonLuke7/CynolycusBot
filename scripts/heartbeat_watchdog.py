@@ -19,6 +19,15 @@ but only *after* it has seen at least one fresh write since startup (so it never
 nags when you simply haven't started the server, or on a market holiday when the
 server idles).
 
+Separately, and at ANY hour, it alerts when a `combined_server` it has already
+seen running disappears. The RTH gate is right for a hung-but-alive server —
+that only costs anything while the market is open — but a process that stops
+outside RTH takes whatever it was running down with it. On 2026-08-20 the server
+went quiet at 22:43 ET with no exit code, no OOM signature and no alert; the
+22:15 data-readiness job died with it, its catch-up then lost the heavy-job lock
+race, and Meta skipped five live entries the next afternoon on a stale readiness
+stamp. "It was running and now it is not" needs no market-hours qualifier.
+
 Alerts go to: this log (always), a Windows toast via powershell.exe (best-effort
 under WSL), and an optional webhook (LIVE_ALERT_WEBHOOK, e.g. Slack/Discord).
 Alerts are de-duplicated by ALERT_COOLDOWN so you get one ping, not a flood.
@@ -154,13 +163,38 @@ def main() -> int:
         f"webhook={'set' if WEBHOOK else 'off'}")
     seen_fresh_today: str | None = None  # date string we last saw a fresh write
     last_alert_ts = 0.0
+    # Has this watchdog ever seen the server process alive? Only then can its
+    # absence mean "it stopped" rather than "it was never started".
+    seen_server_running = False
+    last_disappeared_alert_ts = 0.0
 
     while True:
         now = datetime.now(ET)
         today = now.strftime("%Y-%m-%d")
+
+        # A server that WAS running and now is not has stopped, and that is worth
+        # knowing at any hour — the RTH gate below only makes sense for the
+        # hung-but-alive case. On 2026-08-20 the combined_server's last log line
+        # was 22:43:21 ET with no exit code, no OOM signature and no alert; the
+        # supervisor started a fresh instance at 23:45. Outside RTH, so nothing
+        # fired. The cost landed the next morning: the 22:15 data-readiness job
+        # died with it, its catch-up lost the heavy-job lock race, and Meta's
+        # 14:20 run skipped five live entries on a stale stamp.
+        running_now = server_running()
+        if running_now:
+            seen_server_running = True
+        elif seen_server_running:
+            if time.time() - last_disappeared_alert_ts >= ALERT_COOLDOWN:
+                alert(f"combined_server DISAPPEARED at {now:%Y-%m-%d %H:%M} ET "
+                      f"(it was running earlier in this watchdog session). "
+                      f"Check for a silent stop; anything it was running died with it.")
+                last_disappeared_alert_ts = time.time()
+            # Re-arm: a supervised relaunch should alert again if it stops again.
+            seen_server_running = False
+
         if in_rth(now):
             age = freshest_write_age_secs()
-            running = server_running()
+            running = running_now
             if age is not None and age <= STALE_MIN * 60:
                 seen_fresh_today = today  # server is clearly alive today
 
