@@ -103,6 +103,7 @@ DEFAULT_PORT_AMETHYST = 8772
 DEFAULT_PORT_DEALER_RANKER = 8773
 DEFAULT_PORT_INTRADAY_STRUCTURE = 8774
 DEFAULT_PORT_LIBRARY = 8775
+DEFAULT_PORT_TRADES = 8776
 
 # State book used by the swing real-account (LIVE) policy.
 _SWING_LIVE_BOOK = "Data/inference/multi_ticker_swing/real_account_book_live.json"
@@ -164,7 +165,7 @@ def _run_nightly_jobs() -> None:
     logger.info("Nightly jobs: finished (exit=%s)", result.returncode)
 
 
-def _run_data_readiness(*, catch_up: bool = False) -> None:
+def _run_data_readiness(*, catch_up: bool = False) -> bool:
     """Refresh the shared bars + HTF features + Meta matrix so HTF Swing,
     Momentum, and Meta Ranker all wake up caught up to the same state.
 
@@ -177,6 +178,10 @@ def _run_data_readiness(*, catch_up: bool = False) -> None:
     stamp the readiness gate rejects every entry order, so the modules trade
     nothing at all, and a heavy job during the session is strictly better than
     another dark day. The memory guard still applies.
+
+    Returns True when the script actually ran. False means a guard refused it —
+    contention or memory — which is transient, so a catch-up caller should retry
+    rather than accept a stale stamp for the whole session.
     """
     import os
     import shutil
@@ -188,7 +193,8 @@ def _run_data_readiness(*, catch_up: bool = False) -> None:
     bash = shutil.which("bash")
     if bash is None:
         logger.error("Data readiness: 'bash' not found on PATH — cannot run %s.", script)
-        return
+        # Not transient: retrying will not conjure a shell.
+        return True
     with heavy_job_guard(
         "combined-server-data-readiness",
         block_live_window=not catch_up,
@@ -197,7 +203,7 @@ def _run_data_readiness(*, catch_up: bool = False) -> None:
     ) as guard:
         if not guard.ok:
             logger.warning("Data readiness: skipped (%s)", guard.reason)
-            return
+            return False
         env = dict(os.environ)
         if catch_up:
             # The script has the same live-window guard; lift it for the repair.
@@ -205,6 +211,57 @@ def _run_data_readiness(*, catch_up: bool = False) -> None:
         logger.info("Data readiness: launching %s%s", script, " (stale-stamp catch-up)" if catch_up else "")
         result = subprocess.run([bash, str(script)], cwd=str(repo_root), env=env)
         logger.info("Data readiness: finished (exit=%s)", result.returncode)
+    # Outside the guard: the stamp the run just wrote is what gets published.
+    _publish_readiness_state()
+    return True
+
+
+def _publish_readiness_state() -> str:
+    """Publish the readiness observation the policy engine reads.
+
+    Same gap as the portfolio state: ``adapt_readiness_status`` exists and is
+    tested, and nothing ever called it, so ``SnapshotBuilder`` resolved
+    ``readiness_state=None`` and ``policy.rule.readiness`` vetoed every Meta
+    entry with ``READINESS_STATE_MISSING``. This does not decide anything —
+    ``core.live_readiness.readiness_status`` remains the authority on whether
+    entries are authorized — it only records that verdict where the policy
+    engine can see it.
+
+    Returns a short status string for logging. Never raises: a publication
+    failure must not take down whatever called it.
+    """
+
+    from datetime import datetime as _dt, timezone as _tz
+
+    try:
+        from core.live_readiness import DEFAULT_MAX_AGE_HOURS, readiness_status
+        from core.nervous_system.config.runtime import NervousSystemSettings
+        from core.nervous_system.context.readiness_adapter import adapt_readiness_status
+        from core.nervous_system.persistence.database import (
+            create_database_engine,
+            create_session_factory,
+        )
+        from core.nervous_system.persistence.uow import UnitOfWork
+
+        ok, reason, payload = readiness_status()
+        state = adapt_readiness_status(
+            ready=ok,
+            reason=reason,
+            payload=payload or {},
+            checked_at=_dt.now(_tz.utc),
+            max_age_hours=DEFAULT_MAX_AGE_HOURS,
+        )
+        # No argument, so .env backs any name the process does not export.
+        settings = NervousSystemSettings.from_env()
+        session_factory = create_session_factory(create_database_engine(settings))
+        with UnitOfWork(session_factory) as uow:
+            uow.states.insert_states_idempotently((state,))
+            uow.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Readiness state: NOT published (%s: %s)", type(exc).__name__, exc)
+        return "FAILED"
+    logger.info("Readiness state: published (ready=%s, %s)", ok, reason)
+    return "PUBLISHED"
 
 
 def _run_startup_queue(*, env_file: str, account_label: str) -> None:
@@ -236,6 +293,109 @@ def _run_startup_queue(*, env_file: str, account_label: str) -> None:
         logger.error("Startup queue: drain failed (%s)", exc)
 
 
+NIGHTLY_STAMP_PATH = Path(__file__).resolve().parents[1] / "Data/readiness/nightly_market_data_latest.json"
+
+
+def _nightly_needs_catch_up(
+    *,
+    now_et: "datetime",
+    nightly_time: str,
+    within_hours: float,
+) -> tuple[bool, str]:
+    """Should a starting server run the nightly it already missed?
+
+    Two conditions, both required:
+
+    1. The stamp does not prove a run after the most recent scheduled slot that
+       has already passed. ``NightlyScheduler`` computes its next fire from
+       "now", so a slot missed while the process was dead is simply skipped —
+       it is never made up.
+    2. The next session open is close enough that the gap will actually be
+       traded on. Restarting mid-morning must not kick off a heavy collection
+       during the session; restarting in the evening must.
+
+    Returns ``(needed, reason)`` so the caller can log why either way.
+    """
+
+    import json as _json
+    from datetime import datetime as _dt, time as _t, timedelta as _td
+
+    from core.calendar import is_trading_day, next_trading_day
+    from UI.nightly_scheduler import parse_hhmm
+
+    try:
+        hour, minute = parse_hhmm(nightly_time)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"invalid nightly time {nightly_time!r} ({exc})"
+
+    slot_today = now_et.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    last_slot = slot_today if slot_today <= now_et else slot_today - _td(days=1)
+
+    try:
+        payload = _json.loads(NIGHTLY_STAMP_PATH.read_text())
+        completed = _dt.fromisoformat(
+            str(payload.get("completed_at_utc")).replace("Z", "+00:00")
+        ).astimezone(now_et.tzinfo)
+        ok_status = payload.get("status") == "success"
+    except Exception:
+        completed, ok_status = None, False
+
+    if completed is not None and ok_status and completed >= last_slot:
+        return False, f"nightly already ran at {completed:%Y-%m-%d %H:%M} ET"
+
+    # Before today's open on a trading day the relevant session is today's;
+    # `next_trading_day` would skip to tomorrow and make a 06:00 restart look
+    # 27 hours early. After the open it is genuinely the next session.
+    open_time = _t(9, 30)
+    if is_trading_day(now_et.date()) and now_et.time() < open_time:
+        target_date = now_et.date()
+    else:
+        target_date = next_trading_day(now_et.date())
+    target_open = _dt.combine(target_date, open_time, tzinfo=now_et.tzinfo)
+    hours_to_open = (target_open - now_et).total_seconds() / 3600.0
+    if hours_to_open > within_hours:
+        return False, (
+            f"next open is {hours_to_open:.1f}h away (> {within_hours:.1f}h) — "
+            "leaving the nightly to its schedule"
+        )
+    stamp_desc = (
+        "no completion stamp" if completed is None
+        else f"last completed {completed:%Y-%m-%d %H:%M} ET"
+        + ("" if ok_status else " (failed)")
+    )
+    return True, (
+        f"{stamp_desc}, missed the {nightly_time} ET slot, "
+        f"open in {hours_to_open:.1f}h"
+    )
+
+
+def _nightly_startup_check(*, nightly_time: str, within_hours: float) -> None:
+    """Run the missed nightly at boot when the next session would trade on it.
+
+    On 2026-08-19 the server died at 14:10 ET and stayed down. Nothing ran the
+    16:45 nightly, and a restart that evening would have armed the scheduler for
+    the *following* day — so 08-20 would have opened on news, catalyst, dealer
+    and discovery data a full day stale, with nothing to notice.
+    """
+
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    now_et = _dt.now(ZoneInfo("America/New_York"))
+    try:
+        needed, reason = _nightly_needs_catch_up(
+            now_et=now_et, nightly_time=nightly_time, within_hours=within_hours
+        )
+    except Exception as exc:  # noqa: BLE001 - never let this block boot
+        logger.warning("Nightly startup check failed (%s) — not running catch-up", exc)
+        return
+    if not needed:
+        logger.info("Nightly startup check: no catch-up needed (%s)", reason)
+        return
+    logger.warning("Nightly startup check: running catch-up now (%s)", reason)
+    _run_nightly_jobs()
+
+
 def _data_readiness_startup_check() -> None:
     """Run readiness at boot only when the stamp will not authorize entries.
 
@@ -244,18 +404,89 @@ def _data_readiness_startup_check() -> None:
     whole session with a stale stamp and silently places no entry orders at all.
     """
     try:
+        from datetime import datetime as _dt, time as _time
+        from zoneinfo import ZoneInfo
+
         from core.live_readiness import readiness_status
 
-        ok, reason, _payload = readiness_status()
+        # A server booting outside the session is booting FOR the next session,
+        # so ask the question that session will ask. Asking "is the stamp good
+        # right now?" passes all evening — prev_trading_day is still today — and
+        # then the stamp is stale at tomorrow's open with nothing left to
+        # re-check it, because the 22:15 slot has already gone by. That is the
+        # same gap `for_next_session` was added to close for the 22:15 job
+        # (see core/live_readiness.py). It is what would have left 2026-08-20
+        # trading on 08-18 bars after the 08-19 14:10 ET crash.
+        now_et = _dt.now(ZoneInfo("America/New_York"))
+        outside_session = not (_time(9, 30) <= now_et.time() <= _time(16, 0))
+        ok, reason, _payload = readiness_status(for_next_session=outside_session)
+        if outside_session:
+            reason = f"{reason} [checked for next session]"
     except Exception as exc:  # noqa: BLE001
         logger.warning("Data readiness: startup check failed (%s) — running catch-up", exc)
         ok, reason = False, str(exc)
 
     if ok:
-        logger.info("Data readiness: stamp is current at startup — no catch-up needed")
+        logger.info("Data readiness: stamp is current at startup (%s) — no catch-up needed", reason)
+        # Current is still a verdict the policy engine needs on record.
+        _publish_readiness_state()
         return
     logger.warning("Data readiness: stamp will NOT authorize entries (%s) — running catch-up now", reason)
-    _run_data_readiness(catch_up=True)
+    _run_data_readiness_with_retry(catch_up=True)
+
+
+# A catch-up competes with the nightly job for the heavy-job lock, and losing
+# that race is transient — the other job finishes. Giving up after one attempt
+# is what cost 2026-08-21: the 08-20 22:15 readiness run was killed by the 23:45
+# restart, the restart's own catch-up was refused with "another heavy data job is
+# already running" (the 23:45 nightly rerun held the lock), nothing retried, and
+# Meta's 14:20 ET run then skipped 5 live entries on a stale stamp.
+_READINESS_RETRY_INTERVAL_S = 600.0
+_READINESS_RETRY_DEADLINE_S = 6 * 3600.0
+
+
+def _run_data_readiness_with_retry(
+    *, catch_up: bool = False,
+    interval_s: float = _READINESS_RETRY_INTERVAL_S,
+    deadline_s: float = _READINESS_RETRY_DEADLINE_S,
+    sleep_fn=None,
+    runner=None,
+    monotonic_fn=None,
+) -> bool:
+    """Run readiness, retrying while the only thing stopping it is contention.
+
+    Returns True once a run actually executed. Bounded by ``deadline_s`` so a
+    permanently-held lock cannot leave a thread spinning until the process dies.
+
+    ``monotonic_fn`` travels with ``sleep_fn`` and is not decoration: the
+    deadline is measured against the clock, so a caller that stubs sleeping
+    without also advancing the clock gets an infinite loop. Injecting both keeps
+    that pairing explicit instead of leaving it as a trap.
+    """
+    import time as _time
+
+    sleep_fn = sleep_fn or _time.sleep
+    monotonic_fn = monotonic_fn or _time.monotonic
+    runner = runner or _run_data_readiness
+    started = monotonic_fn()
+    attempt = 0
+    while True:
+        attempt += 1
+        if runner(catch_up=catch_up):
+            return True
+        elapsed = monotonic_fn() - started
+        if elapsed + interval_s > deadline_s:
+            logger.error(
+                "Data readiness: catch-up never ran after %d attempt(s) over %.0f min — "
+                "entries will be blocked until the next scheduled slot",
+                attempt, elapsed / 60.0,
+            )
+            return False
+        logger.warning(
+            "Data readiness: catch-up blocked (attempt %d) — retrying in %.0f min",
+            attempt, interval_s / 60.0,
+        )
+        sleep_fn(interval_s)
 
 
 def _run_broker_equity_snapshot(*, env_file: str, account_label: str) -> None:
@@ -267,10 +498,21 @@ def _run_broker_equity_snapshot(*, env_file: str, account_label: str) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.error("Broker equity snapshot (%s) failed: %s", account_label, exc, exc_info=True)
         return
+    status = result.get("publication_status", "NOT_ATTEMPTED")
     logger.info(
-        "Broker equity snapshot (%s): positions=%d -> %s",
-        account_label, result["position_count"], result["path"],
+        "Broker equity snapshot (%s): positions=%d publication=%s -> %s",
+        account_label, result["position_count"], status, result["path"],
     )
+    if status != "PUBLISHED":
+        # The policy engine reads this state; without it every Meta order is
+        # vetoed BROKER_PORTFOLIO_STATE_MISSING, exits included.
+        logger.error(
+            "Broker equity snapshot (%s): portfolio state NOT published (%s/%s) — "
+            "the Meta governed path will veto exits until this succeeds",
+            account_label,
+            result.get("publication_error", "unknown"),
+            result.get("publication_exception_type", "-"),
+        )
 
 
 def _run_shadow_tracker() -> None:
@@ -553,6 +795,11 @@ def run_combined(
     data_readiness_time: str | None = None,
     data_readiness_on_start: bool = False,
     data_readiness_startup_check: bool = True,
+    broker_snapshot_on_start: bool = True,
+    # Hours before the next session open within which a starting server will run
+    # a nightly it missed. ~14h covers any restart from the prior evening
+    # through the open, while keeping a mid-session restart out of scope.
+    nightly_catch_up_hours: float = 14.0,
     startup_queue_enabled: bool = True,
     startup_queue_account: str = "paper",
     # Market-hours re-drain slots (ET). The boot drain alone cannot fire a
@@ -575,6 +822,8 @@ def run_combined(
     port_intraday_structure: int = DEFAULT_PORT_INTRADAY_STRUCTURE,
     port_library: int = DEFAULT_PORT_LIBRARY,
     library_enabled: bool = True,
+    port_trades: int = DEFAULT_PORT_TRADES,
+    trades_enabled: bool = True,
     intraday_structure_enabled: bool = True,
     intraday_structure_config: str = "strategies/intraday_structure/config/intraday_structure_v1.json",
     meta_ranker_times: str = "14:20,16:20",
@@ -622,6 +871,8 @@ def run_combined(
         dashboard_ports["intraday_structure"] = port_intraday_structure
     if library_enabled:
         dashboard_ports["library"] = port_library
+    if trades_enabled:
+        dashboard_ports["trades"] = port_trades
     _assert_ports_free(host, dashboard_ports)
 
     # ------------------------------------------------------------------
@@ -828,6 +1079,19 @@ def run_combined(
                          name="library-http").start()
         logger.info("Library dashboard:       http://%s:%d", host, port_library)
 
+    # Trade library (port 8776) — read-only review of the closed_trades ledgers
+    # drawn on the underlying's own bars. No broker, no orders; it only reads
+    # Data/inference/*/closed_trades.jsonl, the modules' live state, and the
+    # shared bar cache, so it is safe to run beside a live session.
+    trades_server = None
+    if trades_enabled:
+        from UI.trade_library_dashboard import make_server as _make_trades_server
+
+        trades_server = _make_trades_server(host, port_trades)
+        threading.Thread(target=trades_server.serve_forever, daemon=True,
+                         name="trade-library-http").start()
+        logger.info("Trade library:           http://%s:%d", host, port_trades)
+
     # ------------------------------------------------------------------
     # 4g. Hub / overview dashboard (port 8764) — links + status + start-all
     # ------------------------------------------------------------------
@@ -841,6 +1105,7 @@ def run_combined(
         port_dealer_ranker=port_dealer_ranker,
         port_intraday_structure=port_intraday_structure if intraday_structure_enabled else None,
         port_library=port_library if library_enabled else None,
+        port_trades=port_trades if trades_enabled else None,
     )
     hub_server = _make_hub_server(host, port_hub, hub_app)
     hub_thread = threading.Thread(target=hub_server.serve_forever, daemon=True, name="hub-http")
@@ -862,6 +1127,8 @@ def run_combined(
         print(f"  Intraday Structure:      http://{host}:{port_intraday_structure}  (paper-only)")
     if library_enabled:
         print(f"  Library (news search):   http://{host}:{port_library}  (read-only)")
+    if trades_enabled:
+        print(f"  Trade library:           http://{host}:{port_trades}  (read-only)")
     print(f"  Shared stream:           {len(all_symbols)} symbols")
     print("  Orders default to the PAPER account; LIVE toggle is OFF by default.")
     print("  Press Ctrl+C to stop.")
@@ -900,6 +1167,23 @@ def run_combined(
             nightly_scheduler.start()
             logger.info("Nightly jobs scheduled daily at %s America/New_York (weekdays)", nightly_time)
             print(f"  Nightly jobs:            daily {nightly_time} ET (bounded collection/enrichment)")
+            # The scheduler only ever looks forward, so a slot missed while the
+            # process was down is lost. Make it up when the next session would
+            # otherwise trade on stale collection.
+            if nightly_catch_up_hours > 0:
+                threading.Thread(
+                    target=_nightly_startup_check,
+                    kwargs={
+                        "nightly_time": nightly_time,
+                        "within_hours": nightly_catch_up_hours,
+                    },
+                    daemon=True,
+                    name="nightly-startup-check",
+                ).start()
+                print(
+                    "  Nightly catch-up:        on startup if missed and open "
+                    f"< {nightly_catch_up_hours:g}h away"
+                )
 
     # ------------------------------------------------------------------
     # 5a1. Optional data-readiness on startup. Default is OFF: live startup should
@@ -1167,6 +1451,31 @@ def run_combined(
         tag=dealer_ranker_tag,
     )
 
+    # ------------------------------------------------------------------
+    # 5a1a0. Publish a portfolio state at boot.
+    #
+    #        The policy engine resolves portfolio state from the nervous-system
+    #        store, and the only writer is the broker snapshot at 16:05/20:05 ET.
+    #        A server that starts outside those slots therefore runs with
+    #        portfolio_state=None, and `policy.rule.broker` — one of only two
+    #        hard rules that still apply to risk-reducing orders — vetoes every
+    #        Meta order with BROKER_PORTFOLIO_STATE_MISSING. Exits included.
+    #
+    #        That is what trapped AMLX and MRVL260821C00210000 across the
+    #        2026-08-18 and 2026-08-19 pre-open flushes: the 09:35 flush runs
+    #        long before the first snapshot slot of the day. Capturing here
+    #        makes a restart self-healing, which matters most after a crash —
+    #        exactly when the scheduled slots were missed.
+    # ------------------------------------------------------------------
+    if broker_snapshot_on_start:
+        threading.Thread(
+            target=_run_broker_equity_snapshot,
+            kwargs={"env_file": meta_env, "account_label": "paper"},
+            daemon=True,
+            name="broker-snapshot-startup",
+        ).start()
+        print("  Portfolio state:         publishing at startup (read-only capture)")
+
     # Capture exact broker marks shortly after the regular and extended-session
     # closes.  This is read-only and deliberately independent of signal/order
     # paths, so reporting remains available even when entry readiness is stale.
@@ -1296,6 +1605,8 @@ def run_combined(
         structure_server.shutdown()
     if library_server is not None:
         library_server.shutdown()
+    if trades_server is not None:
+        trades_server.shutdown()
     if meta_server is not None:
         meta_server.shutdown()
 
@@ -1480,6 +1791,8 @@ def main() -> None:
                         help="Port for the Dealer Ranker dashboard (default 8773).")
     parser.add_argument("--port-intraday-structure", type=int, default=DEFAULT_PORT_INTRADAY_STRUCTURE,
                         help="Port for the Intraday Structure dashboard (default 8774).")
+    parser.add_argument("--port-trades", type=int, default=DEFAULT_PORT_TRADES,
+                        help="Port for the read-only trade library dashboard.")
     parser.add_argument("--port-library", type=int, default=DEFAULT_PORT_LIBRARY,
                         help="Port for the Library news/catalyst search dashboard (default 8775).")
     parser.add_argument(
@@ -1565,6 +1878,7 @@ def main() -> None:
         port_intraday_structure=args.port_intraday_structure,
         port_library=args.port_library,
         library_enabled=bool(args.library),
+        port_trades=args.port_trades,
         intraday_structure_enabled=bool(args.intraday_structure),
         intraday_structure_config=args.intraday_structure_config,
         meta_ranker_times=args.meta_ranker_times,
