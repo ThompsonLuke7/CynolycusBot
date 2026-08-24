@@ -9,7 +9,9 @@ port. **B** is the largest recurring money leak. **C** is hardening.
 
 ---
 
-## STATUS — updated 2026-08-22 02:00 ET (branch `fix/nervous-system-state-publication`)
+## STATUS — updated 2026-08-24 00:15 ET (branch `fix/nervous-system-state-publication`)
+
+Every item in the plan is implemented. 14 commits.
 
 | Item | State | Commit |
 |---|---|---|
@@ -19,12 +21,22 @@ port. **B** is the largest recurring money leak. **C** is hardening.
 | A4 optional-state veto | **done** | 59ac69d |
 | A5 outage containment | **done** | 8a60402 |
 | A6 end-to-end DB test | **done** (8 tests) | c9794e8 |
+| A7 exit-queue hygiene + audit of the decision | **done** | bcd767b |
+| B2 ladder dwell + cap (configurable, default off) | **done** | bb7bbcd |
 | B3 spread gate 18% -> 12% | **done** | 2052fce |
-| B4 mid marks in the snapshot | not started | — |
-| B2 ladder dwell + cap | not started, needs live fills | — |
-| C1-C6 | not started | — |
-| A7 stale exit queue / attempt ceiling / audit-of-plan | not started | — |
+| B4 option mid marks | **done** | 5c4a589 |
+| C1 readiness catch-up retry | **done** | 9ee63b4 |
+| C2 nightly discovery non-fatal | **done** | bf98bd0 |
+| C3 silent-stop alert | **done** | 1c15f56 |
+| C4 same-session re-entry cooldown | **done** | d776439 |
+| C5 settle unconfirmed entries in the risk pass | **done** | 8ad8fb1 |
+| C6 no second contract on an unconfirmed entry | **done** | ea20289 |
 | GCP port | blocked on 3 clean sessions | — |
+
+Full suite: **2758 passed**, 119 skipped. The only 7 failures are an untracked
+`test_out_of_core_combine.py` left in the working tree by the stashed
+`gcp-migration` work; it tests a `_flush_combine_buffer` that does not exist on
+this branch. Deal with that stash before merging.
 
 **A fifth blocker was found during implementation and fixed:** `build_router`
 constructed `SnapshotBuilder` with the default `SnapshotEntityScope`, whose
