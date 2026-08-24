@@ -82,3 +82,60 @@ def test_entry_is_refused_for_a_name_exited_this_session(tmp_path):
     )
     # The cooldown is per name, not a halt: a different name still routes.
     assert any(sym.startswith("ENHA") for sym in bought)
+
+
+def test_no_second_contract_while_an_unconfirmed_entry_may_still_fill(tmp_path):
+    """momentum, 2026-08-21. ALM260918C00017500 x24 was submitted from the 09:43
+    pre-open flush, never filled, and dropped not_found at 14:31 — and the same
+    run then bought ALM260918C00020000 x34. managed is keyed by ticker, so the
+    17.5 entry was overwritten in state while its order could still have been
+    resting at the broker. It cost nothing only because that order never filled.
+    """
+    def route_fn(client, ticker, px, **_k):
+        return "option", {"occ": f"{ticker}260918C00020000", "limit": 1.45,
+                          "mid": 1.40, "delta": 0.45, "strike": 20.0,
+                          "expiry": "2026-09-18", "open_interest": 4071,
+                          "volume": 300, "spread": 0.05}, "ok"
+
+    managed = {
+        "ALM": {"route": "option", "occ": "ALM260918C00017500", "contracts": 24,
+                "runs_held": 0, "bars_out": 0, "trimmed": False,
+                "pending_fill": True, "entry_order_id": "a3688ab8"},
+    }
+
+    out = build_mixed_plan(
+        client=None, targets=["ALM"], managed=managed,
+        pos_info={},                      # broker reports nothing: never filled
+        bar=BAR, signal_audits={}, policy=ExecPolicy(target_notional=5000.0),
+        route_fn=route_fn, ref_price_fn=lambda _t: 17.9,
+        verbose=False, module="momentum_expansion", ledger_root=str(tmp_path),
+    )
+
+    assert out.dropped["ALM"]["was_unconfirmed_entry"] is True
+    assert not any(row[1] == "buy" for row in out.plan)
+    assert out.contract_selection["ALM"]["reason"] == "unconfirmed_entry_may_still_fill"
+    assert out.contract_selection["ALM"]["prior_symbol"] == "ALM260918C00017500"
+
+
+def test_a_confirmed_flat_position_can_be_re_entered(tmp_path):
+    """Only an UNCONFIRMED entry blocks. A position the broker confirmed closed
+    leaves no working order behind, so the name is free to trade again."""
+    def route_fn(client, ticker, px, **_k):
+        return "option", {"occ": f"{ticker}260918C00020000", "limit": 1.45,
+                          "mid": 1.40, "delta": 0.45, "strike": 20.0,
+                          "expiry": "2026-09-18", "open_interest": 4071,
+                          "volume": 300, "spread": 0.05}, "ok"
+
+    managed = {
+        "ALM": {"route": "option", "occ": "ALM260918C00017500", "contracts": 24,
+                "runs_held": 3, "bars_out": 0, "trimmed": False},   # no pending_fill
+    }
+    out = build_mixed_plan(
+        client=None, targets=["ALM"], managed=managed,
+        pos_info={"ALM260918C00017500": {"qty": 0}},   # present and flat
+        bar=BAR, signal_audits={}, policy=ExecPolicy(target_notional=5000.0),
+        route_fn=route_fn, ref_price_fn=lambda _t: 17.9,
+        verbose=False, module="momentum_expansion", ledger_root=str(tmp_path),
+    )
+    assert out.dropped["ALM"]["status"] == "confirmed_flat"
+    assert any(row[1] == "buy" for row in out.plan)

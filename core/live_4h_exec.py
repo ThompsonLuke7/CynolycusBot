@@ -563,7 +563,8 @@ def build_mixed_plan(
             logger.warning("build_mixed_plan: dropping %s (%s) from managed — %s%s",
                            tkr, sym, status, " (pending exit settled)" if settled else "")
             out.dropped[tkr] = {"symbol": sym, "route": route, "status": status,
-                                "exit_settled": settled}
+                                "exit_settled": settled,
+                                "was_unconfirmed_entry": bool(st.get("pending_fill"))}
             continue
         # Still held with a resting exit order: the order did not fill and the
         # position is genuinely stuck. Clear the flag so the exit machine
@@ -751,6 +752,31 @@ def build_mixed_plan(
             }
             if verbose:
                 print(f"  ! {t:<6} skip: exited this session ({exited_today[t]})")
+            continue
+        # An entry we just dropped as unconfirmed may still be resting at the
+        # broker: the ladder deliberately leaves its last rung working, which is
+        # how CDE260828C00022000 filled hours after its 2026-08-20 run reported
+        # it unfilled. managed is keyed by TICKER, so routing a second contract
+        # for the same name now would overwrite the first in state and leave the
+        # earlier order to fill into a position nobody claims — the shape of the
+        # 2026-07-23 IOT incident. momentum did exactly this on 08-21: ALM
+        # 17.5C submitted at 09:43 and dropped not_found at 14:31, then ALM 20C
+        # bought minutes later. It cost nothing only because the first never
+        # filled. Skip the name for this pass; the next run re-decides with the
+        # broker's answer in hand.
+        dropped_unconfirmed = out.dropped.get(t, {})
+        if dropped_unconfirmed.get("was_unconfirmed_entry"):
+            out.contract_selection[t] = {
+                "action": "skip",
+                "reason": "unconfirmed_entry_may_still_fill",
+                "prior_symbol": dropped_unconfirmed.get("symbol"),
+                "signal_audit": sa.get(t),
+            }
+            logger.warning(
+                "build_mixed_plan: not re-entering %s this pass — its previous entry "
+                "%s was never confirmed and may still be resting at the broker",
+                t, dropped_unconfirmed.get("symbol"),
+            )
             continue
         px = ref_price_fn(t)
         if not px or px <= 0:
