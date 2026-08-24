@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import math
 import queue
 import threading
@@ -144,8 +145,39 @@ _HEARTBEAT_SECS = 60.0
 _BROKER_RECONCILE_SECS = 60.0
 _LOG_END = _time(16, 15)
 _ENTRY_ORDER_ATTEMPTS = 3
-_ENTRY_ORDER_VERIFY_TIMEOUT_SECS = 5.0
+
+
+def _entry_env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:  # noqa: BLE001 - a bad override must not stop trading
+        return default
+
+
+# How long a passive rung is given before it is cancelled and the ladder walks
+# up. Five seconds is not long enough for a market maker to come to a resting
+# order, so the ladder mechanically escalates: across 490 multi-rung ladders in
+# UI/swing_audit the mean fill sits 0.326 of the way from mid to ask, for
+# $22,025 of cumulative fill-versus-mid slippage and $10,749 of it in August
+# alone.
+#
+# DEFAULTS PRESERVE TODAY'S BEHAVIOUR ON PURPOSE. Whether a longer dwell
+# actually fills better cannot be established from this data: Alpaca paper fills
+# model something (HII filled 10.70 against a ladder of [9.99, 10.41, 10.84];
+# T filled 0.40 below its first rung of 0.41) but they are not evidence about
+# live market makers. Raise the dwell and lower the cap deliberately, then
+# measure BOTH slippage and the miss rate — the ladder already fails to fill
+# more often than it succeeds, so a change that only improves price is not
+# obviously a win.
+_ENTRY_ORDER_VERIFY_TIMEOUT_SECS = _entry_env_float(
+    "MULTITICKER_ENTRY_RUNG_DWELL_SECS", 5.0
+)
 _ENTRY_ORDER_VERIFY_POLL_SECS = 0.5
+# Fraction of the mid->ask distance the last rung is allowed to reach. 1.0 is
+# the ask, which is where the ladder tops out today.
+_ENTRY_LADDER_MAX_ASK_FRACTION = _entry_env_float(
+    "MULTITICKER_ENTRY_LADDER_MAX_ASK_FRACTION", 1.0
+)
 _OPTION_TICK = 0.01
 
 # Tickers that may be in the stream but are excluded from entry signals
@@ -2097,16 +2129,22 @@ def _entry_buy_limit_ladder(
         quote_meta["limit_prices"] = prices
         return prices, quote_meta
 
+    # The ladder tops out at mid + fraction*(ask-mid). At the default 1.0 that
+    # is the ask, exactly as before; below 1.0 the last rung rests short of the
+    # ask rather than crossing the whole spread, and an unfilled ladder simply
+    # leaves that rung working.
+    fraction = min(1.0, max(0.0, _ENTRY_LADDER_MAX_ASK_FRACTION))
+    top = mid + (ask - mid) * fraction
     prices: list[float] = []
-    distance = ask - mid
+    distance = top - mid
     for idx in range(count):
         raw = mid + distance * (idx / (count - 1))
         rounded = _round_option_limit(raw)
         if rounded not in prices:
             prices.append(rounded)
-    ask_limit = _round_option_limit(ask)
-    if prices[-1] != ask_limit:
-        prices.append(ask_limit)
+    top_limit = _round_option_limit(top)
+    if prices[-1] != top_limit:
+        prices.append(top_limit)
     logger.info(
         "entry buy limit ladder symbol=%s bid=%s mid=%.2f ask=%.2f limits=%s",
         symbol,
@@ -2343,10 +2381,20 @@ def _verify_entry_order(
 
 
 def _cancel_entry_order(client: AlpacaOptionsClient, *, order_id: str) -> None:
+    """Cancel one working entry order, and say so.
+
+    The cancel itself was already correct; it was silent, which is a different
+    problem. An unverified entry that walked its whole ladder logs a warning and
+    nothing after it, so the log reads as an order left working at the broker
+    when it was in fact cancelled a second later. Reviewing 2026-08-19 that
+    ambiguity had to be resolved by querying the broker for three order IDs.
+    """
     try:
         client.cancel_order(order_id)
     except Exception as exc:
         logger.warning("entry order cancel warning order_id=%s: %s", order_id, exc)
+    else:
+        logger.info("entry order cancel requested order_id=%s", order_id)
 
 
 def _response_float(resp: Any, key: str) -> float | None:

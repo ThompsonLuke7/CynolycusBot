@@ -14,6 +14,7 @@ has no per-module coupling.
 from __future__ import annotations
 
 import logging
+import os
 import math
 import re
 from dataclasses import dataclass, field
@@ -1218,6 +1219,14 @@ def submit_option_exit_with_ladder(client, *, symbol: str, qty, sleep_fn=None,
 
 _ENTRY_LADDER_ATTEMPTS = 3
 _ENTRY_LADDER_PAUSE_S = 2.0
+# Fraction of the mid->ask distance the last entry rung may reach. 1.0 is the
+# ask, which is where this ladder tops out today; below 1.0 the last rung rests
+# short of the ask instead of crossing the whole spread. Default preserves
+# existing behaviour — see _entry_limit_ladder for why this is not simply
+# lowered.
+_ENTRY_LADDER_MAX_ASK_FRACTION = float(
+    os.getenv("CYNOLYCUS_ENTRY_LADDER_MAX_ASK_FRACTION", "1.0") or 1.0
+)
 
 # A queued exit is never dropped for failing — it is an open risk decision, and
 # 2026-08-18 showed what dropping one costs (meta_ranker's INDI sell was wiped
@@ -1313,11 +1322,21 @@ def _entry_limit_ladder(mid: float | None, ask: float | None,
     mid, and for Dealer Ranker — whose contracts run 3x wider — +12.7% against a
     take-profit target of only +20%.
 
-    The ask is still the last rung, because the mid is not a fillable price on
-    these contracts: of 24 multi_ticker_swing option entries over 2026-08-12..14,
-    which already walk this ladder, ZERO filled at the mid rung, 12 filled at the
-    ask rung and 10 never filled at all. Starting at the mid buys roughly half
-    the crossing cost when it works and costs a missed entry when it does not.
+    CORRECTION (2026-08-23). This docstring used to argue that "the mid is not a
+    fillable price on these contracts", from 24 multi_ticker_swing entries over
+    2026-08-12..14 in which zero filled at the mid rung and 12 filled at the ask.
+    Over the full audit history — 490 multi-rung ladders — it is the other way
+    round: 22.0% fill at the MID rung, 76.9% at an intermediate rung, and 1.0%
+    at the ask. The three-day sample was too small to generalise from, and the
+    conclusion drawn from it has been steering this ladder toward the ask ever
+    since.
+
+    What remains true is that the per-rung dwell is short (see
+    _ENTRY_LADDER_PAUSE_S / _poll_order_filled: a few seconds), so a passive
+    rung gets little chance before the ladder escalates. Whether a longer dwell
+    fills better cannot be settled from paper fills; it needs live measurement.
+    _ENTRY_LADDER_MAX_ASK_FRACTION caps how far the last rung may reach, and
+    defaults to 1.0 — the ask, exactly as before.
     """
     if not ask or ask <= 0:
         return []
@@ -1326,15 +1345,17 @@ def _entry_limit_ladder(mid: float | None, ask: float | None,
     count = max(1, int(attempts))
     if count == 1 or math.isclose(mid, ask, rel_tol=0.0, abs_tol=1e-9):
         return [round(ask, 2)]
-    step = (ask - mid) / (count - 1)
+    fraction = min(1.0, max(0.0, _ENTRY_LADDER_MAX_ASK_FRACTION))
+    top = mid + (ask - mid) * fraction
+    step = (top - mid) / (count - 1)
     out: list[float] = []
     for idx in range(count):
         rung = round(mid + step * idx, 2)
         if rung > 0 and rung not in out:
             out.append(rung)
-    ask_rung = round(ask, 2)
-    if ask_rung not in out:
-        out.append(ask_rung)
+    top_rung = round(top, 2)
+    if top_rung > 0 and top_rung not in out:
+        out.append(top_rung)
     return out
 
 
