@@ -34,7 +34,15 @@ def _args(tmp_path):
 
 @pytest.fixture
 def isolated_ledger(tmp_path, monkeypatch):
-    """Point every pending-queue path at a temp dir."""
+    """Point every pending-queue path at a temp dir, and neutralise the
+    readiness gate.
+
+    The gate reads Data/readiness/latest_success.json from the repo root. That
+    file exists in a live working tree and does NOT exist in a fresh checkout,
+    so without this these tests passed locally and failed in any clean worktree
+    — every order was gated out before reaching the code under test, which is
+    deferral and audit behaviour, not readiness.
+    """
 
     monkeypatch.setattr(
         exec_mod, "pending_open_path",
@@ -43,6 +51,10 @@ def isolated_ledger(tmp_path, monkeypatch):
     monkeypatch.setattr(
         exec_mod, "pending_exit_path",
         lambda module, root=None: tmp_path / f"{module}_pending_exit.json",
+    )
+    monkeypatch.setattr(
+        lr, "filter_entry_orders_for_readiness",
+        lambda plan, **_kwargs: (plan, [], "readiness stubbed for this test"),
     )
     return tmp_path
 
