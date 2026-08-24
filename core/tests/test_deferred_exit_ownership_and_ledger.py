@@ -66,6 +66,11 @@ def _queue(tmp_path, module, entries):
 # --- 1. ownership ---------------------------------------------------------------
 
 _VSH = "VSH260821C00035000"
+# The real contract from the 2026-08-11 incident, kept verbatim so the fixture
+# still names what it documents. It has since expired, and the flush now refuses
+# to send an order for an expired contract, so every flush test below pins the
+# clock to the incident's session rather than swapping in a synthetic symbol.
+_VSH_SESSION = datetime(2026, 8, 11, 9, 35, tzinfo=_ET)
 
 
 def test_deferred_exit_restores_the_position_to_managed(monkeypatch, tmp_path):
@@ -143,7 +148,7 @@ def test_flush_writes_a_realized_pnl_row(tmp_path):
         pos_lookup={_VSH: {"qty": 19, "avg_entry": 2.00}},
         managed={"VSH": {"route": "option", "occ": _VSH, "runs_held": 4,
                          "entry_bar": "2026-08-04 14:00:00+00:00", "unrealized_gain": -0.42}},
-        ledger_root=str(tmp_path))
+        ledger_root=str(tmp_path), now=_VSH_SESSION)
     assert res["count"] == 1
     rows = _rows(tmp_path, "htf")
     assert len(rows) == 1
@@ -166,7 +171,7 @@ def test_flush_row_carries_the_overshoot_decomposition(tmp_path):
         _Client(fill=1.20), "htf", equity_tif_fn=lambda: "day",
         pos_lookup={_VSH: {"qty": 19, "avg_entry": 2.00}},
         managed={"VSH": {"route": "option", "occ": _VSH, "unrealized_gain": -0.42}},
-        ledger_root=str(tmp_path))
+        ledger_root=str(tmp_path), now=_VSH_SESSION)
     r = _rows(tmp_path, "htf")[0]
     assert r["decision_gain"] == -0.42          # where it was when we looked
     assert r["fill_gain"] == -0.40              # where it actually filled
@@ -179,7 +184,7 @@ def test_flush_provenance_is_null_without_managed_state(tmp_path):
                               "route": "option", "reason": "stop_-39%", "bar": "b"}])
     submit_pending_exit_orders(_Client(fill=1.20), "htf", equity_tif_fn=lambda: "day",
                                pos_lookup={_VSH: {"qty": 19, "avg_entry": 2.00}},
-                               ledger_root=str(tmp_path))
+                               ledger_root=str(tmp_path), now=_VSH_SESSION)
     r = _rows(tmp_path, "htf")[0]
     assert r["realized_pnl"] == (1.20 - 2.00) * 100 * 19
     assert r["entry_bar"] is None and r["runs_held"] is None and r["decision_gain"] is None

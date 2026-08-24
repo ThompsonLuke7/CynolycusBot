@@ -1175,6 +1175,43 @@ def submit_option_exit_with_ladder(client, *, symbol: str, qty, sleep_fn=None,
 _ENTRY_LADDER_ATTEMPTS = 3
 _ENTRY_LADDER_PAUSE_S = 2.0
 
+# A queued exit is never dropped for failing — it is an open risk decision, and
+# 2026-08-18 showed what dropping one costs (meta_ranker's INDI sell was wiped
+# from the queue on a dead Postgres and 1,475 shares sat with no exit and no
+# retry). But silence is its own failure: meta_ranker's AMLX take-profit trim
+# failed on 08-18, 08-20 and 08-21 with nothing louder than a WARNING listing
+# the symbol, against a position that was +$3,832 and wanted trimming. Past this
+# many attempts the queue says so at ERROR every flush.
+_PENDING_EXIT_MAX_ATTEMPTS = 3
+
+
+_OCC_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
+
+
+def parse_occ_expiry(symbol: str):
+    """Expiration date embedded in an OCC symbol, or None if it is not one.
+
+    Lives here rather than in live_risk_pass, which already imports from this
+    module: putting it the other way round would close an import cycle. That
+    module re-exports it, so its callers and tests are unaffected.
+    """
+    import datetime as _dt
+
+    match = _OCC_RE.match(str(symbol).strip().upper())
+    if not match:
+        return None
+    stamp = match.group(2)
+    try:
+        return _dt.date(2000 + int(stamp[:2]), int(stamp[2:4]), int(stamp[4:6]))
+    except ValueError:
+        return None
+
+
+def _now_et():
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("America/New_York"))
+
 
 def _entry_limit_ladder(mid: float | None, ask: float | None,
                         attempts: int = _ENTRY_LADDER_ATTEMPTS) -> list[float]:
@@ -1728,7 +1765,7 @@ def defer_exits_if_opg_unavailable(module, bar, plan, limits, *, now=None,
 def submit_pending_exit_orders(client, module, *, equity_tif_fn, pos_lookup=None,
                                ledger_root: str | None = None,
                                managed: dict | None = None,
-                               submit_fn=None) -> dict:
+                               submit_fn=None, now=None) -> dict:
     """Pre-open flush of queued exits. Skips anything no longer held. Clears the queue.
 
     Deliberately does NOT re-rank: an exit decision was already made on its own
@@ -1753,6 +1790,11 @@ def submit_pending_exit_orders(client, module, *, equity_tif_fn, pos_lookup=None
     the governed path, matching submit_pending_open_entries. A queued exit is
     still an order, so a module that has cut over must not reach the broker
     directly here just because the decision was made on an earlier bar.
+
+    ``now`` (ET) is injectable because the expiry check below is date-relative:
+    a test that pins a real historical contract would otherwise pass until that
+    contract's expiry and fail every day after, which is a property of the
+    calendar rather than of the code under test.
     """
     import json
     out = pending_exit_path(module, ledger_root)
@@ -1764,12 +1806,37 @@ def submit_pending_exit_orders(client, module, *, equity_tif_fn, pos_lookup=None
         entries = []
     pos_lookup = pos_lookup or {}
     submitted, skipped = [], []
+    today_et = (now or _now_et()).date()
     for rec in entries:
         sym = rec.get("order_symbol")
         held = pos_lookup.get(sym, {}).get("qty", 0)
         if held <= 0:
             skipped.append({**rec, "skip": "not_held"})
             continue
+        # An expired contract cannot be sold. Terminal like "not_held": retrying
+        # it every session forever is noise that buries the queue entries a human
+        # actually needs to see. The position, if the broker still reports one,
+        # is an expiry/assignment matter and not something an exit order fixes.
+        expiry = parse_occ_expiry(sym)
+        if expiry is not None and expiry < today_et:
+            logger.error(
+                "%s pending-exit: %s expired %s and is still queued (%d held) — "
+                "dropping the order; settle the position with the broker",
+                module, sym, expiry.isoformat(), held,
+            )
+            skipped.append({**rec, "skip": f"contract_expired:{expiry.isoformat()}"})
+            continue
+        attempts = int(rec.get("attempts", 0) or 0)
+        if attempts >= _PENDING_EXIT_MAX_ATTEMPTS:
+            # Still queued and still retried — dropping it would silently strand
+            # an open risk decision, which is the failure this queue exists to
+            # prevent. But it stops being background noise: after this many
+            # sessions the cause is not transient and needs a human.
+            logger.error(
+                "%s pending-exit: %s has failed %d times (last: %s) — a queued exit "
+                "that will not submit needs a human look",
+                module, sym, attempts, str(rec.get("last_skip", ""))[:160],
+            )
         qty = min(int(rec.get("qty") or 0), int(held))
         if qty <= 0:
             skipped.append({**rec, "skip": "zero_qty"})

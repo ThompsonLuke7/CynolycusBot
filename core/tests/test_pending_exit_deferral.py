@@ -204,16 +204,21 @@ def test_flush_submits_a_still_held_exit(tmp_path):
 
 
 def test_flush_routes_an_option_exit_through_the_option_endpoint(tmp_path):
-    """A queued option exit must not be sent as an equity market order."""
-    _queue(tmp_path, [{"order_symbol": "CLSK260821C00015000", "side": "sell", "qty": 43,
+    """A queued option exit must not be sent as an equity market order.
+
+    The contract carries a far-future expiry on purpose: this test is about
+    routing, and the original CLSK260821C00015000 fixture would now be dropped
+    by the expiry check before it ever reached the option endpoint.
+    """
+    _queue(tmp_path, [{"order_symbol": "CLSK991231C00015000", "side": "sell", "qty": 43,
                        "route": "option", "reason": "stop_-39%"}])
     c = _Client()
     res = submit_pending_exit_orders(c, "meta_ranker", equity_tif_fn=lambda: "day",
-                                     pos_lookup={"CLSK260821C00015000": {"qty": 43}},
+                                     pos_lookup={"CLSK991231C00015000": {"qty": 43}},
                                      ledger_root=str(tmp_path))
     assert res["count"] == 1
     assert c.sent == []  # never touched the equity path
-    assert c.option_orders[0][:3] == ("sell", "CLSK260821C00015000", 43)
+    assert c.option_orders[0][:3] == ("sell", "CLSK991231C00015000", 43)
 
 
 def test_flush_skips_a_position_already_gone(tmp_path):
@@ -250,3 +255,125 @@ def test_flush_with_no_queue_is_a_noop(tmp_path):
     res = submit_pending_exit_orders(_Client(), "meta_ranker", equity_tif_fn=lambda: "day",
                                      pos_lookup={}, ledger_root=str(tmp_path))
     assert res == {"submitted": [], "skipped": [], "count": 0}
+
+
+# --- a failed exit stays queued (2026-08-18) ----------------------------------
+#
+# The flush used to end with an unconditional `entries: []` write, so an exit
+# whose submit raised was erased along with the ones that went through. On
+# 2026-08-18 meta_ranker's deferred INDI sell failed on a dead nervous-system
+# Postgres at the 09:35 flush; the queue was cleared and 1,475 shares stayed in
+# the book with no pending exit and no retry. Entries retried forever while
+# exits got exactly one attempt — wrong in opposite directions.
+
+def test_a_failed_exit_stays_queued_for_the_next_flush(tmp_path):
+    client = _Client(reject={"INDI"})
+    q = tmp_path / "meta_ranker"
+    q.mkdir(parents=True)
+    (q / "pending_exit_orders.json").write_text(json.dumps({
+        "updated": "x",
+        "entries": [
+            {"order_symbol": "INDI", "side": "sell", "qty": 236, "route": "equity",
+             "reason": "stop_-39%", "bar": "2026-08-18 18:00"},
+            {"order_symbol": "OKAY", "side": "sell", "qty": 10, "route": "equity",
+             "reason": "stop_-39%", "bar": "2026-08-18 18:00"},
+        ],
+    }))
+
+    res = submit_pending_exit_orders(
+        client, "meta_ranker", equity_tif_fn=lambda: "day",
+        pos_lookup={"INDI": {"qty": 236, "avg_entry": 5.0},
+                    "OKAY": {"qty": 10, "avg_entry": 5.0}},
+        ledger_root=str(tmp_path),
+    )
+
+    assert res["count"] == 1, "the healthy exit still goes"
+    remaining = json.loads((q / "pending_exit_orders.json").read_text())["entries"]
+    assert [r["order_symbol"] for r in remaining] == ["INDI"]
+    assert remaining[0]["attempts"] == 1
+    assert "403" in remaining[0]["last_skip"]
+
+
+def test_a_position_that_is_already_gone_is_not_requeued(tmp_path):
+    """`not_held` is terminal — there is nothing left to sell, so retrying it
+    forever would be the pending-open bug in the other queue."""
+    client = _Client()
+    q = tmp_path / "meta_ranker"
+    q.mkdir(parents=True)
+    (q / "pending_exit_orders.json").write_text(json.dumps({
+        "updated": "x",
+        "entries": [{"order_symbol": "SOLD", "side": "sell", "qty": 5,
+                     "route": "equity", "reason": "stop_-39%", "bar": "b"}],
+    }))
+
+    submit_pending_exit_orders(
+        client, "meta_ranker", equity_tif_fn=lambda: "day",
+        pos_lookup={}, ledger_root=str(tmp_path),
+    )
+
+    assert json.loads((q / "pending_exit_orders.json").read_text())["entries"] == []
+
+
+# --- expiry and attempt ceiling ------------------------------------------------
+
+def test_flush_drops_an_expired_contract(tmp_path, caplog):
+    """An expired option cannot be sold, so the queue stops carrying it.
+
+    meta_ranker queued a 1-contract MRVL260821C00210000 take-profit on the
+    2026-08-20 18:00 UTC bar. The risk pass sold all 4 contracts on 08-21 for
+    expiring_before_closure, but the queue file was last written at 09:35 that
+    morning and still listed the row. Absent the position it is caught by
+    "not_held" — but a contract the broker still reports would otherwise be
+    retried every session forever against a symbol that no longer trades.
+    """
+    _queue(tmp_path, [{"order_symbol": "MRVL260821C00210000", "side": "sell", "qty": 1,
+                       "route": "option", "reason": "take_profit_+30%"}])
+    c = _Client()
+    res = submit_pending_exit_orders(
+        c, "meta_ranker", equity_tif_fn=lambda: "day",
+        pos_lookup={"MRVL260821C00210000": {"qty": 1}}, ledger_root=str(tmp_path),
+    )
+
+    assert res["count"] == 0
+    assert c.option_orders == []
+    assert res["skipped"][0]["skip"] == "contract_expired:2026-08-21"
+    # Terminal: it does not come back on the next flush.
+    q = json.loads((tmp_path / "meta_ranker" / "pending_exit_orders.json").read_text())
+    assert q["entries"] == []
+
+
+def test_flush_keeps_an_unexpired_contract(tmp_path):
+    """The expiry check must not eat a live contract."""
+    _queue(tmp_path, [{"order_symbol": "CLSK991231C00015000", "side": "sell", "qty": 5,
+                       "route": "option", "reason": "stop_-39%"}])
+    c = _Client()
+    res = submit_pending_exit_orders(
+        c, "meta_ranker", equity_tif_fn=lambda: "day",
+        pos_lookup={"CLSK991231C00015000": {"qty": 5}}, ledger_root=str(tmp_path),
+    )
+    assert res["count"] == 1
+
+
+def test_repeatedly_failing_exit_escalates_but_stays_queued(tmp_path, caplog):
+    """meta_ranker's AMLX trim failed on 08-18, 08-20 and 08-21 with nothing
+    louder than a WARNING naming the symbol, against a position sitting at
+    +$3,832 that the module wanted to trim. It must keep retrying — dropping an
+    open risk decision is what stranded 1,475 INDI shares on 08-18 — but it must
+    stop being quiet about it.
+    """
+    _queue(tmp_path, [{"order_symbol": "AMLX", "side": "sell", "qty": 36, "route": "equity",
+                       "reason": "take_profit_+30%", "attempts": 3,
+                       "last_skip": "submit_failed: POLICY_VETO"}])
+    c = _Client(reject={"AMLX"})
+    with caplog.at_level("ERROR"):
+        res = submit_pending_exit_orders(
+            c, "meta_ranker", equity_tif_fn=lambda: "day",
+            pos_lookup={"AMLX": {"qty": 227}}, ledger_root=str(tmp_path),
+        )
+
+    assert res["count"] == 0
+    assert "needs a human look" in caplog.text
+    # Still queued, attempt count advanced.
+    q = json.loads((tmp_path / "meta_ranker" / "pending_exit_orders.json").read_text())
+    assert [e["order_symbol"] for e in q["entries"]] == ["AMLX"]
+    assert q["entries"][0]["attempts"] == 4

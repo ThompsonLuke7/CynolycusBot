@@ -51,7 +51,15 @@ from core.live_4h_exec import (
     _implausible_mark_move,
     build_equity_order_audit,
     build_option_order_audit,
+    # Defined there, not here: live_4h_exec's pending-exit flush needs it too and
+    # importing this module from that one would close a cycle. Re-exported so
+    # existing callers and tests keep importing it from here.
+    parse_occ_expiry,
     resolve_settled_exit,
+    take_profit_reason,
+    trim_quantity,
+    underlying_basis,
+    underlying_stop_level,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,7 +67,7 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCK_ROOT = REPO_ROOT / "Data/runtime/risk_pass"
 
-_OCC_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
+
 
 
 @dataclass(frozen=True)
@@ -96,16 +104,6 @@ class RiskPlan:
     skipped: dict[str, str] = field(default_factory=dict)
 
 
-def parse_occ_expiry(symbol: str) -> dt.date | None:
-    """Expiration date embedded in an OCC symbol, or None if it is not one."""
-    m = _OCC_RE.match(str(symbol).strip().upper())
-    if not m:
-        return None
-    yy, mm, dd = int(m.group(2)[:2]), int(m.group(2)[2:4]), int(m.group(2)[4:6])
-    try:
-        return dt.date(2000 + yy, mm, dd)
-    except ValueError:
-        return None
 
 
 def past_expiry_cutoff(now_et: dt.datetime, cutoff: tuple[int, int]) -> bool:
@@ -133,15 +131,34 @@ def expiring_before_next_session(symbol: str, now_et: dt.datetime,
 
 
 def risk_exit_action(gain: float | None, *, trimmed: bool, peak_gain: float | None,
-                     policy: ExecPolicy, cfg: RiskPassConfig) -> tuple[str, str]:
+                     policy: ExecPolicy, cfg: RiskPassConfig, route: str = "equity",
+                     u_entry=None, u_now=None, u_atr=None) -> tuple[str, str]:
     """The non-model half of ``core.live_4h_exec.exit_action``.
 
     Same thresholds and the same reason strings, so a stop fired here is
     indistinguishable in the ledger from one the 4H runner fired. Horizon and
     rank drop-out are absent by design — both are bar/model driven.
+
+    The hard stop MUST mirror ``exit_action``'s underlying-referenced form for
+    options. This pass runs every few minutes against the 4H runner's twice a
+    day, so it is the path that actually fires most stops: leaving a premium
+    stop here would keep stopping options out on premium noise no matter what
+    the 4H engine does. An underlying stop is just as cadence-independent as a
+    premium one — "the underlying is below entry minus 1.5 ATR" is the same fact
+    whenever you sample it — so checking it more often stays strictly better.
+
+    Expiry is NOT evaluated here; this pass has its own calendar-driven
+    ``expiring_before_next_session`` flatten, which is stricter than the 4H
+    engine's ``min_dte_exit`` and already runs ahead of it.
     """
-    if cfg.hard_stop and policy.stop_loss and gain is not None and gain <= -policy.stop_loss:
-        return "exit", f"stop_-{int(policy.stop_loss * 100)}%"
+    if cfg.hard_stop:
+        u_stop = (underlying_stop_level(policy, u_entry, u_atr)
+                  if route == "option" else None)
+        if u_stop is not None and u_now is not None:
+            if float(u_now) <= u_stop:
+                return "exit", f"underlying_stop_-{policy.underlying_stop_atr:g}atr"
+        elif policy.stop_loss and gain is not None and gain <= -policy.stop_loss:
+            return "exit", f"stop_-{int(policy.stop_loss * 100)}%"
     if (cfg.trailing_stop and policy.trail_stop and gain is not None
             and peak_gain is not None and peak_gain > 0
             and (1 + gain) <= (1 + peak_gain) * (1 - policy.trail_stop)):
@@ -162,10 +179,12 @@ def evaluate_risk_exits(
     now_et: dt.datetime,
     cfg: RiskPassConfig | None = None,
     ledger_root: str | None = None,
+    underlying_fn=None,
 ) -> RiskPlan:
     """Evaluate held positions for non-model exits. Mutates no bar counters."""
     cfg = cfg or RiskPassConfig()
     out = RiskPlan()
+    ufn = underlying_fn or underlying_basis
 
     def _sell_audit(tkr, sym, qty, route):
         if route == "equity":
@@ -211,6 +230,16 @@ def evaluate_risk_exits(
 
         gain = (info["current"] / info["avg_entry"] - 1) if info.get("avg_entry") else None
 
+        # Underlying basis for the option stop. Read-only here: the 4H runner
+        # owns writing u_entry/u_atr into managed state (it is the only pass that
+        # sees an entry). If it has not anchored this position yet, there is no
+        # basis and the premium stop stands — this pass never invents one.
+        u_entry = u_atr = u_now = None
+        if route == "option" and policy.underlying_stop_atr:
+            u_entry, u_atr = st.get("u_entry"), st.get("u_atr")
+            if u_entry is not None and u_atr is not None:
+                u_now, _ = ufn(tkr)
+
         expiring = (route == "option" and cfg.expiry_flatten
                     and expiring_before_next_session(str(sym), now_et, cfg))
         if expiring:
@@ -218,7 +247,8 @@ def evaluate_risk_exits(
         else:
             action, reason = risk_exit_action(
                 gain, trimmed=bool(st.get("trimmed", False)),
-                peak_gain=st.get("peak_gain"), policy=policy, cfg=cfg)
+                peak_gain=st.get("peak_gain"), policy=policy, cfg=cfg,
+                route=route, u_entry=u_entry, u_now=u_now, u_atr=u_atr)
 
         if action == "hold":
             # Only ratchet the peak when the trailing stop is actually armed
@@ -239,7 +269,8 @@ def evaluate_risk_exits(
                 new_gain, new_mark = corrected
                 new_action, new_reason = risk_exit_action(
                     new_gain, trimmed=bool(st.get("trimmed", False)),
-                    peak_gain=st.get("peak_gain"), policy=policy, cfg=cfg)
+                    peak_gain=st.get("peak_gain"), policy=policy, cfg=cfg,
+                    route=route, u_entry=u_entry, u_now=u_now, u_atr=u_atr)
                 out.anomalies[tkr] = {
                     "symbol": sym, "broker_mark": info.get("current"), "quote_mid": new_mark,
                     "broker_gain": gain, "quote_gain": new_gain,
@@ -272,7 +303,17 @@ def evaluate_risk_exits(
             continue
 
         if action == "trim":
-            qty = int(math.floor(policy.scale_frac * held))
+            qty = trim_quantity(policy.scale_frac, held)
+            if qty >= held:
+                # Same rule as the 4H engine: an indivisible position takes the
+                # profit in full instead of booking nothing. See trim_quantity.
+                full_reason = take_profit_reason(policy, full=True)
+                out.plan.append((sym, "sell", held, full_reason, route))
+                out.order_audits[sym] = _sell_audit(tkr, sym, held, route)
+                out.exit_context[sym] = (tkr, dict(st))
+                logger.info("risk pass: %s %s (%s) -> FULL take-profit %s x%d",
+                            module, tkr, sym, full_reason, held)
+                continue
             if qty >= 1:
                 out.plan.append((sym, "sell", qty, reason, route))
                 out.order_audits[sym] = _sell_audit(tkr, sym, qty, route)

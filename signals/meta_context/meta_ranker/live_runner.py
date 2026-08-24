@@ -789,11 +789,27 @@ def _execute(
     """
     limits = limits or {}
     if args.submit:
+        # What the module DECIDED, captured before anything prunes it. The audit
+        # append at the end of this function runs on the surviving plan, so a run
+        # that deferred every row logged `plan: []` — both 2026-08-20 16:20 and
+        # 2026-08-21 16:20 recorded an empty plan while queueing 5-8 orders, and
+        # reconstructing what was intended meant reading the pending files and
+        # hoping they had not been rewritten since.
+        planned = list(plan)
+        planned_disposition: dict[str, str] = {}
+
+        def _mark(before, after, label: str) -> None:
+            gone = {row[0] for row in before} - {row[0] for row in after}
+            for symbol in gone:
+                planned_disposition[symbol] = label
+
         # After the close, queue entries for the next open instead of erroring on
         # them — BEFORE the readiness gate, which is re-applied at flush time by
         # submit_pending_open_entries. See core.live_4h_exec.execute_plan for why
         # the reverse order silently discarded every after-close entry.
+        before = list(plan)
         plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
+        _mark(before, plan, "deferred_entry_market_closed")
         # Exits are deferred separately and AFTER entries — see
         # core.live_4h_exec.execute_plan. Without this an after-close exit is
         # submitted into a window the broker refuses (equity opg 403 / options
@@ -804,15 +820,19 @@ def _execute(
         # deferred exit never reaches submission, so without this the position is
         # held at the broker and claimed by nobody, and a sibling reconcile can
         # adopt it (the 2026-08-11 VSH case; see defer_exits_if_opg_unavailable).
+        before = list(plan)
         plan = defer_exits_if_opg_unavailable(module, bar, plan, limits,
                                               new_managed=new_managed, exit_context=exit_context)
+        _mark(before, plan, "deferred_exit_opg_unavailable")
         # No per-ticker fallback here: this module scores meta_ranker_matrix.parquet
         # (readiness stage 5), not the shared 4H bar cache, so current bars are not
         # evidence that *this* module's input is current. Momentum and HTF build
         # their features from bars at decision time and do take the fallback.
+        before = list(plan)
         plan, skipped, reason = filter_entry_orders_for_readiness(
             plan, new_managed=new_managed, per_ticker_fallback=False
         )
+        _mark(before, plan, f"readiness_gate:{reason}" if skipped else "readiness_gate")
         if skipped:
             print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
         if plan:
@@ -845,6 +865,7 @@ def _execute(
                 )
                 print(f"\n  GOVERNED PATH UNAVAILABLE: queueing {len(plan)} order(s) "
                       f"for the next flush — nothing was submitted")
+                before = list(plan)
                 plan = defer_entries_if_market_closed(
                     module, bar, plan, new_managed, limits,
                     force=True, reason="governed path unavailable",
@@ -853,8 +874,11 @@ def _execute(
                     module, bar, plan, limits,
                     new_managed=new_managed, exit_context=exit_context,
                 )
+                _mark(before, plan, "queued_governed_path_unavailable")
         state["managed"] = new_managed
-        _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits, contract_selection, dropped)
+        _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits,
+                                 contract_selection, dropped,
+                                 planned=planned, disposition=planned_disposition)
         if plan:
             state.setdefault("history", []).append(
                 {
@@ -1069,7 +1093,8 @@ def _submit_via_gateway(
 
 
 def _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits,
-                             contract_selection=None, dropped=None) -> None:
+                             contract_selection=None, dropped=None, *,
+                             planned=None, disposition=None) -> None:
     audit_log = Path(args.signal_audit_log) if str(args.signal_audit_log or "").strip() else None
     append_jsonl(
         audit_log,
@@ -1080,10 +1105,22 @@ def _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audi
             "mode": args.mode,
             "submit": bool(args.submit),
             "targets": targets,
+            # What was actually submitted on this pass.
             "plan": [
                 {"symbol": p[0], "side": p[1], "qty": p[2], "reason": p[3],
                  "route": p[4] if len(p) > 4 else args.mode}
                 for p in plan
+            ],
+            # What the module DECIDED, and what became of each row. `plan` is the
+            # residue after deferral and the readiness gate, so a run that
+            # queued everything logged `plan: []` and the decision survived only
+            # in the pending files. `submitted` here means "reached the submit
+            # call", not "filled".
+            "planned": [
+                {"symbol": p[0], "side": p[1], "qty": p[2], "reason": p[3],
+                 "route": p[4] if len(p) > 4 else args.mode,
+                 "disposition": (disposition or {}).get(p[0], "submitted")}
+                for p in (planned if planned is not None else plan)
             ],
             "signal_audits": signal_audits or {},
             "order_audits": order_audits or {},

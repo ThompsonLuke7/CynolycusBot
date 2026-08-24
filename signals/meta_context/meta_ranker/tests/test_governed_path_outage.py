@@ -123,3 +123,53 @@ def test_snapshot_failure_is_raised_as_governed_path_unavailable(monkeypatch):
     assert "CRWD" in str(excinfo.value)
     assert "RuntimeError" in str(excinfo.value)
     assert "55432" not in str(excinfo.value)
+
+
+def test_audit_records_the_planned_rows_and_their_disposition(
+    tmp_path, monkeypatch, isolated_ledger
+):
+    """`plan` is the residue; `planned` is the decision.
+
+    Both the 2026-08-20 and 2026-08-21 16:20 ET runs logged `plan: []` while
+    deferring 5 and 8 orders respectively, so the audit said the module had
+    decided nothing on bars where it had decided a great deal.
+    """
+    monkeypatch.setattr(lr, "_save_state", lambda state: None)
+    monkeypatch.setattr("core.calendar.is_market_open_now", lambda now=None: False)
+
+    plan = [
+        ("CRWD", "buy", 26, "entry", "equity"),
+        ("PSIG", "buy", 1845, "entry", "equity"),
+    ]
+    new_managed = {
+        "CRWD": {"route": "equity", "symbol": "CRWD", "shares": 26},
+        "PSIG": {"route": "equity", "symbol": "PSIG", "shares": 1845},
+    }
+
+    lr._execute(
+        _args(tmp_path), client=None, plan=list(plan), state={"managed": {}, "history": []},
+        new_managed=new_managed, bar=BAR, targets=["CRWD", "PSIG"],
+        is_option=False, module="meta_ranker",
+    )
+
+    row = json.loads((tmp_path / "audit.jsonl").read_text().splitlines()[0])
+    assert row["plan"] == []          # nothing was submitted, as before
+    assert {p["symbol"] for p in row["planned"]} == {"CRWD", "PSIG"}
+    assert {p["disposition"] for p in row["planned"]} == {"deferred_entry_market_closed"}
+
+
+def test_a_submitted_row_is_recorded_as_submitted(tmp_path, monkeypatch, isolated_ledger):
+    monkeypatch.setattr(lr, "_save_state", lambda state: None)
+    monkeypatch.setattr("core.calendar.is_market_open_now", lambda now=None: True)
+    monkeypatch.setattr(lr, "_submit_via_gateway", lambda *a, **k: None)
+
+    lr._execute(
+        _args(tmp_path), client=None,
+        plan=[("CRWD", "buy", 26, "entry", "equity")],
+        state={"managed": {}, "history": []},
+        new_managed={"CRWD": {"route": "equity", "symbol": "CRWD", "shares": 26}},
+        bar=BAR, targets=["CRWD"], is_option=False, module="meta_ranker",
+    )
+
+    row = json.loads((tmp_path / "audit.jsonl").read_text().splitlines()[0])
+    assert [p["disposition"] for p in row["planned"]] == ["submitted"]
