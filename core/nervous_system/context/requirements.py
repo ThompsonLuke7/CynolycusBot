@@ -267,6 +267,12 @@ def _status_for_rejections(
         return "STALE", "STALE"
     if "FUTURE_BAR" in rejection_codes:
         return "MISSING", "FUTURE_BAR"
+    if "MARKET_SESSION_MISMATCH" in rejection_codes:
+        # Was reaching the caller as the generic MISSING_REQUIRED_STATE, so a
+        # requirement result could not distinguish "the producer never ran" from
+        # "it ran, for a session this decision may not use" — two problems with
+        # nothing in common. FUTURE_BAR is surfaced for the same reason.
+        return "MISSING", "MARKET_SESSION_MISMATCH"
     if "DEALER_NOT_ALLOWED" in rejection_codes:
         return "MISSING", "DEALER_NOT_ALLOWED"
     if "DEALER_CAPTURE_NOT_POST_BOUNDARY" in rejection_codes:
@@ -312,7 +318,28 @@ def _candidate_rejection_reason(
             "state.effective_until",
         ):
             return "MEMBERSHIP_EFFECTIVE_EXPIRED"
-    if rule.state_type in _BAR_BOUND_TYPES and _aware(candidate.as_of, "state.as_of") > decision_bar_utc:
+    # FUTURE_BAR exists for states built FROM the decision bar: a TICKER state
+    # stamped after it necessarily saw bars the decision could not have.
+    #
+    # A session-lagged MARKET state is not that. `_expected_market_session`
+    # walks back `market_session_lag` sessions from the DECISION TIME's session,
+    # so with any lag >= 1 the accepted session is strictly earlier than the
+    # session the decision is being made in, and the state is composed entirely
+    # of information from a session that had already closed. Its causal bound is
+    # `available_at <= decision_time`, enforced below for every candidate.
+    #
+    # Applying the bar bound as well compares a session-close stamp (16:00 ET)
+    # to a 4H bar stamp, and there is one case where those cannot both be
+    # satisfied: a decision bar taken from the lagged session itself. That is
+    # exactly the pre-open flush — every deferred entry carries the 18:00Z bar,
+    # the profile then demands that session's MARKET state, and that state is
+    # stamped 20:00Z. Sixteen rows failed MARKET_SESSION_MISMATCH and two failed
+    # FUTURE_BAR, with no row able to satisfy both, so no flush could ever
+    # succeed. Meta's queue did not drain once between 2026-08-18 and 08-24.
+    bar_bound = rule.state_type in _BAR_BOUND_TYPES
+    if rule.state_type is StateType.MARKET and expected_market_session is not None:
+        bar_bound = False
+    if bar_bound and _aware(candidate.as_of, "state.as_of") > decision_bar_utc:
         return "FUTURE_BAR"
     if _aware(candidate.available_at, "state.available_at") > decision_time_utc:
         return "NOT_AVAILABLE"

@@ -182,7 +182,23 @@ _DISPATCH = {
 }
 
 _SINGLETON_TYPES = frozenset({MarketState, TickerState, DealerState, PortfolioState, ReadinessState})
-_BAR_BOUND_STATE_TYPES = (MarketState, SectorState, ThemeMembership, ThemeState, TickerState)
+# Built FROM the decision bar: a stamp after it means the state saw bars the
+# decision could not have. The bar is the right bound for these.
+_BAR_BOUND_STATE_TYPES = (SectorState, ThemeMembership, ThemeState, TickerState)
+# MarketState is deliberately absent. It is stamped at its SESSION close
+# (16:00 ET), not on a 4H grid, so the bar is the wrong bound: comparing a
+# 20:00Z session stamp to an 18:00Z decision bar made the pre-open flush
+# unsatisfiable — the right session was refused FUTURE_BAR and every other
+# session MARKET_SESSION_MISMATCH — and Meta's queue never drained between
+# 2026-08-18 and 08-24.
+#
+# Removing it costs no causal guarantee. StateEnvelope already requires
+# `as_of <= available_at`, and this model already requires
+# `available_at <= decision_time` for every embedded state, so
+# `as_of <= decision_time` holds transitively and a market state from after the
+# decision remains impossible to embed. An explicit re-check here would be
+# unreachable code. Under a session-lagged profile the selector additionally
+# pins the state to a strictly earlier session than the decision's.
 
 
 class ContextSnapshot(ContractModel):

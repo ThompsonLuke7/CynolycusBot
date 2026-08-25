@@ -399,15 +399,20 @@ def _after_decision_bar(state: StateEnvelope) -> StateEnvelope:
 @pytest.mark.parametrize(
     "state",
     (
-        market_state(),
         sector_state(),
         theme_state(),
         theme_membership("semiconductors", "AMD"),
         ticker_state(),
     ),
-    ids=("market", "sector", "theme", "theme-membership", "ticker"),
+    ids=("sector", "theme", "theme-membership", "ticker"),
 )
 def test_extended_snapshot_rejects_bar_bound_embedded_state_after_decision_bar(state):
+    """These are built FROM the decision bar, so a later stamp saw future bars.
+
+    MARKET is deliberately not in this list: it is stamped at its SESSION close,
+    not on a 4H grid, and is bounded by decision_time instead. See the two tests
+    below.
+    """
     with pytest.raises(ValueError, match="decision_bar"):
         ContextSnapshot.from_states(
             snapshot_id=uuid4(),
@@ -416,6 +421,56 @@ def test_extended_snapshot_rejects_bar_bound_embedded_state_after_decision_bar(s
             strategy_id="meta_ranker",
             ticker="AMD",
             states=(_after_decision_bar(state),),
+            freshness_profile="test@1",
+            freshness_profile_hash="a" * 64,
+        )
+
+
+def test_a_market_state_between_the_bar_and_the_decision_is_accepted():
+    """A session close that lands after the decision bar but before the decision
+    is legal, and the pre-open flush depends on it: every deferred entry carries
+    the 18:00Z bar while that session's market state is stamped 20:00Z. Refusing
+    it left no row able to satisfy both gates and Meta's queue never drained
+    between 2026-08-18 and 2026-08-24."""
+
+    snapshot = ContextSnapshot.from_states(
+        snapshot_id=uuid4(),
+        decision_time=DECISION_TIME,
+        decision_bar=DECISION_TIME - timedelta(minutes=20),
+        strategy_id="meta_ranker",
+        ticker="AMD",
+        states=(_after_decision_bar(market_state()),),
+        freshness_profile="test@1",
+        freshness_profile_hash="a" * 64,
+    )
+    assert snapshot.market_state is not None
+
+
+def test_a_market_state_from_after_the_decision_is_still_impossible():
+    """Dropping MARKET from the bar-bound set costs no causal guarantee.
+
+    StateEnvelope requires as_of <= available_at, and this model requires
+    available_at <= decision_time for every embedded state, so
+    as_of <= decision_time still holds transitively. A market state stamped
+    after the decision cannot be embedded by any route.
+    """
+
+    future = market_state().model_copy(update={
+        "as_of": DECISION_TIME + timedelta(minutes=1),
+        "available_at": DECISION_TIME + timedelta(minutes=1),
+        "generated_at": DECISION_TIME + timedelta(minutes=1),
+        "valid_until": DECISION_TIME + timedelta(hours=2),
+        "source_window_start": DECISION_TIME,
+        "source_window_end": DECISION_TIME + timedelta(minutes=1),
+    })
+    with pytest.raises(ValueError, match="unavailable at decision time"):
+        ContextSnapshot.from_states(
+            snapshot_id=uuid4(),
+            decision_time=DECISION_TIME,
+            decision_bar=DECISION_TIME - timedelta(minutes=20),
+            strategy_id="meta_ranker",
+            ticker="AMD",
+            states=(future,),
             freshness_profile="test@1",
             freshness_profile_hash="a" * 64,
         )
