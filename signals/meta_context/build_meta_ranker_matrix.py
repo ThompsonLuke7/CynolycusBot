@@ -58,6 +58,15 @@ FORWARD_GUIDANCE_SIGNAL = REPO / "signals/meta_context/data/processed/forward_gu
 # quarter + buffer); beyond this the fg_* features are nulled rather than carried forward.
 FG_MAX_CARRY_DAYS = 120
 
+# How long a dynamic-theme reading stays "live". The taxonomy is rebuilt weekly by
+# scripts/weekly_refresh.sh stage 4, so a healthy feed is at most ~7 days old and 21
+# allows two missed cycles before the features are nulled instead of carried forward.
+# Unbounded carry-forward is not hypothetical: stage 4 failed on 2026-08-17 and
+# 2026-08-24, ticker_theme_features.parquet froze at 2026-08-10, and the merge_asof
+# below kept serving those values as current with nothing marking them stale.
+# theme_days_since_refresh is the visible counterpart, mirroring fg_days_since_guidance.
+THEME_MAX_CARRY_DAYS = 21
+
 EARNINGS_CALENDAR_CANDIDATES = [
     REPO / "signals/news/data/processed/ticker_earnings_calendar.parquet",
     REPO / "signals/news/data/processed/fmp_earnings_calendar.parquet",
@@ -184,6 +193,69 @@ def _asof_prior_day_ticker(spine: pd.DataFrame, right: pd.DataFrame) -> pd.DataF
     r = right.sort_values("date")
     merged = pd.merge_asof(s, r, on="date", by="ticker", direction="backward", allow_exact_matches=False)
     return merged.set_index("index").sort_index()
+
+
+def join_theme_context(spine: pd.DataFrame, *, verbose: bool = True) -> tuple[pd.DataFrame, list[str]]:
+    """Join dynamic theme context as-of the prior day, nulling stale carry-forward.
+
+    Shared by the full research builder and the live incremental updater
+    (``meta_ranker/update_meta_matrix.py``). They each had their own copy of this
+    join, and the copies had already drifted: the research path applied a
+    staleness cap to the forward-guidance block while live carried it forward
+    forever, which is exactly the research/live feature-parity break AGENTS.md
+    forbids. One function, two callers, no drift.
+
+    Returns ``(spine, theme_ctx)`` where ``theme_ctx`` leads with ``theme`` (the
+    ticker's primary theme, used by the cross-context groupby) followed by the
+    numeric context features.
+    """
+    path = DYNAMIC_THEME_FEATURES_HISTORY if DYNAMIC_THEME_FEATURES_HISTORY.exists() else DYNAMIC_THEME_FEATURES
+    if not path.exists():
+        if verbose:
+            print("  WARNING: dynamic_theme features not found — theme context will be NaN")
+        spine["theme"] = np.nan
+        numeric = [c for c in DYNAMIC_THEME_CTX if c != "primary_theme"]
+        for col in numeric:
+            spine[col] = np.nan
+        spine["theme_days_since_refresh"] = np.nan
+        return spine, ["theme"] + numeric + ["theme_days_since_refresh"]
+
+    if verbose:
+        print(f"  loading from {path.name} ...")
+    dtf = pd.read_parquet(path)
+    dtf["date"] = pd.to_datetime(dtf["date"]).dt.normalize()
+    # If both history and current-day exist, append current-day for any missing dates
+    if path == DYNAMIC_THEME_FEATURES_HISTORY and DYNAMIC_THEME_FEATURES.exists():
+        today_dtf = pd.read_parquet(DYNAMIC_THEME_FEATURES)
+        today_dtf["date"] = pd.to_datetime(today_dtf["date"]).dt.normalize()
+        missing_dates = set(today_dtf["date"].unique()) - set(dtf["date"].unique())
+        if missing_dates:
+            dtf = pd.concat([dtf, today_dtf[today_dtf["date"].isin(missing_dates)]], ignore_index=True)
+    # Rename primary_theme → theme so cross-context groupby still works
+    dtf = dtf.rename(columns={"primary_theme": "theme"})
+    dtf["theme_source_date"] = dtf["date"]
+    dtf = dtf.sort_values(["ticker", "date"])
+    available_ctx = [c for c in DYNAMIC_THEME_CTX if c in dtf.columns and c != "primary_theme"]
+    if verbose:
+        print(f"  {len(dtf):,} rows, {dtf['date'].nunique()} dates, {len(available_ctx)} ctx features")
+
+    spine = _asof_prior_day_ticker(
+        spine,
+        dtf[["ticker", "date", "theme", "theme_source_date"] + available_ctx],
+    )
+    days_since = (spine["date"] - spine["theme_source_date"]).dt.days
+    stale = days_since.isna() | (days_since > THEME_MAX_CARRY_DAYS)
+    # `theme` is nulled alongside the numerics on purpose: a stale primary_theme
+    # would otherwise keep driving within_theme_mom_rank and theme_crowding_frac
+    # off a taxonomy that no longer describes the market.
+    spine.loc[stale, ["theme"] + available_ctx] = np.nan
+    spine["theme_days_since_refresh"] = days_since.where(~stale, np.nan)
+    spine = spine.drop(columns=["theme_source_date"])
+    if verbose:
+        cov = (~stale).mean()
+        print(f"  joined {len(available_ctx)} theme ctx columns "
+              f"(fresh within {THEME_MAX_CARRY_DAYS}d: {cov:.1%})")
+    return spine, ["theme"] + available_ctx + ["theme_days_since_refresh"]
 
 
 def _first_existing(paths: list[Path]) -> Path | None:
@@ -460,37 +532,7 @@ def main():
     # primary_theme is the ticker's highest-membership theme from the dynamic
     # taxonomy; all other theme features come from step09_meta_features.
     print("joining dynamic theme context (prior day) ...")
-    # Prefer the history file (full training window 2022-2026) over the single-day file
-    _dtf_path = DYNAMIC_THEME_FEATURES_HISTORY if DYNAMIC_THEME_FEATURES_HISTORY.exists() else DYNAMIC_THEME_FEATURES
-    if _dtf_path.exists():
-        print(f"  loading from {_dtf_path.name} ...")
-        dtf = pd.read_parquet(_dtf_path)
-        dtf["date"] = pd.to_datetime(dtf["date"]).dt.normalize()
-        # If both history and current-day exist, append current-day for any missing dates
-        if _dtf_path == DYNAMIC_THEME_FEATURES_HISTORY and DYNAMIC_THEME_FEATURES.exists():
-            today_dtf = pd.read_parquet(DYNAMIC_THEME_FEATURES)
-            today_dtf["date"] = pd.to_datetime(today_dtf["date"]).dt.normalize()
-            missing_dates = set(today_dtf["date"].unique()) - set(dtf["date"].unique())
-            if missing_dates:
-                dtf = pd.concat([dtf, today_dtf[today_dtf["date"].isin(missing_dates)]], ignore_index=True)
-        dtf = dtf.sort_values(["ticker", "date"])
-        # Rename primary_theme → theme so cross-context groupby still works
-        dtf = dtf.rename(columns={"primary_theme": "theme"})
-        available_ctx = [c for c in DYNAMIC_THEME_CTX if c in dtf.columns and c != "primary_theme"]
-        print(f"  {len(dtf):,} rows, {dtf['date'].nunique()} dates, {len(available_ctx)} ctx features")
-        # merge_asof per ticker (strict prior-day, no lookahead)
-        spine = _asof_prior_day_ticker(
-            spine,
-            dtf[["ticker", "date", "theme"] + available_ctx],
-        )
-        theme_ctx = ["theme"] + available_ctx
-    else:
-        print("  WARNING: dynamic_theme features not found — theme context will be NaN")
-        spine["theme"] = np.nan
-        for col in DYNAMIC_THEME_CTX:
-            if col != "primary_theme":
-                spine[col] = np.nan
-        theme_ctx = ["theme"] + [c for c in DYNAMIC_THEME_CTX if c != "primary_theme"]
+    spine, theme_ctx = join_theme_context(spine)
 
     # ---- ticker meta + regime (point-in-time, exact 4H join)
     print("joining ticker meta + regime from features_4h ...")

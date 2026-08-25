@@ -25,7 +25,20 @@ from core.live_4h_exec import (
 )
 
 
-BAR = "2026-08-03T20:00:00Z"
+# The queue now expires entries whose decision bar predates the last trading
+# session, so a frozen literal here would silently turn every retention test
+# into a staleness test the moment the date passed it. Anchor on the previous
+# session instead: that is exactly the age a legitimately-deferred entry has at
+# the pre-open flush that is supposed to submit it.
+def _last_session_bar() -> str:
+    from datetime import datetime, timezone
+
+    from core.calendar import prev_trading_day
+
+    return f"{prev_trading_day(datetime.now(timezone.utc).date()).isoformat()}T20:00:00Z"
+
+
+BAR = _last_session_bar()
 
 
 @pytest.fixture
@@ -284,3 +297,115 @@ def test_the_exit_ladder_uses_an_injected_submitter_without_retrying() -> None:
 
     assert resp == {"id": "governed-exit"}
     assert len(calls) == 1, "one governed close, not a ladder of duplicates"
+
+
+# --------------------------------------------------------------------------
+# Queue ageing and forensics (2026-08-18)
+#
+# The retention rule above is correct on its own but had no counterweight: an
+# entry whose submit failed was retained, the failure was never logged, and the
+# skip reason was stripped before the queue was rewritten. HTF carried
+# LPTH260821C00015000 from the 08-14 bar into 08-18 — an option expiring that
+# same week — re-submitted every morning with nothing in any log to say why.
+# --------------------------------------------------------------------------
+
+STALE_BAR = "2026-01-05T20:00:00Z"
+
+
+def test_an_entry_older_than_the_last_session_is_expired(
+    tmp_path, readiness_ok, caplog
+) -> None:
+    """One flush, then the decision ages out. A 4H signal is not valid days on."""
+
+    defer_entries_if_market_closed(
+        "m", STALE_BAR, [("AMD", "buy", 10, "entry", "equity")], {"AMD": {}}, {},
+        now=None, ledger_root=str(tmp_path),
+    )
+
+    with caplog.at_level("WARNING"):
+        result = submit_pending_open_entries(
+            _RefusingClient(), "m", ["AMD"],
+            equity_tif_fn=lambda: "day", ledger_root=str(tmp_path),
+        )
+
+    assert result["count"] == 0
+    assert not pending_open_path("m", str(tmp_path)).exists(), "expired entry must leave"
+    assert "EXPIRED" in caplog.text
+
+
+def test_a_fresh_entry_is_not_expired(tmp_path, readiness_ok) -> None:
+    """The guard must not eat the entry it is supposed to let through."""
+
+    defer_entries_if_market_closed(
+        "m", BAR, [("AMD", "buy", 10, "entry", "equity")], {"AMD": {}}, {},
+        ledger_root=str(tmp_path),
+    )
+
+    submitted = []
+    submit_pending_open_entries(
+        _RefusingClient(), "m", ["AMD"], equity_tif_fn=lambda: "day",
+        ledger_root=str(tmp_path),
+        submit_fn=lambda **kw: submitted.append(kw) or {"id": "1"},
+    )
+
+    assert [kw["symbol"] for kw in submitted] == ["AMD"]
+
+
+def test_a_failed_submit_is_logged_and_keeps_its_reason(
+    tmp_path, readiness_ok, caplog
+) -> None:
+    """A silent retry loop is the bug. The failure must be visible in the log
+    AND on the requeued record."""
+
+    defer_entries_if_market_closed(
+        "m", BAR, [("AMD", "buy", 10, "entry", "equity")], {"AMD": {}}, {},
+        ledger_root=str(tmp_path),
+    )
+
+    with caplog.at_level("ERROR"):
+        submit_pending_open_entries(
+            _RefusingClient(), "m", ["AMD"], equity_tif_fn=lambda: "day",
+            ledger_root=str(tmp_path),
+        )
+
+    assert "broker said no" in caplog.text
+    queued = json.loads(pending_open_path("m", str(tmp_path)).read_text())["entries"]
+    assert len(queued) == 1
+    assert "broker said no" in queued[0]["last_skip"]
+    assert queued[0]["attempts"] == 1
+
+
+def test_repeated_failures_count_up_on_the_record(tmp_path, readiness_ok) -> None:
+    """`attempts` is how a stuck entry becomes visible without reading logs."""
+
+    defer_entries_if_market_closed(
+        "m", BAR, [("AMD", "buy", 10, "entry", "equity")], {"AMD": {}}, {},
+        ledger_root=str(tmp_path),
+    )
+    for _ in range(3):
+        submit_pending_open_entries(
+            _RefusingClient(), "m", ["AMD"], equity_tif_fn=lambda: "day",
+            ledger_root=str(tmp_path),
+        )
+
+    queued = json.loads(pending_open_path("m", str(tmp_path)).read_text())["entries"]
+    assert queued[0]["attempts"] == 3
+
+
+def test_a_newer_decision_supersedes_an_older_contract_for_the_same_ticker(
+    tmp_path,
+) -> None:
+    """Keying the queue on the CONTRACT let one name accumulate a row per expiry
+    cycle. HTF held two LPTH calls at once expressing the same single idea."""
+
+    defer_entries_if_market_closed(
+        "m", BAR, [("LPTH260821C00015000", "buy", 49, "entry", "option")],
+        {"LPTH": {"occ": "LPTH260821C00015000"}}, {}, ledger_root=str(tmp_path),
+    )
+    defer_entries_if_market_closed(
+        "m", BAR, [("LPTH260918C00015000", "buy", 25, "entry", "option")],
+        {"LPTH": {"occ": "LPTH260918C00015000"}}, {}, ledger_root=str(tmp_path),
+    )
+
+    queued = json.loads(pending_open_path("m", str(tmp_path)).read_text())["entries"]
+    assert [e["order_symbol"] for e in queued] == ["LPTH260918C00015000"]

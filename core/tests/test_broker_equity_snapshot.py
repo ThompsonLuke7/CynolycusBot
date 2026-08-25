@@ -122,3 +122,121 @@ def test_day_pl_is_none_without_a_prior_equity(tmp_path):
         now=_dt(2026, 7, 24, 16, 5, tzinfo=_ET_TZ),
     )
     assert record["day_pl"] is None
+
+
+# --------------------------------------------------------------------------
+# Regression: the portfolio state must actually be published.
+#
+# capture_snapshot only stages a PortfolioState when it is given a unit of
+# work, and capture_from_env -- the sole production caller -- passed none. So
+# nothing ever wrote the state the policy engine reads, SnapshotBuilder always
+# resolved portfolio_state=None, and policy.rule.broker vetoed every Meta order
+# with BROKER_PORTFOLIO_STATE_MISSING. That rule applies to risk-reducing
+# orders, so it trapped exits too: AMLX and MRVL260821C00210000 sat queued
+# across the 2026-08-18 and 2026-08-19 pre-open flushes.
+# --------------------------------------------------------------------------
+import core.broker_equity_snapshot as _bes  # noqa: E402
+
+
+class _RecordingStates:
+    def __init__(self):
+        self.inserted = []
+
+    def insert_states_idempotently(self, states):
+        self.inserted.extend(states)
+
+
+class _RecordingUow:
+    def __init__(self, *_args, **_kwargs):
+        self.states = _RecordingStates()
+        self.committed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return None
+
+    def commit(self):
+        self.committed = True
+
+
+class _ObservableClient(_Client):
+    """`_Client` plus an observable open-order book.
+
+    Publication fails closed when open orders cannot be read, because an
+    unobserved book cannot rule out a duplicate — so a stub without
+    `get_orders` would test the refusal path, not the publication path.
+    """
+
+    def get_orders(self, **_kwargs):
+        return []
+
+
+def _patch_store(monkeypatch, uow):
+    monkeypatch.setattr(_bes, "AlpacaOptionsClient", lambda **_k: _ObservableClient())
+    import sys
+    import types
+
+    runtime = types.ModuleType("core.nervous_system.config.runtime")
+
+    def _from_env(*args, **kwargs):
+        # from_env() with no argument falls back to .env for names the process
+        # does not export; passing a mapping opts OUT of that file read. The
+        # combined server does not export the CYNOLYCUS_* names, so calling it
+        # with os.environ produced six "Field required" errors in production
+        # while every .env-sourced shell worked. Recorded so the call shape is
+        # asserted, not assumed.
+        _from_env.calls.append((args, kwargs))
+        return object()
+
+    _from_env.calls = []
+    runtime.NervousSystemSettings = type("S", (), {"from_env": staticmethod(_from_env)})
+    runtime._from_env = _from_env
+    database = types.ModuleType("core.nervous_system.persistence.database")
+    database.create_database_engine = lambda _s: object()
+    database.create_session_factory = lambda _e: object()
+    uow_mod = types.ModuleType("core.nervous_system.persistence.uow")
+    uow_mod.UnitOfWork = lambda _factory: uow
+    for name, mod in (
+        ("core.nervous_system.config.runtime", runtime),
+        ("core.nervous_system.persistence.database", database),
+        ("core.nervous_system.persistence.uow", uow_mod),
+    ):
+        monkeypatch.setitem(sys.modules, name, mod)
+
+
+def test_capture_from_env_publishes_and_commits_the_portfolio_state(tmp_path, monkeypatch):
+    uow = _RecordingUow()
+    _patch_store(monkeypatch, uow)
+
+    result = _bes.capture_from_env(env_file=".env", account_label="paper", root=tmp_path)
+
+    import sys
+
+    runtime = sys.modules["core.nervous_system.config.runtime"]
+    assert runtime._from_env.calls == [((), {})], (
+        "from_env must be called with no argument so .env backs the process "
+        "environment; passing a mapping disables that fallback"
+    )
+    assert result["publication_status"] == "PUBLISHED"
+    assert uow.committed is True
+    assert len(uow.states.inserted) == 1
+    # A state nobody can find is the same as no state: the policy engine looks
+    # the portfolio up by account alias.
+    assert uow.states.inserted[0].account_alias == "paper"
+
+
+def test_capture_from_env_keeps_the_local_record_when_publication_fails(tmp_path, monkeypatch):
+    class _Exploding(_RecordingUow):
+        def __enter__(self):
+            raise RuntimeError("state store unreachable")
+
+    _patch_store(monkeypatch, _Exploding())
+
+    result = _bes.capture_from_env(env_file=".env", account_label="paper", root=tmp_path)
+
+    # The mark record is the durable artifact and must survive a dead store.
+    assert result["position_count"] == 1
+    assert json.loads(open(result["path"]).readline())["account"]["equity"] == "100123.45"
+    assert result["publication_status"] == "FAILED"

@@ -41,6 +41,21 @@ _client_lock = threading.Lock()
 _cached_client = None
 
 
+def _reauth_command() -> str:
+    """The operator-facing fix, taken from the canonical constant when reachable.
+
+    This module is also run directly (``python core/API/Schwab_API/schwab_client.py
+    --reauth``), where the repo root is not on ``sys.path``, so the import has to
+    be local and optional.
+    """
+    try:
+        from core.schwab_token_status import REAUTH_COMMAND
+
+        return REAUTH_COMMAND
+    except Exception:  # noqa: BLE001 - the message must never mask the real error
+        return ".venv/bin/python core/API/Schwab_API/schwab_client.py --reauth"
+
+
 def _create_or_load_client(force_manual: bool = False):
     """
     Uses schwab-py's helpers to either:
@@ -52,20 +67,24 @@ def _create_or_load_client(force_manual: bool = False):
         with _client_lock:
             if _cached_client is not None:
                 return _cached_client
-            if TOKEN_PATH.exists():
-                _cached_client = client_from_token_file(
-                    token_path=str(TOKEN_PATH),
-                    api_key=API_KEY,
-                    app_secret=APP_SECRET
+            if not TOKEN_PATH.exists():
+                # Never fall through to the interactive flow on this path. Its
+                # callers are unattended (combined_server threads, nightly jobs,
+                # the dealer capture) and have no usable stdin: schwab-py's
+                # `input('Redirect URL> ')` either blocks forever or dies with
+                # EOFError deep inside a worker thread. That is exactly what
+                # happened on 2026-08-24, when an interrupted re-auth left no
+                # token file behind and the dealer runner crashed on startup.
+                # Fail fast, naming the fix, so the operator sees the cause.
+                raise RuntimeError(
+                    f"Schwab token file not found at {TOKEN_PATH}. Interactive login "
+                    f"cannot run in an unattended process. Re-auth with: {_reauth_command()}"
                 )
-            else:
-                # First-time login: walks you through copy-paste OAuth flow in terminal
-                _cached_client = client_from_manual_flow(
-                    api_key=API_KEY,
-                    app_secret=APP_SECRET,
-                    callback_url=CALLBACK_URL,
-                    token_path=str(TOKEN_PATH)
-                )
+            _cached_client = client_from_token_file(
+                token_path=str(TOKEN_PATH),
+                api_key=API_KEY,
+                app_secret=APP_SECRET
+            )
             return _cached_client
 
     # force_manual: an explicit, deliberate reauth request (e.g. `--reauth`).

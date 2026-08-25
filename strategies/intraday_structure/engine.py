@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
+import threading
 from collections import defaultdict
 from dataclasses import replace
 from datetime import timedelta
@@ -42,6 +44,27 @@ from strategies.intraday_structure.target_manager import build_target_plan, eval
 logger = logging.getLogger(__name__)
 
 
+def _synchronized(method):
+    """Serialize a public engine entry point on the engine's own lock.
+
+    WHY: the runner ingests bars on its own thread while HTTP threads read
+    ``snapshot()``/``active_signals()`` and POST manual candidates. Unlocked,
+    ``snapshot()`` iterated ``self.setups`` while the runner inserted into it —
+    ``RuntimeError: dictionary changed size during iteration``, which reproduced
+    about one run in three and killed whichever thread hit it (the runner's own
+    ``persist()`` included, i.e. state loss, not just a failed page load).
+
+    Re-entrant because the mutating paths call ``persist()`` -> ``snapshot()``
+    on their way out, and ``write_active_signals()`` calls ``active_signals()``.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class IntradayStructureEngine:
     """Persistent bar-close state machine. No broker/order methods exist here."""
 
@@ -56,6 +79,9 @@ class IntradayStructureEngine:
     ) -> None:
         if not config.paper_only:
             raise ValueError("intraday structure v1 is paper-only")
+        # Guards every mutable attribute below. Public methods take it; the
+        # private helpers they call must not, so they can nest freely.
+        self._lock = threading.RLock()
         self.config = config
         self.options_provider = options_provider or NullOptionsProvider()
         self.state_store = state_store
@@ -77,6 +103,7 @@ class IntradayStructureEngine:
         }
         self._exhaustion = ExhaustionDetector()
 
+    @_synchronized
     def register_candidate(self, candidate: Candidate) -> bool:
         if self.config.supported_tickers and candidate.ticker not in set(self.config.supported_tickers):
             return False
@@ -138,6 +165,7 @@ class IntradayStructureEngine:
         self.persist()
         return True
 
+    @_synchronized
     def on_bar(self, bar: Bar) -> list[StateTransition]:
         if self._is_context_symbol(bar.symbol):
             self.market_provider.update(bar)
@@ -163,6 +191,7 @@ class IntradayStructureEngine:
             self.persist()
         return self.transitions[emitted_before:]
 
+    @_synchronized
     def on_price_update(self, update: PriceUpdate) -> list[StateTransition]:
         """Use trades/quotes for faster stop/target management, never detection.
 
@@ -202,11 +231,22 @@ class IntradayStructureEngine:
             self.persist()
         return self.transitions[emitted_before:]
 
+    def read_lock(self) -> threading.RLock:
+        """The engine's own lock, for callers composing a multi-read view.
+
+        ``IntradayStructureRunner.snapshot()`` mixes several engine reads into
+        one payload; taking this around them keeps the counts and the signals
+        describing the same instant.
+        """
+        return self._lock
+
+    @_synchronized
     def active_signals(self, *, include_watching: bool = False) -> list[StructureSignal]:
         records = [s for s in self.setups.values() if s.state != SetupState.CLOSED and (include_watching or s.state != SetupState.WATCHING)]
         records.sort(key=lambda s: (s.updated_at or s.candidate.timestamp, s.confidence), reverse=True)
         return [StructureSignal.from_setup(s, self.config.version) for s in records]
 
+    @_synchronized
     def snapshot(self) -> dict:
         return {
             "version": self.config.version,
@@ -217,6 +257,7 @@ class IntradayStructureEngine:
             "bar_counts": dict(self._bar_counts),
         }
 
+    @_synchronized
     def restore(self, raw: dict) -> None:
         if raw.get("version") != self.config.version:
             raise ValueError(f"state version {raw.get('version')} does not match {self.config.version}")
@@ -232,6 +273,7 @@ class IntradayStructureEngine:
         self.market_provider.restore(raw.get("market_histories", {}))
         self._bar_counts = defaultdict(int, {str(k): int(v) for k, v in raw.get("bar_counts", {}).items()})
 
+    @_synchronized
     def restore_from_store(self) -> bool:
         if self.state_store is None:
             return False
@@ -241,10 +283,12 @@ class IntradayStructureEngine:
         self.restore(raw)
         return True
 
+    @_synchronized
     def persist(self) -> None:
         if self.state_store is not None:
             self.state_store.save(self.snapshot())
 
+    @_synchronized
     def write_active_signals(self, path: str | Path | None = None) -> None:
         output = Path(path or self.config.signal_path)
         output.parent.mkdir(parents=True, exist_ok=True)

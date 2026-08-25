@@ -127,13 +127,54 @@ if [ -f "$REPO_ROOT/scripts/wsl_crash_logger.sh" ]; then
   log "WSL crash logger started (PID $CRASHLOG_PID -> C:\\Users\\<you>\\wsl_crashlog)"
 fi
 
+# Stop the server and do not return until it is actually gone.
+#
+# WHY: on 2026-08-24 Ctrl-C sent SIGTERM and this function exited immediately.
+# The server ran its graceful shutdown, logged "Combined server stopped.", and
+# then never reached interpreter exit -- it still had a backlog of dashboard
+# scans to chew through. The supervisor was already gone, so the server was
+# reparented to init and sat there holding all five dashboard sockets. Every
+# subsequent `run_live_server.sh` refused to start against its own orphan.
+#
+# So: SIGTERM, give it $STOP_GRACE seconds to exit on its own, then SIGKILL.
+# A trading process that has been asked to stop and will not stop is not worth
+# waiting on -- the broker state is durable, the in-memory state is not.
+STOP_GRACE="${STOP_GRACE:-20}"
+
+stop_server() {
+  local pid="${1:-}"
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+
+  kill -TERM "$pid" 2>/dev/null
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$STOP_GRACE" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if kill -0 "$pid" 2>/dev/null; then
+    log "combined_server (PID $pid) ignored SIGTERM for ${STOP_GRACE}s — SIGKILL"
+    kill -KILL "$pid" 2>/dev/null
+    # Reap it so the ports are released before we return; the kernel frees the
+    # sockets on process teardown, not on the kill() call.
+    local killwait=0
+    while kill -0 "$pid" 2>/dev/null && [ "$killwait" -lt 10 ]; do
+      sleep 1
+      killwait=$((killwait + 1))
+    done
+    kill -0 "$pid" 2>/dev/null && log "WARNING: PID $pid survived SIGKILL (uninterruptible?)"
+  fi
+}
+
 cleanup() {
   log "shutdown requested — stopping server and watchdog"
-  [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null
+  stop_server "${SERVER_PID:-}"
   [ -n "${TAIL_PID:-}" ] && kill "$TAIL_PID" 2>/dev/null
   [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null
   [ -n "$CRASHLOG_PID" ] && kill "$CRASHLOG_PID" 2>/dev/null
   pkill -f 'dmesg.*--follow' 2>/dev/null
+  log "shutdown complete"
   exit 0
 }
 trap cleanup INT TERM

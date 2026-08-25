@@ -90,7 +90,15 @@ class OptionOrderPolicyConfig:
     meta_stale_retrace_atr: float = 0.25
     meta_setup_failure_exit_enabled: bool = True
     meta_setup_failure_buffer_atr: float = 0.10
-    meta_setup_failure_grace_minutes: int = 0
+    # A structural minimum hold, not a tuned optimum. At 0 the invalidation rule
+    # can fire on the bar immediately after entry, so the shortest possible hold
+    # is one 1m bar — 2026-08-18 produced a 2-second and a 51-second round trip
+    # that way, both `entry_filled` -> `setup_failure_exit`, both pure spread
+    # cost. Two minutes clears the next-bar case while staying far below the
+    # 20-30 minute stale/no-progress timers, so it does not interact with them.
+    # NOT validated by a sweep: phase4_underlying_exit_softening_sweep_summary
+    # has n=1 trade per variant and cannot rank 0 vs 3 vs 5.
+    meta_setup_failure_grace_minutes: int = 2
     meta_no_progress_exit_enabled: bool = False
     meta_no_progress_exit_minutes: int = 10
     meta_no_progress_exit_atr: float = 0.20

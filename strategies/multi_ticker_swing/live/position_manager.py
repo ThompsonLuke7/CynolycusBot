@@ -1766,6 +1766,30 @@ class SwingPositionManager:
         )
         last_result: dict[str, Any] | None = None
         for attempt, limit_price in enumerate(limit_prices, start=1):
+            # The whole ladder is priced off ONE quote taken before the first
+            # rung, but the rungs are ~4s apart and the book moves. In a falling
+            # tape the later rungs are stale-high and cannot fill; the position
+            # burns its budget and leaves on a market order anyway. Re-poll and
+            # track the market DOWN — never up, so a bouncing quote can't walk
+            # our sell limit away from a fill — and never below the live bid, so
+            # we don't undercut a book that is still there.
+            if attempt > 1:
+                fresh_mid = self._get_contract_price(symbol=symbol, mode="mid")
+                fresh_bid = self._get_contract_price(symbol=symbol, mode="bid")
+                adjusted = limit_price
+                if math.isfinite(fresh_mid) and fresh_mid > 0.0:
+                    adjusted = min(adjusted, fresh_mid)
+                if math.isfinite(fresh_bid) and fresh_bid > 0.0:
+                    adjusted = max(adjusted, fresh_bid)
+                adjusted = _round_option_limit(adjusted)
+                if adjusted > 0.0 and adjusted < limit_price:
+                    logger.info(
+                        "[%s] close rung repriced on a fresh quote symbol=%s "
+                        "%.2f -> %.2f (mid=%.2f bid=%.2f) attempt=%d",
+                        pos.ticker, symbol, limit_price, adjusted,
+                        fresh_mid, fresh_bid, attempt,
+                    )
+                    limit_price = adjusted
             try:
                 resp = self._client.submit_option_order(
                     symbol=symbol,
@@ -2456,6 +2480,15 @@ _LIQUIDATION_FLOOR_BY_PASS = (0.85, 0.65, 0.50)
 # after the floor schedule is exhausted.
 _PENNY_RUNG_MAX_BID = 0.02
 _PENNY_RUNG_MIN_SPREAD_PCT_MID = 1.0
+# A bid at least this fraction of the mid is a CREDIBLE price, so the ladder is
+# allowed to reach it on the first pass instead of waiting out the floor
+# schedule. The schedule exists to stop us dumping into a book that has no real
+# bid (VALE: bid 0.01 against a 0.375 mid, ratio 0.027) — it was never meant to
+# stop us crossing a merely wide one. 2026-08-18: TGT260911C00157500 quoted
+# 3.65 x 5.92 (bid/mid 0.76, spread 47% of mid); the pass-1 floor of 0.85*4.79 =
+# 4.07 sat 42 cents ABOVE the best bid, so all five rungs were unfillable by
+# construction and the position left on a market fallback anyway.
+_LIQUIDATION_CREDIBLE_BID_FRAC_OF_MID = 0.50
 
 
 def _liquidation_close_ladder(
@@ -2475,10 +2508,16 @@ def _liquidation_close_ladder(
     """
     stage = max(1, int(close_pass))
     has_bid = math.isfinite(bid) and bid > 0.0
+    credible_bid = has_bid and base > 0.0 and (bid / base) >= _LIQUIDATION_CREDIBLE_BID_FRAC_OF_MID
     if stage <= len(_LIQUIDATION_FLOOR_BY_PASS):
         floor = base * _LIQUIDATION_FLOOR_BY_PASS[stage - 1]
         # A bid above the scheduled floor is a real, better price — take it.
         if has_bid and bid > floor:
+            floor = bid
+        # A credible bid BELOW the scheduled floor means the book is merely
+        # wide, not absent. Reach it: a ladder whose lowest rung never touches
+        # the best bid cannot fill, it can only burn its attempt budget.
+        elif credible_bid:
             floor = bid
     else:
         floor = bid if has_bid else _OPTION_TICK

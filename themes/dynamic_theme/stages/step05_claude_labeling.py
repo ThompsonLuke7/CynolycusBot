@@ -124,10 +124,28 @@ def label_clusters(
     # labeled, so Claude can reuse an existing name instead of minting a
     # near-duplicate for gray-zone clusters (see _LABEL_PROMPT_TEMPLATE).
     known_names = set(prior_meta.keys())
+
+    # Propose a carry-forward for every cluster, then award each prior name to
+    # a single cluster. Without the second pass several clusters keep the same
+    # name and the duplicate (ticker, theme) rows abort step08.
+    proposals: dict[int, tuple[str, float]] = {}
+    for summary in cluster_summaries:
+        cid = int(summary["cluster_id"])
+        match = _match_prior_theme_scored(cid, cur_centroids, prior_centroids)
+        if match is not None and match[0] in prior_meta:
+            proposals[cid] = match
+    carry_forward, displaced = _resolve_carry_forward(proposals)
+    if displaced:
+        logger.info(
+            "Carry-forward collisions: %d cluster(s) lost a contested prior name "
+            "and will be relabeled",
+            displaced,
+        )
+
     rows, reused, relabeled = [], 0, 0
     for summary in cluster_summaries:
         cid = int(summary["cluster_id"])
-        prior_name = _match_prior_theme(cid, cur_centroids, prior_centroids)
+        prior_name = carry_forward.get(cid)
         if prior_name is not None and prior_name in prior_meta:
             pr = prior_meta[prior_name]
             rows.append({
@@ -211,8 +229,15 @@ def _stability_centroids() -> tuple[dict[int, "object"], dict[str, "object"]]:
         return {}, {}
 
 
-def _match_prior_theme(cid: int, cur_centroids: dict, prior_centroids: dict) -> str | None:
-    """Return a prior theme_name to carry forward if cluster cid matches it well."""
+def _match_prior_theme_scored(
+    cid: int, cur_centroids: dict, prior_centroids: dict
+) -> tuple[str, float] | None:
+    """Best prior theme_name for cluster ``cid``, with its similarity.
+
+    The score is what makes carry-forward exclusive: when several clusters all
+    match the same prior theme, the resolver needs to know which one matches it
+    *best* rather than which happened to be iterated first.
+    """
     from themes.dynamic_theme.config import LABEL_STABILITY_THRESHOLD
     from themes.dynamic_theme.stages.step06_discovery import _cosine_similarity
 
@@ -224,8 +249,40 @@ def _match_prior_theme(cid: int, cur_centroids: dict, prior_centroids: dict) -> 
         if s > best_sim:
             best_name, best_sim = name, s
     if best_name and best_sim >= LABEL_STABILITY_THRESHOLD and not str(best_name).startswith("cluster_"):
-        return str(best_name)
+        return str(best_name), float(best_sim)
     return None
+
+
+def _match_prior_theme(cid: int, cur_centroids: dict, prior_centroids: dict) -> str | None:
+    """Return a prior theme_name to carry forward if cluster cid matches it well."""
+    match = _match_prior_theme_scored(cid, cur_centroids, prior_centroids)
+    return match[0] if match else None
+
+
+def _resolve_carry_forward(
+    proposals: dict[int, tuple[str, float]],
+) -> tuple[dict[int, str], int]:
+    """Award each prior theme name to at most one cluster.
+
+    Carry-forward matches every cluster to its nearest prior centroid
+    independently, and nothing stopped two clusters from claiming the same
+    name. Downstream that is not a cosmetic duplicate: membership scores are
+    computed per cluster, so one (ticker, theme) pair ends up with two
+    different scores and step08's immutable-history guard refuses the write.
+
+    On 2026-08-17 this collapsed 187 clusters onto 88 names — seven of them
+    called ``mortgage_reits``. Highest similarity wins the name; the clusters
+    that lose fall through to a fresh label, which is the honest outcome for a
+    grouping that is not actually last week's theme.
+
+    Returns the winning ``{cluster_id: theme_name}`` and the number displaced.
+    """
+    claimed: dict[str, int] = {}
+    # Deterministic: strongest match first, cluster id breaking exact ties.
+    for cid, (name, sim) in sorted(proposals.items(), key=lambda kv: (-kv[1][1], kv[0])):
+        claimed.setdefault(name, cid)
+    carried = {cid: name for name, cid in claimed.items()}
+    return carried, len(proposals) - len(carried)
 
 
 def _load_registry_or_empty() -> pd.DataFrame:

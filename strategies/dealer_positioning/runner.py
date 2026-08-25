@@ -93,11 +93,14 @@ class DealerPositioningRunner:
         }
 
     def start(self) -> None:
-        if self._data_client is None:
-            self._data_client = SchwabDealerDataClient(self.config)
-        # Cheap file read. An already-expired token is knowable before the first
-        # request, so there is no reason to discover it from a failed poll.
+        # Cheap file read, and it must come first: building the Schwab client
+        # against a missing or dead token is what turns a knowable credential
+        # problem into a startup crash. An already-expired token is knowable
+        # before the first request, so there is no reason to discover it from a
+        # failed poll -- or from a constructor blowing up.
         self._halt_early_if_token_already_expired()
+        if self._auth_dead_reason is None and self._data_client is None:
+            self._data_client = SchwabDealerDataClient(self.config)
         self._emit("session_started", self.snapshot())
         while not self._stop.is_set():
             started = time.monotonic()

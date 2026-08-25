@@ -27,6 +27,7 @@ NAV_PORTS: list[tuple[str, int]] = [
     ("Intraday Structure", 8774),
     ("Meta Ranker", 8769),
     ("Library", 8775),
+    ("Trades", 8776),
 ]
 
 THEME_CSS = """:root{
@@ -138,11 +139,20 @@ NAV_HTML = """<nav class="cyno-nav" id="cyno-nav"></nav>
 
 
 def serve_theme_css(handler) -> None:
-    """Answer ``GET /static/cynolycus_theme.css`` from any BaseHTTPRequestHandler."""
+    """Answer ``GET /static/cynolycus_theme.css`` from any BaseHTTPRequestHandler.
+
+    Swallows a mid-write client disconnect for the same reason every
+    dashboard's own ``_send`` does: a closed tab is not a server fault, and an
+    escaping traceback here would be attributed to whichever dashboard happened
+    to serve the stylesheet.
+    """
     body = THEME_CSS.encode("utf-8")
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/css; charset=utf-8")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Cache-Control", "no-store")
-    handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/css; charset=utf-8")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError):
+        handler.close_connection = True

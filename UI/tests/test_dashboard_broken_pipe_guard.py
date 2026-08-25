@@ -12,6 +12,15 @@ caught this; the same guard was applied to the other five, and (2026-07-21,
 after the fix landed) momentum_dashboard.py turned out to be the ONE dashboard
 missed -- with the cache-stampede that had been masking its own write failures
 fixed, it became 96% of the next day's BrokenPipe count. Now covered too.
+
+2026-08-24: it happened a third time. `trade_library_dashboard.py` was written
+after the audit and never got the guard, and its /api/state was slow enough
+(1.2-2.1s in-process, against the hub's 2.5s timeout) that the hub dropped the
+socket on a large share of its 5s polls. `serve_theme_css`, shared by all
+twelve dashboards, had the same unguarded write and is covered here too.
+The sweep this time covered every `wfile.write` in UI/: `intraday_structure`,
+`hub` (whose page polls its own /api/state every 5s) and `forward_guidance`
+were unguarded too, and are fixed here rather than left to recur.
 """
 from __future__ import annotations
 
@@ -23,10 +32,15 @@ import pytest
 from UI.amethyst_dashboard import AmethystHandler
 from UI.dealer_positioning_dashboard import DealerDashboardHandler
 from UI.dealer_ranker_dashboard import DealerRankerHandler
+from UI.forward_guidance_dashboard import ForwardGuidanceDashboardHandler
 from UI.htf_dashboard import HTFHandler
+from UI.hub_dashboard import HubHandler
+from UI.intraday_structure_dashboard import IntradayStructureHandler
 from UI.live_dashboard import DashboardHandler
 from UI.meta_ranker_dashboard import MetaRankerHandler
 from UI.momentum_dashboard import MomentumHandler
+from UI.trade_library_dashboard import Handler as TradeLibraryHandler
+from UI.ui_chrome import serve_theme_css
 
 
 class _FakeWfile:
@@ -60,6 +74,11 @@ def _bare_handler(cls):
         (HTFHandler, "_send", lambda h: h._send(b"{}")),
         (AmethystHandler, "_send", lambda h: h._send(b"{}")),
         (MomentumHandler, "_send", lambda h: h._send(b"{}")),
+        (TradeLibraryHandler, "_send", lambda h: h._send(b"{}")),
+        (IntradayStructureHandler, "_send", lambda h: h._send(b"{}")),
+        (HubHandler, "_send", lambda h: h._send(b"{}")),
+        (ForwardGuidanceDashboardHandler, "_write_json", lambda h: h._write_json({})),
+        (ForwardGuidanceDashboardHandler, "_write_text", lambda h: h._write_text("hi")),
         (DashboardHandler, "_write_json", lambda h: h._write_json({})),
         (DashboardHandler, "_write_text", lambda h: h._write_text("hi")),
         (DealerDashboardHandler, "_write_json", lambda h: h._write_json({})),
@@ -72,7 +91,8 @@ def test_write_path_swallows_broken_pipe(cls, method, call):
     assert h.close_connection is True
 
 
-@pytest.mark.parametrize("cls", [DealerRankerHandler, MetaRankerHandler, HTFHandler, AmethystHandler, MomentumHandler])
+@pytest.mark.parametrize("cls", [DealerRankerHandler, MetaRankerHandler, HTFHandler,
+                                AmethystHandler, MomentumHandler, TradeLibraryHandler])
 def test_send_still_sets_headers_on_success(cls):
     class _OkWfile:
         def __init__(self):
@@ -93,3 +113,11 @@ def test_send_still_sets_headers_on_success(cls):
     h._send(b'{"ok": true}', status=HTTPStatus.OK)
     assert b'{"ok": true}' in h.wfile.written
     assert h.close_connection is False
+
+
+@pytest.mark.parametrize("cls", [DealerRankerHandler, TradeLibraryHandler])
+def test_shared_theme_css_swallows_broken_pipe(cls):
+    """The stylesheet is served by shared chrome, from every dashboard."""
+    h = _bare_handler(cls)
+    serve_theme_css(h)  # must not raise
+    assert h.close_connection is True

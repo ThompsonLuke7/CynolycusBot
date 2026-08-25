@@ -84,21 +84,23 @@ class ForwardGuidanceDashboardHandler(BaseHTTPRequestHandler):
 
     def _write_json(self, payload: dict[str, Any], status: int = HTTPStatus.OK) -> None:
         body = json.dumps(json_safe(payload)).encode("utf-8")
-        self.send_response(int(status))
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        self._write_bytes(body, status, "application/json; charset=utf-8")
 
     def _write_text(self, body: str, *, status: int = HTTPStatus.OK, content_type: str = "text/plain") -> None:
-        blob = body.encode("utf-8")
-        self.send_response(int(status))
-        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
-        self.send_header("Content-Length", str(len(blob)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(blob)
+        self._write_bytes(body.encode("utf-8"), status, f"{content_type}; charset=utf-8")
+
+    def _write_bytes(self, body: bytes, status: int, ctype: str) -> None:
+        # Same guard as every other dashboard: a client that hangs up mid-write
+        # is normal HTTP, not a fault worth a traceback in the server log.
+        try:
+            self.send_response(int(status))
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _serve_index(self) -> None:
         index_path = Path(__file__).resolve().parent / "forward_guidance_index.html"

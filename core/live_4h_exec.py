@@ -2103,6 +2103,49 @@ def defer_entries_if_market_closed(module, bar, plan, new_managed, limits, *,
     return kept
 
 
+def working_order_symbols(client) -> set[str] | None:
+    """Symbols with a live (unfilled) order at the broker, or None if unreadable.
+
+    ``pos_lookup`` only sees FILLED positions, so it cannot see an order that is
+    still working. That gap is cross-module: on 2026-08-24 Meta's 09:35 flush
+    correctly found PSIG/RZLT/PATH260918C00018000 unheld and vetoed them anyway,
+    HTF filled PSIG and RZLT at 09:37 and momentum filled the PATH call at
+    09:45, and Meta's queue kept all three — sized identically, because sizing
+    is deterministic given a shared target notional. Nothing between the flushes
+    would have stopped the account buying the same names twice; only the
+    POLICY_VETO did. PLUG x2273 is queued for the same bar in both Meta and HTF
+    right now.
+
+    Returns None when the broker cannot be asked. That is deliberately distinct
+    from an empty set: the caller must not read "I could not check" as "nothing
+    is working". Failure is non-fatal — the pre-existing ``already_held`` check
+    still applies — because making a transient orders-endpoint error block every
+    deferred entry would trade a rare double-buy for a common silent outage.
+    """
+    get_orders = getattr(client, "get_orders", None)
+    if not callable(get_orders):
+        return None
+    try:
+        orders = get_orders(status="open")
+    except Exception as exc:  # noqa: BLE001 - never let this block a flush
+        logger.warning("pending-open: could not read open orders (%s) — "
+                       "duplicate-order guard is OFF for this flush", exc)
+        return None
+    if not isinstance(orders, (list, tuple)):
+        logger.warning("pending-open: get_orders(status='open') returned %s, not a list — "
+                       "duplicate-order guard is OFF for this flush", type(orders).__name__)
+        return None
+    symbols = set()
+    for order in orders:
+        try:
+            symbol = str(order.get("symbol") or "").strip()
+        except AttributeError:
+            continue
+        if symbol:
+            symbols.add(symbol)
+    return symbols
+
+
 def pending_entry_bar_is_stale(bar, *, now=None) -> bool:
     """True when a queued entry's decision bar predates the last trading session.
 
@@ -2156,6 +2199,8 @@ def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
     pos_lookup = pos_lookup or {}
     submitted, skipped = {}, []
     eligible = []
+    # None means "could not ask", which is not the same as "nothing is working".
+    working = working_order_symbols(client)
     for rec in entries:
         tkr, sym = rec.get("ticker"), rec.get("order_symbol")
         if tset and tkr not in tset:
@@ -2170,6 +2215,20 @@ def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
                 rec.get("attempts", 0), rec.get("last_skip", "none"),
             )
             skipped.append({**rec, "skip": "stale_bar"}); continue
+        # Checked after staleness on purpose: a decision too old to act on is
+        # finished regardless of what is working at the broker, and retaining it
+        # as already_working would keep a dead signal alive another session.
+        if working is not None and sym in working:
+            # Retained, not terminal: the exposure is being established right
+            # now, but a working order can still be cancelled unfilled, and the
+            # queue is the only record that the decision was made. Tomorrow it
+            # either resolves to already_held or ages out on the bar guard.
+            logger.warning(
+                "%s pending-open: %s %s x%s already has a working order at the "
+                "broker — not sending a duplicate (bar %s)",
+                module, rec.get("side"), sym, rec.get("qty"), rec.get("bar"),
+            )
+            skipped.append({**rec, "skip": "already_working"}); continue
         eligible.append(rec)
 
     readiness_plan = [

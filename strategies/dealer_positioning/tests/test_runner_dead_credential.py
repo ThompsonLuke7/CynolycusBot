@@ -183,3 +183,40 @@ def test_transient_error_does_not_halt_polling(runner, monkeypatch):
 
     assert polls == ["SPY", "QQQ", "SLV", "IWM", "GLD"], "all symbols still attempted"
     assert runner._auth_dead_reason is None
+
+
+def test_dead_token_at_startup_never_builds_a_schwab_client(monkeypatch, tmp_path):
+    """The token check must run *before* the client is constructed.
+
+    2026-08-24: an interrupted re-auth left no token file, so
+    ``SchwabDealerDataClient`` dropped into schwab-py's interactive login and
+    the runner thread died on ``EOFError`` at ``runner.start()`` — before the
+    cheap, offline token check that would have reported the real cause.
+    """
+    class Expired:
+        expired = True
+        message = "Schwab refresh token EXPIRED 21h ago"
+
+    monkeypatch.setattr(
+        "core.schwab_token_status.schwab_token_status", lambda *a, **k: Expired()
+    )
+
+    def _explode(config):
+        raise AssertionError("no Schwab client may be built on a dead credential")
+
+    monkeypatch.setattr(dealer_runner, "SchwabDealerDataClient", _explode)
+
+    config = DealerPositioningConfig(
+        symbols=("SPY",),
+        poll_seconds=60,
+        market_hours_only=False,
+        output_root=tmp_path / "dealer",
+    )
+    inst = DealerPositioningRunner(config=config, event_sink=None, bar_queue=queue.Queue())
+    inst._stop = threading.Event()
+    inst._stop.set()
+
+    inst.start()
+
+    assert inst._data_client is None
+    assert inst._auth_dead_reason is not None

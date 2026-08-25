@@ -225,6 +225,20 @@ def _adapt_library(s: dict) -> dict:
             "detail": f"{int(rows or 0):,} records · {int(tickers or 0):,} tickers"}
 
 
+def _adapt_trades(s: dict) -> dict:
+    book = s.get("book") or {}
+    gaps = len((s.get("health") or {}).get("gaps") or [])
+    closed, wr = book.get("closed"), book.get("win_rate")
+    if closed is None:
+        return {"state": "idle", "detail": "no closed trades yet"}
+    detail = f"{closed:,} closed · {book.get('open', 0)} open"
+    if wr is not None:
+        detail += f" · {wr}% round-trip win"
+    if gaps:
+        detail += f" · {gaps} ledger gap(s)"
+    return {"state": "warming" if gaps else "ready", "detail": detail}
+
+
 def _adapt_intraday_structure(s: dict) -> dict:
     active = len(s.get("active_signals") or [])
     candidates = int(s.get("candidate_count") or 0)
@@ -241,7 +255,8 @@ class HubDashboardApp:
                  port_htf: int = 8771, port_amethyst: int = 8772,
                  port_dealer_ranker: int = 8773,
                  port_intraday_structure: int | None = None,
-                 port_library: int | None = 8775) -> None:
+                 port_library: int | None = 8775,
+                 port_trades: int | None = 8776) -> None:
         self.host = host
         self.dashboards: list[_Dash] = [
             _Dash("spy", "SPY Intraday", port_spy, startable=True, stoppable=True, tradeable=True,
@@ -282,6 +297,12 @@ class HubDashboardApp:
                 _Dash("library", "Library", port_library,
                       startable=False, stoppable=False, tradeable=False,
                       start_path=None, start_body=lambda live: {}, adapt=_adapt_library)
+            )
+        if port_trades is not None:
+            self.dashboards.append(
+                _Dash("trades", "Trade Library", port_trades,
+                      startable=False, stoppable=False, tradeable=False,
+                      start_path=None, start_body=lambda live: {}, adapt=_adapt_trades)
             )
 
     def _by_key(self, key: str) -> _Dash:
@@ -565,12 +586,17 @@ class HubHandler(BaseHTTPRequestHandler):
         return self.server.app  # type: ignore[attr-defined]
 
     def _send(self, body: bytes, status=HTTPStatus.OK, ctype="application/json; charset=utf-8"):
-        self.send_response(int(status))
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        # The hub page polls its own /api/state every 5s and each snapshot fans
+        # out to twelve dashboards, so closing the tab mid-fan-out lands here.
+        try:
+            self.send_response(int(status))
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or 0)

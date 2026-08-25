@@ -36,6 +36,7 @@ from strategies.momentum_expansion.features.live_feature_panel_4h import (
 from strategies.momentum_expansion.inference.ranker import ExpansionRanker
 from strategies.multi_ticker_swing_htf.inference.scorer import HTFSwingScorer
 from signals.meta_context import build_meta_ranker_matrix as B
+from signals.meta_context.build_forward_guidance_signal import FG_FEATURE_COLS
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,41 @@ def rebuild_staleness_reason(
     return None
 
 
+#: Bars sampled to establish the expected per-bar breadth of the matrix.
+_BREADTH_LOOKBACK_BARS = 40
+
+
+def last_covered_timestamp(
+    existing: pd.DataFrame, *, min_fraction: float = 0.5
+) -> pd.Timestamp | None:
+    """Timestamp of the newest *fully populated* bar in the matrix.
+
+    Not the same as ``max(timestamp)``, and the difference is load-bearing. A
+    single-ticker append — a ``--tickers NVDA`` smoke test, or one of the
+    off-grid bars illiquid names like CUB emit into Data/shared/bars/4h — sets
+    the maximum for the whole universe. Every later run then sees
+    ``max_ts >= latest_reference_ts``, reports "no new reference-market 4H bar
+    to add", and exits 0 with the real bar never incorporated.
+
+    That is not hypothetical: 2026-07-09 18:00 UTC holds exactly one row (CUB)
+    against 2,874 at 14:00, and the ~2,850 missing ticker-rows were never
+    recovered. 2026-06-22 and 06-23 have the same shape at 242 and 136 rows.
+
+    A bar counts as covered when it carries at least ``min_fraction`` of the
+    median breadth of the last ``_BREADTH_LOOKBACK_BARS`` bars. On a matrix
+    whose bars are all genuinely thin this degrades to the newest bar, which is
+    the old behaviour.
+    """
+    if existing.empty:
+        return None
+    counts = existing.groupby("timestamp").size().sort_index()
+    expected = float(counts.tail(_BREADTH_LOOKBACK_BARS).median())
+    if not expected > 0:
+        return counts.index[-1]
+    covered = counts[counts >= min_fraction * expected]
+    return covered.index[-1] if len(covered) else None
+
+
 def _latest_reference_bar_timestamp() -> pd.Timestamp | None:
     latest: list[pd.Timestamp] = []
     for ticker in REFERENCE_BAR_TICKERS:
@@ -133,7 +169,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     existing = pd.read_parquet(args.matrix).reset_index()
     existing["timestamp"] = pd.to_datetime(existing["timestamp"], utc=True)
     max_ts = existing["timestamp"].max()
-    print(f"existing matrix: {len(existing):,} rows, max ts {max_ts}")
+    # Resume from the last FULLY POPULATED bar, not the raw maximum: a stray
+    # single-ticker row must not convince us the whole universe is up to date.
+    covered_ts = last_covered_timestamp(existing)
+    max_ts = covered_ts if covered_ts is not None else max_ts
+    print(f"existing matrix: {len(existing):,} rows, max ts {existing['timestamp'].max()}")
+    if covered_ts is not None and covered_ts != existing["timestamp"].max():
+        print(f"  last fully-populated bar: {covered_ts} (resuming from there)")
 
     latest_reference_ts = _latest_reference_bar_timestamp()
     if latest_reference_ts is not None and max_ts >= latest_reference_ts:
@@ -185,15 +227,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     spine = spine.merge(feats[["timestamp", "ticker"] + meta_present], on=["timestamp", "ticker"], how="left")
 
     # ---- theme context (as-of prior day) ----
-    dtf_path = B.DYNAMIC_THEME_FEATURES_HISTORY if B.DYNAMIC_THEME_FEATURES_HISTORY.exists() else B.DYNAMIC_THEME_FEATURES
-    if dtf_path.exists():
-        dtf = pd.read_parquet(dtf_path)
-        dtf["date"] = pd.to_datetime(dtf["date"]).dt.normalize()
-        dtf = dtf.rename(columns={"primary_theme": "theme"}).sort_values(["ticker", "date"])
-        ctx_cols = [c for c in B.DYNAMIC_THEME_CTX if c in dtf.columns and c != "primary_theme"]
-        spine = B._asof_prior_day_ticker(spine, dtf[["ticker", "date", "theme"] + ctx_cols])
-    else:
-        spine["theme"] = np.nan
+    # Shared with the research builder so the two cannot drift; it also applies
+    # THEME_MAX_CARRY_DAYS, which this path previously lacked entirely.
+    spine, _ = B.join_theme_context(spine, verbose=False)
 
     # ---- news catalyst (as-of prior day) ----
     if B.NEWS_CATALYST_SIGNAL.exists():
@@ -206,11 +242,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     spine, _ = B._join_calendar_macro_features(spine)
 
     # ---- forward guidance (as-of prior day) ----
+    # The research builder nulls fg_* beyond FG_MAX_CARRY_DAYS and recomputes
+    # fg_days_since_guidance from the source date; this path used to carry a
+    # guidance reading forward indefinitely, so a live bar could be scored on a
+    # year-old reading that the trained model never saw carried that far.
     if B.FORWARD_GUIDANCE_SIGNAL.exists():
         fg = pd.read_parquet(B.FORWARD_GUIDANCE_SIGNAL)
         fg["date"] = pd.to_datetime(fg["date"]).dt.normalize()
-        fg_cols = [c for c in ["fg_guidance_score", "fg_guidance_count_90d", "fg_days_since_guidance"] if c in fg.columns]
-        spine = B._asof_prior_day_ticker(spine, fg[["ticker", "date"] + fg_cols].sort_values(["ticker", "date"]))
+        fg["fg_event_date"] = fg["date"]
+        fg_cols = [c for c in FG_FEATURE_COLS if c in fg.columns]
+        spine = B._asof_prior_day_ticker(
+            spine,
+            fg[["ticker", "date", "fg_event_date"] + fg_cols].sort_values(["ticker", "date"]),
+        )
+        fg_days_since = (spine["date"] - spine["fg_event_date"]).dt.days
+        fg_stale = fg_days_since.isna() | (fg_days_since > B.FG_MAX_CARRY_DAYS)
+        spine.loc[fg_stale, fg_cols] = np.nan
+        spine["fg_days_since_guidance"] = fg_days_since.where(~fg_stale, np.nan)
+        spine = spine.drop(columns=["fg_event_date"])
 
     # ---- cross-sectional context (per bar) ----
     g = spine.groupby("timestamp")

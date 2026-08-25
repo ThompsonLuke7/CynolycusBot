@@ -379,35 +379,25 @@ def _validate_history_timestamps(frame: pd.DataFrame, *, source_name: str) -> No
             raise ValueError(f"generated_at follows available_at in {source_name}")
 
 
-def append_membership_history(
-    current: pd.DataFrame,
-    *,
-    history_path: Path,
-    as_of: date,
-    generated_at: datetime,
-) -> pd.DataFrame:
-    """Append new immutable membership evidence and atomically replace history.
+def assert_publishable_memberships(current: pd.DataFrame) -> pd.DataFrame:
+    """Normalize a membership frame, or raise before any of it is published.
 
-    ``available_at`` marks when validated current and prior evidence is ready
-    for serialization/publication.  It is captured immediately before the new
-    immutable rows are materialized; the following same-directory atomic write
-    does not infer or rewrite that timestamp from filesystem metadata.
+    ``_atomic_write_parquet`` only stops a reader seeing a *torn* file; it
+    publishes a *wrong* one just as atomically. This check used to live solely
+    inside ``append_membership_history``, which ``compute_memberships`` called
+    AFTER it had already written ``TICKER_MEMBERSHIP_PATH`` — so on 2026-08-17
+    and 2026-08-24 the run raised, reported exit=1, and still left 435,450
+    conflicting rows (77% of the file) in the artifact every consumer reads,
+    while the immutable history the check was protecting was never written at
+    all. Validate first, publish second.
+
+    Returns the normalized, de-duplicated frame so callers do not repeat the
+    work. Identical duplicate rows are collapsed; *conflicting* ones raise.
     """
-
     required = {"ticker", "theme", "membership_score"}
     missing = sorted(required - set(current.columns))
     if missing:
         raise ValueError(f"membership frame missing columns: {missing}")
-    if isinstance(as_of, datetime):
-        as_of = as_of.date()
-    if not isinstance(as_of, date):
-        raise ValueError("as_of must be a date")
-    generated_at_utc = _aware_utc(generated_at, field_name="generated_at")
-    as_of_start = datetime.combine(as_of, datetime.min.time(), tzinfo=UTC)
-    if generated_at_utc < as_of_start:
-        raise ValueError("generated_at precedes as_of")
-    taxonomy_version = _taxonomy_from_current(current)
-    producer_version = str(current.attrs.get("producer_version", PRODUCER_VERSION))
 
     validated_rows: list[dict[str, object]] = []
     for row in current.itertuples(index=False):
@@ -430,6 +420,35 @@ def append_membership_history(
             if group["membership_score"].nunique(dropna=False) != 1:
                 raise ValueError("conflicting immutable membership rows in current memberships")
         validated = validated.drop_duplicates(["ticker", "theme"], keep="first")
+    return validated
+
+
+def append_membership_history(
+    current: pd.DataFrame,
+    *,
+    history_path: Path,
+    as_of: date,
+    generated_at: datetime,
+) -> pd.DataFrame:
+    """Append new immutable membership evidence and atomically replace history.
+
+    ``available_at`` marks when validated current and prior evidence is ready
+    for serialization/publication.  It is captured immediately before the new
+    immutable rows are materialized; the following same-directory atomic write
+    does not infer or rewrite that timestamp from filesystem metadata.
+    """
+
+    validated = assert_publishable_memberships(current)
+    if isinstance(as_of, datetime):
+        as_of = as_of.date()
+    if not isinstance(as_of, date):
+        raise ValueError("as_of must be a date")
+    generated_at_utc = _aware_utc(generated_at, field_name="generated_at")
+    as_of_start = datetime.combine(as_of, datetime.min.time(), tzinfo=UTC)
+    if generated_at_utc < as_of_start:
+        raise ValueError("generated_at precedes as_of")
+    taxonomy_version = _taxonomy_from_current(current)
+    producer_version = str(current.attrs.get("producer_version", PRODUCER_VERSION))
 
     existing = _normalize_existing_history(Path(history_path))
 
@@ -468,6 +487,57 @@ def append_membership_history(
     combined = combined.reindex(columns=_HISTORY_COLUMNS)
     _atomic_write_parquet(combined, Path(history_path))
     return combined
+
+
+def _collapse_duplicate_themes(
+    sim_matrix: np.ndarray, theme_names: list[str]
+) -> tuple[np.ndarray, list[str]]:
+    """Merge columns that carry the same theme name into a single theme.
+
+    step05 deliberately lets Claude reuse a name already in play rather than
+    mint a near-duplicate for a gray-zone cluster, so two clusters legitimately
+    arrive here under one name. They are one theme, and a ticker belongs to it
+    if it is close to ANY of its lobes — hence ``max`` rather than a mean, which
+    would invent a centroid in the empty space between two genuinely separate
+    lobes and understate membership for both.
+
+    Left unmerged, the caller emits one row per (ticker, theme-*instance*): on
+    2026-08-24 fifty names were claimed by more than one cluster
+    (``mixed_small_cap_value`` by eleven) and 435,450 of 563,182 rows were
+    duplicate (ticker, theme) pairs carrying conflicting scores. The 2026-08-17
+    exclusivity fix in step05 closed only the carry-forward half of this; the
+    Claude relabel path had no such constraint and was masked behind it.
+    """
+    first_col: dict[str, int] = {}
+    order: list[str] = []
+    members: dict[str, list[int]] = {}
+    for idx, name in enumerate(theme_names):
+        key = canonical_theme_id(name)
+        if key not in first_col:
+            first_col[key] = idx
+            order.append(key)
+            members[key] = []
+        members[key].append(idx)
+    if len(order) == len(theme_names):
+        return sim_matrix, theme_names
+
+    merged_names = [theme_names[first_col[key]] for key in order]
+    collapsed = np.column_stack(
+        [sim_matrix[:, members[key]].max(axis=1) for key in order]
+    ).astype(np.float32)
+    for key in order:
+        if len(members[key]) > 1:
+            logger.info(
+                "  theme '%s' spans %d clusters — merged (max membership)",
+                theme_names[first_col[key]],
+                len(members[key]),
+            )
+    logger.info(
+        "Collapsed %d cluster columns into %d distinct themes",
+        len(theme_names),
+        len(merged_names),
+    )
+    return collapsed, merged_names
 
 
 def _cosine_sim_matrix(ticker_matrix: np.ndarray, centroid_matrix: np.ndarray) -> np.ndarray:
@@ -564,6 +634,7 @@ def compute_memberships(
         len(theme_names),
     )
     sim_matrix = _cosine_sim_matrix(matrix, centroid_matrix)
+    sim_matrix, theme_names = _collapse_duplicate_themes(sim_matrix, theme_names)
     rows = []
     for i, ticker in enumerate(tickers):
         for j, theme in enumerate(theme_names):
@@ -580,6 +651,9 @@ def compute_memberships(
     out = pd.DataFrame(rows, columns=["ticker", "theme", "membership_score", "date"])
     out.attrs["taxonomy_version"] = taxonomy_version
     out.attrs["producer_version"] = PRODUCER_VERSION
+    # Precondition, not a formality: publishing before this check is what put a
+    # 77%-duplicate file in front of every consumer on 2026-08-17 and 08-24.
+    assert_publishable_memberships(out)
     _atomic_write_parquet(out, TICKER_MEMBERSHIP_PATH)
     append_membership_history(
         out,
@@ -620,6 +694,7 @@ def get_primary_theme(memberships_df: pd.DataFrame) -> pd.DataFrame:
 
 __all__ = [
     "append_membership_history",
+    "assert_publishable_memberships",
     "canonical_taxonomy_json",
     "canonical_theme_id",
     "compute_memberships",

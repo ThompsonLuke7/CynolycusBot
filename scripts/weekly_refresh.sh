@@ -51,6 +51,15 @@ fi
   echo "[$(ts)] weekly_refresh.sh starting"
   echo "================================================================"
   STATUS=0
+  # Per-stage outcome, rewritten after every stage. `DONE status=` collapses the
+  # whole run to one number and the detail lives only in a log nobody greps:
+  # stage 4 failed on 08-03, 08-17 and 08-24 while the run still looked "mostly
+  # fine", and the theme feed sat 14 days stale before anyone noticed. This makes
+  # "which stage has been failing, and for how long" a queryable fact.
+  STAGE_STATUS=""
+  record_stage() {
+    STAGE_STATUS="${STAGE_STATUS:+$STAGE_STATUS,}\n    {\"stage\": \"$1\", \"exit_code\": $2}"
+  }
 
   # 1) Backfill bars for the whole universe (incl. newly promoted names).
   echo "[$(ts)] 1/4 catch up shared bars (1H/4H/1D, full universe)"
@@ -59,6 +68,7 @@ fi
   rc=$?
   echo "[$(ts)] catchup exit=$rc"
   [ "$rc" -ne 0 ] && STATUS="$rc"
+  record_stage "catchup" "$rc"
 
   # 2) Momentum weekly universe snapshot (must follow #1 to include new names).
   echo "[$(ts)] 2/4 momentum universe snapshot"
@@ -67,6 +77,7 @@ fi
   rc=$?
   echo "[$(ts)] momentum snapshot exit=$rc"
   [ "$rc" -ne 0 ] && STATUS="$rc"
+  record_stage "momentum_universe_snapshot" "$rc"
 
   # 3) Full-universe catalyst news backfill. The nightly job only collects the
   #    PRIORITY scope (swing ∪ top-300 momentum, ~1.25k names) to stay fast; this weekly
@@ -80,16 +91,19 @@ fi
   rc=$?
   echo "[$(ts)] news collect (full) exit=$rc"
   [ "$rc" -ne 0 ] && STATUS="$rc"
+  record_stage "news_collect_full" "$rc"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_NEWS_PROCESS_TIMEOUT_SECONDS:-21600}s" \
     "$PYTHON" -u -m signals.news.main --stage incremental
   rc=$?
   echo "[$(ts)] news incremental exit=$rc"
   [ "$rc" -ne 0 ] && STATUS="$rc"
+  record_stage "news_incremental" "$rc"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_NEWS_SIGNAL_TIMEOUT_SECONDS:-10800}s" \
     "$PYTHON" -u -m signals.meta_context.build_news_signal --incremental-cache
   rc=$?
   echo "[$(ts)] news signal rebuild exit=$rc"
   [ "$rc" -ne 0 ] && STATUS="$rc"
+  record_stage "news_signal_rebuild" "$rc"
 
   # 4) Meta Ranker feeds + dynamic themes (Claude $).
   echo "[$(ts)] 4/4 meta feeds + dynamic themes (--weekly, costs Claude \$)"
@@ -98,10 +112,22 @@ fi
   rc=$?
   echo "[$(ts)] meta feeds exit=$rc"
   [ "$rc" -ne 0 ] && STATUS="$rc"
+  record_stage "meta_feeds_and_themes" "$rc"
 
   echo ""
   echo "----------------------------------------------------------------"
   echo "[$(ts)] weekly_refresh.sh DONE status=$STATUS"
+
+  # Completion stamp, written last so it can only describe a run that finished.
+  # Mirrors nightly_market_data.sh's stamp; read it instead of grepping the log.
+  stamp_dir="$REPO_ROOT/Data/readiness"
+  mkdir -p "$stamp_dir"
+  printf '{\n  "completed_at_utc": "%s",\n  "job": "weekly_refresh",\n  "status": "%s",\n  "stages": [%b\n  ],\n  "version": 1\n}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)" \
+    "$([ "$STATUS" -eq 0 ] && echo success || echo failed)" \
+    "$STAGE_STATUS" \
+    > "$stamp_dir/weekly_refresh_latest.json.tmp"
+  mv "$stamp_dir/weekly_refresh_latest.json.tmp" "$stamp_dir/weekly_refresh_latest.json"
   echo ""
   echo "  >>> MANUAL STEP: re-auth Schwab (7-day token; dealer gamma levels"
   echo "      go stale without it). Run this and complete the browser login:"

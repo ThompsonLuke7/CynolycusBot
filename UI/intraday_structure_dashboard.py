@@ -68,9 +68,14 @@ class IntradayStructureHandler(BaseHTTPRequestHandler):
 
     def _send(self, payload: Any, *, status=HTTPStatus.OK, content_type="application/json; charset=utf-8") -> None:
         body = payload if isinstance(payload, bytes) else json.dumps(payload, allow_nan=False, default=str).encode("utf-8")
-        self.send_response(int(status)); self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store")
-        self.end_headers(); self.wfile.write(body)
+        # Same guard as every other dashboard: a client that hangs up mid-write
+        # is normal HTTP, not a fault worth a traceback in the server log.
+        try:
+            self.send_response(int(status)); self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store")
+            self.end_headers(); self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def do_GET(self):  # noqa: N802
         if self.path == "/" or self.path.startswith("/index"):

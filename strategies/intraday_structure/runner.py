@@ -80,18 +80,22 @@ class IntradayStructureRunner:
         self.engine.write_active_signals()
 
     def snapshot(self) -> dict:
-        active = [signal.to_dict() for signal in self.engine.active_signals()]
-        return {
-            "running": bool(self._thread and self._thread.is_alive()),
-            "paper_only": True,
-            "candidate_count": len(self.engine.candidates),
-            "setup_count": len(self.engine.setups),
-            "active_signals": active,
-            "qualified_dealer_plate_signals": [
-                signal for signal in active if bool((signal.get("dealer_plate") or {}).get("qualified"))
-            ],
-            "recent_transitions": [transition.to_dict() for transition in self.engine.transitions[-100:]],
-        }
+        # One lock for the whole read: the runner thread is ingesting bars while
+        # this runs on an HTTP thread, and a torn view would report counts from
+        # one instant against signals from another.
+        with self.engine.read_lock():
+            active = [signal.to_dict() for signal in self.engine.active_signals()]
+            return {
+                "running": bool(self._thread and self._thread.is_alive()),
+                "paper_only": True,
+                "candidate_count": len(self.engine.candidates),
+                "setup_count": len(self.engine.setups),
+                "active_signals": active,
+                "qualified_dealer_plate_signals": [
+                    signal for signal in active if bool((signal.get("dealer_plate") or {}).get("qualified"))
+                ],
+                "recent_transitions": [transition.to_dict() for transition in self.engine.transitions[-100:]],
+            }
 
     def _run(self) -> None:
         while not self._stop.is_set():

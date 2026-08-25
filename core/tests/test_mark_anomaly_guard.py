@@ -100,6 +100,9 @@ def _plan(managed, pos_info, targets=()):
         None, targets=list(targets), managed=managed, pos_info=pos_info, bar="2026-08-10 14:00:00+00:00",
         signal_audits={}, policy=_POLICY, route_fn=lambda *a, **k: ("skip", None, "n/a"),
         ref_price_fn=lambda _t: None, verbose=False,
+        # Anomaly-guard behavior is independent of the underlying stop; pin the
+        # basis off so these assertions never depend on the real bar cache.
+        underlying_fn=lambda _t, _at=None: (None, None),
     )
 
 

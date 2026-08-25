@@ -177,6 +177,11 @@ def _plan(client, managed, pos_info, targets=()):
         bar="2026-08-13 18:00:00+00:00", signal_audits={}, policy=ExecPolicy(),
         route_fn=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no entry")),
         ref_price_fn=lambda t: 10.0, verbose=False,
+        # These tests are about the stale-mark CORROBORATION path, which is
+        # reached via the premium stop. Pin the underlying basis to "unavailable"
+        # so they exercise that path deterministically instead of depending on
+        # whatever Data/shared/bars/4h happens to hold for AAOI.
+        underlying_fn=lambda _t, _at=None: (None, None),
     )
 
 
@@ -244,3 +249,45 @@ def test_equity_exits_do_not_call_the_option_quote_path():
                        "entry_bar": "2026-08-12 18:00:00+00:00"}}
     res = _plan(_Boom(), managed, {"AAA": {"qty": 100, "avg_entry": 10.0, "current": 5.0}})
     assert [p[3] for p in res.plan] == ["stop_-39%"]
+
+
+# --- the midpoint has to BE a price (2026-08-18) -------------------------------
+#
+# The guard trusted any mid that diverged from the broker mark. On a wide,
+# one-sided book the midpoint is an arithmetic artifact, and it was the guard's
+# number that was wrong, not the broker's:
+#
+#   EW260821C00092500   flagged "broker 0.2 vs live mid 0.9950" -> filled 0.20
+#   APTV260821C00052500 flagged "broker 0.05 vs live mid 0.0800" -> filled 0.05
+#
+# 20 of the 21 APTV warnings that day suppressed a stop on an inflated mid.
+
+def test_a_wide_book_does_not_override_the_broker_mark():
+    """EW: bid 0.05 / ask 1.94 is a 190%-of-mid spread. The mid is not a price."""
+    client = _QuoteClient(bid=0.05, ask=1.94)           # mid 0.995
+    res = _plan(client, _managed_option(),
+                {"AAOI260821C00140000": {"qty": 5, "avg_entry": 9.20, "current": 4.70}})
+
+    assert [p[3] for p in res.plan] == ["stop_-39%"], "the stop must still fire"
+    assert "AAOI" not in res.anomalies, "a wide book is not a corroborated anomaly"
+
+
+def test_a_one_sided_book_with_no_bid_is_not_corroboration():
+    """Without a bid the 'mid' falls back to a last print — the very thing
+    being corroborated. Refuse to treat it as a second opinion."""
+    client = _QuoteClient(bid=0.0, ask=10.00)
+    res = _plan(client, _managed_option(),
+                {"AAOI260821C00140000": {"qty": 5, "avg_entry": 9.20, "current": 4.70}})
+
+    assert [p[3] for p in res.plan] == ["stop_-39%"]
+    assert "AAOI" not in res.anomalies
+
+
+def test_a_tight_book_still_corroborates():
+    """The AAOI fix must survive the new guard: 9.80 x 10.00 is a 2% spread."""
+    client = _QuoteClient(bid=9.80, ask=10.00)
+    res = _plan(client, _managed_option(),
+                {"AAOI260821C00140000": {"qty": 5, "avg_entry": 9.20, "current": 4.70}})
+
+    assert res.plan == []
+    assert res.anomalies["AAOI"]["quote_mid"] == 9.90

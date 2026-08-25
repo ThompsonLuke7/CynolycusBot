@@ -296,15 +296,23 @@ def _run_startup_queue(*, env_file: str, account_label: str) -> None:
 NIGHTLY_STAMP_PATH = Path(__file__).resolve().parents[1] / "Data/readiness/nightly_market_data_latest.json"
 
 
+# How long the nightly collection actually takes, end to end. Measured, not
+# guessed: 2026-08-24 ran it twice, 09:00:45->14:24:36 (5h24m) and
+# 16:45:00->21:42:28 (4h57m). The catch-up needs at least this much runway
+# before the open or it finishes inside the session.
+NIGHTLY_CATCH_UP_MIN_RUNWAY_H = 6.0
+
+
 def _nightly_needs_catch_up(
     *,
     now_et: "datetime",
     nightly_time: str,
     within_hours: float,
+    min_runway_hours: float = NIGHTLY_CATCH_UP_MIN_RUNWAY_H,
 ) -> tuple[bool, str]:
     """Should a starting server run the nightly it already missed?
 
-    Two conditions, both required:
+    Three conditions, all required:
 
     1. The stamp does not prove a run after the most recent scheduled slot that
        has already passed. ``NightlyScheduler`` computes its next fire from
@@ -313,6 +321,18 @@ def _nightly_needs_catch_up(
     2. The next session open is close enough that the gap will actually be
        traded on. Restarting mid-morning must not kick off a heavy collection
        during the session; restarting in the evening must.
+    3. There is enough runway left before that open for the job to FINISH. This
+       is the bound 2026-08-24 was missing: condition 2 is an upper bound only,
+       so a 09:00 start saw "open in 0.5h", read that as urgent, and launched a
+       five-hour collection that ran until 14:24 — through the whole session,
+       holding the heavy-job lock that readiness needed and pushing momentum's
+       feature panel from 425s to 2,237s. Catching up in the last hours before
+       an open is not catching up; it is moving the outage into the session.
+
+    When 3 fails the catch-up is skipped and the scheduled slot picks it up
+    after the close. That trades one session of stale enrichment for a session
+    that is not competing with a full-universe rebuild — the same call the
+    scheduled slot already makes by running post-close.
 
     Returns ``(needed, reason)`` so the caller can log why either way.
     """
@@ -358,6 +378,12 @@ def _nightly_needs_catch_up(
             f"next open is {hours_to_open:.1f}h away (> {within_hours:.1f}h) — "
             "leaving the nightly to its schedule"
         )
+    if hours_to_open < min_runway_hours:
+        return False, (
+            f"next open is only {hours_to_open:.1f}h away and the nightly needs "
+            f"~{min_runway_hours:.1f}h — it would run inside the session, so "
+            f"leaving it to the {nightly_time} ET slot"
+        )
     stamp_desc = (
         "no completion stamp" if completed is None
         else f"last completed {completed:%Y-%m-%d %H:%M} ET"
@@ -365,11 +391,16 @@ def _nightly_needs_catch_up(
     )
     return True, (
         f"{stamp_desc}, missed the {nightly_time} ET slot, "
-        f"open in {hours_to_open:.1f}h"
+        f"open in {hours_to_open:.1f}h (needs ~{min_runway_hours:.1f}h, fits)"
     )
 
 
-def _nightly_startup_check(*, nightly_time: str, within_hours: float) -> None:
+def _nightly_startup_check(
+    *,
+    nightly_time: str,
+    within_hours: float,
+    min_runway_hours: float = NIGHTLY_CATCH_UP_MIN_RUNWAY_H,
+) -> None:
     """Run the missed nightly at boot when the next session would trade on it.
 
     On 2026-08-19 the server died at 14:10 ET and stayed down. Nothing ran the
@@ -384,7 +415,8 @@ def _nightly_startup_check(*, nightly_time: str, within_hours: float) -> None:
     now_et = _dt.now(ZoneInfo("America/New_York"))
     try:
         needed, reason = _nightly_needs_catch_up(
-            now_et=now_et, nightly_time=nightly_time, within_hours=within_hours
+            now_et=now_et, nightly_time=nightly_time, within_hours=within_hours,
+            min_runway_hours=min_runway_hours,
         )
     except Exception as exc:  # noqa: BLE001 - never let this block boot
         logger.warning("Nightly startup check failed (%s) — not running catch-up", exc)
@@ -394,6 +426,44 @@ def _nightly_startup_check(*, nightly_time: str, within_hours: float) -> None:
         return
     logger.warning("Nightly startup check: running catch-up now (%s)", reason)
     _run_nightly_jobs()
+
+
+# Lower runs first. Readiness decides whether entries are authorized at all and
+# takes ~40 minutes; nightly market data is enrichment its own log calls
+# "non-critical to entry readiness" and takes ~5 hours. Anything unlisted sorts
+# after both, so a step added later cannot silently displace readiness.
+_STARTUP_CATCH_UP_PRIORITY = {"readiness": 0, "nightly": 1}
+
+
+def order_startup_catch_ups(steps):
+    """Sort startup catch-ups into the order they must run in.
+
+    Split out from the runner so the priority is enforced here rather than
+    depending on which section of ``main`` happened to append first.
+    """
+    return tuple(sorted(
+        steps,
+        key=lambda step: _STARTUP_CATCH_UP_PRIORITY.get(step[0], len(_STARTUP_CATCH_UP_PRIORITY)),
+    ))
+
+
+def _run_startup_catch_ups(steps) -> list[str]:
+    """Run the startup catch-ups one at a time, in priority order.
+
+    They all take the same heavy-job lock, so running them concurrently made the
+    winner a coin flip. Sequencing them is the whole point of this function.
+
+    Returns the names that ran, for tests. A step that raises is logged and the
+    rest still run — one failure must not strand the work queued behind it.
+    """
+    ran = []
+    for name, step in order_startup_catch_ups(steps):
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001 - never strand the queue
+            logger.error("Startup catch-up (%s) failed: %s", name, exc, exc_info=True)
+        ran.append(name)
+    return ran
 
 
 def _data_readiness_startup_check() -> None:
@@ -800,6 +870,7 @@ def run_combined(
     # a nightly it missed. ~14h covers any restart from the prior evening
     # through the open, while keeping a mid-session restart out of scope.
     nightly_catch_up_hours: float = 14.0,
+    nightly_catch_up_min_runway_hours: float = NIGHTLY_CATCH_UP_MIN_RUNWAY_H,
     startup_queue_enabled: bool = True,
     startup_queue_account: str = "paper",
     # Market-hours re-drain slots (ET). The boot drain alone cannot fire a
@@ -1149,6 +1220,11 @@ def run_combined(
     # ------------------------------------------------------------------
     # 5a. Nightly jobs scheduler (collection/enrichment after the live refresher closes)
     # ------------------------------------------------------------------
+    # Startup catch-ups, collected here and started as ONE sequenced thread at
+    # 5a1 so they cannot race each other for the heavy-job lock. Collection
+    # order does not matter: order_startup_catch_ups sorts them before they run.
+    startup_catch_up_steps: list[tuple[str, object]] = []
+
     nightly_scheduler = None
     if nightly_time:
         from UI.nightly_scheduler import NightlyScheduler, parse_hhmm
@@ -1169,20 +1245,21 @@ def run_combined(
             print(f"  Nightly jobs:            daily {nightly_time} ET (bounded collection/enrichment)")
             # The scheduler only ever looks forward, so a slot missed while the
             # process was down is lost. Make it up when the next session would
-            # otherwise trade on stale collection.
+            # otherwise trade on stale collection. Queued rather than started
+            # here: see the startup catch-up sequencing note at 5a1.
             if nightly_catch_up_hours > 0:
-                threading.Thread(
-                    target=_nightly_startup_check,
-                    kwargs={
-                        "nightly_time": nightly_time,
-                        "within_hours": nightly_catch_up_hours,
-                    },
-                    daemon=True,
-                    name="nightly-startup-check",
-                ).start()
+                startup_catch_up_steps.append((
+                    "nightly",
+                    lambda: _nightly_startup_check(
+                        nightly_time=nightly_time,
+                        within_hours=nightly_catch_up_hours,
+                        min_runway_hours=nightly_catch_up_min_runway_hours,
+                    ),
+                ))
                 print(
                     "  Nightly catch-up:        on startup if missed and open "
-                    f"< {nightly_catch_up_hours:g}h away"
+                    f"{nightly_catch_up_min_runway_hours:g}-{nightly_catch_up_hours:g}h "
+                    "away (needs runway to finish pre-open)"
                 )
 
     # ------------------------------------------------------------------
@@ -1191,22 +1268,36 @@ def run_combined(
     #      a full-universe catchup/rebuild during the fragile morning window.
     # ------------------------------------------------------------------
     if data_readiness_on_start:
-        threading.Thread(
-            target=_run_data_readiness,
-            daemon=True,
-            name="data-readiness-startup",
-        ).start()
+        startup_catch_up_steps.append(("readiness", _run_data_readiness))
         logger.info("Data readiness: running once on startup (background)")
         print("  Data readiness:          on startup (guarded, background)")
     elif data_readiness_startup_check:
         # Cheap stamp read; only launches the heavy job when entries would
         # otherwise be blocked all session.
-        threading.Thread(
-            target=_data_readiness_startup_check,
-            daemon=True,
-            name="data-readiness-startup-check",
-        ).start()
+        startup_catch_up_steps.append(("readiness", _data_readiness_startup_check))
         print("  Data readiness:          startup check (catch-up only if stamp is stale)")
+
+    # Both catch-ups take the same heavy-job lock, so launching them as
+    # independent threads made the winner a coin flip decided by microseconds.
+    # On 2026-08-24 nightly won by 7ms at 09:00:45, held the lock until 14:24,
+    # and readiness — which is what actually authorizes entries — was refused 35
+    # consecutive times before finally running at 15:07 and finishing at 15:53,
+    # seven minutes before the close. The whole session traded on a stamp the
+    # server had already logged as "will NOT authorize entries".
+    #
+    # Readiness runs first now, and nightly waits for it rather than racing it.
+    # That is the right priority both ways: readiness gates entry orders and
+    # takes ~40 minutes, while nightly market data is enrichment its own log
+    # calls "non-critical to entry readiness" and takes ~5 hours.
+    if startup_catch_up_steps:
+        threading.Thread(
+            target=_run_startup_catch_ups,
+            args=(order_startup_catch_ups(startup_catch_up_steps),),
+            daemon=True,
+            name="startup-catch-up",
+        ).start()
+        logger.info("Startup catch-ups: running sequentially in order %s",
+                    [name for name, _ in order_startup_catch_ups(startup_catch_up_steps)])
 
     # ------------------------------------------------------------------
     # 5a1a. Schwab refresh-token expiry. Purely a file read — no network, no

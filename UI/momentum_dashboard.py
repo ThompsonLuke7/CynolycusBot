@@ -35,7 +35,8 @@ from UI.ui_chrome import NAV_HTML, THEME_LINK, serve_theme_css
 from UI.performance import module_performance
 
 logger = logging.getLogger(__name__)
-SCAN_TTL = 120.0  # evaluate_now is expensive; cache the scan
+SCAN_TTL = 1800.0  # a full-universe evaluate_now() measured 1018s on 2026-08-24;
+                   # the TTL must exceed the build or the cache is stale on arrival.
 
 
 def _json_safe(o: Any) -> Any:
@@ -59,7 +60,8 @@ class MomentumDashboardApp:
         self._live = False
         self._client = AlpacaOptionsClient(env_file=self.env_file)
         self._scan_cache: tuple[float, dict] | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()      # guards _scan_cache/_scan_building/_loop_running
+        self._scan_building = False
         self._loop_running = False
 
     @property
@@ -71,24 +73,48 @@ class MomentumDashboardApp:
         if want != self._live:
             self._live = want
             self._client = AlpacaOptionsClient(env_file=self.env_file)
-            self._scan_cache = None
+            with self._lock:
+                self._scan_cache = None
         return {"live": self._live, "available": bool(self.live_env_file)}
 
     # ---- data ----
     def _scan(self) -> dict:
-        now = time.time()
-        if self._scan_cache and now - self._scan_cache[0] < SCAN_TTL:
-            return self._scan_cache[1]
-        # evaluate_now() walks the full ~2.7k-ticker universe and can take minutes.
-        # Without this lock, every poll that lands during a build (Hub fan-out +
-        # each dashboard's own 5s tick) sees a cache miss and starts its OWN
-        # evaluate_now(), so N overlapping builds thrash CPU/IO and none ever
-        # finish -- symptoms: "live feature panel: 200/2768" resetting forever
-        # instead of progressing, and BrokenPipe once the caller's timeout fires.
+        """Return the last completed scan, refreshing it in the background.
+
+        A request thread must NEVER run evaluate_now() itself. It walks the full
+        ~2.7k-ticker universe and measured 1018s on 2026-08-24, while the callers
+        (Hub fan-out + the page's own 5s tick) give up after 2.5s. The previous
+        version built under a lock and stamped the cache with the time the build
+        STARTED, so with SCAN_TTL=120s every entry was ~15 minutes stale the
+        moment it was written: the cache never hit, every queued request ran its
+        own full scan, and the queue only grew. That wedged the 2026-08-24
+        session -- 41 full scans, ~1770 threads parked on this lock, 1635
+        CLOSE-WAIT sockets on the dashboard port, and a process that could not
+        reach interpreter exit on shutdown.
+
+        So: serve whatever is cached (flagged with its age) and let one
+        background thread do the work. At most one build is ever in flight.
+        """
         with self._lock:
-            now = time.time()
-            if self._scan_cache and now - self._scan_cache[0] < SCAN_TTL:
-                return self._scan_cache[1]
+            cached = self._scan_cache
+            fresh = cached is not None and time.time() - cached[0] < SCAN_TTL
+            if not fresh and not self._scan_building:
+                self._scan_building = True
+                threading.Thread(target=self._build_scan, daemon=True,
+                                 name="momentum-scan").start()
+            building = self._scan_building
+
+        if cached is None:
+            return {"picks": [], "ts": None, "stale": True, "building": building}
+        out = dict(cached[1])
+        out["age_s"] = round(time.time() - cached[0], 1)
+        out["stale"] = not fresh
+        out["building"] = building
+        return out
+
+    def _build_scan(self) -> None:
+        """One full universe scan, off the request path. Stamped when it ENDS."""
+        try:
             try:
                 from strategies.momentum_expansion.live.runner import MomentumLiveRunner
                 runner = MomentumLiveRunner(auto_trade=False)  # display only — never trades
@@ -101,9 +127,13 @@ class MomentumDashboardApp:
                 ]
                 out = {"picks": picks, "ts": datetime.now(timezone.utc).isoformat()}
             except Exception as exc:  # noqa: BLE001
+                logger.error("momentum scan failed: %s", exc)
                 out = {"error": f"scan_failed: {exc}", "picks": []}
-            self._scan_cache = (now, out)
-            return out
+            with self._lock:
+                self._scan_cache = (time.time(), out)
+        finally:
+            with self._lock:
+                self._scan_building = False
 
     def _own_book_symbols(self) -> set[str]:
         """OCC symbols the momentum option policy has opened (durable book)."""
@@ -188,8 +218,9 @@ class MomentumDashboardApp:
             except Exception as exc:  # noqa: BLE001
                 logger.error("momentum loop failed: %s", exc)
             finally:
-                self._scan_cache = None
-                self._loop_running = False
+                with self._lock:
+                    self._scan_cache = None
+                    self._loop_running = False
 
         threading.Thread(target=_go, daemon=True, name="momentum-manual-loop").start()
         return {"started": True, "live": self._live}
@@ -222,6 +253,12 @@ __NAV_HTML__
 </div>
 <script>
 function f(n,d=2){return n==null?'-':Number(n).toLocaleString(undefined,{maximumFractionDigits:d})}
+function scanNote(c){if(!c)return '';if(c.error)return c.error;
+var age=c.age_s==null?null:Math.round(c.age_s/60);
+var parts=[];if(age!=null)parts.push('scan '+age+'m old');
+if(c.building)parts.push(c.ts?'refreshing...':'first scan running (~17m)');
+else if(c.stale)parts.push('stale');
+return parts.join(' · ');}
 async function tick(){let s=await(await fetch('/api/state')).json();
 let live=!!s.config.live;
 document.getElementById('cfg').textContent='momentum · '+(live?'real money':'paper');
@@ -229,7 +266,7 @@ document.getElementById('cfg').className='pill '+(live?'live':'paper');
 let lt=document.getElementById('live-toggle');if(lt){lt.checked=live;lt.disabled=!s.config.live_available;}
 let badge=document.getElementById('cyno-live-badge');
 if(badge){badge.textContent=live?'real money':'paper';badge.className='live-badge'+(live?' live':'');}
-document.getElementById('age').textContent=(s.scan&&s.scan.error)?s.scan.error:'';
+document.getElementById('age').textContent=scanNote(s.scan);
 let a=s.account;document.getElementById('acct').innerHTML=a.error?('<span class=neg>'+a.error+'</span>'):
 ('equity $'+f(a.equity,0)+' · cash $'+f(a.cash,0)+' · BP $'+f(a.buying_power,0)+' · '+a.n_positions+' positions');
 document.getElementById('scan').innerHTML='<tr><th>#</th><th class=t>ticker</th><th>expansion</th><th class=t>trigger</th><th>close</th></tr>'+

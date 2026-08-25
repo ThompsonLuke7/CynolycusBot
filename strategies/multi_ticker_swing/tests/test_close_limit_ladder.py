@@ -117,3 +117,44 @@ def test_ladder_respects_the_attempt_budget():
                         close_pass=pass_no, attempts=5)
         assert 1 <= len(rungs) <= 5
         assert len(rungs) == len(set(rungs))
+
+
+# --- a ladder that cannot reach the book cannot fill (2026-08-18) -------------
+#
+# TGT260911C00157500 quoted 3.65 x 5.92 on a restored_unknown_loss_cut. The
+# pass-1 floor of 0.85 * 4.79 = 4.07 sat 42 cents ABOVE the best bid, so all
+# five rungs were unfillable by construction; the position left on the market
+# fallback at 3.70 after burning ~23 seconds and five cancel/resubmit round
+# trips. The floor schedule exists to avoid dumping into an ABSENT bid (VALE:
+# 0.01 against a 0.375 mid), not a merely WIDE one.
+
+TGT_QUOTE = {"bid": 3.65, "ask": 5.92, "mid": 4.785, "spread": 2.27,
+             "spread_pct_mid": 0.4744}
+
+
+def test_a_wide_book_with_a_credible_bid_is_reachable_on_the_first_pass():
+    rungs = _ladder(reason="restored_unknown_loss_cut", base=4.79, bid=3.65,
+                    quote=TGT_QUOTE)
+    assert min(rungs) == pytest.approx(3.65, abs=0.005), "lowest rung must touch the bid"
+    assert rungs[0] == pytest.approx(4.79), "still starts at the mid"
+    assert rungs == sorted(rungs, reverse=True)
+
+
+def test_an_absent_bid_is_still_treated_as_patiently_as_before():
+    """VALE's 0.01 bid is 2.7% of the mid — not credible, keep the schedule."""
+    rungs = _ladder(reason="restored_unknown_loss_cut", base=0.37, bid=0.01)
+    assert min(rungs) == pytest.approx(0.37 * _LIQUIDATION_FLOOR_BY_PASS[0], abs=0.005)
+    assert min(rungs) > 0.01
+
+
+@pytest.mark.parametrize("bid,base,reachable", [
+    (3.65, 4.79, True),    # 76% of mid — credible
+    (2.40, 4.79, True),    # 50% of mid — exactly at the threshold
+    (2.30, 4.79, False),   # 48% of mid — below it, stay patient
+    (0.01, 0.37, False),   # the VALE book
+])
+def test_bid_credibility_threshold(bid, base, reachable):
+    quote = {"bid": bid, "ask": base * 2 - bid, "mid": base,
+             "spread": (base - bid) * 2, "spread_pct_mid": (base - bid) * 2 / base}
+    rungs = _ladder(reason="restored_unknown_loss_cut", base=base, bid=bid, quote=quote)
+    assert (min(rungs) == pytest.approx(bid, abs=0.005)) is reachable

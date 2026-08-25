@@ -548,7 +548,7 @@ def _build_option_order_policy(
     meta_hard_stop_atr: float = 0.0,
     meta_setup_failure_exit_enabled: bool = True,
     meta_setup_failure_buffer_atr: float = 0.10,
-    meta_setup_failure_grace_minutes: int = 0,
+    meta_setup_failure_grace_minutes: int = 2,
     meta_no_progress_exit_enabled: bool = False,
     meta_no_progress_exit_minutes: int = 10,
     meta_no_progress_exit_atr: float = 0.20,
@@ -2028,7 +2028,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--meta-setup-failure-grace-minutes",
         type=int,
-        default=0,
+        default=2,
         help="Do not evaluate setup invalidation until this many minutes after entry.",
     )
     parser.add_argument(

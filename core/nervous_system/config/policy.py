@@ -119,8 +119,18 @@ class PolicyConfig:
     structure_risk: Mapping[InstrumentFamily, StructureRisk]
     required_snapshot_profile: str
     required_readiness_jobs: frozenset[str]
-    max_daily_loss: Decimal
-    max_gross_notional: Decimal
+    # ``None`` disables the daily-loss circuit breaker. Paper runs it off by
+    # choice: a paper account exists to let a strategy show its real drawdown
+    # shape, and halting it at a dollar figure hides exactly the behaviour the
+    # account is there to measure. PRODUCTION_LIVE may not disable it — see
+    # __post_init__ — because there the same drawdown is real money.
+    max_daily_loss: Decimal | None
+    # ``None`` disables the gross-exposure gate. Paper runs it off by choice:
+    # the broker's own buying power is the real constraint there, and it is
+    # already enforced as BROKER_INSUFFICIENT_BUYING_POWER, so a second
+    # hardcoded ceiling only diverges from the account it is meant to describe.
+    # PRODUCTION_LIVE may not disable it — see __post_init__.
+    max_gross_notional: Decimal | None
     max_position_notional: Decimal
     minimum_order_notional: Decimal
     money_quantum: Decimal
@@ -196,8 +206,22 @@ class PolicyConfig:
             classification[family] = risk
         object.__setattr__(self, "structure_risk", MappingProxyType(classification))
 
-        _require_decimal("max_daily_loss", self.max_daily_loss, allow_zero=False)
-        _require_decimal("max_gross_notional", self.max_gross_notional, allow_zero=False)
+        if self.max_daily_loss is not None:
+            _require_decimal("max_daily_loss", self.max_daily_loss, allow_zero=False)
+        elif self.environment is RuntimeEnvironment.PRODUCTION_LIVE:
+            raise ValueError(
+                "max_daily_loss must be set for PRODUCTION_LIVE: the live account "
+                "may not run without a daily-loss circuit breaker"
+            )
+        if self.max_gross_notional is not None:
+            _require_decimal(
+                "max_gross_notional", self.max_gross_notional, allow_zero=False
+            )
+        elif self.environment is RuntimeEnvironment.PRODUCTION_LIVE:
+            raise ValueError(
+                "max_gross_notional must be set for PRODUCTION_LIVE: the live "
+                "account may not run without a gross-exposure ceiling"
+            )
         _require_decimal(
             "max_position_notional", self.max_position_notional, allow_zero=False
         )
@@ -372,8 +396,12 @@ MVP_POLICY_CONFIG = PolicyConfig(
     structure_risk=_MVP_STRUCTURE_RISK,
     required_snapshot_profile="meta_4h_1420@1",
     required_readiness_jobs=frozenset({"nightly_data_readiness"}),
-    max_daily_loss=Decimal("2000.00"),
-    max_gross_notional=Decimal("150000.00"),
+    # Disabled for paper (see the field comment). Live builds MUST override
+    # this with a real figure; the config refuses to construct otherwise.
+    max_daily_loss=None,
+    # Disabled for paper (see the field comment): buying power is the real
+    # constraint and is enforced separately. Live builds MUST override this.
+    max_gross_notional=None,
     max_position_notional=Decimal("5000.00"),
     minimum_order_notional=Decimal("100.00"),
     money_quantum=Decimal("0.01"),
