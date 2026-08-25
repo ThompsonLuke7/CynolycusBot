@@ -16,6 +16,8 @@ Two properties matter more than anything else here:
 
 from __future__ import annotations
 
+import logging
+
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -39,9 +41,11 @@ from core.nervous_system.contracts.enums import (
     PolicyMode,
     RuntimeEnvironment,
 )
+from core.nervous_system.context.diagnosis import diagnose_snapshot
 from core.nervous_system.contracts.intent import TradeIntent
 from core.nervous_system.contracts.orders import OptionLeg, OrderRequest
 from core.nervous_system.execution.options.close_ladder import close_limit_ladder
+
 from core.nervous_system.execution.options.quotes import parse_occ_symbol
 from core.nervous_system.execution.gateway import order_request_id_for
 from signals.meta_context.meta_ranker.nervous_system_adapter import (
@@ -49,6 +53,9 @@ from signals.meta_context.meta_ranker.nervous_system_adapter import (
     build_plan_intents,
     underlying_for,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class RouterRefusal(str, Enum):
@@ -372,13 +379,24 @@ class MetaGatewayRouter:
             if ticker in snapshots:
                 continue
             try:
-                snapshots[ticker] = self._snapshots.build(
+                snapshot = self._snapshots.build(
                     strategy_id=self._intent_config.strategy_id,
                     entity_id=ticker,
                     decision_time=now,
                     decision_bar=decision_bar,
                     profile=self._profile,
                 )
+                if not snapshot.valid:
+                    # Say WHICH required state failed and what refused its
+                    # candidates, not just that something did. Without this the
+                    # only signal is POLICY_VETO (SNAPSHOT_INVALID,
+                    # SNAPSHOT_REQUIRED_STATE_MISSING) — a category true of five
+                    # states for four different reasons. Meta's pre-open flush
+                    # was blocked 2026-08-18..24 and every failed snapshot
+                    # carried the answer (MARKET: MARKET_SESSION_MISMATCH x16,
+                    # FUTURE_BAR x2) in memory, unread.
+                    logger.warning("%s", diagnose_snapshot(snapshot).describe())
+                snapshots[ticker] = snapshot
             except Exception as exc:  # noqa: BLE001
                 # Snapshots are built for the WHOLE plan before the per-row loop
                 # starts, so an infrastructure fault here takes out every row and
