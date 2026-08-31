@@ -489,16 +489,17 @@ class MomentumLiveRunner:
             state["managed"] = res.new_managed
             _save_state(state)
 
+        dispositions: dict[str, str] = {}
         execute_plan(client, plan=res.plan, limits=res.limits, submit=submit,
                      equity_tif_fn=equity_order_tif,
                      new_managed=res.new_managed, exit_context=res.exit_context,
                      module="momentum_expansion", pos_lookup=pos_info, bar=bar,
-                     persist_managed=_persist_managed)
+                     persist_managed=_persist_managed, dispositions=dispositions)
         audit = order_plan_audit_record(
             module="momentum_expansion", bar=bar, mode="options", submit=submit,
             targets=targets, plan=res.plan, signal_audits=signal_audits,
             order_audits=res.order_audits, contract_selection=res.contract_selection,
-            dropped=res.dropped,
+            dropped=res.dropped, dispositions=dispositions,
         )
         if submit:
             # Persist managed state every submit pass (not only when an order was

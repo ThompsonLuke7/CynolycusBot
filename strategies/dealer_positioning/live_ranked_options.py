@@ -42,6 +42,8 @@ from core.live_4h_exec import (
     build_mixed_plan,
     defer_entries_if_market_closed,
     execute_plan,
+    init_dispositions,
+    mark_plan_gone,
     now_utc_iso,
     order_plan_audit_record,
     submit_pending_open_entries,
@@ -560,6 +562,9 @@ def _select_optionable_targets(
     return rankings.loc[keep_idx], skipped
 
 
+select_atm_option = None  # public alias, bound after the definition below
+
+
 def _select_atm_option(
     client: AlpacaOptionsClient,
     ticker: str,
@@ -569,9 +574,19 @@ def _select_atm_option(
     min_dte: int,
     max_dte: int,
     now_et: datetime | None = None,
+    allow_0dte: bool = False,
 ) -> tuple[dict | None, str]:
+    """Pick the nearest liquid ATM contract in the [min_dte, max_dte] window.
+
+    ``allow_0dte`` defaults False so this module's stated non-0DTE invariant is
+    unchanged (Dealer Ranker passes min_dte=2 and never opts in). The intraday
+    structure engine opts in deliberately: it holds for minutes to hours and
+    flattens anything expiring today well before the close, so same-day expiry is
+    the correct expression there rather than a hazard.
+    """
     now_et = now_et or datetime.now(_ET)
-    start = now_et.date() + timedelta(days=max(1, int(min_dte)))
+    floor = 0 if allow_0dte else 1
+    start = now_et.date() + timedelta(days=max(floor, int(min_dte)))
     end = now_et.date() + timedelta(days=max(int(min_dte), int(max_dte)))
     cp = "call" if option_type == "call" else "put"
     strike_lo = int(round(current_price * 0.90, 0))
@@ -606,7 +621,7 @@ def _select_atm_option(
         and start <= _contract_expiry(c) <= end
     ]
     if not tradable:
-        return None, f"no_non_0dte_{cp}_contracts"
+        return None, f"no_{cp}_contracts_in_window" if allow_0dte else f"no_non_0dte_{cp}_contracts"
     expiry = min(_contract_expiry(c) for c in tradable if _contract_expiry(c) is not None)
     same_exp = [c for c in tradable if _contract_expiry(c) == expiry]
     # Re-apply the +/-10% band locally. The request already sends
@@ -653,7 +668,7 @@ def _select_atm_option(
     # Schwab's chain does. `None` means unknown and must not read as zero.
     ranked = _rank_band_by_liquidity(ticker, exp_str, candidates, current_price, option_type=cp)
     if not ranked:
-        return None, f"no_non_0dte_{cp}_contracts"
+        return None, f"no_{cp}_contracts_in_window" if allow_0dte else f"no_non_0dte_{cp}_contracts"
     if ranked[0]["liquidity_source"] == "unavailable":
         return None, "liquidity_unavailable(src=unavailable)"
     if not ranked[0]["passes"]:
@@ -873,6 +888,9 @@ def main() -> int:
         module=MODULE,
     )
 
+    # Declared outside the submit branch so the dry-run audit below still has a
+    # (empty) map rather than raising NameError.
+    dispositions: dict[str, str] = init_dispositions(plan.plan)
     if args.submit:
         pending = submit_pending_open_entries(
             client,
@@ -890,6 +908,8 @@ def main() -> int:
             plan.new_managed,
             plan.limits,
         )
+        mark_plan_gone(dispositions, plan.plan, active_plan,
+                       "deferred_entry_market_closed")
         def _persist_managed() -> None:
             # Save after every fill, not just at the end of the plan, so a
             # sibling module's broker reconcile never finds a fresh position
@@ -900,6 +920,7 @@ def main() -> int:
 
         execute_plan(
             client,
+            dispositions=dispositions,
             plan=active_plan,
             limits=plan.limits,
             submit=True,
@@ -938,6 +959,7 @@ def main() -> int:
             order_audits=plan.order_audits,
             contract_selection=plan.contract_selection,
             dropped=plan.dropped,
+            dispositions=dispositions,
         ),
     )
     print(f"dealer ranker done: targets={targets} orders={len(plan.plan)} submit={args.submit} account={profile}")
@@ -946,3 +968,9 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# Public alias. The intraday structure engine imports this selector rather than
+# reimplementing near-dated ATM selection; reaching for an underscore-prefixed
+# name across packages is worse than naming it.
+select_atm_option = _select_atm_option

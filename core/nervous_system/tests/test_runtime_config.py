@@ -515,6 +515,36 @@ def test_create_database_engine_forwards_validated_pool_settings(
         "pool_size": 7,
         "max_overflow": 2,
         "future": True,
+        # Nothing in a decision path may wait on a lock forever. See
+        # research/daily_live_reports/2026-08-26.md: a meta_ranker flush blocked
+        # on Lock/transactionid and was still waiting 13 hours later.
+        "connect_args": {
+            "options": (
+                f"-c lock_timeout={database.DEFAULT_LOCK_TIMEOUT_MS} "
+                f"-c statement_timeout={database.DEFAULT_STATEMENT_TIMEOUT_MS}"
+            )
+        },
+    }
+
+
+def test_database_timeouts_are_overridable_for_backfills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A migration or backfill may legitimately need longer than a decision."""
+
+    settings = NervousSystemSettings.from_env(_env())
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        database, "create_engine",
+        lambda url, **kw: (captured.update(kw), object())[1],
+    )
+    monkeypatch.setenv("NERVOUS_SYSTEM_DB_LOCK_TIMEOUT_MS", "1000")
+    monkeypatch.setenv("NERVOUS_SYSTEM_DB_STATEMENT_TIMEOUT_MS", "5000")
+
+    database.create_database_engine(settings)
+
+    assert captured["connect_args"] == {
+        "options": "-c lock_timeout=1000 -c statement_timeout=5000"
     }
 
 

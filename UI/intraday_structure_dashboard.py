@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -19,7 +20,25 @@ class IntradayStructureDashboardApp:
         self.runner.start()
 
     def snapshot(self) -> dict:
-        return {"ts": datetime.now(timezone.utc).isoformat(), **self.runner.snapshot()}
+        return {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            **self.runner.snapshot(),
+            "premarket_plan": self._premarket_plan(),
+        }
+
+    def _premarket_plan(self) -> dict:
+        """Today's pre-open plan, if one has been published.
+
+        A plan from an earlier session is shown with its own date rather than
+        hidden, so a stale panel is visibly stale instead of silently absent.
+        """
+        path = Path("Data/inference/intraday_structure/premarket_plan.json")
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
 
     def add_candidate(self, payload: dict) -> dict:
         candidate = Candidate.from_mapping({
@@ -44,6 +63,8 @@ table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--bo
 </style></head><body>__NAV_HTML__<div class=wrap>
 <div class=head><h2>Intraday Structure Engine</h2><span class="pill paper">paper-only confirmation</span><span id=status class=muted></span></div>
 <div class=muted>Stateful 1-minute setup confirmation. No order-submission path exists in v1.</div>
+<h3>Pre-open plan <span id=plandate class=muted></span></h3><div id=plan class=grid></div>
+<h3>Declined pre-open <span id=avoidcount class=muted></span></h3><div id=avoid class=muted></div>
 <h3>Active setups</h3><div id=setups class=grid></div><h3>Recent transitions</h3><table id=timeline></table>
 </div><script>
 function f(v,d=2){return v==null?'-':Number(v).toFixed(d)}
@@ -51,6 +72,12 @@ function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&l
 async function tick(){let s=await(await fetch('/api/state')).json();
 document.getElementById('status').textContent=(s.running?'running':'stopped')+' · '+s.candidate_count+' candidates · '+(s.qualified_dealer_plate_signals||[]).length+' qualified dealer plates';
 document.getElementById('setups').innerHTML=(s.active_signals||[]).map(x=>{let p=x.dealer_plate||{};let plate=p.qualified?` · <b>dealer plate ${f(p.score)}</b> → ${esc(p.target_type||'-')} ${f(p.target)}`:` · dealer plate ${f(p.score)}`;return `<div class=setup><div class=head><span class=ticker>${esc(x.ticker)}</span><span class=pill>${esc(x.state)}</span><span>${esc(x.direction)}</span></div><b>${esc(x.setup_type)}</b><div>spot ${f(x.spot)} · pivot ${f(x.pivot)} · stop ${f(x.invalidation)}</div><div>target ${f(x.active_target)} · runway ${f(x.runway_score)} · confidence ${f(x.confidence)}${plate}</div><div class=evidence>${(x.evidence||[]).map(esc).join(' · ')}</div></div>`}).join('')||'<span class=muted>No active detected setups.</span>';
+let pl=s.premarket_plan||{};let setups=pl.setups||[];let avoid=pl.avoid||[];
+document.getElementById('plandate').textContent=pl.session?('session '+pl.session):'not published';
+document.getElementById('plan').innerHTML=setups.map(x=>{let arrow=x.direction==='long'?'&gt;':'&lt;';let ladder=(x.targets||[]).map(t=>f(t)).join(' → ');return `<div class=setup><div class=head><span class=ticker>${esc(x.ticker)}</span><span class=pill>${esc(x.direction)}</span><span class=muted>${esc(x.context_regime)}</span></div><div><b>${arrow} ${f(x.trigger)}</b> → ${ladder}</div><div>stop ${f(x.invalidation)} · R:R ${f(x.reward_risk)} · runway ${f(x.runway_score)}</div><div class=evidence>trigger backed by: ${(x.trigger_level_sources||[]).map(esc).join(', ')}</div></div>`}).join('')||'<span class=muted>No actionable pre-open setups.</span>';
+let byReason={};avoid.forEach(x=>{(byReason[x.no_trade_reason]=byReason[x.no_trade_reason]||[]).push(x.ticker+'('+x.direction[0]+')')});
+document.getElementById('avoidcount').textContent=avoid.length?('('+avoid.length+')'):'';
+document.getElementById('avoid').innerHTML=Object.keys(byReason).map(r=>`<div><b>${esc(r)}</b> (${byReason[r].length}): ${byReason[r].map(esc).join(' ')}</div>`).join('')||'<span class=muted>Nothing declined.</span>';
 let rows=(s.recent_transitions||[]).slice().reverse();document.getElementById('timeline').innerHTML='<tr><th>time</th><th>ticker</th><th>setup</th><th>transition</th><th>reason</th></tr>'+rows.map(x=>`<tr><td>${esc(x.timestamp)}</td><td>${esc(x.ticker)}</td><td>${esc(x.setup_type)}</td><td>${esc(x.from_state)} → ${esc(x.to_state)}</td><td>${esc(x.reason)}</td></tr>`).join('');}
 tick();setInterval(tick,5000);
 </script></body></html>""".replace("__THEME_LINK__", THEME_LINK).replace("__NAV_HTML__", NAV_HTML)

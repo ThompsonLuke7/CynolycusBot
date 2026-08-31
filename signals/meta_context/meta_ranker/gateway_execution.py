@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
-from core.live_4h_exec import shares_for_notional
+from core.live_4h_exec import contracts_for_notional, shares_for_notional
 from core.nervous_system.execution.alpaca_adapter import PAPER_HOSTS
 from core.nervous_system.contracts.enums import (
     DebitCredit,
@@ -461,6 +461,30 @@ class MetaGatewayRouter:
         risk_reducing = intent.decision_kind is not DecisionKind.ENTRY
         if risk_reducing:
             order_quantity = intent.position_size_requested
+        elif is_option:
+            # An option entry is sized in CONTRACTS off the premium, never in
+            # shares off the underlying. One contract controls 100 shares, so
+            # the two differ by roughly (underlying / premium) * 100 — for an
+            # AMD 200 call at 4.40 against a $5,000 budget that is 50 contracts
+            # ($22,000 of premium) where 11 is correct. The underlying price is
+            # the wrong denominator entirely; it is not a rounding difference.
+            #
+            # The executable cost of a long option is the ask, which is also
+            # what option_order_request uses for the limit, so the sizing
+            # denominator and the price we expect to pay are the same number.
+            # The quote is already mandatory above (NO_OPTION_QUOTE_FOR_ENTRY),
+            # so an option entry needs no separate reference price: requiring
+            # one would gate on an input the size does not use.
+            ask = getattr(quote, "ask", None)
+            if ask is None or not math.isfinite(float(ask)) or float(ask) <= 0:
+                return RoutedRow(**base, refusal=RouterRefusal.NO_OPTION_QUOTE_FOR_ENTRY)
+            order_quantity = Decimal(
+                str(
+                    contracts_for_notional(
+                        float(ask), float(policy_decision.final_risk_budget)
+                    )
+                )
+            )
         else:
             price = reference_prices.get(intent.ticker)
             if not price or not math.isfinite(float(price)) or float(price) <= 0:

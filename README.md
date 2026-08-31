@@ -55,7 +55,7 @@ and published by [`scripts/publish_theme_explorer.py`](scripts/publish_theme_exp
 | [Momentum expansion](strategies/momentum_expansion/) | Daily/4H continuation | Paper-live |
 | [Meta Ranker](signals/meta_context/meta_ranker/) | Confluence ensemble over the above | Paper-live |
 | [Dealer positioning](strategies/dealer_positioning/) | Options/dealer flow (Amethyst, Dealer Ranker) | Paper-live |
-| [Intraday structure](strategies/intraday_structure/) | Event-driven 1m confirmation engine | Paper-only, opt-in |
+| [Intraday structure](strategies/intraday_structure/) | Event-driven 1m confirmation engine; closed-setup ledger, abstention log, pre-open plan | Paper-only, opt-in |
 
 ---
 

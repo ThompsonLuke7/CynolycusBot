@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable
 
 import math
@@ -175,6 +175,11 @@ class OptionOrderPolicyConfig:
     use_wall_clock_entry_cutoff: bool = False
     expiring_position_exit_hhmm: str | None = "15:40"
     auto_flatten_underlying_shares: bool = True
+
+
+# Ledger identity for this module. Matches the directory the 2026-08 execution
+# study reconstructed by hand from broker fills.
+_LEDGER_MODULE = "spy_daytrader"
 
 
 @dataclass
@@ -2770,6 +2775,95 @@ class OptionOrderPolicy:
         return symbol, strike
 
     def _submit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        intent: str = "open",
+        qty: int | None = None,
+        urgent: bool = False,
+        logger: Callable[[str], None] = print,
+    ) -> dict[str, Any]:
+        """Submit, then record a close to the shared closed-trade ledger.
+
+        A thin wrapper on purpose: the pricing ladder below has several return
+        points and threading a ledger write through each of them is how they
+        drift apart. This module wrote no `closed_trades.jsonl` at all, so the
+        2026-08 execution study had to rebuild its 101 lifecycles from raw
+        broker fills.
+        """
+        result = self._submit_order_inner(
+            symbol=symbol, side=side, intent=intent, qty=qty,
+            urgent=urgent, logger=logger,
+        )
+        if str(intent).strip().lower() == "close":
+            self._append_closed_trade_ledger(
+                symbol=symbol, qty=qty, result=result, logger=logger)
+        return result
+
+    def _side_key_for_symbol(self, symbol: str) -> str | None:
+        """Which option side ('long'/'short') this OCC symbol belongs to."""
+        sym = str(symbol or "").strip().upper()
+        if sym and sym == str(self._long_symbol or "").strip().upper():
+            return "long"
+        if sym and sym == str(self._short_symbol or "").strip().upper():
+            return "short"
+        return None
+
+    def _append_closed_trade_ledger(self, *, symbol, qty, result,
+                                    logger: Callable[[str], None] = print) -> None:
+        """One closed-trade row per close, in the shared cross-module schema."""
+        try:
+            from core.live_4h_exec import append_closed_trade, closed_trade_record
+
+            side_key = self._side_key_for_symbol(symbol)
+            if side_key is None:
+                return
+            entry_premium = (self._long_avg_entry_price if side_key == "long"
+                             else self._short_avg_entry_price)
+            entry_premium = float(entry_premium) if math.isfinite(entry_premium) else None
+            resp = (result or {}).get("response") or {}
+            raw_fill = resp.get("filled_avg_price")
+            try:
+                fill = float(raw_fill) if raw_fill not in (None, "") else None
+            except (TypeError, ValueError):
+                fill = None
+            order_qty = int(qty) if qty is not None else int(self.cfg.qty)
+            realized = (round((fill - entry_premium) * 100.0 * order_qty, 2)
+                        if (fill is not None and entry_premium) else None)
+            trail = self._trail_state(side_key)
+            entry_state = {
+                "entry_bar": trail.entry_ts.isoformat() if trail.entry_ts else None,
+                "entry_fill_price": entry_premium,
+                "entry_filled_qty": float(order_qty),
+                # The UNDERLYING at entry and its ATR — the pair that lets an
+                # option row be compared against the move it was a bet on.
+                "u_entry": (float(trail.entry_price)
+                            if math.isfinite(trail.entry_price) else None),
+                "u_atr": (float(trail.entry_atr)
+                          if math.isfinite(trail.entry_atr) else None),
+            }
+            record = closed_trade_record(
+                module=_LEDGER_MODULE,
+                bar=datetime.now(timezone.utc).isoformat(),
+                ticker=self.cfg.underlying,
+                order_symbol=symbol,
+                route="option",
+                qty=order_qty,
+                exit_reason=str((result or {}).get("exit_reason") or "close"),
+                entry_avg_price=entry_premium,
+                exit_fill_price=fill,
+                realized_pnl=realized,
+                entry_state=entry_state,
+                order_id=str(resp.get("id", "")) or None,
+            )
+            record["option_side"] = side_key
+            record["simulated"] = bool((result or {}).get("simulated"))
+            append_closed_trade(_LEDGER_MODULE, record)
+        except Exception as exc:  # noqa: BLE001 - a ledger write must not stop trading
+            logger(f"[order_policy] closed-trade ledger write failed: {exc}")
+
+    def _submit_order_inner(
         self,
         *,
         symbol: str,

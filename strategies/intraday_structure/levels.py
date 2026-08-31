@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from dataclasses import replace
 from datetime import time
 from typing import Iterable, Sequence
 from zoneinfo import ZoneInfo
@@ -22,6 +22,12 @@ class StructuralLevelProvider:
 
     def __init__(self, policy: LevelPolicy) -> None:
         self.policy = policy
+        # Liquidity zones are 92% of level-building cost: an 80-row pandas
+        # feature frame rebuilt per call, of which only the last row is read.
+        # Every candidate on the same ticker and bar asks the identical
+        # question, so answer it once. One entry per symbol, keyed on the exact
+        # bar identity rather than a TTL, so a corrected last bar invalidates it.
+        self._liquidity_memo: dict[str, tuple[tuple, list[StructuralLevel]]] = {}
 
     def levels(
         self,
@@ -92,7 +98,22 @@ class StructuralLevelProvider:
         subset = list(bars[-max(80, self.policy.swing_lookback_bars):])
         if len(subset) < 5:
             return []
-        frame = pd.DataFrame([b.to_dict() for b in subset]).set_index("timestamp")
+        last = subset[-1]
+        key = (last.timestamp, last.close, last.high, last.low, last.volume, len(subset))
+        cached = self._liquidity_memo.get(last.symbol)
+        if cached is not None and cached[0] == key:
+            return [replace(level) for level in cached[1]]
+        result = self._compute_liquidity_levels(subset)
+        self._liquidity_memo[last.symbol] = (key, [replace(level) for level in result])
+        return result
+
+    def _compute_liquidity_levels(self, subset: Sequence[Bar]) -> list[StructuralLevel]:
+        # Build the frame from raw fields; Bar.to_dict() goes through
+        # dataclasses.asdict, which deep-copies every bar on every call.
+        frame = pd.DataFrame(
+            [(b.timestamp, b.open, b.high, b.low, b.close, b.volume) for b in subset],
+            columns=["timestamp", "open", "high", "low", "close", "volume"],
+        ).set_index("timestamp")
         frame.index = pd.DatetimeIndex(pd.to_datetime(frame.index, utc=True))
         enriched, _, _ = add_liquidity_zone_features(
             frame, lookback=min(78, len(frame)), swing_window=min(20, max(2, len(frame) // 3))

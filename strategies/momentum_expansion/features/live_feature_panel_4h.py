@@ -28,7 +28,9 @@ Usage:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Iterable
@@ -49,6 +51,67 @@ BarLoader = Callable[[str], pd.DataFrame]
 DailyBarLoader = Callable[[str], "pd.DataFrame | None"]
 
 
+# ---------------------------------------------------------------------------
+# Per-ticker memo.
+#
+# WHY: build_ticker_features_4h costs ~129ms/ticker (93% of a panel build;
+# reading both parquets is only ~10ms), so a full 2709-name universe takes ~6
+# minutes standalone and measured 1018s on the contended live server. It is
+# also, in the live tail=1 case, almost entirely redundant: the bar caches are
+# rewritten only when new bars land, so between refreshes every poll recomputes
+# a bit-identical answer. The 2026-08-24 session paid for 41 of them.
+#
+# The key is a content hash of the exact frames handed to the builder plus the
+# trim arguments -- not a clock and not a file mtime. Content, because this
+# module deliberately does not know the caller's storage backend (the docstring
+# above explains why bar loading is injected), and because a hash catches a
+# mid-history bar revision that (last_timestamp, row_count) would miss. Hashing
+# costs ~1.65ms/ticker against the ~129ms it saves.
+#
+# Bounded by construction: one entry per ticker, replaced when its inputs
+# change, so the memo cannot outgrow the universe. Only trimmed results are
+# stored -- an untrimmed panel row-set is ~3.2MB/ticker and has no business in
+# a long-lived process.
+# ---------------------------------------------------------------------------
+_MEMO_LOCK = threading.Lock()
+_MEMO: dict[str, tuple[tuple, pd.DataFrame]] = {}
+_MEMO_MAX_ROWS = 8
+
+
+def _frame_fingerprint(df: "pd.DataFrame | None") -> str | None:
+    """Content hash of a bar frame, including its index. None if there is none."""
+    if df is None or df.empty:
+        return None
+    values = pd.util.hash_pandas_object(df, index=True).to_numpy().tobytes()
+    return hashlib.blake2b(values, digest_size=16).hexdigest()
+
+
+def _ctx_fingerprint(ctx_4h: dict[str, pd.DataFrame]) -> tuple:
+    """Context frames (SPY/VIXY/...) feed every ticker, so they key every entry."""
+    return tuple(sorted((k, _frame_fingerprint(v)) for k, v in (ctx_4h or {}).items()))
+
+
+def clear_feature_panel_memo() -> None:
+    """Drop every memoized row. For tests and for an explicit operator reset."""
+    with _MEMO_LOCK:
+        _MEMO.clear()
+
+
+def _memo_get(ticker: str, key: tuple) -> "pd.DataFrame | None":
+    with _MEMO_LOCK:
+        hit = _MEMO.get(ticker)
+    if hit is None or hit[0] != key:
+        return None
+    return hit[1].copy()   # callers concat/mutate; never hand out the stored frame
+
+
+def _memo_put(ticker: str, key: tuple, feats: pd.DataFrame) -> None:
+    if len(feats) > _MEMO_MAX_ROWS:
+        return
+    with _MEMO_LOCK:
+        _MEMO[ticker] = (key, feats.copy())
+
+
 @dataclass
 class FeaturePanelResult:
     panel: pd.DataFrame  # (timestamp, ticker) MultiIndex; xsec_*/earnings cols ALWAYS present
@@ -56,6 +119,7 @@ class FeaturePanelResult:
     tickers_built: int
     tickers_skipped: list[str]
     build_seconds: float
+    memo_hits: int = 0   # tickers served from the per-ticker memo, not rebuilt
 
 
 def build_live_feature_panel_4h(
@@ -95,6 +159,9 @@ def build_live_feature_panel_4h(
     tickers = list(tickers)
     rows: list[pd.DataFrame] = []
     skipped: list[str] = []
+    memo_hits = 0
+    ctx_fp = _ctx_fingerprint(ctx_4h)
+    since_key = None if since is None else since.isoformat()
 
     for i, t in enumerate(tickers, 1):
         try:
@@ -110,10 +177,25 @@ def build_live_feature_panel_4h(
         except Exception:
             df_1d = None
 
+        # Bars are still read every time: they are ~7% of the cost, and reading
+        # them is what keeps the skip semantics honest (a ticker whose cache
+        # disappeared must still be reported as skipped, memo or no memo).
+        memo_key = (ctx_fp, _frame_fingerprint(df_4h), _frame_fingerprint(df_1d),
+                    tail, since_key)
+        cached = _memo_get(t, memo_key)
+        if cached is not None:
+            memo_hits += 1
+            if not cached.empty:
+                rows.append(cached)
+            if progress_every and i % progress_every == 0:
+                logger.info("live feature panel: %d/%d tickers built (%d memo hits)",
+                            i, len(tickers), memo_hits)
+            continue
+
         try:
             feats = build_ticker_features_4h(ticker=t, df_4h=df_4h, df_1d=df_1d, ctx_4h=ctx_4h)
         except Exception:
-            skipped.append(t)
+            skipped.append(t)   # a build failure may be transient; never memoized
             continue
         if feats is None or feats.empty:
             skipped.append(t)
@@ -125,18 +207,23 @@ def build_live_feature_panel_4h(
         feats["timestamp"] = pd.to_datetime(feats["timestamp"], utc=True)
         if since is not None:
             feats = feats[feats["timestamp"] > since]
+        feats["ticker"] = t
+        # An empty frame here means `since` trimmed everything away -- a real
+        # result for this key, and worth memoizing so the next poll skips the
+        # rebuild too. It just contributes no rows.
+        _memo_put(t, memo_key, feats)
         if feats.empty:
             continue
-        feats["ticker"] = t
         rows.append(feats)
 
         if progress_every and i % progress_every == 0:
-            logger.info("live feature panel: %d/%d tickers built", i, len(tickers))
+            logger.info("live feature panel: %d/%d tickers built (%d memo hits)",
+                        i, len(tickers), memo_hits)
 
     if not rows:
         return FeaturePanelResult(
             panel=pd.DataFrame(), tickers_requested=len(tickers), tickers_built=0,
-            tickers_skipped=skipped, build_seconds=time.time() - t0,
+            tickers_skipped=skipped, build_seconds=time.time() - t0, memo_hits=memo_hits,
         )
 
     panel = pd.concat(rows, ignore_index=True).set_index(["timestamp", "ticker"]).sort_index()
@@ -146,8 +233,8 @@ def build_live_feature_panel_4h(
     n_built = len(tickers) - len(skipped)
     build_seconds = time.time() - t0
     logger.info(
-        "live feature panel built: %d/%d tickers (%d skipped), %d rows, %.1fs",
-        n_built, len(tickers), len(skipped), len(panel), build_seconds,
+        "live feature panel built: %d/%d tickers (%d skipped, %d from memo), %d rows, %.1fs",
+        n_built, len(tickers), len(skipped), memo_hits, len(panel), build_seconds,
     )
     if skipped:
         logger.warning(
@@ -157,7 +244,7 @@ def build_live_feature_panel_4h(
 
     return FeaturePanelResult(
         panel=panel, tickers_requested=len(tickers), tickers_built=n_built,
-        tickers_skipped=skipped, build_seconds=build_seconds,
+        tickers_skipped=skipped, build_seconds=build_seconds, memo_hits=memo_hits,
     )
 
 

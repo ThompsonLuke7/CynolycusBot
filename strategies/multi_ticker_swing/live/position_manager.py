@@ -25,9 +25,14 @@ from zoneinfo import ZoneInfo
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 from core.calendar import is_market_open_now, next_trading_day
+from core.live_4h_exec import append_closed_trade, closed_trade_record
 from strategies.multi_ticker_swing.live.universe import TickerConfig
 
 logger = logging.getLogger(__name__)
+
+# Ledger identity for this module. Matches the directory the 2026-08 execution
+# study reconstructed by hand (Data/inference/multi_ticker_swing/).
+_LEDGER_MODULE = "multi_ticker_swing"
 
 # Legacy defaults — individual positions now use config.arm_pct / config.giveback_pct
 _ARM_PCT_DEFAULT      = 0.025
@@ -1495,6 +1500,7 @@ class SwingPositionManager:
             payload["option_realized_pnl"] = None
             payload["option_realized_pct"] = None
         self._emit("position_closed", payload)
+        self._append_closed_trade_ledger(pos, reason=reason, payload=payload, fill=fill)
         self._last_close_failure_wall.pop(pos.ticker, None)
         self._close_pass_count.pop(pos.ticker, None)
         self._pending_close_orders.pop(pos.ticker, None)
@@ -1502,6 +1508,58 @@ class SwingPositionManager:
         self._remove_deferred_trail_cache(pos)
         del self._positions[pos.ticker]
         self._persist_open_position_state()
+
+    def _append_closed_trade_ledger(self, pos: SwingPosition, *, reason: str,
+                                    payload: dict[str, Any],
+                                    fill: dict[str, Any] | None) -> None:
+        """Write this close to the shared closed-trade ledger.
+
+        This module kept no `closed_trades.jsonl` at all, so it was invisible to
+        every ledger-based analysis — the 2026-08 execution study had to rebuild
+        its 126 position lifecycles from raw Alpaca fills to see them, and the
+        SPY daytrader had the same hole. Same schema as the 4H modules
+        (`core.live_4h_exec.closed_trade_record`) so a cross-module study joins
+        on one definition.
+
+        Underlying anchors go in `u_entry`/`u_atr`: this module's `entry_price`
+        is the UNDERLYING, while `entry_avg_price` below is the option premium.
+        Keeping both is what lets an option row be compared against the move it
+        was a bet on.
+        """
+        try:
+            entry_state = {
+                "entry_bar": pos.entry_time.isoformat() if pos.entry_time else None,
+                "runs_held": int(pos.bar_count_5m or 0),
+                "entry_order_id": (pos.option_entry_meta or {}).get("entry_order_id"),
+                "entry_submitted_at": (pos.option_entry_meta or {}).get("entry_submitted_at"),
+                "entry_filled_at": (pos.option_entry_meta or {}).get("entry_filled_at"),
+                "entry_fill_price": _positive_or_none(pos.option_entry_price),
+                "entry_filled_qty": float(pos.qty) if pos.qty else None,
+                "u_entry": float(pos.entry_price) if pos.entry_price else None,
+                "u_atr": float(pos.atr_at_entry) if pos.atr_at_entry else None,
+            }
+            record = closed_trade_record(
+                module=_LEDGER_MODULE,
+                bar=payload.get("exit_time") or datetime.now(timezone.utc).isoformat(),
+                ticker=pos.ticker,
+                order_symbol=pos.option_symbol,
+                route="option",
+                qty=pos.qty,
+                exit_reason=reason,
+                entry_avg_price=_positive_or_none(pos.option_entry_price),
+                exit_fill_price=_positive_or_none((fill or {}).get("fill_price")),
+                realized_pnl=payload.get("option_realized_pnl"),
+                entry_state=entry_state,
+                order_id=(fill or {}).get("order_id"),
+            )
+            # The underlying move alongside the option result — the pair the
+            # instrument question needs and that nothing recorded before.
+            record["u_exit"] = payload.get("exit_price")
+            record["underlying_return"] = payload.get("exit_pnl_pct")
+            record["direction"] = int(pos.direction)
+            append_closed_trade(_LEDGER_MODULE, record)
+        except Exception as exc:  # noqa: BLE001 - a ledger write must not stop trading
+            logger.warning("closed-trade ledger write failed for %s: %s", pos.ticker, exc)
 
     def _abandon_worthless_close(
         self,

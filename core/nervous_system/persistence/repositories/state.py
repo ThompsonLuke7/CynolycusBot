@@ -307,6 +307,17 @@ class StateRepository:
     def __init__(self, session: Session):
         self._session = session
 
+    def commit(self) -> None:
+        """End this repository's transaction, releasing any locks it holds.
+
+        Callers that own a repository's session outright — rather than
+        borrowing one from a UnitOfWork — need a way to close the transaction
+        an insert opened. Without it the session sits `idle in transaction`
+        holding row locks for the life of the process.
+        """
+
+        self._session.commit()
+
     def save_state(self, state: StateEnvelope) -> StateEnvelope:
         row = StateRecord(**_state_values(state))
         self._session.add(row)

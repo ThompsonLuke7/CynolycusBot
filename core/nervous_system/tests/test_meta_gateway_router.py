@@ -416,6 +416,52 @@ def test_an_option_entry_with_a_quote_is_governed() -> None:
     assert rows[0].refusal is None
 
 
+def test_an_option_entry_is_sized_in_contracts_off_the_premium() -> None:
+    """An option entry sized off the underlying is 4-5x too large.
+
+    ``shares_for_notional(underlying, budget)`` and
+    ``contracts_for_notional(premium, budget)`` differ by roughly
+    (underlying / premium) * 100. For AMD at 100 with a 200 call at 4.40 ask
+    against a $5,000 budget that is 50 contracts — $22,000 of premium — where
+    11 is correct. This was latent only because every Meta option entry was
+    being refused upstream for other reasons; see
+    research/daily_live_reports/2026-08-25.md.
+    """
+
+    from core.live_4h_exec import contracts_for_notional, shares_for_notional
+
+    row = _route_option(
+        _router(policy_budget=Decimal("5000.00")),
+        quotes_by_symbol={"AMD260821C00200000": _option_quote()},
+    )[0]
+
+    assert row.refusal is None
+    # 4.40 is the ask, which is also the limit option_order_request will use.
+    assert row.order_request.parent_quantity == Decimal(
+        str(contracts_for_notional(4.40, 5000.0))
+    )
+    assert row.order_request.parent_quantity != Decimal(
+        str(shares_for_notional(100.0, 5000.0))
+    )
+    # Premium actually committed stays inside the budget.
+    assert float(row.order_request.parent_quantity) * 4.40 * 100 <= 5000.0
+
+
+def test_an_option_entry_is_not_gated_on_an_underlying_reference_price() -> None:
+    """The quote is the price an option entry is sized from, so a missing
+    underlying bar must not refuse it. The mandatory quote is the gate.
+    """
+
+    row = _route_option(
+        _router(policy_budget=Decimal("5000.00")),
+        reference_prices={},
+        quotes_by_symbol={"AMD260821C00200000": _option_quote()},
+    )[0]
+
+    assert row.refusal is None
+    assert row.order_request.parent_quantity > 0
+
+
 def test_an_option_exit_survives_a_failed_quote_fetch() -> None:
     """A close must not be trapped by a missing quote. It degrades to a market
     order carrying the reason, rather than being blocked or invented.

@@ -51,6 +51,14 @@ LEGACY_DIRECT_SUBMIT = {
     "strategies/multi_ticker_swing_htf/live/runner.py": 2,
     "strategies/momentum_expansion/policy/momentum_option_policy.py": 2,
     "strategies/dealer_positioning/execution.py": 2,
+    # Added 2026-08-29 with the intraday structure engine's first real paper
+    # orders. Deliberately on the legacy path, not the governed one: the
+    # nervous system is wired to Meta only, and routing a brand-new execution
+    # surface through a gateway no other 4H module uses would couple this
+    # module's first live data to that migration. It is paper-only by config
+    # (`load_config` raises otherwise), capped at a few concurrent positions,
+    # and belongs on the post-MVP migration list alongside the other four.
+    "strategies/intraday_structure/execution.py": 2,
 }
 
 # Meta's own surface, which must be zero.

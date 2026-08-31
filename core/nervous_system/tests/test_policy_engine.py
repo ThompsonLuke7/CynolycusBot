@@ -996,6 +996,68 @@ def test_an_exit_share_count_is_never_treated_as_a_money_budget() -> None:
     assert decision.modifiers == ()
 
 
+def test_a_trim_share_count_is_never_treated_as_a_money_budget() -> None:
+    """The ADJUSTMENT twin of the EXIT case above, and the one that actually bit.
+
+    A take-profit trim is denominated in SHARES, but ADJUSTMENT used to fall
+    through to the money-sizing chain, where a 36-share sell was compared
+    against a dollar ``minimum_order_notional`` and rejected
+    ``SIZE_BELOW_MINIMUM_EXECUTABLE``. Retrying cannot help: the share count
+    never grows into the dollar floor. meta_ranker's AMLX x36 was stranded from
+    the 2026-08-18 bar through five pre-open flushes on exactly this.
+    """
+
+    snapshot = build_snapshot()
+    intent = build_intent(
+        snapshot=snapshot,
+        decision_kind=DecisionKind.ADJUSTMENT,
+        position_size_requested=Decimal("36"),
+        position_size_unit=SizeUnit.SHARES,
+    )
+
+    decision = evaluate_policy(
+        intent,
+        snapshot,
+        # A floor far above the share count: the old code rejected here.
+        build_config(minimum_order_notional=Decimal("500.00")),
+    )
+
+    assert decision.action is PolicyAction.EXIT
+    assert decision.hard_vetoes == ()
+    assert decision.final_risk_budget == Decimal("36")
+    assert decision.modifiers == ()
+    _assert_auditable_reasons(decision)
+
+
+def test_trim_stays_operable_under_degraded_context() -> None:
+    """Reducing exposure must not depend on a healthy context.
+
+    A trim carries the same narrow permission as a full exit: it lowers risk,
+    so the entry-only rules (snapshot, readiness, instrument, portfolio limits,
+    liquidity) do not gate it. Only environment and broker still bind.
+    """
+
+    snapshot = build_snapshot(
+        states=(
+            ticker_state(dollar_volume=1.0),
+            portfolio_state(day_pl=-9_000.0),
+        ),
+        stale_inputs=("MARKET",),
+        missing_inputs=("READINESS",),
+    )
+    intent = build_intent(
+        snapshot=snapshot,
+        decision_kind=DecisionKind.ADJUSTMENT,
+        position_size_requested=Decimal("16"),
+        position_size_unit=SizeUnit.SHARES,
+    )
+
+    decision = evaluate_policy(intent, snapshot, build_config())
+
+    assert decision.action is PolicyAction.EXIT
+    assert decision.hard_vetoes == ()
+
+
 def test_exit_still_blocked_by_environment_and_account_identity() -> None:
     snapshot = build_snapshot()
     intent = build_intent(snapshot=snapshot, decision_kind=DecisionKind.EXIT)

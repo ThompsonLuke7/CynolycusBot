@@ -6,7 +6,8 @@ from typing import Iterable
 
 import pandas as pd
 
-from strategies.dealer_positioning.models import GammaLevels, OptionContractRow
+from strategies.dealer_positioning.models import GammaLevels, GammaStructure, OptionContractRow
+from strategies.dealer_positioning.topology import EXPIRY_BUCKETS, expiry_bucket_shares
 
 
 LADDER_COLUMNS = [
@@ -20,6 +21,8 @@ LADDER_COLUMNS = [
     "put_volume",
     "call_gamma",
     "put_gamma",
+    "call_gamma_mean_by_expiry",
+    "put_gamma_mean_by_expiry",
     "call_delta",
     "put_delta",
     "call_vega",
@@ -103,6 +106,14 @@ def build_gamma_ladder(rows: Iterable[OptionContractRow] | pd.DataFrame, *, spot
         put_vex=("put_vex", "sum"),
     )
     ladder = pd.merge(call_group, put_group, on="strike", how="outer").fillna(0.0)
+    # `call_gamma`/`put_gamma` are the MEAN per-contract gamma across every
+    # expiry present at that strike, so the call and put values at one strike
+    # are not comparable to each other and neither is "the gamma at that
+    # strike". They are kept only because artifacts on disk carry the name.
+    # The GEX columns are unaffected: exposure is computed per contract above
+    # and summed, so `call_gex`/`put_gex` remain correct.
+    ladder["call_gamma_mean_by_expiry"] = ladder["call_gamma"]
+    ladder["put_gamma_mean_by_expiry"] = ladder["put_gamma"]
     ladder["spot"] = float(spot)
     ladder["net_gex"] = ladder["call_gex"] + ladder["put_gex"]
     ladder["abs_net_gex"] = ladder["net_gex"].abs()
@@ -142,6 +153,8 @@ def compute_gamma_levels(
             vega_threshold_total_vex=0.0,
             expirations=[],
             per_dte_levels={},
+            per_bucket_levels={},
+            term_structure={},
         )
         return ladder, levels
 
@@ -149,6 +162,8 @@ def compute_gamma_levels(
     core = _core_levels_from_ladder(ladder, float(spot), float(magnet_quantile))
     frame = rows_to_frame(rows) if not isinstance(rows, pd.DataFrame) else rows.copy()
     per_dte_levels = _per_dte_levels(frame, symbol=symbol, spot=float(spot), magnet_quantile=float(magnet_quantile))
+    per_bucket_levels = _per_bucket_levels(frame, spot=float(spot), magnet_quantile=float(magnet_quantile))
+    term_structure = _term_structure(frame, spot=float(spot))
 
     levels = GammaLevels(
         timestamp=timestamp,
@@ -170,6 +185,8 @@ def compute_gamma_levels(
         vega_threshold_total_vex=core["vega_threshold_total_vex"],
         expirations=sorted(set(str(x) for x in _expirations_from_rows(rows))),
         per_dte_levels=per_dte_levels,
+        per_bucket_levels=per_bucket_levels,
+        term_structure=term_structure,
     )
     return ladder, levels
 
@@ -246,6 +263,66 @@ def _per_dte_levels(
             "expirations": sorted(set(str(x) for x in sliced["expiration"].dropna().unique())),
         }
     return out
+
+
+def _per_bucket_levels(
+    frame: pd.DataFrame,
+    *,
+    spot: float,
+    magnet_quantile: float,
+) -> dict[str, dict[str, float | str | list[str] | None]]:
+    """Recompute the core levels inside each expiry bucket.
+
+    Unlike ``_per_dte_levels`` (which reports single days and only D0/D1), this
+    covers the whole term so a consumer can ask "where is the near-dated
+    structure" separately from "where is the monthly structure".
+    """
+    if frame.empty or "dte" not in frame.columns:
+        return {}
+    work = frame.copy()
+    work["dte"] = pd.to_numeric(work["dte"], errors="coerce")
+    work = work.dropna(subset=["dte"])
+    if work.empty:
+        return {}
+    out: dict[str, dict[str, float | str | list[str] | None]] = {}
+    for label, low, high in EXPIRY_BUCKETS:
+        sliced = work[(work["dte"] >= low) & (work["dte"] <= high)].copy()
+        if sliced.empty:
+            continue
+        ladder = build_gamma_ladder(sliced, spot=spot)
+        if ladder.empty:
+            continue
+        core = _core_levels_from_ladder(ladder, float(spot), float(magnet_quantile))
+        out[label] = {
+            "label": label,
+            "spot": float(spot),
+            "estimated_net_gex": core["total_gex"],
+            "call_wall": core["call_wall"],
+            "put_wall": core["put_wall"],
+            "nearest_magnet": core["nearest_magnet"],
+            "gamma_flip": core["gamma_flip"],
+            "contract_count": int(len(sliced)),
+            "expirations": sorted(set(str(x) for x in sliced["expiration"].dropna().unique()))
+            if "expiration" in sliced.columns
+            else [],
+        }
+    return out
+
+
+def _term_structure(frame: pd.DataFrame, *, spot: float) -> dict[str, float | None]:
+    """Gamma share by expiry bucket, plus a near-minus-far slope."""
+    shares = expiry_bucket_shares(frame, spot=spot)
+    if not shares:
+        return {}
+    short = float(shares.get("d0", 0.0) + shares.get("d1_2", 0.0))
+    long_dated = float(shares.get("d8_30", 0.0) + shares.get("d30_plus", 0.0))
+    return {
+        **{f"gamma_share_{k}": v for k, v in shares.items()},
+        "zero_dte_gamma_share": shares.get("d0"),
+        "short_gamma_share": short,
+        "weekly_gamma_share": shares.get("d3_7"),
+        "gamma_term_slope": short - long_dated,
+    }
 
 
 def _positive_quantile(series: pd.Series | None, quantile: float) -> float:
@@ -364,3 +441,77 @@ def _air_gap_score(ladder: pd.DataFrame, spot: float, magnet: float | None, thre
     if math.isnan(score) or math.isinf(score):
         return 0.0
     return float(score)
+
+
+def compute_gamma_structure(
+    rows: Iterable[OptionContractRow] | pd.DataFrame,
+    *,
+    symbol: str,
+    spot: float,
+    magnet_quantile: float = 0.90,
+    age_days: float | None = 0.0,
+    avg_dollar_volume_20d: float | None = None,
+    market_cap: float | None = None,
+    with_stability: bool = True,
+) -> "GammaStructure":
+    """The full structural view: levels, unsigned topology, sign estimate, confidence.
+
+    ``compute_gamma_levels`` is unchanged and still returns its ``(ladder,
+    levels)`` pair -- four consumers depend on that shape. This is the richer
+    entry point for anything that needs to know how much to trust what it just
+    read.
+    """
+    from strategies.dealer_positioning.confidence import build_confidence
+    from strategies.dealer_positioning.topology import (
+        build_estimated_signed_exposure,
+        build_gamma_topology,
+    )
+
+    ladder, levels = compute_gamma_levels(
+        rows, symbol=symbol, spot=spot, magnet_quantile=magnet_quantile
+    )
+    frame = rows_to_frame(rows) if not isinstance(rows, pd.DataFrame) else rows.copy()
+
+    strike_coverage = None
+    if not ladder.empty and float(spot) > 0.0:
+        strikes = pd.to_numeric(ladder["strike"], errors="coerce").dropna()
+        if not strikes.empty:
+            # Did the captured window actually bracket spot? A window entirely
+            # on one side describes half a structure.
+            strike_coverage = 1.0 if (strikes.min() < spot < strikes.max()) else 0.5
+
+    confidence = build_confidence(
+        symbol=symbol,
+        frame=frame,
+        age_days=age_days,
+        avg_dollar_volume_20d=avg_dollar_volume_20d,
+        market_cap=market_cap,
+        strike_coverage=strike_coverage,
+    )
+    topology = build_gamma_topology(
+        ladder, symbol=symbol.upper(), spot=float(spot), timestamp=levels.timestamp, frame=frame
+    )
+    signed = build_estimated_signed_exposure(
+        ladder,
+        symbol=symbol.upper(),
+        spot=float(spot),
+        timestamp=levels.timestamp,
+        call_wall=levels.call_wall,
+        put_wall=levels.put_wall,
+        gamma_flip=levels.gamma_flip,
+    )
+
+    stability = None
+    if with_stability and not frame.empty:
+        from strategies.dealer_positioning.stability import assess_stability
+
+        stability = assess_stability(frame, spot=float(spot), magnet_quantile=magnet_quantile)
+
+    return GammaStructure(
+        ladder=ladder,
+        levels=levels,
+        topology=topology,
+        signed=signed,
+        confidence=confidence,
+        stability=stability,
+    )

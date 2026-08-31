@@ -45,9 +45,27 @@ _DEGRADED_SNAPSHOT_STATUSES = {
 
 
 def is_risk_reducing(intent: TradeIntent) -> bool:
-    """Only an explicit EXIT closes exposure and earns the narrow permission."""
+    """A reduction closes or shrinks exposure and earns the narrow permission.
 
-    return intent.decision_kind is DecisionKind.EXIT
+    Both reduction kinds qualify. An ADJUSTMENT is a partial exit — the
+    take-profit trim — and it lowers exposure exactly as a full EXIT does; the
+    only difference is that it leaves a residue. Treating it as an entry ran
+    it through the money-sizing chain, where ``position_size_requested`` is a
+    typed SHARES/CONTRACTS quantity rather than a dollar budget, and the
+    minimum-notional floor then compared a share count against a dollar amount.
+    Every trim small enough to matter was vetoed
+    ``SIZE_BELOW_MINIMUM_EXECUTABLE`` and could never succeed on retry:
+    meta_ranker's AMLX x36 sat queued from the 2026-08-18 bar through five
+    flushes, with PURR x16 and TEM x16 behind it. See
+    research/daily_live_reports/2026-08-25.md.
+
+    This also makes the policy engine agree with the two execution sites that
+    already read the flag off the same distinction —
+    ``gateway.check_exit_reduces_exposure`` and
+    ``gateway_execution._route_one`` both treat "not ENTRY" as risk-reducing.
+    """
+
+    return intent.decision_kind in (DecisionKind.EXIT, DecisionKind.ADJUSTMENT)
 
 
 def _decimal(value: float | int | Decimal) -> Decimal:

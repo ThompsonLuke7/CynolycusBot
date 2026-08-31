@@ -51,6 +51,11 @@ def compute_features(
     true_ranges = np.maximum.reduce([highs - lows, np.abs(highs - prev_closes), np.abs(lows - prev_closes)])
     atr = float(np.mean(true_ranges[-14:])) if len(true_ranges) else 0.0
     atr = max(atr, current.close * 1e-6)
+    # Range compression: the 14-bar ATR against a 60-bar baseline. Below 1.0 the
+    # tape is coiling, which is the condition under which a continuation setup
+    # most often chops instead of running.
+    atr_baseline = float(np.mean(true_ranges[-60:])) if len(true_ranges) else 0.0
+    atr_baseline = max(atr_baseline, current.close * 1e-6)
     ranges = np.maximum(highs - lows, current.close * 1e-9)
     avg_range = float(np.mean(ranges[-21:-1])) if len(ranges) > 1 else float(ranges[-1])
     volume_ref = float(np.mean(volumes[-51:-1])) if len(volumes) > 1 else max(float(volumes[-1]), 1.0)
@@ -80,6 +85,7 @@ def compute_features(
     values = {
         "atr": atr,
         "atr_pct": atr / current.close,
+        "atr_contraction": atr / atr_baseline,
         "session_vwap": session_vwap,
         "distance_to_vwap_atr": (current.close - session_vwap) / atr,
         "vwap_slope": (session_vwap - prior_session_vwap) / atr / max(1, min(5, len(session_vwaps))),

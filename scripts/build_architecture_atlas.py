@@ -40,6 +40,7 @@ PUBLIC_FIELDS = {"label", "summary", "maturity", "mode", "repo_paths", "source_l
 NODE_FIELDS = {"id", "parent_id", "kind", "visibility", "edge_color_role", "position", "public", "local", "evidence", "tags", "layout"}
 EDGE_FIELDS = {"id", "source", "target", "type", "visibility", "public", "local", "evidence", "layout"}
 _ALLOWED_STATIC_FILES = {"index.html", "atlas.css", "atlas.js"}
+_ALLOWED_STATIC_ASSETS = re.compile(r"assets/[A-Za-z0-9_.-]+\.(?:png|webp|jpg|jpeg)")
 _CREDENTIAL_ASSIGNMENT = re.compile(r"\b(?:api[_-]?key|secret|token|password|passwd|credential)\b\s*[:=]\s*[^\s]+", re.IGNORECASE)
 _WINDOWS_PATH = re.compile(r"(?:^|[\s\"'])?[A-Za-z]:\\")
 _POSIX_PATH = re.compile(r"(?:^|[\s\"'])/(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+")
@@ -434,6 +435,8 @@ def _validate_static_inventory(static_dir: Path) -> None:
             continue
         relative = path.relative_to(static_dir).as_posix()
         if relative in _ALLOWED_STATIC_FILES:
+            continue
+        if _ALLOWED_STATIC_ASSETS.fullmatch(relative):
             continue
         if re.fullmatch(r"vendor/(?:cytoscape(?:\.min)?\.js|LICENSE-[A-Za-z0-9_.-]+)", relative):
             continue

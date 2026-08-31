@@ -16,6 +16,11 @@ from typing import Any
 
 import pandas as pd
 
+from strategies.dealer_positioning.level_dynamics_feed import (
+    DYNAMICS_FEATURE_COLUMNS,
+    join_level_dynamics,
+)
+
 REPO = Path(__file__).resolve().parents[3]
 SNAPSHOT_ROOT = REPO / "Data" / "dealer_positioning" / "historical_snapshots"
 RANKING_ROOT = REPO / "Data" / "dealer_positioning" / "rankings"
@@ -93,6 +98,7 @@ def build_rankings(frame: pd.DataFrame) -> pd.DataFrame:
         "gex_concentration_index",
         *ONE_DAY_CHANGE_COLUMNS,
         *VELOCITY_CHANGE_COLUMNS,
+        *DYNAMICS_FEATURE_COLUMNS,
     ]:
         if col not in work.columns:
             work[col] = math.nan
@@ -241,6 +247,10 @@ def run(
 ) -> RankingResult:
     path = Path(snapshot_path) if snapshot_path is not None else latest_snapshot_path(snapshot_root)
     frame = pd.read_parquet(path)
+    # Enrich with the change/velocity/stability features build_level_dynamics
+    # already computes. Fails soft: a missing dynamics artifact leaves the
+    # columns null and the ranking still builds.
+    frame = join_level_dynamics(frame)
     rankings = build_rankings(frame)
     if rankings.empty:
         raise RuntimeError(f"no rankings built from {path}")

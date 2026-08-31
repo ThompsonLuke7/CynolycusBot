@@ -28,6 +28,7 @@ if str(REPO) not in sys.path:
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 from core.live_4h_exec import ExecPolicy, execute_plan
+from core.orphan_positions import find_orphans, log_orphans
 from core.live_risk_pass import (
     RiskPassConfig,
     evaluate_risk_exits,
@@ -130,8 +131,10 @@ def run_module(spec: ModuleSpec, *, client, pos_info: dict, cfg: RiskPassConfig,
         # tick must not rewrite state the 4H runner owns. Clearing an entry's
         # unconfirmed flag counts: it is the whole point of settling it here
         # rather than waiting for the next 4H bar, and an in-place mutation that
-        # is never written back would settle nothing.
-        if submit and (res.plan or res.settled or res.confirmed_entries):
+        # is never written back would settle nothing. Dropping a claim on an
+        # entry that never filled counts for the same reason.
+        if submit and (res.plan or res.settled or res.confirmed_entries
+                       or res.abandoned_entries):
             state["managed"] = res.new_managed
             save_state(spec.state_path, state)
 
@@ -141,6 +144,7 @@ def run_module(spec: ModuleSpec, *, client, pos_info: dict, cfg: RiskPassConfig,
             "orders": len(res.plan),
             "settled": len(res.settled),
             "confirmed_entries": len(res.confirmed_entries),
+            "abandoned_entries": len(res.abandoned_entries),
             "anomalies": len(res.anomalies),
             "skipped_positions": len(res.skipped),
         }
@@ -208,6 +212,20 @@ def main() -> int:
           f"rules: stop={cfg.hard_stop} expiry={cfg.expiry_flatten} "
           f"trail={cfg.trailing_stop} tp={cfg.take_profit_trim}")
     print(f"  broker positions: {len(pos_info)}")
+
+    # Report positions no module claims. Read-only and deliberately so: an
+    # automatic flatten is what made multi_ticker_swing force-sell a legitimate
+    # HTF position it mistook for an assignment on 2026-07-21. This pass already
+    # holds every broker position and every module's state, so it is the
+    # cheapest place to notice — dealer_ranker's TECK and SU sat unowned for
+    # five weeks with no symptom at all. Only run on a full sweep: a
+    # single-module run cannot tell an orphan from a sibling's position.
+    if not args.module:
+        try:
+            orphans = find_orphans(client.get_positions())
+            log_orphans(orphans, logger_=logger)
+        except Exception as exc:  # noqa: BLE001 - a detector must never stop the pass
+            logger.warning("orphan scan failed (%s) — continuing with the risk pass", exc)
 
     total_orders = 0
     for spec in specs:

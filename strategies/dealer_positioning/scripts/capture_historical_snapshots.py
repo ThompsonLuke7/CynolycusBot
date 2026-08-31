@@ -164,6 +164,7 @@ def capture_snapshots(
     snapshot_date: str | None = None,
     ref_date: str | None = None,
     workers: int = 1,
+    publish_states: bool = True,
 ) -> CaptureResult:
     now = datetime.now(tz=_ET)
     snapshot_date_value = snapshot_date or now.date().isoformat()
@@ -284,6 +285,9 @@ def capture_snapshots(
     if error_rows:
         _write_jsonl(output_dir / "errors.jsonl", error_rows)
 
+    if publish_states and summary_rows:
+        _publish_dealer_states(output_dir / "dealer_level_summary.parquet")
+
     return CaptureResult(
         symbols=len(symbols),
         candidate_symbols=len(symbols),
@@ -294,6 +298,31 @@ def capture_snapshots(
         errors=len(error_rows),
         output_dir=output_dir,
     )
+
+
+def _publish_dealer_states(summary_path: Path) -> None:
+    """Hand the captured summary to the governed path.
+
+    Without this call the policy's dealer modifier stays dark and every governed
+    decision records CONTEXT_DEALER_UNAVAILABLE. Publication never raises -- an
+    unreachable state store leaves the decision exactly where it already was --
+    so a capture is never failed by a downstream store being down.
+    """
+    try:
+        import pandas as _pd
+
+        from strategies.dealer_positioning.state_publication import publish_dealer_states
+
+        frame = _pd.read_parquet(summary_path)
+        captured_at = _pd.to_datetime(frame["captured_at"]).max().to_pydatetime()
+        result = publish_dealer_states(
+            frame, captured_at=captured_at, snapshot_path=summary_path
+        )
+        logger.info(
+            "dealer states: %s (published=%s)", result.get("status"), result.get("published")
+        )
+    except Exception as exc:  # noqa: BLE001 - publication is downstream of a completed capture
+        logger.warning("dealer-state publication skipped: %s", type(exc).__name__)
 
 
 def _summary_row(
@@ -909,6 +938,11 @@ def main() -> int:
     parser.add_argument("--snapshot-date", default=None, help="Storage/evaluation date, YYYY-MM-DD. Defaults to today ET.")
     parser.add_argument("--ref-date", default=None, help="Expiration-reference date, YYYY-MM-DD. Defaults to snapshot date.")
     parser.add_argument("--workers", type=int, default=1, help="Parallel symbol/scope fetch workers (default 1).")
+    parser.add_argument(
+        "--no-publish-states",
+        action="store_true",
+        help="Capture only; do not publish DEALER states to the governed path.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
@@ -934,6 +968,7 @@ def main() -> int:
     if not symbols:
         raise SystemExit("no symbols selected")
     result = capture_snapshots(
+        publish_states=not args.no_publish_states,
         symbols=symbols,
         scopes=tuple(str(scope) for scope in args.scopes),
         output_root=Path(args.output_root),

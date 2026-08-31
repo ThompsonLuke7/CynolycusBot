@@ -36,13 +36,16 @@
     research: "#102525 #173936",
     control: "#0d1d2b #142f43"
   };
-  const NODE_TEXTURE = "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 96'%3E%3Cg fill='none' stroke='%23fff' stroke-width='1'%3E%3Cpath opacity='.08' d='M-8 20h46l12-12h38l10 10h70M-8 70h32l14-14h55l12 12h64'/%3E%3Cpath opacity='.045' d='M18-8v34l10 10v68M132-8v28l-12 12v72'/%3E%3C/g%3E%3Cg fill='%23fff'%3E%3Ccircle opacity='.18' cx='38' cy='20' r='1.8'/%3E%3Ccircle opacity='.14' cx='98' cy='18' r='1.5'/%3E%3Ccircle opacity='.18' cx='38' cy='56' r='1.8'/%3E%3Ccircle opacity='.14' cx='105' cy='68' r='1.5'/%3E%3C/g%3E%3C/svg%3E";
+  const NODE_TEXTURE = "data:image/svg+xml;utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20160%2096'%3E%3Cg%20fill='none'%20stroke='%23fff'%20stroke-width='1'%3E%3Cpath%20opacity='.08'%20d='M-8%2020h46l12-12h38l10%2010h70M-8%2070h32l14-14h55l12%2012h64'/%3E%3Cpath%20opacity='.045'%20d='M18-8v34l10%2010v68M132-8v28l-12%2012v72'/%3E%3C/g%3E%3Cg%20fill='%23fff'%3E%3Ccircle%20opacity='.18'%20cx='38'%20cy='20'%20r='1.8'/%3E%3Ccircle%20opacity='.14'%20cx='98'%20cy='18'%20r='1.5'/%3E%3Ccircle%20opacity='.18'%20cx='38'%20cy='56'%20r='1.8'/%3E%3Ccircle%20opacity='.14'%20cx='105'%20cy='68'%20r='1.5'/%3E%3C/g%3E%3C/svg%3E";
 
   const els = {
     cy: document.getElementById("cy"),
+    graphStage: document.querySelector(".graph-stage"),
     fallback: document.getElementById("graph-fallback"),
     breadcrumbs: document.getElementById("breadcrumbs"),
     scopeLabel: document.getElementById("scope-label"),
+    scopeTitle: document.getElementById("scope-title"),
+    scopeMeta: document.getElementById("scope-meta"),
     back: document.getElementById("back-button"),
     inspector: document.getElementById("inspector"),
     inspectorClose: document.getElementById("inspector-close"),
@@ -71,6 +74,14 @@
     outlineTree: document.getElementById("outline-tree"),
     helpPanel: document.getElementById("help-panel"),
     largeTextToggle: document.getElementById("large-text-toggle"),
+    presentationToggle: document.getElementById("presentation-toggle"),
+    presentationRail: document.getElementById("presentation-rail"),
+    holoToggle: document.getElementById("holo-toggle"),
+    systemReadoutState: document.getElementById("system-readout-state"),
+    systemReadoutDetail: document.getElementById("system-readout-detail"),
+    hudNodes: document.getElementById("hud-nodes"),
+    hudRoutes: document.getElementById("hud-routes"),
+    hudDepth: document.getElementById("hud-depth"),
     validationState: document.getElementById("validation-state"),
     validationDetail: document.getElementById("validation-detail"),
     validationReadout: document.querySelector(".validation-readout"),
@@ -94,11 +105,14 @@
     showResearch: true,
     cy: null,
     visibleIds: [],
-    routeAnimation: null
+    routeAnimation: null,
+    hudValues: {nodes: 0, routes: 0, depth: 0}
   };
 
   const LARGE_DISPLAY_QUERY = "(min-width: 2560px) and (min-height: 1080px)";
   const LARGE_DISPLAY_STORAGE_KEY = "cynolycus-atlas-large-display";
+  const PRESENTATION_STORAGE_KEY = "cynolycus-atlas-presentation-mode";
+  const HOLO_MUTED_STORAGE_KEY = "cynolycus-atlas-holo-muted";
 
   function defaultLargeDisplay() {
     return window.matchMedia(LARGE_DISPLAY_QUERY).matches;
@@ -120,7 +134,10 @@
   }
 
   function graphTextScale() {
-    return document.body.classList.contains("large-display") ? 1.18 : 1;
+    if (document.body.classList.contains("large-display")) return 1.18;
+    // Half-screen and laptop windows need a comfortable default without the
+    // oversized 4K presentation layout.
+    return window.innerWidth <= 1680 ? 1.16 : 1;
   }
 
   function graphSpacingScale() {
@@ -190,6 +207,112 @@
       });
       refreshGraphViewport();
     }
+  }
+
+  function readPresentationPreference() {
+    try {
+      return window.localStorage.getItem(PRESENTATION_STORAGE_KEY) === "on";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function applyPresentationMode(enabled, persist) {
+    if (enabled && window.innerWidth <= 760) {
+      toast("Presentation mode is available on the graph view");
+      return false;
+    }
+    document.body.classList.toggle("presentation-mode", enabled);
+    els.presentationToggle.setAttribute("aria-pressed", String(enabled));
+    els.presentationToggle.setAttribute(
+      "aria-label",
+      enabled ? "Disable presentation mode" : "Enable presentation mode"
+    );
+    els.presentationToggle.title = enabled ? "Exit presentation mode" : "Presentation mode";
+    els.presentationRail.classList.toggle("active", enabled);
+    els.presentationRail.setAttribute("aria-pressed", String(enabled));
+    if (persist) {
+      try {
+        window.localStorage.setItem(PRESENTATION_STORAGE_KEY, enabled ? "on" : "off");
+      } catch (_) {
+        // The view still applies in browsers with restricted storage.
+      }
+    }
+    refreshGraphViewport();
+    return true;
+  }
+
+  function updateSystemReadout(scopeNode, visibleCount) {
+    if (!scopeNode) return;
+    const depth = Math.max(0, ancestors(scopeNode.id).length - 1);
+    const activeFilters = state.edgeTypes.size === EDGE_TYPES.length ? "ALL FLOWS" : state.edgeTypes.size + " FLOW TYPES";
+    els.systemReadoutState.textContent = "ARCHITECTURE ONLINE";
+    els.systemReadoutDetail.textContent = "DEPTH " + depth + " / " + visibleCount + " NODES / " + activeFilters;
+    animateHudValue("nodes", visibleCount, els.hudNodes, 3);
+    animateHudValue("routes", state.edges.filter(function (edge) { return state.edgeTypes.has(edge.type); }).length, els.hudRoutes, 3);
+    animateHudValue("depth", depth, els.hudDepth, 2);
+  }
+
+  function animateHudValue(key, target, element, width) {
+    const start = Number(state.hudValues[key]) || 0;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduced || start === target) {
+      state.hudValues[key] = target;
+      element.textContent = String(target).padStart(width, "0");
+      return;
+    }
+    const startedAt = performance.now();
+    const duration = 460;
+    function tick(now) {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const value = Math.round(start + (target - start) * eased);
+      element.textContent = String(value).padStart(width, "0");
+      if (progress < 1) window.requestAnimationFrame(tick);
+      else state.hudValues[key] = target;
+    }
+    window.requestAnimationFrame(tick);
+  }
+
+  function readHoloMutedPreference() {
+    try {
+      return window.localStorage.getItem(HOLO_MUTED_STORAGE_KEY) === "on";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function applyHoloMuted(muted, persist) {
+    document.body.classList.toggle("holo-muted", muted);
+    els.holoToggle.setAttribute("aria-pressed", String(muted));
+    els.holoToggle.setAttribute("aria-label", muted ? "Restore holographic chamber" : "Mute holographic chamber");
+    els.holoToggle.title = muted ? "Restore holographic chamber" : "Holographic chamber";
+    if (persist) {
+      try {
+        window.localStorage.setItem(HOLO_MUTED_STORAGE_KEY, muted ? "on" : "off");
+      } catch (_) {
+        // The current view remains usable when local storage is unavailable.
+      }
+    }
+  }
+
+  function bindHoloCamera() {
+    if (!els.graphStage || !window.matchMedia("(pointer: fine)").matches) return;
+    els.graphStage.addEventListener("pointermove", function (event) {
+      const bounds = els.graphStage.getBoundingClientRect();
+      const x = (event.clientX - bounds.left) / bounds.width - 0.5;
+      const y = (event.clientY - bounds.top) / bounds.height - 0.5;
+      els.graphStage.style.setProperty("--camera-x", (x * 8).toFixed(2) + "deg");
+      els.graphStage.style.setProperty("--camera-y", (y * -5).toFixed(2) + "deg");
+      els.graphStage.style.setProperty("--camera-origin-x", (50 + x * 5).toFixed(2) + "%");
+      els.graphStage.style.setProperty("--camera-origin-y", (48 + y * 4).toFixed(2) + "%");
+    });
+    els.graphStage.addEventListener("pointerleave", function () {
+      els.graphStage.style.setProperty("--camera-x", "0deg");
+      els.graphStage.style.setProperty("--camera-y", "0deg");
+      els.graphStage.style.setProperty("--camera-origin-x", "50%");
+      els.graphStage.style.setProperty("--camera-origin-y", "48%");
+    });
   }
 
   function fail(message) {
@@ -275,11 +398,10 @@
   }
 
   function currentScopeElements() {
-    const focus = state.nodesById.get(state.scopeId);
     const children = (state.childrenByParent.get(state.scopeId) || []).filter(function (node) {
       return state.showResearch || !["research", "audit"].includes(node.kind);
     });
-    const nodes = [focus].concat(children).filter(Boolean);
+    const nodes = children;
     const ids = new Set(nodes.map(function (node) { return node.id; }));
     const portals = [];
 
@@ -289,6 +411,7 @@
       const targetInside = ids.has(edge.target);
       if (sourceInside === targetInside) return;
       const outsideId = sourceInside ? edge.target : edge.source;
+      if (outsideId === state.scopeId) return;
       const outsideNode = state.nodesById.get(outsideId);
       if (!outsideNode || ids.has(outsideId) || portals.some(function (node) { return node.id === outsideId; })) return;
       if (!state.showResearch && ["research", "audit"].includes(outsideNode.kind)) return;
@@ -302,7 +425,6 @@
   }
 
   function graphElements(scope) {
-    const children = new Set((state.childrenByParent.get(state.scopeId) || []).map(function (n) { return n.id; }));
     const nodeElements = scope.nodes.map(function (node) {
       const position = graphPosition(node);
       return {
@@ -314,9 +436,8 @@
           role: node.edge_color_role || node.kind,
           maturity: nodePublic(node).maturity || "",
           mode: nodePublic(node).mode || "",
-          focus: node.id === state.scopeId ? "yes" : "no",
           expandable: hasChildren(node.id) ? "yes" : "no",
-          child: children.has(node.id) ? "yes" : "no"
+          child: "yes"
         },
         position: {x: Number(position.x), y: Number(position.y)}
       };
@@ -367,11 +488,11 @@
           "label": "data(label)",
           "color": "#eaf8ff",
           "font-family": "Space Grotesk",
-          "font-size": 12.5 * textScale,
+          "font-size": 15 * textScale,
           "font-weight": 700,
           "text-wrap": "wrap",
           "text-overflow-wrap": "whitespace",
-          "text-max-width": 132 * nodeScale,
+          "text-max-width": 138 * nodeScale,
           "line-height": 1.2,
           "text-valign": "center",
           "text-halign": "center",
@@ -386,7 +507,7 @@
           "shadow-color": "#000",
           "shadow-opacity": 0.38,
           "shadow-offset-y": 10 * edgeScale,
-          "transition-property": "background-blacken, border-width, opacity, underlay-opacity",
+          "transition-property": "background-blacken, border-width, opacity, underlay-opacity, shadow-opacity",
           "transition-duration": "150ms"
         }
       },
@@ -407,25 +528,7 @@
         style: {"shape": "roundrectangle"}
       },
       {
-        selector: "node[focus = 'yes']",
-        style: {
-          "width": 170 * nodeScale,
-          "height": 170 * nodeScale,
-          "shape": "hexagon",
-          "background-color": "#0b2838",
-          "border-color": "#46f3ff",
-          "border-width": 2.2 * edgeScale,
-          "font-size": 13 * textScale,
-          "text-max-width": 136 * nodeScale,
-          "underlay-opacity": 0,
-          "shadow-blur": 30 * edgeScale,
-          "shadow-color": "#000",
-          "shadow-opacity": 0.42,
-          "shadow-offset-y": 12 * edgeScale
-        }
-      },
-      {
-        selector: "node[expandable = 'yes'][focus != 'yes']",
+        selector: "node[expandable = 'yes']",
         style: {
           "border-width": 2.3 * edgeScale
         }
@@ -433,7 +536,13 @@
       {
         selector: "node.hovered",
         style: {
-          "background-blacken": -0.13
+          "background-blacken": -0.13,
+          "border-width": 2.8 * edgeScale,
+          "underlay-opacity": 0.12,
+          "underlay-padding": 7 * edgeScale,
+          "shadow-color": function (ele) { return COLORS[ele.data("role")] || "#46f3ff"; },
+          "shadow-opacity": 0.34,
+          "shadow-blur": 30 * edgeScale
         }
       },
       {
@@ -444,7 +553,9 @@
           "underlay-opacity": 0,
           "shadow-blur": 28 * edgeScale,
           "shadow-color": "#46f3ff",
-          "shadow-opacity": 0.25
+          "shadow-opacity": 0.34,
+          "underlay-opacity": 0.12,
+          "underlay-padding": 9 * edgeScale
         }
       },
       {
@@ -578,8 +689,9 @@
     renderBreadcrumbs();
     renderMinimap(scope.nodes);
     renderContextDock(scope.portals);
-    els.scopeLabel.textContent = nodeLabel(scopeNode) + " · " +
-      (state.childrenByParent.get(state.scopeId) || []).length + " children";
+    updateSystemReadout(scopeNode, scope.nodes.length);
+    els.scopeTitle.textContent = nodeLabel(scopeNode);
+    els.scopeMeta.textContent = scope.nodes.length + " MODULES · SELECT ONE TO INSPECT";
     els.back.hidden = !parentOf(state.scopeId);
 
     if (!state.cy && !initCy()) return;
@@ -985,6 +1097,19 @@
       applyLargeDisplay(enabled, true);
       toast(enabled ? "Large display text enabled" : "Standard display text enabled");
     });
+    els.presentationToggle.addEventListener("click", function () {
+      const enabled = !document.body.classList.contains("presentation-mode");
+      if (applyPresentationMode(enabled, true)) toast(enabled ? "Presentation mode enabled" : "Presentation mode disabled");
+    });
+    els.presentationRail.addEventListener("click", function () {
+      const enabled = !document.body.classList.contains("presentation-mode");
+      if (applyPresentationMode(enabled, true)) toast(enabled ? "Presentation mode enabled" : "Presentation mode disabled");
+    });
+    els.holoToggle.addEventListener("click", function () {
+      const muted = !document.body.classList.contains("holo-muted");
+      applyHoloMuted(muted, true);
+      toast(muted ? "Holographic chamber dimmed" : "Holographic chamber restored");
+    });
     els.back.addEventListener("click", goBack);
     els.inspectorClose.addEventListener("click", closeInspector);
     els.enterDomain.addEventListener("click", function () { enterNode(els.enterDomain.dataset.nodeId); });
@@ -1018,7 +1143,13 @@
     window.addEventListener("hashchange", routeFromLocation);
     window.addEventListener("popstate", routeFromLocation);
     window.addEventListener("resize", function () {
-      if (state.cy) state.cy.resize();
+      if (state.cy) {
+        state.cy.style(cyStyle());
+        state.cy.resize();
+      }
+      if (window.innerWidth <= 760 && document.body.classList.contains("presentation-mode")) {
+        applyPresentationMode(false, true);
+      }
       if (window.innerWidth <= 760) openOutline();
     });
     document.addEventListener("keydown", function (event) {
@@ -1030,6 +1161,13 @@
         else if (els.inspector.classList.contains("open")) closeInspector();
         else if (els.outlinePanel.classList.contains("open") && window.innerWidth > 760) closeOutline();
         else goBack();
+      } else if (event.key.toLowerCase() === "p" && !["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) {
+        const enabled = !document.body.classList.contains("presentation-mode");
+        if (applyPresentationMode(enabled, true)) toast(enabled ? "Presentation mode enabled" : "Presentation mode disabled");
+      } else if (event.key.toLowerCase() === "h" && !["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) {
+        const muted = !document.body.classList.contains("holo-muted");
+        applyHoloMuted(muted, true);
+        toast(muted ? "Holographic chamber dimmed" : "Holographic chamber restored");
       } else if (event.key === "Enter" && document.activeElement === els.cy) {
         if (state.selectedId) enterNode(state.selectedId);
       }
@@ -1057,12 +1195,15 @@
     }
     state.dataset = state.bundle.datasets.public;
     applyLargeDisplay(readLargeDisplayPreference(), false);
+    applyPresentationMode(readPresentationPreference(), false);
+    applyHoloMuted(readHoloMutedPreference(), false);
     buildIndexes();
     if (!state.bundle.datasets.local) {
       els.datasetSwitch.hidden = true;
     }
     renderEdgeFilters();
     bindEvents();
+    bindHoloCamera();
     updateValidationReadout();
     const route = parseHash();
     if (!location.hash) setRoute("system", null, true);

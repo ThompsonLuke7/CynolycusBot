@@ -2,7 +2,7 @@
   "version": "intraday_structure_v1",
   "enabled": true,
   "paper_only": true,
-  "candidate_limit": 130,
+  "candidate_limit": 140,
   "candidate_ttl_minutes": 1440,
   "min_price": 1.0,
   "min_average_dollar_volume": 2000000.0,
@@ -13,10 +13,19 @@
   "failure_cooldown_bars": 20,
   "alert_states": ["SETUP_DETECTED", "ARMED", "CONFIRMED", "TARGET_REACHED", "EXTENDED", "EXHAUSTED", "INVALIDATED", "CLOSED"],
   "context_symbols": ["SPY", "QQQ", "VIXY"],
-  "manual_watchlist": [],
+  "manual_watchlist": ["SPY", "QQQ", "IWM", "GLD", "SLV"],
   "state_path": "Data/inference/intraday_structure/state.json",
   "transition_log_path": "Data/inference/intraday_structure/transitions.jsonl",
   "signal_path": "Data/inference/intraday_structure/active_signals.json",
+  "ledger_path": "Data/inference/intraday_structure/closed_setups.jsonl",
+  "abstention_path": "Data/inference/intraday_structure/abstentions.jsonl",
+  "evidence": {
+    "enabled": true,
+    "event_path": "Data/inference/intraday_structure/decision_events.jsonl",
+    "outcome_horizons_minutes": [5, 15, 30, 60]
+  },
+  "archive_bars": true,
+  "bar_archive_root": "Data/archive/intraday_1m",
   "detector": {
     "min_history_bars": 20,
     "min_relative_volume": 1.2,
@@ -82,5 +91,48 @@
     "enabled": true,
     "universe_path": "Data/shared/universe/shared_universe.csv",
     "top_n": 50
+  },
+  "opening_discovery": {
+    "enabled": true,
+    "universe_path": "Data/shared/universe/shared_universe.csv",
+    "top_n": 750,
+    "scan_start_hour_et": 4,
+    "scan_end_hour_et": 11,
+    "min_gap_pct": 0.02,
+    "min_rth_return_pct": 0.008,
+    "min_three_bar_return_pct": 0.003,
+    "min_session_range_pct": 0.012,
+    "min_volume_pace": 1.25,
+    "min_relative_strength_pct": 0.004,
+    "max_candidates_per_session": 60
+  },
+  "catalyst_discovery": {
+    "enabled": true,
+    "ledger_path": "signals/news/data/processed/live_catalyst_records.parquet",
+    "universe_path": "Data/shared/universe/shared_universe.csv",
+    "max_age_minutes": 180,
+    "min_bullish_score": 0.62,
+    "max_bearish_score": 0.38,
+    "refresh_seconds": 30.0,
+    "max_candidates_per_poll": 25,
+    "strict_ticker_relevance": true
+  },
+  "candidate_capacity": {
+    "opening_reserve": 25,
+    "catalyst_reserve": 15,
+    "source_priority": [
+      "manual_watchlist",
+      "manual_dashboard",
+      "manual",
+      "validated_catalyst",
+      "opening_momentum",
+      "30m_swing",
+      "meta_ranker",
+      "momentum_expansion",
+      "4h_swing",
+      "dealer_ranker",
+      "dealer_level_map",
+      "high_liquidity_universe"
+    ]
   }
 }

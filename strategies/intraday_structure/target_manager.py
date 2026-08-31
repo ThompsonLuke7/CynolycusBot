@@ -20,7 +20,27 @@ class TargetPlan:
     reward_risk: float
 
 
-def build_target_plan(setup: SetupRecord, ctx: DetectionContext) -> TargetPlan | None:
+@dataclass(frozen=True)
+class TargetPlanOutcome:
+    """A plan, or the specific reason there is none.
+
+    The two failures used to collapse into one ``risk_or_target_plan_unavailable``
+    warning, which made 1,472 of 1,474 refusals in a baseline run indistinguishable
+    -- "no plan" tells you nothing about whether the stop was too wide or there was
+    simply nowhere to go.
+    """
+
+    plan: TargetPlan | None = None
+    reason: str | None = None
+
+
+#: Structure exists, but the stop it implies is wider than the risk budget.
+INVALIDATION_TOO_WIDE = "invalidation_wider_than_max_atr"
+#: No causal level lies beyond spot in the trade's direction; nothing to aim at.
+NO_CAUSAL_TARGET = "no_causal_target_beyond_spot"
+
+
+def build_target_plan(setup: SetupRecord, ctx: DetectionContext) -> TargetPlanOutcome:
     f = ctx.features
     atr = f.get("atr")
     invalidation = setup.invalidation
@@ -35,16 +55,16 @@ def build_target_plan(setup: SetupRecord, ctx: DetectionContext) -> TargetPlan |
         invalidation = ctx.bar.close - minimum_risk if is_long(setup) else ctx.bar.close + minimum_risk
         risk = minimum_risk
     if risk > ctx.config.target.max_invalidation_atr * atr:
-        return None
+        return TargetPlanOutcome(reason=INVALIDATION_TOO_WIDE)
     runway = score_runway(
         spot=ctx.bar.close, direction=setup.direction.value, atr=atr, levels=ctx.levels,
         trend_strength=f.get("trend_strength"), market=ctx.market, options=ctx.options,
     )
     if runway.next_target is None:
-        return None
+        return TargetPlanOutcome(reason=NO_CAUSAL_TARGET)
     reward = (runway.next_target - ctx.bar.close) if is_long(setup) else (ctx.bar.close - runway.next_target)
     rr = reward / risk if risk > 0 else 0.0
-    return TargetPlan(float(invalidation), (float(runway.next_target),), runway, float(rr))
+    return TargetPlanOutcome(TargetPlan(float(invalidation), (float(runway.next_target),), runway, float(rr)))
 
 
 def manage_running_setup(setup: SetupRecord, ctx: DetectionContext) -> DetectionDecision:

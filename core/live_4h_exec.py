@@ -13,6 +13,7 @@ has no per-module coupling.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import math
@@ -880,9 +881,17 @@ def build_mixed_plan(
                 signal_audit=sa.get(t), symbol=t, side="buy", qty=shares,
                 reason="entry", reference_price=px,
             )
+            # Anchor the underlying at entry for equities too. Options have
+            # carried u_entry/u_atr since the underlying stop was added; without
+            # the same fields here an equity row cannot be ATR-normalised
+            # against an option row from the same signal.
+            u_px_eq, u_atr_eq = ufn(t)
             out.new_managed[t] = {"route": "equity", "symbol": t, "shares": shares,
                                   "runs_held": 0, "bars_out": 0, "trimmed": False, "entry_bar": str(bar),
-                                  "signal_audit": sa.get(t), "order_audit": out.order_audits[t]}
+                                  "signal_audit": sa.get(t), "order_audit": out.order_audits[t],
+                                  "u_entry": float(px) if px else u_px_eq,
+                                  "u_atr": u_atr_eq,
+                                  "u_basis_source": "entry"}
             if verbose:
                 print(f"  ~ {t:<6} {shares} shares  [{reason}]")
 
@@ -938,6 +947,113 @@ def _reverify_buys_not_held(client, plan: list, new_managed: dict | None) -> lis
     return out
 
 
+
+
+CLOSED_TRADE_SCHEMA_VERSION = "closed_trade_v2"
+
+
+def closed_trade_record(*, module, bar, ticker, order_symbol, route, qty, exit_reason,
+                        entry_avg_price, exit_fill_price, realized_pnl,
+                        entry_state=None, order_id=None, exit_submitted_at=None,
+                        decision_gain=None) -> dict[str, Any]:
+    """The one definition of a closed-trade ledger row.
+
+    Every module that closes a position writes this shape, so a cross-module
+    study joins on one schema instead of three. Before this, the 30m swing and
+    the SPY daytrader wrote no ledger at all and were invisible to any
+    ledger-based analysis — the 2026-08 execution study had to rebuild their 227
+    trades from raw broker fills to see them.
+
+    `entry_state` is the module's managed-state entry for the position; it
+    supplies the entry-side clock and the underlying anchor. Passing None is
+    allowed (those fields become null) but means the row cannot answer any
+    timing question about itself.
+    """
+    es = entry_state or {}
+    fill_gain = (exit_fill_price / float(entry_avg_price) - 1.0
+                 if (exit_fill_price is not None and entry_avg_price) else None)
+    threshold = _threshold_from_exit_reason(exit_reason)
+    return {
+        "schema_version": CLOSED_TRADE_SCHEMA_VERSION,
+        "ts": now_utc_iso(),
+        "module": module,
+        "bar": str(bar),
+        "ticker": ticker,
+        "order_symbol": order_symbol,
+        "route": route,
+        "side": "sell",
+        "qty": float(qty) if qty is not None else None,
+        "exit_reason": exit_reason,
+        "entry_avg_price": float(entry_avg_price) if entry_avg_price else None,
+        "exit_fill_price": exit_fill_price,
+        "realized_pnl": realized_pnl,
+        "entry_bar": es.get("entry_bar"),
+        "runs_held": es.get("runs_held"),
+        "order_id": order_id,
+        "entry_order_id": es.get("entry_order_id"),
+        "entry_submitted_at": es.get("entry_submitted_at"),
+        "entry_filled_at": es.get("entry_filled_at"),
+        "entry_fill_price": es.get("entry_fill_price"),
+        "entry_filled_qty": es.get("entry_filled_qty"),
+        "u_entry": es.get("u_entry"),
+        "u_atr": es.get("u_atr"),
+        "exit_submitted_at": exit_submitted_at,
+        "decision_gain": float(decision_gain) if decision_gain is not None else None,
+        "fill_gain": round(fill_gain, 6) if fill_gain is not None else None,
+        "stop_overshoot": (round(fill_gain + threshold, 6)
+                           if fill_gain is not None and threshold is not None else None),
+    }
+
+
+def append_closed_trade(module: str, record: dict, ledger_root: str | None = None) -> None:
+    """Append one closed-trade row to the module's ledger. Never raises."""
+    try:
+        out = Path(ledger_root or DEFAULT_LEDGER_ROOT) / str(module) / "closed_trades.jsonl"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("a") as fh:
+            fh.write(json.dumps(record, default=str) + "\n")
+    except Exception as exc:  # noqa: BLE001 - a ledger write must not stop trading
+        logger.warning("closed-trade ledger write failed (%s): %s", module, exc)
+
+
+def managed_key_for_symbol(new_managed, sym: str):
+    """Public alias: the managed-state key that owns this order symbol.
+
+    The runners that keep their own copy of the submit loop need it to recover a
+    trim's entry lineage, and reaching for the underscore-prefixed original from
+    another package is worse than naming it.
+    """
+    return _managed_key_for_symbol(new_managed, sym)
+
+
+def init_dispositions(plan, dispositions: dict[str, str] | None = None) -> dict[str, str]:
+    """Seed a disposition map from a planned order list.
+
+    Shared because three runners (HTF, Meta, and execute_plan itself) each own a
+    copy of the submit loop. Duplicating the bookkeeping in all three is how the
+    audits drifted apart in the first place.
+    """
+    disp = dispositions if dispositions is not None else {}
+    for row in (plan or []):
+        disp.setdefault(str(row[0]), "planned")
+    return disp
+
+
+def mark_plan_gone(disp: dict[str, str], before, after, label: str) -> None:
+    """Label every symbol a pruning step removed from the plan."""
+    for sym in {str(r[0]) for r in (before or [])} - {str(r[0]) for r in (after or [])}:
+        disp[sym] = label
+
+
+def mark_entry_disposition(disp: dict[str, str], new_managed, sym: str) -> None:
+    """After a buy is submitted, record whether it actually filled."""
+    key = _managed_key_for_symbol(new_managed, sym)
+    st = (new_managed or {}).get(key) if key is not None else None
+    if isinstance(st, dict):
+        disp[str(sym)] = ("filled" if st.get("entry_fill_price") is not None
+                          else "accepted_unfilled")
+
+
 def execute_plan(
     client, *, plan, limits, submit: bool, equity_tif_fn: Callable[[], str],
     new_managed: dict[str, dict] | None = None,
@@ -948,6 +1064,7 @@ def execute_plan(
     persist_managed: Callable[[], None] | None = None,
     ledger_root: str | None = None,
     entry_ladder: bool = False,
+    dispositions: dict[str, str] | None = None,
 ) -> set[str]:
     """Submit a mixed plan (paper/live). Each order routes per its 5th tuple element.
 
@@ -959,6 +1076,12 @@ def execute_plan(
     broker refused (e.g. after-hours 403) never becomes a phantom position.
     Filled exits are written to the realized-PnL ledger when `module`/`pos_lookup`
     are supplied. Returns the set of order symbols whose submission failed.
+
+    `dispositions`, when supplied, is filled in place with one entry per planned
+    symbol saying what became of it — submitted, deferred, readiness-skipped,
+    dropped, or failed. The 2026-08 execution study could establish that only 54%
+    of planned entries became positions but not why, because the audit recorded
+    the plan and the fills and nothing in between. This is that missing middle.
 
     `persist_managed`, when supplied, is called right after each order fills so
     the on-disk managed-state file reflects the new position immediately rather
@@ -973,8 +1096,13 @@ def execute_plan(
     """
     limits = limits or {}
     failed: set[str] = set()
+    disp = init_dispositions(plan, dispositions)
     if not (submit and plan):
+        for _sym in list(disp):
+            if disp[_sym] == "planned":
+                disp[_sym] = "not_submitted_dry_run" if not submit else "no_plan"
         return failed
+
     # Order matters. Defer BEFORE gating on readiness: an after-close entry is
     # not being submitted now, it is being *recorded* for the next open, and
     # submit_pending_open_entries re-runs the readiness gate at flush time. Doing
@@ -986,23 +1114,31 @@ def execute_plan(
     # 2026-07-29: every after-close entry vanished with no pending-open queue
     # written. When the market is open, defer_entries_if_market_closed returns
     # the plan unchanged, so live-session behaviour is identical to before.
+    _before = list(plan)
     plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits,
                                          ledger_root=ledger_root)
+    mark_plan_gone(disp, _before, plan, "deferred_entry_market_closed")
     # Exits are deferred separately and AFTER entries: the entry queue prunes
     # new_managed (nothing was placed), while a deferred exit must leave the
     # position tracked — it is still held, only the order waits. build_mixed_plan
     # has already removed it from new_managed, so exit_context is passed in to
     # put it back; see defer_exits_if_opg_unavailable for the VSH case this
     # prevents.
+    _before = list(plan)
     plan = defer_exits_if_opg_unavailable(module, bar, plan, limits, ledger_root=ledger_root,
                                           new_managed=new_managed, exit_context=exit_context)
+    mark_plan_gone(disp, _before, plan, "deferred_exit_opg_unavailable")
     plan, skipped, reason = filter_entry_orders_for_readiness(plan, new_managed=new_managed)
+    for _sym in skipped:
+        disp[str(_sym)] = f"readiness_skipped:{reason}"
     if skipped:
         print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
         failed.update(skipped)
     if not plan:
         return failed
+    _before = list(plan)
     plan = _reverify_buys_not_held(client, plan, new_managed)
+    mark_plan_gone(disp, _before, plan, "dropped_already_held")
     if not plan:
         return failed
     print("\nsubmitting...")
@@ -1032,10 +1168,21 @@ def execute_plan(
                 resp = client.submit_order(symbol=sym, qty=qty, side=side,
                                            order_type="market", time_in_force=equity_tif_fn())
             print(f"  OK {side} {qty} {sym}  id={resp.get('id', '?')}")
+            disp[str(sym)] = "submitted"
             if str(side).strip().lower() == "buy":
-                mark_entry_unconfirmed(new_managed, sym, resp)
+                mark_entry_unconfirmed(new_managed, sym, resp, client=client)
+                mark_entry_disposition(disp, new_managed, sym)
             if module and str(side).strip().lower() == "sell":
                 es = exit_context.get(sym, (None, None))[1] if exit_context else None
+                if es is None and new_managed:
+                    # A TRIM is not in exit_context (that holds FULL exits only),
+                    # so the ledger row lost its entry lineage: all 45 rows with
+                    # entry_bar=null in the 2026-08 study were partial
+                    # take-profits, none of them corrupt. Fall back to the live
+                    # managed state, which still holds the position being trimmed.
+                    tkr_now = _managed_key_for_symbol(new_managed, sym)
+                    if tkr_now is not None and isinstance(new_managed.get(tkr_now), dict):
+                        es = new_managed[tkr_now]
                 # An ACCEPTED sell is not a closed position. The ladder's last
                 # rung is $0.01, which is exactly the price an expiring contract
                 # with an empty book will never trade at, so the order rests
@@ -1065,6 +1212,7 @@ def execute_plan(
                                              ledger_root=ledger_root, exit_fill=exit_fill)
         except Exception as exc:  # noqa: BLE001
             print(f"  FAIL {side} {qty} {sym}: {exc}")
+            disp[str(sym)] = f"submit_failed:{type(exc).__name__}"
             failed.add(sym)
             if new_managed is not None and exit_context and sym in exit_context:
                 tkr, st = exit_context[sym]
@@ -1517,53 +1665,34 @@ def record_exit_realized_pnl(client, *, module, item, resp, entry_state, pos_loo
         occ_m = re.match(r"^([A-Z]+)\d{6}[CP]\d{8}$", str(sym))
         ticker = es.get("ticker") or (es.get("symbol") if route != "option" else None) \
             or (occ_m.group(1) if occ_m else sym)
-        rec = {
-            "ts": now_utc_iso(),
-            "module": module,
-            "bar": str(bar),
-            "ticker": ticker,
-            "order_symbol": sym,
-            "route": route,
-            "side": "sell",
-            "qty": float(qty),
-            "exit_reason": reason,
-            "entry_avg_price": float(avg_entry) if avg_entry else None,
-            "exit_fill_price": exit_fill,
-            "realized_pnl": realized,
-            "entry_bar": es.get("entry_bar"),
-            "runs_held": es.get("runs_held"),
-            "order_id": str((resp or {}).get("id", "")) or None,
-        }
-        # A stop is only TESTED when a runner fires (14:20/16:20 ET and the
-        # pre-open flush), so between tests a position can travel arbitrarily far
-        # past the threshold. `exit_reason` names the policy ("stop_-39%") and
-        # says nothing about where the position actually was, which made the two
-        # causes of a bad exit inseparable: gapping past the level before we
-        # looked (decision_gain already far below -39%) versus filling badly once
-        # we did (fill_gain much worse than decision_gain). Recording both makes
-        # that decomposition measurable — the prerequisite for choosing between a
-        # tighter threshold, a faster cadence, and a resting protective order.
-        # 2026-08-06/07: 9 option stops labelled -39% realized a mean of -57.1%.
-        decision_gain = es.get("unrealized_gain")
-        fill_gain = (exit_fill / float(avg_entry) - 1.0) if (exit_fill is not None and avg_entry) else None
-        threshold = _threshold_from_exit_reason(reason)
-        rec["decision_gain"] = float(decision_gain) if decision_gain is not None else None
-        rec["fill_gain"] = round(fill_gain, 6) if fill_gain is not None else None
-        rec["stop_overshoot"] = (
-            round(fill_gain + threshold, 6)
-            if fill_gain is not None and threshold is not None else None
+        # Built by closed_trade_record so every module's ledger row has exactly
+        # one shape — the 30m swing and the SPY daytrader write the same schema
+        # through append_closed_trade, and a cross-module study joins on one
+        # definition instead of three.
+        #
+        # decision_gain vs fill_gain: a stop is only TESTED when a runner fires,
+        # so between tests a position can travel arbitrarily far past the
+        # threshold. `exit_reason` names the policy ("stop_-39%") and says
+        # nothing about where the position actually was, which made the two
+        # causes of a bad exit inseparable — gapping past the level before we
+        # looked versus filling badly once we did. 2026-08-06/07: 9 option stops
+        # labelled -39% realized a mean of -57.1%.
+        rec = closed_trade_record(
+            module=module, bar=bar, ticker=ticker, order_symbol=sym, route=route,
+            qty=qty, exit_reason=reason, entry_avg_price=avg_entry,
+            exit_fill_price=exit_fill, realized_pnl=realized,
+            entry_state=es, order_id=str((resp or {}).get("id", "")) or None,
+            exit_submitted_at=(resp or {}).get("submitted_at"),
+            decision_gain=es.get("unrealized_gain"),
         )
-        out = Path(ledger_root or DEFAULT_LEDGER_ROOT) / str(module) / "closed_trades.jsonl"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with out.open("a") as fh:
-            fh.write(json.dumps(rec, default=str) + "\n")
+        append_closed_trade(module, rec, ledger_root)
         logger.info("realized-PnL logged: %s %s qty=%s reason=%s pnl=%s",
                     module, sym, qty, reason, realized)
     except Exception as exc:  # noqa: BLE001
         logger.warning("record_exit_realized_pnl failed (%s %s): %s", module, item, exc)
 
 
-def mark_entry_unconfirmed(new_managed: dict | None, sym: str, resp) -> None:
+def mark_entry_unconfirmed(new_managed: dict | None, sym: str, resp, *, client=None) -> None:
     """Record that an ENTRY order was ACCEPTED, not that a position now exists.
 
     build_mixed_plan writes a new position into managed state when it plans the
@@ -1581,6 +1710,17 @@ def mark_entry_unconfirmed(new_managed: dict | None, sym: str, resp) -> None:
     (conservative for sibling reconciliation) and is simply labelled unconfirmed
     until a broker read settles it: build_mixed_plan already drops anything with
     qty <= 0 on the next pass, so the flag clears itself either way.
+
+    Also captures the ENTRY CLOCK, which nothing persisted before: submit time,
+    fill time, fill price and filled qty. Exits have carried these since the
+    ledger existed; entries did not, so the 2026-08 execution study had to
+    reconstruct them from Alpaca order history — which works, but only back to
+    the broker's retention floor (2026-07-13), and four sessions of live history
+    are permanently unrecoverable. Everything from here on is measurable in
+    place.
+
+    The fill poll is best-effort and short: an unfilled entry is the normal
+    ladder case, and a trading run must never stall on instrumentation.
     """
     tkr = _managed_key_for_symbol(new_managed, sym)
     if tkr is None:
@@ -1589,6 +1729,52 @@ def mark_entry_unconfirmed(new_managed: dict | None, sym: str, resp) -> None:
     if isinstance(st, dict):
         st["pending_fill"] = True
         st["entry_order_id"] = str((resp or {}).get("id", "")) or None
+        st["entry_submitted_at"] = (resp or {}).get("submitted_at") or now_utc_iso()
+        fill = _resp_fill_price(resp)
+        filled_at = (resp or {}).get("filled_at")
+        filled_qty = (resp or {}).get("filled_qty")
+        if fill is None and client is not None:
+            cur = _poll_entry_order(client, resp)
+            if cur:
+                fill = _resp_fill_price(cur)
+                filled_at = cur.get("filled_at") or filled_at
+                filled_qty = cur.get("filled_qty") or filled_qty
+        st["entry_fill_price"] = fill
+        st["entry_filled_at"] = filled_at
+        try:
+            st["entry_filled_qty"] = float(filled_qty) if filled_qty not in (None, "") else None
+        except (TypeError, ValueError):
+            st["entry_filled_qty"] = None
+        if fill is not None:
+            st["pending_fill"] = False
+
+
+def _poll_entry_order(client, resp, *, timeout_s: float = 2.0, poll_s: float = 0.4):
+    """Re-read a just-submitted ENTRY order once it has had a moment to fill.
+
+    Deliberately shorter than the exit poll (4s): an exit that does not fill is a
+    stuck position and worth waiting on, while an entry that does not fill is the
+    ladder working as designed. With up to ten entries per pass the wait is
+    bounded at ~20s of a 4-hour cycle.
+    """
+    order_id = str((resp or {}).get("id", "")).strip()
+    if not order_id or not hasattr(client, "get_order"):
+        return None
+    import time
+    deadline = time.monotonic() + timeout_s
+    cur = None
+    while time.monotonic() < deadline:
+        time.sleep(poll_s)
+        try:
+            cur = client.get_order(order_id)
+        except Exception:  # noqa: BLE001 - instrumentation must not break trading
+            continue
+        if _resp_fill_price(cur):
+            return cur
+        status = str((cur or {}).get("status", "")).strip().lower()
+        if status in {"filled", "canceled", "cancelled", "rejected", "expired", "done_for_day"}:
+            break
+    return cur
 
 
 def mark_exit_unconfirmed(new_managed: dict | None, sym: str, resp, *, item, exit_context,
@@ -2319,7 +2505,13 @@ def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
 
 def order_plan_audit_record(*, module, bar, mode, submit, targets, plan,
                             signal_audits, order_audits, contract_selection,
-                            dropped=None) -> dict[str, Any]:
+                            dropped=None, dispositions=None) -> dict[str, Any]:
+    """One order_plan audit row.
+
+    `dispositions` is the map execute_plan fills in — what became of every
+    planned symbol. `plan` alone records intent and the ledger records fills;
+    the reason a planned entry never became a position lived nowhere until this.
+    """
     return {
         "event": "order_plan",
         "module": module,
@@ -2336,6 +2528,13 @@ def order_plan_audit_record(*, module, bar, mode, submit, targets, plan,
         "order_audits": order_audits or {},
         "contract_selection": contract_selection or {},
         "dropped": dropped or {},
+        "planned": [
+            {"symbol": p[0], "side": p[1], "qty": p[2], "reason": p[3],
+             "route": p[4] if len(p) > 4 else mode,
+             "disposition": (dispositions or {}).get(str(p[0]), "submitted")}
+            for p in plan
+        ],
+        "dispositions": dispositions or {},
     }
 
 

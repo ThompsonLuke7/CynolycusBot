@@ -11,6 +11,8 @@
 <body>
   <div class="ambient-grid" aria-hidden="true"></div>
   <div class="ambient-noise" aria-hidden="true"></div>
+  <div class="ambient-orbit ambient-orbit-one" aria-hidden="true"></div>
+  <div class="ambient-orbit ambient-orbit-two" aria-hidden="true"></div>
 
   <header class="command-header">
     <a class="brand" href="#/system" aria-label="Cynolycus System Atlas home">
@@ -40,7 +42,23 @@
         aria-label="Use large display text"
         aria-pressed="false"
         title="Large display text"
-      >Aa</button>
+      >A+</button>
+      <button
+        id="presentation-toggle"
+        class="icon-button presentation-toggle"
+        type="button"
+        aria-label="Enable presentation mode"
+        aria-pressed="false"
+        title="Presentation mode"
+      ><span aria-hidden="true">◈</span></button>
+      <button
+        id="holo-toggle"
+        class="icon-button holo-toggle"
+        type="button"
+        aria-label="Mute holographic chamber"
+        aria-pressed="false"
+        title="Holographic chamber"
+      ><span aria-hidden="true">◎</span></button>
       <button id="help-open" class="icon-button" type="button" aria-label="Open atlas guide">?</button>
     </div>
   </header>
@@ -62,10 +80,51 @@
       <button id="fit-button" class="rail-button" type="button" aria-label="Fit current graph in view" title="Fit graph">
         <span aria-hidden="true">◎</span>
       </button>
+      <button id="presentation-rail" class="rail-button" type="button" aria-label="Toggle presentation mode" title="Presentation mode">
+        <span aria-hidden="true">◈</span>
+      </button>
     </nav>
 
     <section class="graph-stage" aria-label="Interactive architecture graph">
-      <div id="scope-label" class="scope-label">SYSTEM OVERVIEW</div>
+      <div id="holo-lab" class="holo-lab" aria-hidden="true">
+        <div class="holo-sky"></div>
+        <div class="holo-architecture holo-architecture-left"></div>
+        <div class="holo-architecture holo-architecture-right"></div>
+        <div class="holo-floor">
+          <i class="floor-grid"></i><i class="floor-ring floor-ring-one"></i><i class="floor-ring floor-ring-two"></i>
+        </div>
+        <div class="reactor-stage">
+          <div class="reactor-plinth"></div>
+          <div class="reactor-chamber">
+            <i class="chamber-glass"></i><i class="reactor-core"></i>
+            <i class="reactor-ring reactor-ring-one"></i><i class="reactor-ring reactor-ring-two"></i>
+            <i class="reactor-ring reactor-ring-three"></i><i class="reactor-axis"></i>
+          </div>
+          <div class="reactor-crown"><i></i><i></i><i></i></div>
+        </div>
+        <div class="holo-console holo-console-left"><i></i><b>ATLAS FIELD</b><span></span></div>
+        <div class="holo-console holo-console-right"><i></i><b>LIVE TOPOLOGY</b><span></span></div>
+        <div class="holo-particles"></div>
+      </div>
+      <div class="stage-vignette" aria-hidden="true"></div>
+      <div class="stage-corners" aria-hidden="true">
+        <i class="stage-corner stage-corner-tl"></i><i class="stage-corner stage-corner-tr"></i>
+        <i class="stage-corner stage-corner-bl"></i><i class="stage-corner stage-corner-br"></i>
+      </div>
+      <div id="scope-label" class="scope-label">
+        <span id="scope-title">SYSTEM OVERVIEW</span>
+        <small id="scope-meta">SELECT A MODULE TO INSPECT</small>
+      </div>
+      <div class="system-readout" aria-label="Atlas display status">
+        <span class="system-readout-label">SYSTEM STATUS</span>
+        <strong id="system-readout-state">ARCHITECTURE ONLINE</strong>
+        <span id="system-readout-detail">NAVIGATION / OVERVIEW</span>
+      </div>
+      <div class="motion-hud" aria-label="Current architecture telemetry">
+        <div><span>VISIBLE NODES</span><strong id="hud-nodes">000</strong></div>
+        <div><span>ACTIVE ROUTES</span><strong id="hud-routes">000</strong></div>
+        <div><span>NAV DEPTH</span><strong id="hud-depth">00</strong></div>
+      </div>
       <button id="back-button" class="back-button" type="button" hidden>
         <span aria-hidden="true">←</span>
         <span>Back</span>
@@ -158,6 +217,7 @@
         <li>Press Enter or double-click an expandable node to focus its children.</li>
         <li>Use breadcrumbs, Back, or Escape to return upward.</li>
         <li>Large display text turns on automatically for 4K and ultrawide screens; use Aa to override it.</li>
+        <li>Use ◈ or P for a distraction-free presentation mode with a wider graph stage; use H to dim or restore the holographic chamber.</li>
         <li>Public is presentation-safe. Local Full adds internal technical context.</li>
         <li>The atlas is read-only and never connects to market or brokerage APIs.</li>
       </ul>

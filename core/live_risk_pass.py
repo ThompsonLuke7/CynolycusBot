@@ -60,6 +60,7 @@ from core.live_4h_exec import (
     trim_quantity,
     underlying_basis,
     underlying_stop_level,
+    working_order_symbols,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ class RiskPassConfig:
     hard_stop: bool = True
     expiry_flatten: bool = True
     settle_pending_exits: bool = True
+    settle_unfilled_entries: bool = True
     # Path-dependent — see the module docstring before enabling either.
     trailing_stop: bool = False
     take_profit_trim: bool = False
@@ -105,6 +107,9 @@ class RiskPlan:
     # Entries the broker has now confirmed, so their unconfirmed flag was
     # cleared. See the settle in evaluate_risk_exits.
     confirmed_entries: dict[str, dict] = field(default_factory=dict)
+    # Entries that never filled and can no longer fill: no position, no working
+    # order. Dropped from managed rather than left claimed forever.
+    abandoned_entries: dict[str, dict] = field(default_factory=dict)
 
 
 
@@ -189,6 +194,15 @@ def evaluate_risk_exits(
     out = RiskPlan()
     ufn = underlying_fn or underlying_basis
 
+    # Read once per pass, not per position, and only if something asks. The
+    # cached value distinguishes "not asked yet" from "asked, got None".
+    working_orders: list = []
+
+    def _working_orders() -> set[str] | None:
+        if not working_orders:
+            working_orders.append(working_order_symbols(client))
+        return working_orders[0]
+
     def _sell_audit(tkr, sym, qty, route):
         if route == "equity":
             return build_equity_order_audit(signal_audit=None, symbol=sym, side="sell", qty=qty)
@@ -210,6 +224,35 @@ def evaluate_risk_exits(
                                         ledger_root=ledger_root):
                     out.settled[tkr] = {"symbol": sym, "route": route}
                     st.pop("exit_pending", None)
+            # An entry that was accepted but never filled, whose order is no
+            # longer working, cannot ever become a position. Keeping the claim
+            # is not conservative any more — it is stale, and it blocks the
+            # symbol: build_mixed_plan skips a name it already "holds", so the
+            # module cannot re-enter, and the claim survives until the next 4H
+            # run drops it as `not_found`. dealer_ranker's POET sat this way for
+            # a session and RBRK260828C00100000 was doing it again the next day
+            # (ladder unfilled after 3 rungs, left resting at the ask, no
+            # position and no open order at the close).
+            #
+            # `working is None` means the broker could not be asked, which is
+            # NOT the same as "nothing is working": in that case the claim
+            # stands, exactly as mark_entry_unconfirmed intended. Dropping a
+            # claim while an order could still fill is how a later fill becomes
+            # a position nobody owns (the 2026-07-23 IOT incident).
+            if cfg.settle_unfilled_entries and st.get("pending_fill") and sym:
+                working = _working_orders()
+                if working is not None and str(sym) not in working:
+                    logger.warning(
+                        "risk pass: %s %s (%s) entry never filled and has no "
+                        "working order — dropping the unconfirmed claim",
+                        module, tkr, sym,
+                    )
+                    out.abandoned_entries[tkr] = {
+                        "symbol": sym,
+                        "route": route,
+                        "entry_order_id": st.get("entry_order_id"),
+                    }
+                    continue
             out.new_managed[tkr] = st
             continue
 

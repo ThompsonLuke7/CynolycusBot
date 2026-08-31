@@ -10,6 +10,7 @@ import pandas as pd
 from strategies.intraday_structure.config import IntradayStructureConfig
 from strategies.intraday_structure.engine import IntradayStructureEngine
 from strategies.intraday_structure.labels import LabelConfig, build_event_labels
+from strategies.intraday_structure.ledger import build_closed_setup_record
 from strategies.intraday_structure.models import Bar, Candidate, SetupState
 from strategies.intraday_structure.options import NullOptionsProvider, OptionsProvider
 
@@ -58,26 +59,25 @@ class EventReplay:
         return ReplayResult(transition_frame, labels, trades, _metrics(labels, trades))
 
     def _trade_frame(self, engine: IntradayStructureEngine) -> pd.DataFrame:
-        costs = (self.config.replay.spread_bps + self.config.replay.slippage_bps) / 10_000.0
+        """Replay trades, built by the SAME function the live ledger uses.
+
+        AGENTS.md forbids live code computing a quantity differently from the
+        validated research code.  These used to be two hand-rolled cost/R
+        calculations; now there is one, and a replay row and a live ledger row
+        for the same setup are byte-identical.
+        """
         rows = []
         for setup in engine.setups.values():
-            if setup.entry_price is None:
+            record = build_closed_setup_record(
+                setup, replay_policy=self.config.replay, engine_version=self.config.version,
+            )
+            if record is None:
                 continue
-            initial_stop = float(setup.metadata.get("initial_invalidation", setup.invalidation or setup.entry_price))
-            risk = abs(setup.entry_price - initial_stop)
-            sign = 1.0 if setup.direction.value == "long" else -1.0
-            exit_price = float(setup.metadata.get("exit_price", setup.spot or setup.entry_price))
-            gross = sign * (exit_price - setup.entry_price)
-            net = gross - setup.entry_price * costs - 2.0 * self.config.replay.commission_per_share
-            rows.append({
-                "setup_id": setup.setup_id, "ticker": setup.ticker, "setup_type": setup.setup_type.value,
-                "direction": setup.direction.value, "entry_time": setup.entry_time,
-                "entry_price": setup.entry_price, "exit_time": setup.updated_at,
-                "exit_price": exit_price, "final_state": setup.state.value,
-                "gross_points": gross, "net_points": net, "realized_r_after_costs": net / risk if risk > 0 else np.nan,
-                "mfe_points": setup.max_favorable_excursion, "mae_points": setup.max_adverse_excursion,
-                "confidence": setup.confidence, "runway_score": setup.runway_score,
-            })
+            row = record.to_dict()
+            row["final_state"] = row.pop("terminal_state")
+            if row["realized_r_after_costs"] is None:
+                row["realized_r_after_costs"] = np.nan
+            rows.append(row)
         return pd.DataFrame(rows)
 
 

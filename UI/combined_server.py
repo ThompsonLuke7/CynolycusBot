@@ -318,9 +318,21 @@ def _nightly_needs_catch_up(
        has already passed. ``NightlyScheduler`` computes its next fire from
        "now", so a slot missed while the process was dead is simply skipped —
        it is never made up.
-    2. The next session open is close enough that the gap will actually be
-       traded on. Restarting mid-morning must not kick off a heavy collection
-       during the session; restarting in the evening must.
+    2. No scheduled slot will fire before the next open. If one will, it fixes
+       the staleness before it can be traded on, so catching up now is pure
+       duplicated work — that is what keeps a mid-session restart from kicking
+       off a heavy collection.
+
+       This used to be an hours-to-open count (``within_hours``, default 14),
+       which was a proxy for the same question and got the weekend wrong. The
+       scheduler is ``weekdays_only``, so from Friday's close until Monday
+       16:45 there IS no slot — yet a Sunday 19:00 start measured 14.5h to the
+       open, failed a 14h bound, and deferred to a slot that would not run
+       until seven hours AFTER Monday's open. The whole weekend refresh was
+       unreachable this way: a Saturday start measured 45h and was refused
+       outright. Asking the scheduler directly, via the same ``next_run_at``
+       it arms itself with, makes the weekend fall out correctly instead of
+       needing a bigger magic number.
     3. There is enough runway left before that open for the job to FINISH. This
        is the bound 2026-08-24 was missing: condition 2 is an upper bound only,
        so a 09:00 start saw "open in 0.5h", read that as urgent, and launched a
@@ -341,7 +353,7 @@ def _nightly_needs_catch_up(
     from datetime import datetime as _dt, time as _t, timedelta as _td
 
     from core.calendar import is_trading_day, next_trading_day
-    from UI.nightly_scheduler import parse_hhmm
+    from UI.nightly_scheduler import next_run_at, parse_hhmm
 
     try:
         hour, minute = parse_hhmm(nightly_time)
@@ -350,6 +362,14 @@ def _nightly_needs_catch_up(
 
     slot_today = now_et.replace(hour=hour, minute=minute, second=0, microsecond=0)
     last_slot = slot_today if slot_today <= now_et else slot_today - _td(days=1)
+    # The scheduler is weekdays_only, so Saturday and Sunday slots never
+    # existed. Walking back to the most recent one that did is what stops a
+    # weekend restart comparing a perfectly good Friday-night run against a
+    # phantom Sunday slot and calling it missed — which would re-run the whole
+    # collection on every weekend boot. Monday's open is *supposed* to trade on
+    # Friday night's data; that is what the Friday slot is for.
+    while last_slot.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+        last_slot -= _td(days=1)
 
     try:
         payload = _json.loads(NIGHTLY_STAMP_PATH.read_text())
@@ -373,9 +393,20 @@ def _nightly_needs_catch_up(
         target_date = next_trading_day(now_et.date())
     target_open = _dt.combine(target_date, open_time, tzinfo=now_et.tzinfo)
     hours_to_open = (target_open - now_et).total_seconds() / 3600.0
+    next_slot = next_run_at(now_et, hour, minute, weekdays_only=True)
+    if next_slot < target_open:
+        return False, (
+            f"the {nightly_time} ET slot fires {next_slot:%a %H:%M} — before the "
+            f"{target_open:%a %H:%M} open — so it is not a gap this session will "
+            "trade on; leaving the nightly to its schedule"
+        )
+    # Outer sanity cap, not the working rule. Guards against a calendar that
+    # returns a nonsense next_trading_day; the default spans a Friday-evening
+    # start through to Monday's open (64.5h) so it never blocks a real weekend
+    # catch-up, which is the job condition 2 above is actually for.
     if hours_to_open > within_hours:
         return False, (
-            f"next open is {hours_to_open:.1f}h away (> {within_hours:.1f}h) — "
+            f"next open is {hours_to_open:.1f}h away (> {within_hours:.1f}h cap) — "
             "leaving the nightly to its schedule"
         )
     if hours_to_open < min_runway_hours:
@@ -606,6 +637,27 @@ def _run_shadow_tracker() -> None:
     logger.info("Shadow tracker: finished (exit=%s)", result.returncode)
 
 
+def _run_premarket_plan() -> None:
+    """Publish the pre-open trade plan (~09:00 ET) — triggers, stops, ladders, AVOID.
+
+    Read-only: it reads stored bars, the prior session's dealer snapshot and the
+    ranker audits, then writes one JSON. It submits nothing and touches no live
+    state, so a failure here cannot affect trading. Subprocess-isolated like the
+    other loops, and scheduled BEFORE the 09:35/09:37 flushes so the plan is on
+    disk before anything acts.
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[1]
+    argv = [sys.executable, "-m", "scripts.build_premarket_plan", "--quiet"]
+    logger.info("Pre-open plan: launching %s", " ".join(argv))
+    env = {**os.environ, "PYTHONPATH": str(repo_root)}
+    result = subprocess.run(argv, cwd=str(repo_root), env=env)
+    logger.info("Pre-open plan: finished (exit=%s)", result.returncode)
+
+
 def _build_symbol_union(env_file: str) -> list[str]:
     """Union of all symbols needed by both dashboards."""
     from strategies.multi_ticker_swing.config.pipeline_config import CONTEXT_TICKERS
@@ -817,6 +869,13 @@ class RiskPassSupervisor(threading.Thread):
                        take_profit_trim=self._take_profit_trim)
 
 
+# Exit code for "another combined_server owns the ports". Distinct from a
+# generic failure (1) so scripts/run_live_server.sh can tell a crash it should
+# restart from a conflict it can never win by retrying. 78 is sysexits.h
+# EX_CONFIG. Kept in sync with _EX_PORT_CONFLICT in run_live_server.sh.
+EX_PORT_CONFLICT = 78
+
+
 def _assert_ports_free(host: str, ports: dict[str, int]) -> None:
     """Fail fast if any dashboard port is already bound.
 
@@ -827,6 +886,13 @@ def _assert_ports_free(host: str, ports: dict[str, int]) -> None:
     is *stopped/frozen* (SIGSTOP -> state T) still holds its sockets in LISTEN,
     so it reads as "in use" and a fresh launch crash-loops forever against it.
     Probe every port up front and refuse with a clear, actionable message.
+
+    Exits ``EX_PORT_CONFLICT``, not 1. The supervisor's backoff assumes a
+    restart can eventually succeed; against a live owner it never can. On
+    2026-08-24 a manual restart at 23:49 left the old server holding the
+    sockets and the supervisor fast-failed nine times between 23:53 and 00:17
+    before settling into a 300s retry it could not win. A distinct code lets it
+    stop and say so instead.
     """
     import socket
 
@@ -842,12 +908,14 @@ def _assert_ports_free(host: str, ports: dict[str, int]) -> None:
             except OSError:
                 busy.append(f"{name}={port}")
     if busy:
-        raise SystemExit(
+        print(
             "[combined_server] refusing to start: dashboard port(s) already in "
             f"use: {', '.join(busy)}. Another combined_server is already running "
             "(possibly stopped/frozen but still holding the sockets). Find the "
-            r"owner with:  ss -ltnp | grep -E ':(876[4-9]|877[0-4])'"
+            r"owner with:  ss -ltnp | grep -E ':(876[4-9]|877[0-4])'",
+            file=sys.stderr,
         )
+        raise SystemExit(EX_PORT_CONFLICT)
 
 
 def run_combined(
@@ -869,7 +937,7 @@ def run_combined(
     # Hours before the next session open within which a starting server will run
     # a nightly it missed. ~14h covers any restart from the prior evening
     # through the open, while keeping a mid-session restart out of scope.
-    nightly_catch_up_hours: float = 14.0,
+    nightly_catch_up_hours: float = 72.0,
     nightly_catch_up_min_runway_hours: float = NIGHTLY_CATCH_UP_MIN_RUNWAY_H,
     startup_queue_enabled: bool = True,
     startup_queue_account: str = "paper",
@@ -954,18 +1022,25 @@ def run_combined(
     structure_config = None
     if intraday_structure_enabled:
         from strategies.intraday_structure.config import load_config as load_intraday_structure_config
-        from strategies.intraday_structure.candidate_sources import LiquidityCandidateFeed
+        from strategies.intraday_structure.candidate_sources import (
+            LiquidityCandidateFeed,
+            OpeningMomentumCandidateFeed,
+        )
 
         structure_config = load_intraday_structure_config(intraday_structure_config)
         liquidity_symbols = LiquidityCandidateFeed(
             structure_config.liquidity_universe.universe_path,
             top_n=structure_config.liquidity_universe.top_n,
         ).symbols() if structure_config.liquidity_universe.enabled else []
+        opening_discovery_symbols = OpeningMomentumCandidateFeed(
+            structure_config.opening_discovery
+        ).symbols() if structure_config.opening_discovery.enabled else []
         all_symbols = sorted(
             set(all_symbols)
             | set(structure_config.manual_watchlist)
             | set(structure_config.context_symbols)
             | set(liquidity_symbols)
+            | set(opening_discovery_symbols)
         )
     logger.info("Symbol universe: %d symbols", len(all_symbols))
 
@@ -1257,9 +1332,9 @@ def run_combined(
                     ),
                 ))
                 print(
-                    "  Nightly catch-up:        on startup if missed and open "
-                    f"{nightly_catch_up_min_runway_hours:g}-{nightly_catch_up_hours:g}h "
-                    "away (needs runway to finish pre-open)"
+                    "  Nightly catch-up:        on startup if missed, no slot "
+                    "before the open, and "
+                    f"> {nightly_catch_up_min_runway_hours:g}h runway to finish"
                 )
 
     # ------------------------------------------------------------------
@@ -1610,6 +1685,14 @@ def run_combined(
         "14:35,16:35",
         _run_shadow_tracker,
         label="Shadow tracker (2-sleeve)", tag="READ-ONLY",
+    )
+
+    # Pre-open plan at 09:00 ET: before the 09:35/09:37 flushes, so the plan is
+    # published before anything acts on the session. Read-only.
+    premarket_plan_schedulers = _schedule_loop(
+        os.environ.get("PREMARKET_PLAN_TIMES", "09:00"),
+        _run_premarket_plan,
+        label="Pre-open plan", tag="READ-ONLY",
     )
 
     # ------------------------------------------------------------------

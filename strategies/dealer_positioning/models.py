@@ -43,9 +43,40 @@ class GammaLevels:
     vega_threshold_total_vex: float
     expirations: list[str] = field(default_factory=list)
     per_dte_levels: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Levels recomputed inside each expiry bucket. A 0DTE gamma pile and a
+    # 60DTE gamma pile are different structures; the aggregate hides that.
+    per_bucket_levels: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Share of absolute gamma exposure by bucket, plus the derived slope.
+    term_structure: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class GammaStructure:
+    """Everything one chain snapshot supports, with reliability attached.
+
+    Deliberately separates what is close to observed (``topology``: where gamma
+    sits) from what is inferred (``signed``: which side dealers hold), so a
+    consumer can weight them differently instead of receiving one blended
+    number that hides which half it should doubt.
+    """
+
+    ladder: Any
+    levels: GammaLevels
+    topology: Any
+    signed: Any
+    confidence: Any
+    stability: Any = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Flat, JSON-safe summary. The ladder frame is deliberately excluded."""
+        out: dict[str, Any] = {"levels": self.levels.to_dict()}
+        for name in ("topology", "signed", "confidence", "stability"):
+            value = getattr(self, name)
+            out[name] = value.to_dict() if hasattr(value, "to_dict") else value
+        return out
 
 
 @dataclass(frozen=True)

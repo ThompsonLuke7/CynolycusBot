@@ -7,20 +7,32 @@
       "kind": "system",
       "visibility": "public",
       "edge_color_role": "control",
-      "position": {"x": 500, "y": 330},
+      "position": {
+        "x": 500,
+        "y": 330
+      },
       "public": {
         "label": "CynolycusBot",
         "summary": "A research-first market decision system connecting causal data, specialist intelligence, controlled execution, and auditable operations.",
         "maturity": "research",
         "mode": "shared",
-        "repo_paths": ["README.md"]
+        "repo_paths": [
+          "README.md"
+        ]
       },
       "local": {
         "details": "The local view adds runtime ownership, storage, scheduling, recovery, and broker-boundary context without exposing credentials or account state.",
-        "repo_paths": ["LIVING_SUMMARY.md"],
+        "repo_paths": [
+          "LIVING_SUMMARY.md"
+        ],
         "runtime_owner": "Repository-wide"
       },
-      "evidence": {"required_paths": ["README.md"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "README.md"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "domain.inputs",
@@ -28,20 +40,34 @@
       "kind": "source",
       "visibility": "public",
       "edge_color_role": "data",
-      "position": {"x": 150, "y": 125},
+      "position": {
+        "x": 225,
+        "y": 105
+      },
       "public": {
         "label": "Market + Context Inputs",
         "summary": "Bars, quotes, options, orders, news, filings, scheduled events, macro context, and stored research artifacts.",
         "maturity": "operational",
         "mode": "broker-integrated",
-        "repo_paths": ["core/API", "signals"]
+        "repo_paths": [
+          "core/API",
+          "signals"
+        ]
       },
       "local": {
         "details": "Inputs arrive through provider adapters or immutable local artifacts with event and availability timestamps.",
-        "repo_paths": ["Data/raw"],
+        "repo_paths": [
+          "Data/raw"
+        ],
         "runtime_owner": "Provider adapters and nightly collection"
       },
-      "evidence": {"required_paths": ["core/API", "signals"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "core/API",
+          "signals"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "domain.fabric",
@@ -49,20 +75,34 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 150, "y": 535},
+      "position": {
+        "x": 95,
+        "y": 330
+      },
       "public": {
         "label": "Feature + Data Fabric",
         "summary": "Time alignment, universes, completed bars, causal features, caches, readiness, and shared safeguards.",
         "maturity": "operational",
         "mode": "shared",
-        "repo_paths": ["core", "strategies/momentum_expansion/features"]
+        "repo_paths": [
+          "core",
+          "strategies/momentum_expansion/features"
+        ]
       },
       "local": {
         "details": "Off-hours jobs refresh shared bars and matrices while job guards prevent overlap with fragile live windows.",
-        "repo_paths": ["scripts/nightly_data_readiness.sh"],
+        "repo_paths": [
+          "scripts/nightly_data_readiness.sh"
+        ],
         "runtime_owner": "Nightly readiness and shared stream"
       },
-      "evidence": {"required_paths": ["core", "scripts/nightly_data_readiness.sh"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "core",
+          "scripts/nightly_data_readiness.sh"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "domain.context",
@@ -70,20 +110,34 @@
       "kind": "signal",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 500, "y": 90},
+      "position": {
+        "x": 500,
+        "y": 90
+      },
       "public": {
         "label": "Context Intelligence",
         "summary": "News, catalysts, events, guidance, themes, and social attention enrich specialist and meta decisions.",
         "maturity": "research-ready",
         "mode": "research-only",
-        "repo_paths": ["signals", "themes"]
+        "repo_paths": [
+          "signals",
+          "themes"
+        ]
       },
       "local": {
         "details": "Context products are stored and joined by availability time; coverage and taxonomy history vary by source.",
-        "repo_paths": ["signals/meta_context"],
+        "repo_paths": [
+          "signals/meta_context"
+        ],
         "runtime_owner": "Nightly and scheduled context jobs"
       },
-      "evidence": {"required_paths": ["signals", "themes"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "signals",
+          "themes"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "domain.strategies",
@@ -91,20 +145,34 @@
       "kind": "model",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 850, "y": 125},
+      "position": {
+        "x": 775,
+        "y": 105
+      },
       "public": {
         "label": "Specialist Strategies",
         "summary": "Intraday, swing, 4-hour ranking, dealer, and deterministic structure modules solve different decision problems.",
         "maturity": "research",
         "mode": "shared",
-        "repo_paths": ["strategies", "signals/meta_context/meta_ranker"]
+        "repo_paths": [
+          "strategies",
+          "signals/meta_context/meta_ranker"
+        ]
       },
       "local": {
         "details": "Each module retains its own feature, inference, policy, and evidence boundary even when execution services are shared.",
-        "repo_paths": ["strategies"],
+        "repo_paths": [
+          "strategies"
+        ],
         "runtime_owner": "Module runners and combined server schedules"
       },
-      "evidence": {"required_paths": ["strategies", "signals/meta_context/meta_ranker"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "strategies",
+          "signals/meta_context/meta_ranker"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "domain.execution",
@@ -112,20 +180,33 @@
       "kind": "execution",
       "visibility": "public",
       "edge_color_role": "execution",
-      "position": {"x": 850, "y": 535},
+      "position": {
+        "x": 790,
+        "y": 560
+      },
       "public": {
         "label": "Policy + Execution",
         "summary": "Strategy gates, sizing, routes, exits, broker reconciliation, persistent ownership, and audit.",
         "maturity": "operational",
         "mode": "paper",
-        "repo_paths": ["core/live_4h_exec.py", "strategies/multi_ticker_swing/live"]
+        "repo_paths": [
+          "core/live_4h_exec.py",
+          "strategies/multi_ticker_swing/live"
+        ]
       },
       "local": {
         "details": "Paper is the default. Live routes are separately gated and broker responses remain authoritative.",
-        "repo_paths": ["core/live_4h_exec.py"],
+        "repo_paths": [
+          "core/live_4h_exec.py"
+        ],
         "runtime_owner": "Shared and strategy-specific executors"
       },
-      "evidence": {"required_paths": ["core/live_4h_exec.py"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "core/live_4h_exec.py"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "domain.research",
@@ -133,42 +214,73 @@
       "kind": "research",
       "visibility": "public",
       "edge_color_role": "research",
-      "position": {"x": 500, "y": 585},
+      "position": {
+        "x": 500,
+        "y": 600
+      },
       "public": {
         "label": "Research + Control",
         "summary": "Features, labels, training, out-of-fold and frozen evaluation, backtests, dashboards, scheduling, state, and recovery.",
         "maturity": "research",
         "mode": "shared",
-        "repo_paths": ["research", "backtests", "UI"]
+        "repo_paths": [
+          "research",
+          "backtests",
+          "UI"
+        ]
       },
       "local": {
         "details": "Operational controls expose health and audit state but do not turn research evidence into live authority.",
-        "repo_paths": ["UI/combined_server.py", "scripts/run_live_server.sh"],
+        "repo_paths": [
+          "UI/combined_server.py",
+          "scripts/run_live_server.sh"
+        ],
         "runtime_owner": "Research scripts, dashboards, and supervisor"
       },
-      "evidence": {"required_paths": ["research", "backtests", "UI"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "research",
+          "backtests",
+          "UI"
+        ],
+        "symbols": []
+      }
     },
-
     {
       "id": "input.market",
       "parent_id": "domain.inputs",
       "kind": "source",
       "visibility": "public",
       "edge_color_role": "data",
-      "position": {"x": 180, "y": 150},
+      "position": {
+        "x": 180,
+        "y": 150
+      },
       "public": {
         "label": "Market + Broker Data",
         "summary": "Alpaca bars, quotes, options, and orders plus Schwab option chains.",
         "maturity": "operational",
         "mode": "broker-integrated",
-        "repo_paths": ["core/API/Alpaca_API", "core/API/Schwab_API"]
+        "repo_paths": [
+          "core/API/Alpaca_API",
+          "core/API/Schwab_API"
+        ]
       },
       "local": {
         "details": "Broker credentials and account payloads are outside the atlas.",
-        "repo_paths": ["core/API/Alpaca_API", "core/API/Schwab_API"],
+        "repo_paths": [
+          "core/API/Alpaca_API",
+          "core/API/Schwab_API"
+        ],
         "runtime_owner": "Provider adapters"
       },
-      "evidence": {"required_paths": ["core/API/Alpaca_API", "core/API/Schwab_API"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "core/API/Alpaca_API",
+          "core/API/Schwab_API"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "input.context",
@@ -176,20 +288,32 @@
       "kind": "source",
       "visibility": "public",
       "edge_color_role": "data",
-      "position": {"x": 500, "y": 120},
+      "position": {
+        "x": 500,
+        "y": 120
+      },
       "public": {
         "label": "Context Sources",
         "summary": "News, SEC filings, earnings, macro, rates, FINRA, CBOE, profiles, and public datasets.",
         "maturity": "research",
         "mode": "research-only",
-        "repo_paths": ["signals"]
+        "repo_paths": [
+          "signals"
+        ]
       },
       "local": {
         "details": "Coverage depth and point-in-time availability differ across collectors.",
-        "repo_paths": ["signals"],
+        "repo_paths": [
+          "signals"
+        ],
         "runtime_owner": "Collectors and nightly jobs"
       },
-      "evidence": {"required_paths": ["signals"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "signals"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "input.artifacts",
@@ -197,42 +321,70 @@
       "kind": "data",
       "visibility": "public",
       "edge_color_role": "data",
-      "position": {"x": 820, "y": 150},
+      "position": {
+        "x": 820,
+        "y": 150
+      },
       "public": {
         "label": "Stored Artifacts",
         "summary": "Versioned parquet, CSV, JSON, JSONL, model bundles, policies, audits, and result locks.",
         "maturity": "operational",
         "mode": "research-only",
-        "repo_paths": ["Data", "research/capstone/results_lock.json"]
+        "repo_paths": [
+          "Data",
+          "research/capstone/results_lock.json"
+        ]
       },
       "local": {
         "details": "Raw, processed, model-ready, inference, and audit stores remain separated by convention.",
-        "repo_paths": ["Data"],
+        "repo_paths": [
+          "Data"
+        ],
         "runtime_owner": "Ingestion, research, and live modules"
       },
-      "evidence": {"required_paths": ["Data", "research/capstone/results_lock.json"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "Data",
+          "research/capstone/results_lock.json"
+        ],
+        "symbols": []
+      }
     },
-
     {
       "id": "fabric.time",
       "parent_id": "domain.fabric",
       "kind": "control",
       "visibility": "public",
       "edge_color_role": "control",
-      "position": {"x": 140, "y": 170},
+      "position": {
+        "x": 140,
+        "y": 170
+      },
       "public": {
         "label": "Time + Universe",
         "summary": "Market calendars, session boundaries, symbol universes, and decision-time alignment.",
         "maturity": "operational",
         "mode": "shared",
-        "repo_paths": ["core/calendar", "core/shared_universe"]
+        "repo_paths": [
+          "core/calendar",
+          "core/shared_universe"
+        ]
       },
       "local": {
         "details": "Every downstream feature depends on explicit session and availability semantics.",
-        "repo_paths": ["core/calendar", "core/shared_universe"],
+        "repo_paths": [
+          "core/calendar",
+          "core/shared_universe"
+        ],
         "runtime_owner": "Shared core"
       },
-      "evidence": {"required_paths": ["core/calendar", "core/shared_universe"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "core/calendar",
+          "core/shared_universe"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "fabric.bars",
@@ -240,20 +392,34 @@
       "kind": "data",
       "visibility": "public",
       "edge_color_role": "data",
-      "position": {"x": 390, "y": 100},
+      "position": {
+        "x": 390,
+        "y": 100
+      },
       "public": {
         "label": "Bars + Aggregation",
         "summary": "One shared stream fans completed bars into strategy-specific timeframes and caches.",
         "maturity": "operational",
         "mode": "shared",
-        "repo_paths": ["UI/shared_stream.py", "UI/shared_data_refresher.py"]
+        "repo_paths": [
+          "UI/shared_stream.py",
+          "UI/shared_data_refresher.py"
+        ]
       },
       "local": {
         "details": "The combined server owns the single free-tier stream and bounded fan-out.",
-        "repo_paths": ["UI/shared_stream.py"],
+        "repo_paths": [
+          "UI/shared_stream.py"
+        ],
         "runtime_owner": "Combined server"
       },
-      "evidence": {"required_paths": ["UI/shared_stream.py", "UI/shared_data_refresher.py"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "UI/shared_stream.py",
+          "UI/shared_data_refresher.py"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "fabric.features",
@@ -261,20 +427,35 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 650, "y": 100},
+      "position": {
+        "x": 650,
+        "y": 100
+      },
       "public": {
         "label": "Causal Feature Construction",
         "summary": "Backward-looking rolling, exponentially weighted, ranked, and lagged context features.",
         "maturity": "research-ready",
         "mode": "shared",
-        "repo_paths": ["strategies/momentum_expansion/features", "strategies/multi_ticker_swing/features"]
+        "repo_paths": [
+          "strategies/momentum_expansion/features",
+          "strategies/multi_ticker_swing/features"
+        ]
       },
       "local": {
         "details": "Scalers, joins, and higher-timeframe mappings are fitted or shifted before validation/test/live application.",
-        "repo_paths": ["strategies/momentum_expansion/features", "strategies/multi_ticker_swing/features"],
+        "repo_paths": [
+          "strategies/momentum_expansion/features",
+          "strategies/multi_ticker_swing/features"
+        ],
         "runtime_owner": "Feature builders"
       },
-      "evidence": {"required_paths": ["strategies/momentum_expansion/features", "strategies/multi_ticker_swing/features"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/features",
+          "strategies/multi_ticker_swing/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "fabric.readiness",
@@ -282,42 +463,70 @@
       "kind": "control",
       "visibility": "public",
       "edge_color_role": "control",
-      "position": {"x": 860, "y": 260},
+      "position": {
+        "x": 860,
+        "y": 260
+      },
       "public": {
         "label": "Readiness + Job Guards",
         "summary": "Freshness stamps, memory thresholds, single-flight protection, and fail-closed entry checks.",
         "maturity": "operational",
         "mode": "shared",
-        "repo_paths": ["core/live_job_guard.py", "scripts/nightly_data_readiness.sh"]
+        "repo_paths": [
+          "core/live_job_guard.py",
+          "scripts/nightly_data_readiness.sh"
+        ]
       },
       "local": {
         "details": "Heavy jobs are blocked during fragile live windows or under insufficient memory.",
-        "repo_paths": ["core/live_job_guard.py"],
+        "repo_paths": [
+          "core/live_job_guard.py"
+        ],
         "runtime_owner": "Schedulers and executors"
       },
-      "evidence": {"required_paths": ["core/live_job_guard.py", "scripts/nightly_data_readiness.sh"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "core/live_job_guard.py",
+          "scripts/nightly_data_readiness.sh"
+        ],
+        "symbols": []
+      }
     },
-
     {
       "id": "context.news",
       "parent_id": "domain.context",
       "kind": "signal",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 120, "y": 160},
+      "position": {
+        "x": 120,
+        "y": 160
+      },
       "public": {
         "label": "News + Catalysts",
         "summary": "Ingestion, deduplication, embeddings, tone, source quality, buzz, trajectory, and catalyst records.",
         "maturity": "research-ready",
         "mode": "shared",
-        "repo_paths": ["signals/news", "signals/catalysts"]
+        "repo_paths": [
+          "signals/news",
+          "signals/catalysts"
+        ]
       },
       "local": {
         "details": "Standalone claims remain limited by corpus coverage and historical availability.",
-        "repo_paths": ["signals/news", "signals/catalysts"],
+        "repo_paths": [
+          "signals/news",
+          "signals/catalysts"
+        ],
         "runtime_owner": "News and catalyst pipelines"
       },
-      "evidence": {"required_paths": ["signals/news", "signals/catalysts"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "signals/news",
+          "signals/catalysts"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "context.events",
@@ -325,20 +534,34 @@
       "kind": "signal",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 380, "y": 100},
+      "position": {
+        "x": 380,
+        "y": 100
+      },
       "public": {
         "label": "Events + Forward Guidance",
         "summary": "Scheduled earnings, macro, SEC, and post-earnings guidance context.",
         "maturity": "research",
         "mode": "research-only",
-        "repo_paths": ["signals/events", "signals/events/forward_guidance"]
+        "repo_paths": [
+          "signals/events",
+          "signals/events/forward_guidance"
+        ]
       },
       "local": {
         "details": "The module is context and research, not an established standalone execution edge.",
-        "repo_paths": ["signals/events"],
+        "repo_paths": [
+          "signals/events"
+        ],
         "runtime_owner": "Event collectors and feature builders"
       },
-      "evidence": {"required_paths": ["signals/events", "signals/events/forward_guidance"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "signals/events",
+          "signals/events/forward_guidance"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "context.themes",
@@ -346,20 +569,35 @@
       "kind": "signal",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 650, "y": 100},
+      "position": {
+        "x": 650,
+        "y": 100
+      },
       "public": {
         "label": "Dynamic + Legacy Themes",
         "summary": "Embedding clusters, LLM-assisted taxonomy, relationships, memberships, and legacy rotation context.",
         "maturity": "experimental",
         "mode": "shared",
-        "repo_paths": ["themes/dynamic_theme", "themes/theme_expansion_legacy"]
+        "repo_paths": [
+          "themes/dynamic_theme",
+          "themes/theme_expansion_legacy"
+        ]
       },
       "local": {
         "details": "LLM output names taxonomy metadata; it does not select orders. Legacy maps remain live dependencies.",
-        "repo_paths": ["themes/dynamic_theme", "themes/theme_expansion_legacy"],
+        "repo_paths": [
+          "themes/dynamic_theme",
+          "themes/theme_expansion_legacy"
+        ],
         "runtime_owner": "Weekly and nightly theme jobs"
       },
-      "evidence": {"required_paths": ["themes/dynamic_theme", "themes/theme_expansion_legacy"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "themes/dynamic_theme",
+          "themes/theme_expansion_legacy"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "context.social",
@@ -367,20 +605,32 @@
       "kind": "signal",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 860, "y": 250},
+      "position": {
+        "x": 860,
+        "y": 250
+      },
       "public": {
         "label": "Social Attention",
         "summary": "Reddit/social collection, attention, sentiment, embeddings, and clustering MVP.",
         "maturity": "experimental",
         "mode": "research-only",
-        "repo_paths": ["signals/social_attention"]
+        "repo_paths": [
+          "signals/social_attention"
+        ]
       },
       "local": {
         "details": "Historical population remains too limited for a defensible standalone edge.",
-        "repo_paths": ["signals/social_attention"],
+        "repo_paths": [
+          "signals/social_attention"
+        ],
         "runtime_owner": "Social research pipeline"
       },
-      "evidence": {"required_paths": ["signals/social_attention"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "signals/social_attention"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "context.meta",
@@ -388,42 +638,65 @@
       "kind": "model",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 500, "y": 550},
+      "position": {
+        "x": 500,
+        "y": 550
+      },
       "public": {
         "label": "Meta Context Matrix",
         "summary": "Combines specialist scores with liquidity, regime, themes, news, macro, Treasury, and guidance context.",
         "maturity": "experimental",
         "mode": "shared",
-        "repo_paths": ["signals/meta_context"]
+        "repo_paths": [
+          "signals/meta_context"
+        ]
       },
       "local": {
         "details": "Expanding-window OOF specialist predictions protect the training slice from in-sample score leakage.",
-        "repo_paths": ["signals/meta_context"],
+        "repo_paths": [
+          "signals/meta_context"
+        ],
         "runtime_owner": "Nightly meta matrix"
       },
-      "evidence": {"required_paths": ["signals/meta_context"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "signals/meta_context"
+        ],
+        "symbols": []
+      }
     },
-
     {
       "id": "strategy.spy",
       "parent_id": "domain.strategies",
       "kind": "model",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 110, "y": 130},
+      "position": {
+        "x": 110,
+        "y": 130
+      },
       "public": {
         "label": "SPY Intraday",
         "summary": "A 10-minute GA-XGBoost setup model followed by deterministic one-minute confirmation.",
         "maturity": "legacy",
         "mode": "broker-integrated",
-        "repo_paths": ["strategies/spy_intraday"]
+        "repo_paths": [
+          "strategies/spy_intraday"
+        ]
       },
       "local": {
         "details": "End-to-end live/replay plumbing exists, but recent live directional evidence is weak.",
-        "repo_paths": ["strategies/spy_intraday/Policy"],
+        "repo_paths": [
+          "strategies/spy_intraday/Policy"
+        ],
         "runtime_owner": "SPY dashboard and runner"
       },
-      "evidence": {"required_paths": ["strategies/spy_intraday"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "strategies/spy_intraday"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "strategy.swing",
@@ -431,20 +704,32 @@
       "kind": "model",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 360, "y": 90},
+      "position": {
+        "x": 360,
+        "y": 90
+      },
       "public": {
         "label": "Multi-Ticker Swing",
         "summary": "A 30-minute cross-sectional swing classifier with strategy-specific live features and execution.",
         "maturity": "research-ready",
         "mode": "broker-integrated",
-        "repo_paths": ["strategies/multi_ticker_swing"]
+        "repo_paths": [
+          "strategies/multi_ticker_swing"
+        ]
       },
       "local": {
         "details": "Research and live paths share feature logic; option execution remains a material risk boundary.",
-        "repo_paths": ["strategies/multi_ticker_swing/live"],
+        "repo_paths": [
+          "strategies/multi_ticker_swing/live"
+        ],
         "runtime_owner": "Swing session runner"
       },
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "strategy.momentum",
@@ -452,20 +737,32 @@
       "kind": "model",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 640, "y": 90},
+      "position": {
+        "x": 640,
+        "y": 90
+      },
       "public": {
         "label": "Momentum Expansion",
         "summary": "A 4-hour cross-sectional continuation ranker and selective expansion policy.",
         "maturity": "research-ready",
         "mode": "broker-integrated",
-        "repo_paths": ["strategies/momentum_expansion"]
+        "repo_paths": [
+          "strategies/momentum_expansion"
+        ]
       },
       "local": {
         "details": "Shared readiness and execution infrastructure support scheduled ranking and managed exits.",
-        "repo_paths": ["strategies/momentum_expansion/live"],
+        "repo_paths": [
+          "strategies/momentum_expansion/live"
+        ],
         "runtime_owner": "Scheduled 4-hour runner"
       },
-      "evidence": {"required_paths": ["strategies/momentum_expansion"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "strategy.htf",
@@ -473,20 +770,32 @@
       "kind": "model",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 890, "y": 130},
+      "position": {
+        "x": 890,
+        "y": 130
+      },
       "public": {
         "label": "HTF Swing Ranker",
         "summary": "A 4-hour cross-sectional swing ranker with a validation-selected long-only policy.",
         "maturity": "research-ready",
         "mode": "broker-integrated",
-        "repo_paths": ["strategies/multi_ticker_swing_htf"]
+        "repo_paths": [
+          "strategies/multi_ticker_swing_htf"
+        ]
       },
       "local": {
         "details": "Top-K evidence is stronger than global calibration; artifact freshness remains explicit.",
-        "repo_paths": ["strategies/multi_ticker_swing_htf/live"],
+        "repo_paths": [
+          "strategies/multi_ticker_swing_htf/live"
+        ],
         "runtime_owner": "Scheduled 4-hour runner"
       },
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing_htf"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing_htf"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "strategy.meta",
@@ -494,20 +803,32 @@
       "kind": "model",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 170, "y": 430},
+      "position": {
+        "x": 170,
+        "y": 430
+      },
       "public": {
         "label": "Meta Ranker",
         "summary": "Contextual quality and upside rankers combine specialist and contextual evidence.",
         "maturity": "experimental",
         "mode": "broker-integrated",
-        "repo_paths": ["signals/meta_context/meta_ranker"]
+        "repo_paths": [
+          "signals/meta_context/meta_ranker"
+        ]
       },
       "local": {
         "details": "Upside ranking is materially stronger than quality ranking; calibration remains imperfect.",
-        "repo_paths": ["signals/meta_context/meta_ranker"],
+        "repo_paths": [
+          "signals/meta_context/meta_ranker"
+        ],
         "runtime_owner": "Scheduled meta runner"
       },
-      "evidence": {"required_paths": ["signals/meta_context/meta_ranker"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "signals/meta_context/meta_ranker"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "strategy.dealer",
@@ -515,20 +836,32 @@
       "kind": "model",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 420, "y": 510},
+      "position": {
+        "x": 420,
+        "y": 510
+      },
       "public": {
         "label": "Dealer Positioning",
-        "summary": "Schwab-chain GEX/VEX levels, walls, magnets, and historical snapshots.",
+        "summary": "The repository's only gamma-exposure computation: walls, magnets, and flip levels, captured nightly and read by the ranker, the entry gate, and the structure engine.",
         "maturity": "experimental",
-        "mode": "research-only",
-        "repo_paths": ["strategies/dealer_positioning"]
+        "mode": "broker-integrated",
+        "repo_paths": [
+          "strategies/dealer_positioning"
+        ]
       },
       "local": {
         "details": "Short history prevents strong backtest claims; snapshot availability varies by symbol.",
-        "repo_paths": ["strategies/dealer_positioning"],
+        "repo_paths": [
+          "strategies/dealer_positioning"
+        ],
         "runtime_owner": "Dealer snapshot and dashboard jobs"
       },
-      "evidence": {"required_paths": ["strategies/dealer_positioning"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "strategy.dealer_ranker",
@@ -536,20 +869,32 @@
       "kind": "policy",
       "visibility": "public",
       "edge_color_role": "policy",
-      "position": {"x": 670, "y": 510},
+      "position": {
+        "x": 670,
+        "y": 510
+      },
       "public": {
         "label": "Dealer Ranker",
         "summary": "Ranks liquid optionable names from dealer structure and can route separately gated option/equity orders.",
         "maturity": "experimental",
         "mode": "broker-integrated",
-        "repo_paths": ["strategies/dealer_positioning/live_ranked_options.py"]
+        "repo_paths": [
+          "strategies/dealer_positioning/live_ranked_options.py"
+        ]
       },
       "local": {
         "details": "Contract liquidity, duplicate ownership, target notional, and live gates are explicit.",
-        "repo_paths": ["strategies/dealer_positioning/live_ranked_options.py"],
+        "repo_paths": [
+          "strategies/dealer_positioning/live_ranked_options.py"
+        ],
         "runtime_owner": "Scheduled Dealer Ranker loop"
       },
-      "evidence": {"required_paths": ["strategies/dealer_positioning/live_ranked_options.py"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/live_ranked_options.py"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "strategy.structure",
@@ -557,38 +902,67 @@
       "kind": "policy",
       "visibility": "public",
       "edge_color_role": "policy",
-      "position": {"x": 880, "y": 430},
+      "position": {
+        "x": 880,
+        "y": 430
+      },
       "public": {
         "label": "Intraday Structure",
         "summary": "A deterministic one-minute confirmation engine with persistent setup states, targets, and replay labels.",
         "maturity": "experimental",
         "mode": "paper",
-        "repo_paths": ["strategies/intraday_structure"]
+        "repo_paths": [
+          "strategies/intraday_structure"
+        ]
       },
       "local": {
         "details": "There is no broker-order interface. Thresholds remain uncalibrated against broad history.",
-        "repo_paths": ["strategies/intraday_structure", "docs/intraday_structure"],
+        "repo_paths": [
+          "strategies/intraday_structure",
+          "docs/intraday_structure"
+        ],
         "runtime_owner": "Combined stream consumer"
       },
-      "evidence": {"required_paths": ["strategies/intraday_structure", "docs/intraday_structure"], "symbols": []}
+      "evidence": {
+        "required_paths": [
+          "strategies/intraday_structure",
+          "docs/intraday_structure"
+        ],
+        "symbols": []
+      }
     },
-
     {
       "id": "momentum.inputs",
       "parent_id": "strategy.momentum",
       "kind": "data",
       "visibility": "public",
       "edge_color_role": "data",
-      "position": {"x": 100, "y": 180},
+      "position": {
+        "x": 100,
+        "y": 180
+      },
       "public": {
         "label": "Inputs",
         "summary": "Broad universe 4-hour bars plus lagged daily, weekly, benchmark, earnings, and liquidity context.",
         "maturity": "operational",
         "mode": "research-only",
-        "repo_paths": ["strategies/momentum_expansion/data"]
+        "repo_paths": [
+          "strategies/momentum_expansion/data"
+        ]
       },
-      "local": {"details": "Shared bar caches and universe snapshots feed matrix construction.", "repo_paths": ["strategies/momentum_expansion/data"], "runtime_owner": "Readiness pipeline"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/data"], "symbols": []}
+      "local": {
+        "details": "Shared bar caches and universe snapshots feed matrix construction.",
+        "repo_paths": [
+          "strategies/momentum_expansion/data"
+        ],
+        "runtime_owner": "Readiness pipeline"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/data"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.features",
@@ -596,16 +970,32 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 330, "y": 90},
+      "position": {
+        "x": 330,
+        "y": 90
+      },
       "public": {
         "label": "Feature Engineering",
         "summary": "Causal 4-hour and lagged higher-timeframe feature families for cross-sectional continuation.",
         "maturity": "research-ready",
         "mode": "shared",
-        "repo_paths": ["strategies/momentum_expansion/features"]
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ]
       },
-      "local": {"details": "Feature manifests and readiness stamps protect inference parity.", "repo_paths": ["strategies/momentum_expansion/features"], "runtime_owner": "Momentum feature builder"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/features"], "symbols": []}
+      "local": {
+        "details": "Feature manifests and readiness stamps protect inference parity.",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "runtime_owner": "Momentum feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.model",
@@ -613,16 +1003,32 @@
       "kind": "model",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 620, "y": 90},
+      "position": {
+        "x": 620,
+        "y": 90
+      },
       "public": {
         "label": "Cross-Sectional Ranker",
         "summary": "Tree-based rank/classification models prioritize the strongest expansion candidates.",
         "maturity": "research-ready",
         "mode": "shared",
-        "repo_paths": ["strategies/momentum_expansion/models"]
+        "repo_paths": [
+          "strategies/momentum_expansion/models"
+        ]
       },
-      "local": {"details": "Top-K ranking evidence is more defensible than probability calibration.", "repo_paths": ["strategies/momentum_expansion/models"], "runtime_owner": "Momentum inference"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/models"], "symbols": []}
+      "local": {
+        "details": "Top-K ranking evidence is more defensible than probability calibration.",
+        "repo_paths": [
+          "strategies/momentum_expansion/models"
+        ],
+        "runtime_owner": "Momentum inference"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/models"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.signal",
@@ -630,16 +1036,32 @@
       "kind": "signal",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 880, "y": 180},
+      "position": {
+        "x": 880,
+        "y": 180
+      },
       "public": {
         "label": "Signal Selection",
         "summary": "Current candidates are ranked, filtered, freshness-checked, and audited before any plan is built.",
         "maturity": "operational",
         "mode": "shared",
-        "repo_paths": ["strategies/momentum_expansion/inference"]
+        "repo_paths": [
+          "strategies/momentum_expansion/inference"
+        ]
       },
-      "local": {"details": "Signal decisions record skips and inputs for later review.", "repo_paths": ["strategies/momentum_expansion/inference"], "runtime_owner": "Scheduled runner"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/inference"], "symbols": []}
+      "local": {
+        "details": "Signal decisions record skips and inputs for later review.",
+        "repo_paths": [
+          "strategies/momentum_expansion/inference"
+        ],
+        "runtime_owner": "Scheduled runner"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/inference"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.policy",
@@ -647,16 +1069,34 @@
       "kind": "policy",
       "visibility": "public",
       "edge_color_role": "policy",
-      "position": {"x": 850, "y": 470},
+      "position": {
+        "x": 850,
+        "y": 470
+      },
       "public": {
         "label": "Entry + Exit Policy",
         "summary": "Selective entry, explicit target notional, stop/target/scale/time policy, and paper-default routing.",
         "maturity": "research-ready",
         "mode": "paper",
-        "repo_paths": ["strategies/momentum_expansion/policy", "strategies/momentum_expansion/live"]
+        "repo_paths": [
+          "strategies/momentum_expansion/policy",
+          "strategies/momentum_expansion/live"
+        ]
       },
-      "local": {"details": "Shared execution receives strategy-specific rankings and routing functions.", "repo_paths": ["strategies/momentum_expansion/live"], "runtime_owner": "Momentum live runner"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/policy", "strategies/momentum_expansion/live"], "symbols": []}
+      "local": {
+        "details": "Shared execution receives strategy-specific rankings and routing functions.",
+        "repo_paths": [
+          "strategies/momentum_expansion/live"
+        ],
+        "runtime_owner": "Momentum live runner"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/policy",
+          "strategies/momentum_expansion/live"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.execution",
@@ -664,16 +1104,32 @@
       "kind": "execution",
       "visibility": "public",
       "edge_color_role": "execution",
-      "position": {"x": 590, "y": 550},
+      "position": {
+        "x": 590,
+        "y": 550
+      },
       "public": {
         "label": "Shared 4H Execution",
         "summary": "Readiness, duplicate checks, sizing, route selection, exits, reconciliation, and persistent managed state.",
         "maturity": "operational",
         "mode": "shared",
-        "repo_paths": ["core/live_4h_exec.py"]
+        "repo_paths": [
+          "core/live_4h_exec.py"
+        ]
       },
-      "local": {"details": "State persists after order actions so sibling modules do not adopt fresh positions.", "repo_paths": ["core/live_4h_exec.py"], "runtime_owner": "Shared 4-hour executor"},
-      "evidence": {"required_paths": ["core/live_4h_exec.py"], "symbols": []}
+      "local": {
+        "details": "State persists after order actions so sibling modules do not adopt fresh positions.",
+        "repo_paths": [
+          "core/live_4h_exec.py"
+        ],
+        "runtime_owner": "Shared 4-hour executor"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/live_4h_exec.py"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.audit",
@@ -681,28 +1137,68 @@
       "kind": "audit",
       "visibility": "public",
       "edge_color_role": "audit",
-      "position": {"x": 280, "y": 500},
+      "position": {
+        "x": 280,
+        "y": 500
+      },
       "public": {
         "label": "Audit + Evidence",
         "summary": "Walk-forward OOF, frozen policy tests, signal decisions, order intent, broker responses, and managed-state history.",
         "maturity": "research-ready",
         "mode": "shared",
-        "repo_paths": ["strategies/momentum_expansion/backtest", "research/capstone"]
+        "repo_paths": [
+          "strategies/momentum_expansion/backtest",
+          "research/capstone"
+        ]
       },
-      "local": {"details": "Backtests and paper/live records remain separate evidence tiers.", "repo_paths": ["strategies/momentum_expansion/backtest", "research/capstone"], "runtime_owner": "Research and live audit"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/backtest", "research/capstone"], "symbols": []}
+      "local": {
+        "details": "Backtests and paper/live records remain separate evidence tiers.",
+        "repo_paths": [
+          "strategies/momentum_expansion/backtest",
+          "research/capstone"
+        ],
+        "runtime_owner": "Research and live audit"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/backtest",
+          "research/capstone"
+        ],
+        "symbols": []
+      }
     },
-
     {
       "id": "momentum.feature.trend",
       "parent_id": "momentum.features",
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 130, "y": 150},
-      "public": {"label": "Trend + Momentum", "summary": "Returns, moving-average structure, slopes, ADX, RSI, and MACD context.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies/momentum_expansion/features"]},
-      "local": {"details": "Backward-looking windows only.", "repo_paths": ["strategies/momentum_expansion/features"], "runtime_owner": "Feature builder"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/features"], "symbols": []}
+      "position": {
+        "x": 130,
+        "y": 150
+      },
+      "public": {
+        "label": "Trend + Momentum",
+        "summary": "Returns, moving-average structure, slopes, ADX, RSI, and MACD context.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ]
+      },
+      "local": {
+        "details": "Backward-looking windows only.",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "runtime_owner": "Feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.feature.volatility",
@@ -710,10 +1206,32 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 380, "y": 90},
-      "public": {"label": "Volatility + ATR", "summary": "ATR, normalized ranges, realized volatility, compression, and expansion.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies/momentum_expansion/features"]},
-      "local": {"details": "Also informs policy risk geometry.", "repo_paths": ["strategies/momentum_expansion/features"], "runtime_owner": "Feature builder"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/features"], "symbols": []}
+      "position": {
+        "x": 380,
+        "y": 90
+      },
+      "public": {
+        "label": "Volatility + ATR",
+        "summary": "ATR, normalized ranges, realized volatility, compression, and expansion.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ]
+      },
+      "local": {
+        "details": "Also informs policy risk geometry.",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "runtime_owner": "Feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.feature.liquidity",
@@ -721,10 +1239,32 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 650, "y": 90},
-      "public": {"label": "Volume + Liquidity", "summary": "Volume, dollar liquidity, turnover, spread/tradability context, and cross-sectional ranks.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies/momentum_expansion/features"]},
-      "local": {"details": "Eligibility and ranking remain distinct.", "repo_paths": ["strategies/momentum_expansion/features"], "runtime_owner": "Feature builder"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/features"], "symbols": []}
+      "position": {
+        "x": 650,
+        "y": 90
+      },
+      "public": {
+        "label": "Volume + Liquidity",
+        "summary": "Volume, dollar liquidity, turnover, spread/tradability context, and cross-sectional ranks.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ]
+      },
+      "local": {
+        "details": "Eligibility and ranking remain distinct.",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "runtime_owner": "Feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.feature.relative_strength",
@@ -732,10 +1272,32 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 870, "y": 180},
-      "public": {"label": "Relative Strength", "summary": "SPY/QQQ-relative returns and cross-sectional strength ranks.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies/momentum_expansion/features"]},
-      "local": {"details": "Ranks use only the contemporaneously eligible universe.", "repo_paths": ["strategies/momentum_expansion/features"], "runtime_owner": "Feature builder"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/features"], "symbols": []}
+      "position": {
+        "x": 870,
+        "y": 180
+      },
+      "public": {
+        "label": "Relative Strength",
+        "summary": "SPY/QQQ-relative returns and cross-sectional strength ranks.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ]
+      },
+      "local": {
+        "details": "Ranks use only the contemporaneously eligible universe.",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "runtime_owner": "Feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.feature.location",
@@ -743,10 +1305,32 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 820, "y": 470},
-      "public": {"label": "Location + Structure", "summary": "Distance from highs, breakout location, drawdown, and persistence context.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies/momentum_expansion/features"]},
-      "local": {"details": "Used to distinguish late chase from durable expansion.", "repo_paths": ["strategies/momentum_expansion/features"], "runtime_owner": "Feature builder"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/features"], "symbols": []}
+      "position": {
+        "x": 820,
+        "y": 470
+      },
+      "public": {
+        "label": "Location + Structure",
+        "summary": "Distance from highs, breakout location, drawdown, and persistence context.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ]
+      },
+      "local": {
+        "details": "Used to distinguish late chase from durable expansion.",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "runtime_owner": "Feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.feature.regime",
@@ -754,10 +1338,32 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 570, "y": 550},
-      "public": {"label": "Regime + Benchmarks", "summary": "Lagged market, volatility, rates, and benchmark context.", "maturity": "research", "mode": "research-only", "repo_paths": ["strategies/momentum_expansion/features"]},
-      "local": {"details": "Availability alignment is explicit.", "repo_paths": ["strategies/momentum_expansion/features"], "runtime_owner": "Feature builder"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/features"], "symbols": []}
+      "position": {
+        "x": 570,
+        "y": 550
+      },
+      "public": {
+        "label": "Regime + Benchmarks",
+        "summary": "Lagged market, volatility, rates, and benchmark context.",
+        "maturity": "research",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ]
+      },
+      "local": {
+        "details": "Availability alignment is explicit.",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "runtime_owner": "Feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "momentum.feature.higher_timeframe",
@@ -765,22 +1371,65 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 300, "y": 520},
-      "public": {"label": "Daily + Weekly Context", "summary": "Lagged daily and weekly returns, trends, ATR, and survival context.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies/momentum_expansion/features"]},
-      "local": {"details": "Higher-timeframe values are shifted before intraday mapping.", "repo_paths": ["strategies/momentum_expansion/features"], "runtime_owner": "Feature builder"},
-      "evidence": {"required_paths": ["strategies/momentum_expansion/features"], "symbols": []}
+      "position": {
+        "x": 300,
+        "y": 520
+      },
+      "public": {
+        "label": "Daily + Weekly Context",
+        "summary": "Lagged daily and weekly returns, trends, ATR, and survival context.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ]
+      },
+      "local": {
+        "details": "Higher-timeframe values are shifted before intraday mapping.",
+        "repo_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "runtime_owner": "Feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/momentum_expansion/features"
+        ],
+        "symbols": []
+      }
     },
-
     {
       "id": "swing.inputs",
       "parent_id": "strategy.swing",
       "kind": "data",
       "visibility": "public",
       "edge_color_role": "data",
-      "position": {"x": 100, "y": 180},
-      "public": {"label": "Inputs", "summary": "Thirty-minute bars, shorter execution context, benchmark bars, universe metadata, and lagged daily context.", "maturity": "operational", "mode": "research-only", "repo_paths": ["strategies/multi_ticker_swing/data"]},
-      "local": {"details": "Raw and processed stores remain distinct.", "repo_paths": ["strategies/multi_ticker_swing/data"], "runtime_owner": "Swing data pipeline"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/data"], "symbols": []}
+      "position": {
+        "x": 100,
+        "y": 180
+      },
+      "public": {
+        "label": "Inputs",
+        "summary": "Thirty-minute bars, shorter execution context, benchmark bars, universe metadata, and lagged daily context.",
+        "maturity": "operational",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/data"
+        ]
+      },
+      "local": {
+        "details": "Raw and processed stores remain distinct.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/data"
+        ],
+        "runtime_owner": "Swing data pipeline"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/data"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "swing.features",
@@ -788,10 +1437,34 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 330, "y": 90},
-      "public": {"label": "Feature Engineering", "summary": "Shared offline/live 30-minute trend, momentum, volatility, liquidity, relative-strength, and context features.", "maturity": "research-ready", "mode": "shared", "repo_paths": ["strategies/multi_ticker_swing/features"]},
-      "local": {"details": "Live inference reuses the offline feature builder.", "repo_paths": ["strategies/multi_ticker_swing/features", "strategies/multi_ticker_swing/live/context_features.py"], "runtime_owner": "Swing feature pipeline"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/features", "strategies/multi_ticker_swing/live/context_features.py"], "symbols": []}
+      "position": {
+        "x": 330,
+        "y": 90
+      },
+      "public": {
+        "label": "Feature Engineering",
+        "summary": "Shared offline/live 30-minute trend, momentum, volatility, liquidity, relative-strength, and context features.",
+        "maturity": "research-ready",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ]
+      },
+      "local": {
+        "details": "Live inference reuses the offline feature builder.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features",
+          "strategies/multi_ticker_swing/live/context_features.py"
+        ],
+        "runtime_owner": "Swing feature pipeline"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/features",
+          "strategies/multi_ticker_swing/live/context_features.py"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "swing.model",
@@ -799,10 +1472,32 @@
       "kind": "model",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 620, "y": 90},
-      "public": {"label": "Swing Classifier", "summary": "Multiclass swing-zone probabilities and challenger ranking artifacts.", "maturity": "research-ready", "mode": "shared", "repo_paths": ["strategies/multi_ticker_swing/models"]},
-      "local": {"details": "Frozen classifier and ranker artifacts are evaluated separately.", "repo_paths": ["strategies/multi_ticker_swing/models"], "runtime_owner": "Swing inference"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/models"], "symbols": []}
+      "position": {
+        "x": 620,
+        "y": 90
+      },
+      "public": {
+        "label": "Swing Classifier",
+        "summary": "Multiclass swing-zone probabilities and challenger ranking artifacts.",
+        "maturity": "research-ready",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/models"
+        ]
+      },
+      "local": {
+        "details": "Frozen classifier and ranker artifacts are evaluated separately.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/models"
+        ],
+        "runtime_owner": "Swing inference"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/models"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "swing.signal",
@@ -810,10 +1505,32 @@
       "kind": "signal",
       "visibility": "public",
       "edge_color_role": "signal",
-      "position": {"x": 880, "y": 180},
-      "public": {"label": "Rank + Confirmation", "summary": "Universe scanning, probability/rank filtering, freshness checks, and shorter-timeframe confirmation.", "maturity": "operational", "mode": "shared", "repo_paths": ["strategies/multi_ticker_swing/live/ranker_scanner.py"]},
-      "local": {"details": "Entry price intent and broker fill are distinct audit events.", "repo_paths": ["strategies/multi_ticker_swing/live/ranker_scanner.py"], "runtime_owner": "Swing scanner"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/live/ranker_scanner.py"], "symbols": []}
+      "position": {
+        "x": 880,
+        "y": 180
+      },
+      "public": {
+        "label": "Rank + Confirmation",
+        "summary": "Universe scanning, probability/rank filtering, freshness checks, and shorter-timeframe confirmation.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/live/ranker_scanner.py"
+        ]
+      },
+      "local": {
+        "details": "Entry price intent and broker fill are distinct audit events.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/live/ranker_scanner.py"
+        ],
+        "runtime_owner": "Swing scanner"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/live/ranker_scanner.py"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "swing.policy",
@@ -821,10 +1538,32 @@
       "kind": "policy",
       "visibility": "public",
       "edge_color_role": "policy",
-      "position": {"x": 850, "y": 470},
-      "public": {"label": "Swing Order Policy", "summary": "Direction, option/equity route, liquidity/expiry gates, target notional, ATR management, and position limits.", "maturity": "operational", "mode": "broker-integrated", "repo_paths": ["strategies/multi_ticker_swing/live"]},
-      "local": {"details": "Sibling-owned positions are vetoed during broker reconciliation.", "repo_paths": ["strategies/multi_ticker_swing/live"], "runtime_owner": "Swing session"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/live"], "symbols": []}
+      "position": {
+        "x": 850,
+        "y": 470
+      },
+      "public": {
+        "label": "Swing Order Policy",
+        "summary": "Direction, option/equity route, liquidity/expiry gates, target notional, ATR management, and position limits.",
+        "maturity": "operational",
+        "mode": "broker-integrated",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/live"
+        ]
+      },
+      "local": {
+        "details": "Sibling-owned positions are vetoed during broker reconciliation.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/live"
+        ],
+        "runtime_owner": "Swing session"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/live"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "swing.execution",
@@ -832,10 +1571,32 @@
       "kind": "execution",
       "visibility": "public",
       "edge_color_role": "execution",
-      "position": {"x": 590, "y": 550},
-      "public": {"label": "Execution + Reconciliation", "summary": "Strategy-specific position management, broker-authoritative state, exits, restore handling, and duplicate protection.", "maturity": "operational", "mode": "shared", "repo_paths": ["strategies/multi_ticker_swing/live/position_manager.py"]},
-      "local": {"details": "Ownership boundaries prevent cross-module adoption and flattening.", "repo_paths": ["strategies/multi_ticker_swing/live/position_manager.py"], "runtime_owner": "Swing position manager"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/live/position_manager.py"], "symbols": []}
+      "position": {
+        "x": 590,
+        "y": 550
+      },
+      "public": {
+        "label": "Execution + Reconciliation",
+        "summary": "Strategy-specific position management, broker-authoritative state, exits, restore handling, and duplicate protection.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/live/position_manager.py"
+        ]
+      },
+      "local": {
+        "details": "Ownership boundaries prevent cross-module adoption and flattening.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/live/position_manager.py"
+        ],
+        "runtime_owner": "Swing position manager"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/live/position_manager.py"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "swing.audit",
@@ -843,22 +1604,68 @@
       "kind": "audit",
       "visibility": "public",
       "edge_color_role": "audit",
-      "position": {"x": 280, "y": 500},
-      "public": {"label": "Audit + Evidence", "summary": "Frozen classifier/backtest evidence, replay trades, session records, option forensics, and policy experiments.", "maturity": "research-ready", "mode": "shared", "repo_paths": ["strategies/multi_ticker_swing/backtest", "UI/swing_audit"]},
-      "local": {"details": "Directional signal quality and option execution quality are reported separately.", "repo_paths": ["strategies/multi_ticker_swing/backtest", "UI/swing_audit"], "runtime_owner": "Research and session audit"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/backtest", "UI/swing_audit"], "symbols": []}
+      "position": {
+        "x": 280,
+        "y": 500
+      },
+      "public": {
+        "label": "Audit + Evidence",
+        "summary": "Frozen classifier/backtest evidence, replay trades, session records, option forensics, and policy experiments.",
+        "maturity": "research-ready",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/backtest",
+          "UI/swing_audit"
+        ]
+      },
+      "local": {
+        "details": "Directional signal quality and option execution quality are reported separately.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/backtest",
+          "UI/swing_audit"
+        ],
+        "runtime_owner": "Research and session audit"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/backtest",
+          "UI/swing_audit"
+        ],
+        "symbols": []
+      }
     },
-
     {
       "id": "swing.feature.trend",
       "parent_id": "swing.features",
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 140, "y": 160},
-      "public": {"label": "Trend + Momentum", "summary": "Returns, moving averages, slopes, oscillators, and continuation/reversal context.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies/multi_ticker_swing/features"]},
-      "local": {"details": "Feature calculation is shared with live inference.", "repo_paths": ["strategies/multi_ticker_swing/features"], "runtime_owner": "Swing feature builder"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/features"], "symbols": []}
+      "position": {
+        "x": 140,
+        "y": 160
+      },
+      "public": {
+        "label": "Trend + Momentum",
+        "summary": "Returns, moving averages, slopes, oscillators, and continuation/reversal context.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ]
+      },
+      "local": {
+        "details": "Feature calculation is shared with live inference.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "runtime_owner": "Swing feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "swing.feature.volatility",
@@ -866,10 +1673,32 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 390, "y": 100},
-      "public": {"label": "Volatility + ATR", "summary": "Range, ATR, volatility, compression, and move-normalization context.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies/multi_ticker_swing/features"]},
-      "local": {"details": "ATR also anchors policy geometry.", "repo_paths": ["strategies/multi_ticker_swing/features"], "runtime_owner": "Swing feature builder"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/features"], "symbols": []}
+      "position": {
+        "x": 390,
+        "y": 100
+      },
+      "public": {
+        "label": "Volatility + ATR",
+        "summary": "Range, ATR, volatility, compression, and move-normalization context.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ]
+      },
+      "local": {
+        "details": "ATR also anchors policy geometry.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "runtime_owner": "Swing feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "swing.feature.liquidity",
@@ -877,10 +1706,32 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 650, "y": 100},
-      "public": {"label": "Liquidity + Tradability", "summary": "Volume, dollar volume, gaps, spreads, and universe eligibility context.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies/multi_ticker_swing/features"]},
-      "local": {"details": "Underlying and option-contract liquidity are separate gates.", "repo_paths": ["strategies/multi_ticker_swing/features"], "runtime_owner": "Swing feature builder"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/features"], "symbols": []}
+      "position": {
+        "x": 650,
+        "y": 100
+      },
+      "public": {
+        "label": "Liquidity + Tradability",
+        "summary": "Volume, dollar volume, gaps, spreads, and universe eligibility context.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ]
+      },
+      "local": {
+        "details": "Underlying and option-contract liquidity are separate gates.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "runtime_owner": "Swing feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "swing.feature.relative_strength",
@@ -888,10 +1739,32 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 860, "y": 230},
-      "public": {"label": "Relative Strength", "summary": "SPY/QQQ-relative returns, beta context, and cross-sectional ranks.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies/multi_ticker_swing/features"]},
-      "local": {"details": "Ranks are calculated on the eligible contemporaneous universe.", "repo_paths": ["strategies/multi_ticker_swing/features"], "runtime_owner": "Swing feature builder"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/features"], "symbols": []}
+      "position": {
+        "x": 860,
+        "y": 230
+      },
+      "public": {
+        "label": "Relative Strength",
+        "summary": "SPY/QQQ-relative returns, beta context, and cross-sectional ranks.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ]
+      },
+      "local": {
+        "details": "Ranks are calculated on the eligible contemporaneous universe.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "runtime_owner": "Swing feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "swing.feature.structure",
@@ -899,10 +1772,32 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 780, "y": 500},
-      "public": {"label": "Swing Location", "summary": "Pivot zones, distance from highs/lows, breakout context, and recent run-up.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies/multi_ticker_swing/features"]},
-      "local": {"details": "Labels and live features remain separate responsibilities.", "repo_paths": ["strategies/multi_ticker_swing/features"], "runtime_owner": "Swing feature builder"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/features"], "symbols": []}
+      "position": {
+        "x": 780,
+        "y": 500
+      },
+      "public": {
+        "label": "Swing Location",
+        "summary": "Pivot zones, distance from highs/lows, breakout context, and recent run-up.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ]
+      },
+      "local": {
+        "details": "Labels and live features remain separate responsibilities.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "runtime_owner": "Swing feature builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "swing.feature.context",
@@ -910,22 +1805,65 @@
       "kind": "feature",
       "visibility": "public",
       "edge_color_role": "feature",
-      "position": {"x": 500, "y": 550},
-      "public": {"label": "Regime + Daily Context", "summary": "Lagged market, daily trend/ATR, earnings, sector, and benchmark context.", "maturity": "research", "mode": "research-only", "repo_paths": ["strategies/multi_ticker_swing/features"]},
-      "local": {"details": "Daily context is persisted and refreshed outside the session path.", "repo_paths": ["strategies/multi_ticker_swing/features"], "runtime_owner": "Swing context builder"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/features"], "symbols": []}
+      "position": {
+        "x": 500,
+        "y": 550
+      },
+      "public": {
+        "label": "Regime + Daily Context",
+        "summary": "Lagged market, daily trend/ATR, earnings, sector, and benchmark context.",
+        "maturity": "research",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ]
+      },
+      "local": {
+        "details": "Daily context is persisted and refreshed outside the session path.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "runtime_owner": "Swing context builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/features"
+        ],
+        "symbols": []
+      }
     },
-
     {
       "id": "execution.shared",
       "parent_id": "domain.execution",
       "kind": "execution",
       "visibility": "public",
       "edge_color_role": "execution",
-      "position": {"x": 140, "y": 170},
-      "public": {"label": "Shared 4H Engine", "summary": "Readiness, plan execution, sizing, duplicate checks, exits, persistence, and audit for 4-hour modules.", "maturity": "operational", "mode": "paper", "repo_paths": ["core/live_4h_exec.py"]},
-      "local": {"details": "Injected ranking and routing keep strategy intelligence separate.", "repo_paths": ["core/live_4h_exec.py"], "runtime_owner": "Momentum, HTF, Meta, and selected Dealer paths"},
-      "evidence": {"required_paths": ["core/live_4h_exec.py"], "symbols": []}
+      "position": {
+        "x": 140,
+        "y": 170
+      },
+      "public": {
+        "label": "Shared 4H Engine",
+        "summary": "Readiness, plan execution, sizing, duplicate checks, exits, persistence, and audit for 4-hour modules.",
+        "maturity": "operational",
+        "mode": "paper",
+        "repo_paths": [
+          "core/live_4h_exec.py"
+        ]
+      },
+      "local": {
+        "details": "Injected ranking and routing keep strategy intelligence separate.",
+        "repo_paths": [
+          "core/live_4h_exec.py"
+        ],
+        "runtime_owner": "Momentum, HTF, Meta, and selected Dealer paths"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/live_4h_exec.py"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "execution.gates",
@@ -933,10 +1871,32 @@
       "kind": "policy",
       "visibility": "public",
       "edge_color_role": "policy",
-      "position": {"x": 390, "y": 100},
-      "public": {"label": "Strategy Gates", "summary": "Freshness, conviction, direction, timing, liquidity, expiry, buying-power, and ownership gates.", "maturity": "operational", "mode": "shared", "repo_paths": ["strategies"]},
-      "local": {"details": "Gate decisions are audited rather than silently dropped.", "repo_paths": ["strategies"], "runtime_owner": "Module policies"},
-      "evidence": {"required_paths": ["strategies"], "symbols": []}
+      "position": {
+        "x": 390,
+        "y": 100
+      },
+      "public": {
+        "label": "Strategy Gates",
+        "summary": "Freshness, conviction, direction, timing, liquidity, expiry, buying-power, and ownership gates.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies"
+        ]
+      },
+      "local": {
+        "details": "Gate decisions are audited rather than silently dropped.",
+        "repo_paths": [
+          "strategies"
+        ],
+        "runtime_owner": "Module policies"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "execution.risk",
@@ -944,11 +1904,34 @@
       "kind": "policy",
       "visibility": "public",
       "edge_color_role": "policy",
-      "position": {"x": 650, "y": 100},
-      "public": {"label": "Sizing + Exit Policy", "summary": "Target notional, position caps, stop, target, scale-out, trail, and time exits.", "maturity": "research-ready",
-        "mode": "shared", "repo_paths": ["core/live_4h_exec.py", "strategies/multi_ticker_swing/live"]},
-      "local": {"details": "Policies remain module-aware and are not assumed transferable.", "repo_paths": ["core/live_4h_exec.py"], "runtime_owner": "Executors and position managers"},
-      "evidence": {"required_paths": ["core/live_4h_exec.py", "strategies/multi_ticker_swing/live"], "symbols": []}
+      "position": {
+        "x": 650,
+        "y": 100
+      },
+      "public": {
+        "label": "Sizing + Exit Policy",
+        "summary": "Target notional, position caps, stop, target, scale-out, trail, and time exits.",
+        "maturity": "research-ready",
+        "mode": "shared",
+        "repo_paths": [
+          "core/live_4h_exec.py",
+          "strategies/multi_ticker_swing/live"
+        ]
+      },
+      "local": {
+        "details": "Policies remain module-aware and are not assumed transferable.",
+        "repo_paths": [
+          "core/live_4h_exec.py"
+        ],
+        "runtime_owner": "Executors and position managers"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/live_4h_exec.py",
+          "strategies/multi_ticker_swing/live"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "execution.broker",
@@ -956,10 +1939,32 @@
       "kind": "execution",
       "visibility": "public",
       "edge_color_role": "execution",
-      "position": {"x": 860, "y": 250},
-      "public": {"label": "Broker Boundary", "summary": "Separately gated paper/live routes with authoritative order, position, rejection, and fill responses.", "maturity": "operational", "mode": "paper", "repo_paths": ["core/API/Alpaca_API"]},
-      "local": {"details": "Credentials, account identifiers, and current brokerage state never enter the atlas.", "repo_paths": ["core/API/Alpaca_API"], "runtime_owner": "Broker adapters"},
-      "evidence": {"required_paths": ["core/API/Alpaca_API"], "symbols": []}
+      "position": {
+        "x": 860,
+        "y": 250
+      },
+      "public": {
+        "label": "Broker Boundary",
+        "summary": "Separately gated paper/live routes with authoritative order, position, rejection, and fill responses.",
+        "maturity": "operational",
+        "mode": "paper",
+        "repo_paths": [
+          "core/API/Alpaca_API"
+        ]
+      },
+      "local": {
+        "details": "Credentials, account identifiers, and current brokerage state never enter the atlas.",
+        "repo_paths": [
+          "core/API/Alpaca_API"
+        ],
+        "runtime_owner": "Broker adapters"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/API/Alpaca_API"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "execution.audit",
@@ -967,10 +1972,34 @@
       "kind": "audit",
       "visibility": "public",
       "edge_color_role": "audit",
-      "position": {"x": 650, "y": 500},
-      "public": {"label": "Audit + Persistent Ownership", "summary": "Signal inputs, order intent, responses, fills, managed state, ledgers, and recovery rationale.", "maturity": "operational", "mode": "shared", "repo_paths": ["core/live_4h_exec.py", "UI"]},
-      "local": {"details": "Module ownership protects shared accounts from cross-strategy adoption.", "repo_paths": ["core/live_4h_exec.py"], "runtime_owner": "Module state and dashboard audit"},
-      "evidence": {"required_paths": ["core/live_4h_exec.py", "UI"], "symbols": []}
+      "position": {
+        "x": 650,
+        "y": 500
+      },
+      "public": {
+        "label": "Audit + Persistent Ownership",
+        "summary": "Signal inputs, order intent, responses, fills, managed state, ledgers, and recovery rationale.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "core/live_4h_exec.py",
+          "UI"
+        ]
+      },
+      "local": {
+        "details": "Module ownership protects shared accounts from cross-strategy adoption.",
+        "repo_paths": [
+          "core/live_4h_exec.py"
+        ],
+        "runtime_owner": "Module state and dashboard audit"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/live_4h_exec.py",
+          "UI"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "execution.reconcile",
@@ -978,22 +2007,68 @@
       "kind": "control",
       "visibility": "local",
       "edge_color_role": "control",
-      "position": {"x": 330, "y": 500},
-      "public": {"label": "Reconciliation Internals", "summary": "Local-only ownership and recovery detail.", "maturity": "operational", "mode": "shared", "repo_paths": []},
-      "local": {"details": "Broker snapshots, module-managed symbols, restored-position rules, and per-order state persistence.", "repo_paths": ["strategies/multi_ticker_swing/live/position_manager.py", "core/live_4h_exec.py"], "runtime_owner": "Position managers"},
-      "evidence": {"required_paths": ["strategies/multi_ticker_swing/live/position_manager.py", "core/live_4h_exec.py"], "symbols": []}
+      "position": {
+        "x": 330,
+        "y": 500
+      },
+      "public": {
+        "label": "Reconciliation Internals",
+        "summary": "Local-only ownership and recovery detail.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": []
+      },
+      "local": {
+        "details": "Broker snapshots, module-managed symbols, restored-position rules, and per-order state persistence.",
+        "repo_paths": [
+          "strategies/multi_ticker_swing/live/position_manager.py",
+          "core/live_4h_exec.py"
+        ],
+        "runtime_owner": "Position managers"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/multi_ticker_swing/live/position_manager.py",
+          "core/live_4h_exec.py"
+        ],
+        "symbols": []
+      }
     },
-
     {
       "id": "research.pipeline",
       "parent_id": "domain.research",
       "kind": "research",
       "visibility": "public",
       "edge_color_role": "research",
-      "position": {"x": 140, "y": 170},
-      "public": {"label": "Feature + Label Research", "summary": "Explicit feature definitions, forward targets, split boundaries, and leakage checks.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["strategies", "signals"]},
-      "local": {"details": "Raw, engineered, label, and model-ready stages stay distinct.", "repo_paths": ["strategies", "signals"], "runtime_owner": "Research pipelines"},
-      "evidence": {"required_paths": ["strategies", "signals"], "symbols": []}
+      "position": {
+        "x": 140,
+        "y": 170
+      },
+      "public": {
+        "label": "Feature + Label Research",
+        "summary": "Explicit feature definitions, forward targets, split boundaries, and leakage checks.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "strategies",
+          "signals"
+        ]
+      },
+      "local": {
+        "details": "Raw, engineered, label, and model-ready stages stay distinct.",
+        "repo_paths": [
+          "strategies",
+          "signals"
+        ],
+        "runtime_owner": "Research pipelines"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies",
+          "signals"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "research.evaluation",
@@ -1001,10 +2076,35 @@
       "kind": "research",
       "visibility": "public",
       "edge_color_role": "research",
-      "position": {"x": 390, "y": 100},
-      "public": {"label": "OOF + Frozen Evaluation", "summary": "Embargoed walk-forward OOF, validation selection, frozen tests, ablations, and results locks.", "maturity": "research-ready", "mode": "research-only", "repo_paths": ["research/capstone", "backtests"]},
-      "local": {"details": "Evidence tiers separate robust evaluation from weaker same-split sweeps.", "repo_paths": ["research/capstone", "backtests"], "runtime_owner": "Research scripts"},
-      "evidence": {"required_paths": ["research/capstone", "backtests"], "symbols": []}
+      "position": {
+        "x": 390,
+        "y": 100
+      },
+      "public": {
+        "label": "OOF + Frozen Evaluation",
+        "summary": "Embargoed walk-forward OOF, validation selection, frozen tests, ablations, and results locks.",
+        "maturity": "research-ready",
+        "mode": "research-only",
+        "repo_paths": [
+          "research/capstone",
+          "backtests"
+        ]
+      },
+      "local": {
+        "details": "Evidence tiers separate robust evaluation from weaker same-split sweeps.",
+        "repo_paths": [
+          "research/capstone",
+          "backtests"
+        ],
+        "runtime_owner": "Research scripts"
+      },
+      "evidence": {
+        "required_paths": [
+          "research/capstone",
+          "backtests"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "research.dashboards",
@@ -1012,10 +2112,34 @@
       "kind": "ui",
       "visibility": "public",
       "edge_color_role": "control",
-      "position": {"x": 650, "y": 100},
-      "public": {"label": "Dashboards + Operator Views", "summary": "Module dashboards, hub status, live/replay views, alerts, and audit inspection.", "maturity": "operational", "mode": "shared", "repo_paths": ["UI"]},
-      "local": {"details": "Controls remain separate from this read-only atlas.", "repo_paths": ["UI/combined_server.py", "UI/hub_dashboard.py"], "runtime_owner": "Combined server"},
-      "evidence": {"required_paths": ["UI/combined_server.py", "UI/hub_dashboard.py"], "symbols": []}
+      "position": {
+        "x": 650,
+        "y": 100
+      },
+      "public": {
+        "label": "Dashboards + Operator Views",
+        "summary": "Module dashboards, hub status, live/replay views, alerts, and audit inspection.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "UI"
+        ]
+      },
+      "local": {
+        "details": "Controls remain separate from this read-only atlas.",
+        "repo_paths": [
+          "UI/combined_server.py",
+          "UI/hub_dashboard.py"
+        ],
+        "runtime_owner": "Combined server"
+      },
+      "evidence": {
+        "required_paths": [
+          "UI/combined_server.py",
+          "UI/hub_dashboard.py"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "research.operations",
@@ -1023,10 +2147,32 @@
       "kind": "control",
       "visibility": "local",
       "edge_color_role": "control",
-      "position": {"x": 850, "y": 300},
-      "public": {"label": "Runtime Operations", "summary": "Local-only scheduling and recovery detail.", "maturity": "operational", "mode": "shared", "repo_paths": []},
-      "local": {"details": "Supervision, watchdogs, readiness schedules, memory guards, persistent state, and recovery ownership.", "repo_paths": ["scripts/run_live_server.sh", "UI/combined_server.py"], "runtime_owner": "Supervisor and combined server"},
-      "evidence": {"required_paths": ["scripts/run_live_server.sh", "UI/combined_server.py"], "symbols": []}
+      "position": {
+        "x": 850,
+        "y": 300
+      },
+      "public": {
+        "label": "Runtime Operations",
+        "summary": "Local-only view of the runtime harness detailed under Runtime Harness and Management.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": []
+      },
+      "local": {
+        "details": "Supervision, watchdogs, readiness schedules, memory guards, persistent state, and recovery ownership.",
+        "repo_paths": [
+          "scripts/run_live_server.sh",
+          "UI/combined_server.py"
+        ],
+        "runtime_owner": "Supervisor and combined server"
+      },
+      "evidence": {
+        "required_paths": [
+          "scripts/run_live_server.sh",
+          "UI/combined_server.py"
+        ],
+        "symbols": []
+      }
     },
     {
       "id": "research.reports",
@@ -1034,62 +2180,2344 @@
       "kind": "audit",
       "visibility": "public",
       "edge_color_role": "audit",
-      "position": {"x": 500, "y": 510},
-      "public": {"label": "Reports + Provenance", "summary": "Capstone evidence, daily live reviews, leakage audits, figures, and durable handoff notes.", "maturity": "operational", "mode": "research-only", "repo_paths": ["capstone_final", "research/daily_live_reports", "LIVING_SUMMARY.md"]},
-      "local": {"details": "Claims link back to primary artifacts and limitations.", "repo_paths": ["capstone_final", "research"], "runtime_owner": "Research and operations"},
-      "evidence": {"required_paths": ["capstone_final", "research/daily_live_reports", "LIVING_SUMMARY.md"], "symbols": []}
+      "position": {
+        "x": 500,
+        "y": 510
+      },
+      "public": {
+        "label": "Reports + Provenance",
+        "summary": "Capstone evidence, daily live reviews, leakage audits, figures, and durable handoff notes.",
+        "maturity": "operational",
+        "mode": "research-only",
+        "repo_paths": [
+          "capstone_final",
+          "research/daily_live_reports",
+          "LIVING_SUMMARY.md"
+        ]
+      },
+      "local": {
+        "details": "Claims link back to primary artifacts and limitations.",
+        "repo_paths": [
+          "capstone_final",
+          "research"
+        ],
+        "runtime_owner": "Research and operations"
+      },
+      "evidence": {
+        "required_paths": [
+          "capstone_final",
+          "research/daily_live_reports",
+          "LIVING_SUMMARY.md"
+        ],
+        "symbols": []
+      }
+    },
+    {
+      "id": "domain.governance",
+      "parent_id": "system",
+      "kind": "policy",
+      "visibility": "public",
+      "edge_color_role": "policy",
+      "position": {
+        "x": 905,
+        "y": 330
+      },
+      "public": {
+        "label": "Governed Decision Path",
+        "summary": "Typed causal states, snapshot assembly, an auditable policy, and the only route by which an approved intent becomes a broker order.",
+        "maturity": "operational",
+        "mode": "paper-capable",
+        "repo_paths": [
+          "core/nervous_system"
+        ]
+      },
+      "local": {
+        "details": "One module (Meta Ranker) is cut over today; the other strategy modules still execute through the shared 4-hour engine.",
+        "repo_paths": [
+          "core/nervous_system"
+        ],
+        "runtime_owner": "Governed path services"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system"
+        ]
+      }
+    },
+    {
+      "id": "ns.adapters",
+      "parent_id": "domain.governance",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "data",
+      "position": {
+        "x": 390,
+        "y": 100
+      },
+      "public": {
+        "label": "State Producers",
+        "summary": "Module-side adapters that convert module outputs into typed, timestamped state envelopes.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "signals/market_regime/nervous_system_adapter.py",
+          "signals/catalysts/nervous_system_adapter.py",
+          "signals/meta_context/meta_ranker/ticker_state_publication.py",
+          "strategies/dealer_positioning/nervous_system_adapter.py"
+        ]
+      },
+      "local": {
+        "details": "Market, sector, theme, ticker, portfolio, and readiness producers are wired. The dealer producer is written and tested but has no caller.",
+        "repo_paths": [
+          "signals/market_regime/nervous_system_adapter.py",
+          "signals/catalysts/nervous_system_adapter.py",
+          "signals/meta_context/meta_ranker/ticker_state_publication.py",
+          "strategies/dealer_positioning/nervous_system_adapter.py"
+        ],
+        "runtime_owner": "Per-producer schedules"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/contracts"
+        ],
+        "symbols": [
+          {
+            "path": "signals/market_regime/nervous_system_adapter.py",
+            "name": "adapt_market_row",
+            "kind": "function"
+          },
+          {
+            "path": "signals/catalysts/nervous_system_adapter.py",
+            "name": "publish_catalyst_states",
+            "kind": "function"
+          },
+          {
+            "path": "signals/meta_context/meta_ranker/ticker_state_publication.py",
+            "name": "publish_ticker_states",
+            "kind": "function"
+          },
+          {
+            "path": "strategies/dealer_positioning/nervous_system_adapter.py",
+            "name": "adapt_dealer_state",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ns.contracts",
+      "parent_id": "domain.governance",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "context",
+      "position": {
+        "x": 140,
+        "y": 170
+      },
+      "public": {
+        "label": "Typed State Contracts",
+        "summary": "Seven state envelopes carrying as-of, available-at, producer version, lineage, and data-quality issues.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "core/nervous_system/contracts"
+        ]
+      },
+      "local": {
+        "details": "Availability time is separate from event time so a snapshot can never read a state that did not yet exist.",
+        "repo_paths": [
+          "core/nervous_system/contracts"
+        ],
+        "runtime_owner": "Contract package"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/contracts/states.py"
+        ],
+        "symbols": [
+          {
+            "path": "core/nervous_system/contracts/states.py",
+            "name": "DealerState",
+            "kind": "class"
+          },
+          {
+            "path": "core/nervous_system/contracts/context.py",
+            "name": "ContextSnapshot",
+            "kind": "class"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ns.context",
+      "parent_id": "domain.governance",
+      "kind": "context",
+      "visibility": "public",
+      "edge_color_role": "context",
+      "position": {
+        "x": 650,
+        "y": 100
+      },
+      "public": {
+        "label": "Snapshot Assembly",
+        "summary": "Selects the freshest admissible state per requirement, and explains in one line why a rejected snapshot failed.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "core/nervous_system/context"
+        ]
+      },
+      "local": {
+        "details": "Requirement results and rejected candidates are rendered by a pure diagnosis helper shared by the live log and the pre-open preflight.",
+        "repo_paths": [
+          "core/nervous_system/context"
+        ],
+        "runtime_owner": "Snapshot builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/context/requirements.py",
+          "core/nervous_system/context/diagnosis.py",
+          "core/nervous_system/context/snapshot_builder.py"
+        ],
+        "symbols": [
+          {
+            "path": "core/nervous_system/context/diagnosis.py",
+            "name": "diagnose_snapshot",
+            "kind": "function"
+          },
+          {
+            "path": "core/nervous_system/context/snapshot_builder.py",
+            "name": "SnapshotBuilder",
+            "kind": "class"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ns.policy",
+      "parent_id": "domain.governance",
+      "kind": "policy",
+      "visibility": "public",
+      "edge_color_role": "policy",
+      "position": {
+        "x": 885,
+        "y": 235
+      },
+      "public": {
+        "label": "Policy Engine",
+        "summary": "Hard vetoes then ordered sizing modifiers, each carrying its rule id, input, configured value, and reason code.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "core/nervous_system/policy"
+        ]
+      },
+      "local": {
+        "details": "Market, theme, dealer, and data-quality regimes each contribute a multiplier; an unavailable state records a note rather than silently sizing at par.",
+        "repo_paths": [
+          "core/nervous_system/policy"
+        ],
+        "runtime_owner": "Policy evaluation"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/policy/rules.py",
+          "core/nervous_system/policy/engine.py"
+        ],
+        "symbols": [
+          {
+            "path": "core/nervous_system/policy/rules.py",
+            "name": "context_modifier_specs",
+            "kind": "function"
+          },
+          {
+            "path": "core/nervous_system/policy/engine.py",
+            "name": "evaluate_policy",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ns.coordinator",
+      "parent_id": "domain.governance",
+      "kind": "control",
+      "visibility": "public",
+      "edge_color_role": "control",
+      "position": {
+        "x": 870,
+        "y": 485
+      },
+      "public": {
+        "label": "Decision Coordinator",
+        "summary": "Turns an approved policy decision into an order request, and accounts for every plan row it refuses.",
+        "maturity": "operational",
+        "mode": "paper-capable",
+        "repo_paths": [
+          "core/nervous_system/orchestration"
+        ]
+      },
+      "local": {
+        "details": "A silently dropped row is a position nobody manages, so refusals are recorded rather than skipped.",
+        "repo_paths": [
+          "core/nervous_system/orchestration"
+        ],
+        "runtime_owner": "Coordinator + stage runner"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/orchestration/coordinator.py",
+          "core/nervous_system/orchestration/jobs.py"
+        ],
+        "symbols": [
+          {
+            "path": "core/nervous_system/orchestration/coordinator.py",
+            "name": "DecisionCoordinator",
+            "kind": "class"
+          },
+          {
+            "path": "core/nervous_system/orchestration/jobs.py",
+            "name": "run_stages",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ns.execution",
+      "parent_id": "domain.governance",
+      "kind": "execution",
+      "visibility": "public",
+      "edge_color_role": "execution",
+      "position": {
+        "x": 620,
+        "y": 575
+      },
+      "public": {
+        "label": "Execution Gateway",
+        "summary": "The single broker-facing boundary of the governed path; production-live is refused before a broker client exists.",
+        "maturity": "operational",
+        "mode": "paper",
+        "repo_paths": [
+          "core/nervous_system/execution"
+        ]
+      },
+      "local": {
+        "details": "Idempotent order and client identifiers, a fill journal, pending-order tracking, and broker reconciliation.",
+        "repo_paths": [
+          "core/nervous_system/execution"
+        ],
+        "runtime_owner": "Gateway + broker adapters"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/execution/gateway.py",
+          "core/nervous_system/execution/alpaca_adapter.py",
+          "core/nervous_system/execution/reconciliation.py"
+        ],
+        "symbols": [
+          {
+            "path": "core/nervous_system/execution/gateway.py",
+            "name": "ExecutionGateway",
+            "kind": "class"
+          },
+          {
+            "path": "core/nervous_system/execution/reconciliation.py",
+            "name": "reconcile_broker_account",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ns.persistence",
+      "parent_id": "domain.governance",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "data",
+      "position": {
+        "x": 350,
+        "y": 565
+      },
+      "public": {
+        "label": "State + Decision Store",
+        "summary": "Durable states, decisions, orders, and journal entries written through one transactional unit of work.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "core/nervous_system/persistence"
+        ]
+      },
+      "local": {
+        "details": "A relational store reached over a configured connection; credentials never enter this manifest.",
+        "repo_paths": [
+          "core/nervous_system/persistence"
+        ],
+        "runtime_owner": "Database + migrations"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/persistence/uow.py",
+          "core/nervous_system/persistence/database.py"
+        ],
+        "symbols": [
+          {
+            "path": "core/nervous_system/persistence/uow.py",
+            "name": "UnitOfWork",
+            "kind": "class"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ns.preflight",
+      "parent_id": "domain.governance",
+      "kind": "control",
+      "visibility": "public",
+      "edge_color_role": "runtime",
+      "position": {
+        "x": 110,
+        "y": 445
+      },
+      "public": {
+        "label": "Preflight + Replay",
+        "summary": "Read-only rehearsal of both decision shapes before the open, plus outcome attribution replayed from stored decisions.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "scripts/governed_path_preflight.py",
+          "core/nervous_system/replay"
+        ]
+      },
+      "local": {
+        "details": "The preflight exits non-zero when a governed decision would be blocked, so a dead queue is caught before the session rather than after it.",
+        "repo_paths": [
+          "scripts/governed_path_preflight.py",
+          "core/nervous_system/replay"
+        ],
+        "runtime_owner": "Pre-open check + replay tooling"
+      },
+      "evidence": {
+        "required_paths": [
+          "scripts/governed_path_preflight.py",
+          "scripts/validate_nervous_system_mvp.py",
+          "core/nervous_system/replay/attribution.py"
+        ],
+        "symbols": [
+          {
+            "path": "core/nervous_system/replay/attribution.py",
+            "name": "attribute_outcome",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ns.state.market",
+      "parent_id": "ns.contracts",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "context",
+      "position": {
+        "x": 140,
+        "y": 165
+      },
+      "public": {
+        "label": "Market State",
+        "summary": "Index trend, breadth, and volatility regime for the session.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "signals/market_regime"
+        ]
+      },
+      "local": {
+        "details": "Published by the market-regime build; a session-lagged market state is bounded by the decision, not by the bar.",
+        "repo_paths": [
+          "signals/market_regime"
+        ],
+        "runtime_owner": "State producer"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/contracts/states.py"
+        ]
+      }
+    },
+    {
+      "id": "ns.state.sector",
+      "parent_id": "ns.contracts",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "context",
+      "position": {
+        "x": 380,
+        "y": 95
+      },
+      "public": {
+        "label": "Sector State",
+        "summary": "Per-sector regime and relative strength.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "signals/market_regime"
+        ]
+      },
+      "local": {
+        "details": "Published alongside market state.",
+        "repo_paths": [
+          "signals/market_regime"
+        ],
+        "runtime_owner": "State producer"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/contracts/states.py"
+        ]
+      }
+    },
+    {
+      "id": "ns.state.theme",
+      "parent_id": "ns.contracts",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "context",
+      "position": {
+        "x": 640,
+        "y": 95
+      },
+      "public": {
+        "label": "Theme State",
+        "summary": "Dynamic theme regime and membership at decision time.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "themes/dynamic_theme"
+        ]
+      },
+      "local": {
+        "details": "Carry is bounded so a stale taxonomy cannot be read as current.",
+        "repo_paths": [
+          "themes/dynamic_theme"
+        ],
+        "runtime_owner": "State producer"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/contracts/states.py"
+        ]
+      }
+    },
+    {
+      "id": "ns.state.ticker",
+      "parent_id": "ns.contracts",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "context",
+      "position": {
+        "x": 885,
+        "y": 225
+      },
+      "public": {
+        "label": "Ticker State",
+        "summary": "Per-name model conviction, liquidity, and alignment fields.",
+        "maturity": "operational",
+        "mode": "paper-capable",
+        "repo_paths": [
+          "signals/meta_context/meta_ranker/ticker_state_publication.py"
+        ]
+      },
+      "local": {
+        "details": "The dealer-alignment field is declared on the contract but no producer fills it.",
+        "repo_paths": [
+          "signals/meta_context/meta_ranker/ticker_state_publication.py"
+        ],
+        "runtime_owner": "State producer"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/contracts/states.py"
+        ]
+      }
+    },
+    {
+      "id": "ns.state.dealer",
+      "parent_id": "ns.contracts",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "context",
+      "position": {
+        "x": 840,
+        "y": 500
+      },
+      "public": {
+        "label": "Dealer State",
+        "summary": "Dealer gamma regime and level structure, published with the confidence that earned it.",
+        "maturity": "research-ready",
+        "mode": "paper-capable",
+        "repo_paths": [
+          "strategies/dealer_positioning/nervous_system_adapter.py"
+        ]
+      },
+      "local": {
+        "details": "A snapshot below the structure floor asserts no regime and resolves to UNKNOWN, which the policy already sizes conservatively; asserting NEUTRAL instead would raise size.",
+        "repo_paths": [
+          "strategies/dealer_positioning/nervous_system_adapter.py"
+        ],
+        "runtime_owner": "State producer"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/contracts/states.py"
+        ]
+      }
+    },
+    {
+      "id": "ns.state.portfolio",
+      "parent_id": "ns.contracts",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "context",
+      "position": {
+        "x": 500,
+        "y": 580
+      },
+      "public": {
+        "label": "Portfolio State",
+        "summary": "Equity, buying power, and held positions as the broker reports them.",
+        "maturity": "operational",
+        "mode": "paper",
+        "repo_paths": [
+          "core/nervous_system/portfolio"
+        ]
+      },
+      "local": {
+        "details": "Captured read-only at startup and refreshed on schedule.",
+        "repo_paths": [
+          "core/nervous_system/portfolio"
+        ],
+        "runtime_owner": "State producer"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/contracts/states.py"
+        ]
+      }
+    },
+    {
+      "id": "ns.state.readiness",
+      "parent_id": "ns.contracts",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "context",
+      "position": {
+        "x": 180,
+        "y": 475
+      },
+      "public": {
+        "label": "Readiness State",
+        "summary": "Whether data freshness authorizes entries at all.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "core/nervous_system/context/readiness_adapter.py"
+        ]
+      },
+      "local": {
+        "details": "Fail-closed: an unpublished or stale readiness stamp blocks entries.",
+        "repo_paths": [
+          "core/nervous_system/context/readiness_adapter.py"
+        ],
+        "runtime_owner": "State producer"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/nervous_system/contracts/states.py"
+        ]
+      }
+    },
+    {
+      "id": "domain.runtime",
+      "parent_id": "system",
+      "kind": "runtime",
+      "visibility": "public",
+      "edge_color_role": "runtime",
+      "position": {
+        "x": 210,
+        "y": 560
+      },
+      "public": {
+        "label": "Runtime Harness + Management",
+        "summary": "The supervisor, combined server, schedules, job guards, and recovery machinery that decide when every other component is allowed to run.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "UI/combined_server.py",
+          "scripts/run_live_server.sh"
+        ]
+      },
+      "local": {
+        "details": "Most live incidents originate here rather than in a model: lock contention, startup ordering, stale caches, and orphaned processes.",
+        "repo_paths": [
+          "UI/combined_server.py",
+          "scripts/run_live_server.sh"
+        ],
+        "runtime_owner": "Operator-started local stack"
+      },
+      "evidence": {
+        "required_paths": [
+          "UI/combined_server.py",
+          "scripts/run_live_server.sh"
+        ]
+      }
+    },
+    {
+      "id": "runtime.supervisor",
+      "parent_id": "domain.runtime",
+      "kind": "control",
+      "visibility": "public",
+      "edge_color_role": "runtime",
+      "position": {
+        "x": 390,
+        "y": 100
+      },
+      "public": {
+        "label": "Process Supervisor",
+        "summary": "Starts the stack, and on stop escalates from a signal to a wait to a kill so a wedged server cannot outlive it.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "scripts/run_live_server.sh"
+        ]
+      },
+      "local": {
+        "details": "Escalation was added after a wedged server survived its supervisor and squatted on the ports.",
+        "repo_paths": [
+          "scripts/run_live_server.sh"
+        ],
+        "runtime_owner": "Shell supervisor"
+      },
+      "evidence": {
+        "required_paths": [
+          "scripts/run_live_server.sh"
+        ],
+        "dynamic_dependencies": [
+          "run_live_server.sh launches combined_server.py as a subprocess"
+        ]
+      }
+    },
+    {
+      "id": "runtime.server",
+      "parent_id": "domain.runtime",
+      "kind": "runtime",
+      "visibility": "public",
+      "edge_color_role": "runtime",
+      "position": {
+        "x": 140,
+        "y": 170
+      },
+      "public": {
+        "label": "Combined Server",
+        "summary": "Hosts every module dashboard, owns the module loops, and publishes readiness and portfolio state.",
+        "maturity": "operational",
+        "mode": "paper",
+        "repo_paths": [
+          "UI/combined_server.py"
+        ]
+      },
+      "local": {
+        "details": "One process; a module that blocks a request thread degrades every other module hosted beside it.",
+        "repo_paths": [
+          "UI/combined_server.py"
+        ],
+        "runtime_owner": "Combined server process"
+      },
+      "evidence": {
+        "required_paths": [
+          "UI/combined_server.py"
+        ],
+        "symbols": [
+          {
+            "path": "UI/combined_server.py",
+            "name": "order_startup_catch_ups",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "runtime.schedule",
+      "parent_id": "domain.runtime",
+      "kind": "control",
+      "visibility": "public",
+      "edge_color_role": "control",
+      "position": {
+        "x": 650,
+        "y": 100
+      },
+      "public": {
+        "label": "Schedules + Startup Catch-up",
+        "summary": "Bar-aligned module loops plus a single sequenced startup catch-up that runs readiness before the nightly collection.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "UI/combined_server.py"
+        ]
+      },
+      "local": {
+        "details": "Catch-ups were independent racing threads until one starved the job that authorizes entries; the nightly job also needs a runway check so it cannot start a multi-hour collection into the open.",
+        "repo_paths": [
+          "UI/combined_server.py"
+        ],
+        "runtime_owner": "Server scheduler threads"
+      },
+      "evidence": {
+        "required_paths": [
+          "UI/combined_server.py"
+        ],
+        "symbols": [
+          {
+            "path": "UI/combined_server.py",
+            "name": "order_startup_catch_ups",
+            "kind": "function"
+          },
+          {
+            "path": "UI/combined_server.py",
+            "name": "_nightly_needs_catch_up",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "runtime.guards",
+      "parent_id": "domain.runtime",
+      "kind": "control",
+      "visibility": "public",
+      "edge_color_role": "control",
+      "position": {
+        "x": 885,
+        "y": 255
+      },
+      "public": {
+        "label": "Job Guards + Locks",
+        "summary": "Single-flight heavy-job locking, memory budgets, and blocked-window checks.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "core/live_job_guard.py"
+        ]
+      },
+      "local": {
+        "details": "The heavy-job lock is the contended resource behind most catch-up starvation.",
+        "repo_paths": [
+          "core/live_job_guard.py"
+        ],
+        "runtime_owner": "Guard helpers"
+      },
+      "evidence": {
+        "required_paths": [
+          "core/live_job_guard.py"
+        ],
+        "symbols": [
+          {
+            "path": "core/live_job_guard.py",
+            "name": "heavy_job_guard",
+            "kind": "function"
+          },
+          {
+            "path": "core/live_job_guard.py",
+            "name": "memory_budget_ok",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "runtime.jobs",
+      "parent_id": "domain.runtime",
+      "kind": "runtime",
+      "visibility": "public",
+      "edge_color_role": "data",
+      "position": {
+        "x": 760,
+        "y": 525
+      },
+      "public": {
+        "label": "Data + Refresh Jobs",
+        "summary": "Nightly bar and enrichment collection, the data-readiness rebuild, and the weekend full-scope refresh.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "scripts/nightly_market_data.sh",
+          "scripts/nightly_data_readiness.sh",
+          "scripts/weekly_refresh.sh"
+        ]
+      },
+      "local": {
+        "details": "The weekend refresh records per-stage exit codes so a partial Sunday run is visible before Monday.",
+        "repo_paths": [
+          "scripts/nightly_market_data.sh",
+          "scripts/nightly_data_readiness.sh",
+          "scripts/weekly_refresh.sh"
+        ],
+        "runtime_owner": "Scheduled shell jobs"
+      },
+      "evidence": {
+        "required_paths": [
+          "scripts/nightly_market_data.sh",
+          "scripts/nightly_data_readiness.sh",
+          "scripts/weekly_refresh.sh"
+        ]
+      }
+    },
+    {
+      "id": "runtime.dashboards",
+      "parent_id": "domain.runtime",
+      "kind": "ui",
+      "visibility": "public",
+      "edge_color_role": "runtime",
+      "position": {
+        "x": 420,
+        "y": 580
+      },
+      "public": {
+        "label": "Module Dashboards",
+        "summary": "Per-module operator views for rankings, positions, audits, and live scans.",
+        "maturity": "operational",
+        "mode": "paper",
+        "repo_paths": [
+          "UI"
+        ]
+      },
+      "local": {
+        "details": "Dashboard work happens on background threads with cached results; building on the request thread once wedged the whole server.",
+        "repo_paths": [
+          "UI"
+        ],
+        "runtime_owner": "Hosted dashboard apps"
+      },
+      "evidence": {
+        "required_paths": [
+          "UI/momentum_dashboard.py",
+          "UI/meta_ranker_dashboard.py",
+          "UI/amethyst_dashboard.py"
+        ]
+      }
+    },
+    {
+      "id": "runtime.recovery",
+      "parent_id": "domain.runtime",
+      "kind": "control",
+      "visibility": "public",
+      "edge_color_role": "audit",
+      "position": {
+        "x": 130,
+        "y": 480
+      },
+      "public": {
+        "label": "Recovery + Reconciliation",
+        "summary": "Restart-time position restore, broker reconciliation, and the operator checklist for a cold start.",
+        "maturity": "operational",
+        "mode": "paper",
+        "repo_paths": [
+          "MORNING_CHECKLIST.md"
+        ]
+      },
+      "local": {
+        "details": "Restored positions can carry synthetic entry prices, which changes what an exit rule believes it is measuring.",
+        "repo_paths": [
+          "MORNING_CHECKLIST.md"
+        ],
+        "runtime_owner": "Operator + restore paths"
+      },
+      "evidence": {
+        "required_paths": [
+          "MORNING_CHECKLIST.md",
+          "core/nervous_system/execution/reconciliation.py"
+        ]
+      }
+    },
+    {
+      "id": "dealer.chain",
+      "parent_id": "strategy.dealer",
+      "kind": "source",
+      "visibility": "public",
+      "edge_color_role": "input",
+      "position": {
+        "x": 800,
+        "y": 330
+      },
+      "public": {
+        "label": "Chain Capture",
+        "summary": "Broker option chains with greeks and open interest for the liquid optionable universe.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/dealer_positioning/chain.py",
+          "strategies/dealer_positioning/schwab_adapter.py"
+        ]
+      },
+      "local": {
+        "details": "Captured near the close on a liquidity-screened universe across three expiry scopes.",
+        "repo_paths": [
+          "strategies/dealer_positioning/chain.py",
+          "strategies/dealer_positioning/schwab_adapter.py"
+        ],
+        "runtime_owner": "Chain fetcher"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/chain.py",
+          "strategies/dealer_positioning/schwab_adapter.py"
+        ]
+      }
+    },
+    {
+      "id": "dealer.levels",
+      "parent_id": "strategy.dealer",
+      "kind": "feature",
+      "visibility": "public",
+      "edge_color_role": "feature",
+      "position": {
+        "x": 838,
+        "y": 465
+      },
+      "public": {
+        "label": "Gamma Levels",
+        "summary": "The only gamma-exposure computation in the repository: a strike ladder, call and put walls, magnets, and the flip point.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/dealer_positioning/levels.py"
+        ]
+      },
+      "local": {
+        "details": "Exposure per strike is open interest times gamma times contract multiplier times spot, with the put side signed negative; magnets are strikes above a percentile of absolute net exposure.",
+        "repo_paths": [
+          "strategies/dealer_positioning/levels.py"
+        ],
+        "runtime_owner": "Level computation"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/levels.py"
+        ],
+        "symbols": [
+          {
+            "path": "strategies/dealer_positioning/levels.py",
+            "name": "build_gamma_ladder",
+            "kind": "function"
+          },
+          {
+            "path": "strategies/dealer_positioning/levels.py",
+            "name": "compute_gamma_levels",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dealer.matrix",
+      "parent_id": "strategy.dealer",
+      "kind": "feature",
+      "visibility": "public",
+      "edge_color_role": "feature",
+      "position": {
+        "x": 350,
+        "y": 495
+      },
+      "public": {
+        "label": "Positioning Features",
+        "summary": "Derived structure per symbol and scope: distances, concentration, entropy, densities, vacuum, pinning, and imbalance.",
+        "maturity": "research-ready",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/dealer_positioning/scripts/capture_historical_snapshots.py"
+        ]
+      },
+      "local": {
+        "details": "Computed at capture time and stored with the snapshot, so consumers read features rather than recompute levels.",
+        "repo_paths": [
+          "strategies/dealer_positioning/scripts/capture_historical_snapshots.py"
+        ],
+        "runtime_owner": "Snapshot capture"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/scripts/capture_historical_snapshots.py"
+        ],
+        "symbols": [
+          {
+            "path": "strategies/dealer_positioning/scripts/capture_historical_snapshots.py",
+            "name": "capture_snapshots",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dealer.snapshots",
+      "parent_id": "strategy.dealer",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "data",
+      "position": {
+        "x": 200,
+        "y": 330
+      },
+      "public": {
+        "label": "Snapshot Store",
+        "summary": "The dated level-summary and strike-ladder history every downstream consumer reads.",
+        "maturity": "operational",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/dealer_positioning/storage.py"
+        ]
+      },
+      "local": {
+        "details": "One directory per capture date; an empty file is treated as a capture failure rather than a quiet gap.",
+        "repo_paths": [
+          "strategies/dealer_positioning/storage.py"
+        ],
+        "runtime_owner": "Snapshot store"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/storage.py",
+          "strategies/dealer_positioning/scripts/capture_historical_snapshots.py"
+        ]
+      }
+    },
+    {
+      "id": "dealer.dynamics",
+      "parent_id": "strategy.dealer",
+      "kind": "feature",
+      "visibility": "public",
+      "edge_color_role": "feature",
+      "position": {
+        "x": 350,
+        "y": 165
+      },
+      "public": {
+        "label": "Level Dynamics",
+        "summary": "Snapshot-over-snapshot change and velocity features: wall moves, flip velocity, wall distance in volatility units, and level stability.",
+        "maturity": "research-ready",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/dealer_positioning/scripts/build_level_dynamics.py"
+        ]
+      },
+      "local": {
+        "details": "Read by the dealer rankings through a freshness-bounded join; prior snapshots are looked up rather than forward-filled, so gaps stay visible.",
+        "repo_paths": [
+          "strategies/dealer_positioning/scripts/build_level_dynamics.py"
+        ],
+        "runtime_owner": "Offline builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/scripts/build_level_dynamics.py"
+        ],
+        "symbols": [
+          {
+            "path": "strategies/dealer_positioning/scripts/build_level_dynamics.py",
+            "name": "compute_summary_dynamics",
+            "kind": "function"
+          },
+          {
+            "path": "strategies/dealer_positioning/scripts/build_level_dynamics.py",
+            "name": "compute_strike_dynamics",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dealer.gate",
+      "parent_id": "strategy.dealer",
+      "kind": "policy",
+      "visibility": "public",
+      "edge_color_role": "policy",
+      "position": {
+        "x": 500,
+        "y": 60
+      },
+      "public": {
+        "label": "Structural Entry Gate",
+        "summary": "A fail-open, scope-matched veto consulted by other modules just before they commit a contract.",
+        "maturity": "operational",
+        "mode": "broker-integrated",
+        "repo_paths": [
+          "strategies/dealer_positioning/gate.py"
+        ]
+      },
+      "local": {
+        "details": "No model: a hand-written structural veto that recomputes proximity against the live entry price. A missing or stale snapshot allows the trade rather than blocking it.",
+        "repo_paths": [
+          "strategies/dealer_positioning/gate.py"
+        ],
+        "runtime_owner": "Called inline by module runners"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/gate.py"
+        ],
+        "symbols": [
+          {
+            "path": "strategies/dealer_positioning/gate.py",
+            "name": "evaluate_dealer_gate",
+            "kind": "function"
+          }
+        ],
+        "imports": [
+          {
+            "path": "strategies/multi_ticker_swing/live/runner.py",
+            "module": "strategies.dealer_positioning.gate",
+            "name": "evaluate_dealer_gate"
+          },
+          {
+            "path": "signals/meta_context/meta_ranker/options_exec.py",
+            "module": "strategies.dealer_positioning.gate",
+            "name": "evaluate_dealer_gate"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dealer.rankings",
+      "parent_id": "strategy.dealer",
+      "kind": "signal",
+      "visibility": "public",
+      "edge_color_role": "signal",
+      "position": {
+        "x": 650,
+        "y": 165
+      },
+      "public": {
+        "label": "Dealer Rankings",
+        "summary": "Ranks the captured universe by dealer structure into the list the Dealer Ranker trades.",
+        "maturity": "experimental",
+        "mode": "broker-integrated",
+        "repo_paths": [
+          "strategies/dealer_positioning/scripts/build_dealer_rankings.py"
+        ]
+      },
+      "local": {
+        "details": "The only path on which gamma structure selects a name rather than merely vetoing one.",
+        "repo_paths": [
+          "strategies/dealer_positioning/scripts/build_dealer_rankings.py"
+        ],
+        "runtime_owner": "Ranking builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/scripts/build_dealer_rankings.py"
+        ],
+        "symbols": [
+          {
+            "path": "strategies/dealer_positioning/scripts/build_dealer_rankings.py",
+            "name": "build_rankings",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dealer.adapter",
+      "parent_id": "strategy.dealer",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "context",
+      "position": {
+        "x": 838,
+        "y": 195
+      },
+      "public": {
+        "label": "Dealer State Adapter",
+        "summary": "Converts a captured snapshot into the governed path's dealer state, with the confidence that qualifies it.",
+        "maturity": "experimental",
+        "mode": "paper-capable",
+        "repo_paths": [
+          "strategies/dealer_positioning/nervous_system_adapter.py"
+        ]
+      },
+      "local": {
+        "details": "Published per row with its own capture time. Maps structure onto volatility regimes only -- never onto a directional acceleration regime.",
+        "repo_paths": [
+          "strategies/dealer_positioning/nervous_system_adapter.py"
+        ],
+        "runtime_owner": "No scheduled caller"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/nervous_system_adapter.py",
+          "strategies/dealer_positioning/state_publication.py"
+        ],
+        "symbols": [
+          {
+            "path": "strategies/dealer_positioning/nervous_system_adapter.py",
+            "name": "adapt_dealer_state",
+            "kind": "function"
+          },
+          {
+            "path": "strategies/dealer_positioning/nervous_system_adapter.py",
+            "name": "adapt_dealer_state_with_ranking",
+            "kind": "function"
+          },
+          {
+            "path": "strategies/dealer_positioning/state_publication.py",
+            "name": "publish_dealer_states",
+            "kind": "function"
+          }
+        ],
+        "imports": [
+          {
+            "path": "strategies/dealer_positioning/state_publication.py",
+            "module": "strategies.dealer_positioning.nervous_system_adapter",
+            "name": "adapt_dealer_state"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dealer.topology",
+      "parent_id": "strategy.dealer",
+      "kind": "feature",
+      "visibility": "public",
+      "edge_color_role": "feature",
+      "position": {
+        "x": 650,
+        "y": 495
+      },
+      "public": {
+        "label": "Gamma Topology",
+        "summary": "Unsigned structure -- density, concentration, voids, nodes, and term shares -- kept separate from any assumption about who owns the open interest.",
+        "maturity": "research-ready",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/dealer_positioning/topology.py"
+        ]
+      },
+      "local": {
+        "details": "Where gamma sits is close to observable; which side dealers hold is not. Blending them lets a low-confidence inference contaminate a high-confidence measurement.",
+        "repo_paths": [
+          "strategies/dealer_positioning/topology.py"
+        ],
+        "runtime_owner": "Structure builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/topology.py"
+        ],
+        "symbols": [
+          {
+            "path": "strategies/dealer_positioning/topology.py",
+            "name": "build_gamma_topology",
+            "kind": "function"
+          },
+          {
+            "path": "strategies/dealer_positioning/topology.py",
+            "name": "expiry_bucket_shares",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dealer.confidence",
+      "parent_id": "strategy.dealer",
+      "kind": "data",
+      "visibility": "public",
+      "edge_color_role": "context",
+      "position": {
+        "x": 162,
+        "y": 465
+      },
+      "public": {
+        "label": "Positioning Confidence",
+        "summary": "Structure, sign, and freshness reliability weights attached to every gamma observation.",
+        "maturity": "research-ready",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/dealer_positioning/confidence.py"
+        ]
+      },
+      "local": {
+        "details": "Stated priors, not fitted values, and documented as weights rather than probabilities. Sign confidence falls with liquidity because dealer inference does.",
+        "repo_paths": [
+          "strategies/dealer_positioning/confidence.py"
+        ],
+        "runtime_owner": "Confidence builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/confidence.py"
+        ],
+        "symbols": [
+          {
+            "path": "strategies/dealer_positioning/confidence.py",
+            "name": "build_confidence",
+            "kind": "function"
+          },
+          {
+            "path": "strategies/dealer_positioning/confidence.py",
+            "name": "liquidity_tier",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dealer.stability",
+      "parent_id": "strategy.dealer",
+      "kind": "feature",
+      "visibility": "public",
+      "edge_color_role": "feature",
+      "position": {
+        "x": 500,
+        "y": 600
+      },
+      "public": {
+        "label": "Structural Stability",
+        "summary": "Re-derives every level under shocked volatility surfaces to see which ones survive their own model assumptions.",
+        "maturity": "research-ready",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/dealer_positioning/stability.py"
+        ]
+      },
+      "local": {
+        "details": "Gamma is a model output fed a model input. A level that moves two strikes when IV is nudged was an artifact of the volatility it was handed.",
+        "repo_paths": [
+          "strategies/dealer_positioning/stability.py"
+        ],
+        "runtime_owner": "Stability assessment"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/stability.py"
+        ],
+        "symbols": [
+          {
+            "path": "strategies/dealer_positioning/stability.py",
+            "name": "assess_stability",
+            "kind": "function"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dealer.intraday_dynamics",
+      "parent_id": "strategy.dealer",
+      "kind": "feature",
+      "visibility": "public",
+      "edge_color_role": "feature",
+      "position": {
+        "x": 162,
+        "y": 195
+      },
+      "public": {
+        "label": "Intraday Migration",
+        "summary": "Session-scale change features from the one-minute ladder archive: where a wall is going rather than where it is.",
+        "maturity": "research-ready",
+        "mode": "shared",
+        "repo_paths": [
+          "strategies/dealer_positioning/scripts/build_intraday_level_dynamics.py"
+        ]
+      },
+      "local": {
+        "details": "Deltas are backward-looking and are nulled across polling gaps and session boundaries, so an outage cannot look like a violent move.",
+        "repo_paths": [
+          "strategies/dealer_positioning/scripts/build_intraday_level_dynamics.py"
+        ],
+        "runtime_owner": "Offline builder"
+      },
+      "evidence": {
+        "required_paths": [
+          "strategies/dealer_positioning/scripts/build_intraday_level_dynamics.py"
+        ],
+        "symbols": [
+          {
+            "path": "strategies/dealer_positioning/scripts/build_intraday_level_dynamics.py",
+            "name": "compute_intraday_dynamics",
+            "kind": "function"
+          }
+        ]
+      }
     }
   ],
   "edges": [
-    {"id": "root.inputs.fabric", "source": "domain.inputs", "target": "domain.fabric", "type": "data", "visibility": "public", "public": {"label": "timestamped data"}},
-    {"id": "root.fabric.context", "source": "domain.fabric", "target": "domain.context", "type": "feature", "visibility": "public", "public": {"label": "causal context"}},
-    {"id": "root.fabric.strategies", "source": "domain.fabric", "target": "domain.strategies", "type": "feature", "visibility": "public", "public": {"label": "model-ready features"}},
-    {"id": "root.context.strategies", "source": "domain.context", "target": "domain.strategies", "type": "signal", "visibility": "public", "public": {"label": "context signals"}},
-    {"id": "root.strategies.execution", "source": "domain.strategies", "target": "domain.execution", "type": "policy", "visibility": "public", "public": {"label": "ranked intent"}},
-    {"id": "root.execution.research", "source": "domain.execution", "target": "domain.research", "type": "audit", "visibility": "public", "public": {"label": "audit + outcomes"}},
-    {"id": "root.research.fabric", "source": "domain.research", "target": "domain.fabric", "type": "research", "visibility": "public", "public": {"label": "validated definitions"}},
-
-    {"id": "input.market.artifacts", "source": "input.market", "target": "input.artifacts", "type": "data", "visibility": "public", "public": {"label": "snapshots"}},
-    {"id": "input.context.artifacts", "source": "input.context", "target": "input.artifacts", "type": "data", "visibility": "public", "public": {"label": "records"}},
-
-    {"id": "fabric.time.bars", "source": "fabric.time", "target": "fabric.bars", "type": "control", "visibility": "public", "public": {"label": "sessions"}},
-    {"id": "fabric.bars.features", "source": "fabric.bars", "target": "fabric.features", "type": "data", "visibility": "public", "public": {"label": "completed bars"}},
-    {"id": "fabric.features.readiness", "source": "fabric.features", "target": "fabric.readiness", "type": "control", "visibility": "public", "public": {"label": "freshness"}},
-
-    {"id": "context.news.meta", "source": "context.news", "target": "context.meta", "type": "signal", "visibility": "public", "public": {"label": "news features"}},
-    {"id": "context.events.meta", "source": "context.events", "target": "context.meta", "type": "signal", "visibility": "public", "public": {"label": "event features"}},
-    {"id": "context.themes.meta", "source": "context.themes", "target": "context.meta", "type": "signal", "visibility": "public", "public": {"label": "theme features"}},
-    {"id": "context.social.meta", "source": "context.social", "target": "context.meta", "type": "signal", "visibility": "public", "public": {"label": "attention features"}},
-
-    {"id": "strategy.dealer.ranker", "source": "strategy.dealer", "target": "strategy.dealer_ranker", "type": "signal", "visibility": "public", "public": {"label": "dealer rankings"}},
-    {"id": "strategy.dealer.structure", "source": "strategy.dealer", "target": "strategy.structure", "type": "signal", "visibility": "public", "public": {"label": "dealer plate"}},
-    {"id": "strategy.meta.context", "source": "context.meta", "target": "strategy.meta", "type": "feature", "visibility": "public", "public": {"label": "meta matrix"}},
-
-    {"id": "momentum.inputs.features", "source": "momentum.inputs", "target": "momentum.features", "type": "data", "visibility": "public", "public": {"label": "aligned bars"}},
-    {"id": "momentum.features.model", "source": "momentum.features", "target": "momentum.model", "type": "feature", "visibility": "public", "public": {"label": "matrix"}},
-    {"id": "momentum.model.signal", "source": "momentum.model", "target": "momentum.signal", "type": "signal", "visibility": "public", "public": {"label": "ranked scores"}},
-    {"id": "momentum.signal.policy", "source": "momentum.signal", "target": "momentum.policy", "type": "policy", "visibility": "public", "public": {"label": "eligible targets"}},
-    {"id": "momentum.policy.execution", "source": "momentum.policy", "target": "momentum.execution", "type": "execution", "visibility": "public", "public": {"label": "execution plan"}},
-    {"id": "momentum.execution.audit", "source": "momentum.execution", "target": "momentum.audit", "type": "audit", "visibility": "public", "public": {"label": "intent + outcome"}},
-    {"id": "momentum.audit.policy", "source": "momentum.audit", "target": "momentum.policy", "type": "research", "visibility": "public", "public": {"label": "validated policy"}},
-
-    {"id": "swing.inputs.features", "source": "swing.inputs", "target": "swing.features", "type": "data", "visibility": "public", "public": {"label": "aligned bars"}},
-    {"id": "swing.features.model", "source": "swing.features", "target": "swing.model", "type": "feature", "visibility": "public", "public": {"label": "training/live features"}},
-    {"id": "swing.model.signal", "source": "swing.model", "target": "swing.signal", "type": "signal", "visibility": "public", "public": {"label": "probabilities + ranks"}},
-    {"id": "swing.signal.policy", "source": "swing.signal", "target": "swing.policy", "type": "policy", "visibility": "public", "public": {"label": "confirmed targets"}},
-    {"id": "swing.policy.execution", "source": "swing.policy", "target": "swing.execution", "type": "execution", "visibility": "public", "public": {"label": "orders + management"}},
-    {"id": "swing.execution.audit", "source": "swing.execution", "target": "swing.audit", "type": "audit", "visibility": "public", "public": {"label": "fills + exits"}},
-    {"id": "swing.audit.policy", "source": "swing.audit", "target": "swing.policy", "type": "research", "visibility": "public", "public": {"label": "policy forensics"}},
-
-    {"id": "execution.shared.risk", "source": "execution.shared", "target": "execution.risk", "type": "control", "visibility": "public", "public": {"label": "policy state"}},
-    {"id": "execution.gates.risk", "source": "execution.gates", "target": "execution.risk", "type": "policy", "visibility": "public", "public": {"label": "approved intent"}},
-    {"id": "execution.risk.broker", "source": "execution.risk", "target": "execution.broker", "type": "execution", "visibility": "public", "public": {"label": "gated order"}},
-    {"id": "execution.broker.audit", "source": "execution.broker", "target": "execution.audit", "type": "audit", "visibility": "public", "public": {"label": "authoritative response"}},
-    {"id": "execution.reconcile.audit", "source": "execution.reconcile", "target": "execution.audit", "type": "control", "visibility": "local", "public": {"label": "ownership"}},
-
-    {"id": "research.pipeline.evaluation", "source": "research.pipeline", "target": "research.evaluation", "type": "research", "visibility": "public", "public": {"label": "frozen protocol"}},
-    {"id": "research.evaluation.reports", "source": "research.evaluation", "target": "research.reports", "type": "audit", "visibility": "public", "public": {"label": "evidence"}},
-    {"id": "research.operations.dashboards", "source": "research.operations", "target": "research.dashboards", "type": "control", "visibility": "local", "public": {"label": "runtime state"}},
-    {"id": "research.dashboards.reports", "source": "research.dashboards", "target": "research.reports", "type": "audit", "visibility": "public", "public": {"label": "operator review"}}
+    {
+      "id": "root.inputs.fabric",
+      "source": "domain.inputs",
+      "target": "domain.fabric",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "timestamped data"
+      }
+    },
+    {
+      "id": "root.fabric.context",
+      "source": "domain.fabric",
+      "target": "domain.context",
+      "type": "feature",
+      "visibility": "public",
+      "public": {
+        "label": "causal context"
+      }
+    },
+    {
+      "id": "root.fabric.strategies",
+      "source": "domain.fabric",
+      "target": "domain.strategies",
+      "type": "feature",
+      "visibility": "public",
+      "public": {
+        "label": "model-ready features"
+      }
+    },
+    {
+      "id": "root.context.strategies",
+      "source": "domain.context",
+      "target": "domain.strategies",
+      "type": "signal",
+      "visibility": "public",
+      "public": {
+        "label": "context signals"
+      }
+    },
+    {
+      "id": "root.strategies.execution",
+      "source": "domain.strategies",
+      "target": "domain.execution",
+      "type": "policy",
+      "visibility": "public",
+      "public": {
+        "label": "ranked intent"
+      }
+    },
+    {
+      "id": "root.execution.research",
+      "source": "domain.execution",
+      "target": "domain.research",
+      "type": "audit",
+      "visibility": "public",
+      "public": {
+        "label": "audit + outcomes"
+      }
+    },
+    {
+      "id": "root.research.fabric",
+      "source": "domain.research",
+      "target": "domain.fabric",
+      "type": "research",
+      "visibility": "public",
+      "public": {
+        "label": "validated definitions"
+      }
+    },
+    {
+      "id": "input.market.artifacts",
+      "source": "input.market",
+      "target": "input.artifacts",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "snapshots"
+      }
+    },
+    {
+      "id": "input.context.artifacts",
+      "source": "input.context",
+      "target": "input.artifacts",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "records"
+      }
+    },
+    {
+      "id": "fabric.time.bars",
+      "source": "fabric.time",
+      "target": "fabric.bars",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "sessions"
+      }
+    },
+    {
+      "id": "fabric.bars.features",
+      "source": "fabric.bars",
+      "target": "fabric.features",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "completed bars"
+      }
+    },
+    {
+      "id": "fabric.features.readiness",
+      "source": "fabric.features",
+      "target": "fabric.readiness",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "freshness"
+      }
+    },
+    {
+      "id": "context.news.meta",
+      "source": "context.news",
+      "target": "context.meta",
+      "type": "signal",
+      "visibility": "public",
+      "public": {
+        "label": "news features"
+      }
+    },
+    {
+      "id": "context.events.meta",
+      "source": "context.events",
+      "target": "context.meta",
+      "type": "signal",
+      "visibility": "public",
+      "public": {
+        "label": "event features"
+      }
+    },
+    {
+      "id": "context.themes.meta",
+      "source": "context.themes",
+      "target": "context.meta",
+      "type": "signal",
+      "visibility": "public",
+      "public": {
+        "label": "theme features"
+      }
+    },
+    {
+      "id": "context.social.meta",
+      "source": "context.social",
+      "target": "context.meta",
+      "type": "signal",
+      "visibility": "public",
+      "public": {
+        "label": "attention features"
+      }
+    },
+    {
+      "id": "strategy.dealer.ranker",
+      "source": "strategy.dealer",
+      "target": "strategy.dealer_ranker",
+      "type": "signal",
+      "visibility": "public",
+      "public": {
+        "label": "dealer rankings"
+      }
+    },
+    {
+      "id": "strategy.dealer.structure",
+      "source": "strategy.dealer",
+      "target": "strategy.structure",
+      "type": "signal",
+      "visibility": "public",
+      "public": {
+        "label": "dealer plate"
+      }
+    },
+    {
+      "id": "strategy.meta.context",
+      "source": "context.meta",
+      "target": "strategy.meta",
+      "type": "feature",
+      "visibility": "public",
+      "public": {
+        "label": "meta matrix"
+      }
+    },
+    {
+      "id": "momentum.inputs.features",
+      "source": "momentum.inputs",
+      "target": "momentum.features",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "aligned bars"
+      }
+    },
+    {
+      "id": "momentum.features.model",
+      "source": "momentum.features",
+      "target": "momentum.model",
+      "type": "feature",
+      "visibility": "public",
+      "public": {
+        "label": "matrix"
+      }
+    },
+    {
+      "id": "momentum.model.signal",
+      "source": "momentum.model",
+      "target": "momentum.signal",
+      "type": "signal",
+      "visibility": "public",
+      "public": {
+        "label": "ranked scores"
+      }
+    },
+    {
+      "id": "momentum.signal.policy",
+      "source": "momentum.signal",
+      "target": "momentum.policy",
+      "type": "policy",
+      "visibility": "public",
+      "public": {
+        "label": "eligible targets"
+      }
+    },
+    {
+      "id": "momentum.policy.execution",
+      "source": "momentum.policy",
+      "target": "momentum.execution",
+      "type": "execution",
+      "visibility": "public",
+      "public": {
+        "label": "execution plan"
+      }
+    },
+    {
+      "id": "momentum.execution.audit",
+      "source": "momentum.execution",
+      "target": "momentum.audit",
+      "type": "audit",
+      "visibility": "public",
+      "public": {
+        "label": "intent + outcome"
+      }
+    },
+    {
+      "id": "momentum.audit.policy",
+      "source": "momentum.audit",
+      "target": "momentum.policy",
+      "type": "research",
+      "visibility": "public",
+      "public": {
+        "label": "validated policy"
+      }
+    },
+    {
+      "id": "swing.inputs.features",
+      "source": "swing.inputs",
+      "target": "swing.features",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "aligned bars"
+      }
+    },
+    {
+      "id": "swing.features.model",
+      "source": "swing.features",
+      "target": "swing.model",
+      "type": "feature",
+      "visibility": "public",
+      "public": {
+        "label": "training/live features"
+      }
+    },
+    {
+      "id": "swing.model.signal",
+      "source": "swing.model",
+      "target": "swing.signal",
+      "type": "signal",
+      "visibility": "public",
+      "public": {
+        "label": "probabilities + ranks"
+      }
+    },
+    {
+      "id": "swing.signal.policy",
+      "source": "swing.signal",
+      "target": "swing.policy",
+      "type": "policy",
+      "visibility": "public",
+      "public": {
+        "label": "confirmed targets"
+      }
+    },
+    {
+      "id": "swing.policy.execution",
+      "source": "swing.policy",
+      "target": "swing.execution",
+      "type": "execution",
+      "visibility": "public",
+      "public": {
+        "label": "orders + management"
+      }
+    },
+    {
+      "id": "swing.execution.audit",
+      "source": "swing.execution",
+      "target": "swing.audit",
+      "type": "audit",
+      "visibility": "public",
+      "public": {
+        "label": "fills + exits"
+      }
+    },
+    {
+      "id": "swing.audit.policy",
+      "source": "swing.audit",
+      "target": "swing.policy",
+      "type": "research",
+      "visibility": "public",
+      "public": {
+        "label": "policy forensics"
+      }
+    },
+    {
+      "id": "execution.shared.risk",
+      "source": "execution.shared",
+      "target": "execution.risk",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "policy state"
+      }
+    },
+    {
+      "id": "execution.gates.risk",
+      "source": "execution.gates",
+      "target": "execution.risk",
+      "type": "policy",
+      "visibility": "public",
+      "public": {
+        "label": "approved intent"
+      }
+    },
+    {
+      "id": "execution.risk.broker",
+      "source": "execution.risk",
+      "target": "execution.broker",
+      "type": "execution",
+      "visibility": "public",
+      "public": {
+        "label": "gated order"
+      }
+    },
+    {
+      "id": "execution.broker.audit",
+      "source": "execution.broker",
+      "target": "execution.audit",
+      "type": "audit",
+      "visibility": "public",
+      "public": {
+        "label": "authoritative response"
+      }
+    },
+    {
+      "id": "execution.reconcile.audit",
+      "source": "execution.reconcile",
+      "target": "execution.audit",
+      "type": "control",
+      "visibility": "local",
+      "public": {
+        "label": "ownership"
+      }
+    },
+    {
+      "id": "research.pipeline.evaluation",
+      "source": "research.pipeline",
+      "target": "research.evaluation",
+      "type": "research",
+      "visibility": "public",
+      "public": {
+        "label": "frozen protocol"
+      }
+    },
+    {
+      "id": "research.evaluation.reports",
+      "source": "research.evaluation",
+      "target": "research.reports",
+      "type": "audit",
+      "visibility": "public",
+      "public": {
+        "label": "evidence"
+      }
+    },
+    {
+      "id": "research.operations.dashboards",
+      "source": "research.operations",
+      "target": "research.dashboards",
+      "type": "control",
+      "visibility": "local",
+      "public": {
+        "label": "runtime state"
+      }
+    },
+    {
+      "id": "research.dashboards.reports",
+      "source": "research.dashboards",
+      "target": "research.reports",
+      "type": "audit",
+      "visibility": "public",
+      "public": {
+        "label": "operator review"
+      }
+    },
+    {
+      "id": "gov.adapters.contracts",
+      "source": "ns.adapters",
+      "target": "ns.contracts",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "typed states"
+      }
+    },
+    {
+      "id": "gov.contracts.context",
+      "source": "ns.contracts",
+      "target": "ns.context",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "state envelopes"
+      }
+    },
+    {
+      "id": "gov.context.policy",
+      "source": "ns.context",
+      "target": "ns.policy",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "context snapshot"
+      }
+    },
+    {
+      "id": "gov.policy.coordinator",
+      "source": "ns.policy",
+      "target": "ns.coordinator",
+      "type": "policy",
+      "visibility": "public",
+      "public": {
+        "label": "policy decision"
+      }
+    },
+    {
+      "id": "gov.coordinator.execution",
+      "source": "ns.coordinator",
+      "target": "ns.execution",
+      "type": "execution",
+      "visibility": "public",
+      "public": {
+        "label": "order request"
+      }
+    },
+    {
+      "id": "gov.execution.persistence",
+      "source": "ns.execution",
+      "target": "ns.persistence",
+      "type": "audit",
+      "visibility": "public",
+      "public": {
+        "label": "fills + journal"
+      }
+    },
+    {
+      "id": "gov.context.persistence",
+      "source": "ns.context",
+      "target": "ns.persistence",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "state reads"
+      }
+    },
+    {
+      "id": "gov.persistence.coordinator",
+      "source": "ns.persistence",
+      "target": "ns.coordinator",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "decision records"
+      }
+    },
+    {
+      "id": "gov.preflight.context",
+      "source": "ns.preflight",
+      "target": "ns.context",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "read-only rehearsal"
+      }
+    },
+    {
+      "id": "runtime.supervisor.server",
+      "source": "runtime.supervisor",
+      "target": "runtime.server",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "start / stop / escalate"
+      }
+    },
+    {
+      "id": "runtime.server.schedule",
+      "source": "runtime.server",
+      "target": "runtime.schedule",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "loop threads"
+      }
+    },
+    {
+      "id": "runtime.schedule.guards",
+      "source": "runtime.schedule",
+      "target": "runtime.guards",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "single-flight request"
+      }
+    },
+    {
+      "id": "runtime.guards.jobs",
+      "source": "runtime.guards",
+      "target": "runtime.jobs",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "admitted heavy job"
+      }
+    },
+    {
+      "id": "runtime.jobs.dashboards",
+      "source": "runtime.jobs",
+      "target": "runtime.dashboards",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "refreshed artifacts"
+      }
+    },
+    {
+      "id": "runtime.server.dashboards",
+      "source": "runtime.server",
+      "target": "runtime.dashboards",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "hosted ports"
+      }
+    },
+    {
+      "id": "runtime.recovery.server",
+      "source": "runtime.recovery",
+      "target": "runtime.server",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "restart + reconcile"
+      }
+    },
+    {
+      "id": "dealer.chain.levels",
+      "source": "dealer.chain",
+      "target": "dealer.levels",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "chain rows + greeks"
+      }
+    },
+    {
+      "id": "dealer.levels.matrix",
+      "source": "dealer.levels",
+      "target": "dealer.matrix",
+      "type": "feature",
+      "visibility": "public",
+      "public": {
+        "label": "walls / magnets / flip"
+      }
+    },
+    {
+      "id": "dealer.matrix.snapshots",
+      "source": "dealer.matrix",
+      "target": "dealer.snapshots",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "daily rows"
+      }
+    },
+    {
+      "id": "dealer.snapshots.dynamics",
+      "source": "dealer.snapshots",
+      "target": "dealer.dynamics",
+      "type": "feature",
+      "visibility": "public",
+      "public": {
+        "label": "snapshot history"
+      }
+    },
+    {
+      "id": "dealer.snapshots.gate",
+      "source": "dealer.snapshots",
+      "target": "dealer.gate",
+      "type": "policy",
+      "visibility": "public",
+      "public": {
+        "label": "level summary"
+      }
+    },
+    {
+      "id": "dealer.snapshots.rankings",
+      "source": "dealer.snapshots",
+      "target": "dealer.rankings",
+      "type": "signal",
+      "visibility": "public",
+      "public": {
+        "label": "positioning features"
+      }
+    },
+    {
+      "id": "dealer.snapshots.adapter",
+      "source": "dealer.snapshots",
+      "target": "dealer.adapter",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "snapshot row (unpublished)"
+      }
+    },
+    {
+      "id": "strategy.dealer.momentum",
+      "source": "strategy.dealer",
+      "target": "strategy.momentum",
+      "type": "policy",
+      "visibility": "public",
+      "public": {
+        "label": "structural veto"
+      }
+    },
+    {
+      "id": "strategy.dealer.htf",
+      "source": "strategy.dealer",
+      "target": "strategy.htf",
+      "type": "policy",
+      "visibility": "public",
+      "public": {
+        "label": "structural veto"
+      }
+    },
+    {
+      "id": "strategy.dealer.meta",
+      "source": "strategy.dealer",
+      "target": "strategy.meta",
+      "type": "policy",
+      "visibility": "public",
+      "public": {
+        "label": "structural veto"
+      }
+    },
+    {
+      "id": "strategy.dealer.swing",
+      "source": "strategy.dealer",
+      "target": "strategy.swing",
+      "type": "policy",
+      "visibility": "public",
+      "public": {
+        "label": "structural veto"
+      }
+    },
+    {
+      "id": "strategy.dealer.spy",
+      "source": "strategy.dealer",
+      "target": "strategy.spy",
+      "type": "research",
+      "visibility": "local",
+      "public": {
+        "label": "offline context export"
+      }
+    },
+    {
+      "id": "root.strategies.governance",
+      "source": "domain.strategies",
+      "target": "domain.governance",
+      "type": "policy",
+      "visibility": "public",
+      "public": {
+        "label": "trade intent"
+      }
+    },
+    {
+      "id": "root.context.governance",
+      "source": "domain.context",
+      "target": "domain.governance",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "context states"
+      }
+    },
+    {
+      "id": "root.fabric.governance",
+      "source": "domain.fabric",
+      "target": "domain.governance",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "readiness + bars"
+      }
+    },
+    {
+      "id": "root.governance.execution",
+      "source": "domain.governance",
+      "target": "domain.execution",
+      "type": "execution",
+      "visibility": "public",
+      "public": {
+        "label": "approved orders"
+      }
+    },
+    {
+      "id": "root.governance.research",
+      "source": "domain.governance",
+      "target": "domain.research",
+      "type": "audit",
+      "visibility": "public",
+      "public": {
+        "label": "decision records"
+      }
+    },
+    {
+      "id": "root.runtime.fabric",
+      "source": "domain.runtime",
+      "target": "domain.fabric",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "scheduling + guards"
+      }
+    },
+    {
+      "id": "root.runtime.strategies",
+      "source": "domain.runtime",
+      "target": "domain.strategies",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "module lifecycle"
+      }
+    },
+    {
+      "id": "root.runtime.governance",
+      "source": "domain.runtime",
+      "target": "domain.governance",
+      "type": "control",
+      "visibility": "public",
+      "public": {
+        "label": "process lifecycle"
+      }
+    },
+    {
+      "id": "root.runtime.research",
+      "source": "domain.runtime",
+      "target": "domain.research",
+      "type": "audit",
+      "visibility": "public",
+      "public": {
+        "label": "runtime state"
+      }
+    },
+    {
+      "id": "dealer.levels.topology",
+      "source": "dealer.levels",
+      "target": "dealer.topology",
+      "type": "feature",
+      "visibility": "public",
+      "public": {
+        "label": "unsigned structure"
+      }
+    },
+    {
+      "id": "dealer.levels.stability",
+      "source": "dealer.levels",
+      "target": "dealer.stability",
+      "type": "feature",
+      "visibility": "public",
+      "public": {
+        "label": "IV-shocked levels"
+      }
+    },
+    {
+      "id": "dealer.topology.matrix",
+      "source": "dealer.topology",
+      "target": "dealer.matrix",
+      "type": "feature",
+      "visibility": "public",
+      "public": {
+        "label": "topology features"
+      }
+    },
+    {
+      "id": "dealer.matrix.confidence",
+      "source": "dealer.matrix",
+      "target": "dealer.confidence",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "chain quality"
+      }
+    },
+    {
+      "id": "dealer.confidence.adapter",
+      "source": "dealer.confidence",
+      "target": "dealer.adapter",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "reliability weights"
+      }
+    },
+    {
+      "id": "dealer.chain.intraday",
+      "source": "dealer.chain",
+      "target": "dealer.intraday_dynamics",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "one-minute ladders"
+      }
+    },
+    {
+      "id": "dealer.dynamics.rankings",
+      "source": "dealer.dynamics",
+      "target": "dealer.rankings",
+      "type": "feature",
+      "visibility": "public",
+      "public": {
+        "label": "change + velocity"
+      }
+    },
+    {
+      "id": "strategy.dealer.governance",
+      "source": "strategy.dealer",
+      "target": "domain.governance",
+      "type": "data",
+      "visibility": "public",
+      "public": {
+        "label": "dealer state"
+      }
+    }
   ]
 }

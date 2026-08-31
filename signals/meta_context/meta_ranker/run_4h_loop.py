@@ -22,6 +22,7 @@ A skipped stage is only accepted with a freshness certificate.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import subprocess
 import sys
@@ -33,6 +34,8 @@ from typing import Callable, Sequence
 from core.live_job_guard import heavy_job_guard
 from core.nervous_system.orchestration.jobs import Stage, StageStatus, run_stages
 
+logger = logging.getLogger(__name__)
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 PY = sys.executable
@@ -42,6 +45,24 @@ PY = sys.executable
 # (both resolve it as HERE / "meta_ranker_matrix.parquet").
 MATRIX_PATH = HERE / "meta_ranker_matrix.parquet"
 MAX_MATRIX_AGE_SEC = 6 * 3600
+
+# How long the runner stage may take before it is killed.
+#
+# This was 900s and it bit: on 2026-08-25 the 14:20 ET pass was killed at 901s
+# and exited 1, so Meta produced no order plan at all for the 14:00 UTC bar —
+# no entries, no exits, and no audit row for the bar. The 16:20 pass ran the
+# same command in 23s. The box was loaded (momentum was rebuilding a 2,709
+# ticker feature panel in ~403s over the same window) and every runner input is
+# remote — Postgres for the context snapshots, Schwab for the option chains —
+# so the pass is slow, not stuck, and 900s is simply too tight a budget for a
+# heavy afternoon.
+#
+# Raising the ceiling does not make a genuinely hung run harmless: SIGKILL from
+# subprocess.run lands wherever the runner happens to be, and mid-plan that
+# loses the state write that records what was already submitted. A longer
+# budget makes that outcome rarer; it is not a substitute for finding out why a
+# pass ever takes a quarter of an hour.
+RUNNER_TIMEOUT_SEC = int(os.environ.get("META_RANKER_RUNNER_TIMEOUT_SEC", "1800"))
 
 
 @dataclass
@@ -70,6 +91,21 @@ def _run_subprocess(label: str, argv: list[str], timeout: int) -> int:
     t0 = time.time()
     try:
         rc = subprocess.run(argv, cwd=str(REPO), env=env, timeout=timeout).returncode
+    except subprocess.TimeoutExpired:
+        # Loud and specific. A timeout is not the same failure as a non-zero
+        # exit: the stage was killed part-way, so whatever it had already done
+        # is neither finished nor rolled back. Logged at ERROR with the budget
+        # named so the fix (raise it, or find the stall) is obvious from the
+        # line alone — the previous generic handler printed one `!` line that
+        # read like any other error.
+        logger.error(
+            "%s: KILLED after %ds (timeout=%ds) — the stage was cut off "
+            "mid-run, so its work is neither complete nor undone; raise "
+            "META_RANKER_RUNNER_TIMEOUT_SEC or find the stall",
+            label, time.time() - t0, timeout,
+        )
+        print(f"  ! {label}: TIMEOUT after {timeout}s — killed", flush=True)
+        rc = 1
     except Exception as exc:  # noqa: BLE001
         print(f"  ! {label}: {type(exc).__name__}: {exc}")
         rc = 1
@@ -161,7 +197,7 @@ def run_once(
         argv = [PY, str(HERE / "live_runner.py"), "--mode", args.mode, "--top-k", str(args.top_k)]
         if args.submit:
             argv.append("--submit")
-        return _run_subprocess("4/4 runner", argv, timeout=900)
+        return _run_subprocess("4/4 runner", argv, timeout=RUNNER_TIMEOUT_SEC)
 
     needs_heavy = not (args.skip_bars and args.skip_feeds and args.skip_matrix)
     if needs_heavy:

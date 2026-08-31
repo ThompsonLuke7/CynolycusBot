@@ -385,6 +385,7 @@ class _RecordingSnapshotRepository:
         self.requested_state_types = None
         self.requested_decision_time = None
         self.saved_snapshots = []
+        self.commits = 0
 
     def get_state_candidates_for_snapshot(self, state_types, decision_time):
         self.candidate_calls += 1
@@ -395,6 +396,49 @@ class _RecordingSnapshotRepository:
     def save_context_snapshot_idempotently(self, snapshot):
         self.saved_snapshots.append(snapshot)
         return snapshot
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+def test_the_builder_ends_its_transaction_after_persisting() -> None:
+    """The builder owns a long-lived session; an unclosed write deadlocks.
+
+    `build_router` constructs the builder with one session that lives for the
+    whole process. The snapshot insert locks the new snapshot_id until the
+    transaction ends, and the DecisionCoordinator then inserts the SAME
+    snapshot_id through a separate UnitOfWork — so leaving this transaction
+    open makes the second session block on the first while the first waits on
+    the caller blocked on the second. meta_ranker's 2026-08-26 09:35 pre-open
+    flush hung exactly that way and still held the lock 13 hours later.
+    """
+
+    repository = _RecordingSnapshotRepository()
+    profile = SnapshotProfile(
+        profile_id="commit-boundary@1",
+        rules=(
+            FreshnessRule(
+                StateType.TICKER,
+                False,
+                timedelta(hours=1),
+                MissingStateAction.WARN,
+            ),
+        ),
+    )
+
+    SnapshotBuilder(repository).build(
+        strategy_id="commit-boundary",
+        entity_id=TICKER,
+        decision_time=DECISION_1420,
+        decision_bar=DECISION_BAR,
+        profile=profile,
+    )
+
+    assert repository.saved_snapshots, "the snapshot must still be persisted"
+    assert repository.commits == 1, (
+        "the builder must end its transaction after persisting, or it holds a "
+        "row lock for the life of the process"
+    )
 
 
 def test_profiles_are_frozen_versioned_and_have_the_same_required_surface():

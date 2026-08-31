@@ -51,7 +51,11 @@ from core.live_4h_exec import (
     defer_exits_if_opg_unavailable,
     drop_failed_entry,
     exit_action as _shared_exit_action,
+    init_dispositions,
+    managed_key_for_symbol,
+    mark_entry_disposition,
     mark_entry_unconfirmed,
+    mark_plan_gone,
     record_exit_realized_pnl,
     shares_for_notional,
     submit_option_exit_with_ladder,
@@ -395,12 +399,15 @@ def _execute(
     silently orphaned.
     """
     limits = limits or {}
+    disp = init_dispositions(plan)
     if args.submit:
         # After the close, queue entries for the next open instead of erroring on
         # them — BEFORE the readiness gate, which is re-applied at flush time by
         # submit_pending_open_entries. See core.live_4h_exec.execute_plan for why
         # the reverse order silently discarded every after-close entry.
+        _before = list(plan)
         plan = defer_entries_if_market_closed(module, bar, plan, new_managed, limits)
+        mark_plan_gone(disp, _before, plan, "deferred_entry_market_closed")
         # Exits are deferred separately and AFTER entries — see
         # core.live_4h_exec.execute_plan. Without this an after-close exit is
         # submitted into a window the broker refuses (equity opg 403 / options
@@ -411,9 +418,13 @@ def _execute(
         # deferred exit never reaches submission, so without this the position is
         # held at the broker and claimed by nobody. That is what let Swing adopt
         # HTF's VSH on 2026-08-11 while HTF's own deferred exit was still queued.
+        _before = list(plan)
         plan = defer_exits_if_opg_unavailable(module, bar, plan, limits,
                                               new_managed=new_managed, exit_context=exit_context)
+        mark_plan_gone(disp, _before, plan, "deferred_exit_opg_unavailable")
         plan, skipped, reason = filter_entry_orders_for_readiness(plan, new_managed=new_managed)
+        for _sym in skipped:
+            disp[str(_sym)] = f"readiness_skipped:{reason}"
         if skipped:
             print(f"\nreadiness gate: skipped {len(skipped)} entry orders ({reason})")
         if plan:
@@ -437,15 +448,24 @@ def _execute(
                         resp = client.submit_order(symbol=sym, qty=qty, side=side,
                                                    order_type="market", time_in_force=equity_order_tif())
                     print(f"  OK {side} {qty} {sym}  id={resp.get('id', '?')}")
+                    disp[str(sym)] = "submitted"
                     if str(side).strip().lower() == "buy":
                         # Accepted != filled. See core.live_4h_exec.mark_entry_unconfirmed.
-                        mark_entry_unconfirmed(new_managed, sym, resp)
+                        mark_entry_unconfirmed(new_managed, sym, resp, client=client)
+                        mark_entry_disposition(disp, new_managed, sym)
                     if str(side).strip().lower() == "sell":
                         es = exit_context.get(sym, (None, None))[1] if exit_context else None
+                        if es is None and new_managed:
+                            # A trim is not in exit_context; recover the entry
+                            # lineage from live managed state. See execute_plan.
+                            _tk = managed_key_for_symbol(new_managed, sym)
+                            if _tk is not None and isinstance(new_managed.get(_tk), dict):
+                                es = new_managed[_tk]
                         record_exit_realized_pnl(client, module=module, item=item, resp=resp,
                                                  entry_state=es, pos_lookup=pos_lookup, bar=bar)
                 except Exception as exc:  # noqa: BLE001
                     print(f"  FAIL {side} {qty} {sym}: {exc}")
+                    disp[str(sym)] = f"submit_failed:{type(exc).__name__}"
                     if exit_context and sym in exit_context:
                         tkr, st = exit_context[sym]
                         new_managed[tkr] = st
@@ -464,7 +484,8 @@ def _execute(
                     state["managed"] = new_managed
                     _save_state(state)
         state["managed"] = new_managed
-        _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits, contract_selection, dropped)
+        _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits,
+                                 contract_selection, dropped, dispositions=disp)
         if plan:
             state.setdefault("history", []).append(
                 {
@@ -485,7 +506,8 @@ def _execute(
 
 
 def _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audits,
-                             contract_selection=None, dropped=None) -> None:
+                             contract_selection=None, dropped=None, *,
+                             dispositions=None) -> None:
     audit_log = Path(args.signal_audit_log) if str(args.signal_audit_log or "").strip() else None
     append_jsonl(
         audit_log,
@@ -501,6 +523,16 @@ def _append_order_plan_audit(args, bar, targets, plan, signal_audits, order_audi
                  "route": p[4] if len(p) > 4 else args.mode}
                 for p in plan
             ],
+            # What became of each planned row. `plan` records intent and the
+            # closed-trade ledger records fills; the reason a planned entry
+            # never became a position lived nowhere until this.
+            "planned": [
+                {"symbol": p[0], "side": p[1], "qty": p[2], "reason": p[3],
+                 "route": p[4] if len(p) > 4 else args.mode,
+                 "disposition": (dispositions or {}).get(str(p[0]), "submitted")}
+                for p in plan
+            ],
+            "dispositions": dispositions or {},
             "signal_audits": signal_audits or {},
             "order_audits": order_audits or {},
             "contract_selection": contract_selection or {},

@@ -183,6 +183,9 @@ log "supervised launch: MALLOC_ARENA_MAX=$MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD
 log "combined_server args: ${SERVER_ARGS[*]:-(none)}"
 
 # --- restart loop with crash-loop backoff -------------------------------------
+# combined_server exits with this code when another instance already holds the
+# dashboard ports. Kept in sync with EX_PORT_CONFLICT in UI/combined_server.py.
+_EX_PORT_CONFLICT=78
 fast_fails=0
 while true; do
   start_ts=$(date +%s)
@@ -219,6 +222,18 @@ while true; do
 
   if [ "$rc" -eq 0 ]; then
     log "combined_server exited cleanly (rc=0) — not restarting"
+    break
+  fi
+  if [ "$rc" -eq "$_EX_PORT_CONFLICT" ]; then
+    # Retrying cannot win this: the ports belong to a live (or stopped-but-still
+    # listening) combined_server, and backing off only makes the loop quieter.
+    # On 2026-08-24 a manual restart left the old instance holding the sockets
+    # and this loop fast-failed nine times over 28 minutes before a human
+    # noticed. Stop, and say what to do about it.
+    log "combined_server refused to start: another instance owns the dashboard ports."
+    log "  Not restarting — a retry cannot free them. Find the owner with:"
+    log "    ss -ltnp | grep -E ':(876[4-9]|877[0-4])'"
+    log "  Then stop it (or this supervisor) and relaunch."
     break
   fi
   if [ "$rc" -eq 137 ]; then

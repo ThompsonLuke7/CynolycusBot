@@ -143,7 +143,28 @@ class SnapshotBuilder:
             snapshot_id=snapshot_id,
             **common,
         )
-        return self._repository.save_context_snapshot_idempotently(snapshot)
+        persisted = self._repository.save_context_snapshot_idempotently(snapshot)
+        # End the transaction here, before returning.
+        #
+        # This builder owns a single long-lived session (build_router creates it
+        # once via `SnapshotBuilder(StateRepository(session_factory()))`), and
+        # the insert above takes a lock on the new snapshot_id that is held
+        # until the transaction ends. The DecisionCoordinator then persists the
+        # decision chain through a SEPARATE UnitOfWork, and `save_chain` inserts
+        # the SAME snapshot_id — `ON CONFLICT DO NOTHING` still has to wait on
+        # an uncommitted conflicting key, so that second session blocked on
+        # this one, while this one waited on the caller that was blocked on the
+        # second. One process, two connections, deadlocked against itself, with
+        # no lock_timeout to break it.
+        #
+        # That is not hypothetical: meta_ranker's 2026-08-26 09:35 pre-open
+        # flush hung exactly this way and was still holding the lock 13 hours
+        # later. See research/daily_live_reports/2026-08-26.md.
+        #
+        # Committing also stops a read-only build from pinning an idle
+        # transaction open for the life of the process, which blocks vacuum.
+        self._repository.commit()
+        return persisted
 
 
 __all__ = ["SnapshotBuilder"]

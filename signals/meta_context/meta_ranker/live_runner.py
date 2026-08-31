@@ -63,6 +63,7 @@ from core.live_4h_exec import (
     defer_exits_if_opg_unavailable,
     drop_failed_entry,
     exit_action as _shared_exit_action,
+    managed_key_for_symbol,
     mark_entry_unconfirmed,
     record_exit_realized_pnl,
     shares_for_notional,
@@ -912,12 +913,52 @@ def governed_submitter(args, *, bar, module: str = AUDIT_MODULE,
     built without scores turns every queued entry into a skip. The pre-open
     flush only submits names that are still in today's top-K, so today's scores
     are the evidence the decision is actually being re-made on.
+
+    Entries also need a decision-bar reference price. ``_route_one`` sizes an
+    ENTRY as ``shares_for_notional(price, policy_budget)`` and refuses
+    ``NO_REFERENCE_PRICE`` when it has none, so a submitter built with an empty
+    price map rejects *every* queued entry unconditionally — the same shape of
+    bug as the empty quote map above, one layer over. That is what refused all
+    four of meta_ranker's queued 2026-08-24 entries on the 2026-08-25 flush
+    (MRNA/PLUG/ASST/BBCP, ``submitted=0 skipped=10``) while HTF and Momentum
+    flushed the same market minutes later. See
+    research/daily_live_reports/2026-08-25.md.
+
+    The price is read lazily per ticker through the same strict
+    ``_ref_price(ticker, decision_bar=bar)`` the 4H pass uses, at the same bar,
+    so the flush sizes off the exact completed-bar close the decision was made
+    on rather than an unscoped last print.
     """
 
     router = build_router(intent_config=intent_config(args))
     decision_bar = bar.to_pydatetime() if hasattr(bar, "to_pydatetime") else bar
     scores = dict(scores_by_ticker or {})
     quote_client: list = []  # lazily built; the flush may never need a quote
+    reference_prices: dict[str, float] = {}
+
+    def _entry_reference_price(ticker: str | None) -> dict[str, float]:
+        """The exact decision-bar close for one entry, or an empty map.
+
+        Returning a map rather than a float keeps the "never guess" contract at
+        the call site: a name with no readable bar contributes nothing, and
+        ``_route_one`` then refuses it as NO_REFERENCE_PRICE, which is the
+        correct outcome for a name we cannot price.
+        """
+
+        name = str(ticker or "").upper()
+        if not name:
+            return {}
+        if name not in reference_prices:
+            try:
+                reference_prices[name] = _ref_price(name, decision_bar=bar)
+            except Exception as exc:  # noqa: BLE001 - one bad lookup is a skip
+                logger.warning(
+                    "pending-open %s: no exact selected-bar price (%s); the "
+                    "governed path will refuse it rather than guess a size",
+                    name, exc,
+                )
+                return {}
+        return {name: reference_prices[name]}
 
     def _entry_quote(symbol: str, ticker: str | None) -> tuple[Any, str]:
         """Observe the market for one option we are about to BUY.
@@ -966,12 +1007,22 @@ def governed_submitter(args, *, bar, module: str = AUDIT_MODULE,
         # recorded as an ADJUSTMENT even when it closed the position.
         quotes_by_symbol: dict = {}
         quote_failures: dict = {}
-        if str(route) == "option" and str(side).lower() == "buy":
+        opening = str(side).lower() == "buy"
+        if str(route) == "option" and opening:
             quote, why = _entry_quote(symbol, ticker)
             if quote is not None:
                 quotes_by_symbol[symbol] = quote
             else:
                 quote_failures[symbol] = why
+        # Only an opening EQUITY order is sized from a reference price. A
+        # reduction carries its own exact quantity, and an option entry is
+        # sized in contracts off the quoted ask (see _route_one), so neither
+        # may be made conditional on an underlying bar lookup.
+        prices = (
+            _entry_reference_price(ticker or symbol)
+            if opening and str(route) != "option"
+            else {}
+        )
         rows = router.route(
             [(symbol, side, qty, reason or "pending_open", route)],
             exit_context={symbol: (None, None)} if full_exit else {},
@@ -980,7 +1031,7 @@ def governed_submitter(args, *, bar, module: str = AUDIT_MODULE,
             ticker_by_symbol={symbol: str(ticker).upper()} if ticker else {},
             scores_by_ticker=scores,
             decision_bar=decision_bar,
-            reference_prices={},
+            reference_prices=prices,
             position_keys={symbol: f"paper:{symbol}"},
             policy_mode=PolicyMode.ENFORCE,
             submit=True,
@@ -1053,9 +1104,17 @@ def _submit_via_gateway(
                 # filled. See core.live_4h_exec.mark_entry_unconfirmed: an
                 # accepted-but-unfilled entry otherwise persists as a position
                 # the account does not hold.
-                mark_entry_unconfirmed(new_managed, symbol, {"id": broker_id})
+                mark_entry_unconfirmed(new_managed, symbol, {"id": broker_id},
+                                       client=client)
             if str(row.side).strip().lower() == "sell":
                 entry_state = exit_context.get(symbol, (None, None))[1]
+                if entry_state is None and new_managed:
+                    # A trim never enters exit_context (full exits only), so the
+                    # ledger row lost its entry lineage — every entry_bar=null
+                    # row in the 2026-08 study was a partial take-profit.
+                    _tk = managed_key_for_symbol(new_managed, symbol)
+                    if _tk is not None and isinstance(new_managed.get(_tk), dict):
+                        entry_state = new_managed[_tk]
                 item = (symbol, row.side, row.quantity,
                         row.intent.reason_codes[0] if row.intent.reason_codes else "exit",
                         "option" if is_option else "equity")

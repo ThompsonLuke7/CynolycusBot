@@ -55,11 +55,22 @@ class _CapturingRouter:
         )
 
 
+REFERENCE_BARS = {"AMD": 160.0}
+
+
 @pytest.fixture
 def router(monkeypatch) -> _CapturingRouter:
     captured = _CapturingRouter()
     monkeypatch.setattr(live_runner, "build_router", lambda **_: captured)
     monkeypatch.setattr(live_runner, "intent_config", lambda *_a, **_k: object())
+
+    def _fake_ref_price(ticker: str, *, decision_bar):
+        try:
+            return REFERENCE_BARS[ticker]
+        except KeyError:
+            raise ValueError(f"no reference-bar Parquet exists for {ticker}") from None
+
+    monkeypatch.setattr(live_runner, "_ref_price", _fake_ref_price)
     return captured
 
 
@@ -111,6 +122,68 @@ def test_an_unscored_name_is_still_offered_to_the_router(router) -> None:
     submit(symbol="NVDA", side="buy", qty=4, route="equity")
 
     assert router.calls[0]["plan"] == [("NVDA", "buy", 4, "pending_open", "equity")]
+
+
+# ---------------------------------------------------------------------------
+# Entries carry a price to be sized from
+# ---------------------------------------------------------------------------
+
+
+def test_a_queued_equity_entry_reaches_the_router_with_a_reference_price(router) -> None:
+    """The twin of the scores defect, one layer over.
+
+    ``_route_one`` sizes an ENTRY as shares_for_notional(price, budget) and
+    refuses NO_REFERENCE_PRICE without one, so a submitter built with an empty
+    price map rejected *every* queued entry unconditionally. On 2026-08-25 that
+    refused all four of meta_ranker's queued 8/24 entries (submitted=0
+    skipped=10) while HTF and Momentum flushed the same market minutes later.
+    """
+
+    submit = live_runner.governed_submitter(_args(), bar=BAR, scores_by_ticker=SCORES)
+    submit(symbol="AMD", side="buy", qty=10, route="equity", ticker="AMD")
+
+    assert router.calls[0]["reference_prices"] == {"AMD": 160.0}
+
+
+def test_an_unpriceable_equity_entry_is_refused_by_the_router_not_guessed(router) -> None:
+    """A name with no readable decision bar contributes no price at all.
+
+    Substituting a last print or a stale close would put a fabricated quantity
+    on a real order; the correct outcome is the router's NO_REFERENCE_PRICE.
+    """
+
+    submit = live_runner.governed_submitter(_args(), bar=BAR, scores_by_ticker=SCORES)
+    submit(symbol="NVDA", side="buy", qty=4, route="equity", ticker="NVDA")
+
+    assert router.calls[0]["reference_prices"] == {}
+
+
+def test_an_option_entry_is_not_gated_on_an_underlying_bar(router) -> None:
+    """An option entry is sized in contracts off the quoted ask, so it must not
+    be made conditional on a lookup its size never uses.
+    """
+
+    submit = live_runner.governed_submitter(_args(), bar=BAR, scores_by_ticker=SCORES)
+    submit(
+        symbol="ZZZZ260821C00160000", side="buy", qty=3, route="option", ticker="ZZZZ",
+    )
+
+    assert router.calls[0]["reference_prices"] == {}
+
+
+def test_a_reduction_is_never_gated_on_a_reference_price(router) -> None:
+    """A sell carries its own exact quantity. Looking a price up for it would
+    make leaving a position depend on data only an entry needs.
+    """
+
+    submit = live_runner.governed_submitter(_args(), bar=BAR, scores_by_ticker=SCORES)
+    submit(
+        symbol="NVDA", side="sell", qty=10, route="equity",
+        reason="horizon", full_exit=True, ticker="NVDA",
+    )
+
+    assert router.calls[0]["reference_prices"] == {}
+    assert router.calls[0]["plan"] == [("NVDA", "sell", 10, "horizon", "equity")]
 
 
 # ---------------------------------------------------------------------------

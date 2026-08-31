@@ -292,15 +292,23 @@ class StateTransition:
     from_state: SetupState
     to_state: SetupState
     phase: str
-    spot: float
+    spot: float | None
     reason: str
     evidence: tuple[str, ...] = ()
+    #: When ``spot`` was observed on THIS setup's own tape.  Equal to
+    #: ``timestamp`` for a price-driven transition.  Earlier when the transition
+    #: was driven by something other than this ticker printing a bar (a TTL
+    #: expiry, say), in which case the price is the last one actually seen for
+    #: this ticker rather than whichever symbol's bar happened to arrive.
+    #: ``None`` means no price for this ticker had been observed at all.
+    spot_as_of: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
         out["timestamp"] = self.timestamp.isoformat()
         out["from_state"] = self.from_state.value
         out["to_state"] = self.to_state.value
+        out["spot_as_of"] = self.spot_as_of.isoformat() if self.spot_as_of else None
         return out
 
 
@@ -327,6 +335,11 @@ class StructureSignal:
     dealer_plate: dict[str, Any]
     evidence: tuple[str, ...]
     warnings: tuple[str, ...]
+    #: Rule-based tape label at the last confirmation decision, and the reason
+    #: the engine declined if it did. ``no_trade_reason`` is None on a setup
+    #: that was actually taken.
+    context_regime: str = "unknown"
+    no_trade_reason: str | None = None
     version: str = "intraday_structure_v1"
 
     @classmethod
@@ -344,7 +357,10 @@ class StructureSignal:
             market_alignment_score=round(setup.market_alignment_score, 4),
             options_context=dict(setup.options_context), dealer_plate=dict(setup.metadata.get("dealer_plate") or {}),
             evidence=tuple(setup.evidence),
-            warnings=tuple(setup.warnings), version=version,
+            warnings=tuple(setup.warnings),
+            context_regime=str(setup.metadata.get("context_regime") or "unknown"),
+            no_trade_reason=setup.metadata.get("no_trade_reason"),
+            version=version,
         )
 
     def to_dict(self) -> dict[str, Any]:

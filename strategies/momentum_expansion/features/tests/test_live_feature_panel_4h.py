@@ -19,9 +19,23 @@ from strategies.momentum_expansion.config.momentum_config import MIN_4H_BARS
 from strategies.momentum_expansion.features.live_feature_panel_4h import (
     assert_manifest_coverage,
     build_live_feature_panel_4h,
+    clear_feature_panel_memo,
 )
 
 N_BARS = MIN_4H_BARS + 20
+
+
+@pytest.fixture(autouse=True)
+def _isolate_memo():
+    """The per-ticker memo is module state; do not let it leak between tests.
+
+    It is keyed on bar CONTENT, so two tests that build the same synthetic
+    frames for the same ticker name would otherwise share entries -- fine in
+    production, silently misleading in a test that expects a rebuild.
+    """
+    clear_feature_panel_memo()
+    yield
+    clear_feature_panel_memo()
 
 
 def _synthetic_4h_bars(seed: int) -> pd.DataFrame:

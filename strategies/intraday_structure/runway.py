@@ -16,6 +16,9 @@ class RunwayResult:
     intermediate_obstacles: tuple[dict, ...]
     explanation: tuple[str, ...]
     components: dict[str, float]
+    target_level_type: str | None = None
+    target_level_strength: float | None = None
+    target_level_sources: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -79,6 +82,11 @@ def score_runway(
         runway_score=score, next_target=target.price,
         intermediate_obstacles=tuple(level.to_dict() for level in obstacles),
         explanation=tuple(explanation), components=components,
+        target_level_type=target.level_type,
+        target_level_strength=float(target.strength),
+        # cluster_levels() records every merged level family under "sources";
+        # a single unclustered level falls back to its own type.
+        target_level_sources=tuple(target.metadata.get("sources") or (target.level_type,)),
     )
 
 

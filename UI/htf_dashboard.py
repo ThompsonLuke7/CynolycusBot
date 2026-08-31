@@ -141,11 +141,34 @@ class HTFDashboardApp:
             ]
             new = pd.DataFrame(rows)
             SIGNALS_LOG.parent.mkdir(parents=True, exist_ok=True)
+            combined = new
             if SIGNALS_LOG.exists():
-                old = pd.read_parquet(SIGNALS_LOG)
-                combined = pd.concat([old[old["bar"] != bar], new], ignore_index=True)
-            else:
-                combined = new
+                try:
+                    old = pd.read_parquet(SIGNALS_LOG)
+                except Exception as exc:  # noqa: BLE001
+                    # An unreadable history must not block today's write. The
+                    # write-then-rename below stops NEW corruption, but nothing
+                    # recovered from a file already truncated by an earlier
+                    # crash: this read raised on every persist, so the whole
+                    # method failed and HTF persisted nothing from 2026-07-21
+                    # to 2026-08-25 while logging the same warning each time.
+                    # Quarantine the bad file (never delete — it is the only
+                    # copy of whatever survived) and start a fresh one.
+                    quarantine = SIGNALS_LOG.with_suffix(
+                        SIGNALS_LOG.suffix
+                        + f".corrupt.{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+                    )
+                    SIGNALS_LOG.rename(quarantine)
+                    logger.error(
+                        "HTF signal history at %s is unreadable (%s) — moved to %s "
+                        "and starting a new file; earlier signals are only in that "
+                        "quarantined copy",
+                        SIGNALS_LOG, exc, quarantine.name,
+                    )
+                else:
+                    combined = pd.concat(
+                        [old[old["bar"] != bar], new], ignore_index=True
+                    )
             # Write-then-rename: a direct to_parquet(SIGNALS_LOG) can be caught
             # mid-write by a concurrent request thread's read_parquet() above
             # (ThreadingHTTPServer -- every request runs on its own thread),
