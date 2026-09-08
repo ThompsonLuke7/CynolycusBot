@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from core.nervous_system.execution.gateway import ExecutionOutcome
 from signals.meta_context.meta_ranker import live_runner
 
 
@@ -37,19 +38,34 @@ SCORES = {"AMD": {"s_combo": 0.94, "s_quality": 0.71, "s_upside": 0.62}}
 
 
 class _CapturingRouter:
-    """Stands in for the assembled gateway; records what it was asked to route."""
+    """Stands in for the assembled gateway; records what it was asked to route.
 
-    def __init__(self) -> None:
+    The stubbed `execution_result` carries a real `outcome`. It used to carry
+    only a `broker_order_id`, which made an accepted order indistinguishable
+    from a refused one — the same blind spot the live runner had, so no test
+    here could have caught the 2026-08/09 outage where the gateway refused
+    every request and the flush reported each as sent.
+    """
+
+    def __init__(self, outcome: ExecutionOutcome = ExecutionOutcome.SUBMITTED) -> None:
         self.calls: list[dict] = []
+        self._outcome = outcome
 
     def route(self, plan, **kwargs):
         self.calls.append({"plan": list(plan), **kwargs})
+        accepted = self._outcome is ExecutionOutcome.SUBMITTED
         return (
             SimpleNamespace(
                 refusal=None,
-                submitted=True,
+                submitted=accepted,
+                policy_vetoes=(),
                 outcome=SimpleNamespace(
-                    execution_result=SimpleNamespace(broker_order_id="broker-1")
+                    execution_result=SimpleNamespace(
+                        outcome=self._outcome,
+                        broker_order_id="broker-1" if accepted else None,
+                        reason_code=None if accepted else "PREFLIGHT_REFUSED",
+                        detail=None if accepted else "the order request has expired",
+                    )
                 ),
             ),
         )
@@ -275,3 +291,50 @@ def test_a_refusal_raises_so_the_caller_records_a_skip(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="POLICY_BLOCKED"):
         submit(symbol="AMD", side="buy", qty=10, route="equity")
+
+
+@pytest.mark.parametrize(
+    "outcome_kind, expected_verdict",
+    [
+        (ExecutionOutcome.REFUSED, "NO_EXPOSURE"),
+        (ExecutionOutcome.REJECTED, "NO_EXPOSURE"),
+        (ExecutionOutcome.AMBIGUOUS, "UNCERTAIN"),
+        (ExecutionOutcome.DUPLICATE, "UNCERTAIN"),
+    ],
+)
+def test_a_gateway_that_does_not_accept_the_order_is_not_reported_as_sent(
+    monkeypatch, outcome_kind, expected_verdict
+) -> None:
+    """A refusal past the policy layer must still stop the flush.
+
+    The old check was `row.refusal is not None or not row.submitted`, and
+    `submitted` was hardcoded True the moment the gateway was called. So a
+    PREFLIGHT_REFUSED returned a `broker_order_id` of None, the submitter
+    happily returned `{"id": "?"}`, and `submit_pending_open_entries` deleted
+    the entry from the queue as sent. Nothing was ever ordered.
+    """
+
+    monkeypatch.setattr(
+        live_runner, "build_router", lambda **_: _CapturingRouter(outcome_kind)
+    )
+    monkeypatch.setattr(live_runner, "intent_config", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        live_runner, "_ref_price", lambda ticker, *, decision_bar: 160.0
+    )
+
+    submit = live_runner.governed_submitter(_args(), bar=BAR, scores_by_ticker=SCORES)
+
+    with pytest.raises(RuntimeError, match=expected_verdict):
+        submit(symbol="AMD", side="buy", qty=10, route="equity", ticker="AMD")
+
+
+def test_an_accepted_order_returns_the_real_broker_id_never_a_placeholder(
+    router,
+) -> None:
+    """`{"id": "?"}` is what the ledger recorded for thirty phantom trades."""
+
+    submit = live_runner.governed_submitter(_args(), bar=BAR, scores_by_ticker=SCORES)
+
+    assert submit(
+        symbol="AMD", side="buy", qty=10, route="equity", ticker="AMD"
+    ) == {"id": "broker-1"}

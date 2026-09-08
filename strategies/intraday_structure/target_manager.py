@@ -90,7 +90,20 @@ def manage_running_setup(setup: SetupRecord, ctx: DetectionContext) -> Detection
                 (f"target_{setup.active_target_index + 1}_reached",),
                 metadata={"target_reached_at": bar.timestamp.isoformat()},
             )
-    if setup.bars_alive >= policy.max_setup_bars or (setup.entry_time and setup.bars_in_state >= policy.time_exit_bars):
+    # Two different clocks, and they must not be crossed. `max_setup_bars` is a
+    # staleness limit on an *unentered* setup — how long a thesis may wait to
+    # trigger. `time_exit_bars` is the holding period of a *position*, measured
+    # from entry. Once entered, only the holding period applies: a setup that
+    # spent a long time waiting had already earned its entry, and closing it on
+    # the setup clock meant a position could be opened and shut on the same bar
+    # regardless of how it was doing. The entry side now refuses a stale setup
+    # outright (engine._evaluate, "setup too old to enter").
+    entered = setup.entry_time is not None
+    too_long = (
+        setup.bars_in_state >= policy.time_exit_bars if entered
+        else setup.bars_alive >= policy.max_setup_bars
+    )
+    if too_long:
         return DetectionDecision(SetupState.CLOSED, "TIME_EXIT", "maximum setup duration reached", ("time_exit",))
     _tighten_structure_stop(setup, ctx)
     return DetectionDecision()

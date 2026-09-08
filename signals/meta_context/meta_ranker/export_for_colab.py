@@ -13,7 +13,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
 HARNESS = REPO_ROOT / "strategies" / "model_training" / "colab_competition.py"
-FILES = ["meta_ranker_matrix.parquet", "manifest.json", "manifest_upside.json", "meta_ranker_train_colab.py"]
+# The RESEARCH matrix, not the live rolling window. The live file is scored by
+# the DEPLOYED base models, so training on it would fit on in-sample base
+# predictions — the exact leak the walk-forward OOF exists to prevent.
+FILES = ["meta_ranker_matrix_research.parquet", "manifest.json", "manifest_upside.json",
+         "meta_ranker_train_colab.py"]
 BUNDLE = HERE / "meta_ranker_colab_bundle.tgz"
 
 
@@ -27,7 +31,10 @@ def main():
     shutil.copy2(HARNESS, HERE / HARNESS.name)
     with tarfile.open(BUNDLE, "w:gz") as tar:
         for f in FILES:
-            tar.add(HERE / f, arcname=f)
+            # The trainer expects `meta_ranker_matrix.parquet` inside the bundle;
+            # ship the research file under that name so Colab needs no changes.
+            arc = "meta_ranker_matrix.parquet" if f.startswith("meta_ranker_matrix_research") else f
+            tar.add(HERE / f, arcname=arc)
         tar.add(HERE / HARNESS.name, arcname=HARNESS.name)
     mb = BUNDLE.stat().st_size / 1e6
     print(f"wrote {BUNDLE}  ({mb:.1f} MB)")

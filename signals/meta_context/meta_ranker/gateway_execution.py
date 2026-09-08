@@ -20,7 +20,7 @@ import logging
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 import math
@@ -68,9 +68,26 @@ class RouterRefusal(str, Enum):
 
 _VETO_ACTIONS = frozenset({PolicyAction.REJECT, PolicyAction.DEFER})
 
-# How long a planned order stays valid. Matches the MVP policy entry window, so
-# a queued order cannot be submitted against a stale decision.
-DEFAULT_ORDER_TTL = timedelta(minutes=20)
+# How long a planned order stays valid.
+#
+# This used to be a flat 20 minutes measured from the decision bar, which no
+# order on a 4-hourly module could ever satisfy: the Meta loop runs at 14:20 ET
+# on the 14:00 UTC bar (bar + 4h20m) and at 16:20 ET on the 18:00 UTC bar
+# (bar + 2h20m), and an entry deferred after the close is not sent until the
+# next session's 09:35 ET pre-open flush (bar + ~19h35m). Every order request
+# was therefore refused PREFLIGHT_REFUSED "the order request has expired"
+# before it reached the broker. 64 requests were persisted between 2026-08-25
+# and 2026-09-02 and not one produced a submission attempt; see
+# research/daily_live_reports/2026-09-02.md.
+#
+# The window is now the decision bar's own session plus the next one, which is
+# the same rule `core.live_4h_exec.pending_entry_bar_is_stale` already applies
+# to the deferral queue (it drops an entry once its bar predates the previous
+# trading day). Expressing both guards as the same calendar fact means they
+# cannot contradict each other the way a wall-clock timedelta did, and it stays
+# a pure function of `decision_bar`, so the request content hash — and with it
+# the deterministic client order ID — is still stable across retries.
+DEFAULT_ORDER_TTL: timedelta | None = None
 
 # The profile the runner itself uses (live_runner: profile = "PAPER"). The
 # gateway reads the same one so a submission cannot land on a different account
@@ -284,7 +301,7 @@ class MetaGatewayRouter:
         account_alias: str,
         intent_config: MetaIntentConfig,
         clock: Callable[[], datetime],
-        order_ttl: timedelta = DEFAULT_ORDER_TTL,
+        order_ttl: timedelta | None = DEFAULT_ORDER_TTL,
     ) -> None:
         if environment is RuntimeEnvironment.PRODUCTION_LIVE:
             # Refused here, in the constructor, so that no snapshot, intent,
@@ -525,7 +542,7 @@ class MetaGatewayRouter:
             # for the same decision -- a duplicate order. Anchoring also makes
             # the gateway's expiry check fail closed on a stale replay.
             "created_at": decision_bar,
-            "expires_at": decision_bar + self._order_ttl,
+            "expires_at": self._expires_at(decision_bar),
         }
         if is_option:
             order_request = option_order_request(
@@ -548,6 +565,31 @@ class MetaGatewayRouter:
             order_request=order_request,
         )
         return RoutedRow(**base, outcome=outcome)
+
+    def _expires_at(self, decision_bar: datetime) -> datetime:
+        """When this order request stops being actionable.
+
+        A pure function of the decision bar, so the request hash and the
+        deterministic client order ID do not move between the pass that plans
+        an order and the flush that sends it.
+
+        With no explicit ``order_ttl`` the window runs to the end of the
+        trading session after the bar's own session. That is exactly the span
+        the deferral queue allows (`pending_entry_bar_is_stale` drops an entry
+        once its bar predates the previous trading day), so a queued entry that
+        the queue still considers live is never refused here as expired, and a
+        decision two sessions old is refused by both. It also spans weekends and
+        holidays without a magic number, which a fixed timedelta cannot.
+        """
+
+        if self._order_ttl is not None:
+            return decision_bar + self._order_ttl
+        from core.calendar.us_market_calendar import next_trading_day
+
+        deadline = next_trading_day(decision_bar.date())
+        return datetime.combine(
+            deadline, time(23, 59, 59), tzinfo=decision_bar.tzinfo or timezone.utc
+        )
 
     @staticmethod
     def _decision_id(intent: TradeIntent, policy_decision: Any) -> UUID:

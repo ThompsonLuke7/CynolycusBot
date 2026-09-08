@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -31,11 +31,17 @@ from core.nervous_system.execution.gateway import (
     client_order_id_for,
     order_request_id_for,
 )
+from core.nervous_system.execution.journal import (
+    JournalUnavailable,
+    JournalWriteStatus,
+    LocalAtomicJournal,
+)
 from core.nervous_system.persistence.repositories.execution import (
     SubmissionConflict,
     is_legal_transition,
 )
 from core.nervous_system.persistence.uow import UnitOfWork
+from core.nervous_system.tests.fixtures.journal_events import event as journal_event
 from core.nervous_system.tests.fixtures.gateway_harness import (
     ACCOUNT,
     NOW,
@@ -427,3 +433,136 @@ def test_an_entry_is_never_treated_as_an_exit() -> None:
 )
 def test_only_legal_submission_transitions_are_permitted(current, target, legal) -> None:
     assert is_legal_transition(current, target) is legal
+
+
+# --------------------------------------------------------------------------
+# The 4H expiry window (2026-09-02 outage)
+# --------------------------------------------------------------------------
+
+
+def test_a_4h_order_is_not_expired_at_the_time_its_module_submits() -> None:
+    """End-to-end reproduction of the 2026-08/09 Meta execution outage.
+
+    Meta plans against a completed 4H bar and submits from a loop that starts
+    hours later: 14:20 ET on the 14:00 UTC bar, 16:20 ET on the 18:00 UTC bar,
+    and the next session's 09:35 ET pre-open flush for anything deferred after
+    the close. The order TTL was 20 minutes from the bar, so `_preflight`
+    refused every request with "the order request has expired" before the
+    broker was reached. 64 requests were persisted between 2026-08-25 and
+    2026-09-02 and produced zero submission attempts, while the runner reported
+    each one as filled.
+
+    `MetaGatewayRouter._expires_at` now runs the window to the end of the
+    session after the bar's own, so the gateway's own check is what this pins.
+    """
+
+    from signals.meta_context.meta_ranker.gateway_execution import MetaGatewayRouter
+
+    router = MetaGatewayRouter.__new__(MetaGatewayRouter)
+    router._order_ttl = None
+
+    bar = datetime(2026, 8, 3, 14, 0, tzinfo=timezone.utc)  # Monday 4H bar
+    request = order_request(created_at=bar, expires_at=router._expires_at(bar))
+    decision = decision_record()
+
+    for label, at in [
+        ("14:20 ET loop", bar + timedelta(hours=4, minutes=20)),
+        ("16:20 ET loop", bar + timedelta(hours=6, minutes=20)),
+        ("next-session 09:35 ET flush",
+         datetime(2026, 8, 4, 13, 35, tzinfo=timezone.utc)),
+    ]:
+        gateway = build_gateway(at=at)
+        # No unit-of-work factory here, so a request that clears preflight goes
+        # on to fail POSTGRES_UNAVAILABLE. That is the point: the expiry check
+        # is no longer what stops it.
+        result = gateway.submit(decision=decision, request=request)
+        assert result.reason_code != "PREFLIGHT_REFUSED", (
+            f"{label}: {result.reason_code} {result.detail}"
+        )
+
+
+def test_a_decision_two_sessions_old_is_still_refused_as_expired() -> None:
+    """The window is wider, not absent. The deferral queue drops an entry once
+    its bar predates the previous trading day
+    (`core.live_4h_exec.pending_entry_bar_is_stale`); the gateway must refuse
+    the same decision rather than contradict it.
+    """
+
+    from signals.meta_context.meta_ranker.gateway_execution import MetaGatewayRouter
+
+    router = MetaGatewayRouter.__new__(MetaGatewayRouter)
+    router._order_ttl = None
+
+    bar = datetime(2026, 8, 3, 14, 0, tzinfo=timezone.utc)
+    request = order_request(created_at=bar, expires_at=router._expires_at(bar))
+
+    gateway = build_gateway(at=datetime(2026, 8, 5, 13, 35, tzinfo=timezone.utc))
+    result = gateway.submit(decision=decision_record(), request=request)
+
+    assert result.reason_code == "PREFLIGHT_REFUSED"
+    assert "expired" in (result.detail or "")
+
+
+# --------------------------------------------------------------------------
+# Single-sink journals (the shape the Meta path actually passes)
+# --------------------------------------------------------------------------
+
+
+def test_a_bare_single_sink_journal_still_reaches_the_broker(tmp_path) -> None:
+    """A `LocalAtomicJournal` returns a receipt, not a composite result.
+
+    The Meta path constructs its gateway with exactly this sink. On 2026-09-03
+    every Meta submission died on `'JournalReceipt' object has no attribute
+    'is_durable'` before the broker was called — four pre-open buys and three
+    deferred exits, a second consecutive session with nothing submitted. The
+    gateway must gate on durability without caring which shape it was handed.
+    """
+
+    broker = FakeBroker(positions_result=(broker_position("AMD", 100.0),))
+    journal = LocalAtomicJournal(tmp_path / "execution_journal")
+    gateway = build_gateway(broker=broker, journal=journal)
+
+    result = gateway.submit(decision=decision_record(), request=exit_request())
+
+    assert result.outcome is ExecutionOutcome.RECONCILIATION_REQUIRED
+    assert len(broker.submit_calls) == 1
+
+
+def test_a_receipt_reports_durability_for_both_write_statuses(tmp_path) -> None:
+    """Both receipt statuses mean the bytes are installed.
+
+    A second write of identical content is IDEMPOTENT, not a failure; treating
+    it as non-durable would refuse every legitimate replay of a queued order.
+    """
+
+    journal = LocalAtomicJournal(tmp_path / "execution_journal")
+    event = journal_event()
+
+    first = journal.write(event)
+    second = journal.write(event)
+
+    assert first.status is JournalWriteStatus.WRITTEN
+    assert second.status is JournalWriteStatus.IDEMPOTENT
+    assert first.is_durable and second.is_durable
+
+
+def test_a_journal_that_raises_refuses_instead_of_escaping() -> None:
+    """A raising sink must not abort the submission with a traceback.
+
+    A composite absorbs sink failures; a bare sink raises. If that raise
+    escapes it leaves the caller outside the gateway's result vocabulary,
+    potentially after the broker already holds the order.
+    """
+
+    class RaisingJournal:
+        def write(self, event):
+            raise JournalUnavailable("disk is gone")
+
+    broker = FakeBroker(positions_result=(broker_position("AMD", 100.0),))
+    gateway = build_gateway(broker=broker, journal=RaisingJournal())
+
+    result = gateway.submit(decision=decision_record(), request=exit_request())
+
+    assert result.outcome is ExecutionOutcome.REFUSED
+    assert result.reason_code == "JOURNAL_NOT_DURABLE"
+    assert broker.submit_calls == []

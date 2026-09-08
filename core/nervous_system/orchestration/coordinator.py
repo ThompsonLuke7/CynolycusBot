@@ -28,6 +28,7 @@ from core.nervous_system.contracts.enums import (
     RuntimeEnvironment,
 )
 from core.nervous_system.contracts.intent import TradeIntent
+from core.nervous_system.execution.gateway import ExecutionOutcome
 
 from .events import AggregateType, EventType
 
@@ -301,9 +302,18 @@ class DecisionCoordinator:
 
         gateway = self._build_gateway()
         result = gateway.submit(decision=decision, request=order_request)
+        # `submitted` means the broker accepted this order, not merely that the
+        # gateway was called. It used to be hardcoded True, so a gateway that
+        # refused every request still reported success: Meta booked five closed
+        # trades on 2026-09-02 and twenty-five on 2026-08-27 for orders that
+        # never left the process, and released the underlying positions into the
+        # orphan pool. Callers that must distinguish "certainly not sent" from
+        # "may have been sent" read `execution_result.outcome`; `gateway_invoked`
+        # still records that the call happened at all.
+        outcome = getattr(result, "outcome", None)
         return PlanningOutcome(
             decision=decision,
-            submitted=True,
+            submitted=outcome is ExecutionOutcome.SUBMITTED,
             execution_result=result,
             gateway_invoked=True,
         )

@@ -121,35 +121,42 @@ _MAX_EXIT_SPREAD_DEFERRALS = 12  # 5m bars ≈ 1 hour
 # 2026-07-21 Swing force-sold HTF Swing's legitimate 100-share FIG position as
 # a false-positive option-exercise assignment, because Swing's universe
 # happened to also include FIG and nothing checked HTF's own managed state.
-_SIBLING_MODULE_STATE_PATHS = (
-    Path("strategies/momentum_expansion/live/momentum_live_state.json"),
-    Path("strategies/multi_ticker_swing_htf/live/htf_live_state.json"),
-    Path("signals/meta_context/meta_ranker/live_state.json"),
-    Path("Data/inference/dealer_ranker/live_state.json"),
-)
+# The list this function used to keep inline named only the four `managed`
+# 4H-family books, and drifted: intraday_structure keeps a differently-shaped
+# book and was never added, so on 2026-09-01 Swing adopted six of its option
+# positions and force-liquidated four as `restored_unknown_expiring` within
+# three minutes of entry. Ownership is now read from the one place that knows
+# every module's book shape, so a module added there is honoured here too.
+def _sibling_module_owned_symbols() -> set[str] | None:
+    """Equity tickers and option OCC symbols any sibling module currently
+    claims, or None when that could not be determined.
 
+    Swing's *own* book is excluded — it is the caller's, and including it would
+    make every position Swing already holds look sibling-owned and unadoptable.
 
-def _sibling_module_owned_symbols() -> set[str]:
-    """Equity tickers and option OCC symbols the 4H-family modules and Dealer
-    Ranker currently claim in their own persisted ``managed`` state. Best-effort:
-    a missing/unreadable state file just contributes nothing, it never blocks
-    Swing's own reconciliation."""
-    owned: set[str] = set()
-    for path in _SIBLING_MODULE_STATE_PATHS:
-        try:
-            state = json.loads(path.read_text())
-        except Exception:
-            continue
-        for entry in (state.get("managed") or {}).values():
-            if not isinstance(entry, dict):
-                continue
-            symbol = entry.get("symbol")
-            if symbol:
-                owned.add(str(symbol).strip().upper())
-            occ = entry.get("occ")
-            if occ:
-                owned.add(str(occ).strip().upper())
-    return owned
+    None is not the same as the empty set and the caller must not treat it as
+    one. This used to swallow every failure and return an empty set, i.e.
+    "nothing is owned by anyone", which is the single most dangerous answer it
+    can give: the next thing the reconcile does with an unowned option position
+    is adopt it, and for a same-day expiry, force-exit it minutes later. That is
+    how six of Intraday Structure's contracts were taken and four liquidated on
+    2026-09-01. A read that could not be trusted must stop the adoption, not
+    licence it.
+    """
+    from core.orphan_positions import ClaimBookUnreadable, claimed_symbols
+
+    try:
+        return claimed_symbols(exclude=("multi_ticker_swing",), strict=True)
+    except ClaimBookUnreadable as exc:
+        logger.warning(
+            "swing reconcile: a sibling's book could not be read (%s); adopting "
+            "nothing this pass rather than claiming a position someone owns", exc,
+        )
+        return None
+    except Exception:  # noqa: BLE001 - an unexpected fault is still fail-closed
+        logger.warning("swing reconcile: sibling ownership scan failed; "
+                       "adopting nothing this pass", exc_info=True)
+        return None
 
 
 EventSink = Callable[[str, dict], None]
@@ -675,6 +682,10 @@ class SwingPositionManager:
             if ticker in self._positions:
                 ignored.append({"symbol": symbol, "ticker": ticker, "reason": "already_tracked"})
                 continue
+            if sibling_owned is None:
+                ignored.append({"symbol": symbol, "ticker": ticker,
+                                "reason": "sibling_ownership_unknown"})
+                continue
             if symbol in sibling_owned or ticker in sibling_owned:
                 ignored.append({"symbol": symbol, "ticker": ticker, "reason": "owned_by_other_module"})
                 continue
@@ -769,8 +780,15 @@ class SwingPositionManager:
                     restored.append(restored_pos.to_dict())
                 continue
 
+            # Sync DOWN to the broker, never up. The account is shared and Alpaca
+            # nets option positions by symbol, so when a sibling module is long
+            # the same contract the broker reports their size plus ours. Adopting
+            # that total would make Swing's exit sell the sibling's contracts
+            # too — the 2026-09-01 collision in the other direction. Swing never
+            # scales into a position, so `pos.qty` is what it opened and any
+            # excess at the broker is by definition somebody else's.
             broker_qty = int(broker_pos.get("qty", pos.qty) or pos.qty)
-            if broker_qty != pos.qty:
+            if broker_qty < pos.qty:
                 qty_updates.append({
                     "ticker": ticker,
                     "option_symbol": pos.option_symbol,
@@ -778,6 +796,12 @@ class SwingPositionManager:
                     "new_qty": broker_qty,
                 })
                 pos.qty = broker_qty
+            elif broker_qty > pos.qty:
+                logger.info(
+                    "swing reconcile: %s broker holds %d against our %d "
+                    "(a sibling module is long the same contract) — keeping ours",
+                    pos.option_symbol, broker_qty, int(pos.qty),
+                )
             broker_avg = _as_float(broker_pos.get("avg_entry_price"))
             if (
                 math.isfinite(broker_avg)

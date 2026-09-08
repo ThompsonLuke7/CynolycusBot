@@ -1,4 +1,4 @@
-"""Minute-by-minute historical replay engine."""
+"""Compatibility CLI for the chronological, quote-aware replay engine."""
 from __future__ import annotations
 
 import argparse
@@ -6,66 +6,52 @@ from pathlib import Path
 
 import pandas as pd
 
-from strategies.momentum_scalper.execution.entry_policy import evaluate_entry
-from strategies.momentum_scalper.execution.exit_policy import simulate_exit
-from strategies.momentum_scalper.features.build_features import build_features_for_snapshot
-from strategies.momentum_scalper.rankers.rule_ranker import top_ranked_setups
-from strategies.momentum_scalper.scanners.historical_scanner import load_bars_for_day, reconstruct_premarket_scanner
-from strategies.momentum_scalper.utils.io import add_session_columns, write_parquet
+from strategies.momentum_scalper.configs.v1 import load_config
+from strategies.momentum_scalper.replay.event_engine import MomentumReplayEngine, ReplayResult
+from strategies.momentum_scalper.utils.io import write_parquet
 
 
-def replay_day(day: str, top_n: int = 5) -> pd.DataFrame:
-    bars = add_session_columns(load_bars_for_day(day))
-    if bars.empty:
-        return pd.DataFrame()
-    trades: list[dict] = []
-    scanner = reconstruct_premarket_scanner(bars)
-    for ts, snapshot in scanner.groupby("timestamp", sort=True):
-        features = build_features_for_snapshot(snapshot, bars[bars["timestamp"] <= ts])
-        ranked = top_ranked_setups(features, top_n=top_n)
-        for _, row in ranked.iterrows():
-            signal = evaluate_entry(row)
-            if not signal.should_enter:
-                continue
-            hist = bars[(bars["ticker"].eq(row["ticker"])) & (bars["timestamp"] <= ts)].sort_values("timestamp")
-            if hist.empty:
-                continue
-            entry_price = float(hist.iloc[-1]["close"])
-            forward = bars[(bars["ticker"].eq(row["ticker"])) & (bars["timestamp"] > ts) & (bars["timestamp"] <= ts + pd.Timedelta(minutes=30))]
-            exit_result = simulate_exit(forward, entry_price, ts)
-            if exit_result is None:
-                continue
-            trades.append(
-                {
-                    "entry_timestamp": ts,
-                    "ticker": row["ticker"],
-                    "pattern": signal.pattern,
-                    "rank": row["rank"],
-                    "score": row["score"],
-                    "entry_price": entry_price,
-                    "exit_timestamp": exit_result.exit_timestamp,
-                    "exit_price": exit_result.exit_price,
-                    "exit_reason": exit_result.reason,
-                    "pnl_pct": exit_result.pnl_pct,
-                    "MFE": exit_result.mfe_pct,
-                    "MAE": exit_result.mae_pct,
-                    "right_tail_capture": exit_result.right_tail_capture,
-                    "average_giveback": exit_result.average_giveback,
-                }
-            )
-    return pd.DataFrame(trades)
+def replay(
+    *,
+    bars: pd.DataFrame,
+    metadata: pd.DataFrame,
+    news: pd.DataFrame,
+    quotes: pd.DataFrame,
+    halts: pd.DataFrame | None = None,
+    risk_budget_dollars: float,
+) -> ReplayResult:
+    return MomentumReplayEngine(
+        config=load_config(), risk_budget_dollars=risk_budget_dollars,
+    ).run(bars=bars, metadata=metadata, news=news, quotes=quotes, halts=halts)
+
+
+def _read(path: Path | None) -> pd.DataFrame:
+    return pd.read_parquet(path) if path is not None else pd.DataFrame()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Replay one historical day")
-    parser.add_argument("--day", required=True)
-    parser.add_argument("--output", type=Path)
+    parser = argparse.ArgumentParser(description="Run causal, quote-aware momentum scalper replay")
+    parser.add_argument("--bars", type=Path, required=True)
+    parser.add_argument("--metadata", type=Path, required=True)
+    parser.add_argument("--news", type=Path, required=True)
+    parser.add_argument("--quotes", type=Path, required=True)
+    parser.add_argument("--halts", type=Path)
+    parser.add_argument("--risk-budget-dollars", type=float, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
-    trades = replay_day(args.day)
-    if args.output:
-        write_parquet(trades, args.output)
-    print(trades.tail(50).to_string(index=False) if not trades.empty else "no trades")
+    result = replay(
+        bars=_read(args.bars), metadata=_read(args.metadata), news=_read(args.news),
+        quotes=_read(args.quotes), halts=_read(args.halts),
+        risk_budget_dollars=args.risk_budget_dollars,
+    )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("decisions", "orders", "fills", "transitions"):
+        write_parquet(result.frame(name), args.output_dir / f"{name}.parquet")
+    print(f"wrote replay ledgers to {args.output_dir}")
 
 
 if __name__ == "__main__":
     main()
+
+
+__all__ = ["replay"]

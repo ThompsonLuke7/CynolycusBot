@@ -906,6 +906,85 @@ def build_mixed_plan(
     return out
 
 
+# One contract controls 100 shares, the same convention `contracts_for_notional`
+# sizes with.
+OPTION_MULTIPLIER = 100.0
+
+
+def _option_cost_basis(qty, price) -> float | None:
+    """What the broker will charge for `qty` contracts at `price`, or None."""
+
+    try:
+        q, p = float(qty), float(price)
+    except (TypeError, ValueError):
+        return None
+    if q <= 0 or p <= 0:
+        return None
+    return q * p * OPTION_MULTIPLIER
+
+
+def filter_option_entries_by_buying_power(
+    client, plan: list, limits: dict | None, *, disp: dict | None = None,
+    new_managed: dict | None = None,
+) -> tuple[list, list]:
+    """Drop option BUYs the account cannot pay for. Returns (kept, skipped).
+
+    Submitting them anyway does not get them filled; it gets a 403
+    `insufficient options buying power` per order. Eight went out that way on
+    2026-09-02 — three from Momentum at 14:32 against ~$4,235 available, then
+    five from Dealer Ranker at 15:30 against ~$1,255, because Momentum's
+    accepted entries had spent the difference in between. The rejections were
+    only ever visible in the server log, never in the plan audit, so a module
+    silently unable to take its option route looked like a module that simply
+    had no option entries.
+
+    Budget is consumed in plan order, which is rank order, so the names the
+    module ranked highest are the ones that get the remaining capacity.
+
+    An unreadable account changes nothing: this is a pre-filter that saves a
+    doomed round trip, never a gate that may stop a fundable order.
+    """
+
+    limits = limits or {}
+    if not hasattr(client, "get_account"):
+        return plan, []
+    try:
+        account = client.get_account() or {}
+        available = float(account.get("options_buying_power"))
+    except Exception as exc:  # noqa: BLE001 - never block trading on this
+        logger.warning("options buying power: could not read the account (%s); "
+                       "submitting the plan unfiltered", exc)
+        return plan, []
+
+    kept, skipped = [], []
+    for item in plan:
+        sym, side = item[0], str(item[1]).strip().lower()
+        route = item[4] if len(item) > 4 else "option"
+        cost = (
+            _option_cost_basis(item[2], limits.get(sym))
+            if route == "option" and side == "buy" else None
+        )
+        if cost is None:                      # not a priced option entry
+            kept.append(item)
+            continue
+        if cost > available:
+            logger.warning(
+                "options buying power: skipping buy %s x%s — cost basis $%.2f "
+                "exceeds the $%.2f remaining", sym, item[2], cost, available,
+            )
+            print(f"  SKIP buy {item[2]} {sym}: needs ${cost:,.0f}, "
+                  f"${available:,.0f} options buying power left")
+            if disp is not None:
+                disp[str(sym)] = "insufficient_options_buying_power"
+            if new_managed is not None:
+                drop_failed_entry(new_managed, sym)
+            skipped.append(sym)
+            continue
+        available -= cost
+        kept.append(item)
+    return kept, skipped
+
+
 def _reverify_buys_not_held(client, plan: list, new_managed: dict | None) -> list:
     """Drop BUY orders for symbols the broker now shows as already held.
 
@@ -1139,6 +1218,12 @@ def execute_plan(
     _before = list(plan)
     plan = _reverify_buys_not_held(client, plan, new_managed)
     mark_plan_gone(disp, _before, plan, "dropped_already_held")
+    if not plan:
+        return failed
+    plan, unfunded = filter_option_entries_by_buying_power(
+        client, plan, limits, disp=disp, new_managed=new_managed,
+    )
+    failed.update(unfunded)
     if not plan:
         return failed
     print("\nsubmitting...")
@@ -1592,6 +1677,22 @@ def _resp_fill_price(resp) -> float | None:
         return None
 
 
+# A submit response that carries no usable broker order ID. The Meta gateway
+# path prints "?" as a placeholder when `broker_order_id` is None, and that
+# string used to be passed straight into the fill polls below, which then asked
+# the broker about an order literally named "?" and quietly returned no fill —
+# every phantom `realized_pnl: null` row on 2026-08-27 and 2026-09-02 came
+# through here. A placeholder is the absence of an ID, not an ID.
+_PLACEHOLDER_ORDER_IDS = frozenset({"", "?", "none", "null"})
+
+
+def broker_order_id(resp) -> str:
+    """The broker's order ID from a submit response, or "" if there isn't one."""
+
+    oid = str((resp or {}).get("id", "")).strip()
+    return "" if oid.lower() in _PLACEHOLDER_ORDER_IDS else oid
+
+
 def poll_exit_fill_price(client, resp, *, timeout_s: float = 4.0, poll_s: float = 0.4) -> float | None:
     """Best-effort fill price for a just-submitted order (paper fills settle fast).
 
@@ -1600,7 +1701,7 @@ def poll_exit_fill_price(client, resp, *, timeout_s: float = 4.0, poll_s: float 
     fp = _resp_fill_price(resp)
     if fp:
         return fp
-    order_id = str((resp or {}).get("id", "")).strip()
+    order_id = broker_order_id(resp)
     if not order_id or not hasattr(client, "get_order"):
         return None
     import time
@@ -1757,7 +1858,7 @@ def _poll_entry_order(client, resp, *, timeout_s: float = 2.0, poll_s: float = 0
     ladder working as designed. With up to ten entries per pass the wait is
     bounded at ~20s of a 4-hour cycle.
     """
-    order_id = str((resp or {}).get("id", "")).strip()
+    order_id = broker_order_id(resp)
     if not order_id or not hasattr(client, "get_order"):
         return None
     import time

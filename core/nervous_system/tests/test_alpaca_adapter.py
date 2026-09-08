@@ -270,6 +270,21 @@ def test_equity_submit_sends_a_48_character_client_order_id() -> None:
     assert order.status is ExecutionStatus.ACCEPTED
 
 
+def test_extended_hours_equity_limit_order_is_transmitted() -> None:
+    client = FakeClient(submit_order=order_payload())
+    adapter(client).submit(
+        equity_request(
+            order_type="limit",
+            net_limit_price=D("200.00"),
+            extended_hours=True,
+        )
+    )
+
+    sent = client.called("submit_order")[0]
+    assert sent["extended_hours"] is True
+    assert sent["order_type"] == "limit"
+
+
 def test_multileg_submit_maps_legs_and_intents() -> None:
     client = FakeClient(submit_multileg_order=order_payload())
     adapter(client).submit(vertical_request())

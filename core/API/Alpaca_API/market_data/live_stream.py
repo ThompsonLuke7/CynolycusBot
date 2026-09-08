@@ -4,12 +4,12 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 import queue as queue_mod
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.live import StockDataStream
-from alpaca.data.models import Bar
+from alpaca.data.models import Bar, Quote, Trade, TradingStatus
 
 from ..core.config import AlpacaConfig
 
@@ -20,6 +20,7 @@ _ALPACA_WS_LOGGER = "alpaca.data.live.websocket"
 _FATAL_PHRASES = ("connection limit exceeded",)
 
 BarCallback = Callable[[dict], None]
+MarketEventCallback = Callable[[dict], None]
 
 
 def _to_utc(ts: datetime) -> datetime:
@@ -49,6 +50,68 @@ def bar_to_dict(bar: Bar) -> dict:
     if vwap is not None:
         payload["vwap"] = float(vwap)
     return payload
+
+
+def _event_value(event: Any, *names: str) -> Any:
+    """Read an SDK model or raw websocket payload without changing its time."""
+
+    if isinstance(event, dict):
+        for name in names:
+            if name in event:
+                return event[name]
+        return None
+    for name in names:
+        value = getattr(event, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def quote_to_dict(quote: Quote | dict, *, feed: DataFeed) -> dict:
+    """Normalize a two-sided quote for timestamp-preserving strategy buffers."""
+
+    timestamp = _event_value(quote, "timestamp", "t")
+    if timestamp is None:
+        raise ValueError("quote event has no timestamp")
+    return {
+        "ticker": str(_event_value(quote, "symbol", "S") or "").upper(),
+        "timestamp": _to_utc(timestamp),
+        "bid": float(_event_value(quote, "bid_price", "bp")),
+        "ask": float(_event_value(quote, "ask_price", "ap")),
+        "bid_size": float(_event_value(quote, "bid_size", "bs") or 0.0),
+        "ask_size": float(_event_value(quote, "ask_size", "as") or 0.0),
+        "feed": feed.value.upper(),
+    }
+
+
+def trade_to_dict(trade: Trade | dict, *, feed: DataFeed) -> dict:
+    """Normalize a trade print for timestamp-preserving strategy buffers."""
+
+    timestamp = _event_value(trade, "timestamp", "t")
+    if timestamp is None:
+        raise ValueError("trade event has no timestamp")
+    return {
+        "ticker": str(_event_value(trade, "symbol", "S") or "").upper(),
+        "timestamp": _to_utc(timestamp),
+        "price": float(_event_value(trade, "price", "p")),
+        "size": float(_event_value(trade, "size", "s")),
+        "feed": feed.value.upper(),
+    }
+
+
+def trading_status_to_dict(status: TradingStatus | dict, *, feed: DataFeed) -> dict:
+    """Normalize halt/resume notices.  The original status code is retained."""
+
+    timestamp = _event_value(status, "timestamp", "t")
+    if timestamp is None:
+        raise ValueError("trading-status event has no timestamp")
+    return {
+        "ticker": str(_event_value(status, "symbol", "S") or "").upper(),
+        "timestamp": _to_utc(timestamp),
+        "status": str(_event_value(status, "status_code", "sc") or ""),
+        "reason": str(_event_value(status, "reason_code", "rc") or ""),
+        "feed": feed.value.upper(),
+    }
 
 
 class _FatalErrorWatcher(logging.Handler):
@@ -188,6 +251,100 @@ class AlpacaBarStreamer:
     def join(self, timeout: float | None = None) -> None:
         if self._thread:
             self._thread.join(timeout=timeout)
+
+    def is_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+    @property
+    def thread_error(self) -> BaseException | None:
+        return self._thread_error
+
+
+class AlpacaQuoteTradeStatusStreamer:
+    """One paper-safe market-data stream for quotes, trades, and halt statuses.
+
+    This is deliberately data-only: it creates no trading client and exposes no
+    order operation.  Callers receive the vendor event timestamp and a separate
+    ``received_at`` timestamp, which prevents a live strategy from treating a
+    late observation as if it had been available earlier.
+    """
+
+    def __init__(
+        self,
+        *,
+        symbols: Iterable[str],
+        feed: DataFeed,
+        env_file: str | None = ".env",
+        on_quote: MarketEventCallback | None = None,
+        on_trade: MarketEventCallback | None = None,
+        on_status: MarketEventCallback | None = None,
+        stream: StockDataStream | None = None,
+    ) -> None:
+        if feed is not DataFeed.SIP:
+            raise ValueError("quote-aware momentum execution requires the SIP feed")
+        self._symbols = [symbol.strip().upper() for symbol in symbols if symbol.strip()]
+        if not self._symbols:
+            raise ValueError("At least one symbol is required.")
+        self._feed = feed
+        self._on_quote = on_quote
+        self._on_trade = on_trade
+        self._on_status = on_status
+        if stream is None:
+            cfg = AlpacaConfig.from_env(env_file)
+            stream = StockDataStream(cfg.key_id, cfg.secret_key, feed=feed)
+        self._stream = stream
+        self._thread: Optional[threading.Thread] = None
+        self._thread_error: BaseException | None = None
+
+    @staticmethod
+    def _received_at() -> datetime:
+        return datetime.now(timezone.utc)
+
+    async def _handle_quote(self, quote: Quote | dict) -> None:
+        if self._on_quote is not None:
+            payload = quote_to_dict(quote, feed=self._feed)
+            payload["received_at"] = self._received_at()
+            self._on_quote(payload)
+
+    async def _handle_trade(self, trade: Trade | dict) -> None:
+        if self._on_trade is not None:
+            payload = trade_to_dict(trade, feed=self._feed)
+            payload["received_at"] = self._received_at()
+            self._on_trade(payload)
+
+    async def _handle_status(self, status: TradingStatus | dict) -> None:
+        if self._on_status is not None:
+            payload = trading_status_to_dict(status, feed=self._feed)
+            payload["received_at"] = self._received_at()
+            self._on_status(payload)
+
+    def start(self) -> None:
+        self._stream.subscribe_quotes(self._handle_quote, *self._symbols)
+        self._stream.subscribe_trades(self._handle_trade, *self._symbols)
+        self._stream.subscribe_trading_statuses(self._handle_status, *self._symbols)
+        self._stream.run()
+
+    def start_in_thread(self, daemon: bool = True) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+
+        def _target() -> None:
+            try:
+                self.start()
+            except BaseException as exc:
+                self._thread_error = exc
+                logging.getLogger(__name__).exception(
+                    "AlpacaQuoteTradeStatusStreamer thread exited: %s", exc
+                )
+
+        self._thread_error = None
+        self._thread = threading.Thread(
+            target=_target, daemon=daemon, name="alpaca-quote-trade-status-stream"
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stream.stop()
 
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())

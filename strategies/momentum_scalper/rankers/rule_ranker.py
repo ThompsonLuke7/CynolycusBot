@@ -21,6 +21,10 @@ def _clip_score(series: pd.Series, scale: float, cap: float = 1.0) -> pd.Series:
 
 
 def score_setups(features: pd.DataFrame) -> pd.DataFrame:
+    raise RuntimeError(
+        "Legacy rule ranking is retired. v1 ranks only point-in-time scanner candidates "
+        "and records all component evidence in the scanner snapshot."
+    )
     if features.empty:
         return features.assign(score=pd.Series(dtype=float))
     out = features.copy()

@@ -17,6 +17,27 @@ from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 
 PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1 = "phase4_swing_setup_bodyclose_bodyclose_v1"
 
+# Alpaca's own words when a market order finds an empty book. It names the
+# remedy in the message, so this is a reprice instruction rather than a
+# terminal rejection: "order has been rejected due to no available quote for
+# symbol. please reenter with a limit".
+_NO_QUOTE_MARKET_REJECTION_HINTS = (
+    "no available quote",
+    "reenter with a limit",
+)
+
+
+def _is_no_quote_market_rejection(exc: BaseException) -> bool:
+    """Is this the broker asking for a limit price rather than refusing the trade?
+
+    Matched on the message because the HTTP status (403) and the vendor code
+    (40310000) are both shared with genuinely terminal refusals such as
+    `insufficient options buying power`, which must not be retried as a limit.
+    """
+
+    text = str(exc).lower()
+    return any(hint in text for hint in _NO_QUOTE_MARKET_REJECTION_HINTS)
+
 
 def _as_float(value: Any) -> float:
     try:
@@ -2645,14 +2666,36 @@ class OptionOrderPolicy:
         ):
             if qty <= 0 or not symbol or not self._symbol_expires_today(symbol, local_ts=local_ts):
                 continue
-            close_resp = self._submit_order(
-                symbol=symbol,
-                side="sell",
-                intent="close",
-                qty=qty,
-                urgent=True,
-                logger=logger,
-            )
+            try:
+                close_resp = self._submit_order(
+                    symbol=symbol,
+                    side="sell",
+                    intent="close",
+                    qty=qty,
+                    urgent=True,
+                    logger=logger,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # This runs inside `on_1m_bar`, which runs inside the live
+                # loop's `handle_bar`. An exception here does not fail one
+                # order, it ends bar processing for the whole session — which
+                # is exactly what happened on 2026-09-03 at 15:58 ET. Keep the
+                # side owned so the next bar retries; a position we still hold
+                # but no longer track is the orphan this module keeps making.
+                logger(
+                    f"[order_policy] EXPIRING FLATTEN failed side={side} qty={qty} "
+                    f"symbol={symbol}; keeping the position owned for retry: {exc}"
+                )
+                orders.append(
+                    {
+                        "type": f"forced_close_{side}_failed",
+                        "side_key": side,
+                        "symbol": symbol,
+                        "qty": qty,
+                        "error": str(exc),
+                    }
+                )
+                continue
             orders.append(
                 {
                     "type": f"forced_close_{side}",
@@ -2913,32 +2956,51 @@ class OptionOrderPolicy:
             }
         # Urgent close (e.g. flattening an expiring 0DTE at the cut-off): use a
         # MARKET order so the exit actually fills while quotes exist, instead of a
-        # passive limit chase that can ride into expiry. No quote is required, so
-        # this also can't raise no_quote_for_limit_pricing.
+        # passive limit chase that can ride into expiry. A market order needs no
+        # quote from us, but the broker still requires one of its own and rejects
+        # the order when the book is empty — see the handler below.
         if urgent and intent_key == "close":
-            resp = self._client.submit_option_order(
-                symbol=symbol,
-                qty=order_qty,
-                side=side_key,
-                order_type="market",
-                time_in_force=self.cfg.time_in_force,
-            )
-            status = self._status_key(resp.get("status") if isinstance(resp, dict) else None)
-            oid = str(resp.get("id", "")).strip() if isinstance(resp, dict) else ""
-            logger(
-                "[order_policy] URGENT MARKET CLOSE "
-                f"side={side_key} qty={order_qty} symbol={symbol} "
-                f"order_id={oid or 'n/a'} status={status or 'n/a'}"
-            )
-            return {
-                "simulated": False,
-                "intent": intent_key,
-                "response": resp,
-                "side": side_key,
-                "qty": order_qty,
-                "symbol": symbol,
-                "urgent_market": True,
-            }
+            try:
+                resp = self._client.submit_option_order(
+                    symbol=symbol,
+                    qty=order_qty,
+                    side=side_key,
+                    order_type="market",
+                    time_in_force=self.cfg.time_in_force,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # "No quote is required" above is what the broker disagrees
+                # with. On 2026-09-03 at 15:58 ET this exact call came back
+                # `403 order has been rejected due to no available quote for
+                # symbol. please reenter with a limit`, and the HTTPError rode
+                # all the way out of handle_bar and killed the SPY live loop
+                # for the rest of the session. Do what the broker asked and
+                # fall through to the limit ladder; if that cannot price
+                # either, the caller is told so rather than being unwound by
+                # an exception.
+                if not _is_no_quote_market_rejection(exc):
+                    raise
+                logger(
+                    "[order_policy] URGENT MARKET CLOSE rejected for want of a quote "
+                    f"symbol={symbol} qty={order_qty}; repricing as a limit: {exc}"
+                )
+            else:
+                status = self._status_key(resp.get("status") if isinstance(resp, dict) else None)
+                oid = str(resp.get("id", "")).strip() if isinstance(resp, dict) else ""
+                logger(
+                    "[order_policy] URGENT MARKET CLOSE "
+                    f"side={side_key} qty={order_qty} symbol={symbol} "
+                    f"order_id={oid or 'n/a'} status={status or 'n/a'}"
+                )
+                return {
+                    "simulated": False,
+                    "intent": intent_key,
+                    "response": resp,
+                    "side": side_key,
+                    "qty": order_qty,
+                    "symbol": symbol,
+                    "urgent_market": True,
+                }
         # Price ladder policy:
         # - opens use the configured entry quote mode and chase slowly
         # - closes use the configured exit quote mode, then move quickly toward/through bid

@@ -97,3 +97,101 @@ def test_no_action_before_cutoff():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-03: the flatten's market order was rejected for want of a quote and
+# the HTTPError escaped handle_bar, stopping the SPY live loop at 15:58 ET for
+# the rest of the session.
+# ---------------------------------------------------------------------------
+
+NO_QUOTE_403 = (
+    'HTTP Error 403: Forbidden: {"code":40310000,"message":"order has been '
+    'rejected due to no available quote for symbol. please reenter with a limit"}'
+)
+NO_BUYING_POWER_403 = (
+    'HTTP Error 403: Forbidden: {"code":40310000,"cost_basis":"5306.01",'
+    '"message":"insufficient options buying power","options_buying_power":"5283.58"}'
+)
+
+
+class _NoQuoteClient(_FakeClient):
+    """Rejects market orders the way Alpaca does on an empty book."""
+
+    def __init__(self, error: str = NO_QUOTE_403) -> None:
+        super().__init__()
+        self.error = error
+        self.market_attempts = 0
+
+    def submit_option_order(self, **kwargs):
+        if str(kwargs.get("order_type")) == "market":
+            self.market_attempts += 1
+            raise RuntimeError(self.error)
+        return super().submit_option_order(**kwargs)
+
+
+def _expiring_policy(client) -> OptionOrderPolicy:
+    cfg = OptionOrderPolicyConfig(submit_orders=True, expiring_position_exit_hhmm="15:40")
+    pol = OptionOrderPolicy(cfg)
+    pol._client = client
+    pol.sync_from_broker = lambda **_kw: {}  # type: ignore[method-assign]
+    pol._long_contracts = 1
+    pol._long_symbol = EXPIRING_SYMBOL
+    return pol
+
+
+def test_a_no_quote_market_rejection_is_repriced_as_a_limit():
+    client = _NoQuoteClient()
+    pol = _expiring_policy(client)
+    # The ladder needs a price; the point here is that we reach it at all.
+    pol._get_contract_price = lambda **_kw: 0.05  # type: ignore[method-assign]
+
+    result = pol._maybe_force_close_expiring_positions(
+        local_ts=datetime(2026, 6, 25, 15, 45, tzinfo=ET), logger=lambda *_: None
+    )
+
+    assert client.market_attempts == 1
+    limits = [k for k in client.submitted if str(k.get("order_type")) != "market"]
+    assert limits, "the broker asked for a limit and none was sent"
+    assert result is not None
+
+
+def test_a_flatten_that_cannot_submit_never_escapes_to_the_caller():
+    """`on_1m_bar` runs inside the live loop; a raise here ends the session."""
+
+    client = _NoQuoteClient()
+    pol = _expiring_policy(client)
+
+    def _no_price(**_kw):
+        raise RuntimeError("no_quote_for_limit_pricing")
+
+    pol._get_contract_price = _no_price  # type: ignore[method-assign]
+
+    result = pol._maybe_force_close_expiring_positions(
+        local_ts=datetime(2026, 6, 25, 15, 45, tzinfo=ET), logger=lambda *_: None
+    )
+
+    assert result is not None
+    assert any(o["type"].endswith("_failed") for o in result.get("orders", [])), result
+    assert pol._long_contracts == 1, (
+        "a position we could not close must stay owned, or it becomes an orphan"
+    )
+
+
+def test_an_insufficient_buying_power_rejection_is_not_repriced():
+    """Same status and vendor code, but a refusal rather than a reprice request."""
+
+    client = _NoQuoteClient(error=NO_BUYING_POWER_403)
+    pol = _expiring_policy(client)
+    pol._get_contract_price = lambda **_kw: 0.05  # type: ignore[method-assign]
+
+    result = pol._maybe_force_close_expiring_positions(
+        local_ts=datetime(2026, 6, 25, 15, 45, tzinfo=ET), logger=lambda *_: None
+    )
+
+    assert client.market_attempts == 1
+    assert not [k for k in client.submitted if str(k.get("order_type")) != "market"], (
+        "a buying-power refusal must not be retried as a limit order"
+    )
+    assert result is not None
+    assert pol._long_contracts == 1

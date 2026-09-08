@@ -55,6 +55,12 @@ class SharedBarStream:
         self._stop_watchdog = threading.Event()
         self._reconnect_lock = threading.Lock()
         self._reconnect_count = 0
+        # Reviving a dead stream thread is now allowed outside RTH, so it
+        # needs a brake: the failure that killed it (Alpaca's
+        # `connection limit exceeded`) is one that reconnecting in a tight
+        # loop would keep re-triggering.
+        self._revive_attempts = 0
+        self._next_revive_monotonic = 0.0
 
     def is_started(self) -> bool:
         with self._lock:
@@ -152,6 +158,9 @@ class SharedBarStream:
         now = time.monotonic()
         with self._lock:
             self._last_bar_monotonic = now
+            # Bars are flowing: the next outage starts from a clean slate.
+            self._revive_attempts = 0
+            self._next_revive_monotonic = 0.0
             self._last_bar_symbol = str(bar.get("symbol") or "")
             self._last_bar_ts = bar.get("timestamp")
             queues = [
@@ -200,8 +209,15 @@ class SharedBarStream:
 
     def _watchdog_loop(self) -> None:
         while not self._stop_watchdog.wait(30.0):
-            if not self.is_started() or not self._is_rth_watch_window():
+            if not self.is_started():
                 continue
+            # Staleness is only meaningful inside RTH — no bars at 03:00 is
+            # normal. A thread that has *exited* is not: it will never
+            # produce another bar at any hour, and waiting for the RTH
+            # window to notice costs the open. On 2026-09-03 the streamer
+            # died at 07:05 ET on `connection limit exceeded` and nothing
+            # reconnected until 09:35, five minutes into the session.
+            watch_window = self._is_rth_watch_window()
             with self._lock:
                 streamer = self._streamer
                 last_bar = self._last_bar_monotonic
@@ -214,10 +230,25 @@ class SharedBarStream:
             clock = time.monotonic()
             stale_secs = (clock - last_bar) if last_bar is not None else None
             startup_wait_secs = (clock - stream_started) if stream_started is not None else None
-            if alive and not no_bars_yet and stale_secs is not None and stale_secs < 180:
-                continue
-            if alive and no_bars_yet and startup_wait_secs is not None and startup_wait_secs < 180:
-                continue
+            if alive:
+                # Only a live thread gets the benefit of the staleness rules,
+                # and those apply inside the watch window alone.
+                if not watch_window:
+                    continue
+                if not no_bars_yet and stale_secs is not None and stale_secs < 180:
+                    continue
+                if no_bars_yet and startup_wait_secs is not None and startup_wait_secs < 180:
+                    continue
+            else:
+                with self._lock:
+                    next_try = self._next_revive_monotonic
+                    attempts = self._revive_attempts
+                if clock < next_try:
+                    continue
+                backoff = min(30.0 * (2 ** attempts), 600.0)
+                with self._lock:
+                    self._revive_attempts = attempts + 1
+                    self._next_revive_monotonic = clock + backoff
             reason = "no bars received since startup" if no_bars_yet else f"last bar stale for {stale_secs:.0f}s"
             if not alive:
                 reason = f"stream thread not alive; {reason}"

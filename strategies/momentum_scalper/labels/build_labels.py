@@ -81,6 +81,10 @@ def label_feature_rows(features: pd.DataFrame, bars_by_day: dict[str, pd.DataFra
 
 
 def build_labels(features_path: Path = FEATURES_PATH, output: Path = LABELS_PATH) -> pd.DataFrame:
+    raise RuntimeError(
+        "The legacy row-wise labels are retired. v1 labels must be produced from the "
+        "chronological quote-aware replay and conservative fill assumptions."
+    )
     ensure_data_dirs()
     features = pd.read_parquet(features_path) if features_path.exists() else pd.DataFrame()
     if features.empty:

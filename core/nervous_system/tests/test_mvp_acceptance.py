@@ -58,7 +58,12 @@ LEGACY_DIRECT_SUBMIT = {
     # module's first live data to that migration. It is paper-only by config
     # (`load_config` raises otherwise), capped at a few concurrent positions,
     # and belongs on the post-MVP migration list alongside the other four.
-    "strategies/intraday_structure/execution.py": 2,
+    #
+    # 1, down from 2 on 2026-09-01: the exit no longer builds its own market
+    # order but routes through `core.live_4h_exec.submit_option_exit_with_ladder`,
+    # so the count moved onto the shared path rather than disappearing. Only the
+    # entry submits directly now.
+    "strategies/intraday_structure/execution.py": 1,
 }
 
 # Meta's own surface, which must be zero.

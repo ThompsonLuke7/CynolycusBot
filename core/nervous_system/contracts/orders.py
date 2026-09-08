@@ -126,6 +126,7 @@ class _OrderRequestHashMaterial(ContractModel):
     buying_power_required: NonNegativeDecimal
     time_in_force: str
     order_type: Literal["limit", "market"]
+    extended_hours: bool = False
     idempotency_key: str
     quote_snapshot_id: UUID | None
     supersedes_order_request_id: UUID | None
@@ -157,6 +158,9 @@ class OrderRequest(ContractModel):
     buying_power_required: NonNegativeDecimal
     time_in_force: str
     order_type: Literal["limit", "market"]
+    # Extended-hours eligibility is execution-affecting and therefore part of
+    # the immutable order content/hash, not an adapter-side default.
+    extended_hours: bool = False
     idempotency_key: str
     request_hash: Sha256Hex
     quote_snapshot_id: UUID | None = None
@@ -197,6 +201,7 @@ class OrderRequest(ContractModel):
             buying_power_required=self.buying_power_required,
             time_in_force=self.time_in_force,
             order_type=self.order_type,
+            extended_hours=self.extended_hours,
             idempotency_key=self.idempotency_key,
             quote_snapshot_id=self.quote_snapshot_id,
             supersedes_order_request_id=self.supersedes_order_request_id,
@@ -225,6 +230,7 @@ class OrderRequest(ContractModel):
         buying_power_required: NonNegativeDecimal,
         time_in_force: str,
         order_type: Literal["limit", "market"],
+        extended_hours: bool = False,
         idempotency_key: str,
         created_at: UtcDatetime,
         expires_at: UtcDatetime,
@@ -257,6 +263,7 @@ class OrderRequest(ContractModel):
             buying_power_required=buying_power_required,
             time_in_force=time_in_force,
             order_type=order_type,
+            extended_hours=extended_hours,
             idempotency_key=idempotency_key,
             quote_snapshot_id=quote_snapshot_id,
             supersedes_order_request_id=supersedes_order_request_id,
@@ -284,6 +291,7 @@ class OrderRequest(ContractModel):
             buying_power_required=buying_power_required,
             time_in_force=time_in_force,
             order_type=order_type,
+            extended_hours=extended_hours,
             idempotency_key=idempotency_key,
             request_hash=content_hash(material),
             quote_snapshot_id=quote_snapshot_id,
@@ -325,6 +333,11 @@ class OrderRequest(ContractModel):
             raise ValueError("limit orders require a positive non-null net_limit_price")
         if self.order_type == "market" and self.net_limit_price is not None:
             raise ValueError("market orders require net_limit_price to be null")
+        if self.extended_hours:
+            if self.instrument_family is not InstrumentFamily.EQUITY:
+                raise ValueError("extended-hours requests must be equity orders")
+            if self.order_type != "limit" or self.time_in_force.lower() not in {"day", "gtc"}:
+                raise ValueError("extended-hours orders require limit type and day or gtc time-in-force")
         if (
             self.debit_credit is DebitCredit.CREDIT
             and not self.is_pure_close

@@ -345,12 +345,59 @@ def test_order_validity_is_anchored_to_the_decision_bar() -> None:
     """The flip side of a stable identity: an order tied to an old bar must go
     stale on its own, so the gateway's expiry check fails closed on a replay
     rather than submitting an hours-old decision.
+
+    The window has to be a *trading session* window, not a wall-clock one. It
+    was 20 minutes from the bar, which no order on a 4-hourly module could ever
+    meet — the loop runs 2h20m-4h20m after its bar and the pre-open flush ~19h
+    after it — so every request was refused PREFLIGHT_REFUSED before reaching
+    the broker between 2026-08-25 and 2026-09-02.
     """
 
     row = _route(_router())[0]
 
+    # Anchored to the bar, not to the wall clock: this is what keeps the
+    # content hash (and the deterministic client order ID) stable on a retry.
     assert row.order_request.created_at == BAR
-    assert row.order_request.expires_at == BAR + timedelta(minutes=20)
+    # BAR is Monday 2026-08-03; the window runs to the end of the next session.
+    assert row.order_request.expires_at == datetime(
+        2026, 8, 4, 23, 59, 59, tzinfo=timezone.utc
+    )
+
+
+def test_the_validity_window_covers_when_the_module_actually_submits() -> None:
+    """Every real submission time for this module must fall inside the window.
+
+    These are the three moments an order is sent: the 14:20 ET loop on the
+    14:00 UTC bar, the 16:20 ET loop on the 18:00 UTC bar, and the next
+    session's 09:35 ET pre-open flush of an entry deferred after the close.
+    """
+
+    expires_at = _route(_router())[0].order_request.expires_at
+
+    same_day_loop = BAR + timedelta(hours=4, minutes=20)
+    next_session_flush = datetime(2026, 8, 4, 13, 35, tzinfo=timezone.utc)
+    two_sessions_later = datetime(2026, 8, 5, 13, 35, tzinfo=timezone.utc)
+
+    assert same_day_loop < expires_at
+    assert next_session_flush < expires_at
+    # And it still fails closed on a decision the deferral queue would also
+    # have dropped (core.live_4h_exec.pending_entry_bar_is_stale).
+    assert two_sessions_later > expires_at
+
+
+def test_a_weekend_does_not_expire_a_friday_decision_before_monday() -> None:
+    """A Friday-afternoon entry is flushed at Monday's open, ~67h later.
+
+    A fixed timedelta either has to be long enough to span a weekend — which
+    makes it useless on a weekday — or it silently drops every Friday entry.
+    The session-based window handles both without a magic number.
+    """
+
+    friday = datetime(2026, 7, 31, 18, 0, tzinfo=timezone.utc)
+    row = _route(_router(), decision_bar=friday)[0]
+    monday_flush = datetime(2026, 8, 3, 13, 35, tzinfo=timezone.utc)
+
+    assert monday_flush < row.order_request.expires_at
 
 
 # ---------------------------------------------------------------------------

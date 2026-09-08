@@ -259,6 +259,7 @@ class AlpacaPaperAdapter:
                 side=_SIDE_MAP[request.equity_side],
                 order_type=request.order_type,
                 time_in_force=request.time_in_force,
+                extended_hours=request.extended_hours,
                 limit_price=(
                     float(request.net_limit_price)
                     if request.net_limit_price is not None

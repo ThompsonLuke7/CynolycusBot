@@ -240,6 +240,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # ---- calendar / macro / treasury ----
     spine, _ = B._join_calendar_macro_features(spine)
+    # Same regime panel the research builder joins. Research/live feature parity
+    # is not optional (AGENTS.md): a model trained with these 24 columns must see
+    # them at inference, and a live row missing them is not the row the model was
+    # fitted on. Same function, same prior-day rule, no second implementation.
+    spine, _regime_cols, _ = B._join_regime_panel(spine)
 
     # ---- forward guidance (as-of prior day) ----
     # The research builder nulls fg_* beyond FG_MAX_CARRY_DAYS and recomputes

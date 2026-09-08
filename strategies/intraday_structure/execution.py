@@ -40,7 +40,12 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
-from core.live_4h_exec import append_closed_trade, closed_trade_record
+from core.live_4h_exec import (
+    append_closed_trade,
+    closed_trade_record,
+    poll_exit_fill_price,
+    submit_option_exit_with_ladder,
+)
 from strategies.intraday_structure.config import ExecutionPolicy
 from strategies.intraday_structure.models import SetupRecord
 
@@ -50,6 +55,17 @@ LEDGER_MODULE = "intraday_structure"
 OPTION_MULTIPLIER = 100.0
 ET = ZoneInfo("America/New_York")
 
+# Retry discipline for a failing exit. Before this the flatten was driven by the
+# runner clock with no backoff and no cap, and `_close_position` kept the
+# position on failure "so the next event retries" — which on 2026-09-01 meant
+# ~190 rejected submissions a minute for eight straight hours against four
+# contracts the account no longer held. Attempts are counted per position and
+# spaced; past the cap the position is quarantined for a human rather than
+# retried forever.
+EXIT_RETRY_BASE_SECONDS = 30.0
+EXIT_RETRY_MAX_SECONDS = 900.0
+EXIT_MAX_ATTEMPTS = 8
+
 
 def _hhmm(text: str | None) -> time | None:
     text = str(text or "").strip()
@@ -57,6 +73,17 @@ def _hhmm(text: str | None) -> time | None:
         return None
     hh, _, mm = text.partition(":")
     return time(int(hh), int(mm or 0))
+
+
+def _cancel_rejection_means_filled(exc: Exception) -> bool:
+    """True when a rejected cancel is the broker saying the order already filled.
+
+    Alpaca answers `422 {"code":42210000,"message":"order is already in
+    \\"filled\\" state"}`. Matching on the text is unlovely, but the alternative
+    is discarding the only positive evidence we get in this race.
+    """
+    text = str(exc).lower()
+    return "filled" in text and ("already" in text or "state" in text)
 
 
 def _f(value: Any) -> float | None:
@@ -104,7 +131,14 @@ class IntradayOptionExecutor:
     # -- persistence ---------------------------------------------------------
 
     def _restore(self) -> None:
-        """Reload open positions so a restart does not orphan live contracts."""
+        """Reload open positions so a restart does not orphan live contracts.
+
+        The reload is then checked against the broker. A restart used to be no
+        help at all for a stuck book: `maybe_flatten_expiring` fires for any
+        `expiry <= today`, and an expiry in the *past* still satisfies that, so
+        the 2026-09-01 contracts would have resumed their retry loop on every
+        subsequent startup until someone edited the state file by hand.
+        """
         try:
             if self._state_path.exists():
                 raw = json.loads(self._state_path.read_text(encoding="utf-8"))
@@ -113,6 +147,19 @@ class IntradayOptionExecutor:
         except Exception:  # noqa: BLE001
             logger.exception("intraday execution: could not restore open positions")
             self._open = {}
+        if not self._open:
+            return
+        try:
+            held = self._held_contracts()
+            if held is not None:
+                dropped = self._drop_unheld(held)
+                if dropped:
+                    logger.warning(
+                        "intraday execution: startup reconcile released %d stale claim(s): %s",
+                        len(dropped), ", ".join(dropped),
+                    )
+        except Exception:  # noqa: BLE001 - never block startup on a broker call
+            logger.exception("intraday execution: startup broker reconcile failed")
 
     def _persist(self) -> None:
         try:
@@ -124,6 +171,115 @@ class IntradayOptionExecutor:
             )
         except Exception:  # noqa: BLE001
             logger.exception("intraday execution: could not persist open positions")
+
+    # -- broker truth --------------------------------------------------------
+
+    def _held_contracts(self) -> dict[str, float] | None:
+        """Contract -> qty the account actually holds, or None if unknowable.
+
+        None and {} mean different things and must not be conflated: None is "the
+        broker did not answer", which is never grounds for dropping a claim, and
+        {} is "the broker answered and you hold nothing".
+        """
+        try:
+            positions = self._client.get_positions()
+        except Exception as exc:  # noqa: BLE001 - a broker outage is not a fill
+            logger.warning("intraday execution: could not read broker positions (%s)", exc)
+            return None
+        if not isinstance(positions, list):
+            return None
+        held: dict[str, float] = {}
+        for position in positions:
+            if not isinstance(position, dict):
+                continue
+            if str(position.get("asset_class") or "") != "us_option":
+                continue
+            symbol = str(position.get("symbol") or "").strip().upper()
+            qty = _f(position.get("qty"))
+            if symbol and qty:
+                held[symbol] = qty
+        return held
+
+    def _drop_unheld(self, held: dict[str, float]) -> list[str]:
+        """Release claims on contracts the account does not hold. Returns them.
+
+        This is the loop-killer. Whatever the reason a contract left the account
+        — an entry that never filled, a sibling module's reconcile adopting and
+        liquidating it, a manual close — continuing to submit sells for it is
+        never right, and the broker reads those sells as *opening* a naked
+        short, which is why they came back 403 "not eligible to trade uncovered
+        option contracts" rather than as a plain "no position" error.
+        """
+        dropped = []
+        for setup_id, pos in list(self._open.items()):
+            occ = str(pos.get("occ") or "").strip().upper()
+            if not occ or held.get(occ):
+                continue
+            dropped.append(occ)
+            self._open.pop(setup_id, None)
+            logger.warning(
+                "intraday execution: releasing claim on %s (setup %s) — the account "
+                "does not hold it. entry_filled_qty=%s last_exit_error=%s",
+                occ, setup_id, pos.get("entry_filled_qty"),
+                str(pos.get("last_exit_error"))[:120],
+            )
+        if dropped:
+            self._persist()
+        return dropped
+
+    def reconcile_with_broker(self) -> list[str]:
+        """Drop claims on contracts the account no longer holds. Never raises."""
+        try:
+            with self._lock:
+                held = self._held_contracts()
+                if held is None:
+                    return []
+                return self._drop_unheld(held)
+        except Exception:  # noqa: BLE001
+            logger.exception("intraday execution: broker reconcile failed")
+            return []
+
+    # -- retry discipline ----------------------------------------------------
+
+    @staticmethod
+    def _exit_backoff_seconds(attempts: int) -> float:
+        return min(EXIT_RETRY_BASE_SECONDS * (2 ** max(0, attempts - 1)),
+                   EXIT_RETRY_MAX_SECONDS)
+
+    def _exit_retry_blocked(self, pos: dict[str, Any]) -> str | None:
+        """Why this position must not be re-submitted right now, if so."""
+        attempts = int(pos.get("exit_attempts") or 0)
+        if attempts >= EXIT_MAX_ATTEMPTS:
+            return "quarantined"
+        last = pos.get("last_exit_attempt_at")
+        if not last:
+            return None
+        try:
+            since = (self._now() - datetime.fromisoformat(str(last))).total_seconds()
+        except (TypeError, ValueError):
+            return None
+        return "backoff" if since < self._exit_backoff_seconds(attempts) else None
+
+    def _record_exit_failure(self, pos: dict[str, Any], occ: str, exc: Exception) -> None:
+        attempts = int(pos.get("exit_attempts") or 0) + 1
+        pos["exit_attempts"] = attempts
+        pos["last_exit_attempt_at"] = self._now().isoformat()
+        pos["last_exit_error"] = str(exc)[:200]
+        if attempts >= EXIT_MAX_ATTEMPTS:
+            pos["quarantined"] = True
+            logger.error(
+                "intraday execution: QUARANTINED %s after %d failed exit attempts — "
+                "no further orders will be submitted for it. Last error: %s. "
+                "This needs a human; decide via core.startup_queue.",
+                occ, attempts, str(exc)[:200],
+            )
+        else:
+            logger.warning(
+                "intraday execution: exit submit failed for %s (attempt %d/%d, "
+                "next in %.0fs): %s",
+                occ, attempts, EXIT_MAX_ATTEMPTS,
+                self._exit_backoff_seconds(attempts), str(exc)[:200],
+            )
 
     # -- capacity ------------------------------------------------------------
 
@@ -188,20 +344,46 @@ class IntradayOptionExecutor:
             symbol=occ, qty=qty, side="buy", order_type="limit",
             time_in_force="day", limit_price=premium,
         )
-        fill = _f((resp or {}).get("filled_avg_price"))
+        # A submit response is not a fill. Reading `filled_avg_price` straight
+        # off it left every position in this book recording
+        # `entry_filled_qty: 0.0` even when the buy had filled seconds later, so
+        # the module could not tell a filled position from an unfilled one, and
+        # every closed row it ever wrote had `realized_pnl: null`.
+        fill, filled_qty = self._settle_entry(resp, occ)
+        if fill is None:
+            # Nothing was bought (or nothing we can prove was bought). Claiming
+            # it anyway is what produces sells the broker reads as naked shorts.
+            raced = self._cancel_quietly(resp, occ, qty)
+            if raced > 0:
+                # It filled as we cancelled. Own it — an unclaimed filled
+                # position is an orphan nothing stops, sizes or exits.
+                filled_qty = raced
+                fill = _f((resp or {}).get("filled_avg_price")) or premium
+                logger.warning(
+                    "intraday execution: %s filled %g against the cancel — claiming it",
+                    occ, raced,
+                )
+            else:
+                setup.metadata["execution_skip"] = "entry_unfilled"
+                logger.info("intraday execution: entry for %s did not fill; not claiming it", occ)
+                return None
         rec = {
             "setup_id": setup_id,
             "ticker": setup.ticker,
             "direction": direction,
             "occ": occ,
             "option_type": cp,
-            "qty": qty,
+            # The size we actually own, not the size we asked for: a partial
+            # fill sold at the requested qty is the same naked-short rejection
+            # by another route.
+            "qty": int(filled_qty),
+            "requested_qty": qty,
             "limit_price": premium,
             "entry_order_id": str((resp or {}).get("id", "")) or None,
             "entry_submitted_at": (resp or {}).get("submitted_at") or self._now().isoformat(),
             "entry_filled_at": (resp or {}).get("filled_at"),
             "entry_fill_price": fill,
-            "entry_filled_qty": _f((resp or {}).get("filled_qty")),
+            "entry_filled_qty": filled_qty,
             # The underlying leg, captured at entry so the option result can be
             # compared against the move it was a bet on.
             "u_entry": price,
@@ -216,8 +398,111 @@ class IntradayOptionExecutor:
         setup.metadata["execution_occ"] = occ
         setup.metadata["execution_entry_order_id"] = rec["entry_order_id"]
         self._persist()
-        logger.info("intraday execution: BUY %s x%d for %s @ %.2f", occ, qty, setup_id, premium)
+        logger.info("intraday execution: BUY %s x%d filled @ %.2f for %s (limit %.2f)",
+                    occ, int(filled_qty), fill, setup_id, premium)
         return rec
+
+    def _settle_entry(self, resp, occ: str) -> tuple[float | None, float]:
+        """(fill price, filled qty) once the broker confirms, else (None, 0).
+
+        Polls briefly rather than trusting the submit response. Paper fills
+        settle in well under a second; the timeout only bounds the pathological
+        case so the detection loop never stalls behind a broker call.
+        """
+        import time as _time
+
+        resp = resp or {}
+        fill = _f(resp.get("filled_avg_price"))
+        qty = _f(resp.get("filled_qty")) or 0.0
+        if fill and qty:
+            return fill, qty
+        order_id = str(resp.get("id", "")).strip()
+        if not order_id or not hasattr(self._client, "get_order"):
+            return (fill, qty) if (fill and qty) else (None, 0.0)
+        deadline = _time.monotonic() + float(getattr(self._policy, "entry_fill_timeout_s", 3.0))
+        while _time.monotonic() < deadline:
+            _time.sleep(0.25)
+            try:
+                cur = self._client.get_order(order_id) or {}
+            except Exception:  # noqa: BLE001 - a poll failure is not a fill
+                continue
+            fill = _f(cur.get("filled_avg_price"))
+            qty = _f(cur.get("filled_qty")) or 0.0
+            if fill and qty:
+                return fill, qty
+            if str(cur.get("status", "")).lower() in {
+                "canceled", "cancelled", "rejected", "expired", "done_for_day",
+            }:
+                break
+        return None, 0.0
+
+    def _cancel_quietly(self, resp, occ: str, requested_qty: float) -> float:
+        """Cancel an entry that never filled. Returns any quantity that filled anyway.
+
+        Cancellation races the book: an order can fill in the moment between the
+        poll giving up and the cancel landing. Re-reading the order afterwards is
+        what stops that becoming an unclaimed position — which is precisely the
+        orphan this module was creating by other means.
+
+        Every branch that returns 0.0 is a decision to walk away from a position
+        the account may hold, so none of them may be reached on a *failure* to
+        find out. On 2026-09-02 the cancel of SPY260902C00765000 came back
+        `422 order is already in "filled" state` — the broker stating plainly
+        that four contracts had been bought — and that answer was thrown away in
+        favour of a follow-up read whose result was 0. The module logged "did
+        not fill; not claiming it", `live_risk_pass` flagged the contract as an
+        orphan three times, and fourteen minutes later the SPY daytrader's
+        broker reconcile adopted all four and liquidated them at 1.45/1.46
+        against a 2.04 basis, for -$235.
+        """
+        order_id = str((resp or {}).get("id", "")).strip()
+        if not order_id or not hasattr(self._client, "cancel_order"):
+            return 0.0
+        # A rejected cancel is evidence about the order, not noise. "Already
+        # filled" is the broker telling us we own it.
+        filled_per_broker = False
+        try:
+            self._client.cancel_order(order_id)
+        except Exception as exc:  # noqa: BLE001
+            filled_per_broker = _cancel_rejection_means_filled(exc)
+            logger.info(
+                "intraday execution: could not cancel unfilled entry %s (%s)%s",
+                occ, exc, " — the broker says it FILLED" if filled_per_broker else "",
+            )
+
+        qty = 0.0
+        if hasattr(self._client, "get_order"):
+            try:
+                qty = _f((self._client.get_order(order_id) or {}).get("filled_qty")) or 0.0
+            except Exception:  # noqa: BLE001 - a failed read is not proof of nothing
+                qty = 0.0
+        if qty > 0 or not filled_per_broker:
+            return qty
+
+        # The broker said filled and the order read did not confirm a size. Ask
+        # the account. Clamped to what we asked for, because this contract may
+        # also be held by a sibling module and only our own order is ours.
+        held = self._held_contracts()
+        if held is not None and held.get(occ):
+            claimed = min(float(held[occ]), float(requested_qty))
+            logger.warning(
+                "intraday execution: %s not confirmed by the order read, but the "
+                "account holds %g — claiming %g",
+                occ, held[occ], claimed,
+            )
+            return claimed
+        if held is None:
+            # Unknowable, and the broker already said it filled. Claiming the
+            # requested size keeps the position managed; over-claiming is
+            # corrected by `_close_position`'s broker check on the way out,
+            # whereas under-claiming leaves an orphan nothing exits.
+            logger.warning(
+                "intraday execution: %s reported FILLED by the broker but the "
+                "account could not be read — claiming the requested %g",
+                occ, requested_qty,
+            )
+            return float(requested_qty)
+        return 0.0
 
     def _dte_of(self, expiry) -> int | None:
         try:
@@ -313,25 +598,77 @@ class IntradayOptionExecutor:
     def _close_position(self, setup_id, pos, *, exit_reason, u_exit,
                         modelled_entry=None, modelled_exit=None, urgent=False):
         """Sell the contract and write one ledger row. Shared by both exit paths."""
-        occ, qty = pos["occ"], int(pos["qty"])
-        try:
-            resp = self._client.submit_option_order(
-                symbol=occ, qty=qty, side="sell",
-                # An expiring contract must actually get out, and a passive limit
-                # into a thin book is how one rides into expiry. The SPY
-                # daytrader hit exactly that; market is the right order here.
-                order_type="market", time_in_force="day",
-            ) or {}
-        except Exception as exc:  # noqa: BLE001
-            # The position is still held. Keep it open so the next terminal
-            # event (or a restart) retries rather than losing track of it — an
-            # unowned contract is how a sibling module ends up liquidating it.
-            logger.warning("intraday execution: exit submit failed for %s: %s", occ, exc)
-            pos["last_exit_error"] = str(exc)[:200]
+        # Size from OUR OWN FILL, recorded off our own entry order id, never
+        # from the broker's position. The account is shared and Alpaca nets
+        # option positions by symbol, so the broker's size is the sum across
+        # every module holding this contract; only our order tells us which part
+        # is ours.
+        occ = pos["occ"]
+        qty = int(_f(pos.get("entry_filled_qty")) or pos.get("qty") or 0)
+        if qty <= 0:
+            logger.warning("intraday execution: %s has no recorded fill quantity — "
+                           "releasing the claim rather than guessing a size", occ)
+            self._open.pop(setup_id, None)
             self._persist()
             return None
 
-        exit_fill = _f(resp.get("filled_avg_price"))
+        blocked = self._exit_retry_blocked(pos)
+        if blocked:
+            return None
+
+        # Do not submit a sell for something the account does not hold. Every
+        # rejection in the 2026-09-01 loop was this: the contract was gone, so
+        # Alpaca read the sell as opening a naked short. Checking costs one
+        # positions call per attempt, which the backoff above already bounds.
+        held = self._held_contracts()
+        if held is not None and not held.get(occ.upper()):
+            logger.warning(
+                "intraday execution: %s (setup %s) is no longer held at the broker — "
+                "releasing the claim instead of submitting an exit",
+                occ, setup_id,
+            )
+            self._open.pop(setup_id, None)
+            self._persist()
+            return None
+        if held is not None:
+            # The broker total is a CEILING, never the size. It can only ever be
+            # smaller than our own fill if part of our position has gone (expiry,
+            # assignment, a manual close); submitting more than exists is a
+            # guaranteed rejection, so clamp. It being LARGER just means a
+            # sibling module is long the same contract, which is fine and
+            # deliberately not a reason to sell more.
+            broker_qty = int(abs(held.get(occ.upper(), qty)))
+            if broker_qty < qty:
+                logger.warning(
+                    "intraday execution: %s our fill was %d but the account holds only "
+                    "%d in total — selling %d", occ, qty, broker_qty, broker_qty,
+                )
+                qty = broker_qty
+                pos["entry_filled_qty"] = float(broker_qty)
+                pos["qty"] = broker_qty
+            elif broker_qty > qty:
+                logger.info(
+                    "intraday execution: %s account holds %d against our fill of %d "
+                    "(a sibling module is long the same contract) — selling only ours",
+                    occ, broker_qty, qty,
+                )
+
+        try:
+            # The shared 4H exit policy: market first (best fill when there IS a
+            # book), then a descending limit ladder. A bare market order is
+            # rejected outright outside 09:30-16:00 ET for options
+            # ("options market orders are only allowed during market hours"),
+            # which is what turned every after-hours retry into a hard failure.
+            resp = submit_option_exit_with_ladder(
+                self._client, symbol=occ, qty=qty,
+                reason=exit_reason, full_exit=True,
+            ) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._record_exit_failure(pos, occ, exc)
+            self._persist()
+            return None
+
+        exit_fill = _f(resp.get("filled_avg_price")) or poll_exit_fill_price(self._client, resp)
         entry_px = _f(pos.get("entry_fill_price")) or _f(pos.get("limit_price"))
         realized = (round((exit_fill - entry_px) * OPTION_MULTIPLIER * qty, 2)
                     if (exit_fill is not None and entry_px) else None)

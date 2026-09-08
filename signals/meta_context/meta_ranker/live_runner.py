@@ -899,6 +899,48 @@ def _execute(
         print("\n(dry-run: no orders submitted, state unchanged. Add --submit to execute.)")
 
 
+def gateway_verdict(row) -> tuple[str, str | None, str]:
+    """Classify one routed row as ACCEPTED / NO_EXPOSURE / UNCERTAIN.
+
+    `row.submitted` alone is not enough. The gateway can refuse before the
+    broker is reached, and it can also come back not knowing whether the broker
+    took the order. Those two need opposite handling and used to be collapsed
+    into one silent success:
+
+    * ACCEPTED   - the broker holds it. Use `broker_order_id`.
+    * NO_EXPOSURE - refused or rejected; nothing exists at the broker, so the
+      caller must restore a would-be exit and drop a would-be entry.
+    * UNCERTAIN  - DUPLICATE / AMBIGUOUS / RECONCILIATION_REQUIRED. Exposure may
+      exist. The claim must be KEPT (releasing it orphans a real position) and
+      no fill may be booked against it.
+
+    Returns (verdict, broker_order_id, detail).
+    """
+
+    from core.nervous_system.execution.gateway import ExecutionOutcome
+
+    result = getattr(row.outcome, "execution_result", None)
+    outcome = getattr(result, "outcome", None)
+    reason = getattr(result, "reason_code", None)
+    text = getattr(result, "detail", None)
+    parts = [str(p) for p in (getattr(outcome, "value", outcome), reason, text) if p]
+    detail = ": ".join(parts) if parts else "not submitted"
+
+    if row.refusal is not None:
+        detail = row.refusal.value
+        if getattr(row, "policy_vetoes", ()):
+            detail = f"{detail} ({', '.join(row.policy_vetoes)})"
+        return "NO_EXPOSURE", None, detail
+    if outcome is ExecutionOutcome.SUBMITTED:
+        return "ACCEPTED", getattr(result, "broker_order_id", None), detail
+    if outcome in {ExecutionOutcome.REFUSED, ExecutionOutcome.REJECTED}:
+        return "NO_EXPOSURE", None, detail
+    if outcome is None:
+        # The gateway was never reached (policy stop, dry run, no instrument).
+        return "NO_EXPOSURE", None, detail
+    return "UNCERTAIN", getattr(result, "broker_order_id", None), detail
+
+
 def governed_submitter(args, *, bar, module: str = AUDIT_MODULE,
                        scores_by_ticker: Mapping[str, Mapping[str, float]] | None = None):
     """A submit_fn for the shared 4H engine that routes through the gateway.
@@ -1039,15 +1081,18 @@ def governed_submitter(args, *, bar, module: str = AUDIT_MODULE,
             quote_failures=quote_failures,
         )
         row = rows[0]
-        if row.refusal is not None or not row.submitted:
-            detail = row.refusal.value if row.refusal is not None else "not submitted"
-            # Name the rules that refused, so the log says why rather than only
-            # that something did.
-            if getattr(row, "policy_vetoes", ()):
-                detail = f"{detail} ({', '.join(row.policy_vetoes)})"
-            raise RuntimeError(f"governed path refused {side} {qty} {symbol}: {detail}")
-        result = getattr(row.outcome, "execution_result", None)
-        return {"id": getattr(result, "broker_order_id", None) or "?"}
+        verdict, broker_id, detail = gateway_verdict(row)
+        if verdict != "ACCEPTED":
+            # Raising is what marks the queued entry as not-sent, so it stays in
+            # the pending file and is retried. UNCERTAIN raises too: the flush
+            # only ever opens positions, and re-queuing one it may already hold
+            # is caught next pass by the `already_held` / `already_working`
+            # guards, whereas reporting a phantom fill is not caught at all.
+            raise RuntimeError(
+                f"governed path did not submit {side} {qty} {symbol} "
+                f"[{verdict}]: {detail}"
+            )
+        return {"id": broker_id or "?"}
 
     return _submit
 
@@ -1081,11 +1126,32 @@ def _submit_via_gateway(
 
     def _record(row) -> None:
         symbol = row.symbol
-        if row.refusal is not None or not row.submitted:
-            detail = row.refusal.value if row.refusal is not None else "not submitted"
-            if getattr(row, "policy_vetoes", ()):
-                detail = f"{detail} ({', '.join(row.policy_vetoes)})"
+        verdict, broker_id, detail = gateway_verdict(row)
+        if verdict == "UNCERTAIN":
+            # The broker may or may not hold this order, so the one thing we
+            # must not do is release the claim: an unmanaged real position is
+            # how a sibling module ends up adopting and liquidating it. Keep the
+            # position exactly as it was, book no fill, and say so loudly.
+            print(f"  UNCERTAIN {row.side} {row.quantity} {symbol}: {detail}"
+                  f" — claim KEPT, no fill recorded, reconcile before acting")
+            logger.error(
+                "%s: gateway could not confirm %s %s %s (%s) — the broker may "
+                "hold this order; state left unchanged for reconciliation",
+                module, row.side, row.quantity, symbol, detail,
+            )
+            if symbol in exit_context:
+                ticker, previous = exit_context[symbol]
+                new_managed[ticker] = previous
+        elif verdict != "ACCEPTED":
             print(f"  REFUSED {row.side} {row.quantity} {symbol}: {detail}")
+            # Logged at error, not swallowed: a gateway that refuses everything
+            # produced no error line at all for a full session on 2026-09-02
+            # because this branch was never reached — `submitted` was hardcoded
+            # True upstream, so every refusal took the success path below.
+            logger.error(
+                "%s: governed path refused %s %s %s: %s",
+                module, row.side, row.quantity, symbol, detail,
+            )
             if symbol in exit_context:
                 ticker, previous = exit_context[symbol]
                 new_managed[ticker] = previous
@@ -1096,8 +1162,7 @@ def _submit_via_gateway(
             else:
                 drop_failed_entry(new_managed, symbol)
         else:
-            result = getattr(row.outcome, "execution_result", None)
-            broker_id = getattr(result, "broker_order_id", None) or "?"
+            broker_id = broker_id or "?"
             print(f"  OK {row.side} {row.quantity} {symbol}  id={broker_id}")
             if str(row.side).strip().lower() == "buy":
                 # The gateway confirms the broker ACCEPTED the order, not that it

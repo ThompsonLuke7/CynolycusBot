@@ -21,6 +21,10 @@ def _feature_columns(df: pd.DataFrame) -> list[str]:
 
 
 def train_xgb(matrix_path: Path = TRAINING_MATRIX_PATH, artifacts_dir: Path = MODEL_ARTIFACTS_DIR) -> dict:
+    raise RuntimeError(
+        "The legacy XGBoost workflow is retired. Validate the deterministic, quote-aware "
+        "momentum scalper baseline and its point-in-time labels before adding ML."
+    )
     import xgboost as xgb
 
     ensure_data_dirs()

@@ -8,6 +8,7 @@ testpaths = [
     "signals/meta_context/tests",
     "signals/parabolic_filter/tests",
     "strategies/momentum_expansion/tests",
+    "strategies/momentum_scalper/tests",
     "strategies/dealer_positioning/tests",
     "strategies/intraday_structure/tests",
     "strategies/multi_ticker_swing/tests",

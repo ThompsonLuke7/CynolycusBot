@@ -11,6 +11,10 @@ from strategies.momentum_scalper.rankers.rule_ranker import score_setups
 
 
 def predict_breakout_quality(features: pd.DataFrame, artifacts_dir: Path = MODEL_ARTIFACTS_DIR) -> pd.DataFrame:
+    raise RuntimeError(
+        "Legacy breakout-quality prediction is retired until deterministic v1 labels "
+        "and walk-forward validation exist."
+    )
     out = features.copy()
     model_path = artifacts_dir / "xgb_breakout_quality.json"
     manifest_path = artifacts_dir / "feature_manifest.json"

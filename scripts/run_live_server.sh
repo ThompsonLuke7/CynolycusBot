@@ -23,7 +23,7 @@
 #   scripts/run_live_server.sh --readiness-on-start  # explicitly run guarded cache readiness
 #   DATA_READINESS_TIME=22:15 scripts/run_live_server.sh  # evening full shared-data refresh
 #   NIGHTLY_TIME=16:45 scripts/run_live_server.sh  # post-refresher collection/enrichment
-#   DEALER_RANKER_TIME=15:40 scripts/run_live_server.sh  # override near-close dealer run
+#   DEALER_RANKER_TIME=15:40 scripts/run_live_server.sh  # override the dealer run time
 #   VERBOSE=1 scripts/run_live_server.sh       # unfiltered console mirror
 #   QUIET=1 scripts/run_live_server.sh         # no console mirror at all
 #   (any extra args are passed straight through to combined_server)
@@ -88,7 +88,16 @@ SERVER_ARGS+=(
   # bars/context/features/matrix stage succeeds, so stale data stays fail-closed.
   "--data-readiness-time" "${DATA_READINESS_TIME:-22:15}"
   "--nightly-time" "${NIGHTLY_TIME:-16:45}"
-  "--dealer-ranker-time" "${DEALER_RANKER_TIME:-15:45}"
+  # 15:15, not 15:45. The batch takes ~16-17 min (2,790 chain snapshots across 8
+  # workers), so a 15:45 start finished at 16:01-16:02 on every measured day —
+  # after the close. Every entry it planned was therefore deferred to the NEXT
+  # open, ~18 hours after the signal, and on 2026-08-31 the same post-close pass
+  # also submitted two option orders that sat unfilled overnight. 15:15 lands the
+  # order submission around 15:32 with ~28 min of margin, so the signal trades on
+  # the session that produced it. NOTE this is a signal-timing change as well as
+  # an operational one: dealer positioning at 15:15 is not the same reading as at
+  # 15:45, and entries now fill same-day instead of at the next open.
+  "--dealer-ranker-time" "${DEALER_RANKER_TIME:-15:15}"
   "--dealer-ranker-workers" "${DEALER_RANKER_WORKERS:-8}"
   "--dealer-ranker-top-k" "${DEALER_RANKER_TOP_K:-10}"
   "--dealer-ranker-target-notional" "${DEALER_RANKER_TARGET_NOTIONAL:-5000}"

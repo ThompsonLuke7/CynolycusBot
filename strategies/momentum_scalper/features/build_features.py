@@ -82,6 +82,10 @@ def build_features_for_snapshot(snapshot: pd.DataFrame, bars: pd.DataFrame) -> p
 
 
 def build_features(snapshot_paths: list[Path] | None = None, output: Path = FEATURES_PATH) -> pd.DataFrame:
+    raise RuntimeError(
+        "The legacy feature builder is retired: it derives pseudo-spreads and non-causal "
+        "scanner context. Use the v1 causal scanner and pattern/replay pipeline instead."
+    )
     ensure_data_dirs()
     paths = snapshot_paths or sorted(SCANNER_SNAPSHOTS_DIR.glob("*.parquet"))
     frames: list[pd.DataFrame] = []

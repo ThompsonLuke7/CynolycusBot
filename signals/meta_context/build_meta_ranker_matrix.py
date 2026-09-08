@@ -23,12 +23,17 @@ Feature groups:
 Base scores use the walk-forward competition-winner OOF (leak-free, 21d embargo).
 options_score was removed (all-NaN). catalyst_score is the news_catalyst_signal join.
 
-Outputs: meta_context/meta_ranker/{meta_ranker_matrix.parquet, manifest.json}
-Run:     python meta_context/build_meta_ranker_matrix.py
+Outputs: meta_context/meta_ranker/{meta_ranker_matrix_research.parquet, manifest.json}
+         NOTE the _research suffix: the live rolling window that the 4H loop
+         scores from is maintained separately by meta_ranker/update_meta_matrix.py
+         and must never be used for training (its base scores are from the
+         DEPLOYED models, i.e. in-sample).
+Run:     python -m signals.meta_context.build_meta_ranker_matrix
 """
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +41,7 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[2]
 OUT = REPO / "signals/meta_context/meta_ranker"
+FORCE_OVERWRITE = "--force" in sys.argv
 
 # Walk-forward competition-winner OOF (leak-free, 21d embargo) from the 2026-06-14
 # competition bundles — supersedes the older single-model bundle OOF.
@@ -152,6 +158,37 @@ GOOD_LIQUIDITY_PCTILE = 0.40     # dollar_vol_pctile_252 >= 0.40
 # the names are tradeable. Trained as a second target so we can compare a "quality" meta
 # vs an "upside" meta. Regression upside target is the raw fwd_max_return.
 UPSIDE_RETURN_THRESHOLD = 0.15   # forward max return >= +15% (bigger winners)
+
+# ---- meta_rank_quality (dense within-bar rank composite) ------------------------
+# Bake-off winner, 2026-08-31. Components are RANKED within the decision bar
+# before weighting, so these numbers are the effective weights, not nominal ones.
+META_RANK_WEIGHTS = {"atr_adj": 0.45, "beta_alpha": 0.25, "drawdown": 0.15, "persistence": 0.15}
+
+# ---- market regime panel -------------------------------------------------------
+# 36 point-in-time columns with their own `available_at` and per-component
+# staleness, covering 2020-07 -> present. The matrix previously carried FOUR
+# crude regime columns (SPY trend/ret, VIX z/high) while this panel sat unused.
+# `credit_risk_hyg_lqd_z` is deliberately EXCLUDED: HYG/LQD is duration
+# contaminated and inverts in rate shocks (+1.59 sigma "risk-ON" through the 2022
+# bear). `risk_appetite_hyg_iei_z` is the corrected credit ratio and is kept.
+REGIME_PANEL = REPO / "Data/shared/market_regime/daily_regime.parquet"
+REGIME_PANEL_COLS = [
+    "risk_appetite_z", "risk_appetite_xly_xlp_z", "risk_appetite_iwm_spy_z",
+    "risk_appetite_hyg_iei_z", "risk_appetite_rsp_spy_z",
+    "liquidity_stress_z", "liquidity_stress_amihud_z", "liquidity_stress_dollar_vol_z",
+    "liquidity_stress_credit_z", "liquidity_stress_rv20_z",
+    "credit_risk_z", "credit_risk_ratio",
+    "breadth_z", "breadth_raw",
+    "sector_dispersion_z", "sector_dispersion_raw",
+    "spy_rv20_z", "spy_rv20_raw",
+]
+# Staleness companions: a regime reading carried forward for weeks is not the
+# same evidence as a fresh one, and the model should be able to tell.
+REGIME_STALE_COLS = [
+    "risk_appetite_z_stale_days", "liquidity_stress_z_stale_days",
+    "credit_risk_z_stale_days", "breadth_z_stale_days",
+    "sector_dispersion_z_stale_days", "spy_rv20_z_stale_days",
+]
 
 META_COLS = ["sector_id", "market_cap_bucket", "asset_type", "is_etf",
              "beta_spy_60", "dollar_vol_pctile_252",
@@ -485,6 +522,44 @@ def _join_treasury_features(spine: pd.DataFrame) -> tuple[pd.DataFrame, str | No
     return spine, str(path)
 
 
+def _join_regime_panel(spine: pd.DataFrame) -> tuple[pd.DataFrame, list[str], str | None]:
+    """Join the market-regime panel as-of the PRIOR day.
+
+    Market-wide state, so there is no `by=` key — one row per date applies to
+    every ticker. Strictly-prior (`allow_exact_matches=False`) for the same
+    reason every other block here is: a 4H bar must not see the end-of-day
+    aggregate of its own session.
+
+    The panel publishes its own `available_at`; that is a stronger guarantee than
+    prior-day, but prior-day is what the rest of this matrix uses and mixing two
+    availability rules inside one feature block is worse than being uniformly
+    conservative.
+    """
+    cols = REGIME_PANEL_COLS + REGIME_STALE_COLS
+    if not REGIME_PANEL.exists():
+        for c in cols:
+            spine[c] = np.nan
+        return spine, cols, None
+    rg = pd.read_parquet(REGIME_PANEL)
+    have = [c for c in cols if c in rg.columns]
+    if rg.empty or "date" not in rg.columns or not have:
+        for c in cols:
+            spine[c] = np.nan
+        return spine, cols, str(REGIME_PANEL)
+    rg["date"] = pd.to_datetime(rg["date"], errors="coerce").dt.tz_localize(None).dt.normalize()
+    rg = rg[["date"] + have].dropna(subset=["date"]).sort_values("date")
+    merged = pd.merge_asof(
+        spine.sort_values("date").reset_index(),
+        rg,
+        on="date",
+        direction="backward",
+        allow_exact_matches=False,
+    ).set_index("index").sort_index()
+    for c in cols:
+        spine[c] = merged[c] if c in merged.columns else np.nan
+    return spine, cols, str(REGIME_PANEL)
+
+
 def _join_calendar_macro_features(spine: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str | None]]:
     spine, earnings_source = _join_earnings_features(spine)
     spine, economic_source = _join_economic_features(spine)
@@ -581,6 +656,7 @@ def main():
     # ---- earnings/economic-calendar/treasury macro context -----------------
     print("joining earnings/economic/treasury calendar context ...")
     spine, calendar_sources = _join_calendar_macro_features(spine)
+    spine, regime_panel_features, regime_panel_source = _join_regime_panel(spine)
     print(
         "  sources: "
         f"earnings={calendar_sources['earnings_calendar'] or 'missing'}, "
@@ -644,6 +720,41 @@ def main():
             (spine["fwd_max_return"] >= UPSIDE_RETURN_THRESHOLD)
             & (liq >= GOOD_LIQUIDITY_PCTILE)
         ).astype(int)
+
+        # meta_rank_quality — the 2026-08-31 bake-off winner.
+        #
+        # `meta_good` is a 14%-positive binary gate, and a model trained on it
+        # orders forward tradeable move no better than chance: measured within-bar
+        # rank correlation against 5-day forward MFE was +0.0035 (with its proper
+        # binary:logistic objective), against +0.0434 for this dense rank
+        # composite — paired difference +0.0398, 95% CI [+0.0076, +0.0717] over
+        # 105 test bars. The defect is the sparse binary structure, not the beta
+        # bias in the alpha gate: a beta-neutral version of the same gate scored
+        # WORSE than the original.
+        #
+        # Ranked WITHIN decision bar, so every component is on [0, 1] and the
+        # weights mean what they say. That is the one thing momentum's label does
+        # right and HTF's does not (HTF sums raw components whose scales differ
+        # 33x, making its stated 35/25/25/15 an effective 4/92/1/3).
+        #
+        # `beta_alpha` is genuinely market-relative, unlike `fwd_max_alpha`:
+        # bench_fwd_max is a per-bar CONSTANT, so subtracting it cannot change a
+        # cross-sectional rank at all (measured rho with raw return = 1.000).
+        # Scaling it by beta restores real variation across names.
+        def _rank(series, ascending=True):
+            return series.groupby(spine["timestamp"] if "timestamp" in spine.columns
+                                  else spine.index.get_level_values(0)).rank(pct=True,
+                                                                             ascending=ascending)
+
+        bench_fwd_max = spine["fwd_max_return"] - spine["fwd_max_alpha"]
+        beta = spine["beta_spy_60"].clip(-3.0, 5.0).fillna(1.0) if "beta_spy_60" in spine.columns else 1.0
+        beta_alpha = spine["fwd_max_return"] - beta * bench_fwd_max
+        spine["meta_rank_quality"] = (
+            META_RANK_WEIGHTS["atr_adj"] * _rank(spine["fwd_atr_adj_return"])
+            + META_RANK_WEIGHTS["beta_alpha"] * _rank(beta_alpha)
+            + META_RANK_WEIGHTS["drawdown"] * _rank(spine["fwd_max_drawdown"], ascending=False)
+            + META_RANK_WEIGHTS["persistence"] * _rank(spine["trend_persistence"])
+        )
     else:
         print("  WARNING: fwd_max_return/fwd_max_alpha absent from MOM_OOF — "
               "trade_quality/meta_good not built (rebuild momentum OOF to enable).")
@@ -652,7 +763,8 @@ def main():
     id_cols = ["timestamp", "ticker", "theme", "date"]
     label_cols = ["meta_label", "fwd_close_return", "fwd_max_drawdown", "fwd_atr_adj_return", "trend_persistence"]
     if have_quality:
-        label_cols += ["trade_quality", "meta_good", "meta_upside", "fwd_max_return", "fwd_max_alpha"]
+        label_cols += ["trade_quality", "meta_good", "meta_upside", "meta_rank_quality",
+                       "fwd_max_return", "fwd_max_alpha"]
     base_scores = ["mom_score", "htf_score"]
     numeric_theme_ctx = [c for c in theme_ctx if c != "theme"]
     cross = ["mom_xs_rank", "htf_xs_rank", "signal_agreement", "within_theme_mom_rank", "theme_crowding_frac"]
@@ -660,31 +772,63 @@ def main():
     calendar_macro_features = CALENDAR_MACRO_COLS
     forward_guidance_features = fg_features_present
     stubs: list[str] = []  # options_score stub removed (was all-NaN)
-    feature_cols = (base_scores + numeric_theme_ctx + cross + META_COLS + news_features
+    feature_cols = (base_scores + numeric_theme_ctx + cross + META_COLS
+                    + regime_panel_features + news_features
                     + calendar_macro_features + forward_guidance_features + stubs)
 
     out = spine[id_cols + feature_cols + label_cols].copy()
     out = out.dropna(subset=["meta_label"]).set_index(["timestamp", "ticker"]).sort_index()
-    out.to_parquet(OUT / "meta_ranker_matrix.parquet")
+    # RESEARCH and LIVE are different artifacts and no longer share a path.
+    #
+    # This build produces the OOF-based history the models TRAIN on: base scores
+    # are walk-forward out-of-fold with a 21-day embargo, and it ends wherever
+    # MOM_OOF ends. `meta_ranker/update_meta_matrix.py` maintains a rolling
+    # 400-day window scored by the DEPLOYED models, which is what the live 4H
+    # loop reads — and which must never be used for training, because deployed
+    # scores on their own training data are in-sample.
+    #
+    # They wrote the same file until 2026-08-31, when running this build silently
+    # deleted every live row after the OOF cutoff and broke live scoring until
+    # the updater backfilled it. Separate paths remove the failure mode instead
+    # of documenting it.
+    dest = OUT / "meta_ranker_matrix_research.parquet"
+    out.to_parquet(dest)
+    if FORCE_OVERWRITE:
+        # Explicit opt-in only, for the rare case of seeding the live window from
+        # scratch. Follow it immediately with the updater or live scoring has a
+        # hole from the OOF cutoff to today.
+        out.to_parquet(OUT / "meta_ranker_matrix.parquet")
+        print("  --force: also overwrote the LIVE matrix; run update_meta_matrix.py now")
 
     cov = {c: float(out[c].notna().mean()) for c in feature_cols}
     # Competition harness labels: regression on continuous trade_quality, classifier /
     # ranker relevance on the binary meta_good flag. Falls back to the legacy meta_label
     # if the quality columns could not be built.
-    primary_label = "trade_quality" if have_quality else "meta_label"
+    # The regression target the competition harness fits. `meta_rank_quality` is
+    # the bake-off winner and supersedes `trade_quality`; both stay in the matrix
+    # so the change is measurable rather than assumed.
+    primary_label = ("meta_rank_quality" if (have_quality and "meta_rank_quality" in out.columns)
+                     else ("trade_quality" if have_quality else "meta_label"))
     manifest = {
         "unit": "(ticker, 4H bar)",
         "horizon": "momentum 25x4H (~10 trading days)",
         "label_column": primary_label,
         "label_definition": (
-            "trade_quality = %.2f*fwd_max_alpha + %.2f*trend_persistence "
-            "- %.2f*fwd_max_drawdown - %.2f*max(0, fwd_max_return - fwd_close_return)"
-            % (TRADE_QUALITY_WEIGHTS["alpha"], TRADE_QUALITY_WEIGHTS["persist"],
-               TRADE_QUALITY_WEIGHTS["mae"], TRADE_QUALITY_WEIGHTS["vol"])
-            if have_quality
-            else "fwd_close_return - %.1f * fwd_max_drawdown" % DRAWDOWN_PENALTY
+            "meta_rank_quality = %.2f*rank(fwd_atr_adj_return) + %.2f*rank(beta_alpha) "
+            "+ %.2f*rank(-fwd_max_drawdown) + %.2f*rank(trend_persistence), ranked within bar"
+            % (META_RANK_WEIGHTS["atr_adj"], META_RANK_WEIGHTS["beta_alpha"],
+               META_RANK_WEIGHTS["drawdown"], META_RANK_WEIGHTS["persistence"])
+            if primary_label == "meta_rank_quality"
+            else ("trade_quality = %.2f*fwd_max_alpha + %.2f*trend_persistence "
+                  "- %.2f*fwd_max_drawdown - %.2f*max(0, fwd_max_return - fwd_close_return)"
+                  % (TRADE_QUALITY_WEIGHTS["alpha"], TRADE_QUALITY_WEIGHTS["persist"],
+                     TRADE_QUALITY_WEIGHTS["mae"], TRADE_QUALITY_WEIGHTS["vol"])
+                  if have_quality
+                  else "fwd_close_return - %.1f * fwd_max_drawdown" % DRAWDOWN_PENALTY)
         ),
-        # colab_competition.py keys
+        # colab_competition.py keys. The classifier/ranker relevance stays on
+        # meta_good (it needs a binary), while the regression target moves to the
+        # dense rank composite that won the bake-off.
         "target_column": "meta_good" if have_quality else "meta_label",
         "regression_target_column": primary_label,
         "relevance_column": "meta_good" if have_quality else None,
@@ -694,6 +838,9 @@ def main():
             % (GOOD_RETURN_THRESHOLD, GOOD_DRAWDOWN_MAG_MAX, GOOD_LIQUIDITY_PCTILE)
         ) if have_quality else None,
         "meta_good_positive_rate": float(out["meta_good"].mean()) if have_quality and "meta_good" in out.columns else None,
+        "meta_rank_quality_weights": META_RANK_WEIGHTS if primary_label == "meta_rank_quality" else None,
+        "regime_panel_source": regime_panel_source,
+        "regime_panel_columns": regime_panel_features,
         "train_frac": 0.6,
         "val_frac": 0.2,
         "rank_group": "timestamp",
@@ -751,7 +898,7 @@ def main():
         (OUT / "manifest_upside.json").write_text(json.dumps(upside, indent=2, default=str))
         print(f"wrote manifest_upside.json  meta_upside positive rate={out['meta_upside'].mean():.4f}")
 
-    print(f"\nwrote {OUT/'meta_ranker_matrix.parquet'}  rows={len(out):,}  features={len(feature_cols)}")
+    print(f"\nwrote {dest}  rows={len(out):,}  features={len(feature_cols)}")
     print("coverage (non-null):")
     for c in feature_cols:
         prefix = "  [news] " if c in news_features else ("  [cal] " if c in calendar_macro_features else "  ")

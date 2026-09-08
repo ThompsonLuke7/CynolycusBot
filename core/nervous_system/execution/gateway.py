@@ -50,7 +50,9 @@ from .broker import (
 )
 from .journal import (
     CompositeJournalResult,
+    CompositeStatus,
     ExecutionJournalEvent,
+    JournalError,
     PostgresPersistenceStatus,
     link_event,
 )
@@ -170,6 +172,26 @@ class ExecutionGateway:
         self._worker_id = worker_id
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lease = timedelta(seconds=lease_seconds)
+
+    def _write_journal(self, event: ExecutionJournalEvent) -> Any:
+        """Write one event and always answer with something that has `is_durable`.
+
+        A composite journal absorbs sink failures and reports them in its
+        status. A bare sink raises instead, and an escaping exception here is
+        the worst outcome available: it aborts the submission mid-flight,
+        outside the caller's REFUSED/AMBIGUOUS vocabulary, and after the
+        broker may already hold the order. Turning the raise into a
+        not-durable result keeps every journal problem inside the gateway's
+        own result contract.
+        """
+
+        try:
+            return self._journal.write(event)
+        except JournalError as exc:
+            return CompositeJournalResult(
+                status=CompositeStatus.FAILED,
+                failures=(f"{type(exc).__name__}: {exc}",),
+            )
 
     # -- public surface -----------------------------------------------------
 
@@ -365,7 +387,7 @@ class ExecutionGateway:
 
         # 2. Durable intent journal. Still no broker call.
         intent_event = self._intent_event(request, client_order_id, now)
-        journal_result = self._journal.write(intent_event)
+        journal_result = self._write_journal(intent_event)
         if not journal_result.is_durable:
             with self._open_uow() as uow:
                 uow.executions.transition_attempt(
@@ -444,7 +466,7 @@ class ExecutionGateway:
         response_event = self._response_event(
             intent_event, request, client_order_id, order
         )
-        response_result = self._journal.write(response_event)
+        response_result = self._write_journal(response_event)
         outcome = ExecutionOutcome.SUBMITTED
         reason: str | None = None
         if not response_result.is_durable:
@@ -506,7 +528,7 @@ class ExecutionGateway:
             broker_order_id=None,
             payload={"error": type(exc).__name__, "detail": str(exc)},
         )
-        self._journal.write(rejection_event)
+        self._write_journal(rejection_event)
         with self._open_uow() as uow:
             uow.executions.transition_attempt(
                 submission_attempt_id=attempt_id,
@@ -636,7 +658,7 @@ class ExecutionGateway:
             now,
             postgres_status=PostgresPersistenceStatus.RECONCILIATION_REQUIRED,
         )
-        journal_result = self._journal.write(intent_event)
+        journal_result = self._write_journal(intent_event)
         if not journal_result.is_durable:
             return ExecutionResult(
                 outcome=ExecutionOutcome.REFUSED,
@@ -667,7 +689,7 @@ class ExecutionGateway:
             order,
             postgres_status=PostgresPersistenceStatus.RECONCILIATION_REQUIRED,
         )
-        self._journal.write(response_event)
+        self._write_journal(response_event)
         return ExecutionResult(
             outcome=ExecutionOutcome.RECONCILIATION_REQUIRED,
             order_request_id=request.order_request_id,

@@ -432,12 +432,35 @@ class IntradayStructureEngine:
             if setup.state == SetupState.CLOSED:
                 continue
             if setup.state == SetupState.CONFIRMED:
+                # A setup that took too long to confirm is not entered at all.
+                # `max_setup_bars` is a staleness limit on the *setup*, but
+                # `manage_running_setup` also reads it as a reason to close a
+                # *position*, so a setup that confirmed at or past the limit
+                # used to be bought and closed on the same bar. HOOD did that on
+                # 2026-09-02 at 15:33:40 -> 15:33:42, paying the spread both ways
+                # for a -$35 round trip it was never going to hold. Refusing the
+                # entry is the same judgement made two seconds earlier and for
+                # free.
+                if setup.bars_alive >= self.config.target.max_setup_bars:
+                    self._transition(
+                        setup, SetupState.CLOSED, bar,
+                        "setup too old to enter", ("stale_at_entry",), phase="CLOSED",
+                    )
+                    continue
                 setup.entry_price = bar.open
                 setup.entry_time = bar.timestamp
                 self._submit_entry(setup, bar)
                 self._transition(setup, SetupState.RUNNING, bar, "next-bar entry delay elapsed", ("running",), phase="RUNNING")
-                decision = manage_running_setup(setup, ctx)
-                self._apply_decision(setup, decision, ctx)
+                # Deliberately NOT managed on this bar. The engine sees bars only
+                # once they are complete, so the entry order is actually sent
+                # after this bar closed — the position does not exist during it.
+                # Managing it here compared the bar's own high/low against the
+                # invalidation and stopped the trade out on price action that
+                # predates the fill: PATH 10:46:18 -> 10:46:19, HOOD 11:02:30 ->
+                # 11:02:32, NKE 13:24:17 -> 13:24:18 and HOOD 14:03:52 ->
+                # 14:03:54 on 2026-09-02, all "invalidation touched", -$203 of
+                # pure spread between them. The first bar this position can
+                # honestly be judged on is the next one.
                 continue
             if setup.state == SetupState.TARGET_REACHED:
                 self._apply_decision(setup, evaluate_extension(setup, ctx), ctx)

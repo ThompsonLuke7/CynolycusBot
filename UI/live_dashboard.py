@@ -34,6 +34,33 @@ from strategies.spy_intraday.Policy.replay_option_proxy import ReplayOptionPrice
 
 logger = logging.getLogger(__name__)
 
+# A single SPY 10-minute close occasionally takes minutes, and the aggregate
+# `loop cost` line cannot say which part. On 2026-09-02 and 2026-09-03 the live
+# loop sat at busy=100% from 09:50 to 16:12 ET with per-bar maxima of 230-1,366
+# seconds and the bar queue backing up to 271, while nine of every ten bars in
+# the same window cost ~3s in total — so it is one phase stalling, not general
+# slowness. Measured and ruled out: the meta feature frame build, which takes
+# 0.87s over the full 50,000-bar buffer with pivot and TB probabilities on.
+# These per-phase timings name the phase the next time it happens.
+SLOW_PHASE_WARN_SECONDS = 5.0
+
+
+def _timed_phase(name: str, symbol: str, fn, *args, **kwargs):
+    """Run one phase of the bar handler, logging it when it stalls."""
+
+    started = time.monotonic()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed >= SLOW_PHASE_WARN_SECONDS:
+            logger.warning(
+                "[live] SLOW PHASE %s for %s took %.1fs — this is what backs the "
+                "bar queue up; everything downstream of it is that far behind the tape",
+                name, symbol, elapsed,
+            )
+
+
 UI_BUILD = "2026-04-18-regime-percentile-thresholds"
 DEFAULT_SPY_1M_PATH = "Data/raw/spy/spy_intraday_1min.parquet"
 DEFAULT_REGIME_PROBABILITY_FRAME = (
@@ -3435,11 +3462,16 @@ class LiveSession:
             def _on_15m(symbol: str, bar15: dict, buffer: Any) -> None:
                 if order_policies is not None and symbol in order_policies:
                     policy = order_policies[symbol]
-                    policy.on_15m_bar(closed_bar=bar15)
+                    _timed_phase("policy.on_15m_bar", symbol,
+                                 policy.on_15m_bar, closed_bar=bar15)
                     self._store.set_policy_state(symbol, policy.snapshot_state())
-                    _persist_policy_runtime_cache_throttled()
+                    _timed_phase("persist_policy_cache", symbol,
+                                 _persist_policy_runtime_cache_throttled)
 
-                action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
+                action = _timed_phase(
+                    "inference.on_15m_close", symbol, inference.on_15m_close,
+                    df_1m=buffer.to_dataframe(), closed_bar=bar15,
+                )
                 if action is None:
                     self._store.add_15m_bar(symbol, bar15)
                     self._emit("bar_15m", {"symbol": symbol, "bar": _normalize_bar(bar15)})
@@ -3595,7 +3627,8 @@ class LiveSession:
                     return
 
                 policy = order_policies[symbol]
-                result = policy.on_decision(
+                result = _timed_phase(
+                    "policy.on_decision", symbol, policy.on_decision,
                     action=float(selected_action),
                     closed_bar=bar_payload,
                     update_bar_state=False,
@@ -3605,8 +3638,12 @@ class LiveSession:
                 self._store.set_policy_state(symbol, policy_state)
                 event_key = str(result.get("event", "")).strip().lower()
                 force_io = event_key not in {"hold", "no_change"}
-                _persist_policy_runtime_cache_throttled(force=force_io)
-                broker_snap = _snapshot_broker_state(symbol, policy, force=force_io)
+                _timed_phase("persist_policy_cache", symbol,
+                             _persist_policy_runtime_cache_throttled, force=force_io)
+                broker_snap = _timed_phase(
+                    "snapshot_broker_state", symbol,
+                    _snapshot_broker_state, symbol, policy, force=force_io,
+                )
                 policy_pos = int(policy_state.get("position", 0) or 0)
                 self._store.set_last_action(
                     symbol,
@@ -4203,6 +4240,51 @@ class LiveSession:
             )
 
             last_broker_poll = 0.0
+            # Loop-cost instrumentation. On 2026-08-31 the bar-to-decision lag
+            # reached 153 min (Friday: 129) and broker maintenance — which only
+            # runs when this queue drains — collapsed from ~115/hour overnight to
+            # 3-6/hour during RTH, so the loop is demonstrably saturated. What is
+            # NOT yet known is where the time goes, and the fix differs by answer:
+            # a slow `handle_bar` wants a bounded inference window, while slow
+            # maintenance wants its own thread. Measure before changing either.
+            # Aggregated once a minute; never per bar.
+            _loop_cost = {"spy_n": 0, "spy_s": 0.0, "spy_max": 0.0,
+                          "ctx_n": 0, "ctx_s": 0.0,
+                          "maint_n": 0, "maint_s": 0.0, "maint_max": 0.0}
+            _loop_cost_logged_at = time.monotonic()
+
+            def _record_cost(bucket: str, seconds: float) -> None:
+                _loop_cost[f"{bucket}_n"] += 1
+                _loop_cost[f"{bucket}_s"] += seconds
+                key = f"{bucket}_max"
+                if key in _loop_cost and seconds > _loop_cost[key]:
+                    _loop_cost[key] = seconds
+
+            def _maybe_log_loop_cost() -> None:
+                nonlocal _loop_cost_logged_at
+                now_m = time.monotonic()
+                window = now_m - _loop_cost_logged_at
+                if window < 60.0:
+                    return
+                _loop_cost_logged_at = now_m
+                spy_n, ctx_n, maint_n = (_loop_cost["spy_n"], _loop_cost["ctx_n"],
+                                         _loop_cost["maint_n"])
+                busy = _loop_cost["spy_s"] + _loop_cost["ctx_s"] + _loop_cost["maint_s"]
+                logger.info(
+                    "[live] loop cost over %.0fs: spy_bars=%d mean=%.3fs max=%.3fs | "
+                    "context_bars=%d mean=%.3fs | maintenance=%d mean=%.3fs max=%.3fs | "
+                    "queue=%d busy=%.0f%%",
+                    window,
+                    spy_n, (_loop_cost["spy_s"] / spy_n) if spy_n else 0.0, _loop_cost["spy_max"],
+                    ctx_n, (_loop_cost["ctx_s"] / ctx_n) if ctx_n else 0.0,
+                    maint_n, (_loop_cost["maint_s"] / maint_n) if maint_n else 0.0,
+                    _loop_cost["maint_max"],
+                    bar_queue.qsize(),
+                    100.0 * busy / window if window else 0.0,
+                )
+                for k in _loop_cost:
+                    _loop_cost[k] = 0 if k.endswith("_n") else 0.0
+
             while not stop_event.is_set():
                 try:
                     bar = bar_queue.get(timeout=0.5)
@@ -4211,20 +4293,51 @@ class LiveSession:
                 if bar is not None:
                     bar_symbol = str(bar.get("symbol", "")).upper()
                     context_processor = context_processors.get(bar_symbol)
-                    if context_processor is not None:
-                        context_processor.handle_bar(bar)
+                    # One bad bar must not end the session. Before this guard a
+                    # broker 403 raised inside the order policy propagated out
+                    # of handle_bar and stopped the loop outright at 15:58 ET
+                    # on 2026-09-03, with nothing in the server log to say so.
+                    # Losing a bar is recoverable; losing the loop is not.
+                    try:
+                        if context_processor is not None:
+                            _t0 = time.monotonic()
+                            context_processor.handle_bar(bar)
+                            _record_cost("ctx", time.monotonic() - _t0)
+                            _maybe_log_loop_cost()
+                            continue
+                        if live_vix_enabled and vix_processor is not None and bar_symbol == live_vix_symbol:
+                            _t0 = time.monotonic()
+                            vix_processor.handle_bar(bar)
+                            _record_cost("ctx", time.monotonic() - _t0)
+                            _maybe_log_loop_cost()
+                            continue
+                        _t0 = time.monotonic()
+                        processor.handle_bar(bar)
+                        _record_cost("spy", time.monotonic() - _t0)
+                        _maybe_log_loop_cost()
                         continue
-                    if live_vix_enabled and vix_processor is not None and bar_symbol == live_vix_symbol:
-                        vix_processor.handle_bar(bar)
+                    except Exception:
+                        logger.exception(
+                            "[live] bar processing failed symbol=%s ts=%s; "
+                            "dropping this bar and continuing",
+                            bar_symbol,
+                            bar.get("timestamp"),
+                        )
+                        self._emit(
+                            "status",
+                            {
+                                "running": True,
+                                "message": f"bar processing error for {bar_symbol}; loop continuing",
+                            },
+                        )
                         continue
-                    processor.handle_bar(bar)
-                    continue
 
                 # Keep broker-side positions/orders fresh when the market-data queue is idle.
                 if order_policies is not None:
                     now = time.monotonic()
                     if now - last_broker_poll >= float(cfg.broker_snapshot_interval_sec):
                         last_broker_poll = now
+                        _maint_t0 = now
                         for symbol, policy in order_policies.items():
                             reconcile_event: dict[str, Any] | None = None
                             try:
@@ -4341,6 +4454,9 @@ class LiveSession:
                                 self._emit("broker_state", {"symbol": symbol, "state": broker_error_state})
                                 self._audit("broker_state", {"symbol": symbol, "state": broker_error_state})
                                 continue
+                        _record_cost("maint", time.monotonic() - _maint_t0)
+
+                _maybe_log_loop_cost()
 
         except Exception as exc:
             error_message = f"{exc}"

@@ -136,6 +136,28 @@ class JournalReceipt(ContractModel):
     content_hash: Sha256Hex
     status: JournalWriteStatus
 
+    @property
+    def is_durable(self) -> bool:
+        """Whether this sink holds the event.
+
+        A receipt only ever exists because a sink installed the record: both
+        WRITTEN and IDEMPOTENT mean the bytes are on the backend under this
+        locator. Every failure path raises (`JournalConflict`,
+        `JournalUnavailable`) instead of returning, so there is no receipt
+        that represents a non-durable write.
+
+        This mirrors `CompositeJournalResult.is_durable` so the gateway can
+        gate on durability without caring whether it was handed a single sink
+        or a composite. Callers that pass a bare sink — the Meta path does —
+        would otherwise raise AttributeError inside the gateway and never
+        reach the broker at all.
+        """
+
+        return self.status in {
+            JournalWriteStatus.WRITTEN,
+            JournalWriteStatus.IDEMPOTENT,
+        }
+
 
 class ExecutionJournalEvent(ContractModel):
     event_id: UUID

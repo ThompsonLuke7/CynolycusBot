@@ -1969,6 +1969,12 @@ class SwingLiveRunner:
             if verified_order is not None
             else _response_float(order_resp, "filled_avg_price")
         )
+        owned_qty = _owned_qty_from_fill(verified_order or order_resp, requested=qty)
+        if owned_qty != int(qty):
+            logger.warning(
+                "[%s] partial fill: requested %d x %s, filled %d — claiming %d",
+                ticker, int(qty), option_symbol, owned_qty, owned_qty,
+            )
         pos = SwingPosition(
             ticker=ticker,
             direction=sig.direction,
@@ -1976,7 +1982,7 @@ class SwingLiveRunner:
             entry_time=entry_time,
             atr_at_entry=sig.atr,
             option_symbol=option_symbol,
-            qty=qty,
+            qty=owned_qty,
             config=sig.config,
             option_entry_price=option_entry_price,
             option_entry_meta=option_entry_meta,
@@ -2395,6 +2401,26 @@ def _cancel_entry_order(client: AlpacaOptionsClient, *, order_id: str) -> None:
         logger.warning("entry order cancel warning order_id=%s: %s", order_id, exc)
     else:
         logger.info("entry order cancel requested order_id=%s", order_id)
+
+
+def _owned_qty_from_fill(order: Any, *, requested: int) -> int:
+    """Contracts this module actually owns, from its own entry order.
+
+    The paper account is shared and Alpaca nets option positions by symbol, so
+    the broker's reported size is the sum across every module long that
+    contract and can never say which part is ours. Our own order's
+    ``filled_qty`` is the only attribution there is, and every exit is sized
+    from it — claiming the requested size after a partial fill would sell
+    contracts belonging to whichever sibling also holds it.
+
+    Falls back to ``requested`` when the order does not report a fill quantity,
+    which is the pre-existing behaviour and the safe direction for a broker that
+    answered without the field: the exit path clamps to the broker total anyway.
+    """
+    filled = _response_float(order, "filled_qty")
+    if not filled:
+        return int(requested)
+    return max(1, min(int(requested), int(filled)))
 
 
 def _response_float(resp: Any, key: str) -> float | None:

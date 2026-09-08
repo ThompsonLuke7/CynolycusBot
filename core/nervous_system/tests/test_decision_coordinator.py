@@ -11,6 +11,7 @@ from core.nervous_system.contracts.enums import (
     PolicyMode,
     RuntimeEnvironment,
 )
+from core.nervous_system.execution.gateway import ExecutionOutcome, ExecutionResult
 from core.nervous_system.orchestration.coordinator import (
     STAGES,
     CoordinatorRefusal,
@@ -41,12 +42,32 @@ class ExplodingGatewayFactory:
 
 
 class RecordingGateway:
-    def __init__(self) -> None:
+    """A gateway that returns a real ExecutionResult, not a stand-in string.
+
+    The previous stub returned the literal ``"submitted"``, so no test could
+    tell an accepted order from a refused one and `PlanningOutcome.submitted`
+    was free to be hardcoded True. Production paid for that: the Meta gateway
+    refused every request between 2026-08-25 and 2026-09-02 and the runner
+    reported each one as filled.
+    """
+
+    def __init__(self, outcome: ExecutionOutcome = ExecutionOutcome.SUBMITTED,
+                 reason_code: str | None = None) -> None:
         self.submits: list = []
+        self._outcome = outcome
+        self._reason_code = reason_code
 
     def submit(self, *, decision, request):
         self.submits.append(request)
-        return "submitted"
+        return ExecutionResult(
+            outcome=self._outcome,
+            order_request_id=request.order_request_id,
+            client_order_id="cid-1",
+            broker_order_id=(
+                "broker-1" if self._outcome is ExecutionOutcome.SUBMITTED else None
+            ),
+            reason_code=self._reason_code,
+        )
 
 
 def coordinator(
@@ -153,6 +174,45 @@ def test_submitting_modes_reach_the_gateway_in_qa_paper(mode) -> None:
     assert outcome.submitted is True
     assert outcome.gateway_invoked is True
     assert gateway.submits == [request]
+
+
+@pytest.mark.parametrize(
+    "outcome_kind",
+    [
+        ExecutionOutcome.REFUSED,
+        ExecutionOutcome.REJECTED,
+        ExecutionOutcome.DUPLICATE,
+        ExecutionOutcome.AMBIGUOUS,
+        ExecutionOutcome.RECONCILIATION_REQUIRED,
+    ],
+)
+def test_a_gateway_that_does_not_submit_is_not_reported_as_submitted(
+    outcome_kind,
+) -> None:
+    """Reaching the gateway is not the same as the broker taking the order.
+
+    `submitted` was hardcoded True the moment `gateway.submit` returned, so a
+    PREFLIGHT_REFUSED came back indistinguishable from a fill. Meta booked
+    thirty phantom closed trades on that gap across 2026-08-27 and 2026-09-02.
+    """
+
+    gateway = RecordingGateway(outcome_kind, reason_code="PREFLIGHT_REFUSED")
+    coord = coordinator(gateway_factory=lambda: gateway)
+
+    outcome = coord.process_intent(
+        an_intent(),
+        policy_mode=PolicyMode.ENFORCE,
+        submit=True,
+        policy_decision=FakePolicy(PolicyAction.APPROVE),
+        selection=FakeSelection("SELECTED_OPTION"),
+        order_request=order_request(),
+    )
+
+    assert outcome.submitted is False
+    # The call still happened, and the verdict is preserved for the caller to
+    # tell "certainly not sent" from "may have been sent".
+    assert outcome.gateway_invoked is True
+    assert outcome.execution_result.outcome is outcome_kind
 
 
 @pytest.mark.parametrize("action", [PolicyAction.REJECT, PolicyAction.DEFER])

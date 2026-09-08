@@ -21,6 +21,10 @@ class ExitResult:
 
 
 def simulate_exit(forward_bars: pd.DataFrame, entry_price: float, entry_timestamp: pd.Timestamp, config: ExitConfig = ExitConfig()) -> ExitResult | None:
+    raise RuntimeError(
+        "Legacy OHLC exit simulation is retired. Use MomentumReplayEngine and its "
+        "quote-aware, fill-aware position lifecycle."
+    )
     if forward_bars.empty or entry_price <= 0:
         return None
     risk = entry_price * (config.stop_risk / 100.0)
