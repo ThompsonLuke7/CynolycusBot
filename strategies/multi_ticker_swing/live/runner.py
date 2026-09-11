@@ -1648,6 +1648,49 @@ class SwingLiveRunner:
     # Trade entry
     # ------------------------------------------------------------------
 
+    def _option_entry_unfunded(
+        self, *, option_symbol: str, qty: int, limit_price: float | None,
+    ) -> dict | None:
+        """Cost/available when the account cannot fund this buy, else None.
+
+        Deliberately a pre-filter and not a gate: it only ever saves a round
+        trip that would come back 403. Anything it cannot establish — no
+        account endpoint, an unreadable account, an unpriced order — returns
+        None and the submit proceeds untouched.
+        """
+
+        from core.live_4h_exec import _option_cost_basis
+
+        client = self._client
+        if not hasattr(client, "get_account"):
+            return None
+        cost = _option_cost_basis(qty, limit_price)
+        if cost is None:
+            return None
+        try:
+            account = client.get_account() or {}
+            available = float(account.get("options_buying_power"))
+        except Exception as exc:  # noqa: BLE001 - never block trading on this
+            logger.warning(
+                "options buying power: could not read the account (%s); "
+                "submitting %s unfiltered", exc, option_symbol,
+            )
+            return None
+        if cost <= available:
+            return None
+        logger.warning(
+            "options buying power: skipping buy %s x%s — cost basis $%.2f "
+            "exceeds the $%.2f available", option_symbol, qty, cost, available,
+        )
+        return {
+            "reason": (
+                f"insufficient options buying power: {option_symbol} x{qty} needs "
+                f"${cost:,.2f}, ${available:,.2f} available"
+            ),
+            "cost": float(cost),
+            "available": float(available),
+        }
+
     def _enter_trade(self, sig: Signal, conf_bar: dict) -> None:
         ticker = sig.ticker
         # Entry at close of confirmation bar (matches backtest realism)
@@ -1853,6 +1896,30 @@ class SwingLiveRunner:
                 })
                 return
         if not self._dry_run:
+            # The 4H family pre-filters option buys it cannot pay for; this path
+            # never did, so on 2026-09-08 a KDP261016C00033000 buy needing
+            # $5,025.03 was pushed at $919.55 of options buying power and spent
+            # its whole three-rung limit ladder collecting 403s. The broker
+            # rejection is the only place that constraint appeared. Best-effort
+            # and never a gate on a fundable order: an unreadable account
+            # submits exactly as before.
+            unfunded = self._option_entry_unfunded(
+                option_symbol=option_symbol, qty=qty,
+                limit_price=limit_prices[0] if limit_prices else None,
+            )
+            if unfunded is not None:
+                logger.info("[%s] entry skipped: %s", ticker, unfunded["reason"])
+                self._emit("entry_skipped", {
+                    "ticker": ticker,
+                    "direction": int(sig.direction),
+                    "reason": "insufficient_options_buying_power",
+                    "entry_price": entry_price,
+                    "option_symbol": option_symbol,
+                    "option_entry_meta": option_entry_meta,
+                    "options_buying_power": unfunded["available"],
+                    "cost_basis": unfunded["cost"],
+                })
+                return
             for attempt, limit_price in enumerate(limit_prices, start=1):
                 try:
                     order_resp = self._client.submit_option_order(

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1014">
+  <title>Cynolycus · Operations</title>
+  <link rel="stylesheet" href="/static/hub.css">
+  <script src="/static/hub.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to workspace</a>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Cynolycus home"><span class="sigil">C</span><span>Cynolycus<small>RESEARCH & EXECUTION</small></span></a>
+    <div class="workspace-label">WORKSPACE</div>
+    <nav class="primary-nav" aria-label="Workspace">
+      <a href="/" class="active" aria-current="page"><span aria-hidden="true">▦</span> Overview <span class="nav-index">01</span></a>
+      <a href="/architecture/"><span aria-hidden="true">◇</span> System atlas <span class="nav-index">02</span></a>
+    </nav>
+    <div class="workspace-label module-label">MODULE DIRECTORY <span id="directory-count">—</span></div>
+    <nav id="module-nav" class="module-nav" aria-label="Module dashboards"></nav>
+    <div class="sidebar-foot"><span class="small-dot"></span> Combined server<small>One workspace. Every strategy.</small></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><span>Workspace <span class="slash">/</span> <strong>Overview</strong></span><div class="topbar-right"><span id="connection" class="connection">Connecting</span><time id="clock"></time></div></header>
+    <main id="main">
+      <section class="page-heading">
+        <div><div class="eyebrow">OPERATIONS / 01</div><h1>A clear view of the system.</h1><p>Performance, strategy health, and execution. Together.</p></div>
+        <button id="refresh" class="button secondary"><span aria-hidden="true">↻</span> Refresh</button>
+      </section>
+      <section class="metrics" aria-label="Account summary">
+        <article class="metric"><div class="metric-label">Account equity <span>USD</span></div><strong id="equity">—</strong><small>Shared account · reported once</small></article>
+        <article class="metric"><div class="metric-label">Open positions <span>BOOK</span></div><strong id="positions">—</strong><small id="account-positions">Attributed to reporting modules</small></article>
+        <article class="metric"><div class="metric-label">Unrealized P/L <span>USD</span></div><strong id="upl">—</strong><small>Attributed open positions</small></article>
+        <article class="metric health-metric"><div class="metric-label">Module availability <span class="small-dot"></span></div><strong id="availability">—</strong><div class="health-track" id="health-track" aria-hidden="true"></div><small id="health-note">Waiting for the first snapshot</small></article>
+      </section>
+      <section class="workspace-strip">
+        <div><span class="strip-icon" aria-hidden="true">◇</span><span><strong>Understand the whole system</strong><small>Explore the connections from data to execution.</small></span></div>
+        <a href="/architecture/">Explore system atlas <span aria-hidden="true">↗</span></a>
+      </section>
+      <section aria-labelledby="modules-title">
+        <div class="section-heading"><div><div class="eyebrow">THE WORKSPACE</div><h2 id="modules-title">Your modules <span id="module-count"></span></h2></div><div class="section-actions"><label class="preview-choice"><input id="previews-toggle" type="checkbox"> Live previews</label><button id="start-all" class="button primary">Start all sessions <span aria-hidden="true">↗</span></button></div></div>
+        <div class="module-toolbar"><div class="filters" role="group" aria-label="Filter modules"><button data-filter="all" aria-pressed="true">All modules</button><button data-filter="trading" aria-pressed="false">Trading</button><button data-filter="research" aria-pressed="false">Research & data</button><button data-filter="attention" aria-pressed="false">Needs attention <span id="attention-count">0</span></button></div><label class="search"><span aria-hidden="true">⌕</span><input id="module-search" type="search" placeholder="Find a module…" aria-label="Search modules"><kbd>/</kbd></label></div>
+        <div id="msg" class="notice" role="status" aria-live="polite" hidden></div>
+        <div id="stale-notice" class="notice warning" role="status" hidden></div>
+        <div id="grid" class="module-grid" aria-label="Modules"></div>
+        <div id="empty" class="empty" hidden><span aria-hidden="true">⌕</span><h3>No matching modules</h3><p>Try another name or choose a different filter.</p><button id="reset-filters" class="button secondary">Reset filters</button></div>
+      </section>
+      <footer><span>Orders default to paper. Real-money intent is set per module.</span><span id="updated">Awaiting snapshot · refreshes every 5s</span></footer>
+    </main>
+  </div>
+</body>
+</html>

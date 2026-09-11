@@ -193,6 +193,41 @@ class ExecutionGateway:
                 failures=(f"{type(exc).__name__}: {exc}",),
             )
 
+    @staticmethod
+    def _journal_evidence(journal_result: Any) -> tuple[str, str] | None:
+        """Return this write's ``(backend, locator)``, whatever shape it came in.
+
+        `_write_journal` hands back whatever the configured journal returns: a
+        `CompositeJournalResult` carrying a tuple of receipts, or — when the
+        journal is a single sink, which the Meta path uses — a bare
+        `JournalReceipt`. Both are durable evidence, but only the composite has
+        `.receipts`, so reaching for `.receipts[0]` unconditionally raised
+        AttributeError mid-submission and aborted every bare-sink order before
+        it reached the broker. `JournalReceipt.is_durable` exists for exactly
+        this reason; this is the matching half for recording the receipt.
+        """
+
+        receipt = journal_result
+        if hasattr(journal_result, "receipts"):
+            receipts = journal_result.receipts
+            if not receipts:
+                return None
+            receipt = receipts[0]
+        backend = getattr(receipt, "backend", None)
+        locator = getattr(receipt, "locator", None)
+        if backend is None or locator is None:
+            return None
+        return backend.value, locator.uri
+
+    @staticmethod
+    def _journal_failures(journal_result: Any) -> str:
+        """Describe why a write was not durable, for either result shape."""
+
+        failures = getattr(journal_result, "failures", ())
+        if failures:
+            return "; ".join(failures)
+        return f"journal write was not durable: {journal_result!r}"
+
     # -- public surface -----------------------------------------------------
 
     def submit(
@@ -405,18 +440,22 @@ class ExecutionGateway:
                 client_order_id=client_order_id,
                 submission_attempt_id=attempt.submission_attempt_id,
                 reason_code="JOURNAL_NOT_DURABLE",
-                detail="; ".join(journal_result.failures),
+                detail=self._journal_failures(journal_result),
             )
 
+        evidence = self._journal_evidence(journal_result)
+
         with self._open_uow() as uow:
-            uow.executions.record_journal_receipt(
-                submission_attempt_id=attempt.submission_attempt_id,
-                event_id=intent_event.event_id,
-                event_hash=intent_event.event_hash,
-                backend=journal_result.receipts[0].backend.value,
-                locator=journal_result.receipts[0].locator.uri,
-                journaled_at=self._clock(),
-            )
+            if evidence is not None:
+                backend, locator = evidence
+                uow.executions.record_journal_receipt(
+                    submission_attempt_id=attempt.submission_attempt_id,
+                    event_id=intent_event.event_id,
+                    event_hash=intent_event.event_hash,
+                    backend=backend,
+                    locator=locator,
+                    journaled_at=self._clock(),
+                )
             uow.executions.transition_attempt(
                 submission_attempt_id=attempt.submission_attempt_id,
                 expected=SubmissionAttemptStatus.RESERVED,

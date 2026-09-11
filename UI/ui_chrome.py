@@ -32,14 +32,14 @@ NAV_PORTS: list[tuple[str, int]] = [
 
 THEME_CSS = """:root{
   color-scheme: dark;
-  --bg:#0d1117; --panel:#161b22; --panel2:#1f2630; --panel-2:#1f2630;
-  --text:#e6edf3; --muted:#8b949e;
-  --green:#3fb950; --good:#3fb950;
-  --red:#f85149;   --bad:#f85149;
-  --yellow:#d29922; --warn:#d29922; --gold:#d29922;
-  --blue:#58a6ff;  --accent:#58a6ff;
-  --border:#30363d; --line:#30363d;
-  --radius:6px;
+  --bg:#0b1014; --panel:#11191e; --panel2:#172127; --panel-2:#172127;
+  --text:#edf3f1; --muted:#94a4a9;
+  --green:#91ddc5; --good:#91ddc5;
+  --red:#f49b9b;   --bad:#f49b9b;
+  --yellow:#e7c38c; --warn:#e7c38c; --gold:#e7c38c;
+  --blue:#91ddc5;  --accent:#91ddc5;
+  --border:#263238; --line:#263238;
+  --radius:9px;
 }
 
 *{box-sizing:border-box}
@@ -54,10 +54,10 @@ a:hover{text-decoration:underline}
 /* shared top navigation */
 .cyno-nav{
   display:flex; align-items:center; gap:4px; flex-wrap:wrap;
-  padding:6px 14px; background:#0a0e14; border-bottom:1px solid var(--border);
+  padding:10px 18px; background:#0e1519; border-bottom:1px solid var(--border);
   font-size:12px; position:sticky; top:0; z-index:50;
 }
-.cyno-nav .brand{font-weight:700;letter-spacing:.4px;margin-right:10px;color:var(--text)}
+.cyno-nav .brand{font-weight:600;letter-spacing:1px;margin-right:16px;color:var(--text)}
 .cyno-nav a{
   color:var(--muted); padding:5px 10px; border-radius:6px;
   border:1px solid transparent;
@@ -87,7 +87,7 @@ button,select,input[type="number"],input[type="text"]{
   background:var(--panel2);color:var(--text);border:1px solid var(--border);
   border-radius:5px;padding:6px 10px;font:inherit}
 button:hover{background:#2c3340;cursor:pointer}
-button.primary{background:#1f6feb;border-color:#1f6feb}
+button.primary{background:var(--accent);border-color:var(--accent);color:#102a24}
 button.primary:hover{filter:brightness(1.1)}
 button.danger{background:#6e1f1f;border-color:#6e1f1f}
 button.danger:hover{background:#8a2929}
@@ -97,6 +97,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
 .card-head{padding:8px 12px;background:var(--panel2);border-bottom:1px solid var(--border);
   color:var(--muted);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.4px}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .muted{color:var(--muted)}
 .pos,.good{color:var(--green)} .neg,.bad{color:var(--red)}
 """

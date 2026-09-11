@@ -158,6 +158,9 @@ def main() -> None:
     ap.add_argument("--max-spread", type=float, default=None,
                     help="only fetch names whose measured option spread is at or under this "
                          "(uses option_liquidity_by_name.json)")
+    ap.add_argument("--max-rank", type=int, default=None,
+                    help="only fetch signals the module ranked at or better than this "
+                         "(requires --from-signals; rank is per decision bar)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -177,13 +180,17 @@ def main() -> None:
                 continue
             if allow is not None and r["ticker"] not in allow:
                 continue
+            rank = r.get("rank")
+            if args.max_rank is not None and (rank is None or int(rank) > args.max_rank):
+                continue
             key = (r["module"], r["ticker"], r["available_at"][:10])
             if key in seen:
                 continue
             seen.add(key)
             entries.append({"module": r["module"], "ticker": r["ticker"],
                             "signal_available_at": r["available_at"],
-                            "signal_side": r.get("side") or "long"})
+                            "signal_side": r.get("side") or "long",
+                            "rank": None if rank is None else int(rank)})
     else:
         for line in SPINE.open():
             r = json.loads(line)
@@ -214,6 +221,7 @@ def main() -> None:
             spot = _spot_for(r, day)
             if spot is None:
                 fh.write(json.dumps({"module": r["module"], "ticker": r["ticker"],
+                                     "rank": r.get("rank"),
                                      "signal_date": day.isoformat(), "skip": "no_spot"}) + "\n")
                 continue
             exp = target_monthly(day)
@@ -222,13 +230,14 @@ def main() -> None:
             time.sleep(args.sleep)
             if contract is None:
                 fh.write(json.dumps({"module": r["module"], "ticker": r["ticker"],
+                                     "rank": r.get("rank"),
                                      "signal_date": day.isoformat(), "skip": why}) + "\n")
                 continue
             sym = str(contract.get("symbol"))
             bars, bwhy = fetch_bars(client, sym, day, exp)
             time.sleep(args.sleep)
             row = {
-                "module": r["module"], "ticker": r["ticker"],
+                "module": r["module"], "ticker": r["ticker"], "rank": r.get("rank"),
                 "signal_date": day.isoformat(), "signal_ts": r["signal_available_at"],
                 "side": r.get("signal_side") or "long",
                 "spot_at_signal": float(spot),

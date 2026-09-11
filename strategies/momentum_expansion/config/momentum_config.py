@@ -179,7 +179,45 @@ WALK_FORWARD_CONFIG: dict = {
 # Ranking
 # ---------------------------------------------------------------------------
 RANKING_CONFIG: dict = {
-    "top_n":         10,      # per-bar top-N selection (matches meta_ranker top_k)
+    # 3, not 10. The 2026-07-03 calibration below established that the edge lives
+    # in the per-bar RANKING; the 2026-09-08 study established how far down that
+    # ranking it survives. Two samples:
+    #
+    #   LIVE, 67 decision bars (2026-07..08, the reconstructed signal spine):
+    #     top-2 beat a within-bar rank shuffle by +7.88pp at a 10-day hold
+    #     (p<0.0001) and beat top-3 at every hold (p=0.010/0.003/0.022).
+    #   OOF, 1,739 decision bars (2022-11..2026-05, from `mom_score` in the Meta
+    #   research matrix -- walk-forward out-of-fold, 21-day embargo), screened
+    #   with `core.corporate_actions` (see the caveat below):
+    #     k=3 vs k=10  +1.10 / +1.68 / +2.85pp at the 5/10/15-day holds, p<0.001
+    #     k=2 vs k=3   +0.22 / +0.62 / +0.68pp, p=0.256 / 0.014 / 0.053
+    #     k=1 vs k=2   +0.12 / +0.16 / -1.08pp, none significant
+    #
+    # What replicates at every hold in both samples is that SHALLOW BEATS TOP-10.
+    # What does not replicate is the live sample's confident "2 beats 3" and its
+    # +7.9pp magnitude -- on 26x the data the honest number is +1.7 to +2.9pp and
+    # k=2 vs k=3 is marginal at best. Hence 3 rather than 2: statistically
+    # indistinguishable, and the return distribution is tail-driven, so the extra
+    # name buys another shot at the tail at no measured cost in expectation.
+    # k=1 is not better than k=2 anywhere, so do not go to 1.
+    #
+    # TWO MEASUREMENT CAVEATS, both load-bearing:
+    #  1. `Data/shared/bars/1d` carries UNADJUSTED corporate actions. Raw, the
+    #     same table reads +16.2% at k=1 instead of +6.7%, because 16 WOLF bars
+    #     around its 2025-09 Chapter 11 emergence show returns to +2,189% (price
+    #     x15 overnight, volume /13 -- a share-count change, not a gain). Only
+    #     0.006% of observations are affected, but they are **186x
+    #     over-represented among top-1 picks**: the ranker selects for extreme
+    #     price action, which is what an unadjusted recapitalisation looks like.
+    #     Screen with `core.corporate_actions.suspect_sessions` before trusting
+    #     any multi-year study on that cache.
+    #  2. The LEVELS above (k=10 still shows +4.3% excess at 10 days) are almost
+    #     certainly inflated by survivorship: of 4,076 bar files exactly 2 end
+    #     before 2026, so delisted names are largely absent. The k-vs-k
+    #     DIFFERENCES are within-bar and far more trustworthy than the levels,
+    #     and only the differences are used to set this parameter.
+    # Full study: research/execution_quality/23_rank_depth_and_options.md
+    "top_n":         3,       # per-bar top-N selection (was 10; see note above)
     "top_pct":       0.10,    # use min(top_n, top_pct * universe_size)
     # This model is a per-bar RANKER, not a calibrated classifier. The 2026-07-03
     # calibration (scripts/calibrate_momentum_threshold.py) showed an ABSOLUTE

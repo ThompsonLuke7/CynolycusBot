@@ -24,11 +24,15 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
+import mimetypes
+from urllib.parse import unquote, urlsplit
+
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
-from UI.ui_chrome import NAV_HTML, THEME_LINK, serve_theme_css
+from UI.ui_chrome import serve_theme_css
 from UI.performance import module_performance
 
 logger = logging.getLogger(__name__)
@@ -430,146 +434,27 @@ class HubDashboardApp:
         return {"results": [self.start_one(d.key, bool(live_map.get(d.key))) for d in startable] + skipped}
 
 
-_PAGE = """<!doctype html><html><head><meta charset=utf-8><title>Cynolycus Hub</title>
-__THEME_LINK__
-<style>
-.wrap{margin:16px 18px}
-h1{font-size:18px;margin:0 0 4px}
-.totals{display:flex;gap:18px;flex-wrap:wrap;margin:8px 0 4px;font-size:13px}
-.totals b{font-size:16px}
-.bar{display:flex;align-items:center;gap:12px;margin:10px 0 16px;flex-wrap:wrap}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:14px}
-.card .body{padding:12px;display:grid;gap:10px}
-.row{display:flex;align-items:center;justify-content:space-between;gap:8px}
-.detail{color:var(--muted);font-size:12px}
-.tog{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}
-.warn{color:var(--yellow);font-size:12px}
-.acct{font-size:12px}
-.perf{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11px}
-.perf span{background:var(--panel2);padding:6px;border-radius:5px;text-align:center;color:var(--muted)}
-.perf b{display:block;font-size:13px;color:var(--text)}
-.thumb{width:100%;height:170px;overflow:hidden;position:relative;background:var(--panel2)}
-.thumb iframe{width:400%;height:400%;transform:scale(.25);transform-origin:0 0;border:0;position:absolute;top:0;left:0;pointer-events:none}
-</style></head><body>
-__NAV_HTML__
-<div class=wrap>
-<h1>Cynolycus Overview</h1>
-<div class=detail>Each module submits to the PAPER account unless its own "real money" toggle is on.</div>
-<div class=totals id=totals></div>
-<div class=bar>
-  <button class=primary onclick=startAll()>▶ Start All</button>
-  <label class=tog><input type=checkbox id=previewsToggle checked onchange=togglePreviews()> show live previews</label>
-  <span id=msg class=muted></span>
-</div>
-<div class=grid id=grid></div>
-</div>
-<script>
-var liveState={};  // per-card real-money intent, persisted in localStorage
-try{liveState=JSON.parse(localStorage.getItem('cyno-hub-live')||'{}');}catch(e){}
-var staticDashboards=[
-  {key:'spy',name:'SPY Intraday',url:'http://'+location.hostname+':8765/',startable:true,stoppable:true,tradeable:true,up:false,state:'down',detail:'waiting for state'},
-  {key:'swing',name:'Swing',url:'http://'+location.hostname+':8766/',startable:true,stoppable:true,tradeable:true,up:false,state:'down',detail:'waiting for state'},
-  {key:'htf',name:'HTF Swing',url:'http://'+location.hostname+':8771/',startable:false,stoppable:false,tradeable:false,up:false,state:'down',detail:'waiting for state'},
-  {key:'momentum',name:'Momentum',url:'http://'+location.hostname+':8770/',startable:true,stoppable:false,tradeable:true,up:false,state:'down',detail:'waiting for state'},
-  {key:'amethyst',name:'Amethyst',url:'http://'+location.hostname+':8772/',startable:false,stoppable:false,tradeable:false,up:false,state:'down',detail:'waiting for state'},
-  {key:'dealer',name:'Dealer Positioning',url:'http://'+location.hostname+':8768/',startable:true,stoppable:true,tradeable:false,up:false,state:'down',detail:'waiting for state'},
-  {key:'dealer_ranker',name:'Dealer Ranker',url:'http://'+location.hostname+':8773/',startable:true,stoppable:false,tradeable:true,up:false,state:'down',detail:'waiting for state'},
-  {key:'meta',name:'Meta Ranker',url:'http://'+location.hostname+':8769/',startable:true,stoppable:false,tradeable:true,up:false,state:'down',detail:'waiting for state'},
-  {key:'library',name:'Library',url:'http://'+location.hostname+':8775/',startable:false,stoppable:false,tradeable:false,up:false,state:'down',detail:'waiting for state'}
-];
-function setLive(key,v){liveState[key]=v;localStorage.setItem('cyno-hub-live',JSON.stringify(liveState));tick();}
-function f(n,d){if(n==null)return '-';return Number(n).toLocaleString(undefined,{maximumFractionDigits:(d==null?2:d)});}
-var showPreviews=localStorage.getItem('cyno-hub-previews')!=='off';
-document.addEventListener('DOMContentLoaded',function(){document.getElementById('previewsToggle').checked=showPreviews;});
-function togglePreviews(){
-  showPreviews=document.getElementById('previewsToggle').checked;
-  localStorage.setItem('cyno-hub-previews',showPreviews?'on':'off');
-  document.querySelectorAll('.thumb').forEach(function(el){el.style.display=showPreviews?'':'none';});
+_UI_ROOT = Path(__file__).resolve().parent
+_PAGE = (_UI_ROOT / "hub_static" / "index.html").read_text(encoding="utf-8")
+_HUB_ASSETS = {
+    "/static/hub.css": (_UI_ROOT / "hub_static/hub.css", "text/css; charset=utf-8"),
+    "/static/hub.js": (_UI_ROOT / "hub_static/hub.js", "text/javascript; charset=utf-8"),
+    **{
+        f"/static/fonts/{name}.woff2": (
+            _UI_ROOT / f"architecture_atlas/static/fonts/{name}.woff2", "font/woff2"
+        ) for name in ("SpaceGrotesk", "JetBrainsMono")
+    },
 }
-var builtKeys=null;  // skeleton (incl. preview iframes) only rebuilt when the module list changes,
-                     // so the 5s poll never forces every embedded dashboard to reload its own page.
-function render(s){
-  let t=s.totals||{};
-  var acctPos=(t.account_positions==null)?'':' <span class=muted>/ '+f(t.account_positions,0)+' in account</span>';
-  document.getElementById('totals').innerHTML=
-    '<div>Account equity (shared) <b>$'+f(t.equity,0)+'</b></div>'+
-    '<div>Open positions (attributed) <b>'+f(t.open_positions,0)+'</b>'+acctPos+'</div>'+
-    '<div>Unrealized P/L (attributed) <b class="'+((t.unrealized_pl||0)>=0?'pos':'neg')+'">$'+f(t.unrealized_pl)+'</b></div>';
-  let list=s.dashboards||[];
-  let keys=list.map(function(d){return d.key;}).join(',');
-  let g=document.getElementById('grid');
-  if(keys!==builtKeys){
-    g.innerHTML=list.map(function(d){
-      return '<div class=card><div class=card-head>'+d.name+'</div>'+
-        '<div class=thumb style="display:'+(showPreviews?'':'none')+'"><iframe src="'+d.url+'" loading=lazy scrolling=no></iframe></div>'+
-        '<div class=body id="body-'+d.key+'"></div></div>';
-    }).join('');
-    builtKeys=keys;
-  }
-  list.forEach(function(d){
-    var body=document.getElementById('body-'+d.key);
-    if(!body)return;
-    var intend=!!liveState[d.key];
-    var acctType=d.tradeable?(d.account_type||(intend?'real money':'paper')):null;
-    var indicator=acctType?('<span class="pill '+(acctType==='real money'?'live':'paper')+'">'+acctType+'</span>'):'';
-    var pillState=d.up?(d.state||'idle'):'error';
-    var toggle=d.tradeable?('<label class=tog title="Off: paper. On: real-money account.">'+
-       '<input type=checkbox '+(intend?'checked':'')+' '+(d.live_available?'':'disabled')+
-       ' onchange="setLive(\\''+d.key+'\\',this.checked)"> real money</label>'+
-       (intend&&!d.live_available?'<div class=warn>real money not configured — runs paper</div>':'')):'';
-    var startBtn=d.startable?('<button class=primary onclick="ctl(\\''+d.key+'\\',\\'start\\')">'+
-       (d.key==='meta'||d.key==='momentum'||d.key==='dealer_ranker'?'Run':'Start')+'</button>'):'';
-    var stopBtn=d.stoppable?('<button class=danger onclick="ctl(\\''+d.key+'\\',\\'stop\\')">Stop</button>'):'';
-    var p=d.performance||{};
-    var tracked=p.closed_trades>0;
-    var perf='<div class=perf><span><b class="'+((p.tracked_pnl||0)>=0?'pos':'neg')+'">'+(tracked?'$'+f(p.tracked_pnl):'—')+'</b>tracked P/L</span>'+
-      '<span><b>'+f(p.win_rate,1)+(p.win_rate==null?'':'%')+'</b>win rate</span>'+
-      '<span><b>'+f(p.closed_trades,0)+'</b>closed</span></div>';
-    body.innerHTML=
-      '<div class=row><span class="pill '+pillState+'">'+(d.up?(d.state||'idle'):'down')+'</span>'+
-      indicator+'<a href="'+d.url+'" target=_blank>open ↗</a></div>'+
-      '<div class=detail>'+(d.up?(d.detail||''):(d.error||'unreachable'))+'</div>'+
-      perf+
-      toggle+
-      '<div class=row>'+startBtn+stopBtn+'</div>';
-  });
-}
-async function tick(){
-  let s;
-  try{
-    let resp=await fetch('/api/state');
-    if(!resp.ok) throw new Error('HTTP '+resp.status);
-    s=await resp.json();
-  }
-  catch(e){
-    document.getElementById('msg').textContent='hub state unavailable, retrying...';
-    render({dashboards:staticDashboards,totals:{}});
-    return;
-  }
-  document.getElementById('msg').textContent='';
-  render(s);
-}
-async function ctl(key,action){
-  document.getElementById('msg').textContent=action+' '+key+'...';
-  var live=!!liveState[key];
-  if(action==='start'&&live&&!confirm('Start '+key+' on the REAL-MONEY account?')){
-    document.getElementById('msg').textContent='';return;}
-  var body=action==='start'?{key:key,live:live}:{key:key};
-  let r=await(await fetch('/api/'+action,{method:'POST',body:JSON.stringify(body)})).json();
-  document.getElementById('msg').textContent=(r.ok?'ok: ':'failed: ')+key+(r.error?(' — '+r.error):'');
-  tick();
-}
-async function startAll(){
-  var anyLive=Object.keys(liveState).some(function(k){return liveState[k];});
-  if(anyLive&&!confirm('Start All — some modules are set to REAL MONEY. Continue?'))return;
-  document.getElementById('msg').textContent='starting all...';
-  let r=await(await fetch('/api/start-all',{method:'POST',body:JSON.stringify({live_map:liveState})})).json();
-  let bad=(r.results||[]).filter(function(x){return !x.ok;});
-  document.getElementById('msg').textContent=bad.length?('issues: '+bad.map(function(x){return x.key+'('+x.error+')';}).join(', ')):'all started';
-  tick();
-}
-tick();setInterval(tick,5000);
-</script></body></html>""".replace("__THEME_LINK__", THEME_LINK).replace("__NAV_HTML__", NAV_HTML)
+_ATLAS_PUBLIC = _UI_ROOT / "architecture_atlas/dist/public"
+
+
+def _atlas_asset(path: str) -> Path | None:
+    """Resolve only files inside the presentation-safe build, including symlink checks."""
+    relative = unquote(path.removeprefix("/architecture/")) or "index.html"
+    candidate = (_ATLAS_PUBLIC / relative).resolve()
+    if not candidate.is_relative_to(_ATLAS_PUBLIC.resolve()) or not candidate.is_file():
+        return None
+    return candidate
 
 
 class HubHTTPServer(ThreadingHTTPServer):
@@ -604,9 +489,33 @@ class HubHandler(BaseHTTPRequestHandler):
         return json.loads(raw or b"{}")
 
     def do_GET(self):  # noqa: N802
-        if self.path == "/" or self.path.startswith("/index"):
-            self._send(_PAGE.encode("utf-8"), ctype="text/html; charset=utf-8")
-        elif self.path == "/static/cynolycus_theme.css":
+        path = urlsplit(self.path).path
+        if path in ("/", "/index.html"):
+            initial = [{"key": d.key, "name": d.name, "port": d.port,
+                        "startable": d.startable, "stoppable": d.stoppable,
+                        "tradeable": d.tradeable, "up": False}
+                       for d in self._app().dashboards]
+            config = json.dumps(initial).replace("<", "\\u003c")
+            page = _PAGE.replace("</head>", '<script id="dashboard-config" type="application/json">'
+                                 + config + '</script></head>')
+            self._send(page.encode("utf-8"), ctype="text/html; charset=utf-8")
+        elif path in _HUB_ASSETS:
+            asset, ctype = _HUB_ASSETS[path]
+            self._send(asset.read_bytes(), ctype=ctype)
+        elif path == "/architecture":
+            self.send_response(HTTPStatus.MOVED_PERMANENTLY)
+            self.send_header("Location", "/architecture/")
+            self.end_headers()
+        elif path.startswith("/architecture/"):
+            asset = _atlas_asset(path)
+            if asset is not None:
+                self._send(asset.read_bytes(), ctype=mimetypes.guess_type(asset.name)[0] or "application/octet-stream")
+            elif path == "/architecture/" and not (_ATLAS_PUBLIC / "index.html").is_file():
+                self._send(b"Architecture atlas has not been built. Run: .venv/bin/python scripts/build_architecture_atlas.py",
+                           status=HTTPStatus.SERVICE_UNAVAILABLE, ctype="text/plain; charset=utf-8")
+            else:
+                self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+        elif path == "/static/cynolycus_theme.css":
             serve_theme_css(self)
         elif self.path.startswith("/api/state"):
             self._send_json(self._app().snapshot())

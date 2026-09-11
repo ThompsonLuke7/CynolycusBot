@@ -39,9 +39,18 @@ logger = logging.getLogger(__name__)
 # loop sat at busy=100% from 09:50 to 16:12 ET with per-bar maxima of 230-1,366
 # seconds and the bar queue backing up to 271, while nine of every ten bars in
 # the same window cost ~3s in total — so it is one phase stalling, not general
-# slowness. Measured and ruled out: the meta feature frame build, which takes
-# 0.87s over the full 50,000-bar buffer with pivot and TB probabilities on.
-# These per-phase timings name the phase the next time it happens.
+# slowness. These per-phase timings name the phase the next time it happens.
+#
+# They did: on 2026-09-08 `inference.on_15m_close` ran 325-506s across 39 bars
+# and put the SPY daytrader up to 152 minutes behind the tape. The sub-phase
+# timers in core.API.Alpaca_API.inference.live_inference then attributed it —
+# `base_frame_build` 278.6s over 49,951 rows plus `swing_setup_probs` 85.4s
+# over 4,998 rows, which sums to 364s and lands squarely inside that range.
+#
+# A note here previously claimed the meta feature frame build was "measured and
+# ruled out" at 0.87s over the full 50,000-bar buffer. That is contradicted by
+# the measurement above and has been removed rather than left to misdirect the
+# next reader; whatever was timed at 0.87s, it was not what runs per bar.
 SLOW_PHASE_WARN_SECONDS = 5.0
 
 

@@ -46,6 +46,7 @@ from core.live_4h_exec import (
     mark_plan_gone,
     now_utc_iso,
     order_plan_audit_record,
+    submit_pending_exit_orders,
     submit_pending_open_entries,
 )
 from core.live_signal_audit import append_jsonl, build_signal_audit
@@ -783,6 +784,25 @@ def main() -> int:
                          "least two daily management runs before it expires.")
     ap.add_argument("--max-dte", type=int, default=21)
     ap.add_argument("--side-mode", choices=["call", "dealer_direction"], default="call")
+    # Default flipped to equity 2026-09-08. Across 27 closed option round trips
+    # this module returned a MEAN of -60.5% per trade at an 11% win rate on a
+    # 2-day median hold. The cause is not the ranking: dealer selects mega caps
+    # (median $56 price, $252M daily dollar volume, 4.2% median daily range) and
+    # a 4%-range name cannot travel far enough in two days to pay for premium.
+    # Its SHARE picks over the same signals were mildly positive (+1.79% excess
+    # over an equal-weight universe draw at top-3, 10-day hold -- not
+    # significant, but not the -60% either).
+    #
+    # The dealer-positioning thesis still says options; nothing here refutes
+    # that. What it refutes is buying near-dated premium on low-volatility names
+    # and holding it for two days. Pass --route option to restore the previous
+    # behavior; if you do, the DTE and hold window are what need revisiting
+    # first, not the ranking.
+    # Study: research/execution_quality/23_rank_depth_and_options.md
+    ap.add_argument("--route", choices=["equity", "option"], default="equity",
+                    help="Instrument for new entries. equity (default) buys "
+                         "shares of the ranked name; option restores the prior "
+                         "ATM-contract behavior.")
     ap.add_argument("--workers", type=int, default=8, help="Parallel chain-capture workers when --refresh-chain is set.")
     ap.add_argument("--scan-limit", type=int, default=None)
     ap.add_argument("--sleep-seconds", type=float, default=0.0)
@@ -845,6 +865,8 @@ def main() -> int:
     managed = state.get("managed", {})
 
     def _route(client_: AlpacaOptionsClient, ticker: str, px: float, **_kwargs) -> tuple[str, dict | None, str]:
+        if args.route == "equity":
+            return "equity", None, "route_equity"
         opt_type = _side_for_ticker(ticker, side_mode=args.side_mode, top=top)
         cached = selection_cache.get((str(ticker).upper(), opt_type))
         if cached is not None:
@@ -872,6 +894,11 @@ def main() -> int:
         # exit-policy search (Momentum/HTF/Meta only), so it keeps its own prior
         # behavior rather than silently inheriting ExecPolicy's new default.
         trail_stop=0.35,
+        # NOTE on --route equity: stop_loss=0.50 and trail_stop=0.35 were sized
+        # for option premium. Left as-is deliberately -- on shares they almost
+        # never fire, which lets a position run to horizon_bars instead of being
+        # cut at the 2-day median that the option route produced. That longer
+        # hold is the point of the change. Re-tune only with share-path evidence.
         target_notional=float(args.target_notional),
     )
     plan = build_mixed_plan(
@@ -892,6 +919,22 @@ def main() -> int:
     # (empty) map rather than raising NameError.
     dispositions: dict[str, str] = init_dispositions(plan.plan)
     if args.submit:
+        # Exits first, for the same two reasons the HTF runner gives: a queued
+        # exit is an already-made decision on a position still held, and
+        # flushing it frees the buying power the queued entries are about to
+        # use. This module deferred exits into the queue but never flushed it,
+        # so a `trail_-35%` sell for RBRK260828C00100000 queued on 2026-08-28
+        # was still sitting there eleven days later, past the contract's own
+        # expiry, with nothing ever retrying it.
+        ex = submit_pending_exit_orders(
+            client,
+            MODULE,
+            equity_tif_fn=equity_order_tif,
+            pos_lookup=pos_info,
+            managed=managed,
+        )
+        if ex["count"] or ex["skipped"]:
+            print(f"pending-exit flush: submitted {ex['count']} / skipped {len(ex['skipped'])}")
         pending = submit_pending_open_entries(
             client,
             MODULE,
@@ -951,7 +994,7 @@ def main() -> int:
         order_plan_audit_record(
             module=MODULE,
             bar=bar,
-            mode="options",
+            mode=("options" if args.route == "option" else "equity"),
             submit=bool(args.submit),
             targets=targets,
             plan=plan.plan,

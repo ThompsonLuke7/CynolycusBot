@@ -65,6 +65,35 @@ def test_every_exec_path_writes_the_realized_pnl_ledger(path):
     )
 
 
+# Every module that can DEFER an exit into the pending queue. Dealer Ranker
+# reaches the queue through the shared `execute_plan` rather than its own
+# `_execute`, which is why it is absent from EXEC_PATHS but present here.
+QUEUE_OWNING_RUNNERS = [
+    REPO / "strategies/multi_ticker_swing_htf/live/runner.py",
+    REPO / "signals/meta_context/meta_ranker/live_runner.py",
+    REPO / "strategies/momentum_expansion/live/runner.py",
+    REPO / "strategies/dealer_positioning/live_ranked_options.py",
+]
+
+
+@pytest.mark.parametrize("path", QUEUE_OWNING_RUNNERS, ids=lambda p: p.name)
+def test_a_module_that_defers_exits_also_flushes_them(path):
+    """Writing to the queue without draining it strands the exit forever.
+
+    Dealer Ranker deferred exits into `pending_exit_orders.json` but only ever
+    called `submit_pending_open_entries`, so a `trail_-35%` sell for
+    RBRK260828C00100000 queued on 2026-08-28 was still sitting in the file
+    eleven days later — past the contract's own expiry, with nothing retrying
+    it and nothing reporting it. The queue is only a deferral if something
+    flushes it; otherwise it is a silent drop.
+    """
+
+    assert _calls(path, "submit_pending_exit_orders"), (
+        f"{path.relative_to(REPO)} can queue a deferred exit but never calls "
+        "submit_pending_exit_orders, so anything it defers is stranded."
+    )
+
+
 def test_the_pending_exit_flush_also_writes_the_ledger():
     """The flush is a fourth exit path and had no ledger call at all until
     2026-08-12 — the AMAT/VSH rows that went missing on 08-11."""

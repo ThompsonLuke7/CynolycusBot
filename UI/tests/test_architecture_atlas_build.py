@@ -170,25 +170,22 @@ def test_static_app_includes_large_display_mode() -> None:
     assert "body.presentation-mode" in css
     assert ".holo-lab" in css
     assert 'url("assets/atlas-lab-reference.png")' in css
-    assert "@keyframes core-pulse" in css
     assert "min-width: 2560px" in javascript
     assert "cynolycus-atlas-large-display" in javascript
     assert "cynolycus-atlas-presentation-mode" in javascript
     assert "applyPresentationMode" in javascript
-    assert "bindHoloCamera" in javascript
+    assert "applyHoloMuted" in javascript
     assert "animateHudValue" in javascript
     assert "cynolycus-atlas-holo-muted" in javascript
     assert (static_dir / "assets/atlas-lab-reference.png").is_file()
     assert 'id="context-dock"' in html
     assert "text-overflow-wrap" in javascript
-    assert '"shape": "cutrectangle"' in javascript
-    assert '"shape": "hexagon"' in javascript
+    assert '"shape": "roundrectangle"' in javascript
     assert "edge.active-flow" in javascript
     assert "const nodes = children;" in javascript
     assert 'selector: "node[focus = \'yes\']"' not in javascript
     assert "formatGraphLabel" in javascript
     assert '"text-overflow-wrap": "whitespace"' in javascript
-    assert '"background-image": NODE_TEXTURE' in javascript
     assert '"background-fill": "linear-gradient"' in javascript
 
 

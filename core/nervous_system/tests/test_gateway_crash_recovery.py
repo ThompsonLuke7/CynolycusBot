@@ -29,6 +29,10 @@ from core.nervous_system.execution.gateway import (
     ExecutionGateway,
     ExecutionOutcome,
 )
+from core.nervous_system.execution.journal import (
+    JournalBackend,
+    LocalAtomicJournal,
+)
 from core.nervous_system.persistence.repositories.execution import SubmissionConflict
 from core.nervous_system.persistence.uow import UnitOfWork
 from core.nervous_system.tests.fixtures.gateway_harness import (
@@ -105,6 +109,45 @@ def test_the_happy_path_journals_intent_then_response(uow_factory) -> None:
     assert attempt.status is SubmissionAttemptStatus.ACCEPTED
     assert attempt.broker_order_id == "brk-1"
     assert attempt.journal_event_id is not None
+
+
+def test_a_bare_single_sink_journal_submits_on_the_durable_path(
+    uow_factory, tmp_path
+) -> None:
+    """The Meta path's journal shape must survive the *durable* submit, too.
+
+    `LocalAtomicJournal` -- the sink the Meta gateway is built with -- returns a
+    bare `JournalReceipt`, not a `CompositeJournalResult`. An earlier fix taught
+    the receipt `is_durable`, but the durability gate is only half the contract:
+    `_submit_durable` then records the receipt, and it reached for
+    `.receipts[0]`, which only a composite has.
+
+    That gap took Meta Ranker's whole 2026-09-08 session. The pre-open flush
+    lost all 10 deferred exits to `'JournalReceipt' object has no attribute
+    'receipts'` and the 14:20 ET run died on it with exit code 1, so nothing was
+    submitted all day. The existing bare-sink test missed it because it used a
+    risk-reducing exit with Postgres down -- the fail-operational path, which
+    only ever touches `is_durable`. This one takes an entry through the path
+    that actually records the receipt.
+    """
+
+    request = order_request()
+    _seed(uow_factory, request)
+    broker = FakeBroker()
+    journal = LocalAtomicJournal(tmp_path / "execution_journal")
+
+    result = gateway_for(uow_factory, broker=broker, journal=journal).submit(
+        decision=decision_record(), request=request
+    )
+
+    assert result.outcome is ExecutionOutcome.SUBMITTED
+    assert len(broker.submit_calls) == 1, "the order must reach the broker"
+
+    attempt = _attempt(uow_factory, request)
+    assert attempt.status is SubmissionAttemptStatus.ACCEPTED
+    assert attempt.journal_event_id is not None
+    assert attempt.journal_backend == JournalBackend.LOCAL.value
+    assert attempt.journal_locator, "the receipt's locator must be recorded"
 
 
 def test_the_client_order_id_is_the_deterministic_identity(uow_factory) -> None:

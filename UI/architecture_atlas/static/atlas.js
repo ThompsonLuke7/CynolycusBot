@@ -3,18 +3,18 @@
 
   const EDGE_TYPES = ["data", "feature", "signal", "policy", "execution", "audit", "research", "control"];
   const COLORS = {
-    data: "#5498ff",
-    feature: "#52eba0",
-    signal: "#af79ff",
-    policy: "#ffc95c",
-    execution: "#ff6fa9",
-    audit: "#46f3ff",
+    data: "#8fb6ee",
+    feature: "#a6cfac",
+    signal: "#baa4e0",
+    policy: "#e1be8b",
+    execution: "#df9fb2",
+    audit: "#91ddc5",
     research: "#6db8aa",
     control: "#7aa4c4",
-    source: "#5498ff",
-    model: "#ffc95c",
-    system: "#46f3ff",
-    ui: "#46f3ff"
+    source: "#8fb6ee",
+    model: "#e1be8b",
+    system: "#91ddc5",
+    ui: "#91ddc5"
   };
   const NODE_BACKGROUNDS = {
     data: "#0a1d32",
@@ -36,7 +36,7 @@
     research: "#102525 #173936",
     control: "#0d1d2b #142f43"
   };
-  const NODE_TEXTURE = "data:image/svg+xml;utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20160%2096'%3E%3Cg%20fill='none'%20stroke='%23fff'%20stroke-width='1'%3E%3Cpath%20opacity='.08'%20d='M-8%2020h46l12-12h38l10%2010h70M-8%2070h32l14-14h55l12%2012h64'/%3E%3Cpath%20opacity='.045'%20d='M18-8v34l10%2010v68M132-8v28l-12%2012v72'/%3E%3C/g%3E%3Cg%20fill='%23fff'%3E%3Ccircle%20opacity='.18'%20cx='38'%20cy='20'%20r='1.8'/%3E%3Ccircle%20opacity='.14'%20cx='98'%20cy='18'%20r='1.5'/%3E%3Ccircle%20opacity='.18'%20cx='38'%20cy='56'%20r='1.8'/%3E%3Ccircle%20opacity='.14'%20cx='105'%20cy='68'%20r='1.5'/%3E%3C/g%3E%3C/svg%3E";
+
 
   const els = {
     cy: document.getElementById("cy"),
@@ -105,7 +105,6 @@
     showResearch: true,
     cy: null,
     visibleIds: [],
-    routeAnimation: null,
     hudValues: {nodes: 0, routes: 0, depth: 0}
   };
 
@@ -246,10 +245,10 @@
     if (!scopeNode) return;
     const depth = Math.max(0, ancestors(scopeNode.id).length - 1);
     const activeFilters = state.edgeTypes.size === EDGE_TYPES.length ? "ALL FLOWS" : state.edgeTypes.size + " FLOW TYPES";
-    els.systemReadoutState.textContent = "ARCHITECTURE ONLINE";
+    els.systemReadoutState.textContent = "STATIC ARCHITECTURE";
     els.systemReadoutDetail.textContent = "DEPTH " + depth + " / " + visibleCount + " NODES / " + activeFilters;
     animateHudValue("nodes", visibleCount, els.hudNodes, 3);
-    animateHudValue("routes", state.edges.filter(function (edge) { return state.edgeTypes.has(edge.type); }).length, els.hudRoutes, 3);
+    animateHudValue("routes", currentScopeElements().edges.length, els.hudRoutes, 3);
     animateHudValue("depth", depth, els.hudDepth, 2);
   }
 
@@ -276,7 +275,7 @@
 
   function readHoloMutedPreference() {
     try {
-      return window.localStorage.getItem(HOLO_MUTED_STORAGE_KEY) === "on";
+      return window.localStorage.getItem(HOLO_MUTED_STORAGE_KEY) !== "off";
     } catch (_) {
       return false;
     }
@@ -285,8 +284,8 @@
   function applyHoloMuted(muted, persist) {
     document.body.classList.toggle("holo-muted", muted);
     els.holoToggle.setAttribute("aria-pressed", String(muted));
-    els.holoToggle.setAttribute("aria-label", muted ? "Restore holographic chamber" : "Mute holographic chamber");
-    els.holoToggle.title = muted ? "Restore holographic chamber" : "Holographic chamber";
+    els.holoToggle.setAttribute("aria-label", muted ? "Show ambient backdrop" : "Hide ambient backdrop");
+    els.holoToggle.title = muted ? "Show ambient backdrop" : "Hide ambient backdrop";
     if (persist) {
       try {
         window.localStorage.setItem(HOLO_MUTED_STORAGE_KEY, muted ? "on" : "off");
@@ -294,25 +293,6 @@
         // The current view remains usable when local storage is unavailable.
       }
     }
-  }
-
-  function bindHoloCamera() {
-    if (!els.graphStage || !window.matchMedia("(pointer: fine)").matches) return;
-    els.graphStage.addEventListener("pointermove", function (event) {
-      const bounds = els.graphStage.getBoundingClientRect();
-      const x = (event.clientX - bounds.left) / bounds.width - 0.5;
-      const y = (event.clientY - bounds.top) / bounds.height - 0.5;
-      els.graphStage.style.setProperty("--camera-x", (x * 8).toFixed(2) + "deg");
-      els.graphStage.style.setProperty("--camera-y", (y * -5).toFixed(2) + "deg");
-      els.graphStage.style.setProperty("--camera-origin-x", (50 + x * 5).toFixed(2) + "%");
-      els.graphStage.style.setProperty("--camera-origin-y", (48 + y * 4).toFixed(2) + "%");
-    });
-    els.graphStage.addEventListener("pointerleave", function () {
-      els.graphStage.style.setProperty("--camera-x", "0deg");
-      els.graphStage.style.setProperty("--camera-y", "0deg");
-      els.graphStage.style.setProperty("--camera-origin-x", "50%");
-      els.graphStage.style.setProperty("--camera-origin-y", "48%");
-    });
   }
 
   function fail(message) {
@@ -392,9 +372,9 @@
   function routeFromLocation() {
     const route = parseHash();
     state.scopeId = state.nodesById.has(route.scope) && hasChildren(route.scope) ? route.scope : "system";
-    state.selectedId = state.nodesById.has(route.selected) ? route.selected : null;
+    const selected = state.nodesById.has(route.selected) ? route.selected : null;
     renderScope();
-    if (state.selectedId) selectNode(state.selectedId, false);
+    if (selected) selectNode(selected, false);
   }
 
   function currentScopeElements() {
@@ -469,7 +449,7 @@
         style: {
           "width": 176 * nodeScale,
           "height": 96 * nodeScale,
-          "shape": "cutrectangle",
+          "shape": "roundrectangle",
           "background-color": function (ele) {
             return NODE_BACKGROUNDS[ele.data("role")] || NODE_BACKGROUNDS.control;
           },
@@ -478,18 +458,17 @@
             return NODE_GRADIENTS[ele.data("role")] || NODE_GRADIENTS.control;
           },
           "background-gradient-direction": "to-bottom-right",
-          "background-image": NODE_TEXTURE,
           "background-fit": "cover",
           "background-clip": "node",
-          "background-image-opacity": 0.42,
-          "background-opacity": 0.94,
-          "border-width": 1.5 * edgeScale,
-          "border-color": function (ele) { return COLORS[ele.data("role")] || "#46f3ff"; },
+          "background-image-opacity": 0,
+          "background-opacity": 1,
+          "border-width": 1 * edgeScale,
+          "border-color": function (ele) { return COLORS[ele.data("role")] || "#91ddc5"; },
           "label": "data(label)",
           "color": "#eaf8ff",
           "font-family": "Space Grotesk",
           "font-size": 15 * textScale,
-          "font-weight": 700,
+          "font-weight": 500,
           "text-wrap": "wrap",
           "text-overflow-wrap": "whitespace",
           "text-max-width": 138 * nodeScale,
@@ -497,15 +476,15 @@
           "text-valign": "center",
           "text-halign": "center",
           "text-outline-color": "#06101b",
-          "text-outline-opacity": 0.72,
+          "text-outline-opacity": 0,
           "text-outline-width": 1.1 * edgeScale,
           "overlay-opacity": 0,
-          "underlay-color": function (ele) { return COLORS[ele.data("role")] || "#46f3ff"; },
+          "underlay-color": function (ele) { return COLORS[ele.data("role")] || "#91ddc5"; },
           "underlay-opacity": 0,
           "underlay-padding": 0,
           "shadow-blur": 22 * edgeScale,
           "shadow-color": "#000",
-          "shadow-opacity": 0.38,
+          "shadow-opacity": 0.12,
           "shadow-offset-y": 10 * edgeScale,
           "transition-property": "background-blacken, border-width, opacity, underlay-opacity, shadow-opacity",
           "transition-duration": "150ms"
@@ -513,15 +492,15 @@
       },
       {
         selector: "node[role = 'data']",
-        style: {"shape": "barrel"}
+        style: {"shape": "roundrectangle"}
       },
       {
         selector: "node[role = 'signal']",
-        style: {"shape": "hexagon"}
+        style: {"shape": "roundrectangle"}
       },
       {
         selector: "node[role = 'policy']",
-        style: {"shape": "tag"}
+        style: {"shape": "roundrectangle"}
       },
       {
         selector: "node[role = 'execution']",
@@ -530,7 +509,7 @@
       {
         selector: "node[expandable = 'yes']",
         style: {
-          "border-width": 2.3 * edgeScale
+          "border-width": 1.5 * edgeScale
         }
       },
       {
@@ -540,7 +519,7 @@
           "border-width": 2.8 * edgeScale,
           "underlay-opacity": 0.12,
           "underlay-padding": 7 * edgeScale,
-          "shadow-color": function (ele) { return COLORS[ele.data("role")] || "#46f3ff"; },
+          "shadow-color": function (ele) { return COLORS[ele.data("role")] || "#91ddc5"; },
           "shadow-opacity": 0.34,
           "shadow-blur": 30 * edgeScale
         }
@@ -548,11 +527,11 @@
       {
         selector: "node:selected",
         style: {
-          "border-color": "#46f3ff",
+          "border-color": "#91ddc5",
           "border-width": 3.2 * edgeScale,
           "underlay-opacity": 0,
           "shadow-blur": 28 * edgeScale,
-          "shadow-color": "#46f3ff",
+          "shadow-color": "#91ddc5",
           "shadow-opacity": 0.34,
           "underlay-opacity": 0.12,
           "underlay-padding": 9 * edgeScale
@@ -577,9 +556,9 @@
           "target-arrow-color": function (ele) { return COLORS[ele.data("type")] || "#2b5572"; },
           "target-arrow-shape": "triangle",
           "arrow-scale": 0.65 * edgeScale,
-          "line-style": "dashed",
+          "line-style": "solid",
           "line-dash-pattern": [5 * edgeScale, 11 * edgeScale],
-          "opacity": 0.42,
+          "opacity": 0.5,
           "label": "data(label)",
           "font-family": "JetBrains Mono",
           "font-size": 7 * textScale,
@@ -618,28 +597,6 @@
     ];
   }
 
-  function stopRouteAnimation() {
-    if (state.routeAnimation) cancelAnimationFrame(state.routeAnimation);
-    state.routeAnimation = null;
-  }
-
-  function startRouteAnimation() {
-    stopRouteAnimation();
-    if (!state.cy || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    let offset = 0;
-    function tick() {
-      offset = (offset - 0.22) % 16;
-      try {
-        state.cy.edges().style("line-dash-offset", offset);
-      } catch (_) {
-        stopRouteAnimation();
-        return;
-      }
-      state.routeAnimation = requestAnimationFrame(tick);
-    }
-    state.routeAnimation = requestAnimationFrame(tick);
-  }
-
   function initCy() {
     if (typeof window.cytoscape !== "function") {
       fail("The vendored graph renderer did not load.");
@@ -651,7 +608,7 @@
       elements: [],
       style: cyStyle(),
       layout: {name: "preset"},
-      minZoom: 0.48,
+      minZoom: 0.15,
       maxZoom: graphScale() > 1 ? 2.2 : 1.7,
       wheelSensitivity: 0.2,
       boxSelectionEnabled: false,
@@ -691,11 +648,10 @@
     renderContextDock(scope.portals);
     updateSystemReadout(scopeNode, scope.nodes.length);
     els.scopeTitle.textContent = nodeLabel(scopeNode);
-    els.scopeMeta.textContent = scope.nodes.length + " MODULES · SELECT ONE TO INSPECT";
+    els.scopeMeta.textContent = scope.nodes.length + " components · Select one to inspect its purpose and connections";
     els.back.hidden = !parentOf(state.scopeId);
 
     if (!state.cy && !initCy()) return;
-    stopRouteAnimation();
     state.cy.elements().remove();
     state.cy.add(graphElements(scope));
     state.cy.layout({name: "preset", fit: false}).run();
@@ -704,7 +660,6 @@
       {fit: {eles: state.cy.elements(), padding: graphFitPadding()}},
       {duration: duration, easing: "ease-in-out-cubic"}
     );
-    startRouteAnimation();
     renderOutline();
   }
 
@@ -1108,7 +1063,7 @@
     els.holoToggle.addEventListener("click", function () {
       const muted = !document.body.classList.contains("holo-muted");
       applyHoloMuted(muted, true);
-      toast(muted ? "Holographic chamber dimmed" : "Holographic chamber restored");
+      toast(muted ? "Ambient backdrop hidden" : "Ambient backdrop shown");
     });
     els.back.addEventListener("click", goBack);
     els.inspectorClose.addEventListener("click", closeInspector);
@@ -1145,7 +1100,7 @@
     window.addEventListener("resize", function () {
       if (state.cy) {
         state.cy.style(cyStyle());
-        state.cy.resize();
+        refreshGraphViewport();
       }
       if (window.innerWidth <= 760 && document.body.classList.contains("presentation-mode")) {
         applyPresentationMode(false, true);
@@ -1167,7 +1122,7 @@
       } else if (event.key.toLowerCase() === "h" && !["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) {
         const muted = !document.body.classList.contains("holo-muted");
         applyHoloMuted(muted, true);
-        toast(muted ? "Holographic chamber dimmed" : "Holographic chamber restored");
+        toast(muted ? "Ambient backdrop hidden" : "Ambient backdrop shown");
       } else if (event.key === "Enter" && document.activeElement === els.cy) {
         if (state.selectedId) enterNode(state.selectedId);
       }
@@ -1186,6 +1141,7 @@
   }
 
   function boot() {
+    document.getElementById("hub-link").hidden = !location.pathname.startsWith("/architecture/");
     try {
       validateBundle(state.bundle);
     } catch (error) {
@@ -1203,15 +1159,15 @@
     }
     renderEdgeFilters();
     bindEvents();
-    bindHoloCamera();
     updateValidationReadout();
     const route = parseHash();
     if (!location.hash) setRoute("system", null, true);
     state.scopeId = state.nodesById.has(route.scope) && hasChildren(route.scope) ? route.scope : "system";
     state.selectedId = state.nodesById.has(route.selected) ? route.selected : null;
+    const initialSelected = state.selectedId;
     renderScope();
-    if (state.selectedId) selectNode(state.selectedId, false);
     if (window.innerWidth <= 760) openOutline();
+    if (initialSelected) selectNode(initialSelected, false);
   }
 
   boot();

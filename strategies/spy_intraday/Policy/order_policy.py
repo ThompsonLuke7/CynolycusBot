@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable
 
+import logging
 import math
 import pandas as pd
 import re
@@ -13,6 +14,9 @@ from zoneinfo import ZoneInfo
 
 from core.live_signal_audit import build_option_order_audit
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+
+
+logger = logging.getLogger(__name__)
 
 
 PHASE4_SWING_SETUP_BODYCLOSE_BODYCLOSE_V1 = "phase4_swing_setup_bodyclose_bodyclose_v1"
@@ -1038,6 +1042,45 @@ class OptionOrderPolicy:
             return False
         return latest_snapshot_ts <= entry_signal_ts
 
+    @staticmethod
+    def _sibling_module_owned_symbols() -> set[str] | None:
+        """Option OCC symbols a sibling module currently claims, or None.
+
+        This reconcile adopts any broker position whose symbol starts with the
+        underlying and parses as an option. Nothing checked who opened it, so
+        on 2026-09-08 Intraday Structure bought 5x SPY260909P00767000 at 15:49
+        ET and this policy adopted the contract three minutes later and sold
+        four of the five; Intraday Structure then found one left where it
+        expected five. Neither module recorded a valid P&L for the trade.
+
+        Swing learned this twice already (HTF's FIG in 2026-07, Intraday
+        Structure's contracts in 2026-09) and reads ownership from the shared
+        claim book. This reads the same book, so a module registered there is
+        honoured here too.
+
+        None means the book could not be read and is not the empty set. The
+        caller must skip the reconcile entirely rather than treat it as "nobody
+        owns anything", which is the answer that licences the adoption.
+        """
+
+        from core.orphan_positions import ClaimBookUnreadable, claimed_symbols
+
+        try:
+            return claimed_symbols(exclude=("spy_daytrader",), strict=True)
+        except ClaimBookUnreadable as exc:
+            logger.warning(
+                "spy reconcile: a sibling's book could not be read (%s); leaving "
+                "local position state alone rather than claiming someone's position",
+                exc,
+            )
+            return None
+        except Exception:  # noqa: BLE001 - an unexpected fault is still fail-closed
+            logger.warning(
+                "spy reconcile: sibling ownership scan failed; leaving local "
+                "position state alone this pass", exc_info=True,
+            )
+            return None
+
     def _read_broker_position_state(self) -> dict[str, Any]:
         if not self.cfg.submit_orders:
             return {
@@ -1066,11 +1109,14 @@ class OptionOrderPolicy:
         positions = self._extract_positions(resp)
         under = self.cfg.underlying.strip().upper()
 
+        sibling_owned = self._sibling_module_owned_symbols()
+
         long_candidates: list[tuple[float, str, float]] = []
         short_candidates: list[tuple[float, str, float]] = []
         underlying_equity_qty = 0.0
         underlying_equity_side: str | None = None
         ignored_short_count = 0
+        ignored_sibling_owned: list[str] = []
         for p in positions:
             symbol = str(p.get("symbol", "")).strip().upper()
             if symbol == under:
@@ -1084,6 +1130,10 @@ class OptionOrderPolicy:
                 continue
             cp = self._option_cp(symbol)
             if cp is None:
+                continue
+            if sibling_owned and symbol in sibling_owned:
+                # Another module opened this contract and is managing its exit.
+                ignored_sibling_owned.append(symbol)
                 continue
 
             qty_val = _as_float(p.get("qty"))
@@ -1125,6 +1175,11 @@ class OptionOrderPolicy:
             "qty_short": short_qty if short_symbol else 0.0,
             "multiple_positions": (len(long_candidates) > 1 or len(short_candidates) > 1),
             "ignored_short_positions": ignored_short_count,
+            "ignored_sibling_owned": ignored_sibling_owned,
+            "sibling_owned_tickers": tuple(
+                t for t in (under,) if sibling_owned and t in sibling_owned
+            ),
+            "ownership_unknown": sibling_owned is None,
             "underlying_equity_qty": underlying_equity_qty,
             "underlying_equity_side": underlying_equity_side,
         }
@@ -1271,12 +1326,38 @@ class OptionOrderPolicy:
         }
         broker_state = self._read_broker_position_state()
         self._last_broker_reconcile_monotonic = now_mono
+        if bool(broker_state.get("ownership_unknown")):
+            # Applying this view could adopt — and then exit — a contract a
+            # sibling module opened. Local state is the safer of the two
+            # imperfect answers, so leave it untouched until the book reads.
+            logger(
+                "[order_policy] BROKER RECONCILE SKIPPED reason=sibling_ownership_unknown"
+            )
+            return {
+                "checked": True,
+                "changed": False,
+                "skipped": True,
+                "reason": "sibling_ownership_unknown",
+                "broker_state": broker_state,
+            }
         equity_flatten = None
         if bool(self.cfg.auto_flatten_underlying_shares):
-            equity_flatten = self._maybe_flatten_underlying_equity(
-                broker_state=broker_state,
-                logger=logger,
-            )
+            # The share flatten is a market sell of whatever SPY equity is in
+            # the account. It exists to clean up an option assignment, but it
+            # never asked who owned the shares — a sibling holding the
+            # underlying would have been liquidated the same way the option
+            # contract was.
+            under = str(broker_state.get("underlying") or self.cfg.underlying).strip().upper()
+            if under in (broker_state.get("sibling_owned_tickers") or ()):
+                logger(
+                    "[order_policy] UNDERLYING EQUITY FLATTEN SKIPPED "
+                    f"symbol={under} reason=owned_by_other_module"
+                )
+            else:
+                equity_flatten = self._maybe_flatten_underlying_equity(
+                    broker_state=broker_state,
+                    logger=logger,
+                )
 
         changed = any(
             prev_state.get(key) != broker_state.get(key)
@@ -1312,11 +1393,17 @@ class OptionOrderPolicy:
                 and int(broker_state.get("short_contracts", 0) or 0) <= 0
             ):
                 self._set_entry_lockout(local_ts=local_ts, reason="broker_expiration_flattened")
+        sibling_note = ""
+        if broker_state.get("ignored_sibling_owned"):
+            sibling_note = (
+                f" left_to_other_modules={','.join(broker_state['ignored_sibling_owned'])}"
+            )
         logger(
             "[order_policy] BROKER RECONCILE "
             f"prev_long={prev_state['long_contracts']} prev_short={prev_state['short_contracts']} "
             f"next_long={broker_state.get('long_contracts', 0)} next_short={broker_state.get('short_contracts', 0)} "
             f"next_long_symbol={broker_state.get('long_symbol')} next_short_symbol={broker_state.get('short_symbol')}"
+            f"{sibling_note}"
         )
         return {
             "checked": True,
@@ -2242,6 +2329,17 @@ class OptionOrderPolicy:
         """
         try:
             broker_state = self._read_broker_position_state()
+            if bool(broker_state.get("ownership_unknown")):
+                logger(
+                    "[order_policy] Startup sync skipped: sibling ownership could not "
+                    "be read, so no broker position was adopted."
+                )
+                return {
+                    "synced": False,
+                    "skipped": True,
+                    "reason": "sibling_ownership_unknown",
+                    "broker_state": broker_state,
+                }
             self._apply_broker_position_state(
                 broker_state=broker_state,
                 preserve_bars_held=False,
@@ -2866,11 +2964,18 @@ class OptionOrderPolicy:
                              else self._short_avg_entry_price)
             entry_premium = float(entry_premium) if math.isfinite(entry_premium) else None
             resp = (result or {}).get("response") or {}
-            raw_fill = resp.get("filled_avg_price")
-            try:
-                fill = float(raw_fill) if raw_fill not in (None, "") else None
-            except (TypeError, ValueError):
-                fill = None
+            # The submission response is the *acknowledgement*, and on this
+            # path it comes back `pending_new`/`new` with no fill price — the
+            # fill is established a moment later by the verification poll. The
+            # ledger read only the acknowledgement, so every close on
+            # 2026-09-08 recorded `exit_fill_price: null` and
+            # `realized_pnl: null` despite ORDER VERIFIED status=filled. Prefer
+            # the verified order, exactly as the option-mark capture does.
+            verification = (result or {}).get("verification") or {}
+            fill_val = self._extract_filled_avg_price(verification.get("order"))
+            if not math.isfinite(fill_val):
+                fill_val = self._extract_filled_avg_price(resp)
+            fill = float(fill_val) if math.isfinite(fill_val) else None
             order_qty = int(qty) if qty is not None else int(self.cfg.qty)
             realized = (round((fill - entry_premium) * 100.0 * order_qty, 2)
                         if (fill is not None and entry_premium) else None)

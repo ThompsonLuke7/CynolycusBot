@@ -1,7 +1,7 @@
 # Cynolycus System Atlas
 
 The System Atlas is a read-only, zoomable architecture map for explaining the
-repository from its six major domains down to models, feature families,
+repository from its eight major domains down to models, feature families,
 signals, policies, execution boundaries, and research evidence.
 
 It has two views generated from one curated manifest:
@@ -39,7 +39,9 @@ private local review.
 
 ## Explore the atlas
 
+- Open `/architecture/` on the hub to explore the Public atlas in the operations workspace.
 - Select a node to inspect it.
+- The canvas defaults to a quiet dot grid. Use H to show the optional ambient backdrop.
 - Press Enter or double-click to focus its next sublayer.
 - Use Back, Escape, breadcrumbs, or browser history to move upward.
 - Search jumps to any component, including deeply nested nodes.

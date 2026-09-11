@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import contextlib
 import io
 import json
+import logging
 from pathlib import Path
+import time as _time
 from typing import Callable, Iterator, Optional
 import warnings
 
@@ -59,6 +62,33 @@ from strategies.spy_intraday.Models.competition_ranker import CompetitionSwingRa
 
 _EMITTED_RUNTIME_WARNINGS: set[str] = set()
 _LIVE_VIX_RANGE_CACHE: dict[str, tuple[int, pd.Timestamp | None, pd.Timestamp | None]] = {}
+
+
+logger = logging.getLogger(__name__)
+
+# UI.live_dashboard's SLOW PHASE timers narrowed the 2026-09 live-loop stall to
+# a single phase — `inference.on_15m_close` — which on 2026-09-08 ran 325-506s
+# per SPY bar and pushed the daytrader's decisions up to 152 minutes behind the
+# tape. Naming the phase is as far as that instrumentation reaches; these
+# sub-timers say which part of the phase. Same threshold and the same
+# report-only stance: nothing here changes what the agent decides.
+INFERENCE_SUBPHASE_WARN_SECONDS = 5.0
+
+
+@contextmanager
+def _timed_subphase(name: str, *, rows: int | None = None):
+    started = _time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed = _time.monotonic() - started
+        if elapsed >= INFERENCE_SUBPHASE_WARN_SECONDS:
+            size = "" if rows is None else f" over {rows} rows"
+            logger.warning(
+                "[live] SLOW SUBPHASE %s took %.1fs%s — this is the part of "
+                "inference.on_15m_close that is stalling the loop",
+                name, elapsed, size,
+            )
 
 
 def _warn_once(message: str) -> None:
@@ -2080,12 +2110,17 @@ class LiveIndependentMetaXGBAgent:
         return out
 
     def _build_independent_base_frame(self, *, df_1m: pd.DataFrame) -> pd.DataFrame:
-        base_frame = self._base_agent._build_base_frame(df_1m=df_1m)
+        with _timed_subphase("base_frame_build", rows=len(df_1m)):
+            base_frame = self._base_agent._build_base_frame(df_1m=df_1m)
         if self._uses_direct_setup_probs():
-            base_frame = self._annotate_swing_setup_probs(df_1m=df_1m, base_frame=base_frame)
+            with _timed_subphase("swing_setup_probs", rows=len(base_frame)):
+                base_frame = self._annotate_swing_setup_probs(
+                    df_1m=df_1m, base_frame=base_frame)
         if self._regime_probability_calibrator is not None and not base_frame.empty:
             try:
-                base_frame = add_sticky_trend_regime(base_frame, config=StickyRegimeConfig())
+                with _timed_subphase("sticky_trend_regime", rows=len(base_frame)):
+                    base_frame = add_sticky_trend_regime(
+                        base_frame, config=StickyRegimeConfig())
             except Exception:
                 pass
         return base_frame
@@ -2345,7 +2380,8 @@ class LiveIndependentMetaXGBAgent:
             rows = base_frame.loc[base_frame.index > self._last_processed_ts] if self._last_processed_ts is not None else base_frame.tail(1)
             if rows.empty:
                 rows = base_frame.tail(1)
-        actions = self._process_rows(base_frame=base_frame, rows=rows)
+        with _timed_subphase("process_rows", rows=len(rows)):
+            actions = self._process_rows(base_frame=base_frame, rows=rows)
         if not actions:
             return None
         return float(actions[-1]["action"])

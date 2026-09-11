@@ -93,3 +93,38 @@ def test_start_all_skips_one_shot_4h_loops(monkeypatch):
     # imply the hub could start it under other circumstances.
     assert skipped["momentum"]["reason"] == "scheduled_4h_loop"
     assert "meta" not in skipped
+
+
+@pytest.mark.parametrize("request_path", [
+    "/architecture/../local/index.html",
+    "/architecture/%2e%2e/local/index.html",
+    "/architecture/%2fetc/passwd",
+    "/architecture/missing.js",
+    "/architecture/leaked.html",
+])
+def test_atlas_asset_never_exposes_files_outside_public_build(tmp_path, monkeypatch, request_path):
+    from UI import hub_dashboard as hub
+
+    public = tmp_path / "public"
+    public.mkdir()
+    local = tmp_path / "local"
+    local.mkdir()
+    private = local / "index.html"
+    private.write_text("local-only evidence")
+    (public / "leaked.html").symlink_to(private)
+    monkeypatch.setattr(hub, "_ATLAS_PUBLIC", public)
+
+    assert hub._atlas_asset(request_path) is None
+
+
+def test_atlas_asset_resolves_public_home_and_nested_fonts(tmp_path, monkeypatch):
+    from UI import hub_dashboard as hub
+
+    (tmp_path / "fonts").mkdir()
+    (tmp_path / "index.html").write_text("public architecture")
+    font = tmp_path / "fonts/SpaceGrotesk.woff2"
+    font.write_bytes(b"fixture")
+    monkeypatch.setattr(hub, "_ATLAS_PUBLIC", tmp_path)
+
+    assert hub._atlas_asset("/architecture/") == tmp_path / "index.html"
+    assert hub._atlas_asset("/architecture/fonts/SpaceGrotesk.woff2") == font
