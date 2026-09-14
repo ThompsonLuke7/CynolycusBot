@@ -411,3 +411,128 @@ used to set the parameter.
 Getting a survivorship-clean universe is the next data-integrity item; it is a
 bigger job than the corporate-action guard because it needs point-in-time
 listing data the repo does not currently hold.
+
+---
+
+# 9. Survivorship, HTF, and live exposure (2026-09-10)
+
+## 9.1 Correction to 8.7
+
+8.7 said the k-vs-k differences are "unaffected by which names survived". That is
+too strong. Section 8.5 demonstrated the mechanism that breaks it: a selective
+ranker concentrates defects at the top (corporate actions 186x over-represented
+at k=1). If top picks are also disproportionately the distressed names that later
+delisted, pruning dead names removes more from the top than from the deep ranks
+and inflates the difference. Differences are LESS exposed than levels, not immune.
+
+## 9.2 By-year diagnostic
+
+If pruning drives the gap, it should shrink toward the present (least time to be
+pruned). 10-day hold, guarded:
+
+| year | mom k3 vs k10 | htf k3 vs k10 |
+|---|---|---|
+| 2023 | +0.92 | -0.30 |
+| 2024 | +0.90 | +1.03* |
+| 2025 | **+4.78*** | +1.47* |
+| 2026 (Jan-May) | **-1.76*** | **+2.94*** |
+
+HTF's gap GROWS toward the present -- the opposite of the survivorship signature.
+Momentum's is carried by 2025 and reverses significantly in early 2026, while the
+live Jul-Aug 2026 spine shows +3.98pp (p=0.002). Momentum's depth effect is real
+on the pool but not stationary.
+
+## 9.3 HTF on 1,703 OOF bars -- contradicts the live study
+
+| pair | 5d | 10d | 15d |
+|---|---|---|---|
+| k=1 vs k=2 | +0.29 | +0.76* | +1.13* |
+| k=3 vs k=10 | +0.71* | +0.96* | +1.40* |
+
+Monotone k1>k2>k3>k5>k10. Live (68 bars) had HTF top-1 significantly negative and
+the ordering backwards. Candidate explanations, untested: the live universe is
+~2,900 names including thin microcaps (live HTF top-1 median $6.79 / $6.7M ADV)
+while the OOF pool is ~1,080 more established names; small-sample noise. No HTF
+parameter change is justified while the two disagree.
+
+## 9.4 Survivorship-clean universe -- feasibility
+
+* Prices for dead companies ARE available: Alpaca returns bars for SIVB (to
+  2023-03-09), BBBY, FRC, TUP up to their last trading day.
+* The MEMBERSHIP list is what is missing. Alpaca's inactive assets (19,183; 2,867
+  non-OTC) do not carry delisted names under their trading symbols (none of SIVB,
+  BBBY, FRC, SBNY, WE, RAD, EXPR, GOEV, TUP, BIG present -- renamed on delisting,
+  e.g. SIVB -> SIVBQ); a 60-symbol sample yielded 10 with 2022-26 history, mostly
+  funds/ADRs, zero failure-shaped.
+* The repo keeps no history of its own: `Data/**` is gitignored and
+  `build_shared_universe` (`core/shared_universe/universe.py:146`) overwrites
+  `shared_universe.csv` in place.
+
+So a backward reconstruction needs an external point-in-time delisting source
+(SEC EDGAR Form 25 is the free candidate; untested here). Going forward is
+trivial: write a dated, immutable snapshot on every build.
+
+## 9.5 Live exposure to the corporate-action defect
+
+Live momentum reads the same unadjusted cache (`RAW_1D_DIR`). Checked every live
+audit against 70 flags since 2026-05-01: one hit -- HTF targeted STI 27 days
+after a 5x gap, and meta traded it. STI's dollar-volume ratio is 3,162 (volume up
+624x), i.e. a real move with real participation, not a recapitalisation. No live
+module ranked a recap-shaped name. The flag table also catches known leveraged
+ETF reverse splits (TZA, TECS, SOXS 2026-07-15; MSTU 2026-08-24; ratios ~0.2).
+Exposure is low in practice but unguarded.
+
+---
+
+# 10. Shipped: corporate-action screen and universe snapshots (2026-09-10)
+
+## 10.1 Guard fix -- it could not see forward splits
+
+The first `core/corporate_actions.py` flagged `|open/prev_close - 1| >= 300%`.
+A down-gap can never exceed -100%, so it could not see a forward split at all.
+The threshold is now on the RATIO in either direction (>= 4x or <= 1/4x). The
+cache rescan went from 187 to **243 flags over 189 tickers**: 54 down-gaps it
+had missed (TENX, SION, KLAC 2026-06-03, the Vanguard ETF splits 2026-04-21).
+
+## 10.2 Organic vs not
+
+`organic` = up-gap on >= 5x trailing median share volume. 161 up-gaps are
+non-organic, 28 organic; the volume distribution is empty between 3.11 and 5,
+so the threshold is not a fine-tuned value. Down-gaps are never organic (a
+forward split multiplies share volume just as a real collapse does). Research
+masks the 215 non-organic flags and keeps the 28 organic -- those are real returns.
+
+Corrected OOF numbers with both directions masked (momentum, 10d): k=3 vs k=10
++1.66pp (was +1.68), 15d +2.82 (was +2.85). Down-gaps almost never sit inside a
+top-10 momentum window, so the finding is unchanged.
+
+## 10.3 Live entry screen
+
+`core.live_4h_exec.corporate_action_screen` + `build_mixed_plan(...,
+corporate_action_fn=)`: a NEW entry is refused when the shared 4H cache shows a
+non-organic flag within the last `ENTRY_LOOKBACK_SESSIONS` = 20 sessions. Logged
+to `contract_selection` with reason `corporate_action_suspect` and the raw
+diagnostic, so it reaches every module's existing order_plan audit. Held
+positions are untouched (the mark guard owns those). Applies to all four 4H
+modules (meta, momentum, HTF, dealer) with no runner changes.
+
+Verification on real 4H bars: TENX and SION flagged 2 sessions after their
+2026-08-10 splits; WOLF 3 sessions after 2025-09-29; TENX as of 2026-08-07 is
+clear (no look-ahead). Full live-universe scan today: 3,095 names screened at
+14 ms each, **0 currently blocked** -- the recent 1d flags (LGCL, AIXI, HCWC,
+CYCU, REAX, MSTU, BIAF) have no 4H file, i.e. they are outside what the 4H
+modules can rank.
+
+Known limitation: a vetoed name is not backfilled -- a top-3 book with one
+vetoed name buys 2. Chosen over per-module ranking changes because the veto
+fires rarely (0 today, 1 live hit in 2.5 months that would pass as organic) and
+one choke point is easier to keep correct than four.
+
+## 10.4 Universe snapshots
+
+`build_shared_universe` now also writes
+`Data/shared/universe/snapshots/shared_universe_<UTC>.csv.gz` in exclusive-create
+mode (never overwritten). `load_universe_as_of(ts)` returns the latest snapshot
+at or before `ts` and raises `LookupError` rather than fall back to today's list.
+The first real snapshot lands on the next nightly build; history before
+2026-09-10 still needs an external point-in-time source.

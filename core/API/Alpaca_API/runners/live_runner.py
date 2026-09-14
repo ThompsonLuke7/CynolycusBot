@@ -1988,7 +1988,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--meta-model-root", default="Data/models/meta_xgboost/10min", help="Meta-XGB model root.")
     parser.add_argument(
         "--meta-base-frame-path",
-        default="Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet",
+        default="Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts.parquet",
         help="Optional cached 10m meta feature matrix path. Supports {symbol} and {symbol_lower}.",
     )
     parser.add_argument(

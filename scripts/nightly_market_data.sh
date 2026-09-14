@@ -117,6 +117,27 @@ fi
     echo "[$(ts)] Dealer snapshots disabled by DEALER_SNAPSHOT_ENABLED=0"
   fi
 
+  # 1c) Implied-volatility surface (forward collection). The dealer snapshots
+  #     collapse expirations per strike and CBOE keeps one iv30 level, so
+  #     neither can produce the IV-shape signals that survived 2023-2026
+  #     (call-put IV spread, risk-neutral skew, 30-60d term slope). Also keeps
+  #     the raw per-contract bid/ask -- the only option-quote history we have.
+  #     Schwab serves no history, so a skipped night can never be backfilled.
+  #     NON-FATAL like discovery: nothing downstream reads it yet.
+  if [ "${IV_SURFACE_ENABLED:-1}" != "0" ]; then
+    echo "[$(ts)] IV surface — call/put IV spread, risk-neutral skew, term slope, quote archive"
+    timeout --signal=TERM --kill-after=60s "${NIGHTLY_IV_SURFACE_TIMEOUT_SECONDS:-5400}s" \
+      "$PYTHON" -u -m strategies.dealer_positioning.scripts.capture_iv_surface \
+        --sleep-seconds "${IV_SURFACE_SLEEP_SECONDS:-0.25}"
+    iv_surface_exit=$?
+    echo "[$(ts)] IV surface exit=$iv_surface_exit"
+    if [ "$iv_surface_exit" -ne 0 ]; then
+      echo "[$(ts)] WARNING: IV surface capture failed (exit=$iv_surface_exit); continuing (non-fatal — nothing downstream reads it yet)"
+    fi
+  else
+    echo "[$(ts)] IV surface disabled by IV_SURFACE_ENABLED=0"
+  fi
+
   # 2) FINRA prior-trading-day short volume (appends a single day's parquet)
   echo "[$(ts)] FINRA — pulling yesterday's CSV"
   timeout --signal=TERM --kill-after=30s "${NIGHTLY_FINRA_TIMEOUT_SECONDS:-900}s" "$PYTHON" -u <<'PYEOF'

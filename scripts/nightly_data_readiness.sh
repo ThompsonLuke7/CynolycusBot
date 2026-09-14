@@ -191,13 +191,13 @@ fi
 
   STATUS=0
 
-  run_timed "1/5 catch up shared bars (1H/4H/1D, full universe, 429 backoff)" \
+  run_timed "1/6 catch up shared bars (1H/4H/1D, full universe, 429 backoff)" \
     "${READINESS_BARS_TIMEOUT_SECONDS:-7200}" \
     "$PYTHON" -u scripts/catchup_shared_bars.py --workers 4
   STATUS=$?
 
   if [ "$STATUS" -eq 0 ]; then
-    run_timed "2/5 refresh shared context bars (including VIXY)" \
+    run_timed "2/6 refresh shared context bars (including VIXY)" \
       "${READINESS_CONTEXT_TIMEOUT_SECONDS:-1800}" \
       "$PYTHON" -u scripts/refresh_shared_context_bars.py
     STATUS=$?
@@ -207,7 +207,7 @@ fi
   # so a regime failure degrades feature freshness instead of withholding the
   # stamp and blanking the next session.
   if [ "$STATUS" -eq 0 ]; then
-    run_timed "3/5 rebuild daily market-regime + sector-state tables" \
+    run_timed "3/6 rebuild daily market-regime + sector-state tables" \
       "${READINESS_REGIME_TIMEOUT_SECONDS:-1800}" \
       "$PYTHON" -u -m signals.market_regime.build
     REGIME_STATUS=$?
@@ -217,7 +217,7 @@ fi
   fi
 
   if [ "$STATUS" -eq 0 ]; then
-    echo "[$(ts)] 4/5 rebuild HTF 4H feature matrix (features_4h.parquet)"
+    echo "[$(ts)] 4/6 rebuild HTF 4H feature matrix (features_4h.parquet)"
   # --refresh-stale, not --force. Plain (no flag) skips entirely when the combined
   # parquet exists, which froze the matrix and had HTF Swing scoring a 3-week-old
   # bar. --force fixed that but rebuilt all ~2,900 tickers every run, so a run
@@ -228,19 +228,35 @@ fi
   # combined parquet, so it stays correct AND resumes. Use --force by hand after
   # feature-code changes, which leave mtimes untouched.
     if [ "${#MEM_CAP[@]}" -eq 0 ]; then
-      echo "[$(ts)] NOTE: systemd --user unavailable; 4/5 runs without a memory cap"
+      echo "[$(ts)] NOTE: systemd --user unavailable; 4/6 runs without a memory cap"
     fi
-    run_timed "4/5 build-features" "${READINESS_FEATURES_TIMEOUT_SECONDS:-7200}" \
+    run_timed "4/6 build-features" "${READINESS_FEATURES_TIMEOUT_SECONDS:-7200}" \
       "${MEM_CAP[@]}" \
       "$PYTHON" -u -m strategies.momentum_expansion.main --build-features --refresh-stale
     STATUS=$?
   fi
 
   if [ "$STATUS" -eq 0 ]; then
-    run_timed "5/5 append fresh bars to the Meta Ranker matrix" \
+    run_timed "5/6 append fresh bars to the Meta Ranker matrix" \
       "${READINESS_MATRIX_TIMEOUT_SECONDS:-2700}" \
       "$PYTHON" -u signals/meta_context/meta_ranker/update_meta_matrix.py
     STATUS=$?
+  fi
+
+  # NON-FATAL: a stale SPY matrix costs speed, not correctness -- live inference
+  # falls back to rebuilding every feature from the 1m buffer on each 10-minute
+  # bar, which is what put the SPY loop up to 92 minutes behind the tape on
+  # 2026-09-10. Rebuild rather than append: appending a whole session at once
+  # drifts (see --rebuild), and those rows would become tomorrow's cached
+  # predecessors.
+  if [ "$STATUS" -eq 0 ]; then
+    run_timed "6/6 rebuild the SPY 10m meta matrix (live inference cache)" \
+      "${READINESS_SPY_MATRIX_TIMEOUT_SECONDS:-2700}" \
+      "$PYTHON" -u scripts/update_live_meta_base_frame.py --rebuild
+    SPY_MATRIX_STATUS=$?
+    if [ "$SPY_MATRIX_STATUS" -ne 0 ]; then
+      echo "[$(ts)] WARNING: SPY meta matrix rebuild failed (exit=$SPY_MATRIX_STATUS); live inference will rebuild features from the 1m buffer every bar"
+    fi
   fi
 
   if [ "$STATUS" -eq 0 ]; then

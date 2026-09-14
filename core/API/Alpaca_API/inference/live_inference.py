@@ -658,6 +658,78 @@ def build_agent_feature_frame_from_15m(
     return df[cols].copy()
 
 
+_PROB_DERIVATIVE_BASES = ("p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short")
+
+
+def recompute_prob_derivatives(
+    frame: pd.DataFrame, *, bases: tuple[str, ...] = _PROB_DERIVATIVE_BASES
+) -> pd.DataFrame:
+    """Rebuild the lag/rolling/delta family from the frame's own history.
+
+    `_add_pivot_features` (strategies/spy_intraday/Features/feature_matrix_regime.py)
+    derives four columns per probability, each reading at most three rows back:
+    `_lag1` = shift(1), `_lag2` = shift(2), `_max_last_4` = rolling(4).max(),
+    `_delta_1` = diff(1).
+
+    A tail recomputed over a warm-up window brings its own recomputed
+    predecessors, so those four drifted up to 0.06 from the full-history values
+    even at a 160-day window (2026-09-12 measurement) while the base probability
+    itself matched to ~1e-5. They are live model inputs -- `p_pivot_long_lag1`,
+    `_delta_1` and friends are in the entry and exit feature lists. Rebuilt
+    against the cached rows, which were computed over full history, they are
+    exact. Only existing columns are rewritten, so a frame built without TB or
+    pivot probabilities never gains columns here.
+    """
+    out = frame
+    for base in bases:
+        if base not in frame.columns:
+            continue
+        series = pd.to_numeric(frame[base], errors="coerce")
+        derived = {
+            f"{base}_lag1": series.shift(1),
+            f"{base}_lag2": series.shift(2),
+            f"{base}_max_last_4": series.rolling(4, min_periods=1).max(),
+            f"{base}_delta_1": series - series.shift(1),
+        }
+        for column, values in derived.items():
+            if column not in frame.columns:
+                continue
+            if out is frame:
+                out = frame.copy()
+            out[column] = values
+    return out
+
+
+def continue_origin_relative_columns(cached: pd.DataFrame, appended: pd.DataFrame) -> pd.DataFrame:
+    """Renumber `appended`'s origin-relative columns to continue `cached`.
+
+    `day_id` is `factorize(session dates)`, so it counts from the start of
+    whichever window computed it. A tail recomputed over a short warm-up window
+    therefore restarts it at 0, and a naive merge yields a column that runs
+    ... 1446, 1447, 0, 1, 2. It is a live model input -- it appears in the entry
+    (97 features), exit (104) and swing-setup selected-feature lists -- so that
+    discontinuity is a feature bug, not cosmetics.
+
+    A tail that continues the session `cached` ended in keeps that session's id;
+    each later session takes the next one.
+    """
+    if cached.empty or appended.empty:
+        return appended
+    if "day_id" not in cached.columns or "day_id" not in appended.columns:
+        return appended
+    base = pd.to_numeric(cached["day_id"], errors="coerce").max()
+    if not np.isfinite(base):
+        return appended
+    out = appended.copy()
+    days = pd.DatetimeIndex(out.index).normalize()
+    unique_days = pd.Index(days.unique())
+    same_session = bool(unique_days[0] == pd.DatetimeIndex(cached.index).normalize()[-1])
+    first = 0 if same_session else 1
+    mapping = {day: float(base) + first + offset for offset, day in enumerate(unique_days)}
+    out["day_id"] = pd.Series(days, index=out.index).map(mapping)
+    return out
+
+
 def build_meta_feature_frame_from_1m(
     df_1m: pd.DataFrame,
     *,
@@ -675,7 +747,15 @@ def build_meta_feature_frame_from_1m(
     ga_predictor: LiveGAXGBPredictor | None = None,
     ga_probs_frame: pd.DataFrame | None = None,
     ga_probs_mode: str = "xgb",
+    x_tree: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
+    """``x_tree`` is an already-built tree feature frame for this same ``df_1m``.
+
+    The swing-setup path builds an identical frame from the same input with the
+    same arguments, and on 2026-09-10 each build cost 49.5s over a 50,000-row
+    buffer. Passing it in here is exact -- same function, same inputs -- and
+    halves the per-bar cost. Omit it and the frame is built as before.
+    """
     prob_cols = ("p_pivot_long", "p_pivot_short", "p_tb_long", "p_tb_short")
     df_tf = build_15m(
         df_1m,
@@ -691,14 +771,15 @@ def build_meta_feature_frame_from_1m(
 
     if ga_predictor is not None:
         try:
-            x_tree = build_tree_feature_frame_from_1m(
-                df_1m,
-                label_timeframe=rule,
-                resample_label=label,
-                resample_closed=closed,
-                tz=tz,
-                assume_tz=assume_tz,
-            )
+            if x_tree is None:
+                x_tree = build_tree_feature_frame_from_1m(
+                    df_1m,
+                    label_timeframe=rule,
+                    resample_label=label,
+                    resample_closed=closed,
+                    tz=tz,
+                    assume_tz=assume_tz,
+                )
             if not x_tree.empty:
                 probs_df = ga_predictor.predict_frame(x_tree)
                 for col in probs_df.columns:
@@ -1283,7 +1364,10 @@ class LiveMetaXGBAgent:
             tp_seen=False,
         )
 
-    def _build_base_frame(self, *, df_1m: pd.DataFrame) -> pd.DataFrame:
+    def _build_base_frame(self, *, df_1m: pd.DataFrame,
+                          x_tree: pd.DataFrame | None = None) -> pd.DataFrame:
+        # `x_tree` belongs to `df_1m`. The append path below rebuilds from a
+        # shorter tail, so it is only used on the full-build path.
         if isinstance(self._precomputed_base_frame, pd.DataFrame) and not self._precomputed_base_frame.empty:
             pre = self._precomputed_base_frame
             if df_1m is None or df_1m.empty:
@@ -1343,13 +1427,36 @@ class LiveMetaXGBAgent:
             )
             if computed_tail.empty:
                 return self._remember_runtime_status(pre)
-            pre_prefix = _copy_without_attrs(pre.loc[pre.index < computed_tail.index.min()])
-            computed_tail_plain = _copy_without_attrs(computed_tail)
+            # Append only what is new. The window is warm-up for the new rows,
+            # not a rewrite of the old ones: every row at or before `cached_max`
+            # was computed over full history and is strictly better than
+            # anything a short window can produce. The old merge replaced the
+            # whole window, so each bar overwrote months of full-history values
+            # with short-history ones.
+            #
+            # Measured 2026-09-12 against a full 554,655-row build: with the
+            # cached rows kept and the probability derivatives rebuilt below, a
+            # 20-day window reproduces the newest row exactly for close, atr,
+            # trend phase, trend strength and dist_to_pdh, and to ~1e-5 for the
+            # pivot and trend probabilities. 40, 80 and 160 days were no better.
+            fresh = computed_tail.loc[computed_tail.index > cached_max]
+            if fresh.empty:
+                return self._remember_runtime_status(pre)
+            if set(fresh.columns) != set(pre.columns):
+                _warn_once(
+                    "[live] cached meta matrix and freshly computed rows disagree on "
+                    f"columns ({len(set(fresh.columns) - set(pre.columns))} new, "
+                    f"{len(set(pre.columns) - set(fresh.columns))} missing); "
+                    "aligning to the cached frame"
+                )
+                fresh = fresh.reindex(columns=pre.columns)
+            fresh = continue_origin_relative_columns(pre, fresh)
             merged = pd.concat(
-                [pre_prefix, computed_tail_plain],
+                [_copy_without_attrs(pre), _copy_without_attrs(fresh)],
                 axis=0,
             ).sort_index()
             merged = merged[~merged.index.duplicated(keep="last")]
+            merged = recompute_prob_derivatives(merged)
             _merge_frame_attrs(merged, pre, computed_tail)
             self._precomputed_base_frame = merged
             return self._remember_runtime_status(merged)
@@ -1369,6 +1476,7 @@ class LiveMetaXGBAgent:
             ga_predictor=self._ga_predictor,
             ga_probs_frame=self._ga_probs_frame,
             ga_probs_mode=self._ga_probs_mode,
+            x_tree=x_tree,
         ))
 
     @staticmethod
@@ -1994,10 +2102,11 @@ class LiveIndependentMetaXGBAgent:
         self._swing_setup_annotated_cache = None
         self._swing_setup_annotated_cache_key = None
 
-    def _build_setup_feature_frame(self, *, df_1m: pd.DataFrame, base_frame: pd.DataFrame) -> pd.DataFrame:
+    def _build_setup_feature_frame(self, *, df_1m: pd.DataFrame, base_frame: pd.DataFrame,
+                                   x_tree: pd.DataFrame | None = None) -> pd.DataFrame:
         if base_frame.empty:
             return base_frame.copy()
-        tree_frame = build_tree_feature_frame_from_1m(
+        tree_frame = x_tree if x_tree is not None else build_tree_feature_frame_from_1m(
             df_1m,
             label_timeframe=self._base_agent._label_timeframe_rule,
             resample_label=self._base_agent._resample_label,
@@ -2019,7 +2128,8 @@ class LiveIndependentMetaXGBAgent:
                 combined[col] = base_frame[col]
         return combined
 
-    def _annotate_swing_setup_probs(self, *, df_1m: pd.DataFrame, base_frame: pd.DataFrame) -> pd.DataFrame:
+    def _annotate_swing_setup_probs(self, *, df_1m: pd.DataFrame, base_frame: pd.DataFrame,
+                                    x_tree: pd.DataFrame | None = None) -> pd.DataFrame:
         if base_frame.empty:
             return base_frame
         cache_key = (
@@ -2052,7 +2162,7 @@ class LiveIndependentMetaXGBAgent:
         if self._entry_prob_source in {"competition_ranker", "competition_long_active_short"}:
             if self._competition_swing is None:
                 return frame_probs if frame_probs is not None else base_frame
-            setup_frame = self._build_setup_feature_frame(df_1m=df_1m, base_frame=base_frame)
+            setup_frame = self._build_setup_feature_frame(df_1m=df_1m, base_frame=base_frame, x_tree=x_tree)
             probs = self._competition_swing.predict_frame(setup_frame)
             if self._entry_prob_source == "competition_long_active_short":
                 if frame_probs is not None and saved_complete_mask is not None and bool(saved_complete_mask.all()):
@@ -2086,7 +2196,7 @@ class LiveIndependentMetaXGBAgent:
 
         if self._swing_setup_single is None:
             return frame_probs if frame_probs is not None else base_frame
-        setup_frame = self._build_setup_feature_frame(df_1m=df_1m, base_frame=base_frame)
+        setup_frame = self._build_setup_feature_frame(df_1m=df_1m, base_frame=base_frame, x_tree=x_tree)
         missing = [col for col in self._swing_setup_single.feature_cols if col not in setup_frame.columns]
         if missing and not self._swing_setup_missing_warned:
             preview = ", ".join(missing[:12])
@@ -2110,12 +2220,31 @@ class LiveIndependentMetaXGBAgent:
         return out
 
     def _build_independent_base_frame(self, *, df_1m: pd.DataFrame) -> pd.DataFrame:
+        # One tree frame per bar, not two. The GA probability path inside
+        # build_meta_feature_frame_from_1m and the swing-setup path below both
+        # built it from this same df_1m with the same arguments: 49.5s each over
+        # the 50,000-row live buffer on 2026-09-10, on a 10-minute decision
+        # cadence. Shared only when this agent's VIX setting matches the GA
+        # path's default, so the two callers can never silently diverge.
+        ba = self._base_agent
+        x_tree = None
+        if (ba._ga_predictor is not None or self._uses_direct_setup_probs()) and ba._include_vix_features:
+            with _timed_subphase("tree_frame_build", rows=len(df_1m)):
+                x_tree = build_tree_feature_frame_from_1m(
+                    df_1m,
+                    label_timeframe=ba._label_timeframe_rule,
+                    resample_label=ba._resample_label,
+                    resample_closed=ba._resample_closed,
+                    tz=ba._tz,
+                    assume_tz=ba._assume_tz,
+                    include_vix_features=True,
+                )
         with _timed_subphase("base_frame_build", rows=len(df_1m)):
-            base_frame = self._base_agent._build_base_frame(df_1m=df_1m)
+            base_frame = ba._build_base_frame(df_1m=df_1m, x_tree=x_tree)
         if self._uses_direct_setup_probs():
             with _timed_subphase("swing_setup_probs", rows=len(base_frame)):
                 base_frame = self._annotate_swing_setup_probs(
-                    df_1m=df_1m, base_frame=base_frame)
+                    df_1m=df_1m, base_frame=base_frame, x_tree=x_tree)
         if self._regime_probability_calibrator is not None and not base_frame.empty:
             try:
                 with _timed_subphase("sticky_trend_regime", rows=len(base_frame)):

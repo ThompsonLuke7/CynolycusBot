@@ -188,14 +188,15 @@ RANKING_CONFIG: dict = {
     #     (p<0.0001) and beat top-3 at every hold (p=0.010/0.003/0.022).
     #   OOF, 1,739 decision bars (2022-11..2026-05, from `mom_score` in the Meta
     #   research matrix -- walk-forward out-of-fold, 21-day embargo), screened
-    #   with `core.corporate_actions` (see the caveat below):
-    #     k=3 vs k=10  +1.10 / +1.68 / +2.85pp at the 5/10/15-day holds, p<0.001
-    #     k=2 vs k=3   +0.22 / +0.62 / +0.68pp, p=0.256 / 0.014 / 0.053
+    #   with `core.corporate_actions` (215 non-organic flags masked, both
+    #   directions; see the caveat below):
+    #     k=3 vs k=10  +1.10 / +1.66 / +2.82pp at the 5/10/15-day holds, p<0.001
+    #     k=2 vs k=3   +0.22 / +0.62 / +0.68pp, p=0.253 / 0.014 / 0.048
     #     k=1 vs k=2   +0.12 / +0.16 / -1.08pp, none significant
     #
     # What replicates at every hold in both samples is that SHALLOW BEATS TOP-10.
     # What does not replicate is the live sample's confident "2 beats 3" and its
-    # +7.9pp magnitude -- on 26x the data the honest number is +1.7 to +2.9pp and
+    # +7.9pp magnitude -- on 26x the data the honest number is +1.7 to +2.8pp and
     # k=2 vs k=3 is marginal at best. Hence 3 rather than 2: statistically
     # indistinguishable, and the return distribution is tail-driven, so the extra
     # name buys another shot at the tail at no measured cost in expectation.
@@ -210,7 +211,9 @@ RANKING_CONFIG: dict = {
     #     over-represented among top-1 picks**: the ranker selects for extreme
     #     price action, which is what an unadjusted recapitalisation looks like.
     #     Screen with `core.corporate_actions.suspect_sessions` before trusting
-    #     any multi-year study on that cache.
+    #     any multi-year study on that cache. Live, `build_mixed_plan` now
+    #     refuses new entries on names with a non-organic flag in the last 20
+    #     sessions (`corporate_action_screen`).
     #  2. The LEVELS above (k=10 still shows +4.3% excess at 10 days) are almost
     #     certainly inflated by survivorship: of 4,076 bar files exactly 2 end
     #     before 2026, so delisted names are largely absent. The k-vs-k

@@ -162,8 +162,8 @@ def test_build_mixed_plan_settles_a_pending_exit_when_the_broker_goes_flat(tmp_p
 
 
 def test_still_held_after_a_failed_exit_is_surfaced_as_stuck(tmp_path):
-    """The order did not fill and the contract is still there: re-plan, and shout."""
-    client = _Client(fill_price=None)
+    """The order died unfilled and the contract is still there: re-plan, and shout."""
+    client = _Client(fill_price=None, order_status="expired")
     managed = {"HPE": {**_managed()["HPE"], "exit_pending": {
         "order_id": f"{_HPE}-oid", "reason": "stop_-50%", "route": "option",
         "qty": 52.0, "entry_avg_price": 0.92, "submitted_bar": "2026-08-14 19:45"}}}
@@ -180,4 +180,28 @@ def test_still_held_after_a_failed_exit_is_surfaced_as_stuck(tmp_path):
     # Flag cleared so the exit machine re-evaluates rather than sitting on a stale order.
     assert "exit_pending" not in res.new_managed.get("HPE", {})
     # Nothing booked: the position is still held.
+    assert _ledger_rows(tmp_path) == []
+
+
+def test_a_still_working_exit_order_is_left_resting_not_stacked(tmp_path):
+    """2026-09-10 NIO260911C00004000: the 13:54 $0.01 sell was still resting when
+    later passes re-submitted, and every re-submit came back 403 "account not
+    eligible to trade uncovered option contracts" -- the resting order had
+    already reserved all 833 contracts."""
+    client = _Client(fill_price=None, order_status="accepted")
+    managed = {"HPE": {**_managed()["HPE"], "exit_pending": {
+        "order_id": f"{_HPE}-oid", "reason": "stop_-50%", "route": "option",
+        "qty": 52.0, "entry_avg_price": 0.92, "submitted_bar": "2026-08-14 19:45"}}}
+
+    res = build_mixed_plan(
+        client, targets=[], managed=managed, pos_info={_HPE: {"qty": 52, "current": 0.01}},
+        bar="2026-08-14 19:50", signal_audits={}, policy=ExecPolicy(),
+        route_fn=lambda *a, **k: None, ref_price_fn=lambda t: None, verbose=False,
+        module="dealer_ranker", ledger_root=str(tmp_path),
+    )
+
+    assert "HPE" not in res.stuck_exits
+    assert res.new_managed["HPE"]["exit_pending"]["order_id"] == f"{_HPE}-oid"
+    assert not any(item[0] == _HPE for item in res.plan)
+    assert client.submitted == []
     assert _ledger_rows(tmp_path) == []

@@ -26,6 +26,8 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+from core.corporate_actions import recent_corporate_action
+
 from core.live_signal_audit import build_equity_order_audit, build_option_order_audit
 from core.live_readiness import filter_entry_orders_for_readiness
 
@@ -254,6 +256,18 @@ def underlying_basis(ticker: str, at=None, *, bars_dir=None,
     if not (np.isfinite(px) and np.isfinite(a)) or px <= 0 or a <= 0:
         return None, None
     return px, a
+
+
+def corporate_action_screen(ticker: str, *, bars_dir=None) -> dict | None:
+    """Most recent non-organic corporate-action flag inside the entry lookback,
+    read from the shared 4H cache. None means the name is clear to enter.
+
+    The 4H cache, not the 1d one: all four 4H modules score on it, and the daily
+    cache lags the live bar by a session, so a split that printed this morning
+    would be invisible there. Both caches are raw (unadjusted) -- verified on
+    TENX/SION/WOLF 2026-09-10. See core/corporate_actions.py for the rule.
+    """
+    return recent_corporate_action(_read_4h(ticker, bars_dir))
 
 
 def underlying_stop_level(policy: ExecPolicy, u_entry, u_atr) -> float | None:
@@ -524,6 +538,7 @@ def build_mixed_plan(
     module: str | None = None,
     ledger_root: str | None = None,
     underlying_fn: Callable[..., tuple] | None = None,
+    corporate_action_fn: Callable[[str], dict | None] | None = None,
 ) -> MixedPlan:
     """Manage held positions + route new entries into one mixed option/share plan.
 
@@ -533,10 +548,15 @@ def build_mixed_plan(
 
     `underlying_fn(ticker, at=None) -> (close, atr)` supplies the basis for the
     underlying-referenced option stop; it defaults to the shared 4H bar cache.
+
+    `corporate_action_fn(ticker) -> dict | None` screens NEW entries only; it
+    defaults to `corporate_action_screen`. Held positions are covered by the
+    mark guard (`_implausible_mark_move`), not by this.
     """
     out = MixedPlan()
     sa = signal_audits or {}
     ufn = underlying_fn or underlying_basis
+    cafn = corporate_action_fn or corporate_action_screen
 
     def _sell_audit(tkr, sym, qty, route):
         if route == "equity":
@@ -568,10 +588,26 @@ def build_mixed_plan(
                                 "exit_settled": settled,
                                 "was_unconfirmed_entry": bool(st.get("pending_fill"))}
             continue
-        # Still held with a resting exit order: the order did not fill and the
-        # position is genuinely stuck. Clear the flag so the exit machine
-        # re-evaluates and re-submits this pass (broker day orders die at the
-        # close, so there is nothing to stack against).
+        # Still held with an accepted exit order that is still WORKING at the
+        # broker: leave it resting. A second sell stacks on top of it and the
+        # broker reads the excess as a naked short. That is how
+        # NIO260911C00004000 (833 ctr) drew 403 "account not eligible to trade
+        # uncovered option contracts" on every pass from 15:27 to 15:56 ET on
+        # 2026-09-10: the 13:54 $0.01 sell was still resting and had reserved
+        # every contract. "Day orders die at the close, so there is nothing to
+        # stack against" only holds across days; this re-check runs every pass.
+        if isinstance(st.get("exit_pending"), dict) and _order_is_working(
+                client, st["exit_pending"].get("order_id")):
+            logger.warning(
+                "build_mixed_plan: %s (%s) exit order %s is still working at the "
+                "broker — leaving it resting, not re-submitting",
+                tkr, sym, st["exit_pending"].get("order_id"),
+            )
+            out.new_managed[tkr] = st
+            continue
+        # Still held and the accepted exit order is dead (expired, cancelled,
+        # rejected) without filling: the position is genuinely stuck. Clear the
+        # flag so the exit machine re-evaluates and re-submits this pass.
         if isinstance(st.get("exit_pending"), dict):
             stale = st.pop("exit_pending")
             out.stuck_exits[tkr] = {"symbol": sym, "route": route, **stale}
@@ -779,6 +815,30 @@ def build_mixed_plan(
                 "%s was never confirmed and may still be resting at the broker",
                 t, dropped_unconfirmed.get("symbol"),
             )
+            continue
+        # A split, reverse split or recapitalisation inside the lookback means the
+        # features that ranked this name were computed on a price series with a
+        # share-count jump in it. The ranker selects for exactly that shape: in
+        # the 2022-2026 OOF study such names were 186x over-represented at rank 1
+        # (WOLF's Chapter 11 emergence read as +2,189%). Organic moves -- a real
+        # gap on real volume -- are not flagged here and still trade.
+        ca = cafn(t)
+        if ca is not None:
+            out.contract_selection[t] = {
+                "action": "skip",
+                "reason": "corporate_action_suspect",
+                "corporate_action": ca,
+                "signal_audit": sa.get(t),
+            }
+            logger.warning(
+                "build_mixed_plan: not entering %s -- %s-gap of %.2fx on %s (%d sessions "
+                "ago, volume x%s) looks like a corporate action, not a price move",
+                t, ca["direction"], ca["gap_ratio"], ca["session"], ca["sessions_ago"],
+                ca["volume_ratio"],
+            )
+            if verbose:
+                print(f"  ! {t:<6} skip: corporate action suspect ({ca['direction']} "
+                      f"{ca['gap_ratio']}x on {ca['session']})")
             continue
         px = ref_price_fn(t)
         if not px or px <= 0:
@@ -1878,6 +1938,28 @@ def _poll_entry_order(client, resp, *, timeout_s: float = 2.0, poll_s: float = 0
     return cur
 
 
+# Order states in which an accepted order can still fill. Anything else --
+# filled, expired, canceled, rejected, replaced, done_for_day -- is finished.
+_WORKING_ORDER_STATUSES = frozenset({
+    "new", "accepted", "pending_new", "accepted_for_bidding",
+    "partially_filled", "held", "pending_replace", "pending_cancel",
+})
+
+
+def _order_is_working(client, order_id) -> bool:
+    """True when the broker says `order_id` can still fill.
+
+    Unreadable counts as not working, which falls back to re-evaluating the exit.
+    """
+    if not order_id or not hasattr(client, "get_order"):
+        return False
+    try:
+        status = str((client.get_order(order_id) or {}).get("status", "")).strip().lower()
+    except Exception:  # noqa: BLE001 - an unreadable order must not trap the exit
+        return False
+    return status in _WORKING_ORDER_STATUSES
+
+
 def mark_exit_unconfirmed(new_managed: dict | None, sym: str, resp, *, item, exit_context,
                           pos_lookup, bar) -> None:
     """Record that an EXIT order was ACCEPTED but has not filled.
@@ -2065,7 +2147,9 @@ def opg_window_is_open(now=None) -> bool:
 def defer_exits_if_opg_unavailable(module, bar, plan, limits, *, now=None,
                                    ledger_root: str | None = None,
                                    new_managed: dict | None = None,
-                                   exit_context: dict | None = None) -> list:
+                                   exit_context: dict | None = None,
+                                   force: bool = False,
+                                   reason: str = "market closed") -> list:
     """Queue exits the broker would reject after the close, instead of failing them.
 
     Two different broker restrictions, so two different conditions:
@@ -2098,17 +2182,27 @@ def defer_exits_if_opg_unavailable(module, bar, plan, limits, *, now=None,
     for half an hour two modules both believed they owned the position, and a
     stop firing in that window would have tried to sell contracts already spoken
     for. See research/daily_live_reports/2026-08-11.md.
+
+    ``force`` queues every sell regardless of the calendar, for a caller that has
+    already established the plan cannot be submitted on this pass -- an
+    unreachable governed path. Without it a market-hours exit stays in a plan
+    that is never submitted: not sent, not queued, and already dropped from
+    managed. That is how Meta lost MSTR's horizon exit at 14:20 ET on
+    2026-09-10 during the Postgres outage, leaving 50 shares claimed by nobody.
     """
     if not module:
         return plan
-    try:
-        from core.calendar import is_market_open_now
-        market_open = is_market_open_now(now)
-        if market_open:
-            return plan
-        opg_open = opg_window_is_open(now)
-    except Exception:
-        return plan  # fail safe: if we can't tell, behave as before (submit)
+    if force:
+        opg_open = False  # nothing reaches the broker this pass, OPG included
+    else:
+        try:
+            from core.calendar import is_market_open_now
+            market_open = is_market_open_now(now)
+            if market_open:
+                return plan
+            opg_open = opg_window_is_open(now)
+        except Exception:
+            return plan  # fail safe: if we can't tell, behave as before (submit)
     import json
     kept, deferred = [], []
     for item in plan:
@@ -2153,8 +2247,8 @@ def defer_exits_if_opg_unavailable(module, bar, plan, limits, *, now=None,
         out.write_text(json.dumps({"updated": now_utc_iso(), "entries": list(by_sym.values())},
                                   default=str, indent=1))
         n_opt = sum(1 for e in deferred if e["route"] == "option")
-        logger.info("%s: market closed — deferred %d exits to next open (%d option, %d equity) -> %s",
-                    module, len(deferred), n_opt, len(deferred) - n_opt, out)
+        logger.info("%s: %s — deferred %d exits to next open (%d option, %d equity) -> %s",
+                    module, reason, len(deferred), n_opt, len(deferred) - n_opt, out)
         print(f"\n{module}: deferred {len(deferred)} exit(s) to next open "
               f"({n_opt} option, {len(deferred) - n_opt} equity)")
     return kept

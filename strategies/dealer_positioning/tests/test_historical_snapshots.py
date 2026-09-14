@@ -88,6 +88,17 @@ def test_snapshot_summary_persists_requested_level_and_matrix_features():
     assert json.loads(summary["expirations"]) == ["2026-07-10"]
 
 
+def test_matrix_features_tolerates_a_chain_with_no_put_wall():
+    # 2026-09-10: 203 symbol-scopes failed with "bad operand type for abs(): 'NoneType'".
+    rows = [
+        {"strike": 100.0, "spot": 100.0, "net_gex": 500, "total_abs_gex": 500, "call_gex": 500, "put_gex": 0},
+        {"strike": 105.0, "spot": 100.0, "net_gex": 900, "total_abs_gex": 900, "call_gex": 900, "put_gex": 0},
+    ]
+    out = _matrix_features(rows, levels={"spot": 100.0, "call_wall": 105.0, "put_wall": None})
+    assert out["wall_dominance"] is None
+    assert out["net_gex"] == 1400.0
+
+
 def test_load_prior_summary_no_future_warning_with_an_empty_day(tmp_path):
     # 2026-07-13's summary has rows; 2026-07-14's is present but empty (e.g. a
     # capture that ran with zero eligible candidates) -- pandas warns on

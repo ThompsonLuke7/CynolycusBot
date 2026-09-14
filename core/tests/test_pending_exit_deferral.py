@@ -377,3 +377,44 @@ def test_repeatedly_failing_exit_escalates_but_stays_queued(tmp_path, caplog):
     q = json.loads((tmp_path / "meta_ranker" / "pending_exit_orders.json").read_text())
     assert [e["order_symbol"] for e in q["entries"]] == ["AMLX"]
     assert q["entries"][0]["attempts"] == 4
+
+
+def test_force_queues_every_exit_even_while_the_market_is_open(monkeypatch, tmp_path):
+    """2026-09-10 14:20 ET: Meta's governed path was down with the market OPEN, so
+    the calendar check kept MSTR's horizon exit in a plan that was never
+    submitted, and the position had already left managed state. Forced, every
+    sell is queued and the position stays claimed."""
+    monkeypatch.setattr("core.calendar.is_market_open_now", lambda now=None: True)
+    plan = [
+        ("MSTR", "sell", 50, "horizon", "equity"),
+        ("BBB260821C00050000", "sell", 10, "stop_-39%", "option"),
+        ("AAA", "buy", 100, "entry", "equity"),
+    ]
+    mstr = {"route": "equity", "symbol": "MSTR", "shares": 50}
+    new_managed: dict = {}
+
+    out = defer_exits_if_opg_unavailable(
+        "meta_ranker", "bar", plan, {}, ledger_root=str(tmp_path),
+        new_managed=new_managed, exit_context={"MSTR": ("MSTR", mstr)},
+        force=True, reason="governed path unavailable",
+    )
+
+    assert out == [("AAA", "buy", 100, "entry", "equity")]
+    queued = json.loads((tmp_path / "meta_ranker" / "pending_exit_orders.json").read_text())
+    assert {e["order_symbol"] for e in queued["entries"]} == {"MSTR", "BBB260821C00050000"}
+    assert new_managed == {"MSTR": mstr}
+
+
+def test_force_does_not_depend_on_the_calendar(monkeypatch, tmp_path):
+    def _broken(now=None):
+        raise RuntimeError("calendar unavailable")
+
+    monkeypatch.setattr("core.calendar.is_market_open_now", _broken)
+    plan = [("CRWV", "sell", 12, "take_profit_+30%", "equity")]
+
+    out = defer_exits_if_opg_unavailable("meta_ranker", "bar", plan, {},
+                                         ledger_root=str(tmp_path), force=True)
+
+    assert out == []
+    queued = json.loads((tmp_path / "meta_ranker" / "pending_exit_orders.json").read_text())
+    assert [e["order_symbol"] for e in queued["entries"]] == ["CRWV"]

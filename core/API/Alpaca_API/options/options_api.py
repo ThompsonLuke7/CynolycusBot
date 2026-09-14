@@ -310,6 +310,7 @@ class AlpacaOptionsClient:
         stop_price: float | None = None,
         position_intent: str | None = None,
         client_order_id: str | None = None,
+        extended_hours: bool = False,
     ) -> Any:
         """
         POST /v2/orders.
@@ -317,6 +318,14 @@ class AlpacaOptionsClient:
         ``client_order_id`` is optional and omitted from the payload unless a
         caller supplies one, so existing call sites are unaffected. Supplying
         it makes the submission idempotent at the broker.
+
+        ``extended_hours`` is an equity-only Alpaca flag. The governed path's
+        broker adapter has always passed it (`alpaca_adapter._submit_equity`),
+        and this signature did not accept it, so every governed equity order
+        died with `TypeError: unexpected keyword argument 'extended_hours'`.
+        That is what failed all 14 of Meta's queued exits at the 2026-09-11
+        pre-open flush. Omitted from the payload unless true, so nothing else
+        changes shape.
         """
         url = f"{self._trading_base}/v2/orders"
         payload = {
@@ -334,6 +343,8 @@ class AlpacaOptionsClient:
             payload["position_intent"] = position_intent
         if client_order_id is not None:
             payload["client_order_id"] = str(client_order_id)
+        if extended_hours:
+            payload["extended_hours"] = True
         return self._request("POST", url, json_body=payload)
 
     def submit_option_order(

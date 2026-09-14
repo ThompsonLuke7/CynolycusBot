@@ -1565,7 +1565,8 @@ def run_combined(
     #     on the same multi-time 4H cadence. Scheduled a few minutes AFTER Meta so
     #     they read the bars/matrix Meta just refreshed.
     # ------------------------------------------------------------------
-    def _schedule_loop(times: str, job, *, label: str, tag: str) -> list:
+    def _schedule_loop(times: str, job, *, label: str, tag: str,
+                       weekdays_only: bool = True) -> list:
         scheds: list = []
         if not times:
             return scheds
@@ -1582,7 +1583,8 @@ def run_combined(
                 logger.error("Invalid %s time %r (%s) — skipped", label, hhmm, exc)
                 continue
             sched = NightlyScheduler(job, hour=hh, minute=mm, stop_event=stop_evt,
-                                     name=f"{label}-scheduler-{hhmm}")
+                                     name=f"{label}-scheduler-{hhmm}",
+                                     weekdays_only=weekdays_only)
             sched.start()
             scheds.append(sched)
             fired.append(hhmm)
@@ -1656,6 +1658,15 @@ def run_combined(
                 env_file=env, account_label=label,
             ),
             label=f"Broker snapshot {account_label}", tag="READ-ONLY",
+            # Weekends included, unlike every trading loop. This is a read-only
+            # broker capture, and PORTFOLIO state expires after one day while
+            # `policy.rule.broker` is one of only two hard rules that still apply
+            # to risk-reducing orders. Weekdays-only left Friday 20:05 ET as the
+            # newest publication, ~61h stale by the Monday 09:35 pre-open flush,
+            # so the snapshot rejects it, portfolio resolves to None and every
+            # Meta order is vetoed BROKER_PORTFOLIO_STATE_MISSING -- exits
+            # included, which is exactly the queue this flush exists to drain.
+            weekdays_only=False,
         )
 
     # Re-drain the startup queue during market hours.

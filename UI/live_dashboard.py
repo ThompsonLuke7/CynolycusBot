@@ -878,8 +878,25 @@ class SessionConfig:
     meta_model_root: str = "Data/models/meta_xgboost/10min"
     meta_entry_prob_source: str = "competition_long_active_short"
     swing_setup_single_model_dir: str = "Data/models/ga_xgboost/10min/single/swing_support_single"
-    meta_base_frame_path: str = "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet"
+    # The stable name the refresher writes and keeps current
+    # (scripts/update_live_meta_base_frame.py). The old default named a dated
+    # 2026-03-27 snapshot that no longer exists, so the live loop logged
+    # "Cached setup feature frame unavailable" and rebuilt every feature from
+    # the whole 1m buffer on every 10-minute bar.
+    meta_base_frame_path: str = "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts.parquet"
+    # How much 1m history to KEEP on disk and in the buffer. Not a warm-up
+    # window: the trimmed frame is persisted back over the runtime RTH cache, so
+    # lowering this would destroy the 2020-2026 history that a cold-start full
+    # rebuild needs.
     meta_base_frame_append_lookback_days: int = 900
+    # How much 1m history to RECOMPUTE when appending new rows to the cached
+    # matrix. Measured 2026-09-12 against a full 554,655-row build: with cached
+    # rows kept and the probability derivatives rebuilt from them, 20 days
+    # reproduces the newest row exactly for close, atr, trend phase, trend
+    # strength and dist_to_pdh, and to ~1e-5 for the pivot and trend
+    # probabilities. 40, 80 and 160 days were no better and cost 14-57s a bar
+    # against 19s.
+    meta_base_frame_warmup_days: int = 20
     no_agent: bool = False
     stochastic: bool = False
     device: str = "auto"
@@ -1035,7 +1052,7 @@ class SessionConfig:
                     "setup_feature_frame_path",
                     payload.get(
                         "meta_base_frame_path",
-                        "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts_live_2026_03_27.parquet",
+                        "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts.parquet",
                     ),
                 )
             ),
@@ -2320,7 +2337,7 @@ class LiveSession:
                     entry_short_threshold_override=cfg.meta_intrabar_short_setup_threshold,
                     exit_threshold_override=cfg.meta_exit_threshold,
                     precomputed_base_frame=precomputed_meta_frame,
-                    precomputed_append_lookback_days=int(cfg.meta_base_frame_append_lookback_days),
+                    precomputed_append_lookback_days=int(cfg.meta_base_frame_warmup_days),
                     min_hold_bars=2,
                     exit_entry_delta=0.15,
                     soft_exit_confirm_bars=2,
@@ -3182,7 +3199,7 @@ class LiveSession:
                         entry_short_threshold_override=cfg.meta_intrabar_short_setup_threshold,
                         exit_threshold_override=cfg.meta_exit_threshold,
                         precomputed_base_frame=precomputed_meta_frame,
-                        precomputed_append_lookback_days=int(cfg.meta_base_frame_append_lookback_days),
+                        precomputed_append_lookback_days=int(cfg.meta_base_frame_warmup_days),
                         min_hold_bars=2,
                         exit_entry_delta=0.15,
                         soft_exit_confirm_bars=2,

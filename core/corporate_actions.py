@@ -1,123 +1,203 @@
-"""Detect unadjusted corporate actions in the shared daily bar cache.
+"""Detect unadjusted corporate actions in the shared bar caches.
 
-`Data/shared/bars/1d` is NOT corporate-action adjusted. A reverse split, a
-recapitalisation, or an emergence from Chapter 11 changes the SHARE COUNT, so
-the price per share jumps without anyone's account changing value -- and an
-unadjusted series records that jump as a return.
+`Data/shared/bars/1d` and `Data/shared/bars/4h` are fetched RAW, not
+corporate-action adjusted (verified 2026-09-10 on TENX, SION and WOLF: both
+caches show the same artifacts). A split, reverse split, or recapitalisation
+changes the SHARE COUNT, so the price per share jumps without anyone's account
+changing value -- and an unadjusted series records that jump as a return.
 
-The case that motivated this (2026-09-08, found while replicating the rank-depth
-study over 2022-2026):
+    WOLF 2025-09-26 close 1.20, vol 2.30M  ->  2025-09-29 open 17.88, vol 0.18M
+         (Chapter 11 emergence: old shares replaced; nobody made 1,390%)
+    TENX 2026-08-07 close 13.44            ->  2026-08-10 open 1.79 (10:1 forward split)
 
-    date        close    volume
-    2025-09-26   1.20   2,303,766
-    2025-09-29  21.51     180,927     <- WOLF emerges from Chapter 11
+WHAT A FLAG IS
+--------------
+A session whose opening gap is a factor of `SUSPECT_RATIO` (4x) or more in
+EITHER direction: open / prev_close >= 4 or <= 1/4. The threshold is on the
+ratio, not the arithmetic return, because a down-gap can never exceed -100% --
+the first version of this module used `|gap| >= 300%` and so could not see a
+forward split at all. A cache-wide rescan found 54 such down-gaps it had missed
+(TENX, SION, KLAC 2026-06-03, the Vanguard ETF splits of 2026-04-21, ...).
 
-Price per share x15 overnight while volume fell 13x; dollar volume was $2.76M
-before and $3.26M after. Nobody made 1,390% -- the old shares were replaced. Left
-in, those 16 observations moved one year's measured top-1 return from +5.5%
-(median) to +47.3% (mean) and inflated the whole study's headline by 3x.
+ORGANIC VS NOT
+--------------
+Each flag carries `organic`: True only for an UP-gap on share volume at least
+`ORGANIC_MIN_VOLUME_RATIO` (5x) its trailing median. The rule comes from the
+cache itself (2026-09-10, 164 up-gap flags with a volume baseline):
 
-WHAT THIS DOES AND DOES NOT DO
-------------------------------
-It FLAGS. It does not adjust prices, and it does not label a flag "a 10:1 split".
-That mirrors `core.live_4h_exec._implausible_mark_move`, whose docstring makes
-the argument: at these magnitudes a tolerance loose enough to match a real split
-matches everything else too, and a confident-looking wrong diagnosis is worse
-than the raw ratio an operator can check against a real corporate-action source.
+    volume_ratio  <=1.0   121   share volume did not rise with a 4x+ price:
+                  1-3      14   the share count shrank (reverse split/recap)
+                  3-5       1
+                  >=5      28   real participation arrived: a genuine move
 
-The research caller's correct action is to DROP the affected observations and
-report how many, which `mask_windows` supports and AGENTS.md requires ("do not
-silently ... drop rows ... without documenting the rule and its impact").
+The distribution is empty between 3.11 and 5, so any threshold in that gap
+classifies identically. A genuine 4x-37x rise on 1-3x volume is not something
+organic buying produces.
 
-DISTINGUISHING A RECAPITALISATION FROM A REAL MOVE
--------------------------------------------------
-A genuine explosive move -- a biotech readout, a squeeze -- comes with a volume
-EXPANSION, and that tail is exactly what a momentum study is trying to measure.
-Excluding it would bias results down. A share-count change instead moves price
-and volume inversely, leaving dollar volume roughly intact.
+DOWN-gaps are never organic. A forward split multiplies share volume by roughly
+its ratio (TENX 44x, SION 67x), which is exactly what a genuine -90% collapse
+looks like too; nothing local separates them. The live mark guard
+(`live_4h_exec._implausible_mark_move`) reaches the same conclusion. Neither
+case is something to buy, and neither return is one to trust.
 
-So `dollar_volume_ratio` is reported alongside every flag: near 1.0 is positive
-evidence of a recapitalisation, well above 1.0 suggests a real move with real
-participation. It is a DIAGNOSTIC, not a silent second condition -- the flag
-itself is on the price gap alone, because being conservative about what enters a
-study is cheaper than being clever about what to keep.
+Missing volume (no baseline) is never organic: unresolvable means suspect.
+
+WHAT CALLERS DO WITH IT
+-----------------------
+* Research: `mask_windows` drops forward windows containing a NON-organic flag
+  and the caller reports how many (AGENTS.md: document every dropped row).
+  Organic flags are kept -- that tail is what a momentum study measures.
+* Live: `recent_corporate_action` answers "is there a non-organic flag inside
+  the entry lookback?" and `live_4h_exec.build_mixed_plan` refuses NEW entries
+  when there is. Held positions are the mark guard's job, not this one's.
+
+It FLAGS. It never adjusts a price and never names a split ratio -- at these
+magnitudes a tolerance loose enough to match a real split matches everything,
+and a confident wrong label is worse than the raw ratio a person can check.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
-#: Overnight gap (|open_t / close_{t-1} - 1|) at or beyond which a session is
-#: flagged. 3.0 = a 300% gap. Deliberately far looser than the live mark guard's
-#: 0.70: that one protects an open position and should fire early, while this one
-#: screens a research sample where a real +100% day is signal worth keeping.
-SUSPECT_GAP = 3.0
+#: Opening gap, as a price ratio in either direction, at or beyond which a
+#: session is flagged. 4.0 = up 300% or down 75%.
+SUSPECT_RATIO = 4.0
 
-#: Sessions of trailing volume used as the "normal" baseline for the diagnostic.
+#: An up-gap on at least this multiple of trailing median share volume is a
+#: genuine move. Sits in the empty band (3.11, 5] of the observed distribution.
+ORGANIC_MIN_VOLUME_RATIO = 5.0
+
+#: Sessions a non-organic flag keeps a name out of NEW entries. Set from two
+#: things that agree: `ret_20` is the longest short-horizon return feature, so a
+#: gap inside the last 20 sessions is inside it by construction; and measured on
+#: the OOF momentum ranking (2022-11..2026-05), recap-shaped names sat at the
+#: 93.5th score percentile beforehand, 98.0th in the first 5 days after, 96.8th
+#: at 6-20 days, and were back at ~92nd by 21-40 days. That measurement rests on
+#: only 4 names (BBAI, CORZ, SIRI, WOLF) -- treat 20 as a floor, not an optimum.
+ENTRY_LOOKBACK_SESSIONS = 20
+
+#: Sessions of trailing volume used as the "normal" baseline.
 _VOL_WINDOW = 20
+_FLAG_COLUMNS = ["idx", "gap_ratio", "direction", "volume_ratio",
+                 "dollar_volume_ratio", "organic"]
 
 
 def suspect_sessions(
     df: pd.DataFrame,
     *,
-    threshold: float = SUSPECT_GAP,
+    min_ratio: float = SUSPECT_RATIO,
+    organic_min_volume_ratio: float = ORGANIC_MIN_VOLUME_RATIO,
 ) -> pd.DataFrame:
     """Flag sessions whose opening gap is too large to be a price move.
 
-    `df` needs `open`, `close` and (for the diagnostic) `volume`, ordered oldest
-    first -- the layout of the shared 1d cache. Returns one row per flagged
-    session with the raw ratios; an empty frame means nothing tripped.
+    `df` needs `open` and `close` (and `volume` for the organic test), ordered
+    oldest first. Returns one row per flag; `idx` is the row's label in `df`.
+    An empty frame means nothing tripped.
     """
-    if df.empty or not {"open", "close"} <= set(df.columns):
-        return pd.DataFrame(columns=["idx", "gap", "gap_ratio", "volume_ratio",
-                                     "dollar_volume_ratio"])
+    if df is None or df.empty or not {"open", "close"} <= set(df.columns):
+        return pd.DataFrame(columns=_FLAG_COLUMNS)
     prev_close = df["close"].shift(1)
-    gap = df["open"] / prev_close - 1.0
-    hit = gap.abs() >= threshold
-    hit &= prev_close > 0
+    ratio = df["open"] / prev_close
+    valid = (prev_close > 0) & (df["open"] > 0)
+    hit = valid & ((ratio >= min_ratio) | (ratio <= 1.0 / min_ratio))
     if not hit.any():
-        return pd.DataFrame(columns=["idx", "gap", "gap_ratio", "volume_ratio",
-                                     "dollar_volume_ratio"])
-
-    gap_ratio = df["open"] / prev_close
+        return pd.DataFrame(columns=_FLAG_COLUMNS)
     if "volume" in df.columns:
-        base_vol = df["volume"].shift(1).rolling(_VOL_WINDOW, min_periods=3).median()
-        vol_ratio = df["volume"] / base_vol.replace(0, pd.NA)
+        base = df["volume"].shift(1).rolling(_VOL_WINDOW, min_periods=3).median()
+        vol_ratio = df["volume"] / base.where(base > 0)
     else:
-        vol_ratio = pd.Series(pd.NA, index=df.index)
+        vol_ratio = pd.Series(np.nan, index=df.index)
     out = pd.DataFrame({
         "idx": df.index[hit],
-        "gap": gap[hit].to_numpy(),
-        "gap_ratio": gap_ratio[hit].to_numpy(),
-        "volume_ratio": vol_ratio[hit].to_numpy(),
+        "gap_ratio": ratio[hit].to_numpy(float),
+        "direction": np.where(ratio[hit].to_numpy(float) > 1.0, "up", "down"),
+        "volume_ratio": vol_ratio[hit].to_numpy(float),
     })
-    # ~1.0 means the share count moved and the traded VALUE did not, which is
-    # what a recapitalisation looks like. Much greater than 1.0 means real
-    # participation arrived, i.e. probably a genuine move worth keeping.
+    # Diagnostic only: ~1 means traded value was preserved while the share count
+    # moved. Reported, not used -- volume_ratio is the cleaner separator.
     out["dollar_volume_ratio"] = out["gap_ratio"] * out["volume_ratio"]
-    return out.reset_index(drop=True)
+    out["organic"] = ((out["direction"] == "up")
+                      & (out["volume_ratio"] >= organic_min_volume_ratio))
+    return out
 
 
 def mask_windows(
     df: pd.DataFrame,
     hold: int,
     *,
-    threshold: float = SUSPECT_GAP,
+    min_ratio: float = SUSPECT_RATIO,
+    include_organic: bool = False,
 ) -> pd.Series:
-    """True where a forward window of `hold` sessions CONTAINS a suspect session.
+    """True where a forward window of `hold` sessions CONTAINS a flagged session.
 
-    A return measured from session i to session i+hold-1 is contaminated if any
-    session strictly after the entry carries an unadjusted corporate action, so
-    the whole window is masked, not just the gap day.
+    Entering at row j and holding `hold` rows spans j .. j+hold-1, so a flag at
+    row p contaminates every entry in (p-hold, p]. Organic flags are left in by
+    default: a real move is the return being measured, not a defect in it.
     """
-    flags = suspect_sessions(df, threshold=threshold)
     bad = pd.Series(False, index=df.index)
+    flags = suspect_sessions(df, min_ratio=min_ratio)
+    if not include_organic:
+        flags = flags[~flags["organic"].astype(bool)]
     if flags.empty:
         return bad
-    positions = {df.index.get_loc(i) for i in flags["idx"]}
     n = len(df)
-    for pos in positions:
-        # entering at j and holding `hold` sessions spans j .. j+hold-1; that
-        # window contains `pos` when j is in (pos-hold, pos].
-        lo = max(0, pos - hold + 1)
-        bad.iloc[lo:min(pos + 1, n)] = True
+    for pos in {df.index.get_loc(i) for i in flags["idx"]}:
+        bad.iloc[max(0, pos - hold + 1):min(pos + 1, n)] = True
     return bad
+
+
+def _bar_times(df: pd.DataFrame) -> pd.Series:
+    """UTC timestamp per row, from a DatetimeIndex or a `timestamp` column."""
+    if isinstance(df.index, pd.DatetimeIndex):
+        idx = df.index if df.index.tz is not None else df.index.tz_localize("UTC")
+        return pd.Series(idx.tz_convert("UTC"), index=df.index)
+    if "timestamp" in df.columns:
+        return pd.to_datetime(df["timestamp"], utc=True)
+    raise ValueError("bars need a DatetimeIndex or a 'timestamp' column to be dated")
+
+
+def recent_corporate_action(
+    df: pd.DataFrame | None,
+    *,
+    as_of=None,
+    lookback_sessions: int = ENTRY_LOOKBACK_SESSIONS,
+    min_ratio: float = SUSPECT_RATIO,
+) -> dict | None:
+    """The most recent NON-organic flag within the last `lookback_sessions`
+    trading sessions, or None when the name is clear.
+
+    Only bars at or before `as_of` are read, so a backtest can never be vetoed
+    by a corporate action that had not happened yet. Works on any bar frequency:
+    the lookback counts distinct US/Eastern session dates, not rows.
+    """
+    if df is None or len(df) < 2:
+        return None
+    times = _bar_times(df)
+    if as_of is not None:
+        cutoff = pd.Timestamp(as_of)
+        cutoff = cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff
+        keep = (times <= cutoff).to_numpy()
+        df, times = df[keep], times[keep]
+        if len(df) < 2:
+            return None
+    flags = suspect_sessions(df, min_ratio=min_ratio)
+    flags = flags[~flags["organic"].astype(bool)]
+    if flags.empty:
+        return None
+    sessions = times.dt.tz_convert("America/New_York").dt.normalize()
+    window = sorted(sessions.unique())[-int(lookback_sessions):]
+    flags = flags.assign(session=sessions.loc[flags["idx"]].to_numpy())
+    flags = flags[flags["session"] >= window[0]]
+    if flags.empty:
+        return None
+    last = flags.iloc[-1]
+    vr = float(last["volume_ratio"])
+    return {
+        "session": pd.Timestamp(last["session"]).date().isoformat(),
+        "sessions_ago": len(window) - 1 - window.index(last["session"]),
+        "gap_ratio": round(float(last["gap_ratio"]), 4),
+        "direction": str(last["direction"]),
+        "volume_ratio": round(vr, 4) if np.isfinite(vr) else None,
+        "lookback_sessions": int(lookback_sessions),
+    }

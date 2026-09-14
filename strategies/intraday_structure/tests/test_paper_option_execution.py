@@ -751,3 +751,51 @@ def test_a_cancel_rejected_for_any_other_reason_does_not_claim(tmp_path):
     ex = _executor(tmp_path, _OtherRejection(held_qty=4))
 
     assert ex.on_entry(_setup(), spot=10.0) is None
+
+
+# --- options buying power -------------------------------------------------------
+
+class _FundedClient(_Client):
+    def __init__(self, options_buying_power, **k):
+        super().__init__(**k)
+        self._bp = options_buying_power
+
+    def get_account(self):
+        return {"options_buying_power": str(self._bp)}
+
+
+def test_an_entry_the_account_cannot_fund_is_never_submitted(tmp_path):
+    """2026-09-10: MSTR, SOFI and MU were sent against $80.68 of options buying
+    power and came back 403. The 4H family and swing 30m pre-check; this module
+    did not, so each rejection surfaced only as a server-log traceback."""
+    client = _FundedClient(80.68)
+    ex = _executor(tmp_path, client)
+    setup = _setup()
+
+    assert ex.on_entry(setup) is None
+    assert client.orders == []
+    assert setup.metadata["execution_skip"] == "insufficient_options_buying_power"
+    assert ex.open_positions == {}
+
+
+def test_a_fundable_entry_is_still_submitted(tmp_path):
+    client = _FundedClient(100_000.0)
+    ex = _executor(tmp_path, client)
+
+    assert ex.on_entry(_setup()) is not None
+    assert [side for side, _sym, _qty in client.orders] == ["buy"]
+
+
+def test_an_unreadable_account_does_not_block_entries(tmp_path):
+    """A pre-filter that saves a doomed round trip, never a gate that can stop a
+    fundable order."""
+
+    class _Unreadable(_Client):
+        def get_account(self):
+            raise RuntimeError("account endpoint down")
+
+    client = _Unreadable()
+    ex = _executor(tmp_path, client)
+
+    assert ex.on_entry(_setup()) is not None
+    assert len(client.orders) == 1

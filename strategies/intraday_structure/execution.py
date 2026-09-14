@@ -43,6 +43,7 @@ from typing import Any
 from core.live_4h_exec import (
     append_closed_trade,
     closed_trade_record,
+    filter_option_entries_by_buying_power,
     poll_exit_fill_price,
     submit_option_exit_with_ladder,
 )
@@ -339,6 +340,18 @@ class IntradayOptionExecutor:
             return None
         qty = int(max(1, min(int(self._policy.max_contracts),
                              self._policy.target_notional // (premium * OPTION_MULTIPLIER))))
+
+        # An entry the account cannot pay for is a doomed round trip: the broker
+        # answers 403 `insufficient options buying power` and the rejection shows
+        # up only as a traceback in the server log. MSTR, SOFI and MU went out
+        # that way on 2026-09-10 against $80.68 available. Same pre-filter the 4H
+        # family and swing 30m run; an unreadable account submits unfiltered.
+        _, unfunded = filter_option_entries_by_buying_power(
+            self._client, [(occ, "buy", qty, "entry", "option")], {occ: premium},
+        )
+        if unfunded:
+            setup.metadata["execution_skip"] = "insufficient_options_buying_power"
+            return None
 
         resp = self._client.submit_option_order(
             symbol=occ, qty=qty, side="buy", order_type="limit",

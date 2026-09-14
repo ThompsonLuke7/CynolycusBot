@@ -533,7 +533,11 @@ def _matrix_features(rows: list[dict[str, Any]], *, levels: dict[str, Any]) -> d
     gamma_density_5 = _gamma_density(frame, spot=spot, pct=0.05)
     gamma_density_10 = _gamma_density(frame, spot=spot, pct=0.10)
     call_wall_strength = _level_strength(frame, levels.get("call_wall"), "call_gex")
-    put_wall_strength = abs(_level_strength(frame, levels.get("put_wall"), "put_gex"))
+    # A chain with no put wall returns None; abs(None) killed 203 of 2,038
+    # symbol-scopes on 2026-09-10. wall_dominance is then None via _safe_div.
+    put_wall_strength = _level_strength(frame, levels.get("put_wall"), "put_gex")
+    if put_wall_strength is not None:
+        put_wall_strength = abs(put_wall_strength)
     total_call_gex = float(frame["call_gex"].sum())
     total_put_gex = float(frame["put_gex"].sum())
     dealer_imbalance = net_gex / total_abs_gex if total_abs_gex else None

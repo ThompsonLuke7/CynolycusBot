@@ -871,9 +871,14 @@ def _execute(
                     module, bar, plan, new_managed, limits,
                     force=True, reason="governed path unavailable",
                 )
+                # Exits too, forced: during market hours the calendar check
+                # would keep them in a plan that is never submitted, and the
+                # position is already dropped from managed. MSTR's 14:20 ET
+                # horizon exit on 2026-09-10 was lost that way.
                 plan = defer_exits_if_opg_unavailable(
                     module, bar, plan, limits,
                     new_managed=new_managed, exit_context=exit_context,
+                    force=True, reason="governed path unavailable",
                 )
                 _mark(before, plan, "queued_governed_path_unavailable")
         state["managed"] = new_managed

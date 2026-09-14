@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -15,6 +16,15 @@ MANUAL_AI_WATCHLIST = DATA_DIR / "manual_ai_watchlist.csv"
 # status has been promoted by the nightly screen are folded in as eligible.
 PENDING_TICKERS_CSV = DATA_DIR / "pending_tickers.csv"
 PENDING_NOVEL_TICKERS_CSV = DATA_DIR / "pending_tickers_novel.csv"
+# Point-in-time record of the universe. `shared_universe.csv` is rewritten in
+# place on every build, and `Data/**` is gitignored, so until 2026-09-10 there
+# was no way to know what was eligible on any past date -- every multi-year
+# study silently used TODAY's universe, which contains almost no delisted names
+# (of 4,076 daily-bar files, exactly 2 end before 2026). Every build now also
+# writes an immutable, timestamped snapshot here; `load_universe_as_of` reads it.
+SNAPSHOT_DIR = DATA_DIR / "snapshots"
+_SNAPSHOT_PREFIX = "shared_universe_"
+_SNAPSHOT_STAMP = "%Y%m%dT%H%M%SZ"
 
 THEME_MAP_V4 = REPO_ROOT / "themes" / "theme_expansion_legacy" / "data" / "theme_map_v4.csv"
 THEME_ELIGIBLE = REPO_ROOT / "themes" / "theme_expansion_legacy" / "outputs" / "universe_filter.csv"
@@ -180,7 +190,59 @@ def build_shared_universe(*, out_path: Path = SHARED_UNIVERSE_CSV) -> pd.DataFra
     out = out.sort_values(["is_eligible", "source_count", "ticker"], ascending=[False, False, True]).reset_index(drop=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(out_path, index=False)
+    write_universe_snapshot(out, snapshot_dir=out_path.parent / "snapshots")
     return out
+
+
+def write_universe_snapshot(df: pd.DataFrame, *, snapshot_dir: Path = SNAPSHOT_DIR,
+                            now=None) -> Path:
+    """Write `df` as an immutable, UTC-timestamped snapshot and return its path.
+
+    Opened in exclusive-create mode: a snapshot is never overwritten, so a second
+    write for the same second raises instead of silently replacing history.
+    """
+    ts = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    path = snapshot_dir / f"{_SNAPSHOT_PREFIX}{ts.strftime(_SNAPSHOT_STAMP)}.csv.gz"
+    with path.open("xb") as fh:
+        df.assign(snapshot_utc=ts.isoformat()).to_csv(fh, index=False, compression="gzip")
+    return path
+
+
+def load_universe_as_of(at, *, snapshot_dir: Path = SNAPSHOT_DIR,
+                        eligible_only: bool = True) -> pd.DataFrame:
+    """The universe as it stood at `at`: the latest snapshot taken at or before it.
+
+    Raises LookupError when no snapshot is that old. It deliberately does NOT fall
+    back to the current universe -- that fallback is the survivorship bias this
+    exists to remove, and a study that needs an earlier date needs a real
+    point-in-time source, not today's list.
+    """
+    ts = pd.Timestamp(at)
+    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+    found = []
+    for path in snapshot_dir.glob(f"{_SNAPSHOT_PREFIX}*.csv.gz"):
+        stamp = path.name[len(_SNAPSHOT_PREFIX):-len(".csv.gz")]
+        try:
+            taken = pd.Timestamp(datetime.strptime(stamp, _SNAPSHOT_STAMP), tz="UTC")
+        except ValueError:
+            continue
+        if taken <= ts:
+            found.append((taken, path))
+    if not found:
+        raise LookupError(
+            f"no universe snapshot at or before {ts.isoformat()} in {snapshot_dir}; "
+            "snapshots only exist from the first build after 2026-09-10"
+        )
+    df = pd.read_csv(max(found)[1])
+    for col in ["in_theme_v4", "in_momentum_candidate", "in_swing_train", "in_swing_live",
+                "in_discovered", "is_eligible"]:
+        if col in df.columns:
+            df[col] = df[col].astype(bool)
+    if eligible_only and "is_eligible" in df.columns:
+        df = df[df["is_eligible"]].copy()
+    return df.reset_index(drop=True)
 
 
 def load_shared_universe(*, eligible_only: bool = True, rebuild: bool = False) -> pd.DataFrame:

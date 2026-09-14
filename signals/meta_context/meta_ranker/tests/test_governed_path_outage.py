@@ -185,3 +185,33 @@ def test_a_submitted_row_is_recorded_as_submitted(tmp_path, monkeypatch, isolate
 
     row = json.loads((tmp_path / "audit.jsonl").read_text().splitlines()[0])
     assert [p["disposition"] for p in row["planned"]] == ["submitted"]
+
+
+def test_governed_path_outage_queues_exits_during_market_hours(
+    tmp_path, monkeypatch, isolated_ledger
+):
+    """2026-09-10 14:20 ET: with the market open, the exit-deferral calendar check
+    kept MSTR's horizon exit in the never-submitted plan. The position had
+    already been dropped from managed, so it became an orphan nothing stopped."""
+    saved = {}
+    monkeypatch.setattr(lr, "_save_state", lambda state: saved.update(state))
+    monkeypatch.setattr(exec_mod, "is_market_open_now", lambda now=None: True, raising=False)
+    monkeypatch.setattr("core.calendar.is_market_open_now", lambda now=None: True)
+
+    def boom(*_args, **_kwargs):
+        raise GovernedPathUnavailable("context snapshot unavailable for MSTR: OperationalError")
+
+    monkeypatch.setattr(lr, "_submit_via_gateway", boom)
+    mstr = {"route": "equity", "symbol": "MSTR", "shares": 50}
+
+    lr._execute(
+        _args(tmp_path), client=None, plan=[("MSTR", "sell", 50, "horizon", "equity")],
+        state={"managed": {"MSTR": mstr}, "history": []}, new_managed={}, bar=BAR,
+        targets=[], is_option=False, module="meta_ranker",
+        exit_context={"MSTR": ("MSTR", mstr)},
+    )
+
+    queued = json.loads((isolated_ledger / "meta_ranker_pending_exit.json").read_text())
+    assert [e["order_symbol"] for e in queued["entries"]] == ["MSTR"]
+    # Still claimed, so no sibling reconcile can adopt it before the flush.
+    assert saved["managed"] == {"MSTR": mstr}
