@@ -54,6 +54,14 @@ class _Client:
             raise RuntimeError("HTTP Error 422: Unprocessable Entity")
         return {"id": f"{symbol}-{side}"}
 
+    def get_order(self, order_id):
+        symbol = str(order_id).rsplit("-sell", 1)[0]
+        for side, sent_symbol, qty in [*self.sent, *[(r[0], r[1], r[2]) for r in self.option_orders]]:
+            if sent_symbol == symbol and side == "sell":
+                return {"id": order_id, "status": "filled", "filled_qty": str(qty),
+                        "filled_avg_price": "1.00"}
+        return {"id": order_id, "status": "unknown"}
+
 
 # --- opg_window_is_open --------------------------------------------------------
 

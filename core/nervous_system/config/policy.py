@@ -16,6 +16,7 @@ import json
 from types import MappingProxyType
 from typing import Mapping
 
+from core.nervous_system.config.portfolio import PortfolioConfig
 from core.nervous_system.contracts.enums import (
     DataQualitySeverity,
     DealerRegime,
@@ -142,6 +143,17 @@ class PolicyConfig:
     theme_regime_multipliers: Mapping[ThemeRegime, Decimal]
     dealer_regime_multipliers: Mapping[DealerRegime, Decimal]
     data_quality_multipliers: Mapping[DataQualitySeverity, Decimal]
+    # ``None`` disables concentration gating, and that is the default so an
+    # existing policy version keeps its exact decision identity.  When set, the
+    # symbol/sector/theme/factor limits it carries become hard vetoes -- until
+    # this was wired, those four limits were configured but enforced by nothing
+    # (only daily-loss and gross ever reached a veto).
+    portfolio_exposure: PortfolioConfig | None = None
+    # Compute the concentration evaluation and RECORD it, without vetoing.
+    # PolicyMode.SHADOW is not this: shadow selects the sizing basis and hard
+    # vetoes still bind in every mode, so it cannot answer "what would this
+    # gate have refused?" without actually refusing it. This can.
+    concentration_observe_only: bool = False
 
     def __post_init__(self) -> None:
         for name in ("policy_version", "config_version", "account_alias",
@@ -150,6 +162,17 @@ class PolicyConfig:
         for name in ("policy_version", "config_version"):
             if "@" not in getattr(self, name):
                 raise ValueError(f"{name} must be versioned with '@'")
+        if self.portfolio_exposure is not None and not isinstance(
+            self.portfolio_exposure, PortfolioConfig
+        ):
+            raise TypeError("portfolio_exposure must be a PortfolioConfig or None")
+        if not isinstance(self.concentration_observe_only, bool):
+            raise TypeError("concentration_observe_only must be a bool")
+        if self.concentration_observe_only and self.portfolio_exposure is None:
+            raise ValueError(
+                "concentration_observe_only requires portfolio_exposure: there is "
+                "nothing to observe without limits to evaluate"
+            )
         if not isinstance(self.mode, PolicyMode):
             raise TypeError("mode must be a PolicyMode")
         if not isinstance(self.environment, RuntimeEnvironment):
@@ -290,6 +313,19 @@ class PolicyConfig:
 
 
 def _canonical_value(value: object) -> object:
+    if isinstance(value, PortfolioConfig):
+        # The sector/factor maps run to thousands of tickers and are re-hashed
+        # for every decision, so they are represented by the version string that
+        # names them. PortfolioConfig.__post_init__ requires that version to
+        # carry an '@', and the four limits below are inlined because they
+        # change a veto outcome directly.
+        return {
+            "config_version": value.config_version,
+            "max_symbol_notional": _decimal_text(value.max_symbol_notional),
+            "max_sector_notional": _decimal_text(value.max_sector_notional),
+            "max_theme_notional": _decimal_text(value.max_theme_notional),
+            "max_factor_notional": _decimal_text(value.max_factor_notional),
+        }
     if isinstance(value, Decimal):
         return _decimal_text(value)
     if isinstance(value, timedelta):
@@ -385,7 +421,10 @@ MVP_POLICY_CONFIG = PolicyConfig(
     environment=RuntimeEnvironment.DEVELOPMENT,
     account_alias="paper",
     paper_account_aliases=frozenset({"paper"}),
-    permitted_strategies=frozenset({"meta_ranker"}),
+    # momentum_expansion is permitted but not yet routed: its runner still
+    # calls execute_plan directly. Permission is inert until the cutover, and
+    # listing it here is what lets a shadow session be run at all.
+    permitted_strategies=frozenset({"meta_ranker", "momentum_expansion"}),
     allowed_instruments=frozenset(
         {
             InstrumentFamily.EQUITY,

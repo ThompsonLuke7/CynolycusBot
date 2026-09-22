@@ -88,11 +88,46 @@ def load_bundle(bundle: Path, work_dir: Path, manifest_name: str) -> dict[str, A
     return json.loads((work_dir / manifest_name).read_text())
 
 
-def time_split(frame: pd.DataFrame, train_frac: float, val_frac: float) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    n = len(frame)
-    t1 = int(n * train_frac)
-    t2 = int(n * (train_frac + val_frac))
-    return frame.iloc[:t1].copy(), frame.iloc[t1:t2].copy(), frame.iloc[t2:].copy()
+def purge_before(frame, boundary, *, timestamp_column="timestamp", embargo_bars=0,
+                 label_end_column=None):
+    """Retain only labels available strictly before a decision boundary."""
+    ts = pd.to_datetime(frame[timestamp_column], utc=True)
+    result = frame[ts < pd.Timestamp(boundary)]
+    if label_end_column:
+        if label_end_column not in result:
+            raise ValueError(f"Missing label availability column: {label_end_column}")
+        ends = pd.to_datetime(result[label_end_column], utc=True)
+        return result[ends.notna() & (ends < pd.Timestamp(boundary))]
+    if embargo_bars:
+        # Per-symbol observed bars are conservative when the history is sparse.
+        ids = [c for c in ("ticker",) if c in result]
+        def trim(g):
+            stamps = np.sort(g[timestamp_column].unique())
+            return g.iloc[:0] if len(stamps) <= embargo_bars else g[g[timestamp_column] < stamps[-embargo_bars]]
+        return pd.concat([trim(g) for _, g in result.groupby(ids[0])]) if ids and not result.empty else trim(result)
+    return result
+
+def time_split(frame, train_frac, val_frac, *, timestamp_column="timestamp",
+               embargo_bars=0, label_end_column=None):
+    """Whole timestamp groups; fixed cutoffs followed by label purging."""
+    if not 0 < train_frac < train_frac + val_frac < 1:
+        raise ValueError("Require nonempty train/validation/test fractions")
+    frame = frame.sort_values(timestamp_column)
+    ts = pd.to_datetime(frame[timestamp_column], utc=True)
+    stamps = np.sort(ts.unique())
+    if len(stamps) < 3:
+        raise ValueError("At least three decision timestamps required")
+    i1, i2 = int(len(stamps)*train_frac), int(len(stamps)*(train_frac+val_frac))
+    if not 0 < i1 < i2 < len(stamps):
+        raise ValueError("Insufficient timestamps for requested split")
+    c1, c2 = stamps[i1], stamps[i2]
+    kwargs = dict(timestamp_column=timestamp_column, embargo_bars=embargo_bars, label_end_column=label_end_column)
+    tr = purge_before(frame[ts < c1], c1, **kwargs)
+    va = purge_before(frame[(ts >= c1) & (ts < c2)], c2, **kwargs)
+    te = frame[ts >= c2]
+    if any(x.empty for x in (tr, va, te)):
+        raise ValueError("Purging leaves an empty split; expand history, not reduce the guard")
+    return tr.copy(), va.copy(), te.copy()
 
 
 def normalize_features(frame: pd.DataFrame, feature_columns: list[str]) -> list[str]:
@@ -343,66 +378,10 @@ def train_one_family(
     test_df: pd.DataFrame,
     cfg: CompetitionConfig,
 ) -> tuple[Any, dict[str, Any], pd.DataFrame, set[str]]:
-    labels = sorted(train_df[cfg.target_column].dropna().unique().tolist())
-    positive_label = resolve_positive_label(train_df[cfg.target_column].to_numpy(), cfg.positive_label)
-    positive_index = labels.index(positive_label) if positive_label in labels else len(labels) - 1
-    n_classes = len(labels)
-    early_rounds = int((cfg.xgb_config or {}).get("early_stopping_rounds", 60))
-
-    if family == "xgb_classifier":
-        params = xgb_classifier_params(seed, n_classes, cfg)
-        model = xgb.XGBClassifier(**params, early_stopping_rounds=early_rounds)
-        model.fit(
-            train_df[cfg.feature_columns].to_numpy(np.float32),
-            train_df[cfg.target_column].to_numpy(),
-            sample_weight=sample_weights(train_df, cfg),
-            eval_set=[(val_df[cfg.feature_columns].to_numpy(np.float32), val_df[cfg.target_column].to_numpy())],
-            verbose=50,
-        )
-        test_scores = classifier_score(model, test_df[cfg.feature_columns].to_numpy(np.float32), positive_index)
-    elif family == "xgb_ranker":
-        rank_train, train_group = sorted_for_ranker(train_df, cfg)
-        rank_val, val_group = sorted_for_ranker(val_df, cfg)
-        model = xgb.XGBRanker(**xgb_ranker_params(seed, cfg), early_stopping_rounds=early_rounds)
-        model.fit(
-            rank_train[cfg.feature_columns].to_numpy(np.float32),
-            relevance(rank_train, cfg),
-            group=train_group,
-            eval_set=[(rank_val[cfg.feature_columns].to_numpy(np.float32), relevance(rank_val, cfg))],
-            eval_group=[val_group],
-            verbose=50,
-        )
-        test_scores = model.predict(test_df[cfg.feature_columns].to_numpy(np.float32))
-    elif family in {"lgbm_classifier", "lgbm_ranker"}:
-        try:
-            import lightgbm as lgb
-        except ImportError as exc:
-            raise ImportError("Install LightGBM in Colab first: !pip install -q lightgbm") from exc
-        if family == "lgbm_classifier":
-            model = lgb.LGBMClassifier(**lgbm_classifier_params(seed, n_classes, cfg))
-            model.fit(
-                train_df[cfg.feature_columns],
-                train_df[cfg.target_column],
-                sample_weight=sample_weights(train_df, cfg),
-                eval_set=[(val_df[cfg.feature_columns], val_df[cfg.target_column])],
-                callbacks=[lgb.early_stopping(early_rounds, verbose=True)],
-            )
-            test_scores = classifier_score(model, test_df[cfg.feature_columns].to_numpy(np.float32), positive_index)
-        else:
-            rank_train, train_group = sorted_for_ranker(train_df, cfg)
-            rank_val, val_group = sorted_for_ranker(val_df, cfg)
-            model = lgb.LGBMRanker(**lgbm_ranker_params(seed, cfg))
-            model.fit(
-                rank_train[cfg.feature_columns],
-                relevance(rank_train, cfg),
-                group=train_group,
-                eval_set=[(rank_val[cfg.feature_columns], relevance(rank_val, cfg))],
-                eval_group=[val_group],
-                callbacks=[lgb.early_stopping(early_rounds, verbose=True)],
-            )
-            test_scores = model.predict(test_df[cfg.feature_columns])
-    else:
-        raise ValueError(f"Unsupported family: {family}")
+    labels, positive_label, positive_index, _ = _train_labels(train_df, cfg)
+    model = fit_family(family, seed, train_df, val_df, cfg)
+    val_scores = score_family(model, family, val_df, cfg, positive_index)
+    test_scores = score_family(model, family, test_df, cfg, positive_index)
 
     row: dict[str, Any] = {
         "family": family,
@@ -417,7 +396,10 @@ def train_one_family(
     if "classifier" in family:
         row.update(classification_metrics(model, val_df, cfg.feature_columns, cfg.target_column, labels, positive_label, "val"))
         row.update(classification_metrics(model, test_df, cfg.feature_columns, cfg.target_column, labels, positive_label, "test"))
+    row.update(rank_metrics(val_scores, val_df, cfg, "val"))
+    row.update(spearman_metric(val_scores, val_df, cfg, "val"))
     row.update(rank_metrics(test_scores, test_df, cfg, "test"))
+    row.update(spearman_metric(test_scores, test_df, cfg, "test"))
     picks = top_pick_ids(test_df, test_scores, cfg)
     return model, row, feature_importance(model, cfg.feature_columns), picks
 
@@ -474,24 +456,29 @@ def pick_overlap_frame(picks: dict[tuple[str, int], set[str]], cfg: CompetitionC
 
 
 def choose_best(results: pd.DataFrame) -> pd.Series:
-    ranker_metric = "test_ndcg_at_10" if "test_ndcg_at_10" in results.columns else None
-    if "val_log_loss" in results.columns and results["val_log_loss"].notna().any():
-        sortable = results.sort_values(["val_log_loss", "test_positive_f1"], ascending=[True, False], na_position="last")
-        return sortable.iloc[0]
-    if ranker_metric:
-        return results.sort_values(ranker_metric, ascending=False, na_position="last").iloc[0]
-    metric = [c for c in results.columns if c.startswith("test_ndcg_at_")]
-    if metric:
-        return results.sort_values(metric[0], ascending=False, na_position="last").iloc[0]
-    return results.iloc[0]
+    primary = primary_metric_name(results)
+    valid = results[pd.to_numeric(results[primary], errors="coerce").notna()]
+    tie = [c for c in sorted(results) if c.startswith("val_precision_at_")]
+    if "val_spearman" in results:
+        tie.append("val_spearman")
+    cols = list(dict.fromkeys([primary, *tie]))
+    return valid.sort_values(cols, ascending=False, kind="stable", na_position="last").iloc[0]
 
 
 def run_competition(frame: pd.DataFrame, cfg: CompetitionConfig) -> dict[str, Any]:
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     frame = frame.sort_values(cfg.timestamp_column).reset_index(drop=True)
-    frame = frame.dropna(subset=[cfg.target_column]).copy()
+    # Require a usable label: the classifier/relevance target, and the regression
+    # target when any regression family is in play.
+    required = [cfg.target_column]
+    if any("regressor" in fam for fam in cfg.families):
+        required.append(cfg.reg_target())
+    required = list(dict.fromkeys(c for c in required if c in frame.columns))
+    frame = frame.dropna(subset=required).copy()
     normalize_features(frame, cfg.feature_columns)
-    train_df, val_df, test_df = time_split(frame, cfg.train_frac, cfg.val_frac)
+    train_df, val_df, test_df = time_split(frame, cfg.train_frac, cfg.val_frac,
+        timestamp_column=cfg.timestamp_column, embargo_bars=cfg.embargo_bars,
+        label_end_column=cfg.label_end_column)
 
     rows: list[dict[str, Any]] = []
     importances: dict[tuple[str, int], pd.DataFrame] = {}
@@ -524,7 +511,15 @@ def run_competition(frame: pd.DataFrame, cfg: CompetitionConfig) -> dict[str, An
     summary = summarize_runs(rows)
     stability = stability_frame(importances, cfg)
     pick_overlap = pick_overlap_frame(picks, cfg)
-    best = choose_best(results)
+    # Pick the best FAMILY by its seed-averaged primary metric (robust to one lucky
+    # seed), then the best SEED within that family.
+    primary = primary_metric_name(results)
+    if primary:
+        fam_mean = results.groupby("family")[primary].apply(lambda s: pd.to_numeric(s, errors="coerce").mean())
+        best_family = str(fam_mean.idxmax())
+        best = choose_best(results[results["family"] == best_family])
+    else:
+        best = choose_best(results)
     best_key = (str(best["family"]), int(best["seed"]))
     best_model = models[best_key]
 
@@ -542,12 +537,21 @@ def run_competition(frame: pd.DataFrame, cfg: CompetitionConfig) -> dict[str, An
     metadata = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "task_name": cfg.task_name,
+        "selection_metric": primary,
+        "selection_end": str(test_df[cfg.timestamp_column].min()),
+        "embargo_bars": cfg.embargo_bars,
+        "label_end_column": cfg.label_end_column,
         "target_column": cfg.target_column,
         "families": cfg.families,
         "seeds": cfg.seeds,
         "positive_label": resolve_positive_label(frame[cfg.target_column].to_numpy(), cfg.positive_label),
         "rank_group": cfg.rank_group,
         "top_k": cfg.top_k,
+        "scale_pos_weight": cfg.scale_pos_weight,
+        "magnitude_column": cfg.magnitude_column,
+        "magnitude_gain": cfg.magnitude_gain if cfg.magnitude_column else None,
+        "graded_relevance": bool(cfg.graded_relevance and cfg.magnitude_column),
+        "graded_relevance_bins": cfg.graded_relevance_bins if (cfg.graded_relevance and cfg.magnitude_column) else None,
         "best": best.to_dict(),
         "errors": errors,
     }
@@ -562,6 +566,7 @@ def run_competition(frame: pd.DataFrame, cfg: CompetitionConfig) -> dict[str, An
         "train_df": train_df,
         "val_df": val_df,
         "test_df": test_df,
+        "selection_end": test_df[cfg.timestamp_column].min(),
     }
 
 

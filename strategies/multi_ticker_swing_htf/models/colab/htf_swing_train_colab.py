@@ -127,21 +127,13 @@ print("top-pick overlap\n", result["pick_overlap"])
 OUT = cfg.output_dir
 
 # %%
-# Walk-forward OOF of the winner → feeds the meta-ranker spine (HTF_OOF score).
+# Walk-forward OOF must match the artifact loaded by live inference.  The
+# competition winner can be LightGBM while production deliberately loads the
+# XGBoost JSON below; writing the former as the unqualified OOF made Meta train
+# on a different base model from the one it sees in production.
 best = result["best"]
 best_family, best_seed = str(best["family"]), int(best["seed"])
 train_months = int(round(float(WF["train_years"]) * 12))
-oof = walk_forward_oof(
-    df, cfg, best_family, best_seed,
-    train_months=train_months,
-    embargo_days=int(WF["embargo_days"]),
-    test_months=int(WF["test_months"]),
-    min_train_rows=int(WF.get("min_train_rows", 20000)),
-    diagnostic_columns=DIAGNOSTIC_COLUMNS,
-)
-if not oof.empty:
-    oof.to_parquet(OUT / "oof_preds.parquet")
-    print("OOF rows", len(oof), "| OOF Spearman(score,y)", round(float(oof["score"].corr(oof["y"], method="spearman")), 4))
 
 # %%
 # Final full-data fit for the shippable boosters (live inference loads htf_swing_xgb.json).
@@ -153,13 +145,36 @@ def _final_fit(family: str, seed: int):
 
 results = result["results"]
 xgb_rows = results[results["family"].str.startswith("xgb")]
-if not xgb_rows.empty:
-    metric = primary_metric_name(results)
-    best_xgb = xgb_rows.sort_values(metric, ascending=False, na_position="last").iloc[0] if metric else xgb_rows.iloc[0]
-    xgb_model = _final_fit(str(best_xgb["family"]), int(best_xgb["seed"]))
-    booster = xgb_model.get_booster() if hasattr(xgb_model, "get_booster") else xgb_model
-    booster.save_model(str(OUT / "htf_swing_xgb.json"))
-    print("saved live-compat booster from", best_xgb["family"], "seed", int(best_xgb["seed"]))
+if xgb_rows.empty:
+    raise ValueError("Live HTF inference requires an XGBoost candidate; do not publish an unscorable winner")
+metric = primary_metric_name(results)
+best_xgb = xgb_rows.sort_values(metric, ascending=False, na_position="last").iloc[0]
+deployed_family, deployed_seed = str(best_xgb["family"]), int(best_xgb["seed"])
+xgb_model = _final_fit(deployed_family, deployed_seed)
+booster = xgb_model.get_booster() if hasattr(xgb_model, "get_booster") else xgb_model
+booster.save_model(str(OUT / "htf_swing_xgb.json"))
+print("saved live-compat booster from", deployed_family, "seed", deployed_seed)
+
+def _oof(family: str, seed: int):
+    return walk_forward_oof(
+        df, cfg, family, seed,
+        train_months=train_months,
+        embargo_days=int(WF["embargo_days"]),
+        test_months=int(WF["test_months"]),
+        min_train_rows=int(WF.get("min_train_rows", 20000)),
+        diagnostic_columns=DIAGNOSTIC_COLUMNS,
+    )
+
+# This is the only unqualified OOF filename downstream consumers may use.
+oof = _oof(deployed_family, deployed_seed)
+if not oof.empty:
+    oof.to_parquet(OUT / "oof_preds.parquet")
+    print("deployed OOF rows", len(oof), "| Spearman(score,y)",
+          round(float(oof["score"].corr(oof["y"], method="spearman")), 4))
+if (best_family, best_seed) != (deployed_family, deployed_seed):
+    winner_oof = _oof(best_family, best_seed)
+    if not winner_oof.empty:
+        winner_oof.to_parquet(OUT / "oof_preds_overall_winner.parquet")
 
 import joblib
 winner_full = _final_fit(best_family, best_seed)
@@ -170,6 +185,10 @@ joblib.dump(winner_full, OUT / "best_model_full.joblib")
     "best": best.to_dict(),
     "winner_family": best_family,
     "winner_seed": best_seed,
+    "deployed_family": deployed_family,
+    "deployed_seed": deployed_seed,
+    "deployed_artifact": "htf_swing_xgb.json",
+    "oof_artifact": "oof_preds.parquet",
     "primary_metric": primary_metric_name(results),
     "target_column": REG_TARGET,
     "relevance_column": RELEVANCE_COL,
@@ -182,6 +201,8 @@ meta = {
     "run_id": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ_htf_swing_4h_competition"),
     "created_at_utc": datetime.now(timezone.utc).isoformat(),
     "winner": {"family": best_family, "seed": best_seed},
+    "deployed": {"family": deployed_family, "seed": deployed_seed,
+                 "artifact": "htf_swing_xgb.json", "oof_artifact": "oof_preds.parquet"},
     "feature_names": FEATURES,
     "manifest": manifest,
     "competition_artifacts": sorted(p.name for p in OUT.iterdir() if p.is_file()),

@@ -4,8 +4,8 @@ The 4H modules (Meta Ranker, Momentum, HTF Swing, Dealer Ranker) decide once or
 twice a day because that is the bar their models were trained on. Risk is not a
 model output, so it does not have to wait for the next bar: whether a held
 position has breached its stop, or whether a contract expires today, uses no
-model and no training-time feature. Checking those between bars breaks no
-research/live parity.
+model and no training-time feature. Checking those between bars changes sampling and must be evaluated at the
+actual execution cadence; it does not change the model feature pipeline.
 
 2026-08-14 is the worked example. Dealer Ranker bought HPE (8/12) and ZM (8/13),
 both expiring 8/14, and runs once a day at 15:45 ET — so each contract got
@@ -24,8 +24,8 @@ WHAT THIS PASS DELIBERATELY DOES NOT DO
 
 CADENCE-SENSITIVE RULES ARE OPT-IN
 ----------------------------------
-A hard stop is cadence-independent: "down 39% from entry" is the same fact
-whenever you look, so checking more often is strictly better. A TRAILING stop is
+A fixed hard stop has a stable threshold, but an intrabar breach/recovery can
+change outcomes relative to close-only checks; faster is not necessarily better. A TRAILING stop is
 not — it ratchets off the observed peak, so sampling 78 times a day instead of
 twice finds higher peaks and therefore triggers earlier. ``trail_stop=0.35`` was
 calibrated against the 4H sampling cadence, so enabling it here would silently
@@ -56,6 +56,7 @@ from core.live_4h_exec import (
     # existing callers and tests keep importing it from here.
     parse_occ_expiry,
     resolve_settled_exit,
+    reconcile_pending_exit,
     take_profit_reason,
     trim_quantity,
     underlying_basis,
@@ -75,9 +76,8 @@ LOCK_ROOT = REPO_ROOT / "Data/runtime/risk_pass"
 class RiskPassConfig:
     """Which non-model rules this pass is allowed to act on.
 
-    Defaults are the two that are provably cadence-independent and strictly
-    risk-reducing. Everything path-dependent is off until it is re-validated at
-    this cadence.
+    Defaults preserve the configured hard-stop and expiry policy. Trailing and
+    profit rules remain opt-in; all performance claims need cadence-aware evaluation.
     """
 
     hard_stop: bool = True
@@ -192,7 +192,12 @@ def evaluate_risk_exits(
     """Evaluate held positions for non-model exits. Mutates no bar counters."""
     cfg = cfg or RiskPassConfig()
     out = RiskPlan()
-    ufn = underlying_fn or underlying_basis
+    if underlying_fn is None:
+        from core.risk_prices import CurrentUnderlyingPrices
+        prices = CurrentUnderlyingPrices(client, list(managed), now_et)
+        ufn = lambda ticker: (prices.get(ticker), None)
+    else:
+        ufn = underlying_fn
 
     # Read once per pass, not per position, and only if something asks. The
     # cached value distinguishes "not asked yet" from "asked, got None".
@@ -209,21 +214,34 @@ def evaluate_risk_exits(
         return build_option_order_audit(signal_audit=None, option_symbol=sym,
                                         route="call_option", side="sell", qty=qty)
 
+    from core.order_reconciliation import recover_pending_exits, owned_quantity
+    from core.live_4h_exec import DEFAULT_LEDGER_ROOT
+    if cfg.settle_pending_exits:
+        recover_pending_exits(ledger_root or DEFAULT_LEDGER_ROOT, module, managed)
     for tkr, st in managed.items():
         route = st.get("route", "option")
         sym = st.get("occ") if route == "option" else st.get("symbol", tkr)
         held = pos_info.get(sym, {}).get("qty", 0) if sym else 0
 
-        if held <= 0:
-            # Gone from the broker. The 4H runner owns dropping it from managed —
-            # this pass only settles a resting exit so the loss reaches the
-            # ledger promptly instead of waiting for the next bar.
-            if cfg.settle_pending_exits and isinstance(st.get("exit_pending"), dict):
-                if resolve_settled_exit(client, module=module, ticker=tkr, symbol=sym,
-                                        state=st, bar=now_et.isoformat(),
-                                        ledger_root=ledger_root):
+        if isinstance(st.get("exit_pending"), dict):
+            if cfg.settle_pending_exits:
+                result, _ = reconcile_pending_exit(client, module=module, ticker=tkr,
+                    symbol=sym, state=st, bar=now_et.isoformat(), held_qty=held, ledger_root=ledger_root)
+                if result == "closed":
                     out.settled[tkr] = {"symbol": sym, "route": route}
-                    st.pop("exit_pending", None)
+                    continue
+            else:
+                result = "pending"
+            if result != "retry":
+                # Unknown is deliberately treated like a resting order for
+                # trading purposes: neither outcome authorizes a second sell.
+                # Keep the more specific state flag for the next reconciliation.
+                out.skipped[tkr] = ("exit_order_already_resting"
+                                    if result in {"pending", "unresolved"}
+                                    else "exit_reconciliation_required")
+                out.new_managed[tkr] = st
+                continue
+        if held <= 0:
             # An entry that was accepted but never filled, whose order is no
             # longer working, cannot ever become a position. Keeping the claim
             # is not conservative any more — it is stale, and it blocks the
@@ -269,12 +287,7 @@ def evaluate_risk_exits(
             st.pop("entry_order_id", None)
             out.confirmed_entries[tkr] = {"symbol": sym, "route": route, "qty": held}
 
-        if isinstance(st.get("exit_pending"), dict):
-            # An exit order is already resting against this position. Submitting
-            # a second one would double-sell if the first fills.
-            out.skipped[tkr] = "exit_order_already_resting"
-            out.new_managed[tkr] = st
-            continue
+        held = int(owned_quantity(st, route, held))
 
         info = pos_info.get(sym, {})
         anomaly = _implausible_mark_move(route, st.get("last_mark_price"), info.get("current"))
@@ -362,7 +375,7 @@ def evaluate_risk_exits(
             continue
 
         if action == "trim":
-            qty = trim_quantity(policy.scale_frac, held)
+            qty = min(held, int(st.get("trim_remaining_qty") or trim_quantity(policy.scale_frac, held)))
             if qty >= held:
                 # Same rule as the 4H engine: an indivisible position takes the
                 # profit in full instead of booking nothing. See trim_quantity.
@@ -376,7 +389,6 @@ def evaluate_risk_exits(
             if qty >= 1:
                 out.plan.append((sym, "sell", qty, reason, route))
                 out.order_audits[sym] = _sell_audit(tkr, sym, qty, route)
-                st["trimmed"] = True
                 logger.info("risk pass: %s %s (%s) -> TRIM %s x%d", module, tkr, sym, reason, qty)
         out.new_managed[tkr] = st
 
@@ -384,50 +396,10 @@ def evaluate_risk_exits(
 
 
 @contextlib.contextmanager
-def module_state_lock(module: str, *, timeout_note: str = "") -> Iterator[bool]:
-    """Non-blocking exclusive lock on one module's live state.
-
-    The 4H runner and this pass both read-modify-write ``live_state.json``. That
-    file has already been corrupted in this repo (see
-    ``Data/inference/*/_corrupt_backup``), so a concurrent write is a real
-    failure mode rather than a theoretical one. When the runner holds the lock
-    this pass yields False and skips the tick: the runner is the authority and
-    will evaluate the same stops moments later.
-    """
-    LOCK_ROOT.mkdir(parents=True, exist_ok=True)
-    path = LOCK_ROOT / f"{module}.lock"
-    fh = path.open("a+")
-    acquired = False
-    try:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            acquired = True
-        except BlockingIOError:
-            logger.info("risk pass: %s state is locked by another writer — skipping tick%s",
-                        module, f" ({timeout_note})" if timeout_note else "")
-            yield False
-            return
-        yield True
-    finally:
-        if acquired:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            except Exception:  # noqa: BLE001
-                logger.debug("risk pass: failed to unlock %s", module, exc_info=True)
-        fh.close()
+def module_state_lock(module: str, *, timeout_note: str = ""):
+    from core.live_state import module_state_lock as shared_lock
+    with shared_lock(module, root=LOCK_ROOT) as acquired:
+        yield acquired
 
 
-def load_state(path: Path) -> dict:
-    try:
-        return json.loads(Path(path).read_text())
-    except Exception:  # noqa: BLE001
-        return {"managed": {}, "history": []}
-
-
-def save_state(path: Path, state: dict) -> None:
-    """Write state atomically so a crash mid-write cannot truncate the file."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2, default=str))
-    tmp.replace(path)
+from core.live_state import load_state, save_state

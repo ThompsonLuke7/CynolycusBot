@@ -15,6 +15,7 @@ from .states import (
     DealerState,
     MarketState,
     PortfolioState,
+    PeerGroupState,
     ReadinessState,
     SectorState,
     StateContract,
@@ -179,6 +180,7 @@ _DISPATCH = {
     DealerState: "dealer_state",
     PortfolioState: "portfolio_state",
     ReadinessState: "readiness_state",
+    PeerGroupState: "peer_groups",
 }
 
 _SINGLETON_TYPES = frozenset({MarketState, TickerState, DealerState, PortfolioState, ReadinessState})
@@ -214,12 +216,20 @@ class ContextSnapshot(ContractModel):
     sector_states: tuple[SectorState, ...] = ()
     theme_memberships: tuple[ThemeMembership, ...] = ()
     theme_states: tuple[ThemeState, ...] = ()
+    # Memberships for underlyings OTHER than ``ticker``, carried so that
+    # portfolio-wide exposure can bucket every held position by theme.  The
+    # single-ticker invariant below (``_validate_ticker_scope``) is what makes
+    # a snapshot a statement about ONE decision, so peers are a separate field
+    # rather than a relaxation of it: nothing that scores or sizes this ticker
+    # may read them, and the exposure engine is the only intended consumer.
+    peer_theme_memberships: tuple[ThemeMembership, ...] = ()
     ticker_state: TickerState | None = None
     catalyst_events: tuple[CatalystEvent, ...] = ()
     catalyst_pressures: tuple[CatalystPressure, ...] = ()
     dealer_state: DealerState | None = None
     portfolio_state: PortfolioState | None = None
     readiness_state: ReadinessState | None = None
+    peer_groups: tuple[PeerGroupState, ...] = ()
     state_ids: tuple[UUID, ...] = ()
     state_hashes: tuple[str, ...] = ()
     stale_inputs: tuple[str, ...] = ()
@@ -344,6 +354,11 @@ class ContextSnapshot(ContractModel):
             or re.fullmatch(r"[0-9a-fA-F]{64}", self.freshness_profile_hash) is None
         ):
             raise ValueError("freshness_profile_hash must be a SHA-256 hex string")
+        for peer in self.peer_theme_memberships:
+            if peer.ticker == self.ticker:
+                raise ValueError(
+                    f"peer membership for {peer.ticker} duplicates the snapshot ticker"
+                )
         if len(self.state_ids) != len(self.state_hashes):
             raise ValueError("state_ids and state_hashes must be one-to-one")
         if len(set(self.state_ids)) != len(self.state_ids):
@@ -371,6 +386,7 @@ class ContextSnapshot(ContractModel):
         ticker: str,
         states: tuple[StateContract, ...],
         freshness_profile: str,
+        peer_theme_memberships: tuple[ThemeMembership, ...] = (),
         stale_inputs: tuple[str, ...] = (),
         missing_inputs: tuple[str, ...] = (),
         freshness_profile_hash: str = "",
@@ -390,9 +406,44 @@ class ContextSnapshot(ContractModel):
         seen_state_ids: set[UUID] = set()
         seen_collection_keys: set[tuple[str, ...]] = set()
 
-        sorted_states = sorted(states, key=_state_sort_key)
+        peers: list[ThemeMembership] = []
+        for peer in peer_theme_memberships:
+            if not isinstance(peer, ThemeMembership):
+                raise TypeError(
+                    "peer_theme_memberships accepts ThemeMembership only, got "
+                    f"{type(peer).__name__}"
+                )
+            if peer.ticker == ticker:
+                # The context ticker's own membership carries the freshness
+                # accounting that sizing depends on. Admitting it here too would
+                # double-count its notional in the theme bucket.
+                raise ValueError(
+                    f"peer membership for {peer.ticker} duplicates the snapshot ticker; "
+                    "pass it in states instead"
+                )
+            peers.append(peer)
+
+        sorted_states = sorted([*states, *peers], key=_state_sort_key)
+        peer_ids = {id(peer) for peer in peers}
+        peer_bucket: list[ThemeMembership] = []
 
         for state in sorted_states:
+            if id(state) in peer_ids:
+                # Routed by identity, not by ticker: an off-ticker membership
+                # reaching `states` must still fail `_validate_ticker_scope`
+                # rather than being silently reclassified as a peer.
+                _validate_peer_causality(state, normalized_decision_time)
+                collection_key = _collection_key(state)
+                if collection_key in seen_collection_keys:
+                    raise ValueError(f"duplicate effective collection selection: {collection_key}")
+                seen_collection_keys.add(collection_key)
+                if state.state_id in seen_state_ids:
+                    raise ValueError(f"duplicate state_id: {state.state_id}")
+                seen_state_ids.add(state.state_id)
+                state_ids.append(state.state_id)
+                peer_bucket.append(state)
+                state_hashes.append(content_hash(state, exclude={"state_id"}))
+                continue
             field_name = _DISPATCH.get(type(state))
             if field_name is None:
                 raise TypeError(f"unsupported concrete state type: {type(state).__name__}")
@@ -433,7 +484,16 @@ class ContextSnapshot(ContractModel):
             buckets[field_name].append(state)
             state_hashes.append(content_hash(state, exclude={"state_id"}))
 
-        envelope_states = [state for state in sorted_states if isinstance(state, StateEnvelope)]
+        # Peers describe OTHER positions, so they are deliberately excluded from
+        # the decision's quality and version accounting: a stale membership on
+        # an unrelated holding must not raise DATA_QUALITY_BLOCKING and veto
+        # this ticker. Their lineage is still hashed via state_hashes above, and
+        # the exposure engine reports peer gaps as UNALLOCATED on its own.
+        envelope_states = [
+            state
+            for state in sorted_states
+            if isinstance(state, StateEnvelope) and id(state) not in peer_ids
+        ]
         versions = {
             "config_version": tuple(dict.fromkeys(state.config_version for state in envelope_states)),
             "model_versions": tuple(dict.fromkeys(state.model_version for state in envelope_states)),
@@ -505,6 +565,7 @@ class ContextSnapshot(ContractModel):
             "market_state": buckets["market_state"][0] if buckets["market_state"] else None,
             "sector_states": tuple(buckets["sector_states"]),
             "theme_memberships": tuple(buckets["theme_memberships"]),
+            "peer_theme_memberships": tuple(peer_bucket),
             "theme_states": tuple(buckets["theme_states"]),
             "ticker_state": buckets["ticker_state"][0] if buckets["ticker_state"] else None,
             "catalyst_events": tuple(buckets["catalyst_events"]),
@@ -512,6 +573,7 @@ class ContextSnapshot(ContractModel):
             "dealer_state": buckets["dealer_state"][0] if buckets["dealer_state"] else None,
             "portfolio_state": buckets["portfolio_state"][0] if buckets["portfolio_state"] else None,
             "readiness_state": buckets["readiness_state"][0] if buckets["readiness_state"] else None,
+            "peer_groups": tuple(buckets["peer_groups"]),
             "state_ids": tuple(state_ids),
             "state_hashes": tuple(state_hashes),
             "stale_inputs": stale_inputs,
@@ -551,6 +613,8 @@ def _state_sort_key(state: StateContract) -> tuple[str, ...]:
         business = (state.sector_id,)
     elif isinstance(state, ThemeState):
         business = (state.theme_id,)
+    elif isinstance(state, PeerGroupState):
+        business = (state.group_id,)
     elif isinstance(state, PortfolioState):
         business = (state.account_alias,)
     elif isinstance(state, ReadinessState):
@@ -579,6 +643,10 @@ def _sorted_embedded_states(snapshot: ContextSnapshot) -> tuple[StateContract, .
             embedded_states.extend(value)
         else:
             embedded_states.append(value)
+    # Peers are real states with their own lineage, so they are hashed like any
+    # other embedded state.  `_state_sort_key` leads with the ticker, so a peer
+    # never collides with the context ticker's own membership.
+    embedded_states.extend(snapshot.peer_theme_memberships)
     return tuple(sorted(embedded_states, key=_state_sort_key))
 
 
@@ -593,7 +661,24 @@ def _collection_key(state: StateContract) -> tuple[str, ...] | None:
         return ("catalyst_pressure", state.scope_type, state.scope_id)
     if isinstance(state, CatalystEvent):
         return ("catalyst_event", str(state.event_id))
+    if isinstance(state, PeerGroupState):
+        return ("peer_group", state.group_id)
     return None
+
+
+def _validate_peer_causality(state: ThemeMembership, decision_time: UtcDatetime) -> None:
+    """Apply every causal gate a context-ticker membership gets, minus scope."""
+
+    if state.available_at > decision_time:
+        raise ValueError(f"peer membership {state.state_id} is unavailable at decision time")
+    if decision_time >= state.valid_until:
+        raise ValueError(f"peer membership {state.state_id} is expired at decision time")
+    if decision_time < state.effective_from or (
+        state.effective_until is not None and decision_time >= state.effective_until
+    ):
+        raise ValueError(
+            f"peer membership {state.ticker}/{state.theme_id} is invalid at decision time"
+        )
 
 
 def _validate_ticker_scope(state: StateContract, ticker: str) -> None:

@@ -14,6 +14,20 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 LEDGER_ROOT = REPO / "Data" / "inference"
+_RECONCILIATION_CERTIFICATE = LEDGER_ROOT / "broker_reconciliation" / "paper" / "latest_certificate.json"
+
+
+def _reconciliation_status() -> tuple[str, str | None]:
+    """Expose the broker-accounting gate without making dashboard reads fail."""
+    if not _RECONCILIATION_CERTIFICATE.exists():
+        return "provisional_missing_broker_certificate", None
+    try:
+        certificate = json.loads(_RECONCILIATION_CERTIFICATE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "provisional_invalid_broker_certificate", None
+    status = str(certificate.get("status", "FAIL"))
+    return ("reconciled" if status == "PASS" else "provisional_broker_reconciliation_failed",
+            certificate.get("generated_at"))
 
 
 def _number(value: Any) -> float | None:
@@ -48,6 +62,7 @@ def module_performance(module: str, *, open_upl: float | None = None) -> dict[st
     today = datetime.now(timezone.utc).date().isoformat()
     today_pnl = round(sum(r["realized_pnl"] for r in rows if str(r.get("ts", "")).startswith(today)), 2)
     marked = _number(open_upl) or 0.0
+    reconciliation_status, reconciliation_at = _reconciliation_status()
     return {
         "module": module,
         "ledger_available": path.exists(),
@@ -58,5 +73,8 @@ def module_performance(module: str, *, open_upl: float | None = None) -> dict[st
         "today_realized_pnl": today_pnl,
         "open_unrealized_pnl": round(marked, 2),
         "tracked_pnl": round(realized + marked, 2),
-        "status": "tracked" if rows else "no_closed_ledger",
+        "status": ("tracked" if rows else "no_closed_ledger") if reconciliation_status == "reconciled"
+                  else reconciliation_status,
+        "reconciliation_status": reconciliation_status,
+        "reconciliation_generated_at": reconciliation_at,
     }

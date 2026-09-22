@@ -27,6 +27,7 @@ from core.nervous_system.contracts.states import (
     SectorState,
     StateEnvelope,
     ThemeMembership,
+    PeerGroupState,
     ThemeState,
     TickerState,
 )
@@ -45,6 +46,7 @@ _STATE_TYPES: dict[StateType, tuple[type[StateEnvelope], ...]] = {
     StateType.DEALER: (DealerState,),
     StateType.PORTFOLIO: (PortfolioState,),
     StateType.READINESS: (ReadinessState,),
+    StateType.PEER_GROUP: (PeerGroupState,),
 }
 
 

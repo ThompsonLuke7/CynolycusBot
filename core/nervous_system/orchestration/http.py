@@ -149,6 +149,8 @@ class AuditRouter:
             return self._list(self.store.decisions, query)
         if path == f"{_ROUTE_PREFIX}/decisions/detail":
             return self._detail(query)
+        if path == f"{_ROUTE_PREFIX}/snapshots/packet":
+            return self._packet(query)
         if path == f"{_ROUTE_PREFIX}/alerts":
             return self._list(self.store.alerts, query)
         if path == f"{_ROUTE_PREFIX}/reconciliations":
@@ -176,6 +178,15 @@ class AuditRouter:
             # rather than "this decision does not exist".
             raise _NotFound()
         return AuditResponse(200, redact(row))
+
+    def _packet(self, query: Mapping[str, str]) -> AuditResponse:
+        identifier = query.get("id")
+        if not identifier:
+            raise _BadRequest("id is required")
+        packet = self.store.snapshot_packet(identifier)
+        if packet is None:
+            raise _NotFound()
+        return AuditResponse(200, redact(packet))
 
     def _health(self) -> AuditResponse:
         report = self.store.health()

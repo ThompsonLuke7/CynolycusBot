@@ -215,6 +215,27 @@ of different sizes (328 vs 251), which confounds the exit with re-entry timing.
 this window in training. It is a direction check. A clean test needs a walk-forward OOF extension,
 i.e. a GPU retrain.
 
+**CORRECTION — "id4" is not the whole live exit story, and this test does not cover options.**
+The id4 shape is the shared hold/scale/horizon logic. Since then:
+* **2026-08-18, options only:** `ExecPolicy.underlying_stop_atr = 1.5` — an option's hard stop is
+  now measured against the UNDERLYING (1.5 entry-ATRs below entry), and `stop_loss=0.39` is NOT
+  applied to that option. The premium stop still governs equity, and options whose underlying
+  basis is unavailable (fail-safe). Rationale in the code: across 42 option stops with resolvable
+  4H bars, the median underlying move when the premium stop fired was −3.1%, 18 of 42 fired with
+  the underlying down <2% (−$43,944 realized), and the underlying recovered above entry within 40
+  4H bars in 13 of those 18. Marked "NOT yet paper-validated".
+* **Momentum runs a second, option-specific exit path**: `MomentumOptionPolicy.update_and_check_exit`
+  (ATR stop, ATR trail arm/distance, expansion-score decay, `max_holding_4h_bars=30`), called from
+  its live runner alongside `ExecPolicy`.
+* **SPY daytrader has its own**: `option_exit_policy="option_adaptive_trail_v1"` (choices also
+  include `option_value_bracket_v1`, `software_oco_v1`).
+
+`all_trades` simulates on the UNDERLYING's 4H bars with premium-agnostic returns, so **§6 compares
+the SHARES exit shape only**. It is silent on the 2026-08-18 underlying-ATR option stop, on
+MomentumOptionPolicy, and on the SPY option policies. Any option-exit verdict needs a premium path
+(the 2026-09-02 cost-validated study is the relevant evidence there, and it said: keep the option
+stop, do not shorten the horizon on that evidence).
+
 Paired, same entries, same bars:
 
 | module | pair | per trade | per bar | holds (bars) |
@@ -235,9 +256,15 @@ Paired, same entries, same bars:
   only thing that settles it.
 
 **Two data defects found while doing this:**
-1. `strategies/multi_ticker_swing_htf/data/processed/features_4h.parquet` ends **2026-06-02** and
-   was last written 2026-06-14 — three months stale, against momentum's 2026-09-10. HTF's row in
-   the fresh-window check covers 33 bars and is uninformative for that reason, not censoring.
+1. `strategies/multi_ticker_swing_htf/data/processed/features_4h.parquet` ends **2026-06-02**
+   (last written 2026-06-14). **CORRECTED — this is a research-only artifact, not a live defect.**
+   Live HTF is current: readiness stage 4/6 rebuilds momentum's SHARED `features_4h.parquet`
+   (current to 2026-09-10) and the comment there calls it "the HTF 4H feature matrix" precisely
+   because HTF shares it; `inference/scorer.py` reads that shared path, and the HTF live runner
+   scores off `meta_ranker_matrix.parquet` (current to 2026-09-11). Only HTF's local copy is
+   stale, and it is read by `main.py --build-features` and research scripts
+   (`exit_policy_fresh_window_check.py`, `two_sleeve_cross_module.py`). That is why HTF's row in
+   §6 covers 33 bars — a stale research input, NOT censoring and NOT stale live inference.
 2. `strategies/momentum_expansion/config/momentum_config.py` lines 329-334 define
    `atr_trail_distance`, `score_decay_exit` and `trend_break_atr` **twice** in the same dict
    literal. The values are identical so behaviour is unaffected, but one edit to the first copy
@@ -308,13 +335,59 @@ The allocation actually proposed, on the same events:
   tilt toward the leader, not sit at 50/50 — with the caveat that leader-only is a single name per
   event, so its concentration risk is not priced in an average-of-events table.
 
-**The caveat that decides whether this is tradeable.** All of it is measured on the BACKFILLED
-membership — one registry applied to all history, therefore unnaturally stable. The live PIT
-snapshots churn 83-88% a week (§4). So this is evidence that *a stable theme grouping* has a
-tradeable leader/follower structure; it is NOT yet evidence that today's live theme assignment
-does. Also: overlapping 20-session windows across 896 days mean the CIs are optimistic (the
-day-clustering handles within-day, not across-day overlap), and these are universe-relative
-excesses with no costs or slippage.
+### CORRECTION — most of that was untradeable names
+
+The table above screens corporate-action flags on the ENTRY DAY ONLY and applies no liquidity
+filter. The trader diagnostic (§8) showed what that admits: 40% of these events are in names under
+$1M/day, and those names carry the return. Re-run with the two missing screens — 20-day dollar
+volume >= $10M and price >= $5 on the decision day, and any >=4x/<=1/4x overnight move ANYWHERE in
+the holding window removed — the event count falls from 24,865 to **3,202** per hold (87% of the
+events were untradeable) and the effect roughly halves:
+
+| hold | theme mean (liquid) | theme median | sector | shuffled |
+|---|---|---|---|---|
+| 1d | +0.025% [−0.133, +0.166] | +0.005% | +0.011% | −0.000% |
+| 3d | +0.085% [−0.152, +0.327] | +0.042% | −0.014% | +0.016% |
+| 5d | +0.159% [−0.169, +0.527] | +0.126% | −0.051% | +0.039% |
+| 10d | +0.449% [−0.113, +1.046] | +0.396% | −0.008% | +0.001% |
+| 20d | **+0.839%** [+0.031, +1.600] | +0.933% | +0.035% | −0.092% |
+
+**Revised verdict: weak, and only at 20 sessions.** Four of five holds have CIs straddling zero;
+the 20-day cell barely clears (+0.03 lower bound), and one marginal cell in five is about what
+multiple testing produces on its own. Two points still favour it: the controls stay at ~0 (sector
+and shuffled), and the MEDIAN tracks the mean in the liquid subset (+0.93% vs +0.84% at 20d), so
+what remains is a broad small effect rather than a tail artefact. Against it: round-trip costs
+(~0.2%) take a quarter of the 20-day figure before any slippage from entering after a +7% pop.
+
+Other standing caveats: membership is the BACKFILLED registry (unnaturally stable; live PIT churns
+83-88% a week, §4), overlapping 20-session windows make the CIs optimistic, and these are
+universe-relative excesses, not P&L.
+
+## 8. Theme trader vs SPY — RETRACTED, and why
+
+Built the portfolio version (`scripts/horizon_thesis/theme_trader_backtest.py`): leader-only,
+followers-only, the 50/50 split, a 70/30 tilt and an out-of-theme random control, 5/10/20-day
+holds, 20 capital slots, 10bps/side, measured against SPY buy-and-hold (+96.6% total, +20.9% CAGR,
+Sharpe 1.32 over 2022-11..2026-06).
+
+It reported **+2,450% total / 148% CAGR / +74% annual alpha** for the leader arm at a 5-day hold.
+**That result is retracted.** Numbers that size in this repo have twice been corporate-action
+artefacts, so it was diagnosed rather than reported (`theme_trader_diagnose.py`):
+
+1. **Concentration** — the top 1% of trades are 66% of summed return; the top 5% are 164%, i.e.
+   everything outside the top 5% is net negative.
+2. **Corporate actions inside the hold** — 11 trades (0.043%) carrying a >=4x overnight jump
+   produce 7.6% of all return. The two worst are **WOLF 2025-09-25 (+1,107%)** — the same
+   contaminant recorded in `core/corporate_actions.py`'s own case notes — and SBET (+1,316%).
+3. **Tradeability** — by dollar volume, mean 5-day return runs +2.81% (<$1M/day, 40% of trades),
+   +0.88% ($1-10M), +0.40% ($10-100M), +0.21% (>$100M). In the liquid subset ($10M+/day, $5+):
+   **mean +0.34%, median −0.18%** against +1.54% for all trades.
+
+So the alpha was microcap tails plus split artefacts. The honest read of the arms: the random
+control behaved correctly (alpha −0.8%, beta 0.92), which is why the machinery was trusted enough
+to diagnose rather than discard — but no theme-trader result from this window should be quoted.
+A tradeable version has to be built on the liquid universe from the start, where §7's corrected
+numbers say the available edge is ~+0.8% over 20 sessions before costs.
 
 **So themes are good for something — just not what they are currently wired into.** They are a
 grouping/propagation signal, not a cross-sectional ranking feature (§4: −0.0167 rho when fed to

@@ -217,6 +217,26 @@ META_4H_1620_PROFILE = SnapshotProfile(
     market_session_lag=1,
 )
 
+# Momentum runs the same 4H grid and the same required states, so it reuses the
+# rule set rather than redefining it: a second copy would drift, and the rules
+# describe the STATE STORE, not the strategy. Only the id differs, so each
+# module's snapshots stay attributable and a profile can be tightened for one
+# module without touching another.
+MOMENTUM_4H_1420_PROFILE = SnapshotProfile(
+    profile_id="momentum_4h_1420@1",
+    rules=_REQUIRED_RULES + _OPTIONAL_RULES,
+    dealer_allowed=False,
+    dealer_capture_after_et=None,
+    market_session_lag=1,
+)
+MOMENTUM_4H_1620_PROFILE = SnapshotProfile(
+    profile_id="momentum_4h_1620@1",
+    rules=_REQUIRED_RULES + _OPTIONAL_RULES,
+    dealer_allowed=True,
+    dealer_capture_after_et=time(14, 20),
+    market_session_lag=1,
+)
+
 # Public aliases keep the registry discoverable without making callers depend
 # on one spelling of the profile constants.
 META_4H_1420 = META_4H_1420_PROFILE
@@ -225,6 +245,8 @@ SNAPSHOT_PROFILES: Mapping[str, SnapshotProfile] = MappingProxyType(
     {
         META_4H_1420_PROFILE.profile_id: META_4H_1420_PROFILE,
         META_4H_1620_PROFILE.profile_id: META_4H_1620_PROFILE,
+        MOMENTUM_4H_1420_PROFILE.profile_id: MOMENTUM_4H_1420_PROFILE,
+        MOMENTUM_4H_1620_PROFILE.profile_id: MOMENTUM_4H_1620_PROFILE,
     }
 )
 FRESHNESS_PROFILES = SNAPSHOT_PROFILES

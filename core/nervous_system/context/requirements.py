@@ -389,6 +389,82 @@ def _selected_ticker_theme_ids(
     return frozenset(str(getattr(candidate, "theme_id")) for candidate in selected)
 
 
+def select_peer_memberships(
+    candidates: Sequence[StateEnvelope],
+    *,
+    peer_entity_ids: Sequence[str],
+    entity_id: str,
+    decision_time: datetime,
+    decision_bar: datetime,
+    profile: SnapshotProfile,
+    scope: SnapshotEntityScope | None = None,
+) -> tuple[ThemeMembership, ...]:
+    """Select causal theme memberships for tickers OTHER than the decision's.
+
+    Peers exist so portfolio-wide exposure can bucket every held position by
+    theme.  They are deliberately ADVISORY: a peer that is missing, stale, or
+    ineligible is simply not selected, and never marks the snapshot invalid.
+    Exposure reports an unbucketed position as ``UNALLOCATED``, which is the
+    honest answer -- whereas blocking this ticker's decision because an
+    unrelated holding's membership went stale would trap open risk.
+
+    Eligibility reuses ``_candidate_rejection_reason`` unchanged, so a peer is
+    held to exactly the same causal bar as the context ticker's own membership.
+    """
+
+    if not peer_entity_ids:
+        return ()
+    decision_time_utc = _aware(decision_time, "decision_time")
+    decision_bar_utc = _aware(decision_bar, "decision_bar")
+    if decision_bar_utc > decision_time_utc:
+        raise ValueError("decision_bar must not be after decision_time")
+    rule = next(
+        (rule for rule in profile.rules if rule.state_type is StateType.THEME_MEMBERSHIP),
+        None,
+    )
+    if rule is None:
+        return ()
+    scope = scope or SnapshotEntityScope()
+
+    pool = [
+        candidate
+        for candidate in candidates
+        if candidate.state_type is StateType.THEME_MEMBERSHIP
+    ]
+    selected: list[ThemeMembership] = []
+    seen: set[str] = set()
+    for peer_ticker in peer_entity_ids:
+        if not isinstance(peer_ticker, str) or not peer_ticker.strip():
+            raise ValueError("peer_entity_ids must contain non-empty strings")
+        if peer_ticker == entity_id or peer_ticker in seen:
+            # The context ticker's membership is selected by the required-rule
+            # path; re-selecting it here would double-count its notional.
+            continue
+        seen.add(peer_ticker)
+        eligible = [
+            candidate
+            for candidate in pool
+            if _candidate_rejection_reason(
+                candidate,
+                rule,
+                entity_id=peer_ticker,
+                decision_time_utc=decision_time_utc,
+                decision_bar_utc=decision_bar_utc,
+                profile=profile,
+                scope=scope,
+            )
+            is None
+        ]
+        grouped: dict[tuple[str, ...], list[StateEnvelope]] = {}
+        for candidate in eligible:
+            grouped.setdefault(_effective_key(candidate), []).append(candidate)
+        for group in grouped.values():
+            winner = max(group, key=candidate_tie_key)
+            if isinstance(winner, ThemeMembership):
+                selected.append(winner)
+    return tuple(selected)
+
+
 def evaluate_requirements(
     candidates: Sequence[StateEnvelope],
     *,

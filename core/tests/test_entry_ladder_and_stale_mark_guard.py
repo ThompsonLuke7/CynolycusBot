@@ -72,7 +72,8 @@ class _LadderClient:
 
     def get_order(self, oid):
         n = int(str(oid)[1:])
-        return {"id": oid, "status": "filled" if n == self.fills_at_rung else "new"}
+        status = "filled" if n == self.fills_at_rung else ("canceled" if str(oid) in self.cancelled else "new")
+        return {"id": oid, "status": status, "filled_qty": "3" if status == "filled" else "0"}
 
     def cancel_order(self, oid):
         self.cancelled.append(str(oid))

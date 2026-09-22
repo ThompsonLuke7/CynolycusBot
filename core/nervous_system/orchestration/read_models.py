@@ -166,6 +166,33 @@ class AuditStore:
             "payload": row.payload,
         }
 
+    def snapshot_packet(self, snapshot_id: str) -> dict[str, Any] | None:
+        """One decision's context rendered as a structured packet, or nothing.
+
+        Read-only and derived: the packet is computed from the stored snapshot
+        every time rather than persisted, so it can never drift from the
+        evidence it describes.
+        """
+
+        from core.nervous_system.context.packet import (
+            format_context_packet,
+            render_context_packet,
+        )
+        from core.nervous_system.persistence.repositories.state import StateRepository
+
+        try:
+            identifier = UUID(str(snapshot_id))
+        except (TypeError, ValueError):
+            # Malformed is 'not found', matching `decision` above: an exception
+            # would surface as a 503 and report a healthy system as broken.
+            return None
+        snapshot = StateRepository(self._session).get_context_snapshot(identifier)
+        if snapshot is None:
+            return None
+        packet = render_context_packet(snapshot)
+        packet["text"] = format_context_packet(snapshot)
+        return packet
+
     # -- health -------------------------------------------------------------
 
     def health(self) -> HealthReport:

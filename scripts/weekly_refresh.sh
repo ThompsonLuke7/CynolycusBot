@@ -62,7 +62,7 @@ fi
   }
 
   # 1) Backfill bars for the whole universe (incl. newly promoted names).
-  echo "[$(ts)] 1/4 catch up shared bars (1H/4H/1D, full universe)"
+  echo "[$(ts)] 1/5 catch up shared bars (1H/4H/1D, full universe)"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_BARS_TIMEOUT_SECONDS:-21600}s" \
     "$PYTHON" -u scripts/catchup_shared_bars.py --workers 6
   rc=$?
@@ -71,7 +71,7 @@ fi
   record_stage "catchup" "$rc"
 
   # 2) Momentum weekly universe snapshot (must follow #1 to include new names).
-  echo "[$(ts)] 2/4 momentum universe snapshot"
+  echo "[$(ts)] 2/5 momentum universe snapshot"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_UNIVERSE_TIMEOUT_SECONDS:-7200}s" \
     "$PYTHON" -u -m strategies.momentum_expansion.main --refresh-universe
   rc=$?
@@ -85,7 +85,7 @@ fi
   #    incremental embed/cluster + rebuilds news_catalyst_signal so the broad
   #    corpus the Meta ranker reads is current. (This is the ~3h tail moved off
   #    the nightly path.)
-  echo "[$(ts)] 3/4 full-universe news: collect (scope=full) → embed → signal"
+  echo "[$(ts)] 3/5 full-universe news: collect (scope=full) → embed → signal"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_NEWS_COLLECT_TIMEOUT_SECONDS:-43200}s" \
     "$PYTHON" -u -m scripts.collect_news_scope --scope full
   rc=$?
@@ -105,8 +105,30 @@ fi
   [ "$rc" -ne 0 ] && STATUS="$rc"
   record_stage "news_signal_rebuild" "$rc"
 
-  # 4) Meta Ranker feeds + dynamic themes (Claude $).
-  echo "[$(ts)] 4/4 meta feeds + dynamic themes (--weekly, costs Claude \$)"
+  # 4) Empirical sector assignments for the whole universe. Must follow #1 and
+  #    #2: it correlates each name's trailing daily returns against the 11
+  #    sector ETFs, over the universe snapshot those stages just refreshed.
+  #
+  #    Why it matters: the curated SECTOR_MAP covers 95/2,903 live names (3.3%),
+  #    and under that map the nervous system's sector concentration limit
+  #    buckets ~97% of positions as UNALLOCATED -- which never vetoes, so the
+  #    sector arm of the gate is inert. This fills it to ~82% (a 0.30 |corr|
+  #    floor leaves the rest explicitly unknown rather than guessed).
+  #
+  #    Cheap to run weekly: the resolver snapshots per CALENDAR MONTH and the
+  #    script exits immediately when the current month is already cached, so
+  #    this costs ~2 minutes once a month and seconds otherwise. It MERGES --
+  #    earlier months are the point-in-time record and are never overwritten.
+  echo "[$(ts)] 4/5 empirical sector assignments (monthly snapshot; skips if current)"
+  timeout --signal=TERM --kill-after=60s "${WEEKLY_SECTOR_TIMEOUT_SECONDS:-3600}s" \
+    "$PYTHON" -u scripts/build_sector_assignments.py
+  rc=$?
+  echo "[$(ts)] sector assignments exit=$rc"
+  [ "$rc" -ne 0 ] && STATUS="$rc"
+  record_stage "sector_assignments" "$rc"
+
+  # 5) Meta Ranker feeds + dynamic themes (Claude $).
+  echo "[$(ts)] 5/5 meta feeds + dynamic themes (--weekly, costs Claude \$)"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_FEEDS_TIMEOUT_SECONDS:-21600}s" \
     "$PYTHON" -u signals/meta_context/meta_ranker/update_feeds.py --weekly
   rc=$?

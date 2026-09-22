@@ -32,6 +32,16 @@ class TargetPlanOutcome:
 
     plan: TargetPlan | None = None
     reason: str | None = None
+    #: Diagnostics for the REFUSAL case. `build_target_plan` knows the stop it
+    #: would have used and how wide that is in ATR, then used to throw both away
+    #: -- so `invalidation_wider_than_max_atr`, which is 98.8% of all
+    #: abstentions, was logged with `proposed_invalidation: null` every time and
+    #: the width it turned on was never recorded anywhere. Measured 2026-09-20:
+    #: 0% populated across 30,000 sampled events, which blocks the "widen the cap
+    #: and size down instead of refusing" question entirely.
+    proposed_invalidation: float | None = None
+    proposed_risk_atr: float | None = None
+    max_invalidation_atr: float | None = None
 
 
 #: Structure exists, but the stop it implies is wider than the risk budget.
@@ -54,14 +64,28 @@ def build_target_plan(setup: SetupRecord, ctx: DetectionContext) -> TargetPlanOu
     if risk < minimum_risk:
         invalidation = ctx.bar.close - minimum_risk if is_long(setup) else ctx.bar.close + minimum_risk
         risk = minimum_risk
-    if risk > ctx.config.target.max_invalidation_atr * atr:
-        return TargetPlanOutcome(reason=INVALIDATION_TOO_WIDE)
+    cap = ctx.config.target.max_invalidation_atr
+    risk_atr = (risk / atr) if atr else None
+    if risk > cap * atr:
+        return TargetPlanOutcome(
+            reason=INVALIDATION_TOO_WIDE,
+            proposed_invalidation=float(invalidation),
+            proposed_risk_atr=float(risk_atr) if risk_atr is not None else None,
+            max_invalidation_atr=float(cap),
+        )
     runway = score_runway(
         spot=ctx.bar.close, direction=setup.direction.value, atr=atr, levels=ctx.levels,
         trend_strength=f.get("trend_strength"), market=ctx.market, options=ctx.options,
     )
     if runway.next_target is None:
-        return TargetPlanOutcome(reason=NO_CAUSAL_TARGET)
+        # Same diagnostics on the other refusal: the stop was affordable here, and
+        # knowing that separates "nowhere to go" from "too expensive to get there".
+        return TargetPlanOutcome(
+            reason=NO_CAUSAL_TARGET,
+            proposed_invalidation=float(invalidation),
+            proposed_risk_atr=float(risk_atr) if risk_atr is not None else None,
+            max_invalidation_atr=float(cap),
+        )
     reward = (runway.next_target - ctx.bar.close) if is_long(setup) else (ctx.bar.close - runway.next_target)
     rr = reward / risk if risk > 0 else 0.0
     return TargetPlanOutcome(TargetPlan(float(invalidation), (float(runway.next_target),), runway, float(rr)))

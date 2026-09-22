@@ -27,6 +27,10 @@ import numpy as np
 import pandas as pd
 
 from core.corporate_actions import recent_corporate_action
+from core.live_state import append_once
+from core.broker_fill_reconciliation import account_label_for_client, register_order_ownership
+from core.order_reconciliation import (observe_order, owned_quantity, number,
+    read_evidence, save_evidence, recover_pending_exits, settlement_activity)
 
 from core.live_signal_audit import build_equity_order_audit, build_option_order_audit
 from core.live_readiness import filter_entry_orders_for_readiness
@@ -564,59 +568,35 @@ def build_mixed_plan(
         return build_option_order_audit(signal_audit=sa.get(tkr), option_symbol=sym,
                                         route="call_option", side="sell", qty=qty)
 
+    if module:
+        recover_pending_exits(ledger_root or DEFAULT_LEDGER_ROOT, module, managed)
+
     # 1) manage existing positions (option OR share) with one exit machine.
     for tkr, st in managed.items():
         route = st.get("route", "option")
         sym = st.get("occ") if route == "option" else st.get("symbol", tkr)
         info_present = bool(sym) and sym in pos_info
         held = pos_info.get(sym, {}).get("qty", 0) if sym else 0
+        if isinstance(st.get("exit_pending"), dict) and module:
+            result, _ = reconcile_pending_exit(client, module=module, ticker=tkr,
+                symbol=sym, state=st, bar=bar, held_qty=held, ledger_root=ledger_root)
+            if result == "closed":
+                out.dropped[tkr] = {"symbol": sym, "route": route, "status": "confirmed_flat", "exit_settled": True}
+                continue
+            if result in {"pending", "unresolved"}:
+                out.new_managed[tkr] = st
+                continue
+            out.stuck_exits[tkr] = {"symbol": sym, "route": route}
         if held <= 0:
-            status = "confirmed_flat" if info_present else "not_found"
-            # A position carrying exit_pending was left owned on purpose because
-            # its exit order was accepted but never filled. The broker no longer
-            # reporting it is the settle signal: book the close now, with the
-            # basis snapshotted at submit time (the broker can no longer supply
-            # it). Without this the loss simply never reaches the ledger.
-            settled = False
-            if isinstance(st.get("exit_pending"), dict) and module:
-                settled = resolve_settled_exit(
-                    client, module=module, ticker=tkr, symbol=sym, state=st, bar=bar,
-                    ledger_root=ledger_root)
-            logger.warning("build_mixed_plan: dropping %s (%s) from managed — %s%s",
-                           tkr, sym, status, " (pending exit settled)" if settled else "")
-            out.dropped[tkr] = {"symbol": sym, "route": route, "status": status,
-                                "exit_settled": settled,
-                                "was_unconfirmed_entry": bool(st.get("pending_fill"))}
+            # An entry can still fill after a position snapshot reports no holding.
+            if st.get("pending_fill") and _order_is_working(client, st.get("entry_order_id")):
+                out.new_managed[tkr] = st
+                continue
+            out.dropped[tkr] = {"symbol": sym, "route": route,
+                "status": "confirmed_flat" if info_present else "not_found",
+                "was_unconfirmed_entry": bool(st.get("pending_fill"))}
             continue
-        # Still held with an accepted exit order that is still WORKING at the
-        # broker: leave it resting. A second sell stacks on top of it and the
-        # broker reads the excess as a naked short. That is how
-        # NIO260911C00004000 (833 ctr) drew 403 "account not eligible to trade
-        # uncovered option contracts" on every pass from 15:27 to 15:56 ET on
-        # 2026-09-10: the 13:54 $0.01 sell was still resting and had reserved
-        # every contract. "Day orders die at the close, so there is nothing to
-        # stack against" only holds across days; this re-check runs every pass.
-        if isinstance(st.get("exit_pending"), dict) and _order_is_working(
-                client, st["exit_pending"].get("order_id")):
-            logger.warning(
-                "build_mixed_plan: %s (%s) exit order %s is still working at the "
-                "broker — leaving it resting, not re-submitting",
-                tkr, sym, st["exit_pending"].get("order_id"),
-            )
-            out.new_managed[tkr] = st
-            continue
-        # Still held and the accepted exit order is dead (expired, cancelled,
-        # rejected) without filling: the position is genuinely stuck. Clear the
-        # flag so the exit machine re-evaluates and re-submits this pass.
-        if isinstance(st.get("exit_pending"), dict):
-            stale = st.pop("exit_pending")
-            out.stuck_exits[tkr] = {"symbol": sym, "route": route, **stale}
-            logger.error(
-                "build_mixed_plan: %s (%s) STILL HELD after an accepted exit order "
-                "(%s, submitted %s) never filled — re-evaluating the exit this pass. "
-                "A contract that repeatedly fails to sell needs a human look.",
-                tkr, sym, stale.get("reason"), stale.get("submitted_bar"),
-            )
+        held = int(owned_quantity(st, route, held))
         # The broker confirms the position exists, so an entry flagged
         # unconfirmed by execute_plan has now settled.
         st.pop("pending_fill", None)
@@ -738,7 +718,7 @@ def build_mixed_plan(
             out.exit_context[sym] = (tkr, dict(st))
             continue
         if action == "trim":
-            q = trim_quantity(policy.scale_frac, held)
+            q = min(held, int(st.get("trim_remaining_qty") or trim_quantity(policy.scale_frac, held)))
             if q >= held:
                 # Indivisible position (1 contract) or a scale_frac of 1.0: take
                 # the profit in full rather than booking nothing. Emitted as a
@@ -752,15 +732,6 @@ def build_mixed_plan(
             if q >= 1:
                 out.plan.append((sym, "sell", q, reason, route))
                 out.order_audits[sym] = _sell_audit(tkr, sym, q, route)
-                st["trimmed"] = True
-                # Exit sizing re-reads `held` from the broker every run, so a
-                # stale size here never mis-sizes an order. It does corrupt every
-                # reader that values the open book from state instead of the
-                # broker: on 2026-08-13 dealer FIG said 61 contracts against 31
-                # actually held, overstating that one position by $6,360 in the
-                # daily report. Keep the persisted size in step with what the
-                # trim just sold.
-                _apply_trim_to_size(st, route, q)
         out.new_managed[tkr] = st
 
     # 2) entries: route each new top-K name to options or shares.
@@ -1338,35 +1309,22 @@ def execute_plan(
                 # then failed to sell them (403 uncovered, then 422 expired).
                 # 43 of 62 rows in dealer_ranker/closed_trades.jsonl were written
                 # this way. Confirm the fill before booking anything.
-                exit_fill = poll_exit_fill_price(client, resp)
-                is_full_exit = bool(exit_context and sym in exit_context)
-                if exit_fill is None and is_full_exit:
-                    mark_exit_unconfirmed(new_managed, sym, resp, item=item,
-                                          exit_context=exit_context,
-                                          pos_lookup=pos_lookup, bar=bar)
-                elif exit_fill is None:
-                    # A TRIM: the position is legitimately still held either way,
-                    # so there is nothing to keep owned and nothing stuck. Just
-                    # don't book a partial close that may not have happened.
-                    logger.warning(
-                        "trim accepted but UNFILLED for %s (qty=%s) — not booked; "
-                        "the next broker read reconciles the size", sym, qty)
-                else:
-                    record_exit_realized_pnl(client, module=module, item=item, resp=resp,
-                                             entry_state=es, pos_lookup=pos_lookup, bar=bar,
-                                             ledger_root=ledger_root, exit_fill=exit_fill)
+                track_exit_submission(client, module=module, item=item, resp=resp,
+                    new_managed=new_managed, exit_context=exit_context,
+                    pos_lookup=pos_lookup, bar=bar, ledger_root=ledger_root)
+
         except Exception as exc:  # noqa: BLE001
             print(f"  FAIL {side} {qty} {sym}: {exc}")
             disp[str(sym)] = f"submit_failed:{type(exc).__name__}"
             failed.add(sym)
             if new_managed is not None and exit_context and sym in exit_context:
                 tkr, st = exit_context[sym]
-                new_managed[tkr] = st
+                new_managed.setdefault(tkr, st)
                 logger.warning(
                     "execute_plan: exit submit failed for %s (%s) — restoring to managed state",
                     tkr, sym,
                 )
-            elif new_managed is not None:
+            elif new_managed is not None and str(side).lower() == "buy":
                 drop_failed_entry(new_managed, sym)
         finally:
             if persist_managed is not None:
@@ -1682,16 +1640,28 @@ def submit_option_entry_with_ladder(client, *, symbol: str, qty, ask: float | No
             symbol=symbol, qty=qty, side="buy",
             order_type="limit", time_in_force="day", limit_price=limit_price)
         if poll_fn(resp):
-            logger.info("entry ladder: %s FILLED at limit %.2f (%d/%d, mid=%s ask=%s)",
-                        symbol, limit_price, attempt, len(ladder),
-                        _fmt_num(mid), _fmt_num(ask))
             return resp
+        observation = observe_order(client, broker_order_id(resp), resp)
+        if observation.filled_qty:
+            # A partial fill keeps this rung resting. Do not replace a partially
+            # filled entry with the full intent size; subsequent fills belong to
+            # this one order and can be reconciled without cross-rung attribution.
+            return {**resp, "status": observation.status,
+                    "filled_qty": observation.filled_qty,
+                    "filled_avg_price": observation.average_price}
         if attempt < len(ladder):
             _cancel_order_quietly(client, resp)
             sleep_fn(_ENTRY_LADDER_PAUSE_S)
-    logger.info("entry ladder: %s unfilled after %d rungs (mid=%s ask=%s) — left "
-                "resting at the ask, entry stays unconfirmed",
-                symbol, len(ladder), _fmt_num(mid), _fmt_num(ask))
+            canceled = observe_order(client, broker_order_id(resp))
+            if not canceled.terminal or canceled.filled_qty is None:
+                logger.warning("entry ladder: %s cancellation unconfirmed; keeping order %s claimed",
+                               symbol, broker_order_id(resp))
+                return resp
+            if canceled.filled_qty:
+                return {**resp, "status": canceled.status,
+                        "filled_qty": canceled.filled_qty, "filled_avg_price": canceled.average_price}
+            if canceled.status == "filled":
+                return resp  # inconsistent fill evidence: do not add exposure
     return resp
 
 
@@ -1906,8 +1876,11 @@ def mark_entry_unconfirmed(new_managed: dict | None, sym: str, resp, *, client=N
             st["entry_filled_qty"] = float(filled_qty) if filled_qty not in (None, "") else None
         except (TypeError, ValueError):
             st["entry_filled_qty"] = None
-        if fill is not None:
-            st["pending_fill"] = False
+        obs = observe_order(client, st["entry_order_id"], resp) if client is not None else None
+        if fill is not None and st.get("entry_filled_qty"):
+            st["pending_fill"] = not (obs and obs.terminal)
+            st["remaining_qty"] = st["entry_filled_qty"]
+            st["contracts" if st.get("route", "option") == "option" else "shares"] = st["entry_filled_qty"]
 
 
 def _poll_entry_order(client, resp, *, timeout_s: float = 2.0, poll_s: float = 0.4):
@@ -1947,17 +1920,8 @@ _WORKING_ORDER_STATUSES = frozenset({
 
 
 def _order_is_working(client, order_id) -> bool:
-    """True when the broker says `order_id` can still fill.
-
-    Unreadable counts as not working, which falls back to re-evaluating the exit.
-    """
-    if not order_id or not hasattr(client, "get_order"):
-        return False
-    try:
-        status = str((client.get_order(order_id) or {}).get("status", "")).strip().lower()
-    except Exception:  # noqa: BLE001 - an unreadable order must not trap the exit
-        return False
-    return status in _WORKING_ORDER_STATUSES
+    """Working OR unknown keeps a reservation; only proven terminal releases it."""
+    return not observe_order(client, order_id).terminal
 
 
 def mark_exit_unconfirmed(new_managed: dict | None, sym: str, resp, *, item, exit_context,
@@ -1989,7 +1953,7 @@ def mark_exit_unconfirmed(new_managed: dict | None, sym: str, resp, *, item, exi
     st = new_managed.get(tkr)
     if not isinstance(st, dict):
         return
-    basis = (pos_lookup or {}).get(sym, {}).get("avg_entry")
+    basis = st.get("entry_fill_price") or (pos_lookup or {}).get(sym, {}).get("avg_entry")
     if basis is None:
         basis = st.get("entry_avg_price")
     st["exit_pending"] = {
@@ -1997,6 +1961,9 @@ def mark_exit_unconfirmed(new_managed: dict | None, sym: str, resp, *, item, exi
         "reason": item[3] if len(item) > 3 else "exit",
         "route": item[4] if len(item) > 4 else "option",
         "qty": float(item[2]),
+        "position_qty": max(float(item[2]), number(st.get("remaining_qty")) or number(st.get(
+            "contracts" if (item[4] if len(item) > 4 else "option") == "option" else "shares")) or float(item[2])),
+        "full_exit": bool(exit_context and sym in exit_context),
         "entry_avg_price": float(basis) if basis else None,
         "submitted_bar": str(bar),
         "submitted_ts": now_utc_iso(),
@@ -2008,77 +1975,175 @@ def mark_exit_unconfirmed(new_managed: dict | None, sym: str, resp, *, item, exi
     )
 
 
-def resolve_settled_exit(client, *, module, ticker, symbol, state, bar,
-                         ledger_root: str | None = None) -> bool:
-    """Book a close for a position whose resting exit order has now settled.
+def reconcile_pending_exit(client, *, module, ticker, symbol, state, bar,
+                           held_qty=None, response=None, ledger_root=None):
+    """Project broker-confirmed fills; returns (closed/pending/retry/unresolved, row).
 
-    Called when the broker no longer reports the position. The resting order is
-    the authority on what happened:
-
-    * `filled` -> book the real fill price.
-    * anything else (expired/canceled) with the position gone -> the contract
-      expired. An option that expires unexercised is a total loss of premium, so
-      realized is -basis. That is the number the ledger was missing.
-
-    Returns True when a row was written, so the caller can clear the flag.
+    Evidence and projections are idempotent by broker order ID. A status read
+    failure cannot release a reservation, and a missing position cannot create P&L.
     """
-    pending = (state or {}).get("exit_pending")
+    import copy
+    pending = state.get("exit_pending")
     if not isinstance(pending, dict):
-        return False
-    try:
-        import json
-        from pathlib import Path
-        order_id = pending.get("order_id")
-        basis = pending.get("entry_avg_price")
-        qty = float(pending.get("qty") or 0)
-        route = pending.get("route", "option")
-        mult = 100.0 if route == "option" else 1.0
-        status, fill = "unknown", None
-        if order_id and hasattr(client, "get_order"):
-            try:
-                cur = client.get_order(order_id) or {}
-                status = str(cur.get("status", "")).strip().lower() or "unknown"
-                fill = _resp_fill_price(cur)
-            except Exception:  # noqa: BLE001
-                pass
-        if fill is not None and basis:
-            realized = round((float(fill) - float(basis)) * mult * qty, 2)
-            outcome = "exit_filled"
-        elif basis:
-            # Gone from the broker with no fill: the premium is gone.
-            realized, outcome = round(-float(basis) * mult * qty, 2), "expired_worthless"
+        return "retry", None
+    root = ledger_root or DEFAULT_LEDGER_ROOT
+    oid = pending.get("order_id")
+    if not oid or oid == "?":
+        state["reconciliation_required"] = "exit_order_id_unavailable"
+        return "unresolved", None
+    previous = read_evidence(root, module, oid) or {}
+    prior = previous.get("state", {}).get("exit_pending", {})
+    requested = float(pending.get("qty") or 0)
+    route = pending.get("route", state.get("route", "option"))
+    position_qty = float(pending.setdefault("position_qty", max(
+        requested, number(state.get("remaining_qty")) or number(state.get(
+            "contracts" if route == "option" else "shares")) or requested)))
+    full_exit = pending.setdefault("full_exit", requested >= position_qty)
+    old_qty = float(prior.get("confirmed_qty", 0))
+    old_proceeds = float(prior.get("confirmed_proceeds", 0))
+    observation = observe_order(client, oid, response)
+    q, px = observation.filled_qty, observation.average_price
+    valid = q is not None and q <= requested and q >= old_qty and (q == 0 or px is not None)
+    # Filled status with a contradictory size, or a missing filled_qty, is not
+    # authority to remove a position. Preserve previously established facts.
+    if observation.status == "filled" and q != requested:
+        valid = False
+    if valid and q == old_qty and q > 0 and not math.isclose(q * px, old_proceeds) and old_qty:
+        valid = False  # corrections require explicit broker-activity reconciliation
+    qty = float(q) if valid else old_qty
+    proceeds = qty * float(px) if valid and qty else old_proceeds
+    basis = number(pending.get("entry_avg_price"))
+    mult = 100.0 if route == "option" else 1.0
+    if qty > old_qty:
+        delta = qty - old_qty
+        delta_proceeds = proceeds - old_proceeds
+        append_once(Path(root) / module / "exit_fills.jsonl", {
+            "ts": now_utc_iso(), "module": module, "order_id": oid,
+            "ticker": state.get("ticker", ticker), "order_symbol": symbol,
+            "qty": delta, "cumulative_qty": qty, "proceeds": delta_proceeds * mult,
+            "realized_pnl": None if basis is None else round((delta_proceeds - basis * delta) * mult, 2),
+        }, identity=f"{oid}:fill:{qty}")
+    pending.update(confirmed_qty=qty, confirmed_proceeds=proceeds,
+                   status=observation.status, observed_at=now_utc_iso())
+    remaining = max(0.0, position_qty - qty)
+    state["remaining_qty"] = remaining
+    size_key = "contracts" if route == "option" else "shares"
+    state[size_key] = remaining
+    if "qty" in state:
+        state["qty"] = remaining
+    # Alpaca's order stream and REST representation can briefly disagree on
+    # status.  A complete quantity *and* an average fill price are nevertheless
+    # sufficient execution evidence; the reverse is not true.  In particular,
+    # never turn a bare ``filled`` status into a close when ``filled_qty`` is
+    # absent.
+    fully_filled = valid and q == requested and q > 0 and px is not None
+    terminal = valid and (observation.terminal or fully_filled)
+    result = "pending" if (observation.known and valid) else "unresolved"
+    row = None
+    if terminal and qty > 0:
+        row = closed_trade_record(
+            module=module, bar=bar, ticker=state.get("ticker", ticker), order_symbol=symbol,
+            route=route, qty=qty, exit_reason=pending.get("reason", "exit"),
+            entry_avg_price=basis, exit_fill_price=proceeds / qty,
+            realized_pnl=None if basis is None else round((proceeds - basis * qty) * mult, 2),
+            entry_state=state, order_id=oid, exit_submitted_at=pending.get("submitted_ts"),
+            decision_gain=(pending.get("ledger_context") or {}).get(
+                "decision_gain", state.get("unrealized_gain")))
+        row.update(pending.get("ledger_context") or {})
+        row.update(settle_outcome="exit_filled", exit_order_status=observation.status)
+        append_once(Path(root) / module / "closed_trades.jsonl", row, identity=f"{oid}:close")
+    if terminal:
+        if full_exit and remaining == 0:
+            result = "closed"
+        elif held_qty is not None and held_qty <= 0 and remaining > 0:
+            result = "unresolved"  # disappearance requires activity evidence
         else:
-            realized, outcome = None, "settled_basis_unknown"
-        rec = {
-            "ts": now_utc_iso(),
-            "module": module,
-            "bar": str(bar),
-            "ticker": ticker,
-            "order_symbol": symbol,
-            "route": route,
-            "side": "sell",
-            "qty": qty,
-            "exit_reason": pending.get("reason", "exit"),
-            "entry_avg_price": float(basis) if basis else None,
-            "exit_fill_price": float(fill) if fill is not None else None,
-            "realized_pnl": realized,
-            "entry_bar": (state or {}).get("entry_bar"),
-            "runs_held": (state or {}).get("runs_held"),
-            "order_id": order_id,
-            "settle_outcome": outcome,
-            "exit_order_status": status,
-            "exit_submitted_bar": pending.get("submitted_bar"),
-        }
-        out = Path(ledger_root or DEFAULT_LEDGER_ROOT) / str(module) / "closed_trades.jsonl"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with out.open("a") as fh:
-            fh.write(json.dumps(rec, default=str) + "\n")
-        logger.info("pending exit settled: %s %s qty=%s outcome=%s pnl=%s",
-                    module, symbol, qty, outcome, realized)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("resolve_settled_exit failed (%s %s): %s", module, symbol, exc)
-        return False
+            result = "retry"
+            if not full_exit:
+                state["trimmed"] = qty >= requested
+                state["trim_remaining_qty"] = max(0.0, requested - qty)
+    if held_qty is not None and held_qty <= 0 and remaining > 0 and route == "option":
+        activity = settlement_activity(client, symbol, state, now=bar)
+        if activity:
+            pending["settlement_activity"] = activity
+            expiry = parse_occ_expiry(symbol)
+            try:
+                expired_qty = -float(activity.get("qty", 0))
+                date = pd.Timestamp(activity.get("date")).date()
+                verified = (activity.get("activity_type") == "OPEXP" and expiry is not None
+                            and expiry <= date <= pd.Timestamp(bar).date()
+                            and expired_qty >= remaining and float(activity.get("net_amount")) == 0)
+            except (ValueError, TypeError):
+                verified = False
+            if verified and basis is not None:
+                row = closed_trade_record(module=module, bar=bar, ticker=state.get("ticker", ticker),
+                    order_symbol=symbol, route=route, qty=remaining, exit_reason=pending.get("reason", "exit"),
+                    entry_avg_price=basis, exit_fill_price=0.0, realized_pnl=round(-basis * remaining * mult, 2),
+                    entry_state=state, order_id=oid)
+                row.update(settle_outcome="expired_worthless", activity_id=activity["id"])
+                append_once(Path(root) / module / "closed_trades.jsonl", row,
+                            identity=f"{oid}:expiry:{activity['id']}")
+                state["remaining_qty"] = state[size_key] = 0.0
+                result = "closed"
+    if result == "unresolved":
+        state["reconciliation_required"] = "exit_evidence_incomplete"
+        logger.error("%s %s exit %s unresolved (status=%s, filled=%s)", module, symbol, oid, observation.status, q)
+    else:
+        state.pop("reconciliation_required", None)
+    if result in {"closed", "retry"}:
+        state["exit_reconciled_ids"] = list(dict.fromkeys([*state.get("exit_reconciled_ids", []), oid]))
+    # Save before releasing the pending flag: restart can replay a stale state
+    # against the same cumulative evidence and ledger event identities.
+    save_evidence(root, module, oid, {"owner": ticker, "symbol": symbol,
+        "state": copy.deepcopy(state), "complete": result in {"closed", "retry"}, "result": result})
+    if result in {"closed", "retry"}:
+        state.pop("exit_pending", None)
+    return result, row
+
+
+def track_exit_submission(client, *, module, item, resp, new_managed,
+                          exit_context=None, pos_lookup=None, bar=None, ledger_root=None,
+                          ledger_context=None):
+    """Keep an accepted exit owned, then project only its confirmed fills."""
+    sym = item[0]
+    mark_exit_unconfirmed(new_managed, sym, resp, item=item, exit_context=exit_context,
+                          pos_lookup=pos_lookup, bar=bar)
+    key = _managed_key_for_symbol(new_managed, sym)
+    if key is None:
+        raise ValueError(f"Exit {sym} has no owning state")
+    st = new_managed[key]
+    pending = st["exit_pending"]
+    pending["ledger_context"] = ledger_context or {}
+    root = ledger_root or DEFAULT_LEDGER_ROOT
+    if pending.get("order_id"):
+        # Account-wide ownership is independent of the managed-state save below.
+        # If this process dies after an accepted order, the reconciliation sweep
+        # can still prove its owner or block the report instead of losing the fill.
+        register_order_ownership(
+            order_id=pending["order_id"], module=module, symbol=sym,
+            side=item[1], qty=item[2], route=pending.get("route", "option"),
+            entry_avg_price=pending.get("entry_avg_price"),
+            reason=pending.get("reason"), root=root,
+            account_label=account_label_for_client(client),
+        )
+        import copy
+        # Initial durable evidence closes the submit-response -> state-save gap.
+        if read_evidence(root, module, pending["order_id"]) is None:
+            save_evidence(root, module, pending["order_id"],
+                          {"owner": key, "symbol": sym, "state": copy.deepcopy(st), "complete": False})
+    result, row = reconcile_pending_exit(client, module=module, ticker=key,
+        symbol=sym, state=st, bar=bar, response=resp, ledger_root=root)
+    if result == "closed":
+        new_managed.pop(key, None)
+    return result, row
+
+
+def resolve_settled_exit(client, *, module, ticker, symbol, state, bar,
+                         ledger_root=None) -> bool:
+    """Only proven complete fills settle; absence is never a zero-price fill."""
+    result, _ = reconcile_pending_exit(client, module=module, ticker=ticker,
+        symbol=symbol, state=state, bar=bar, held_qty=0, ledger_root=ledger_root)
+    return result == "closed"
 
 
 def drop_failed_entry(new_managed: dict | None, sym: str) -> None:
@@ -2297,7 +2362,17 @@ def submit_pending_exit_orders(client, module, *, equity_tif_fn, pos_lookup=None
     except Exception:
         entries = []
     pos_lookup = pos_lookup or {}
+    # Current runners always supply their managed state.  Keep old queue files
+    # executable for the one-pass, fully-confirmed case by constructing a
+    # short-lived owner from the queue record.  An explicit but missing owner is
+    # still an error: it means a live runner lost state and must reconcile before
+    # it is allowed to sell.
+    legacy_managed = managed is None
+    if legacy_managed:
+        managed = {}
     submitted, skipped = [], []
+    if managed is not None:
+        recover_pending_exits(ledger_root or DEFAULT_LEDGER_ROOT, module, managed)
     today_et = (now or _now_et()).date()
     for rec in entries:
         sym = rec.get("order_symbol")
@@ -2305,6 +2380,30 @@ def submit_pending_exit_orders(client, module, *, equity_tif_fn, pos_lookup=None
         if held <= 0:
             skipped.append({**rec, "skip": "not_held"})
             continue
+        tkr = _managed_key_for_symbol(managed, sym)
+        if tkr is None and legacy_managed:
+            tkr = str(rec.get("owner") or rec.get("ticker") or sym)
+            route = rec.get("route", "option")
+            managed[tkr] = {
+                "route": route,
+                "occ" if route == "option" else "symbol": sym,
+                "contracts" if route == "option" else "shares": float(held),
+                "entry_avg_price": pos_lookup.get(sym, {}).get("avg_entry"),
+            }
+        if tkr is None:
+            skipped.append({**rec, "skip": "submit_failed: missing owner; reconcile first"})
+            continue
+        st = managed[tkr]
+        if isinstance(st.get("exit_pending"), dict):
+            oid = st["exit_pending"].get("order_id")
+            result, _ = reconcile_pending_exit(client, module=module, ticker=tkr,
+                symbol=sym, state=st, bar=rec.get("bar"), held_qty=held, ledger_root=ledger_root)
+            if result != "retry":
+                if result == "closed":
+                    managed.pop(tkr, None)
+                submitted.append({**rec, "order_id": oid, "reconciled": result})
+                continue
+        held = owned_quantity(st, rec.get("route", "option"), held)
         # An expired contract cannot be sold. Terminal like "not_held": retrying
         # it every session forever is noise that buries the queue entries a human
         # actually needs to see. The position, if the broker still reports one,
@@ -2353,16 +2452,17 @@ def submit_pending_exit_orders(client, module, *, equity_tif_fn, pos_lookup=None
             else:
                 resp = client.submit_order(symbol=sym, qty=qty, side=rec.get("side", "sell"),
                                            order_type="market", time_in_force=equity_tif_fn())
+            tkr = _managed_key_for_symbol(managed, sym)
+            if tkr is None:
+                raise ValueError(f"Deferred exit {sym} has no owning state")
+            context = {sym: (tkr, managed[tkr])} if full_exit else {}
+            track_exit_submission(client, module=module,
+                item=(sym, rec.get("side", "sell"), qty, reason, rec.get("route", "option")),
+                resp=resp, new_managed=managed, exit_context=context,
+                pos_lookup=pos_lookup, bar=rec.get("bar"), ledger_root=ledger_root)
             submitted.append({**rec, "qty": qty, "order_id": resp.get("id", "")})
             print(f"  OK deferred-exit sell {qty} {sym}  id={resp.get('id', '?')}")
-            tkr = _managed_key_for_symbol(managed, sym)
-            record_exit_realized_pnl(
-                client, module=module,
-                item=(sym, rec.get("side", "sell"), qty, rec.get("reason", "exit"),
-                      rec.get("route", "option")),
-                resp=resp, entry_state=(managed or {}).get(tkr) if tkr else None,
-                pos_lookup=pos_lookup, bar=rec.get("bar"), ledger_root=ledger_root,
-            )
+
         except Exception as exc:  # noqa: BLE001
             skipped.append({**rec, "skip": f"submit_failed: {exc}"})
             print(f"  FAIL deferred-exit sell {qty} {sym}: {exc}")

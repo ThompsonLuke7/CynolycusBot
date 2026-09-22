@@ -58,10 +58,10 @@ def test_every_exec_path_flags_unconfirmed_entries(path):
 
 
 @pytest.mark.parametrize("path", EXEC_PATHS, ids=lambda p: p.name)
-def test_every_exec_path_writes_the_realized_pnl_ledger(path):
-    assert _calls(path, "record_exit_realized_pnl"), (
-        f"{path.relative_to(REPO)} submits exits without writing the realized-PnL "
-        "ledger; closed trades would go unrecorded."
+def test_every_exec_path_reconciles_exit_fills_before_ledger_write(path):
+    assert _calls(path, "track_exit_submission"), (
+        f"{path.relative_to(REPO)} submits exits without the shared fill reconciliation; "
+        "accepted or partial orders could be booked as closed."
     )
 
 
@@ -94,12 +94,12 @@ def test_a_module_that_defers_exits_also_flushes_them(path):
     )
 
 
-def test_the_pending_exit_flush_also_writes_the_ledger():
-    """The flush is a fourth exit path and had no ledger call at all until
-    2026-08-12 — the AMAT/VSH rows that went missing on 08-11."""
+def test_the_pending_exit_flush_reconciles_before_writing_the_ledger():
+    """The flush is a fourth exit path.  It must use the same quantitative
+    fill evidence as direct exits before producing a closed-trade event."""
     src = (REPO / "core/live_4h_exec.py").read_text()
     tree = ast.parse(src)
     flush = next(n for n in ast.walk(tree)
                  if isinstance(n, ast.FunctionDef) and n.name == "submit_pending_exit_orders")
-    assert any(isinstance(n, ast.Call) and getattr(n.func, "id", None) == "record_exit_realized_pnl"
+    assert any(isinstance(n, ast.Call) and getattr(n.func, "id", None) == "track_exit_submission"
                for n in ast.walk(flush))

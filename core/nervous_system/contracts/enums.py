@@ -105,6 +105,7 @@ class StateType(str, Enum):
     DEALER = "DEALER"
     PORTFOLIO = "PORTFOLIO"
     READINESS = "READINESS"
+    PEER_GROUP = "PEER_GROUP"
 
 
 class AssetClass(str, Enum):

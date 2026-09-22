@@ -247,7 +247,8 @@ def test_a_small_option_position_books_a_trim_instead_of_nothing():
                 {"XYZ260918C00100000": {"qty": 4, "avg_entry": 9.20, "current": 24.0}},
                 ufn=lambda _t, at=None: (118.0, 5.0))
     assert [(i[2], i[3]) for i in res.plan] == [(1, "take_profit_+30%")]
-    assert res.new_managed["XYZ"]["trimmed"] is True
+    # Planning is not a fill.  The trim flag changes only after broker evidence.
+    assert res.new_managed["XYZ"].get("trimmed") is not True
 
 
 # --- the between-bar risk pass must mirror the same stop ------------------------
@@ -361,7 +362,7 @@ def test_the_mrvl_case_now_books_a_trim(_ufn=lambda _t, at=None: (100.0, 5.0)):
     assert [(i[0], i[2], i[3]) for i in res.plan] == [
         ("XYZ260918C00100000", 1, "take_profit_+30%")]
     st = res.new_managed["XYZ"]
-    assert st["trimmed"] is True and st["contracts"] == 4   # 5 held - 1 sold
+    assert st.get("trimmed") is not True and st["contracts"] == 5
 
 
 def test_the_sndk_case_takes_profit_in_full():

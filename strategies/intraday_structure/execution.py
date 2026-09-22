@@ -45,6 +45,8 @@ from core.live_4h_exec import (
     closed_trade_record,
     filter_option_entries_by_buying_power,
     poll_exit_fill_price,
+    track_exit_submission,
+    reconcile_pending_exit,
     submit_option_exit_with_ladder,
 )
 from strategies.intraday_structure.config import ExecutionPolicy
@@ -148,6 +150,9 @@ class IntradayOptionExecutor:
         except Exception:  # noqa: BLE001
             logger.exception("intraday execution: could not restore open positions")
             self._open = {}
+        from core.order_reconciliation import recover_pending_exits
+        from core.live_4h_exec import DEFAULT_LEDGER_ROOT
+        recover_pending_exits(self._ledger_root or DEFAULT_LEDGER_ROOT, LEDGER_MODULE, self._open)
         if not self._open:
             return
         try:
@@ -214,7 +219,7 @@ class IntradayOptionExecutor:
         dropped = []
         for setup_id, pos in list(self._open.items()):
             occ = str(pos.get("occ") or "").strip().upper()
-            if not occ or held.get(occ):
+            if not occ or held.get(occ) or isinstance(pos.get("exit_pending"), dict):
                 continue
             dropped.append(occ)
             self._open.pop(setup_id, None)
@@ -617,13 +622,26 @@ class IntradayOptionExecutor:
         # every module holding this contract; only our order tells us which part
         # is ours.
         occ = pos["occ"]
-        qty = int(_f(pos.get("entry_filled_qty")) or pos.get("qty") or 0)
+        qty = int(pos.get("remaining_qty", _f(pos.get("entry_filled_qty")) or pos.get("qty") or 0))
         if qty <= 0:
             logger.warning("intraday execution: %s has no recorded fill quantity — "
                            "releasing the claim rather than guessing a size", occ)
             self._open.pop(setup_id, None)
             self._persist()
             return None
+
+        if isinstance(pos.get("exit_pending"), dict):
+            held_now = self._held_contracts()
+            result, record = reconcile_pending_exit(self._client, module=LEDGER_MODULE,
+                ticker=setup_id, symbol=occ, state=pos, bar=self._now().isoformat(),
+                held_qty=None if held_now is None else held_now.get(occ.upper(), 0),
+                ledger_root=self._ledger_root)
+            if result == "closed":
+                self._open.pop(setup_id, None)
+            self._persist()
+            if result != "retry":
+                return record
+            qty = int(pos.get("remaining_qty", qty))
 
         blocked = self._exit_retry_blocked(pos)
         if blocked:
@@ -681,46 +699,32 @@ class IntradayOptionExecutor:
             self._persist()
             return None
 
-        exit_fill = _f(resp.get("filled_avg_price")) or poll_exit_fill_price(self._client, resp)
-        entry_px = _f(pos.get("entry_fill_price")) or _f(pos.get("limit_price"))
-        realized = (round((exit_fill - entry_px) * OPTION_MULTIPLIER * qty, 2)
-                    if (exit_fill is not None and entry_px) else None)
-
-        record = closed_trade_record(
-            module=LEDGER_MODULE,
-            bar=self._now().isoformat(),
-            ticker=pos["ticker"],
-            order_symbol=occ,
-            route="option",
-            qty=qty,
-            exit_reason=exit_reason,
-            entry_avg_price=entry_px,
-            exit_fill_price=exit_fill,
-            realized_pnl=realized,
-            entry_state=pos,
-            order_id=str(resp.get("id", "")) or None,
-            exit_submitted_at=resp.get("submitted_at"),
-        )
-        # Intraday-specific context, and the modelled counterpart. The gap
-        # between the modelled prices and the realized option result is the
-        # execution cost this engine could never see.
-        record["setup_id"] = setup_id
-        record["setup_type"] = pos.get("setup_type")
-        record["direction"] = pos.get("direction")
-        record["option_type"] = pos.get("option_type")
-        record["expiry"] = pos.get("expiry")
-        record["dte_at_entry"] = pos.get("dte_at_entry")
-        record["u_exit"] = u_exit
-        record["modelled_entry_price"] = modelled_entry
-        record["modelled_exit_price"] = modelled_exit
-        record["urgent_exit"] = bool(urgent)
-        append_closed_trade(LEDGER_MODULE, record, self._ledger_root)
-
-        self._open.pop(setup_id, None)
+        context = {
+            "setup_id": setup_id, "setup_type": pos.get("setup_type"),
+            "direction": pos.get("direction"), "option_type": pos.get("option_type"),
+            "expiry": pos.get("expiry"), "dte_at_entry": pos.get("dte_at_entry"),
+            "u_exit": u_exit, "modelled_entry_price": modelled_entry,
+            "modelled_exit_price": modelled_exit, "urgent_exit": bool(urgent),
+        }
+        _, record = track_exit_submission(self._client, module=LEDGER_MODULE,
+            item=(occ, "sell", qty, exit_reason, "option"), resp=resp,
+            new_managed=self._open, exit_context={occ: (setup_id, pos)},
+            pos_lookup={occ: {"avg_entry": _f(pos.get("entry_fill_price")) or _f(pos.get("limit_price"))}},
+            bar=self._now().isoformat(), ledger_root=self._ledger_root, ledger_context=context)
         self._persist()
-        logger.info("intraday execution: SELL %s x%d for %s reason=%s pnl=%s",
-                    occ, qty, setup_id, exit_reason, realized)
         return record
+
+    def reconcile_exits(self):
+        """Run independently of setup terminal callbacks, including after restart."""
+        from core.order_reconciliation import recover_pending_exits
+        from core.live_4h_exec import DEFAULT_LEDGER_ROOT
+        with self._lock:
+            recover_pending_exits(self._ledger_root or DEFAULT_LEDGER_ROOT, LEDGER_MODULE, self._open)
+            for key, pos in list(self._open.items()):
+                if isinstance(pos.get("exit_pending"), dict):
+                    reason = pos["exit_pending"].get("reason", "exit")
+                    self._close_position(key, pos, exit_reason=reason, u_exit=None)
+            self._persist()
 
 
     # -- introspection -------------------------------------------------------

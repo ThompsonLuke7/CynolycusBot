@@ -78,8 +78,8 @@ def momentum_candidates(df: pd.DataFrame) -> dict[str, pd.Series]:
     r_balpha = rank_in_bar(pd.DataFrame({"x": df["fwd_max_return"] - beta * bench},
                                         index=df.index), "x")
     return {
-        # as deployed today
-        "M0_current": 0.40 * r_alpha + 0.25 * r_atr + 0.20 * r_pers + 0.15 * r_dd,
+        # Composite-regression label baseline; not the installed classifier.
+        "M0_composite_regression": 0.40 * r_alpha + 0.25 * r_atr + 0.20 * r_pers + 0.15 * r_dd,
         # same shape, alpha made genuinely market-relative
         "M1_beta_alpha": 0.40 * r_balpha + 0.25 * r_atr + 0.20 * r_pers + 0.15 * r_dd,
         # alpha dropped, its weight moved to the volatility-neutral component
@@ -187,15 +187,16 @@ def decile_lift(df: pd.DataFrame, pred: np.ndarray, target: str) -> float:
 
 
 def split_with_embargo(df: pd.DataFrame):
-    ts = df.index.get_level_values(0)
-    uniq = np.array(sorted(ts.unique()))
-    n = len(uniq)
-    tr_end, va_end = uniq[int(n * 0.60)], uniq[int(n * 0.78)]
-    gap = pd.Timedelta(hours=4 * EMBARGO_BARS)
-    train = df[ts <= tr_end]
-    val = df[(ts > tr_end + gap) & (ts <= va_end)]
-    test = df[ts > va_end + gap]
-    return train, val, test
+    from strategies.model_training.colab_competition import time_split
+    work = df.copy()
+    work["_decision_timestamp"] = df.index.get_level_values(0)
+    work["ticker"] = df.index.get_level_values(1)
+    # Keep the original 60%/78% cutoff fractions, purge 60 observed bars per
+    # ticker, and leave validation/test dates fixed. Supports explicit endpoints.
+    parts = time_split(work, .60, .18, timestamp_column="_decision_timestamp",
+                       embargo_bars=EMBARGO_BARS,
+                       label_end_column="label_end" if "label_end" in work else None)
+    return tuple(part.drop(columns=["_decision_timestamp", "ticker"]) for part in parts)
 
 
 def run_module(name: str, matrix: Path, cand_fn, feature_cols, label_inputs, out_rows) -> None:
@@ -299,7 +300,9 @@ def main() -> None:
                        "dollar_vol_pctile_252"]
         run_module("META  (raw-value label, stacked over mom/htf OOF)", meta,
                    meta_candidates, [c for c in cols if c not in drop], meta_inputs, rows)
-    out = DATA / "label_bakeoff_results.json"
+    out = DATA / "label_bakeoff_results_purged_v2.json"
+    if out.exists():
+        raise FileExistsError(f"Preserve existing experiment: {out}")
     out.write_text(json.dumps(rows, indent=1))
     print(f"\nwrote {out}")
 

@@ -65,6 +65,9 @@ class CompetitionConfig:
     graded_relevance: bool = False       # ranker training target: graded magnitude buckets
     graded_relevance_bins: int = 4
 
+    embargo_bars: int = 0
+    label_end_column: str | None = None
+
     def reg_target(self) -> str:
         return self.regression_target_column or self.target_column
 
@@ -124,11 +127,46 @@ def load_bundle(bundle: Path, work_dir: Path, manifest_name: str) -> dict[str, A
     return json.loads((work_dir / manifest_name).read_text())
 
 
-def time_split(frame: pd.DataFrame, train_frac: float, val_frac: float) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    n = len(frame)
-    t1 = int(n * train_frac)
-    t2 = int(n * (train_frac + val_frac))
-    return frame.iloc[:t1].copy(), frame.iloc[t1:t2].copy(), frame.iloc[t2:].copy()
+def purge_before(frame, boundary, *, timestamp_column="timestamp", embargo_bars=0,
+                 label_end_column=None):
+    """Retain only labels available strictly before a decision boundary."""
+    ts = pd.to_datetime(frame[timestamp_column], utc=True)
+    result = frame[ts < pd.Timestamp(boundary)]
+    if label_end_column:
+        if label_end_column not in result:
+            raise ValueError(f"Missing label availability column: {label_end_column}")
+        ends = pd.to_datetime(result[label_end_column], utc=True)
+        return result[ends.notna() & (ends < pd.Timestamp(boundary))]
+    if embargo_bars:
+        # Per-symbol observed bars are conservative when the history is sparse.
+        ids = [c for c in ("ticker",) if c in result]
+        def trim(g):
+            stamps = np.sort(g[timestamp_column].unique())
+            return g.iloc[:0] if len(stamps) <= embargo_bars else g[g[timestamp_column] < stamps[-embargo_bars]]
+        return pd.concat([trim(g) for _, g in result.groupby(ids[0])]) if ids and not result.empty else trim(result)
+    return result
+
+def time_split(frame, train_frac, val_frac, *, timestamp_column="timestamp",
+               embargo_bars=0, label_end_column=None):
+    """Whole timestamp groups; fixed cutoffs followed by label purging."""
+    if not 0 < train_frac < train_frac + val_frac < 1:
+        raise ValueError("Require nonempty train/validation/test fractions")
+    frame = frame.sort_values(timestamp_column)
+    ts = pd.to_datetime(frame[timestamp_column], utc=True)
+    stamps = np.sort(ts.unique())
+    if len(stamps) < 3:
+        raise ValueError("At least three decision timestamps required")
+    i1, i2 = int(len(stamps)*train_frac), int(len(stamps)*(train_frac+val_frac))
+    if not 0 < i1 < i2 < len(stamps):
+        raise ValueError("Insufficient timestamps for requested split")
+    c1, c2 = stamps[i1], stamps[i2]
+    kwargs = dict(timestamp_column=timestamp_column, embargo_bars=embargo_bars, label_end_column=label_end_column)
+    tr = purge_before(frame[ts < c1], c1, **kwargs)
+    va = purge_before(frame[(ts >= c1) & (ts < c2)], c2, **kwargs)
+    te = frame[ts >= c2]
+    if any(x.empty for x in (tr, va, te)):
+        raise ValueError("Purging leaves an empty split; expand history, not reduce the guard")
+    return tr.copy(), va.copy(), te.copy()
 
 
 def normalize_features(frame: pd.DataFrame, feature_columns: list[str]) -> list[str]:
@@ -589,6 +627,7 @@ def train_one_family(
 ) -> tuple[Any, dict[str, Any], pd.DataFrame, set[str]]:
     labels, positive_label, positive_index, _ = _train_labels(train_df, cfg)
     model = fit_family(family, seed, train_df, val_df, cfg)
+    val_scores = score_family(model, family, val_df, cfg, positive_index)
     test_scores = score_family(model, family, test_df, cfg, positive_index)
 
     row: dict[str, Any] = {
@@ -604,21 +643,23 @@ def train_one_family(
     if "classifier" in family:
         row.update(classification_metrics(model, val_df, cfg.feature_columns, cfg.target_column, labels, positive_label, "val"))
         row.update(classification_metrics(model, test_df, cfg.feature_columns, cfg.target_column, labels, positive_label, "test"))
+    row.update(rank_metrics(val_scores, val_df, cfg, "val"))
+    row.update(spearman_metric(val_scores, val_df, cfg, "val"))
     row.update(rank_metrics(test_scores, test_df, cfg, "test"))
     row.update(spearman_metric(test_scores, test_df, cfg, "test"))
     picks = top_pick_ids(test_df, test_scores, cfg)
     return model, row, feature_importance(model, cfg.feature_columns), picks
 
 
-def primary_metric_name(results: pd.DataFrame) -> str | None:
-    """The universal model-selection metric, preferred order: NDCG@k > precision@k > Spearman."""
-    for prefix in ("test_ndcg_at_", "test_precision_at_"):
-        cols = [c for c in results.columns if c.startswith(prefix)]
-        if cols and pd.to_numeric(results[cols[0]], errors="coerce").notna().any():
-            return cols[0]
-    if "test_spearman" in results.columns and pd.to_numeric(results["test_spearman"], errors="coerce").notna().any():
-        return "test_spearman"
-    return None
+def primary_metric_name(results: pd.DataFrame) -> str:
+    """Selection is validation-only; test metrics are reporting-only."""
+    for prefix in ("val_ndcg_at_", "val_precision_at_"):
+        for col in sorted(c for c in results.columns if c.startswith(prefix)):
+            if pd.to_numeric(results[col], errors="coerce").notna().any():
+                return col
+    if "val_spearman" in results and pd.to_numeric(results["val_spearman"], errors="coerce").notna().any():
+        return "val_spearman"
+    raise ValueError("No usable validation selection metric; test fallback is forbidden")
 
 
 def summarize_runs(rows: list[dict[str, Any]]) -> pd.DataFrame:
@@ -688,20 +729,13 @@ def pick_overlap_frame(picks: dict[tuple[str, int], set[str]], cfg: CompetitionC
 
 
 def choose_best(results: pd.DataFrame) -> pd.Series:
-    """Best single run by the universal metric: NDCG@k, tiebreak precision@k then Spearman."""
-    ndcg = [c for c in results.columns if c.startswith("test_ndcg_at_")]
-    prec = [c for c in results.columns if c.startswith("test_precision_at_")]
-    sort_cols: list[str] = []
-    ascending: list[bool] = []
-    if ndcg:
-        sort_cols.append(ndcg[0]); ascending.append(False)
-    if prec:
-        sort_cols.append(prec[0]); ascending.append(False)
-    if "test_spearman" in results.columns:
-        sort_cols.append("test_spearman"); ascending.append(False)
-    if not sort_cols:
-        return results.iloc[0]
-    return results.sort_values(sort_cols, ascending=ascending, na_position="last").iloc[0]
+    primary = primary_metric_name(results)
+    valid = results[pd.to_numeric(results[primary], errors="coerce").notna()]
+    tie = [c for c in sorted(results) if c.startswith("val_precision_at_")]
+    if "val_spearman" in results:
+        tie.append("val_spearman")
+    cols = list(dict.fromkeys([primary, *tie]))
+    return valid.sort_values(cols, ascending=False, kind="stable", na_position="last").iloc[0]
 
 
 def run_competition(frame: pd.DataFrame, cfg: CompetitionConfig) -> dict[str, Any]:
@@ -715,7 +749,9 @@ def run_competition(frame: pd.DataFrame, cfg: CompetitionConfig) -> dict[str, An
     required = list(dict.fromkeys(c for c in required if c in frame.columns))
     frame = frame.dropna(subset=required).copy()
     normalize_features(frame, cfg.feature_columns)
-    train_df, val_df, test_df = time_split(frame, cfg.train_frac, cfg.val_frac)
+    train_df, val_df, test_df = time_split(frame, cfg.train_frac, cfg.val_frac,
+        timestamp_column=cfg.timestamp_column, embargo_bars=cfg.embargo_bars,
+        label_end_column=cfg.label_end_column)
 
     rows: list[dict[str, Any]] = []
     importances: dict[tuple[str, int], pd.DataFrame] = {}
@@ -774,6 +810,10 @@ def run_competition(frame: pd.DataFrame, cfg: CompetitionConfig) -> dict[str, An
     metadata = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "task_name": cfg.task_name,
+        "selection_metric": primary,
+        "selection_end": str(test_df[cfg.timestamp_column].min()),
+        "embargo_bars": cfg.embargo_bars,
+        "label_end_column": cfg.label_end_column,
         "target_column": cfg.target_column,
         "families": cfg.families,
         "seeds": cfg.seeds,
@@ -799,6 +839,7 @@ def run_competition(frame: pd.DataFrame, cfg: CompetitionConfig) -> dict[str, An
         "train_df": train_df,
         "val_df": val_df,
         "test_df": test_df,
+        "selection_end": test_df[cfg.timestamp_column].min(),
     }
 
 
@@ -841,11 +882,12 @@ def walk_forward_oof(
     min_test_rows: int = 1000,
     val_frac: float = 0.2,
     diagnostic_columns: list[str] | None = None,
+    selection_end=None,
 ) -> pd.DataFrame:
     """Refit `family` per walk-forward fold and emit out-of-fold per-row scores.
 
-    The competition picks the winning family/seed on a single split; this regenerates
-    full-history OOF predictions with that winner so downstream backtests / the meta
+    The competition selects on validation; only observations after selection_end
+    are eligible for this frozen specification. This emits forward OOF predictions so downstream backtests / the meta
     spine keep their contract. Returns a frame indexed by id_columns with `score`, `y`
     (continuous quality), and any `diagnostic_columns` present.
     """
@@ -858,10 +900,20 @@ def walk_forward_oof(
     folds = date_folds(ts, train_months=train_months, embargo_days=embargo_days, test_months=test_months)
     print(f"walk_forward_oof: {family} seed={seed} folds={len(folds)}")
 
+    if selection_end is None:
+        _, _, holdout = time_split(work, cfg.train_frac, cfg.val_frac,
+            timestamp_column=cfg.timestamp_column, embargo_bars=cfg.embargo_bars,
+            label_end_column=cfg.label_end_column)
+        selection_end = holdout[cfg.timestamp_column].min()
+    selection_end = pd.Timestamp(selection_end)
     blocks: list[pd.DataFrame] = []
     for fi, f in enumerate(folds):
         tr = work[(ts >= f["train_start"]) & (ts <= f["train_end"])]
-        te = work[(ts >= f["test_start"]) & (ts <= f["test_end"])]
+        te = work[(ts >= f["test_start"]) & (ts < f["test_end"]) & (ts >= selection_end)]
+        if te.empty:
+            continue
+        tr = purge_before(tr, te[cfg.timestamp_column].min(), timestamp_column=cfg.timestamp_column,
+                          embargo_bars=cfg.embargo_bars, label_end_column=cfg.label_end_column)
         if len(tr) < min_train_rows or len(te) < min_test_rows:
             continue
         days = np.sort(pd.to_datetime(tr[cfg.timestamp_column], utc=True).dt.normalize().unique())
@@ -869,6 +921,8 @@ def walk_forward_oof(
         cut = pd.Timestamp(days[split_at])
         tr_ts = pd.to_datetime(tr[cfg.timestamp_column], utc=True)
         inner_tr, inner_val = tr[tr_ts < cut], tr[tr_ts >= cut]
+        inner_tr = purge_before(inner_tr, cut, timestamp_column=cfg.timestamp_column,
+                                embargo_bars=cfg.embargo_bars, label_end_column=cfg.label_end_column)
         if len(inner_tr) < min_train_rows // 2 or len(inner_val) < 200:
             continue
         _, _, positive_index, _ = _train_labels(inner_tr, cfg)
@@ -876,6 +930,11 @@ def walk_forward_oof(
         scores = score_family(model, family, te, cfg, positive_index)
         block = te[[c for c in cfg.id_columns if c in te.columns]].copy()
         block["score"] = np.asarray(scores, dtype=float)
+        block["model_family"] = family
+        block["model_seed"] = seed
+        block["selection_end"] = selection_end
+        block["fit_label_cutoff"] = te[cfg.timestamp_column].min()
+        block["fold"] = fi
         block["y"] = pd.to_numeric(te[cfg.reg_target()], errors="coerce").to_numpy(float)
         for c in diagnostic_columns:
             if c in te.columns:

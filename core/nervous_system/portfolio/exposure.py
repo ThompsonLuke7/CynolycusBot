@@ -53,16 +53,16 @@ def calculate_exposure(
     """Compute exposure for one broker observation against one context."""
 
     issues: list[DataQualityIssue] = []
-    theme_weights = _theme_weights(context)
+    theme_weights_by_ticker = _theme_weights_by_ticker(context)
 
     existing = _aggregate(
-        portfolio.positions, config, theme_weights, context.ticker, issues
+        portfolio.positions, config, theme_weights_by_ticker, issues
     )
 
     proposed = None
     if proposed_position is not None:
         proposed = _aggregate(
-            (proposed_position,), config, theme_weights, context.ticker, issues
+            (proposed_position,), config, theme_weights_by_ticker, issues
         )
 
     combined = _combine(existing, proposed)
@@ -112,6 +112,62 @@ def calculate_exposure(
     )
 
 
+def evaluate_proposed_concentration(
+    portfolio: PortfolioState,
+    context: ContextSnapshot,
+    *,
+    config: PortfolioConfig,
+    proposed_underlying: str,
+    proposed_notional: Decimal,
+) -> tuple[ExposureLimitResult, ...]:
+    """Evaluate concentration limits for the portfolio PLUS one proposed entry.
+
+    Pure, and deliberately separate from ``calculate_exposure``: the policy
+    engine must not mint a report id or persist anything to decide a veto, and
+    a post-trade report must not be the thing a pre-trade gate depends on.
+
+    The proposal is added as notional to the buckets its underlying maps to,
+    rather than as a fabricated ``PortfolioPosition``, because a synthetic
+    position would need an invented quantity and price to exist at all -- and
+    the limits are stated in notional, so the invention would buy nothing.
+    """
+
+    if not isinstance(proposed_underlying, str) or not proposed_underlying.strip():
+        raise ValueError("proposed_underlying must be a non-empty string")
+    notional = _decimal(proposed_notional)
+    if notional < _ZERO:
+        raise ValueError("proposed_notional must not be negative")
+
+    issues: list[DataQualityIssue] = []
+    theme_weights_by_ticker = _theme_weights_by_ticker(context)
+    aggregate = _aggregate(portfolio.positions, config, theme_weights_by_ticker, issues)
+
+    if notional > _ZERO:
+        aggregate.gross += notional
+        aggregate.long += notional
+        aggregate.net += notional
+        _add(aggregate.symbol, proposed_underlying, notional)
+        sector_id = config.sector_for(proposed_underlying)
+        _add(aggregate.sector, sector_id if sector_id is not None else UNALLOCATED, notional)
+        _allocate_theme(
+            aggregate,
+            PortfolioPosition(
+                broker_position_id=f"PROPOSED:{proposed_underlying}",
+                symbol=proposed_underlying,
+                underlying=proposed_underlying,
+                asset_class=AssetClass.EQUITY,
+                quantity=Decimal("1"),
+            ),
+            notional,
+            theme_weights_by_ticker,
+        )
+        for factor_id in config.factors_for(proposed_underlying):
+            _add(aggregate.factor, factor_id, notional)
+
+    quality = DataQualitySummary(issues=tuple(issues))
+    return _evaluate_limits(aggregate, config, unknown=not quality.is_usable)
+
+
 def _quantize_map(bucket: Mapping[str, Decimal], quantum: Decimal) -> dict[str, Decimal]:
     return {key: _quantize(value, quantum) for key, value in sorted(bucket.items())}
 
@@ -146,8 +202,7 @@ class _Aggregate:
 def _aggregate(
     positions: tuple[PortfolioPosition, ...],
     config: PortfolioConfig,
-    theme_weights: Mapping[str, Decimal],
-    context_ticker: str,
+    theme_weights_by_ticker: Mapping[str, Mapping[str, Decimal]],
     issues: list[DataQualityIssue],
 ) -> _Aggregate:
     result = _Aggregate()
@@ -188,7 +243,7 @@ def _aggregate(
         else:
             _add(result.sector, sector_id, notional)
 
-        _allocate_theme(result, position, notional, theme_weights, context_ticker)
+        _allocate_theme(result, position, notional, theme_weights_by_ticker)
 
         for factor_id in config.factors_for(position.underlying):
             _add(result.factor, factor_id, notional)
@@ -205,12 +260,14 @@ def _allocate_theme(
     result: _Aggregate,
     position: PortfolioPosition,
     notional: Decimal,
-    theme_weights: Mapping[str, Decimal],
-    context_ticker: str,
+    theme_weights_by_ticker: Mapping[str, Mapping[str, Decimal]],
 ) -> None:
-    """Split one position's notional across its normalised theme weights."""
+    """Split one position's notional across its own normalised theme weights."""
 
-    if position.underlying != context_ticker or not theme_weights:
+    theme_weights = theme_weights_by_ticker.get(position.underlying)
+    if not theme_weights:
+        # No membership was carried for this underlying, so its theme is
+        # genuinely unknown. UNALLOCATED says so rather than guessing.
         _add(result.theme, UNALLOCATED, notional)
         return
     allocated = _ZERO
@@ -336,18 +393,32 @@ def _evaluate_limits(
     return tuple(results)
 
 
-def _theme_weights(context: ContextSnapshot) -> dict[str, Decimal]:
-    """Normalise positive theme memberships so one position is split, not copied."""
+def _theme_weights_by_ticker(context: ContextSnapshot) -> dict[str, dict[str, Decimal]]:
+    """Normalised theme weights per underlying, for the context ticker and peers.
 
-    positive = {
-        membership.theme_id: _decimal(membership.weight)
-        for membership in context.theme_memberships
-        if membership.weight > 0
-    }
-    total = sum(positive.values(), _ZERO)
-    if total <= _ZERO:
-        return {}
-    return {theme_id: weight / total for theme_id, weight in positive.items()}
+    Before peers existed this returned weights for the context ticker alone, so
+    every OTHER holding fell to ``UNALLOCATED`` and a theme limit could only
+    ever see one position.  Sector and factor buckets never had that problem --
+    they come from portfolio-wide config maps -- which is why theme was the one
+    scope that could not be enforced.
+    """
+
+    grouped: dict[str, dict[str, Decimal]] = {}
+    for membership in (*context.theme_memberships, *context.peer_theme_memberships):
+        if membership.weight <= 0:
+            continue
+        grouped.setdefault(membership.ticker, {})[membership.theme_id] = _decimal(
+            membership.weight
+        )
+    normalised: dict[str, dict[str, Decimal]] = {}
+    for ticker, positive in grouped.items():
+        total = sum(positive.values(), _ZERO)
+        if total <= _ZERO:
+            continue
+        normalised[ticker] = {
+            theme_id: weight / total for theme_id, weight in positive.items()
+        }
+    return normalised
 
 
-__all__ = ["UNALLOCATED", "calculate_exposure"]
+__all__ = ["UNALLOCATED", "calculate_exposure", "evaluate_proposed_concentration"]

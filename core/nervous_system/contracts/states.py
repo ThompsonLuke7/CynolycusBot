@@ -224,6 +224,56 @@ class DealerState(StateEnvelope):
     metrics: ImmutableFloatMap = Field(default_factory=dict)
 
 
+class PeerGroupState(StateEnvelope):
+    """One group of co-moving tickers, and how that grouping was derived.
+
+    This is the lateral axis of the state registry.  Every other state type
+    describes a level of the hierarchy (market, sector, theme, ticker); this
+    one describes which names move TOGETHER, which the hierarchy cannot say.
+
+    ``method`` matters more than it looks.  Measured on this repo's own data
+    (research/execution_quality/24_horizon_thesis_experiments.md §7), trailing
+    correlation clustering reaches 0.343 forward 20d pairwise correlation
+    against 0.388 for the LLM theme taxonomy and 0.217 for a size-matched
+    random draw -- about 73% of the taxonomy's edge over random, with none of
+    its 83-88% weekly membership churn.  Recording the method keeps those two
+    groupings distinguishable instead of silently interchangeable.
+    """
+
+    state_type: StateType = StateType.PEER_GROUP
+    expected_state_type: ClassVar[StateType] = StateType.PEER_GROUP
+    identity_field: ClassVar[str] = "group_id"
+    group_id: str
+    method: str
+    members: tuple[str, ...]
+    member_weights: ImmutableFloatMap = Field(default_factory=dict)
+    lookback_sessions: int
+    # Mean pairwise correlation over the TRAILING window the group was fit on.
+    # Trailing, not forward: a forward figure would be a label, not a feature.
+    trailing_cohesion: FiniteFloat | None = None
+    universe_version: str = "UNKNOWN"
+    metrics: ImmutableFloatMap = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_membership(self) -> PeerGroupState:
+        if not self.members:
+            raise ValueError("a peer group must carry at least one member")
+        if len(set(self.members)) != len(self.members):
+            raise ValueError("peer group members must be unique")
+        if tuple(sorted(self.members)) != self.members:
+            raise ValueError("peer group members must be sorted for a stable hash")
+        if not isinstance(self.method, str) or not self.method.strip():
+            raise ValueError("method must be a non-empty string")
+        if self.lookback_sessions <= 0:
+            raise ValueError("lookback_sessions must be positive")
+        unknown = set(self.member_weights) - set(self.members)
+        if unknown:
+            raise ValueError(
+                f"member_weights names non-members: {sorted(unknown)}"
+            )
+        return self
+
+
 class PortfolioPosition(ContractModel):
     broker_position_id: str
     symbol: str
@@ -270,7 +320,8 @@ class ReadinessState(StateEnvelope):
 
 
 StateContract = (
-    MarketState
+    PeerGroupState
+    | MarketState
     | SectorState
     | ThemeMembership
     | ThemeState
@@ -287,6 +338,7 @@ __all__ = [
     "CatalystPressure",
     "DealerState",
     "MarketState",
+    "PeerGroupState",
     "PortfolioPosition",
     "PortfolioState",
     "ReadinessState",

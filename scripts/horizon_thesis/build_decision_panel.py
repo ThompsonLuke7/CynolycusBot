@@ -35,7 +35,8 @@ DATA = REPO / "research/execution_quality/data"
 MATRIX = REPO / "signals/meta_context/meta_ranker/meta_ranker_matrix_research.parquet"
 BARS_1D = REPO / "Data/shared/bars/1d"
 FLAGS = DATA / "corporate_action_flags.parquet"
-OUT = DATA / "decision_panel.parquet"
+PANEL_VERSION = 2
+OUT = DATA / "decision_panel_v2.parquet"
 
 HOLDS = [5, 10, 15, 20, 30]
 CHECKPOINT = 5
@@ -50,6 +51,8 @@ REGIME_COLS = ["regime_spy_trend", "regime_spy_ret_20", "regime_vix_z", "regime_
 def load_panel(require: list[str] | None = None, drop_flagged: bool = True) -> pd.DataFrame:
     """Shared reader for the experiments. Drops corporate-action-flagged windows by default."""
     p = pd.read_parquet(OUT)
+    if "panel_version" not in p or not p["panel_version"].eq(PANEL_VERSION).all():
+        raise ValueError("Rebuild the versioned decision panel; legacy checkpoint features leaked")
     if drop_flagged:
         p = p[~p["ca_flagged"]]
     if require:
@@ -94,9 +97,9 @@ def ticker_frame(ticker: str, spy_ret: pd.Series | None = None) -> pd.DataFrame 
         out["cp_mae"] = out[f"mae_{CHECKPOINT}"]
         out["cp_close_vs_high"] = np.where(cp_high > 0, cp_close / cp_high - 1.0, np.nan)
         up = pd.Series((c > pd.Series(c).shift(1).to_numpy()).astype(float))
-        out["cp_up_day_share"] = up.shift(-1).rolling(CHECKPOINT).mean().shift(-(CHECKPOINT - 1)).to_numpy()
+        out["cp_up_day_share"] = up.rolling(CHECKPOINT).mean().shift(-(CHECKPOINT - 1)).to_numpy()
         vol20 = pd.Series(v).rolling(20).mean().shift(1).to_numpy()
-        cp_vol = pd.Series(v).shift(-1).rolling(CHECKPOINT).mean().shift(-(CHECKPOINT - 1)).to_numpy()
+        cp_vol = pd.Series(v).rolling(CHECKPOINT).mean().shift(-(CHECKPOINT - 1)).to_numpy()
         out["cp_volume_ratio"] = np.where(vol20 > 0, cp_vol / vol20, np.nan)
         for n in HOLDS:
             if n > CHECKPOINT:
@@ -179,6 +182,9 @@ def main() -> None:
 
     for c in panel.select_dtypes("float64").columns:
         panel[c] = panel[c].astype("float32")
+    if OUT.exists():
+        raise FileExistsError(f"Preserve existing experiment: {OUT}")
+    panel["panel_version"] = PANEL_VERSION
     panel.to_parquet(OUT, index=False)
     print(f"wrote {OUT} rows={len(panel):,} cols={len(panel.columns)} "
           f"fwdret_30 present {panel['fwdret_30'].notna().mean():.1%}  ({time.time() - t0:.0f}s)")

@@ -38,6 +38,7 @@ _ALPACA_BASE_URL_NAME = "CYNOLYCUS_ALPACA_BASE_URL"
 _ALPACA_ACCOUNT_ID_NAME = "CYNOLYCUS_ALPACA_ACCOUNT_ID"
 _SECRET_BINDING_NAME = "CYNOLYCUS_SECRET_BINDING"
 _SUBMIT_ENABLED_NAME = "CYNOLYCUS_SUBMIT_ENABLED"
+_CONCENTRATION_LIMITS_NAME = "CYNOLYCUS_CONCENTRATION_LIMITS"
 
 # The only endpoints that are paper by construction. Identity is never inferred
 # from the account alias: an alias called "paper" pointed at the live endpoint
@@ -231,6 +232,29 @@ class NervousSystemSettings(ContractModel):
     # what it points at never enters this process's configuration at all.
     secret_binding: str | None = None
     submit_enabled: bool = False
+    # Concentration gating (symbol/sector/theme/factor notional) is opt-in and
+    # OFF by default. The limits have existed in PortfolioConfig since Task 16
+    # but reached no veto, so switching them to enforce changes live behaviour:
+    # names that used to fill will be refused.
+    #
+    #   off      (default) the gate is not evaluated at all
+    #   observe  evaluated and RECORDED, never blocking -- this is the dry run
+    #   enforce  a hard veto
+    #
+    # `observe` exists because PolicyMode.SHADOW cannot serve as one: shadow
+    # selects the sizing basis and hard vetoes bind in every mode, so it
+    # answers "what would this refuse?" only by actually refusing it.
+    concentration_limits_mode: Literal["off", "observe", "enforce"] = "off"
+
+    @property
+    def concentration_limits_enabled(self) -> bool:
+        """True when the gate is evaluated at all (observe or enforce)."""
+
+        return self.concentration_limits_mode in ("observe", "enforce")
+
+    @property
+    def concentration_observe_only(self) -> bool:
+        return self.concentration_limits_mode == "observe"
 
     def __init__(self, **data: Any) -> None:
         try:
@@ -347,6 +371,15 @@ class NervousSystemSettings(ContractModel):
         data["submit_enabled"] = (
             str(source.get(_SUBMIT_ENABLED_NAME, "")).strip().lower() == "true"
         )
+        # Fail-closed: an unrecognised value resolves to "off" rather than to
+        # a gate that can refuse entries. "true" is accepted as "enforce" so an
+        # environment set before the three-way mode existed keeps its meaning.
+        raw_mode = str(source.get(_CONCENTRATION_LIMITS_NAME, "")).strip().lower()
+        data["concentration_limits_mode"] = {
+            "enforce": "enforce",
+            "true": "enforce",
+            "observe": "observe",
+        }.get(raw_mode, "off")
 
         return cls.model_validate(data)
 
@@ -378,6 +411,7 @@ class NervousSystemSettings(ContractModel):
             "alpaca_account_id": self.alpaca_account_id,
             "secret_binding": self.secret_binding,
             "submit_enabled": self.submit_enabled,
+            "concentration_limits_mode": self.concentration_limits_mode,
             "execution_veto": self.execution_veto(),
         }
 

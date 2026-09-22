@@ -1,0 +1,17 @@
+# Context extraction review
+
+- Input: `HTML fallback (normalized source absent)`.
+- Scoped messages read: 2058 (channels: free-chat=114, free-watchlists=1280, post-ur-profits=664).
+- Caller messages considered: 1494 (ACE=1311, FT=183).
+- Candidate messages classified: 675; context rows written: 1460.
+- Event counts: performance_claim=152, stop_adjustment=7, unknown_management=184, watchlist=1117.
+- Unresolved attachment/contract notes: 184.
+
+## Interpretation constraints
+
+- ACE and FT are separate callers. Other members' messages are outside this file even where they describe a trade.
+- A performance claim remains a claim; it is not an exit, fill, return verification, or lifecycle link.
+- Conditional breakout, support, stop, or target language is stored as watchlist context, never as a filled order.
+- Options require ticker, call/put, strike, and expiry before a claimed entry/exit can be lifecycle-eligible. Missing terms remain null and are recorded as unresolved management context.
+- Attachment URLs are evidence references only. No image was fetched or OCRed; image-only messages retain an explicit unresolved note.
+- `field_sources` in every JSONL row maps each non-null substantive field to its originating message ID. Future messages are not used to enrich entry context.

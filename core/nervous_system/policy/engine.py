@@ -28,6 +28,7 @@ from .reason_codes import ReasonCode
 from .rules import (
     HARD_RULES,
     ModifierSpec,
+    concentration_notes,
     context_modifier_specs,
     is_risk_reducing,
     max_position_cap_spec,
@@ -159,6 +160,11 @@ def evaluate_policy(
         )
 
     context_specs, context_notes = context_modifier_specs(snapshot, config)
+    # Observe mode: record what the concentration gate WOULD have refused,
+    # without refusing it. Evaluated only after the hard rules have passed, so
+    # a note never appears on a decision that was rejected for another reason
+    # and would never have reached the gate in enforce mode either.
+    context_notes = context_notes + concentration_notes(intent, snapshot, config)
     modifiers, budget = _apply(context_specs, base_budget, config)
 
     cap_modifier, budget = _apply_one(max_position_cap_spec(budget, config), budget, config)

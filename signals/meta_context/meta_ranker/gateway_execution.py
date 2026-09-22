@@ -391,6 +391,19 @@ class MetaGatewayRouter:
         now: datetime,
     ) -> dict[str, Any]:
         snapshots: dict[str, Any] = {}
+        # Resolved once for the whole plan: the peer set is the set of things
+        # already held, and it does not change between rows of one pass.
+        # Failing soft is deliberate -- with no peers every holding buckets to
+        # UNALLOCATED, which is what happened before peers existed, so a
+        # missing portfolio state costs exposure resolution, never the trade.
+        try:
+            peer_entity_ids = self._snapshots.held_underlyings(decision_time=now)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "peer set unavailable, exposure will read UNALLOCATED: %s",
+                type(exc).__name__,
+            )
+            peer_entity_ids = ()
         for row in plan:
             ticker = ticker_by_symbol.get(row[0]) or underlying_for(row[0])
             if ticker in snapshots:
@@ -402,6 +415,9 @@ class MetaGatewayRouter:
                     decision_time=now,
                     decision_bar=decision_bar,
                     profile=self._profile,
+                    peer_entity_ids=tuple(
+                        peer for peer in peer_entity_ids if peer != ticker
+                    ),
                 )
                 if not snapshot.valid:
                     # Say WHICH required state failed and what refused its
@@ -612,6 +628,7 @@ def build_router(
     intent_config: MetaIntentConfig,
     environ: Mapping[str, str] | None = None,
     clock: Callable[[], datetime] | None = None,
+    required_snapshot_profile: str | None = None,
 ) -> MetaGatewayRouter:
     """Assemble the governed path from the documented environment.
 
@@ -644,7 +661,7 @@ def build_router(
 
     if settings.environment is RuntimeEnvironment.PRODUCTION_LIVE:
         raise GovernedPathUnavailable(
-            "PRODUCTION_LIVE is refused: the Meta path has no live route"
+            "PRODUCTION_LIVE is refused: the governed path has no live route"
         )
 
     tick = clock or (lambda: datetime.now(timezone.utc))
@@ -654,11 +671,34 @@ def build_router(
     def uow_factory() -> UnitOfWork:
         return UnitOfWork(session_factory)
 
+    from core.nervous_system.config.portfolio_assembly import (
+        portfolio_config_with_sectors,
+    )
+
+    # Widened from the empirical sector assignments when they exist. Without
+    # them the curated map covers 3.3% of the universe and the sector arm of
+    # the concentration gate is inert (everything buckets UNALLOCATED, and
+    # UNALLOCATED never vetoes).
+    exposure_config = portfolio_config_with_sectors()
+
     policy_config = replace(
         MVP_POLICY_CONFIG,
         mode=settings.policy_mode,
         environment=settings.environment,
         account_alias=settings.account_alias,
+        # Off unless deliberately enabled: these limits reached no veto before
+        # this change, so turning them on refuses entries that used to fill.
+        portfolio_exposure=(
+            exposure_config if settings.concentration_limits_enabled else None
+        ),
+        concentration_observe_only=settings.concentration_observe_only,
+        # Each module carries its own profile id so its snapshots stay
+        # attributable and one module's profile can be tightened alone.
+        **(
+            {"required_snapshot_profile": required_snapshot_profile}
+            if required_snapshot_profile
+            else {}
+        ),
     )
     return MetaGatewayRouter(
         coordinator=DecisionCoordinator(

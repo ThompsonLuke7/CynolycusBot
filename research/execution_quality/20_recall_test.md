@@ -1,3 +1,11 @@
+> **RETRACTED 2026-09-20 — the headline does not survive a matched control.**
+> Paired against same-ticker minutes matched on time-of-day and prior run-up,
+> CONFIRMED setups are indistinguishable from comparable moments at 15/30/60m
+> (p=0.92/0.73/0.72). The random-minute control below was confounded exactly as
+> this document's own "Limits" section warned. The gate also DOES carry
+> information: declined setups underperform their matched controls.
+> See `25_matched_control_and_depth_null.md` §A.
+
 # Meta-labelling premise test — the answer is worse than "no"
 
 2026-09-04. `scripts/thesis_test/recall_test.py`

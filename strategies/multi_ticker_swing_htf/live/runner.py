@@ -28,6 +28,7 @@ Run:
 """
 from __future__ import annotations
 
+
 import argparse
 import json
 import logging
@@ -37,6 +38,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from core.live_state import module_state_lock, load_state, save_state
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 from core.live_signal_audit import (
     append_jsonl,
@@ -57,6 +59,7 @@ from core.live_4h_exec import (
     mark_entry_unconfirmed,
     mark_plan_gone,
     record_exit_realized_pnl,
+    track_exit_submission,
     shares_for_notional,
     submit_option_exit_with_ladder,
     submit_pending_exit_orders,
@@ -95,13 +98,11 @@ def _load_blacklist() -> set[str]:
 
 
 def _load_state() -> dict:
-    if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text())
-    return {"managed": {}, "history": []}
+    return load_state(STATE_PATH)
 
 
 def _save_state(state: dict) -> None:
-    STATE_PATH.write_text(json.dumps(state, indent=2, default=str))
+    save_state(STATE_PATH, state)
 
 
 def _ref_price(ticker: str) -> float | None:
@@ -247,120 +248,124 @@ def main():
         },
     )
 
-    # --- account + positions ---
-    client = AlpacaOptionsClient(env_file=env_file)
-    acct = client.get_account()
-    equity = float(acct["equity"])
-    pos_info = {
-        p["symbol"]: {"qty": int(float(p["qty"])),
-                      "avg_entry": float(p.get("avg_entry_price", 0) or 0),
-                      "current": float(p.get("current_price", 0) or 0)}
-        for p in (client.get_positions() or [])
-    }
-    state = _load_state()
-    managed = state.get("managed", {})
-    print(f"equity=${equity:,.0f}  target_notional/name=${args.target_notional:,.0f}  TP +{int(args.take_profit*100)}% "
-          f"(sell {int(args.scale_frac*100)}%)  horizon {args.horizon_bars}b  grace {args.grace_bars}b")
-    print(f"managed held: {sorted(managed)}")
+    with module_state_lock("multi_ticker_swing_htf") as acquired:
+        if not acquired:
+            logger.warning("multi_ticker_swing_htf state transaction already running; skipping pass")
+            return
+        # --- account + positions ---
+        client = AlpacaOptionsClient(env_file=env_file)
+        acct = client.get_account()
+        equity = float(acct["equity"])
+        pos_info = {
+            p["symbol"]: {"qty": int(float(p["qty"])),
+                          "avg_entry": float(p.get("avg_entry_price", 0) or 0),
+                          "current": float(p.get("current_price", 0) or 0)}
+            for p in (client.get_positions() or [])
+        }
+        state = _load_state()
+        managed = state.get("managed", {})
+        print(f"equity=${equity:,.0f}  target_notional/name=${args.target_notional:,.0f}  TP +{int(args.take_profit*100)}% "
+              f"(sell {int(args.scale_frac*100)}%)  horizon {args.horizon_bars}b  grace {args.grace_bars}b")
+        print(f"managed held: {sorted(managed)}")
 
-    # Pre-open flush: submit after-close-queued entries still in TODAY's top-K
-    # (re-rank against the freshly-scored `targets`), then exit — no position mgmt.
-    if getattr(args, "flush_pending_open", False):
-        if args.submit:
-            # Exits first: a queued exit is an already-made decision on a position
-            # we still hold, and flushing it before entries frees the buying power
-            # the queued entries are about to use.
-            ex = submit_pending_exit_orders(client, AUDIT_MODULE,
-                                            equity_tif_fn=equity_order_tif, pos_lookup=pos_info,
-                                            managed=managed)
-            if ex["count"] or ex["skipped"]:
-                print(f"pending-exit flush: submitted {ex['count']} / skipped {len(ex['skipped'])}")
-            res = submit_pending_open_entries(client, AUDIT_MODULE, targets,
-                                              equity_tif_fn=equity_order_tif, pos_lookup=pos_info)
-            managed.update(res["submitted"])
-            state["managed"] = managed
-            _save_state(state)
-            print(f"pending-open flush: submitted {res['count']} / skipped {len(res['skipped'])}")
-        else:
-            print("pending-open flush (dry-run): add --submit to place queued entries")
-        return
+        # Pre-open flush: submit after-close-queued entries still in TODAY's top-K
+        # (re-rank against the freshly-scored `targets`), then exit — no position mgmt.
+        if getattr(args, "flush_pending_open", False):
+            if args.submit:
+                # Exits first: a queued exit is an already-made decision on a position
+                # we still hold, and flushing it before entries frees the buying power
+                # the queued entries are about to use.
+                ex = submit_pending_exit_orders(client, AUDIT_MODULE,
+                                                equity_tif_fn=equity_order_tif, pos_lookup=pos_info,
+                                                managed=managed)
+                if ex["count"] or ex["skipped"]:
+                    print(f"pending-exit flush: submitted {ex['count']} / skipped {len(ex['skipped'])}")
+                res = submit_pending_open_entries(client, AUDIT_MODULE, targets,
+                                                  equity_tif_fn=equity_order_tif, pos_lookup=pos_info)
+                managed.update(res["submitted"])
+                state["managed"] = managed
+                _save_state(state)
+                print(f"pending-open flush: submitted {res['count']} / skipped {len(res['skipped'])}")
+            else:
+                print("pending-open flush (dry-run): add --submit to place queued entries")
+            return
 
-    if args.mode == "options":
-        return _run_options(args, client, targets, state, managed, pos_info, bar, signal_audits)
+        if args.mode == "options":
+            return _run_options(args, client, targets, state, managed, pos_info, bar, signal_audits)
 
-    # --- equity reconciliation (only ever SELL symbols we manage) ---
-    plan: list[tuple[str, str, int, str]] = []
-    order_audits: dict[str, dict] = {}
-    new_managed: dict[str, dict] = {}
-    exit_context: dict[str, tuple[str, dict]] = {}
-    dropped: dict[str, dict] = {}
-    for sym, st in managed.items():
-        info_present = sym in pos_info
-        held = pos_info.get(sym, {}).get("qty", 0)
-        if held <= 0:
-            status = "confirmed_flat" if info_present else "not_found"
-            logger.warning("equity reconcile: dropping %s from managed — %s", sym, status)
-            dropped[sym] = {"symbol": sym, "route": "equity", "status": status}
-            continue
-        in_tgt = sym in targets
-        st["runs_held"] = st.get("runs_held", 0) + 1
-        st["bars_out"] = 0 if in_tgt else st.get("bars_out", 0) + 1
-        info = pos_info.get(sym, {})
-        gain = (info["current"] / info["avg_entry"] - 1) if info.get("avg_entry") else None
-        action, reason = _exit_action(gain, st["runs_held"], st["bars_out"], st.get("trimmed", False), args)
-        if action == "exit":
-            plan.append((sym, "sell", held, reason))
-            order_audits[sym] = build_equity_order_audit(
-                signal_audit=signal_audits.get(sym),
-                symbol=sym,
-                side="sell",
-                qty=held,
-                reason=reason,
-                reference_price=info.get("current"),
-            )
-            exit_context[sym] = (sym, dict(st))
-            continue
-        if action == "trim":
-            q = int(math.floor(args.scale_frac * held))
-            if q >= 1:
-                plan.append((sym, "sell", q, reason))
+        # --- equity reconciliation (only ever SELL symbols we manage) ---
+        plan: list[tuple[str, str, int, str]] = []
+        order_audits: dict[str, dict] = {}
+        new_managed: dict[str, dict] = {}
+        exit_context: dict[str, tuple[str, dict]] = {}
+        dropped: dict[str, dict] = {}
+        for sym, st in managed.items():
+            info_present = sym in pos_info
+            held = pos_info.get(sym, {}).get("qty", 0)
+            if held <= 0:
+                status = "confirmed_flat" if info_present else "not_found"
+                logger.warning("equity reconcile: dropping %s from managed — %s", sym, status)
+                dropped[sym] = {"symbol": sym, "route": "equity", "status": status}
+                continue
+            in_tgt = sym in targets
+            st["runs_held"] = st.get("runs_held", 0) + 1
+            st["bars_out"] = 0 if in_tgt else st.get("bars_out", 0) + 1
+            info = pos_info.get(sym, {})
+            gain = (info["current"] / info["avg_entry"] - 1) if info.get("avg_entry") else None
+            action, reason = _exit_action(gain, st["runs_held"], st["bars_out"], st.get("trimmed", False), args)
+            if action == "exit":
+                plan.append((sym, "sell", held, reason))
                 order_audits[sym] = build_equity_order_audit(
                     signal_audit=signal_audits.get(sym),
                     symbol=sym,
                     side="sell",
-                    qty=q,
+                    qty=held,
                     reason=reason,
                     reference_price=info.get("current"),
                 )
-                st["trimmed"] = True
-        new_managed[sym] = st
-    for t in targets:
-        if t in new_managed or pos_info.get(t, {}).get("qty", 0) > 0:
-            continue
-        qty = shares_for_notional(_ref_price(t), args.target_notional)
-        plan.append((t, "buy", qty, "entry"))
-        order_audits[t] = build_equity_order_audit(
-            signal_audit=signal_audits.get(t),
-            symbol=t,
-            side="buy",
-            qty=qty,
-            reason="entry",
-            reference_price=_ref_price(t),
+                exit_context[sym] = (sym, dict(st))
+                continue
+            if action == "trim":
+                q = int(math.floor(args.scale_frac * held))
+                if q >= 1:
+                    plan.append((sym, "sell", q, reason))
+                    order_audits[sym] = build_equity_order_audit(
+                        signal_audit=signal_audits.get(sym),
+                        symbol=sym,
+                        side="sell",
+                        qty=q,
+                        reason=reason,
+                        reference_price=info.get("current"),
+                    )
+                    st["trimmed"] = True
+            new_managed[sym] = st
+        for t in targets:
+            if t in new_managed or pos_info.get(t, {}).get("qty", 0) > 0:
+                continue
+            qty = shares_for_notional(_ref_price(t), args.target_notional)
+            plan.append((t, "buy", qty, "entry"))
+            order_audits[t] = build_equity_order_audit(
+                signal_audit=signal_audits.get(t),
+                symbol=t,
+                side="buy",
+                qty=qty,
+                reason="entry",
+                reference_price=_ref_price(t),
+            )
+            new_managed[t] = {"qty": qty, "runs_held": 0, "bars_out": 0, "trimmed": False, "entry_bar": str(bar)}
+
+        print(f"\n--- order plan ({len(plan)} orders) ---")
+        for sym, side, qty, reason in plan:
+            px = _ref_price(sym) or 0.0
+            print(f"  {side.upper():4} {qty:>4} {sym:<6} (~${qty*px:,.0f} @ {px:.2f})  [{reason}]")
+        if not plan:
+            print("  (nothing to do — positions within policy)")
+
+        _execute(
+            args, client, plan, state, new_managed, bar, targets,
+            is_option=False, signal_audits=signal_audits, order_audits=order_audits,
+            exit_context=exit_context, dropped=dropped, module=AUDIT_MODULE, pos_lookup=pos_info,
         )
-        new_managed[t] = {"qty": qty, "runs_held": 0, "bars_out": 0, "trimmed": False, "entry_bar": str(bar)}
-
-    print(f"\n--- order plan ({len(plan)} orders) ---")
-    for sym, side, qty, reason in plan:
-        px = _ref_price(sym) or 0.0
-        print(f"  {side.upper():4} {qty:>4} {sym:<6} (~${qty*px:,.0f} @ {px:.2f})  [{reason}]")
-    if not plan:
-        print("  (nothing to do — positions within policy)")
-
-    _execute(
-        args, client, plan, state, new_managed, bar, targets,
-        is_option=False, signal_audits=signal_audits, order_audits=order_audits,
-        exit_context=exit_context, dropped=dropped, module=AUDIT_MODULE, pos_lookup=pos_info,
-    )
 
 
 def _run_options(args, client, targets, state, managed, pos_info, bar, signal_audits=None):
@@ -461,18 +466,19 @@ def _execute(
                             _tk = managed_key_for_symbol(new_managed, sym)
                             if _tk is not None and isinstance(new_managed.get(_tk), dict):
                                 es = new_managed[_tk]
-                        record_exit_realized_pnl(client, module=module, item=item, resp=resp,
-                                                 entry_state=es, pos_lookup=pos_lookup, bar=bar)
+                        track_exit_submission(client, module=module, item=item, resp=resp,
+                            new_managed=new_managed, exit_context=exit_context,
+                            pos_lookup=pos_lookup, bar=bar)
                 except Exception as exc:  # noqa: BLE001
                     print(f"  FAIL {side} {qty} {sym}: {exc}")
                     disp[str(sym)] = f"submit_failed:{type(exc).__name__}"
                     if exit_context and sym in exit_context:
                         tkr, st = exit_context[sym]
-                        new_managed[tkr] = st
+                        new_managed.setdefault(tkr, st)
                         logger.warning(
                             "_execute: exit submit failed for %s (%s) — restoring to managed state", tkr, sym,
                         )
-                    else:
+                    elif str(side).lower() == "buy":
                         drop_failed_entry(new_managed, sym)
                 finally:
                     # Save after every fill, not just at the end of the plan, so a

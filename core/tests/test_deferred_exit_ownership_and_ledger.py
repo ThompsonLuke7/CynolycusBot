@@ -42,8 +42,10 @@ class _Client:
     def __init__(self, fill=1.20):
         self.fill = fill
         self.option_orders = []
+        self.equity_orders = []
 
     def submit_order(self, *, symbol, qty, side, **k):
+        self.equity_orders.append((side, symbol, qty))
         return {"id": f"{symbol}-{side}"}
 
     def get_option_quotes(self, symbols, **k):
@@ -53,8 +55,12 @@ class _Client:
         self.option_orders.append((side, symbol, qty))
         return {"id": f"{symbol}-{side}"}
 
-    def get_order(self, _oid):
-        return {"status": "filled", "filled_avg_price": self.fill, "filled_qty": "19"}
+    def get_order(self, oid):
+        symbol = str(oid).rsplit("-sell", 1)[0]
+        for _side, order_symbol, qty in [*self.option_orders, *self.equity_orders]:
+            if order_symbol == symbol:
+                return {"status": "filled", "filled_avg_price": self.fill, "filled_qty": str(qty)}
+        return {"status": "unknown"}
 
 
 def _queue(tmp_path, module, entries):

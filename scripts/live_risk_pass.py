@@ -108,6 +108,15 @@ def run_module(spec: ModuleSpec, *, client, pos_info: dict, cfg: RiskPassConfig,
 
         state = load_state(spec.state_path)
         managed = state.get("managed", {}) or {}
+        from core.order_reconciliation import recover_pending_exits
+        from core.live_4h_exec import DEFAULT_LEDGER_ROOT
+        if submit:
+            recover_pending_exits(DEFAULT_LEDGER_ROOT, spec.module, managed)
+        # Refresh after acquiring the state transaction, not before waiting on it.
+        pos_info = build_pos_info(client)
+        if not submit:
+            from dataclasses import replace
+            cfg = replace(cfg, settle_pending_exits=False)
         if not managed:
             return {"module": spec.module, "managed": 0, "orders": 0}
 
@@ -133,8 +142,7 @@ def run_module(spec: ModuleSpec, *, client, pos_info: dict, cfg: RiskPassConfig,
         # rather than waiting for the next 4H bar, and an in-place mutation that
         # is never written back would settle nothing. Dropping a claim on an
         # entry that never filled counts for the same reason.
-        if submit and (res.plan or res.settled or res.confirmed_entries
-                       or res.abandoned_entries):
+        if submit:
             state["managed"] = res.new_managed
             save_state(spec.state_path, state)
 

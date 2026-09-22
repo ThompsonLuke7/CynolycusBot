@@ -1,3 +1,11 @@
+> **CORRECTED — do not cite the precision table below.** Forward MFE was measured
+> from the prior close rather than a tradeable entry, crediting each ranker with a
+> gap it could not trade; HTF top-1 is 4.4% against a 5.0% base, not 17.6%. See
+> `23_rank_depth_and_options.md` §0. Separately, model-based top-k excess on raw
+> returns needs a trained-on-permuted-label control — the LEVELS here are inflated
+> by a ~2x beta tilt, though the top-vs-deep GRADIENT survives it
+> (`25_matched_control_and_depth_null.md` §B).
+
 # The rankings do work — at the top only. Selectivity is the lever.
 
 2026-09-08. `scripts/thesis_test/ml_recall_test.py` + rank-depth analysis

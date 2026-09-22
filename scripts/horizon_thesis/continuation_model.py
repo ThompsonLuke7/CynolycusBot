@@ -148,7 +148,9 @@ def main() -> None:
         print(f"    day-5 return vs remaining return: Spearman {rho:+.4f}   model vs remaining: {rho_ml:+.4f}")
         out[f"top{k}"] = dict(rows=rows, rho_cp=rho, rho_ml=rho_ml, thr_half=thr_half,
                              bounds=[str(b) for b in bounds], best_iter=int(bst.best_iteration or 0))
-    path = DATA / "continuation_model.json"
+    path = DATA / "continuation_model_panel_v2.json"
+    if path.exists():
+        raise FileExistsError(f"Preserve existing experiment: {path}")
     path.write_text(json.dumps(out, indent=1, default=str))
     print(f"\nwrote {path}")
 

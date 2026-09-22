@@ -231,7 +231,7 @@ def main() -> None:
             labels[f"{fam}_{name}"] = rank_in_bar(df, df[f"{fam}_{h}"])
     if args.module == "mom":
         r = lambda c, asc=True: df[c].groupby(level=0).rank(pct=True, ascending=asc)  # noqa: E731
-        labels["M0_current_25bar"] = (0.40 * r("fwd_max_alpha") + 0.25 * r("fwd_atr_adj_return")
+        labels["M0_composite_regression_25bar"] = (0.40 * r("fwd_max_alpha") + 0.25 * r("fwd_atr_adj_return")
                                       + 0.20 * r("trend_persistence") + 0.15 * r("fwd_max_drawdown", False))
     base = labels["mfe_10d"]
     for s in range(N_PERM):
@@ -283,7 +283,7 @@ def main() -> None:
         sub = res[(res["eval"] == ename) & ~res["candidate"].str.startswith("NULL")]
         best_val = sub.sort_values("val_rho", ascending=False).iloc[0]["candidate"]
         matched = {20: "mfe_10d", 40: "mfe_20d", 60: "mfe_30d"}[h]
-        ref = "M0_current_25bar" if args.module == "mom" else matched
+        ref = "M0_composite_regression_25bar" if args.module == "mom" else matched
         for a, b in ((ref, best_val), (matched, best_val), (ref, "STACK_mfe_all"), (ref, "mfe_2d")):
             if a == b:
                 continue

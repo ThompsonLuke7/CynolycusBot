@@ -28,7 +28,9 @@ from strategies.intraday_structure.models import SetupRecord, StructuralLevel
 from strategies.intraday_structure.state_store import append_jsonl
 
 
-ABSTENTION_SCHEMA_VERSION = "intraday_structure_abstention_v1"
+# v2 (2026-09-20) adds proposed_risk_atr + max_invalidation_atr. v1 rows have
+# neither; readers must treat a missing key as unknown, not as zero.
+ABSTENTION_SCHEMA_VERSION = "intraday_structure_abstention_v2"
 
 TRENDING_UP = "TRENDING_UP"
 TRENDING_DOWN = "TRENDING_DOWN"
@@ -144,6 +146,10 @@ class AbstentionRecord:
     regime_evidence: list[str]
     proposed_invalidation: float | None
     proposed_target: float | None
+    #: Width of the stop the structure implied, in ATR, and the cap it was tested
+    #: against. On `invalidation_wider_than_max_atr` these two ARE the decision.
+    proposed_risk_atr: float | None
+    max_invalidation_atr: float | None
     runway_score: float | None
     reward_risk: float | None
     min_runway_score: float
@@ -179,6 +185,8 @@ def build_abstention_record(
     reward_risk: float | None = None,
     proposed_invalidation: float | None = None,
     proposed_target: float | None = None,
+    proposed_risk_atr: float | None = None,
+    max_invalidation_atr: float | None = None,
 ) -> AbstentionRecord:
     return AbstentionRecord(
         schema_version=ABSTENTION_SCHEMA_VERSION,
@@ -194,6 +202,8 @@ def build_abstention_record(
         regime_evidence=list(regime.evidence),
         proposed_invalidation=proposed_invalidation,
         proposed_target=proposed_target,
+        proposed_risk_atr=proposed_risk_atr,
+        max_invalidation_atr=max_invalidation_atr,
         runway_score=runway_score,
         reward_risk=reward_risk,
         min_runway_score=min_runway_score,

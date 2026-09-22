@@ -42,6 +42,7 @@ _CONFIG_VERSION = "meta-ranker-ticker@1"
 _SHA256_LENGTH = 64
 
 _DEFAULT_INSTRUMENT_PREFERENCES = tuple(InstrumentFamily)
+_REDUCTION_SCORE_FIELDS_DEFAULT = ("s_combo", "s_upside", "s_quality")
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,13 @@ class MetaIntentConfig:
     expected_holding_period: str = "53x4h"
     entry_window: str = "current-or-next-open"
     reason_codes: tuple[str, ...] = ("META_TOP_K", "META_LONG_ENTRY")
+    # The score vocabulary, so a second module can use the same intent
+    # machinery with its own score names. `primary_score` becomes the intent's
+    # raw_score; `score_fields` is the allowlist recorded as score_components.
+    # An entry whose primary score is missing is refused -- opening risk we
+    # cannot explain is never acceptable, whichever module asks.
+    primary_score: str = "s_combo"
+    score_fields: tuple[str, ...] = _REDUCTION_SCORE_FIELDS_DEFAULT
 
     def __post_init__(self) -> None:
         for field_name in ("strategy_id", "model_version", "feature_version", "config_version"):
@@ -82,6 +90,14 @@ class MetaIntentConfig:
             raise ValueError("requested_notional must be a finite non-negative amount") from exc
         if notional.is_nan() or not notional.is_finite() or notional < 0:
             raise ValueError("requested_notional must be a finite non-negative amount")
+        if not isinstance(self.primary_score, str) or not self.primary_score.strip():
+            raise TypeError("primary_score must be non-empty text")
+        fields = tuple(self.score_fields)
+        if not fields or any(not isinstance(name, str) or not name.strip() for name in fields):
+            raise ValueError("score_fields must be non-empty text")
+        if self.primary_score not in fields:
+            raise ValueError("primary_score must appear in score_fields")
+        object.__setattr__(self, "score_fields", fields)
         if not self.instrument_preferences:
             raise ValueError("instrument_preferences must be non-empty")
         preferences = tuple(self.instrument_preferences)
@@ -552,7 +568,7 @@ UNSCORED_REASON_CODE = "META_SCORE_UNAVAILABLE"
 
 _REDUCTION_UNITS = (SizeUnit.SHARES, SizeUnit.CONTRACTS)
 
-_REDUCTION_SCORE_FIELDS = ("s_combo", "s_upside", "s_quality")
+_REDUCTION_SCORE_FIELDS = _REDUCTION_SCORE_FIELDS_DEFAULT
 
 
 def underlying_for(symbol: str) -> str:
@@ -603,7 +619,11 @@ def _reduction_idempotency_key(
 
 
 def _reduction_scores(
-    scores: Mapping[str, object] | None, *, ticker: str
+    scores: Mapping[str, object] | None,
+    *,
+    ticker: str,
+    primary_score: str = "s_combo",
+    score_fields: tuple[str, ...] = _REDUCTION_SCORE_FIELDS_DEFAULT,
 ) -> dict[str, float]:
     """Score context for a reduction, or nothing at all.
 
@@ -614,10 +634,10 @@ def _reduction_scores(
 
     if not scores:
         return {}
-    if "s_combo" not in scores or _is_missing(scores["s_combo"]):
+    if primary_score not in scores or _is_missing(scores[primary_score]):
         return {}
     out: dict[str, float] = {}
-    for name in _REDUCTION_SCORE_FIELDS:
+    for name in score_fields:
         if name not in scores or _is_missing(scores[name]):
             # An absent component is omitted, never imputed to zero: a missing
             # upside score is not an upside score of nothing.
@@ -670,7 +690,12 @@ def build_reduction_intent(
     if decision_bar_utc > decision_time_utc:
         raise ValueError("decision_bar must not be after decision_time")
 
-    score_components = _reduction_scores(scores, ticker=name)
+    score_components = _reduction_scores(
+        scores,
+        ticker=name,
+        primary_score=config.primary_score,
+        score_fields=config.score_fields,
+    )
     if not score_components and UNSCORED_REASON_CODE not in codes:
         codes = codes + (UNSCORED_REASON_CODE,)
 
@@ -690,7 +715,7 @@ def build_reduction_intent(
         ticker=name,
         direction=Direction.LONG,
         decision_kind=decision_kind,
-        raw_score=score_components.get("s_combo"),
+        raw_score=score_components.get(config.primary_score),
         # The Meta combo score is an uncalibrated ranking statistic. Presenting
         # it as raw_probability would hand every consumer a P(win) that was
         # never fitted.
@@ -757,10 +782,10 @@ def build_plan_intents(
 
         if str(side).strip().lower() == "buy":
             # Opening risk we cannot explain is never acceptable.
-            if not scores or _is_missing(scores.get("s_combo")):
+            if not scores or _is_missing(scores.get(config.primary_score)):
                 raise ValueError(
-                    f"no Meta scores for {name} ({symbol}); refusing to open a "
-                    "position that cannot be explained"
+                    f"no {config.strategy_id} scores for {name} ({symbol}); refusing "
+                    "to open a position that cannot be explained"
                 )
             intents.append(
                 _entry_intent_from_scores(
@@ -816,7 +841,7 @@ def _entry_intent_from_scores(
         raise ValueError("decision_bar must not be after decision_time")
     components = {
         name: _finite(scores[name], field_name=f"{ticker} {name}")
-        for name in _REDUCTION_SCORE_FIELDS
+        for name in config.score_fields
         if name in scores and not _is_missing(scores[name])
     }
     idempotency_key = _reduction_idempotency_key(
@@ -835,7 +860,7 @@ def _entry_intent_from_scores(
         ticker=ticker,
         direction=Direction.LONG,
         decision_kind=DecisionKind.ENTRY,
-        raw_score=components["s_combo"],
+        raw_score=components[config.primary_score],
         raw_probability=None,
         expected_return=None,
         expected_holding_period=config.expected_holding_period,
@@ -870,8 +895,23 @@ def adapt_scored_ticker_state(
     valid_until: datetime,
     matrix_lineage: tuple[LineageRef, ...],
     bar_lineage: tuple[LineageRef, ...],
+    producer: str = _PRODUCER,
+    model_version: str = _MODEL_VERSION,
+    feature_version: str = _FEATURE_VERSION,
+    config_version: str = _CONFIG_VERSION,
 ) -> TickerState:
-    """Join one scored Meta row to one explicitly selected exact 4H bar."""
+    """Join one scored row to one explicitly selected exact 4H bar.
+
+    The body reads only generic columns (close, setup, the state strings), so
+    the producer identifiers are parameters rather than constants: a second
+    module publishing TICKER state for the same name is describing the same
+    entity from a different feature matrix, and the record has to say which.
+
+    Defaults are Meta's, so an existing caller is unchanged byte for byte.
+    Note that ``_stable_state_id`` keys on ticker/bar/lineage/content and NOT
+    on the producer, so two modules publishing identical content for the same
+    bar converge on one row rather than duplicating it.
+    """
 
     if not isinstance(scored_row, Mapping):
         raise TypeError("scored_row must be a single mapping")
@@ -909,6 +949,10 @@ def adapt_scored_ticker_state(
         available_at=available_at,
         valid_until=valid_until,
         lineage=_validated_lineage(matrix_lineage) + _validated_lineage(bar_lineage),
+        producer=producer,
+        model_version=model_version,
+        feature_version=feature_version,
+        config_version=config_version,
     )
 
 
@@ -919,6 +963,10 @@ def adapt_ticker_state(
     available_at: datetime,
     valid_until: datetime,
     lineage: tuple[LineageRef, ...],
+    producer: str = _PRODUCER,
+    model_version: str = _MODEL_VERSION,
+    feature_version: str = _FEATURE_VERSION,
+    config_version: str = _CONFIG_VERSION,
 ) -> TickerState:
     """Adapt exactly one already-selected, completed Meta matrix row.
 
@@ -992,10 +1040,10 @@ def adapt_ticker_state(
         source_window_start=selected_bar,
         source_window_end=selected_bar,
         schema_version=1,
-        producer=_PRODUCER,
-        model_version=_MODEL_VERSION,
-        feature_version=_FEATURE_VERSION,
-        config_version=_CONFIG_VERSION,
+        producer=producer,
+        model_version=model_version,
+        feature_version=feature_version,
+        config_version=config_version,
         lineage_ids=_lineage_ids(validated_lineage),
         data_quality=data_quality,
         ticker=ticker,

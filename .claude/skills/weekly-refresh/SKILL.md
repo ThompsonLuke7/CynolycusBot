@@ -97,7 +97,15 @@ Stages, in the order the script runs them (the order is load-bearing):
 | 1 | `catchup_shared_bars.py --workers 6` (full universe, 1H/4H/1D) | names promoted during the week have no history yet |
 | 2 | `momentum_expansion.main --refresh-universe` | scores off daily bars, so needs #1 first |
 | 3 | `collect_news_scope --scope full` → `signals.news.main --stage incremental` → `meta_context.build_news_signal` | nightly only collects the ~1.25k PRIORITY scope; this is the ~2.9k full sweep |
-| 4 | `meta_ranker/update_feeds.py --weekly` | Meta feeds + dynamic theme taxonomy; **costs Claude API $** |
+| 4 | `build_sector_assignments.py` | empirical sector map over the universe #2 just refreshed; snapshots per CALENDAR MONTH and exits in seconds when the month is already cached, so it only really runs once a month |
+| 5 | `meta_ranker/update_feeds.py --weekly` | Meta feeds + dynamic theme taxonomy; **costs Claude API $** |
+
+Stage 4 is usually a no-op. It matters because the curated `SECTOR_MAP` covers
+95 of 2,903 live names (3.3%), and under that map the nervous system's sector
+concentration limit buckets ~97% of positions as `UNALLOCATED` — which never
+vetoes, so the sector arm of the gate is inert. The stage fills it to ~82%.
+It MERGES: earlier months are the point-in-time record and are never
+overwritten, and it refuses a future `--as-of`.
 
 ### 4. Chain the readiness rebuild
 

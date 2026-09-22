@@ -126,6 +126,8 @@ def build_ticker_states(
     matrix_path: Path,
     bars_4h_root: Path = _BARS_4H_ROOT,
     bars_1d_root: Path = _BARS_1D_ROOT,
+    producer_identity: Mapping[str, str] | None = None,
+    record_prefix: str = "meta_ranker_matrix",
 ) -> tuple[list[object], dict[str, str]]:
     """Adapt one TICKER state per resolvable name.
 
@@ -134,6 +136,7 @@ def build_ticker_states(
     a policy veto later.
     """
 
+    identity = dict(producer_identity or {})
     skipped: dict[str, str] = {}
     states: list[object] = []
     if scored is None or scored.empty:
@@ -176,7 +179,7 @@ def build_ticker_states(
                     LineageRef(
                         source_id=str(matrix_path),
                         content_hash=matrix_hash,
-                        record_locator=f"meta_ranker_matrix:{ticker}:{bar_utc.isoformat()}",
+                        record_locator=f"{record_prefix}:{ticker}:{bar_utc.isoformat()}",
                     ),
                 ),
                 bar_lineage=(
@@ -186,6 +189,7 @@ def build_ticker_states(
                         record_locator=f"bars_4h:{ticker}:{bar_utc.isoformat()}",
                     ),
                 ),
+                **identity,
             )
         except Exception as exc:  # noqa: BLE001 - one bad row must not stop the rest
             skipped[ticker] = f"adapt_failed:{type(exc).__name__}"

@@ -12,6 +12,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
+from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy.orm import Session, sessionmaker
 
 from core.nervous_system.contracts.context import ContextSnapshot
@@ -62,15 +63,25 @@ def postgres_engine(postgres_url: str):
     cfg = Config(str(config_path))
     cfg.set_main_option("sqlalchemy.url", postgres_url)
     with engine.connect() as connection:
-        version_row = connection.execute(
-            text(
-                # Pinned to the current head: a database left at an earlier
-                # revision must still be upgraded, or new tables silently
-                # never appear.
-                "SELECT version_num FROM public.alembic_version "
-                "WHERE version_num = '0004_audit_observability'"
-            )
-        ).first()
+        # A FRESH database has no `alembic_version` table at all, and the probe
+        # below used to raise UndefinedTable straight out of this fixture --
+        # before `command.upgrade` could ever run. Every test depending on it
+        # then ERRORED, so a first run against a new database reported 116
+        # errors and only a second run (against the schema the failed first run
+        # had somehow left behind) passed. Treat "table absent" as "not
+        # migrated", which is what it means.
+        if sqlalchemy_inspect(connection).has_table("alembic_version", schema="public"):
+            version_row = connection.execute(
+                text(
+                    # Pinned to the current head: a database left at an earlier
+                    # revision must still be upgraded, or new tables silently
+                    # never appear.
+                    "SELECT version_num FROM public.alembic_version "
+                    "WHERE version_num = '0004_audit_observability'"
+                )
+            ).first()
+        else:
+            version_row = None
     if version_row is None:
         command.upgrade(cfg, "head")
     yield engine

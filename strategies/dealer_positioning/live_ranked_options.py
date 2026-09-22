@@ -13,6 +13,7 @@ It is an experiment harness, not a proof of edge. Live routing requires --live a
 """
 from __future__ import annotations
 
+
 import argparse
 import json
 import logging
@@ -36,6 +37,7 @@ while str(REPO) in sys.path:
     sys.path.remove(str(REPO))
 sys.path.insert(0, str(REPO))
 
+from core.live_state import module_state_lock, load_state, save_state
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 from core.live_4h_exec import (
     ExecPolicy,
@@ -165,15 +167,11 @@ def _rank_band_by_liquidity(
 
 
 def _load_state() -> dict:
-    try:
-        return json.loads(STATE_PATH.read_text())
-    except Exception:
-        return {"managed": {}, "history": []}
+    return load_state(STATE_PATH)
 
 
 def _save_state(state: dict) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=2, default=str))
+    save_state(STATE_PATH, state)
 
 
 def _build_pos_info(client: AlpacaOptionsClient) -> dict[str, dict]:
@@ -860,153 +858,157 @@ def main() -> int:
     append_jsonl(AUDIT_LOG, {"event": "signal_decision", "module": MODULE, "bar": bar,
                              "targets": targets, "signal_audits": signal_audits,
                              "skipped_not_optionable": skipped_not_optionable})
-    pos_info = _build_pos_info(client)
-    state = _load_state()
-    managed = state.get("managed", {})
+    with module_state_lock("dealer_ranker") as acquired:
+        if not acquired:
+            logger.warning("dealer_ranker state transaction already running; skipping pass")
+            return
+        pos_info = _build_pos_info(client)
+        state = _load_state()
+        managed = state.get("managed", {})
 
-    def _route(client_: AlpacaOptionsClient, ticker: str, px: float, **_kwargs) -> tuple[str, dict | None, str]:
-        if args.route == "equity":
-            return "equity", None, "route_equity"
-        opt_type = _side_for_ticker(ticker, side_mode=args.side_mode, top=top)
-        cached = selection_cache.get((str(ticker).upper(), opt_type))
-        if cached is not None:
-            order, reason = cached
-        else:
-            order, reason = _select_atm_option(
-                client_,
-                ticker,
-                px,
-                option_type=opt_type,
-                min_dte=args.min_dte,
-                max_dte=args.max_dte,
-            )
-        if order is None:
-            return "skip", {"option_type": opt_type}, reason
-        return "option", order, "ok"
+        def _route(client_: AlpacaOptionsClient, ticker: str, px: float, **_kwargs) -> tuple[str, dict | None, str]:
+            if args.route == "equity":
+                return "equity", None, "route_equity"
+            opt_type = _side_for_ticker(ticker, side_mode=args.side_mode, top=top)
+            cached = selection_cache.get((str(ticker).upper(), opt_type))
+            if cached is not None:
+                order, reason = cached
+            else:
+                order, reason = _select_atm_option(
+                    client_,
+                    ticker,
+                    px,
+                    option_type=opt_type,
+                    min_dte=args.min_dte,
+                    max_dte=args.max_dte,
+                )
+            if order is None:
+                return "skip", {"option_type": opt_type}, reason
+            return "option", order, "ok"
 
-    policy = ExecPolicy(
-        take_profit=float(args.take_profit),
-        scale_frac=float(args.scale_frac),
-        horizon_bars=int(args.horizon_bars),
-        grace_bars=args.grace_bars,
-        stop_loss=float(args.stop_loss) if args.stop_loss else None,
-        # Pinned explicitly: this module wasn't part of the 2026-07-18 cross-module
-        # exit-policy search (Momentum/HTF/Meta only), so it keeps its own prior
-        # behavior rather than silently inheriting ExecPolicy's new default.
-        trail_stop=0.35,
-        # NOTE on --route equity: stop_loss=0.50 and trail_stop=0.35 were sized
-        # for option premium. Left as-is deliberately -- on shares they almost
-        # never fire, which lets a position run to horizon_bars instead of being
-        # cut at the 2-day median that the option route produced. That longer
-        # hold is the point of the change. Re-tune only with share-path evidence.
-        target_notional=float(args.target_notional),
-    )
-    plan = build_mixed_plan(
-        client,
-        targets=targets,
-        managed=managed,
-        pos_info=pos_info,
-        bar=bar,
-        signal_audits=signal_audits,
-        policy=policy,
-        route_fn=_route,
-        ref_price_fn=_ref_price_fn(spot_map),
-        verbose=True,
-        module=MODULE,
-    )
-
-    # Declared outside the submit branch so the dry-run audit below still has a
-    # (empty) map rather than raising NameError.
-    dispositions: dict[str, str] = init_dispositions(plan.plan)
-    if args.submit:
-        # Exits first, for the same two reasons the HTF runner gives: a queued
-        # exit is an already-made decision on a position still held, and
-        # flushing it frees the buying power the queued entries are about to
-        # use. This module deferred exits into the queue but never flushed it,
-        # so a `trail_-35%` sell for RBRK260828C00100000 queued on 2026-08-28
-        # was still sitting there eleven days later, past the contract's own
-        # expiry, with nothing ever retrying it.
-        ex = submit_pending_exit_orders(
+        policy = ExecPolicy(
+            take_profit=float(args.take_profit),
+            scale_frac=float(args.scale_frac),
+            horizon_bars=int(args.horizon_bars),
+            grace_bars=args.grace_bars,
+            stop_loss=float(args.stop_loss) if args.stop_loss else None,
+            # Pinned explicitly: this module wasn't part of the 2026-07-18 cross-module
+            # exit-policy search (Momentum/HTF/Meta only), so it keeps its own prior
+            # behavior rather than silently inheriting ExecPolicy's new default.
+            trail_stop=0.35,
+            # NOTE on --route equity: stop_loss=0.50 and trail_stop=0.35 were sized
+            # for option premium. Left as-is deliberately -- on shares they almost
+            # never fire, which lets a position run to horizon_bars instead of being
+            # cut at the 2-day median that the option route produced. That longer
+            # hold is the point of the change. Re-tune only with share-path evidence.
+            target_notional=float(args.target_notional),
+        )
+        plan = build_mixed_plan(
             client,
-            MODULE,
-            equity_tif_fn=equity_order_tif,
-            pos_lookup=pos_info,
-            managed=managed,
-        )
-        if ex["count"] or ex["skipped"]:
-            print(f"pending-exit flush: submitted {ex['count']} / skipped {len(ex['skipped'])}")
-        pending = submit_pending_open_entries(
-            client,
-            MODULE,
-            targets,
-            equity_tif_fn=equity_order_tif,
-            pos_lookup=pos_info,
-        )
-        if pending.get("submitted"):
-            plan.new_managed.update(pending["submitted"])
-        active_plan = defer_entries_if_market_closed(
-            MODULE,
-            bar,
-            plan.plan,
-            plan.new_managed,
-            plan.limits,
-        )
-        mark_plan_gone(dispositions, plan.plan, active_plan,
-                       "deferred_entry_market_closed")
-        def _persist_managed() -> None:
-            # Save after every fill, not just at the end of the plan, so a
-            # sibling module's broker reconcile never finds a fresh position
-            # missing from this module's on-disk managed state (see
-            # core.live_4h_exec.execute_plan's persist_managed docstring).
-            state["managed"] = plan.new_managed
-            _save_state(state)
-
-        execute_plan(
-            client,
-            dispositions=dispositions,
-            plan=active_plan,
-            limits=plan.limits,
-            submit=True,
-            equity_tif_fn=equity_order_tif,
-            new_managed=plan.new_managed,
-            exit_context=plan.exit_context,
-            module=MODULE,
-            pos_lookup=pos_info,
-            bar=bar,
-            persist_managed=_persist_managed,
-            # Dealer Ranker only. Its contracts quote ~33% of mid at the median
-            # against ~10% for Meta/Momentum/HTF, so paying the ask costs it
-            # +12.7% per entry versus +2.9% for them — against a +20%
-            # take-profit target. The other three stay on the single-shot path
-            # until there is a reason to accept their missed-entry risk too.
-            entry_ladder=True,
-        )
-        state["managed"] = plan.new_managed
-        state.setdefault("history", []).append(
-            {"ts": bar, "targets": targets, "orders": len(active_plan), "profile": profile}
-        )
-        _save_state(state)
-    else:
-        print("\n(dry-run: no orders submitted, state unchanged. Add --submit to execute.)")
-
-    append_jsonl(
-        AUDIT_LOG,
-        order_plan_audit_record(
-            module=MODULE,
-            bar=bar,
-            mode=("options" if args.route == "option" else "equity"),
-            submit=bool(args.submit),
             targets=targets,
-            plan=plan.plan,
+            managed=managed,
+            pos_info=pos_info,
+            bar=bar,
             signal_audits=signal_audits,
-            order_audits=plan.order_audits,
-            contract_selection=plan.contract_selection,
-            dropped=plan.dropped,
-            dispositions=dispositions,
-        ),
-    )
-    print(f"dealer ranker done: targets={targets} orders={len(plan.plan)} submit={args.submit} account={profile}")
-    return 0
+            policy=policy,
+            route_fn=_route,
+            ref_price_fn=_ref_price_fn(spot_map),
+            verbose=True,
+            module=MODULE,
+        )
+
+        # Declared outside the submit branch so the dry-run audit below still has a
+        # (empty) map rather than raising NameError.
+        dispositions: dict[str, str] = init_dispositions(plan.plan)
+        if args.submit:
+            # Exits first, for the same two reasons the HTF runner gives: a queued
+            # exit is an already-made decision on a position still held, and
+            # flushing it frees the buying power the queued entries are about to
+            # use. This module deferred exits into the queue but never flushed it,
+            # so a `trail_-35%` sell for RBRK260828C00100000 queued on 2026-08-28
+            # was still sitting there eleven days later, past the contract's own
+            # expiry, with nothing ever retrying it.
+            ex = submit_pending_exit_orders(
+                client,
+                MODULE,
+                equity_tif_fn=equity_order_tif,
+                pos_lookup=pos_info,
+                managed=managed,
+            )
+            if ex["count"] or ex["skipped"]:
+                print(f"pending-exit flush: submitted {ex['count']} / skipped {len(ex['skipped'])}")
+            pending = submit_pending_open_entries(
+                client,
+                MODULE,
+                targets,
+                equity_tif_fn=equity_order_tif,
+                pos_lookup=pos_info,
+            )
+            if pending.get("submitted"):
+                plan.new_managed.update(pending["submitted"])
+            active_plan = defer_entries_if_market_closed(
+                MODULE,
+                bar,
+                plan.plan,
+                plan.new_managed,
+                plan.limits,
+            )
+            mark_plan_gone(dispositions, plan.plan, active_plan,
+                           "deferred_entry_market_closed")
+            def _persist_managed() -> None:
+                # Save after every fill, not just at the end of the plan, so a
+                # sibling module's broker reconcile never finds a fresh position
+                # missing from this module's on-disk managed state (see
+                # core.live_4h_exec.execute_plan's persist_managed docstring).
+                state["managed"] = plan.new_managed
+                _save_state(state)
+
+            execute_plan(
+                client,
+                dispositions=dispositions,
+                plan=active_plan,
+                limits=plan.limits,
+                submit=True,
+                equity_tif_fn=equity_order_tif,
+                new_managed=plan.new_managed,
+                exit_context=plan.exit_context,
+                module=MODULE,
+                pos_lookup=pos_info,
+                bar=bar,
+                persist_managed=_persist_managed,
+                # Dealer Ranker only. Its contracts quote ~33% of mid at the median
+                # against ~10% for Meta/Momentum/HTF, so paying the ask costs it
+                # +12.7% per entry versus +2.9% for them — against a +20%
+                # take-profit target. The other three stay on the single-shot path
+                # until there is a reason to accept their missed-entry risk too.
+                entry_ladder=True,
+            )
+            state["managed"] = plan.new_managed
+            state.setdefault("history", []).append(
+                {"ts": bar, "targets": targets, "orders": len(active_plan), "profile": profile}
+            )
+            _save_state(state)
+        else:
+            print("\n(dry-run: no orders submitted, state unchanged. Add --submit to execute.)")
+
+        append_jsonl(
+            AUDIT_LOG,
+            order_plan_audit_record(
+                module=MODULE,
+                bar=bar,
+                mode=("options" if args.route == "option" else "equity"),
+                submit=bool(args.submit),
+                targets=targets,
+                plan=plan.plan,
+                signal_audits=signal_audits,
+                order_audits=plan.order_audits,
+                contract_selection=plan.contract_selection,
+                dropped=plan.dropped,
+                dispositions=dispositions,
+            ),
+        )
+        print(f"dealer ranker done: targets={targets} orders={len(plan.plan)} submit={args.submit} account={profile}")
+        return 0
 
 
 if __name__ == "__main__":

@@ -115,6 +115,7 @@ class IntradayStructureRunner:
         if self.executor is None:
             return
         try:
+            self.executor.reconcile_exits()
             self.executor.maybe_flatten_expiring()
         except Exception:  # noqa: BLE001 - never take the loop down
             logger.exception("Intraday Structure expiring flatten failed")

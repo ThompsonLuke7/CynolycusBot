@@ -20,6 +20,10 @@ from core.nervous_system.contracts.enums import (
     RuntimeEnvironment,
 )
 from core.nervous_system.contracts.intent import TradeIntent
+from core.nervous_system.portfolio.exposure import (
+    UNALLOCATED,
+    evaluate_proposed_concentration,
+)
 
 from .permissions import environment_vetoes, instrument_vetoes
 from .reason_codes import ReasonCode
@@ -229,6 +233,92 @@ def portfolio_limit_vetoes(
 # ---------------------------------------------------------------------------
 
 
+_CONCENTRATION_REASONS: dict[str, ReasonCode] = {
+    "PORTFOLIO_MAX_SYMBOL_NOTIONAL_BREACH": ReasonCode.PORTFOLIO_MAX_SYMBOL_NOTIONAL_BREACH,
+    "PORTFOLIO_MAX_SECTOR_NOTIONAL_BREACH": ReasonCode.PORTFOLIO_MAX_SECTOR_NOTIONAL_BREACH,
+    "PORTFOLIO_MAX_THEME_NOTIONAL_BREACH": ReasonCode.PORTFOLIO_MAX_THEME_NOTIONAL_BREACH,
+    "PORTFOLIO_MAX_FACTOR_NOTIONAL_BREACH": ReasonCode.PORTFOLIO_MAX_FACTOR_NOTIONAL_BREACH,
+}
+
+
+def concentration_vetoes(
+    intent: TradeIntent,
+    snapshot: ContextSnapshot,
+    config: PolicyConfig,
+) -> tuple[ReasonCode, ...]:
+    """Veto an entry that would breach a symbol, sector, theme, or factor limit.
+
+    Disabled unless ``config.portfolio_exposure`` is set, so an existing policy
+    version keeps its exact behaviour and decision identity.
+
+    This is the only rule that reasons about positions OTHER than the intent's
+    own, which is why it needs the snapshot's peer memberships: without them
+    every unrelated holding buckets to ``UNALLOCATED`` and a theme limit can
+    only ever see one position.
+
+    ``UNALLOCATED`` is deliberately NOT vetoed on. It means "we do not know this
+    position's theme", and a limit on the unknown bucket would block entries for
+    a mapping gap rather than for real concentration. The gap is reported as a
+    data-quality issue by the exposure engine instead.
+    """
+
+    if config.concentration_observe_only:
+        # Observed and recorded by `concentration_notes`, never vetoed here.
+        return ()
+    return _concentration_breaches(intent, snapshot, config)
+
+
+def concentration_notes(
+    intent: TradeIntent,
+    snapshot: ContextSnapshot,
+    config: PolicyConfig,
+) -> tuple[ReasonCode, ...]:
+    """What the concentration gate WOULD have refused, in observe mode.
+
+    Returns nothing unless observe mode is on, so the enforcing path never
+    double-reports a breach as both a veto and a note.
+    """
+
+    if not config.concentration_observe_only:
+        return ()
+    if not _concentration_breaches(intent, snapshot, config):
+        return ()
+    return (ReasonCode.PORTFOLIO_CONCENTRATION_OBSERVED,)
+
+
+def _concentration_breaches(
+    intent: TradeIntent,
+    snapshot: ContextSnapshot,
+    config: PolicyConfig,
+) -> tuple[ReasonCode, ...]:
+    exposure_config = config.portfolio_exposure
+    if exposure_config is None:
+        return ()
+    portfolio = snapshot.portfolio_state
+    if portfolio is None:
+        # Rule 5 already vetoed the missing broker fact; do not double-report.
+        return ()
+    if any(position.market_value is None for position in portfolio.positions):
+        # Rule 6 already raises PORTFOLIO_EXPOSURE_UNKNOWN for this.
+        return ()
+
+    results = evaluate_proposed_concentration(
+        portfolio,
+        snapshot,
+        config=exposure_config,
+        proposed_underlying=intent.ticker,
+        proposed_notional=intent.position_size_requested,
+    )
+    vetoes: list[ReasonCode] = []
+    for result in results:
+        if not result.breached or result.scope_id == UNALLOCATED:
+            continue
+        reason = _CONCENTRATION_REASONS.get(result.reason_code)
+        if reason is not None:
+            vetoes.append(reason)
+    return _dedupe(vetoes)
+
+
 def liquidity_vetoes(
     intent: TradeIntent,
     snapshot: ContextSnapshot,
@@ -272,6 +362,7 @@ HARD_RULES: tuple[HardRule, ...] = (
     HardRule("policy.rule.instrument", False, instrument_vetoes),
     HardRule("policy.rule.broker", True, broker_vetoes),
     HardRule("policy.rule.portfolio_limits", False, portfolio_limit_vetoes),
+    HardRule("policy.rule.concentration", False, concentration_vetoes),
     HardRule("policy.rule.liquidity", False, liquidity_vetoes),
 )
 
@@ -435,6 +526,8 @@ def money_quantum_cap_spec(budget: Decimal, config: PolicyConfig) -> ModifierSpe
 
 __all__ = [
     "HARD_RULES",
+    "concentration_notes",
+    "concentration_vetoes",
     "HardRule",
     "ModifierSpec",
     "RULES_VERSION",

@@ -51,7 +51,9 @@ from strategies.intraday_structure.regime import (
 )
 from strategies.intraday_structure.regime import RegimeAssessment
 from strategies.intraday_structure.state_store import JsonStateStore, append_jsonl
-from strategies.intraday_structure.target_manager import TargetPlan, build_target_plan, evaluate_extension, manage_running_setup
+from strategies.intraday_structure.target_manager import (
+    TargetPlan, TargetPlanOutcome, build_target_plan, evaluate_extension, manage_running_setup,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -504,7 +506,8 @@ class IntradayStructureEngine:
             outcome = build_target_plan(setup, ctx)
             plan = outcome.plan
             if plan is None:
-                self._abstain(setup, ctx, outcome.reason or "target_plan_unavailable", regime)
+                self._abstain(setup, ctx, outcome.reason or "target_plan_unavailable",
+                              regime, outcome=outcome)
                 return
             setup.invalidation = plan.invalidation
             setup.metadata["initial_invalidation"] = plan.invalidation
@@ -553,6 +556,7 @@ class IntradayStructureEngine:
     def _abstain(
         self, setup: SetupRecord, ctx: DetectionContext, reason: str,
         regime: RegimeAssessment, *, plan: TargetPlan | None = None,
+        outcome: "TargetPlanOutcome | None" = None,
     ) -> None:
         """Record a decision NOT to confirm, instead of dropping it on the floor.
 
@@ -572,8 +576,13 @@ class IntradayStructureEngine:
             min_reward_risk=self.config.target.min_reward_risk,
             runway_score=plan.runway.runway_score if plan else None,
             reward_risk=plan.reward_risk if plan else None,
-            proposed_invalidation=plan.invalidation if plan else None,
+            # Falls back to the refused plan's diagnostics: when there is no plan
+            # the reason IS the geometry, and it used to be dropped here.
+            proposed_invalidation=(plan.invalidation if plan
+                                   else outcome.proposed_invalidation if outcome else None),
             proposed_target=plan.targets[0] if plan and plan.targets else None,
+            proposed_risk_atr=outcome.proposed_risk_atr if outcome else None,
+            max_invalidation_atr=outcome.max_invalidation_atr if outcome else None,
         )
         try:
             self.abstention_sink(record)

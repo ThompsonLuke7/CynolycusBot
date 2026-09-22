@@ -51,7 +51,13 @@ class ReasonCode(str, Enum):
     # 6 hard portfolio limits
     PORTFOLIO_MAX_DAILY_LOSS_BREACH = "PORTFOLIO_MAX_DAILY_LOSS_BREACH"
     PORTFOLIO_MAX_GROSS_NOTIONAL_BREACH = "PORTFOLIO_MAX_GROSS_NOTIONAL_BREACH"
+    PORTFOLIO_MAX_SYMBOL_NOTIONAL_BREACH = "PORTFOLIO_MAX_SYMBOL_NOTIONAL_BREACH"
+    PORTFOLIO_MAX_SECTOR_NOTIONAL_BREACH = "PORTFOLIO_MAX_SECTOR_NOTIONAL_BREACH"
+    PORTFOLIO_MAX_THEME_NOTIONAL_BREACH = "PORTFOLIO_MAX_THEME_NOTIONAL_BREACH"
+    PORTFOLIO_MAX_FACTOR_NOTIONAL_BREACH = "PORTFOLIO_MAX_FACTOR_NOTIONAL_BREACH"
     PORTFOLIO_EXPOSURE_UNKNOWN = "PORTFOLIO_EXPOSURE_UNKNOWN"
+    # Recorded, not enforced: the concentration gate running in observe mode.
+    PORTFOLIO_CONCENTRATION_OBSERVED = "PORTFOLIO_CONCENTRATION_OBSERVED"
 
     # 7 liquidity and data-quality limits
     DATA_QUALITY_BLOCKING = "DATA_QUALITY_BLOCKING"
@@ -160,9 +166,29 @@ _DETAIL: Mapping[ReasonCode, str] = MappingProxyType(
         ReasonCode.PORTFOLIO_MAX_GROSS_NOTIONAL_BREACH: (
             "The proposed entry would exceed the configured gross notional limit."
         ),
+        ReasonCode.PORTFOLIO_MAX_SYMBOL_NOTIONAL_BREACH: (
+            "The proposed entry would exceed the configured per-symbol notional "
+            "limit for its underlying."
+        ),
+        ReasonCode.PORTFOLIO_MAX_SECTOR_NOTIONAL_BREACH: (
+            "The proposed entry would exceed the configured sector notional "
+            "limit, counting every open position in that sector."
+        ),
+        ReasonCode.PORTFOLIO_MAX_THEME_NOTIONAL_BREACH: (
+            "The proposed entry would exceed the configured theme notional "
+            "limit, counting every open position carrying that theme."
+        ),
+        ReasonCode.PORTFOLIO_MAX_FACTOR_NOTIONAL_BREACH: (
+            "The proposed entry would exceed the configured factor notional "
+            "limit, counting every open position carrying that factor tag."
+        ),
         ReasonCode.PORTFOLIO_EXPOSURE_UNKNOWN: (
             "An open position carries no market value, so gross exposure cannot "
             "be established and the limit cannot be enforced."
+        ),
+        ReasonCode.PORTFOLIO_CONCENTRATION_OBSERVED: (
+            "A concentration limit would have been breached. The gate is in "
+            "observe mode, so this was recorded and the entry was NOT blocked."
         ),
         ReasonCode.DATA_QUALITY_BLOCKING: (
             "A context state carries a data-quality issue at a blocking severity."

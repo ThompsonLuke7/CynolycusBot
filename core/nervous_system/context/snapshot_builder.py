@@ -11,8 +11,11 @@ from core.nervous_system.context.requirements import (
     SnapshotEntityScope,
     decision_session,
     evaluate_requirements,
+    select_peer_memberships,
 )
 from core.nervous_system.contracts.context import ContextSnapshot
+from core.nervous_system.contracts.enums import StateType
+from core.nervous_system.contracts.states import PortfolioState
 from core.nervous_system.persistence.repositories.state import StateRepository
 
 
@@ -68,6 +71,37 @@ class SnapshotBuilder:
             sector_entity_ids=sector_entity_ids,
         )
 
+    def held_underlyings(self, *, decision_time: datetime) -> tuple[str, ...]:
+        """Distinct underlyings held at ``decision_time``, newest state wins.
+
+        The peer set for a decision IS the set of things already owned: those
+        are the positions a concentration limit has to count.  Resolved from
+        the registry's own PORTFOLIO state rather than from the broker, so the
+        same answer replays later.
+
+        Returns ``()`` when no portfolio state is available.  That degrades to
+        today's behaviour -- every holding buckets to UNALLOCATED -- rather
+        than blocking a decision on a missing peer set.
+        """
+
+        decision_time_utc = _aware(decision_time, "decision_time")
+        candidates = self._repository.get_state_candidates_for_snapshot(
+            (StateType.PORTFOLIO,), decision_time_utc
+        )
+        portfolios = [
+            candidate
+            for candidate in candidates
+            if isinstance(candidate, PortfolioState)
+            and candidate.entity_id == self._scope.portfolio_entity_id
+            and decision_time_utc < candidate.valid_until
+        ]
+        if not portfolios:
+            return ()
+        latest = max(portfolios, key=lambda state: (state.available_at, state.as_of))
+        return tuple(
+            sorted({position.underlying for position in latest.positions if position.underlying})
+        )
+
     def build(
         self,
         *,
@@ -76,6 +110,7 @@ class SnapshotBuilder:
         decision_time: datetime,
         decision_bar: datetime,
         profile: SnapshotProfile,
+        peer_entity_ids: tuple[str, ...] = (),
     ) -> ContextSnapshot:
         """Load candidates once, select causally, and persist idempotently."""
 
@@ -107,6 +142,19 @@ class SnapshotBuilder:
             scope=self._scope,
         )
 
+        # Advisory and additive: with no peers requested this selects nothing
+        # and the snapshot -- including its content hash -- is byte-identical to
+        # what the same inputs produced before peers existed.
+        peer_memberships = select_peer_memberships(
+            candidates,
+            peer_entity_ids=peer_entity_ids,
+            entity_id=entity_id,
+            decision_time=decision_time_utc,
+            decision_bar=decision_bar_utc,
+            profile=profile,
+            scope=self._scope,
+        )
+
         session_label = decision_session(decision_time_utc)
         common = {
             "decision_time": decision_time_utc,
@@ -115,6 +163,7 @@ class SnapshotBuilder:
             "strategy_id": strategy_id,
             "ticker": entity_id,
             "states": evaluation.selected_states,
+            "peer_theme_memberships": peer_memberships,
             "freshness_profile": profile.profile_id,
             "freshness_profile_hash": profile.profile_hash,
             "stale_inputs": evaluation.stale_inputs,

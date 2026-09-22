@@ -616,6 +616,24 @@ def _run_broker_equity_snapshot(*, env_file: str, account_label: str) -> None:
         )
 
 
+def _run_broker_fill_reconciliation(*, env_file: str, account_label: str) -> None:
+    """Read-only execution-accounting gate for reports and operations."""
+    from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+    from core.broker_fill_reconciliation import reconcile_account
+
+    try:
+        certificate = reconcile_account(
+            AlpacaOptionsClient(env_file=env_file), account_label=account_label,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Broker fill reconciliation (%s) failed: %s", account_label, exc, exc_info=True)
+        return
+    logger.log(logging.INFO if certificate["status"] == "PASS" else logging.ERROR,
+               "Broker fill reconciliation (%s): %s fills=%d unattributed=%d mismatches=%d",
+               account_label, certificate["status"], certificate["fill_count"],
+               len(certificate["unattributed_fills"]), len(certificate["ledger_mismatches"]))
+
+
 def _run_shadow_tracker() -> None:
     """Two-sleeve (id4 tail-rider / g284 harvester) exit-policy shadow tracker for
     Momentum/HTF/Meta — paper-only observation, no submit_order path (see
@@ -1642,6 +1660,12 @@ def run_combined(
             daemon=True,
             name="broker-snapshot-startup",
         ).start()
+        threading.Thread(
+            target=_run_broker_fill_reconciliation,
+            kwargs={"env_file": meta_env, "account_label": "paper"},
+            daemon=True,
+            name="broker-fill-reconciliation-startup",
+        ).start()
         print("  Portfolio state:         publishing at startup (read-only capture)")
 
     # Capture exact broker marks shortly after the regular and extended-session
@@ -1666,6 +1690,14 @@ def run_combined(
             # so the snapshot rejects it, portfolio resolves to None and every
             # Meta order is vetoed BROKER_PORTFOLIO_STATE_MISSING -- exits
             # included, which is exactly the queue this flush exists to drain.
+            weekdays_only=False,
+        )
+        snapshot_schedulers += _schedule_loop(
+            "16:10,20:10",
+            lambda env=snapshot_env, label=account_label: _run_broker_fill_reconciliation(
+                env_file=env, account_label=label,
+            ),
+            label=f"Broker fill reconciliation {account_label}", tag="READ-ONLY",
             weekdays_only=False,
         )
 

@@ -13,6 +13,7 @@ LIVE_CONFIG["auto_trade"] = True to wire orders through the policy.
 """
 from __future__ import annotations
 
+
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ import pandas as pd
 
 from strategies.momentum_expansion.config.momentum_config import (
     CONTEXT_TICKERS,
+    FEATURES_COMBINED,
     LIVE_CONFIG,
     SECTOR_ETFS,
 )
@@ -31,14 +33,27 @@ from strategies.momentum_expansion.data.bars import (
     fetch_context_bars,
     fetch_universe_bars,
 )
+from core.live_state import module_state_lock, load_state, save_state
+from core.governed_plan_execution import submit_plan_via_router
 from core.live_4h_exec import (
     ExecPolicy,
     build_mixed_plan,
+    defer_entries_if_market_closed,
+    defer_exits_if_opg_unavailable,
     execute_plan,
     now_utc_iso,
     order_plan_audit_record,
     submit_pending_exit_orders,
     submit_pending_open_entries,
+)
+from strategies.momentum_expansion.live.gateway_execution import (
+    DEFAULT_PROFILE,
+    GovernedPathUnavailable,
+    build_momentum_router,
+    momentum_scores_by_ticker,
+)
+from strategies.momentum_expansion.live.ticker_state_publication import (
+    publish_momentum_ticker_states,
 )
 from core.live_signal_audit import append_jsonl, build_signal_audit
 from signals.meta_context.meta_ranker.options_exec import equity_order_tif, route_option_or_shares
@@ -69,14 +84,11 @@ SIGNAL_MAX_STALENESS_DAYS = float(os.getenv("MOMENTUM_MAX_SIGNAL_STALENESS_DAYS"
 
 
 def _load_state() -> dict:
-    try:
-        return json.loads(STATE_PATH.read_text())
-    except Exception:
-        return {"managed": {}, "history": []}
+    return load_state(STATE_PATH)
 
 
 def _save_state(state: dict) -> None:
-    STATE_PATH.write_text(json.dumps(state, indent=2, default=str))
+    save_state(STATE_PATH, state)
 
 
 def _ref_price_4h(ticker: str) -> float | None:
@@ -184,6 +196,7 @@ class MomentumLiveRunner:
         policy: MomentumOptionPolicy | None = None,
         auto_trade: bool | None = None,
         exec_policy: ExecPolicy | None = None,
+        governed: bool = False,
     ):
         self.ranker = ranker or ExpansionRanker()
         cfg = MomentumOptionConfig(submit_orders=bool(auto_trade if auto_trade is not None else LIVE_CONFIG["auto_trade"]))
@@ -192,6 +205,11 @@ class MomentumLiveRunner:
         # Shared 4H engine hold/scale-out sizing (configurable via CLI in main(),
         # same as Meta/HTF); defaults match the engine's own defaults.
         self.exec_policy = exec_policy or ExecPolicy()
+        # Route orders through the nervous system instead of calling the broker
+        # directly. OFF by default: the direct path is what has been running,
+        # and two paths submitting the same signal is the worst outcome
+        # available, so this is switched on deliberately per process.
+        self.governed = bool(governed)
         # Populated by evaluate_now for run_pass (shared 4H engine).
         self._last_gate: dict | None = None
 
@@ -356,8 +374,11 @@ class MomentumLiveRunner:
 
         # Execution + exits now run through the shared 4H engine in run_pass();
         # this method stays display/alert-only (used by the dashboard).
+        # `ranked` goes with it: the governed path refuses to open a position
+        # it cannot explain, so the scored frame is the evidence, not a nicety.
         self._last_gate = {"targets": targets, "entry_ok": entry_ok,
-                           "signal_audits": sa_map, "bar": ts_used}
+                           "signal_audits": sa_map, "bar": ts_used,
+                           "ranked": ranked}
         return emitted
 
     # ---- exit management ----
@@ -427,6 +448,66 @@ class MomentumLiveRunner:
                 out.append(payload)
         return out
 
+    # ---- governed execution ----
+    def _submit_via_gateway(self, res, *, client, bar, pos_info,
+                            persist_managed, dispositions) -> None:
+        """Route one plan through the nervous system. Never calls a broker.
+
+        Ticker states are published FIRST. Momentum names outside Meta's top-K
+        have no TICKER state otherwise, and the governed path refuses a
+        decision it cannot evidence -- so without this every momentum entry
+        would be vetoed as SNAPSHOT_REQUIRED_STATE_MISSING.
+
+        Exits are published for too: liquidity and snapshot rules gate exits as
+        well (broker_vetoes carries applies_to_risk_reducing=True), so
+        publishing only the entries would leave every exit vetoed.
+        """
+
+        gate = self._last_gate or {}
+        ranked = gate.get("ranked")
+        scores = momentum_scores_by_ticker(ranked)
+
+        held = {str(t).upper() for t in (res.new_managed or {})}
+        planned = {str(row[0]).upper() for row in res.plan}
+        publishable = sorted(set(scores) | held | planned)
+        if publishable:
+            pub = publish_momentum_ticker_states(
+                ranked,
+                tickers=publishable,
+                decision_bar=bar.to_pydatetime() if hasattr(bar, "to_pydatetime") else bar,
+                matrix_path=FEATURES_COMBINED,
+            )
+            print(f"ticker states: {pub['status']} published={pub['published']}/{len(publishable)}")
+            skipped_states = pub.get("skipped") or {}
+            if skipped_states:
+                # Named, not counted: a name with no state will be refused by
+                # the governed path, and "which names" is the first question
+                # that asks.
+                preview = sorted(skipped_states)[:10]
+                print(f"  no ticker state for {len(skipped_states)}: {preview}"
+                      f"{' ...' if len(skipped_states) > len(preview) else ''}")
+
+        router = build_momentum_router(
+            requested_notional=self.exec_policy.target_notional,
+            held_tickers=frozenset(held),
+            profile_id=DEFAULT_PROFILE,
+        )
+        submit_plan_via_router(
+            router,
+            res.plan,
+            module="momentum_expansion",
+            client=client,
+            bar=bar,
+            new_managed=res.new_managed,
+            exit_context=res.exit_context,
+            pos_lookup=pos_info,
+            scores_by_ticker=scores,
+            contract_selection=res.contract_selection,
+            persist_managed=persist_managed,
+            dispositions=dispositions,
+            is_option=True,
+        )
+
     # ---- shared 4H option/share execution + exits ----
     def run_pass(self, client, *, submit: bool, bar_ts: pd.Timestamp | None = None,
                  flush_pending_open: bool = False) -> dict:
@@ -448,71 +529,114 @@ class MomentumLiveRunner:
         signal_audits = gate["signal_audits"] if gate else {}
         entry_ok = gate["entry_ok"] if gate else {}
 
-        state = _load_state()
-        managed = state.get("managed", {})
-        pos_info = _build_pos_info(client)
+        with module_state_lock("momentum_expansion") as acquired:
+            if not acquired:
+                logger.warning("momentum_expansion state transaction already running; skipping pass")
+                return {"skipped": "state_locked"}
+            state = _load_state()
+            managed = state.get("managed", {})
+            pos_info = _build_pos_info(client)
 
-        # Pre-open flush: submit after-close-queued entries still in TODAY's top-K
-        # (re-rank against the freshly-ranked `targets`), then exit — no position mgmt.
-        if flush_pending_open:
-            if submit:
-                # Exits first: a queued exit is an already-made decision on a
-                # position we still hold, and flushing it before entries frees the
-                # buying power the queued entries are about to use.
-                ex = submit_pending_exit_orders(client, "momentum_expansion",
-                                                equity_tif_fn=equity_order_tif, pos_lookup=pos_info,
-                                                managed=managed)
-                if ex["count"] or ex["skipped"]:
-                    print(f"pending-exit flush: submitted {ex['count']} / skipped {len(ex['skipped'])}")
-                r = submit_pending_open_entries(client, "momentum_expansion", targets,
-                                                equity_tif_fn=equity_order_tif, pos_lookup=pos_info)
-                managed.update(r["submitted"])
-                state["managed"] = managed
+            # Pre-open flush: submit after-close-queued entries still in TODAY's top-K
+            # (re-rank against the freshly-ranked `targets`), then exit — no position mgmt.
+            if flush_pending_open:
+                if submit:
+                    # Exits first: a queued exit is an already-made decision on a
+                    # position we still hold, and flushing it before entries frees the
+                    # buying power the queued entries are about to use.
+                    ex = submit_pending_exit_orders(client, "momentum_expansion",
+                                                    equity_tif_fn=equity_order_tif, pos_lookup=pos_info,
+                                                    managed=managed)
+                    if ex["count"] or ex["skipped"]:
+                        print(f"pending-exit flush: submitted {ex['count']} / skipped {len(ex['skipped'])}")
+                    r = submit_pending_open_entries(client, "momentum_expansion", targets,
+                                                    equity_tif_fn=equity_order_tif, pos_lookup=pos_info)
+                    managed.update(r["submitted"])
+                    state["managed"] = managed
+                    _save_state(state)
+                    print(f"pending-open flush: submitted {r['count']} / skipped {len(r['skipped'])}")
+                    return {"orders": r["count"]}
+                print("pending-open flush (dry-run): add --submit to place queued entries")
+                return {"orders": 0}
+
+            res = build_mixed_plan(
+                client, targets=targets, managed=managed, pos_info=pos_info,
+                bar=bar, signal_audits=signal_audits, policy=self.exec_policy,
+                route_fn=route_option_or_shares, ref_price_fn=_ref_price_4h,
+                entry_ok=entry_ok, gate_reason="no_entry_trigger",
+                module="momentum_expansion",
+            )
+            def _persist_managed() -> None:
+                # Save after every fill, not just at the end of the plan, so a
+                # sibling module's broker reconcile never finds a fresh position
+                # missing from this module's on-disk managed state (see
+                # core.live_4h_exec.execute_plan's persist_managed docstring).
+                state["managed"] = res.new_managed
                 _save_state(state)
-                print(f"pending-open flush: submitted {r['count']} / skipped {len(r['skipped'])}")
-                return {"orders": r["count"]}
-            print("pending-open flush (dry-run): add --submit to place queued entries")
-            return {"orders": 0}
 
-        res = build_mixed_plan(
-            client, targets=targets, managed=managed, pos_info=pos_info,
-            bar=bar, signal_audits=signal_audits, policy=self.exec_policy,
-            route_fn=route_option_or_shares, ref_price_fn=_ref_price_4h,
-            entry_ok=entry_ok, gate_reason="no_entry_trigger",
-            module="momentum_expansion",
-        )
-        def _persist_managed() -> None:
-            # Save after every fill, not just at the end of the plan, so a
-            # sibling module's broker reconcile never finds a fresh position
-            # missing from this module's on-disk managed state (see
-            # core.live_4h_exec.execute_plan's persist_managed docstring).
-            state["managed"] = res.new_managed
-            _save_state(state)
-
-        dispositions: dict[str, str] = {}
-        execute_plan(client, plan=res.plan, limits=res.limits, submit=submit,
-                     equity_tif_fn=equity_order_tif,
-                     new_managed=res.new_managed, exit_context=res.exit_context,
-                     module="momentum_expansion", pos_lookup=pos_info, bar=bar,
-                     persist_managed=_persist_managed, dispositions=dispositions)
-        audit = order_plan_audit_record(
-            module="momentum_expansion", bar=bar, mode="options", submit=submit,
-            targets=targets, plan=res.plan, signal_audits=signal_audits,
-            order_audits=res.order_audits, contract_selection=res.contract_selection,
-            dropped=res.dropped, dispositions=dispositions,
-        )
-        if submit:
-            # Persist managed state every submit pass (not only when an order was
-            # placed) — hold/grace counters (runs_held/bars_out) must advance on
-            # quiet passes too, or horizon/grace exits stall indefinitely.
-            state["managed"] = res.new_managed
-            if res.plan:
-                state.setdefault("history", []).append(
-                    {"ts": now_utc_iso(), "bar": str(bar), "orders": len(res.plan)})
-            _save_state(state)
-            print(f"state updated -> {STATE_PATH}")
-        append_jsonl(DEFAULT_SIGNAL_AUDIT_LOG, audit)
-        return {"orders": len(res.plan)}
+            dispositions: dict[str, str] = {}
+            if self.governed and submit and res.plan:
+                # Governed path: the runner never talks to a broker. If it
+                # cannot be built or reached, the plan is QUEUED rather than
+                # submitted directly -- falling back to a direct broker call
+                # would reintroduce the exact bypass this removes.
+                try:
+                    self._submit_via_gateway(
+                        res, client=client, bar=bar, pos_info=pos_info,
+                        persist_managed=_persist_managed,
+                        dispositions=dispositions,
+                    )
+                except GovernedPathUnavailable as exc:
+                    # An unreachable governed path means "cannot submit now",
+                    # never "lose the plan". Both deferrals are FORCED: during
+                    # market hours the calendar check would otherwise leave an
+                    # exit in a plan that is never submitted, while the position
+                    # has already been dropped from managed state.
+                    logger.error(
+                        "momentum_expansion: governed path unavailable (%s) — "
+                        "queueing %d order(s) for the next flush instead of submitting",
+                        type(exc).__name__, len(res.plan),
+                    )
+                    print(f"\n  GOVERNED PATH UNAVAILABLE: queueing {len(res.plan)} "
+                          "order(s) for the next flush — nothing was submitted")
+                    before = list(res.plan)
+                    remaining = defer_entries_if_market_closed(
+                        "momentum_expansion", bar, res.plan, res.new_managed, res.limits,
+                        force=True, reason="governed path unavailable",
+                    )
+                    remaining = defer_exits_if_opg_unavailable(
+                        "momentum_expansion", bar, remaining, res.limits,
+                        new_managed=res.new_managed, exit_context=res.exit_context,
+                        force=True, reason="governed path unavailable",
+                    )
+                    still_present = {str(row[0]) for row in remaining}
+                    for row in before:
+                        if str(row[0]) not in still_present:
+                            dispositions[str(row[0])] = "queued_governed_path_unavailable"
+            else:
+                execute_plan(client, plan=res.plan, limits=res.limits, submit=submit,
+                             equity_tif_fn=equity_order_tif,
+                             new_managed=res.new_managed, exit_context=res.exit_context,
+                             module="momentum_expansion", pos_lookup=pos_info, bar=bar,
+                             persist_managed=_persist_managed, dispositions=dispositions)
+            audit = order_plan_audit_record(
+                module="momentum_expansion", bar=bar, mode="options", submit=submit,
+                targets=targets, plan=res.plan, signal_audits=signal_audits,
+                order_audits=res.order_audits, contract_selection=res.contract_selection,
+                dropped=res.dropped, dispositions=dispositions,
+            )
+            if submit:
+                # Persist managed state every submit pass (not only when an order was
+                # placed) — hold/grace counters (runs_held/bars_out) must advance on
+                # quiet passes too, or horizon/grace exits stall indefinitely.
+                state["managed"] = res.new_managed
+                if res.plan:
+                    state.setdefault("history", []).append(
+                        {"ts": now_utc_iso(), "bar": str(bar), "orders": len(res.plan)})
+                _save_state(state)
+                print(f"state updated -> {STATE_PATH}")
+            append_jsonl(DEFAULT_SIGNAL_AUDIT_LOG, audit)
+            return {"orders": len(res.plan)}
 
 
 def main() -> None:
@@ -539,6 +663,9 @@ def main() -> None:
     ap.add_argument("--target-notional", type=float, default=5000.0,
                     help="Dollar size per new entry; shares/contracts are computed from the "
                          "current price/premium so exposure is comparable across tickers.")
+    ap.add_argument("--governed", action="store_true",
+                    help="Route orders through the nervous system (paper only) instead of "
+                         "calling the broker directly. Default off.")
     ap.add_argument("--roll-trading-days", type=int, default=5,
                     help="Options: roll to next monthly when nearest is within this many trading days.")
     args = ap.parse_args()
@@ -554,7 +681,12 @@ def main() -> None:
                              stop_loss=args.stop_loss, trail_stop=args.trail_stop,
                              target_notional=args.target_notional,
                              roll_trading_days=args.roll_trading_days)
-    runner = MomentumLiveRunner(auto_trade=bool(args.submit), exec_policy=exec_policy)
+    if args.governed and args.live:
+        # The governed path refuses PRODUCTION_LIVE in the router constructor;
+        # say so here rather than building a client that cannot be used.
+        raise SystemExit("--governed is paper-only: the governed path has no live route")
+    runner = MomentumLiveRunner(auto_trade=bool(args.submit), exec_policy=exec_policy,
+                                governed=bool(args.governed))
     result = runner.run_pass(client, submit=bool(args.submit),
                              flush_pending_open=bool(getattr(args, "flush_pending_open", False)))
     print(f"orders: {result['orders']}")

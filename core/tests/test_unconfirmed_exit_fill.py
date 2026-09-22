@@ -35,10 +35,11 @@ _HPE = "HPE260814C00060000"
 class _Client:
     """Accepts the sell but never fills it — the 0DTE-with-no-bid case."""
 
-    def __init__(self, *, fill_price=None, order_status="accepted"):
+    def __init__(self, *, fill_price=None, order_status="accepted", activities=None):
         self.fill_price = fill_price
         self.order_status = order_status
         self.submitted: list[dict] = []
+        self.activities = activities or []
 
     def submit_option_order(self, *, symbol, qty, side, **k):
         self.submitted.append({"symbol": symbol, "qty": qty, "side": side, **k})
@@ -46,7 +47,11 @@ class _Client:
 
     def get_order(self, order_id):
         return {"id": order_id, "status": self.order_status,
-                "filled_avg_price": self.fill_price}
+                "filled_avg_price": self.fill_price,
+                "filled_qty": "52" if self.order_status == "filled" else "0"}
+
+    def get_account_activities(self, **_kwargs):
+        return self.activities
 
     def get_positions(self):
         return []
@@ -99,7 +104,7 @@ def test_accepted_but_unfilled_exit_is_not_booked_as_a_close(tmp_path, monkeypat
 
 
 def test_filled_exit_still_books_immediately(tmp_path, monkeypatch):
-    client = _Client(fill_price="0.46")
+    client = _Client(fill_price="0.46", order_status="filled")
     new_managed: dict = {}
     exit_context = {_HPE: ("HPE", _managed()["HPE"])}
 
@@ -111,9 +116,12 @@ def test_filled_exit_still_books_immediately(tmp_path, monkeypatch):
     assert "HPE" not in new_managed
 
 
-def test_settled_pending_exit_books_the_expiry_loss(tmp_path):
-    """Gone from the broker with no fill == the premium expired worthless."""
-    client = _Client(fill_price=None, order_status="expired")
+def test_settled_pending_exit_books_the_expiry_loss_from_activity(tmp_path):
+    """Only an executed expiration activity can prove a worthless settlement."""
+    client = _Client(fill_price=None, order_status="expired", activities=[{
+        "id": "expiry-1", "symbol": _HPE, "status": "executed", "activity_type": "OPEXP",
+        "qty": "-52", "net_amount": "0", "date": "2026-08-14",
+    }])
     state = {**_managed()["HPE"], "exit_pending": {
         "order_id": f"{_HPE}-oid", "reason": "stop_-50%", "route": "option",
         "qty": 52.0, "entry_avg_price": 0.92, "submitted_bar": "2026-08-14 19:45"}}
@@ -144,8 +152,11 @@ def test_settled_pending_exit_books_a_late_fill_at_its_real_price(tmp_path):
     assert rows[0]["realized_pnl"] == round((0.05 - 0.92) * 100 * 52, 2)
 
 
-def test_build_mixed_plan_settles_a_pending_exit_when_the_broker_goes_flat(tmp_path):
-    client = _Client(fill_price=None, order_status="expired")
+def test_build_mixed_plan_settles_a_pending_exit_when_activity_proves_expiry(tmp_path):
+    client = _Client(fill_price=None, order_status="expired", activities=[{
+        "id": "expiry-1", "symbol": _HPE, "status": "executed", "activity_type": "OPEXP",
+        "qty": "-52", "net_amount": "0", "date": "2026-08-14",
+    }])
     managed = {"HPE": {**_managed()["HPE"], "exit_pending": {
         "order_id": f"{_HPE}-oid", "reason": "stop_-50%", "route": "option",
         "qty": 52.0, "entry_avg_price": 0.92, "submitted_bar": "2026-08-14 19:45"}}}
@@ -161,8 +172,8 @@ def test_build_mixed_plan_settles_a_pending_exit_when_the_broker_goes_flat(tmp_p
     assert _ledger_rows(tmp_path)[0]["realized_pnl"] == -4784.0
 
 
-def test_still_held_after_a_failed_exit_is_surfaced_as_stuck(tmp_path):
-    """The order died unfilled and the contract is still there: re-plan, and shout."""
+def test_still_held_after_a_proven_unfilled_exit_is_surfaced_as_stuck(tmp_path):
+    """A terminal zero-fill status safely releases the reservation for retry."""
     client = _Client(fill_price=None, order_status="expired")
     managed = {"HPE": {**_managed()["HPE"], "exit_pending": {
         "order_id": f"{_HPE}-oid", "reason": "stop_-50%", "route": "option",
@@ -175,10 +186,8 @@ def test_still_held_after_a_failed_exit_is_surfaced_as_stuck(tmp_path):
         module="dealer_ranker", ledger_root=str(tmp_path),
     )
 
-    assert "HPE" in res.stuck_exits
-    assert res.stuck_exits["HPE"]["reason"] == "stop_-50%"
-    # Flag cleared so the exit machine re-evaluates rather than sitting on a stale order.
-    assert "exit_pending" not in res.new_managed.get("HPE", {})
+    assert res.stuck_exits["HPE"]["symbol"] == _HPE
+    assert "exit_pending" not in res.new_managed["HPE"]
     # Nothing booked: the position is still held.
     assert _ledger_rows(tmp_path) == []
 
