@@ -843,6 +843,8 @@ def build_mixed_plan(
                 "open_interest": order.get("open_interest"), "volume": order.get("volume"),
                 "spread": order.get("spread"), "dealer_gate": order.get("dealer_gate"),
                 "contracts": contracts,
+                # Decision-time implied vol / greeks. Observable only now.
+                "iv": order.get("iv"), "greeks": order.get("greeks"),
                 "signal_audit": sa.get(t),
                 # The validated two-sided mark select_option observed. The
                 # governed path builds the option leg from it; without it an
@@ -857,6 +859,7 @@ def build_mixed_plan(
                 premium=order.get("limit") or order.get("mid"), limit_price=order.get("limit"),
                 mid_price=order.get("mid"), delta=order.get("delta"),
                 dte=_option_dte(order.get("expiry"), bar), expiration=order.get("expiry"),
+                iv=order.get("iv"), greeks=order.get("greeks"),
             )
             # Anchor the underlying stop at entry. `px` is the same reference
             # price the contract was selected against, so the stop is measured
@@ -1107,6 +1110,10 @@ def closed_trade_record(*, module, bar, ticker, order_symbol, route, qty, exit_r
         "entry_filled_qty": es.get("entry_filled_qty"),
         "u_entry": es.get("u_entry"),
         "u_atr": es.get("u_atr"),
+        # The entry rule that opened the position (momentum: break_body_prev_high
+        # / pullback_continuation). Null for modules without one, and for
+        # positions whose state predates the signal audit — null is UNKNOWN.
+        "trigger_rule": ((es.get("signal_audit") or {}).get("extra") or {}).get("trigger_rule"),
         "exit_submitted_at": exit_submitted_at,
         "decision_gain": float(decision_gain) if decision_gain is not None else None,
         "fill_gain": round(fill_gain, 6) if fill_gain is not None else None,

@@ -1,0 +1,44 @@
+
+=== hold 63 sessions (entry next open) ===
+arm                                               n tickers  mean_ret  med_ret mean_xsSPY  hit>SPY  mean_MDD  xs_vs_baseline [95% month-boot]
+all_days (baseline)                           98652     689    +2.31%   +0.61%     -0.67%    44.4%   -14.84%  +0.00% [+nan%, +nan%]
+discount_only (dipped<200, no TMO turn)       15602     725    +1.84%   +0.40%     -1.12%    44.0%   -15.65%  -0.45% [-1.22%, +0.31%]
+tmo_turn_only (no dip)                         2768     553    +3.60%   +1.76%     +0.21%    45.3%   -14.04%  +0.88% [-0.49%, +2.37%]
+SETUP dip<200 + OS + TMO turn                  6948     593    +2.22%   +0.73%     -0.89%    45.1%   -15.72%  -0.22% [-1.31%, +0.91%]
+SETUP + rising 200 (uptrend pullback)          3358     558    +3.54%   +1.40%     +0.13%    46.5%   -14.61%  +0.80% [-0.58%, +2.34%]
+discount + rising 200, no turn (control)       6792     651    +3.47%   +1.26%     +0.02%    45.6%   -14.59%  +0.69% [-0.53%, +1.97%]
+near 52w low + OS + TMO turn                   3776     519    +1.00%   +0.19%     -1.70%    44.1%   -15.42%  -1.03% [-2.44%, +0.33%]
+
+=== hold 90 sessions (entry next open) ===
+arm                                               n tickers  mean_ret  med_ret mean_xsSPY  hit>SPY  mean_MDD  xs_vs_baseline [95% month-boot]
+all_days (baseline)                           96454     669    +3.26%   +0.73%     -0.98%    43.2%   -17.36%  +0.00% [+nan%, +nan%]
+discount_only (dipped<200, no TMO turn)       15271     712    +2.07%   -0.14%     -1.98%    42.4%   -18.42%  -1.00% [-1.94%, -0.14%]
+tmo_turn_only (no dip)                         2716     547    +6.52%   +3.02%     +1.24%    44.8%   -16.33%  +2.21% [+0.60%, +3.87%]
+SETUP dip<200 + OS + TMO turn                  6809     585    +2.81%   +0.78%     -1.46%    44.0%   -18.53%  -0.48% [-1.77%, +0.77%]
+SETUP + rising 200 (uptrend pullback)          3298     549    +4.33%   +1.31%     -0.10%    44.6%   -17.45%  +0.88% [-0.91%, +2.65%]
+discount + rising 200, no turn (control)       6656     639    +3.85%   +0.65%     -0.39%    44.1%   -17.28%  +0.59% [-0.86%, +2.01%]
+near 52w low + OS + TMO turn                   3686     515    +1.23%   -0.07%     -2.63%    42.9%   -18.25%  -1.65% [-3.47%, -0.05%]
+
+=== hold 126 sessions (entry next open) ===
+arm                                               n tickers  mean_ret  med_ret mean_xsSPY  hit>SPY  mean_MDD  xs_vs_baseline [95% month-boot]
+all_days (baseline)                           93523     663    +4.56%   +1.27%     -1.28%    42.0%   -20.13%  +0.00% [+nan%, +nan%]
+discount_only (dipped<200, no TMO turn)       14804     708    +2.40%   -0.32%     -3.08%    40.2%   -21.35%  -1.80% [-2.98%, -0.74%]
+tmo_turn_only (no dip)                         2662     547    +9.57%   +4.81%     +2.15%    45.9%   -18.92%  +3.43% [+1.01%, +6.17%]
+SETUP dip<200 + OS + TMO turn                  6617     579    +2.86%   +0.14%     -2.57%    41.2%   -21.48%  -1.29% [-2.93%, +0.27%]
+SETUP + rising 200 (uptrend pullback)          3204     544    +4.56%   +0.61%     -0.80%    42.9%   -20.50%  +0.48% [-1.67%, +2.77%]
+discount + rising 200, no turn (control)       6404     635    +3.64%   -0.42%     -1.51%    40.9%   -20.32%  -0.22% [-1.83%, +1.37%]
+near 52w low + OS + TMO turn                   3593     513    +0.73%   -0.41%     -4.43%    39.8%   -21.11%  -3.15% [-5.46%, -1.29%]
+
+=== by signal year, hold 90, mean excess vs SPY ===
+     all_days (baseline) discount + rising 200, no tu SETUP dip<200 + OS + TMO tur SETUP + rising 200 (uptrend 
+year                                                                                                           
+2019         -3.8% (n=1)                          NaN                          NaN                          NaN
+2020       +29.0% (n=18)                          NaN                 +31.7% (n=2)                          NaN
+2021      -8.0% (n=8830)                -8.1% (n=943)               -11.5% (n=564)                -8.2% (n=437)
+2022     -1.4% (n=20154)               -2.3% (n=1293)               -1.4% (n=2117)                -2.0% (n=699)
+2023     -0.7% (n=20033)               +1.2% (n=1176)               +0.1% (n=1268)                +1.4% (n=599)
+2024     -1.7% (n=19890)               +0.0% (n=1268)               -1.8% (n=1137)                +0.9% (n=654)
+2025     +2.1% (n=20067)               +3.2% (n=1359)               +1.1% (n=1183)                +2.9% (n=596)
+2026      +1.0% (n=7461)                +3.9% (n=617)                +0.1% (n=538)                +4.6% (n=313)
+
+concentration (uptrend SETUP, 90d): top-10 events carry -535% of summed excess; trimmed-5% mean -1.41%

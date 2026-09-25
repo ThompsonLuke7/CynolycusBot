@@ -315,13 +315,15 @@ def main() -> int:
             tickers = universe["ticker"].astype(str).tolist()
         out_path = Path(args.output) if args.output else EARNINGS_CALENDAR_PATH
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        from signals.events.earnings_calendar import merge_calendar_snapshot
+
         df = fetch_earnings_calendar(tickers, request_timeout_s=args.ticker_timeout)
-        if out_path.exists():
-            try:
-                prior = pd.read_parquet(out_path)
-                df = pd.concat([prior, df], ignore_index=True).drop_duplicates(["ticker", "snapshot_date"], keep="last")
-            except Exception:
-                pass
+        # The file also holds the multi-year report history written by
+        # signals.events.earnings_calendar; only snapshot rows are replaced here.
+        # An unreadable prior file fails loudly: silently overwriting it with
+        # tonight's snapshot alone is how the history was lost.
+        prior = pd.read_parquet(out_path) if out_path.exists() else None
+        df = merge_calendar_snapshot(prior, df)
         df.to_parquet(out_path, index=False)
         print(f"earnings-calendar: {len(df)} rows -> {out_path}")
     elif args.stage == "economic-calendar":

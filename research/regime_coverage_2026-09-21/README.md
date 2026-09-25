@@ -181,3 +181,122 @@ price-structure screen.
 .venv/bin/python research/regime_coverage_2026-09-21/vol_regime.py       # vol hypothesis
 .venv/bin/python research/regime_coverage_2026-09-21/post_stop.py        # post-stop recovery
 ```
+
+---
+
+# Round 2 (2026-09-21, later) — both recommendations TESTED and REJECTED
+
+Asked to implement only what tests prove beneficial. **Neither of my own two
+recommendations survived. Nothing was implemented.**
+
+## Recommendation 1 — commit the `extended_hours` fix: already done
+
+Committed in `5b716b8`; `git show HEAD:core/API/Alpaca_API/options/options_api.py`
+contains it. No action needed.
+
+## Recommendation 2 — inverse-volatility sizing: REJECTED, makes it worse
+
+Current sizing is flat `target_notional=5000` for every entry
+(`core/live_4h_exec.py:75`) with no volatility term at all — so the gap was real.
+Reweighting the 299 realized trades by 1/ATR%, mean-normalised to the same average
+capital (the Barroso–Santa-Clara construction):
+
+| variant | total P&L | mean/trade | maxDD |
+|---|---|---|---|
+| **baseline flat $5,000 (what we run)** | **−283,434** | −948 | −301,657 |
+| inverse-vol, 2x weight cap | −320,270 | −1,071 | −332,222 |
+| inverse-vol, 3x weight cap | −321,111 | −1,074 | −330,556 |
+| inverse-vol, 4x weight cap | −312,889 | −1,046 | −320,441 |
+
+Worse at every cap. Per-module it helps momentum (+12.7k) and HTF (+22.2k) but is
+swamped by dealer_ranker (−36.5k) and multi_ticker_swing (−38.7k), whose losses sit
+in *lower*-volatility names that inverse-vol sizing buys *more* of.
+
+**Why the academic result doesn't transfer:** vol scaling raises the Sharpe of a
+strategy with *positive* expectancy. Ours is −11% mean return per trade. Reweighting
+a negative-expectancy book only redistributes losses; you cannot reweight your way
+to positive. This was my error in recommending it without testing.
+
+## Recommendation 3 — cap entry extension above the EMA100: REJECTED
+
+Total loss does fall monotonically with the cap (−283k → −167k at 2 ATR), **but that
+is the fewer-trades artifact, not an effect.** Any rule that refuses trades lowers
+total loss when mean P&L is negative. The real test is the per-trade conditional
+outcome, and it is not significant:
+
+| threshold | extended mean return | the rest | p (return) |
+|---|---|---|---|
+| >2 ATR | −19.29% (n=100) | −8.13% (n=199) | 0.158 |
+| >3 ATR | −13.14% (n=64) | −11.76% (n=235) | 0.878 |
+| >4 ATR | −14.86% (n=48) | −11.49% (n=251) | 0.697 |
+
+And **within momentum_expansion the sign reverses**: >3 ATR entries returned −8.70%
+vs −17.21% for the less-extended ones (p=0.418). The universe-level support (lift
+0.89x, MFE/MAE 1.05 vs 1.14) is real but far too small to survive 299 trades. Do not
+wire the cap on this evidence.
+
+## The recall question, answered directly
+
+Recall/precision/lift for moving-average support bounces. 2,811 tickers, 429k
+stock-days. Event = a +15% (or +20%) max gain within 20 sessions.
+
+Base rate for +15%: **25.87%** of all stock-days.
+
+| signal | fires | recall | precision | **lift** |
+|---|---|---|---|---|
+| touch of rising EMA100 (±1 ATR) | 12.52% | 12.46% | 25.75% | **1.00x** |
+| + pulled back (range_pos ≤0.35) | 8.24% | 8.51% | 26.73% | 1.03x |
+| touch of rising SMA200 (±1 ATR) | 8.35% | 8.38% | 25.97% | 1.00x |
+| touch of rising EMA50 (±1 ATR) | 18.51% | 17.70% | 24.74% | 0.96x |
+| **union of all three** | 27.71% | **27.32%** | 25.51% | **0.99x** |
+| intersection EMA50+EMA100 | 9.25% | 9.07% | 25.36% | 0.98x |
+| [ref] extended >3 ATR above | 23.14% | 20.58% | 23.01% | **0.89x** |
+
+**Recall equals the firing rate to within 0.5pp on every row.** That is the exact
+signature of no information: a rule firing on X% of days catches X% of events by
+coincidence alone. Precision sits on the base rate (lift 1.00x).
+
+The union answers "shouldn't combined recall be better?" — combined recall *is*
+higher (27.3% vs 12.5%), but only because it fires on 27.7% of days instead of
+12.5%, and precision stays at the base rate (0.99x). Combining zero-lift rules
+yields zero lift. Precision only improves by combining rules that each carry signal
+*and* whose errors are independent; `research/confluence_discovery_2026-07-07.md`
+already found zero certified cross-signal interactions here.
+
+The only row that is not 1.00x is the extended reference at **0.89x** — buying
+extension is mildly *anti*-predictive, consistent with the MFE/MAE result.
+
+## What the loss actually is: the options route
+
+The one effect in this entire investigation that clears significance. Both routes
+target the same $5,000 notional, so dollar P&L per trade is apples-to-apples.
+
+| route | n | total P&L | per trade | median | win rate |
+|---|---|---|---|---|---|
+| equity | 172 | −49,748 | **−289** | +25 | **57.0%** |
+| option | 263 | −250,628 | **−953** | −220 | **23.6%** |
+
+Options lose **3.3x more per trade** (t=−2.55, p=0.011) and carry **83.4% of the
+total loss**. Within `momentum_expansion`, which runs both routes off the *same*
+signals — so selection is held roughly fixed — option trades returned **−31.50%** vs
+equity **+5.44%**, a **−36.93pp** gap (t=−2.92, p=0.006). That reproduces the ~35%
+options round-trip hurdle already recorded in the rank-depth findings.
+
+Had the 263 option trades merely matched the equity route's per-trade average, the
+book would be −125,817 instead of −300,376: a **+174,559** difference.
+
+**Conclusion: entry structure is not the binding constraint — routing is.** Every
+structural hypothesis tested here (pullback, extension cap, vol sizing, MA bounces)
+came back at p>0.15 or worse. The route effect is p=0.006–0.011 and accounts for
+five-sixths of the loss. Fix that before adding any new regime strategy.
+
+### Limits on this round
+- 299–435 trades over ~3 months, one universe. Not a backtest: the sizing test is a
+  reweighting counterfactual (valid at our notional — no market impact — but it
+  cannot capture changed portfolio or buying-power paths).
+- Option vs equity `fill_gain` are not the same quantity (options are leveraged), so
+  the *return* comparison overstates the economic gap; the *dollar-per-trade at equal
+  notional* comparison is the one to quote.
+- Equity's mean return is positive (+5.82%) while its total P&L is negative, so a few
+  large-notional equity losers offset many small winners. "Equity is profitable" is
+  NOT supported; "equity loses 3.3x less per trade" is.

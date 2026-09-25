@@ -822,7 +822,7 @@ async function status(){
   var badge=$('cyno-live-badge');
   if(badge){badge.textContent='library';badge.className='live-badge';}
 }
-$('f_ticker').value='__DEFAULT_TICKER__';
+$('f_ticker').value=(new URLSearchParams(location.search).get('ticker')||'__DEFAULT_TICKER__').toUpperCase();
 status();setInterval(status,30000);
 loadFacets();loadTickers();run();
 </script></body></html>"""

@@ -383,26 +383,27 @@ def extract_events(messages: Iterable[dict[str, Any]]) -> tuple[list[dict[str, A
         if message["author_id"] not in CALLERS or message["channel_id"] not in CHANNELS:
             continue
         text = message["text"]
-        event_type = classify(text, message["channel_id"])
+        event_types = classify(text, message["channel_id"])
         # A textless attachment from a caller is preserved as an unresolved
         # source item, even though its trade meaning cannot be read.
         if not text and message["attachments"]:
             events.append(event_from(message, "unknown_management", None, 0, unresolved="Image-only/attachment-only message; visual content unresolved."))
             continue
-        if event_type is None:
+        if not event_types:
             continue
         candidate_count += 1
         symbols = extract_symbols(text)
-        if event_type == "watchlist":
-            # Per-symbol rows make PIT lookup exact.  Preserve a no-symbol
-            # market-context item too, rather than inventing a ticker.
-            targets = symbols or [None]
-        elif event_type == "performance_claim":
-            targets = symbols or [None]
-        else:
-            targets = symbols[:1] or [None]
-        for index, symbol_pair in enumerate(targets):
-            events.append(event_from(message, event_type, symbol_pair, index))
+        for event_type in event_types:
+            if event_type == "watchlist":
+                # Per-symbol rows make PIT lookup exact.  Preserve a no-symbol
+                # market-context item too, rather than inventing a ticker.
+                targets = symbols or [None]
+            elif event_type == "performance_claim":
+                targets = symbols or [None]
+            else:
+                targets = symbols[:1] or [None]
+            for index, symbol_pair in enumerate(targets):
+                events.append(event_from(message, event_type, symbol_pair, index))
     return events, Counter(event["event_type"] for event in events), candidate_count
 
 

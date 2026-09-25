@@ -260,7 +260,8 @@ class HubDashboardApp:
                  port_dealer_ranker: int = 8773,
                  port_intraday_structure: int | None = None,
                  port_library: int | None = 8775,
-                 port_trades: int | None = 8776) -> None:
+                 port_trades: int | None = 8776,
+                 port_universe: int | None = 8777) -> None:
         self.host = host
         self.dashboards: list[_Dash] = [
             _Dash("spy", "SPY Intraday", port_spy, startable=True, stoppable=True, tradeable=True,
@@ -301,6 +302,17 @@ class HubDashboardApp:
                 _Dash("library", "Library", port_library,
                       startable=False, stoppable=False, tradeable=False,
                       start_path=None, start_body=lambda live: {}, adapt=_adapt_library)
+            )
+        if port_universe is not None:
+            self.dashboards.append(
+                _Dash("universe", "Tradable Universe", port_universe,
+                      startable=False, stoppable=False, tradeable=False,
+                      start_path=None, start_body=lambda live: {},
+                      adapt=lambda s: {"state": "warming" if s.get("building") else
+                                                ("ready" if s.get("universe") else "idle"),
+                                       "detail": "loading watchlist" if s.get("building") else
+                                                 f"{(s.get('universe') or {}).get('eligible', 0):,} eligible · "
+                                                 f"{(s.get('universe') or {}).get('priced', 0):,} priced"})
             )
         if port_trades is not None:
             self.dashboards.append(

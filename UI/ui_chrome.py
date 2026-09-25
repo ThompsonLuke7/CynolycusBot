@@ -28,6 +28,7 @@ NAV_PORTS: list[tuple[str, int]] = [
     ("Meta Ranker", 8769),
     ("Library", 8775),
     ("Trades", 8776),
+    ("Tradable Universe", 8777),
 ]
 
 THEME_CSS = """:root{

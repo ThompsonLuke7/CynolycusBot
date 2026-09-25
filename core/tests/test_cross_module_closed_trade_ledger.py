@@ -57,6 +57,15 @@ def test_the_row_carries_the_underlying_anchor_next_to_the_option_price():
     assert r["u_entry"] == 11.40 and r["u_atr"] == 0.62
 
 
+def test_the_row_carries_the_entry_trigger_rule():
+    """Momentum's trigger lives on the entry's signal audit; without it on the
+    row, outcomes cannot be attributed to pullback vs breakout entries."""
+    sa = {"module": "momentum_expansion", "extra": {"trigger_rule": "pullback_continuation"}}
+    assert _record(entry_state={**_ENTRY, "signal_audit": sa})["trigger_rule"] == "pullback_continuation"
+    assert _record()["trigger_rule"] is None
+    assert _record(entry_state={**_ENTRY, "signal_audit": {"extra": None}})["trigger_rule"] is None
+
+
 def test_fill_gain_and_stop_overshoot_are_derived_consistently():
     r = _record(exit_reason="stop_-39%", exit_fill_price=1.16)
     assert r["fill_gain"] == -0.42

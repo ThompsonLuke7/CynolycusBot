@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from signals.events.forward_guidance.config import EVENTS_PATH, ensure_data_dirs
+from signals.events.forward_guidance.config import EVENTS_PATH, RAW_DIR, ensure_data_dirs
 from signals.events.forward_guidance.data.ingest_events import ingest_event, load_events, load_events_from_csv, write_events
 from signals.events.forward_guidance.data.market_data import fetch_event_market_window
 from signals.events.forward_guidance.data.schema import EarningsEvent, event_from_record
@@ -46,8 +46,12 @@ def _limit(events: list[EarningsEvent], limit: int | None) -> list[EarningsEvent
 def stage_ingest(args: argparse.Namespace) -> None:
     events = _limit(_events_from_args(args), args.limit)
     write_events(events)
+    # One shared cache: a per-event cache re-downloaded the ~7MB companyfacts and
+    # submissions JSON for every event (5GB for 20 tickers).
+    from signals.events.forward_guidance.data.sec_client import SecClient
+    sec = SecClient(cache_dir=RAW_DIR / "_sec_cache")
     for event in events:
-        ingest_event(event, force=args.force)
+        ingest_event(event, sec_client=sec, force=args.force)
     logger.info("Ingested %d events", len(events))
 
 

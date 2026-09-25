@@ -183,6 +183,14 @@ Prioritize:
 * For data or model changes, validate schema, row counts, timestamps, null rates, feature availability, label alignment, and output distributions as applicable.
 * For backtest changes, run a baseline comparison and inspect representative trades/signals, not only aggregate metrics.
 * If verification fails, investigate and fix it when feasible. Do not suppress, ignore, or misrepresent failures.
+* **Report the minimum detectable effect alongside any null result.** An underpowered null is
+  "not measurable here", not "no effect" — say explicitly which one it is. A test whose MDE
+  exceeds any realistic edge is not evidence of absence and must not be presented as a rejection.
+* **A failed test must end with the next testable variant**, or an explicit statement that the
+  hypothesis class is exhausted and why. Do not terminate a line of inquiry on a null alone.
+* **Do not let a deprecated or non-production module anchor a conclusion about live behavior.**
+  State which modules are in scope for a result, and re-run without the dead ones before
+  concluding.
 * Before finalizing, run a post-pass: “What did I not finish?” Check for incomplete requested work, untested edits, broken assumptions, regression risk, leakage risk, accidental scope creep, and missing documentation or summary updates.
 * Do not claim a result is fixed, complete, profitable, robust, or ready for live use unless the relevant validation supports that claim.
 

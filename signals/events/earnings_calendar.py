@@ -40,6 +40,40 @@ MAX_EARNINGS_DISTANCE_DAYS = 90
 _LIMIT = 40
 
 
+# ── shared-file merge ─────────────────────────────────────────────────────────
+# OUT_PATH holds TWO row kinds from two writers:
+#   history rows  (this module's --refresh): ticker, date, eps_*, surprise_pct; snapshot_date NaT
+#   snapshot rows (signals.news --stage earnings-calendar, nightly): ticker,
+#                 next_earnings_date, days_to_earnings, is_earnings_week, snapshot_date
+# Each writer must replace only its own kind. Until 2026-09-24 the nightly stage
+# deduped the WHOLE file on (ticker, snapshot_date); history rows all share
+# snapshot_date=NaT, so every run collapsed each ticker's history to one row and
+# the training matrix lost its earnings features
+# (research/exit_stop_validation_2026-09-24/07_findings.md §C.1).
+
+def _is_snapshot(df: pd.DataFrame) -> pd.Series:
+    if "snapshot_date" not in df.columns:
+        return pd.Series(False, index=df.index)
+    return df["snapshot_date"].notna()
+
+
+def merge_calendar_snapshot(prior: pd.DataFrame | None, snapshot: pd.DataFrame) -> pd.DataFrame:
+    """Append a nightly snapshot; history rows in `prior` pass through untouched."""
+    if prior is None or prior.empty:
+        return snapshot.reset_index(drop=True)
+    snap = _is_snapshot(prior)
+    snaps = (pd.concat([prior[snap], snapshot], ignore_index=True)
+             .drop_duplicates(["ticker", "snapshot_date"], keep="last"))
+    return pd.concat([prior[~snap], snaps], ignore_index=True)
+
+
+def merge_calendar_history(prior: pd.DataFrame | None, history: pd.DataFrame) -> pd.DataFrame:
+    """Replace the history rows; snapshot rows in `prior` pass through untouched."""
+    if prior is None or prior.empty:
+        return history.reset_index(drop=True)
+    return pd.concat([history, prior[_is_snapshot(prior)]], ignore_index=True)
+
+
 # ── fetch ─────────────────────────────────────────────────────────────────────
 
 def _fetch_one(ticker: str, *, retries: int = 3) -> pd.DataFrame | None:
@@ -91,6 +125,7 @@ def fetch_earnings_calendar(
     existing = pd.DataFrame()
     if merge and out_path.exists():
         existing = load_earnings_calendar(out_path)
+        existing = existing[~_is_snapshot(existing)]
         have = set(existing["ticker"].unique())
         tickers = [t for t in tickers if t not in have]
         logger.info("Merge mode: %d already present, fetching %d missing", len(have), len(tickers))
@@ -122,7 +157,8 @@ def fetch_earnings_calendar(
     cal = (pd.concat(all_frames, ignore_index=True)
            .drop_duplicates(["ticker", "date"])
            .sort_values(["ticker", "date"]).reset_index(drop=True))
-    cal.to_parquet(out_path, index=False)
+    prior_raw = pd.read_parquet(out_path) if out_path.exists() else None
+    merge_calendar_history(prior_raw, cal).to_parquet(out_path, index=False)
     logger.info(
         "Wrote %s  rows=%d  tickers=%d  range %s → %s  (%d had no data)",
         out_path, len(cal), cal["ticker"].nunique(),

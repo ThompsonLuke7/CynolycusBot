@@ -104,6 +104,7 @@ DEFAULT_PORT_DEALER_RANKER = 8773
 DEFAULT_PORT_INTRADAY_STRUCTURE = 8774
 DEFAULT_PORT_LIBRARY = 8775
 DEFAULT_PORT_TRADES = 8776
+DEFAULT_PORT_UNIVERSE = 8777
 
 # State book used by the swing real-account (LIVE) policy.
 _SWING_LIVE_BOOK = "Data/inference/multi_ticker_swing/real_account_book_live.json"
@@ -981,6 +982,7 @@ def run_combined(
     library_enabled: bool = True,
     port_trades: int = DEFAULT_PORT_TRADES,
     trades_enabled: bool = True,
+    port_universe: int = DEFAULT_PORT_UNIVERSE,
     intraday_structure_enabled: bool = True,
     intraday_structure_config: str = "strategies/intraday_structure/config/intraday_structure_v1.json",
     meta_ranker_times: str = "14:20,16:20",
@@ -1030,6 +1032,7 @@ def run_combined(
         dashboard_ports["library"] = port_library
     if trades_enabled:
         dashboard_ports["trades"] = port_trades
+    dashboard_ports["universe"] = port_universe
     _assert_ports_free(host, dashboard_ports)
 
     # ------------------------------------------------------------------
@@ -1256,6 +1259,13 @@ def run_combined(
                          name="trade-library-http").start()
         logger.info("Trade library:           http://%s:%d", host, port_trades)
 
+    from UI.universe_dashboard import make_server as _make_universe_server
+
+    universe_server = _make_universe_server(host, port_universe)
+    threading.Thread(target=universe_server.serve_forever, daemon=True,
+                     name="universe-http").start()
+    logger.info("Tradable universe:        http://%s:%d", host, port_universe)
+
     # ------------------------------------------------------------------
     # 4g. Hub / overview dashboard (port 8764) — links + status + start-all
     # ------------------------------------------------------------------
@@ -1270,6 +1280,7 @@ def run_combined(
         port_intraday_structure=port_intraday_structure if intraday_structure_enabled else None,
         port_library=port_library if library_enabled else None,
         port_trades=port_trades if trades_enabled else None,
+        port_universe=port_universe,
     )
     hub_server = _make_hub_server(host, port_hub, hub_app)
     hub_thread = threading.Thread(target=hub_server.serve_forever, daemon=True, name="hub-http")
@@ -1293,6 +1304,7 @@ def run_combined(
         print(f"  Library (news search):   http://{host}:{port_library}  (read-only)")
     if trades_enabled:
         print(f"  Trade library:           http://{host}:{port_trades}  (read-only)")
+    print(f"  Tradable universe:       http://{host}:{port_universe}  (read-only)")
     print(f"  Shared stream:           {len(all_symbols)} symbols")
     print("  Orders default to the PAPER account; LIVE toggle is OFF by default.")
     print("  Press Ctrl+C to stop.")
@@ -1824,6 +1836,7 @@ def run_combined(
         library_server.shutdown()
     if trades_server is not None:
         trades_server.shutdown()
+    universe_server.shutdown()
     if meta_server is not None:
         meta_server.shutdown()
 
@@ -2008,6 +2021,8 @@ def main() -> None:
                         help="Port for the Dealer Ranker dashboard (default 8773).")
     parser.add_argument("--port-intraday-structure", type=int, default=DEFAULT_PORT_INTRADAY_STRUCTURE,
                         help="Port for the Intraday Structure dashboard (default 8774).")
+    parser.add_argument("--port-universe", type=int, default=DEFAULT_PORT_UNIVERSE,
+                        help="Port for the read-only tradable-universe dashboard (default 8777).")
     parser.add_argument("--port-trades", type=int, default=DEFAULT_PORT_TRADES,
                         help="Port for the read-only trade library dashboard.")
     parser.add_argument("--port-library", type=int, default=DEFAULT_PORT_LIBRARY,
@@ -2096,6 +2111,7 @@ def main() -> None:
         port_library=args.port_library,
         library_enabled=bool(args.library),
         port_trades=args.port_trades,
+        port_universe=args.port_universe,
         intraday_structure_enabled=bool(args.intraday_structure),
         intraday_structure_config=args.intraday_structure_config,
         meta_ranker_times=args.meta_ranker_times,

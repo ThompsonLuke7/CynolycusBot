@@ -286,11 +286,34 @@ class _ConfirmState:
 # Nothing observable at signal time predicts move speed (best |r| = 0.22), so a flat
 # floor is the right instrument -- a per-trade adaptive/learned DTE is not supportable.
 #
-# NOT yet proven: that the extra premium of a longer-dated contract is repaid. Option
-# marks cannot be reconstructed historically for this universe
-# (see 10_RETRACTION_option_pnl_invalid.md), so this is an evidence-backed change to
-# the move-capture window, not a validated P&L improvement. Watch realized results.
-_MIN_DTE_DAYS = 21
+# 2026-09-23 REVISED 21 -> 7. The 21d rationale above is sound ONLY IF the module
+# holds for the move. It does not: measured over its own 47 real option round-trips,
+# median hold is 0 calendar days (p75 = 1) against a median 24 DTE bought, i.e. it
+# used 0% of the contract's life. The floor was solving a problem this module does
+# not have, and was paying for it twice:
+#   * premium for 3+ weeks of time value that is discarded within a day, and
+#   * the entire right tail. Repriced on real underlying paths NET of an 8c half
+#     spread (research/options_experiment/11_option_cost_reference.md), the 24-DTE/
+#     1-day-hold policy produced 0.0% of trades above +100% with a p99 of +72%,
+#     versus 36.4% above +100% at a 3-DTE/2-day policy. A 24-DTE contract exited
+#     same-day is structurally incapable of a gamma-driven move, which is the payoff
+#     this module's short-horizon signal is actually positioned for.
+# Paired over identical signals (n=22), short-DTE minus current was +75.7pp,
+# 95% CI [+2.3, +156.8]. See research/regime_coverage_2026-09-21/exp_d_ci.py.
+#
+# WHY 7 AND NOT 3: 3 tested better (+73.7% vs +33.7% mean) but leaves a same-day
+# entry holding a contract into expiry week, where assignment handling and OTM
+# liquidity both degrade; 7 keeps several days of buffer after this module's p75
+# 1-day hold while still capturing most of the gamma. Raise toward 3 only with the
+# expiry/assignment path re-verified.
+#
+# CONFIDENCE, stated plainly: n=22 paired, the CI lower bound is barely above zero,
+# and the repricing is model-based (Black-Scholes, IV = trailing RV held constant,
+# so it does NOT model the IV expansion that accompanies real squeezes -- a bias
+# AGAINST short DTE here). Supporting real-fill evidence points the same way:
+# 11_option_cost_reference.md §3 shows 0-1 DTE at +4% mean (n=252) and >21 DTE at
+# -23% mean / 17% win (n=30, the worst bucket of all). Watch realized results.
+_MIN_DTE_DAYS = 7
 _EXPIRY_LOOKAHEAD_DAYS = 90
 _ZERO_DTE_CUTOFF = _time(13, 0)
 _FRIDAY_LATE_EXPIRY_CUTOFF = _time(13, 0)

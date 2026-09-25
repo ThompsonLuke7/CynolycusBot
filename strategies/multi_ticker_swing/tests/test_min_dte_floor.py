@@ -17,24 +17,69 @@ import pytest
 from strategies.multi_ticker_swing.live import runner
 
 
-def test_min_dte_floor_is_at_least_two_weeks():
-    """A floor under 14 days systematically buys less time than the move needs."""
-    assert runner._MIN_DTE_DAYS >= 14, (
-        "DTE floor regressed below 14 days; 2-DTE contracts captured only 19% of "
-        "achievable +10% moves in the live-fill study"
+def test_min_dte_floor_never_returns_to_same_week_expiry():
+    """The floor may be short, but never 0-2 DTE again.
+
+    The original regression was a 0 floor putting the median entry on a 2-DTE
+    contract. The 2026-09 revision shortens the floor deliberately, but a
+    same-week expiry re-introduces the assignment and OTM-liquidity problems the
+    floor exists to prevent -- and 0-2 DTE is where the 8c fixed half-spread is
+    most punitive (58% round-trip on a $0.28 premium).
+    """
+    assert runner._MIN_DTE_DAYS >= 3, (
+        "DTE floor regressed to same-week expiry; that is the 2-DTE default the "
+        "floor was introduced to remove"
     )
 
 
-def test_min_dte_floor_is_the_validated_value():
-    assert runner._MIN_DTE_DAYS == 21, (
-        "21d is the validated efficiency knee (74% move capture). Changing it is a "
-        "policy decision -- update this test and the rationale comment together."
+def test_min_dte_floor_is_the_current_policy_value():
+    assert runner._MIN_DTE_DAYS == 7, (
+        "7d is the current policy: this module holds a median 0 days (p75 1d) against "
+        "a formerly 24-day median DTE, using 0% of the contract's life and producing "
+        "0.0% of trades above +100%. Changing it is a policy decision -- update this "
+        "test and the rationale comment in runner.py together. "
+        "See research/regime_coverage_2026-09-21/exp_d_ci.py."
+    )
+
+
+def test_min_dte_floor_matches_the_modules_actual_holding_period():
+    """The floor must stay in the same order of magnitude as the hold.
+
+    This is the failure the 21d floor represented: a floor chosen from how long
+    the MOVE takes, on a module that exits within a day. Whatever the floor is,
+    it should be days-not-weeks while the p75 hold is 1 day.
+    """
+    assert runner._MIN_DTE_DAYS <= 14, (
+        "floor drifted back toward a multi-week contract on a module whose p75 "
+        "holding period is 1 calendar day"
     )
 
 
 def test_min_dte_floor_is_not_absurdly_long():
     """Guard the other direction: an over-long floor drifts away from the signal horizon."""
     assert runner._MIN_DTE_DAYS <= 60
+
+
+def test_live_selection_floor_is_the_constant_not_the_monthly_helper():
+    """The LIVE path floors on `_MIN_DTE_DAYS` against broker-listed expiries.
+
+    `_next_monthly_expiry` returns third Fridays only and is NOT on the live path
+    (it has no non-test caller). Live selection queries the contracts endpoint from
+    `ref_date + _MIN_DTE_DAYS` and takes the nearest listed expiry, so with weeklies
+    the floor is what actually determines DTE. Pinning that here because lowering
+    the constant only produces short-dated contracts if this remains true.
+    """
+    import inspect
+
+    src = inspect.getsource(runner)
+    assert "_next_monthly_expiry(" not in src.split("def _next_monthly_expiry")[0], (
+        "_next_monthly_expiry gained a caller before its definition; the live "
+        "expiry path may have changed"
+    )
+    assert "ref_date + timedelta(days=_MIN_DTE_DAYS)" in src, (
+        "live contract discovery no longer starts at ref_date + _MIN_DTE_DAYS; "
+        "the floor may no longer bind the expiry actually chosen"
+    )
 
 
 def test_next_monthly_expiry_respects_the_floor():

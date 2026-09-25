@@ -210,6 +210,11 @@ class AlpacaOptionsClient:
         return self._request("GET", f"{self._data_base}/v2/stocks/quotes/latest",
                              params={"symbols": symbols, "feed": feed})
 
+    def get_latest_stock_bars(self, *, symbols: str, feed: str = "iex") -> Any:
+        """Latest 1-minute stock bars; `t` is the bar OPEN, feed selection is explicit."""
+        return self._request("GET", f"{self._data_base}/v2/stocks/bars/latest",
+                             params={"symbols": symbols, "feed": feed})
+
     def get_account_activities(self, **params: Any) -> Any:
         """Read settlement evidence; pagination is explicit to the caller."""
         return self._request("GET", f"{self._trading_base}/v2/account/activities", params=params)

@@ -26,6 +26,7 @@
 #   DEALER_RANKER_TIME=15:40 scripts/run_live_server.sh  # override the dealer run time
 #   VERBOSE=1 scripts/run_live_server.sh       # unfiltered console mirror
 #   QUIET=1 scripts/run_live_server.sh         # no console mirror at all
+#   ACE_CANDIDATE_TAPE=1 scripts/run_live_server.sh  # research-only IEX candidate recorder
 #   (any extra args are passed straight through to combined_server)
 #
 # Stop: Ctrl-C (stops the watchdog and the server together), or kill this script.
@@ -48,6 +49,8 @@ mkdir -p "$LOG_DIR"
 DATESTAMP="$(date +%Y%m%d)"
 SERVER_LOG="$LOG_DIR/server_${DATESTAMP}.log"
 WATCHDOG_LOG="$LOG_DIR/watchdog_${DATESTAMP}.log"
+ACE_TAPE_LOG="$LOG_DIR/ace_candidate_tape_${DATESTAMP}.log"
+ACE_TAPE_PID_FILE="/tmp/cynolycus_ace_candidate_tape.pid"
 
 # --- glibc allocator tuning (read once at process start; must be exported here) ---
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
@@ -136,6 +139,25 @@ if [ -f "$REPO_ROOT/scripts/wsl_crash_logger.sh" ]; then
   log "WSL crash logger started (PID $CRASHLOG_PID -> C:\\Users\\<you>\\wsl_crashlog)"
 fi
 
+# --- ACE research candidate tape (explicit opt-in; never affects orders) -----
+# This writes immutable research evidence only. Normal launches are unchanged
+# unless ACE_CANDIDATE_TAPE=1 is supplied.
+ACE_TAPE_PID=""
+ACE_TAPE_OWNED=0
+if [ "${ACE_CANDIDATE_TAPE:-0}" = "1" ]; then
+  if [ -f "$ACE_TAPE_PID_FILE" ] && kill -0 "$(cat "$ACE_TAPE_PID_FILE")" 2>/dev/null; then
+    ACE_TAPE_PID="$(cat "$ACE_TAPE_PID_FILE")"
+    log "ACE candidate tape already running (PID $ACE_TAPE_PID, log $ACE_TAPE_LOG)"
+  else
+    rm -f "$ACE_TAPE_PID_FILE"
+    nohup "$PYTHON" -u -m scripts.discord_ledger.capture_ace_candidate_tape >> "$ACE_TAPE_LOG" 2>&1 &
+    ACE_TAPE_PID=$!
+    ACE_TAPE_OWNED=1
+    echo "$ACE_TAPE_PID" > "$ACE_TAPE_PID_FILE"
+    log "ACE candidate tape started (PID $ACE_TAPE_PID, log $ACE_TAPE_LOG)"
+  fi
+fi
+
 # Stop the server and do not return until it is actually gone.
 #
 # WHY: on 2026-08-24 Ctrl-C sent SIGTERM and this function exited immediately.
@@ -177,11 +199,15 @@ stop_server() {
 }
 
 cleanup() {
-  log "shutdown requested — stopping server and watchdog"
+  log "shutdown requested — stopping server and companions"
   stop_server "${SERVER_PID:-}"
   [ -n "${TAIL_PID:-}" ] && kill "$TAIL_PID" 2>/dev/null
   [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null
   [ -n "$CRASHLOG_PID" ] && kill "$CRASHLOG_PID" 2>/dev/null
+  if [ "$ACE_TAPE_OWNED" = "1" ] && [ -n "$ACE_TAPE_PID" ]; then
+    kill "$ACE_TAPE_PID" 2>/dev/null
+    rm -f "$ACE_TAPE_PID_FILE"
+  fi
   pkill -f 'dmesg.*--follow' 2>/dev/null
   log "shutdown complete"
   exit 0

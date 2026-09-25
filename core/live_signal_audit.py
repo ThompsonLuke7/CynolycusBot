@@ -126,6 +126,8 @@ def build_option_order_audit(
     dte: Any = None,
     spread_pct: Any = None,
     expiration: Any = None,
+    iv: Any = None,
+    greeks: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     underlying = finite_float(underlying_price)
     strike_val = finite_float(strike)
@@ -145,8 +147,13 @@ def build_option_order_audit(
         else:
             breakeven = strike_val + premium_val
             breakeven_move_pct = (breakeven - underlying) / underlying
+    # v2 adds `iv` and `greeks`: the decision-time vol surface, which cannot be
+    # reconstructed later because historical option marks are unavailable (see
+    # research/options_experiment/10_RETRACTION_option_pnl_invalid.md). Readers
+    # must treat BOTH keys as UNKNOWN when absent — v1 rows predate the capture
+    # and a missing IV is not zero implied vol.
     return {
-        "schema_version": "order_audit_v1",
+        "schema_version": "order_audit_v2",
         "instrument": "option",
         "option_symbol": str(option_symbol),
         "route": route,
@@ -162,6 +169,8 @@ def build_option_order_audit(
         "spread_pct": finite_float(spread_pct),
         "expiration": json_safe(expiration),
         "breakeven_move_pct": breakeven_move_pct,
+        "iv": finite_float(iv),
+        "greeks": {k: finite_float(v) for k, v in (greeks or {}).items()} or None,
         "signal_audit": signal_audit,
     }
 

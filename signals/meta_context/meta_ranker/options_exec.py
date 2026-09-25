@@ -84,6 +84,51 @@ def target_monthly_expiry(ref_date: date, roll_trading_days: int = 5) -> date:
     raise ValueError(f"Could not determine monthly expiry after {ref_date}")
 
 
+def _snapshot_vol_surface(snap: dict) -> tuple[float | None, dict[str, float]]:
+    """Decision-time implied vol and greeks, as the snapshot reported them.
+
+    Alpaca's option snapshot carries `impliedVolatility` and a full greeks block
+    alongside the `delta` this module already reads. Both were being discarded:
+    the order dict built below kept only delta, so the IV we paid for on every
+    single entry was thrown away at the moment it was observed.
+
+    That matters because implied vol at the DECISION bar cannot be reconstructed
+    later. Historical option marks are unavailable (see
+    `research/options_experiment/10_RETRACTION_option_pnl_invalid.md` — trade
+    bars are stale prints, not marks), so an IV series can only ever be built
+    forward from here. Capturing it is the prerequisite for any variance-risk-
+    premium work: IV is the market's forecast, and the realised half is already
+    computable from underlying bars.
+
+    Returns `(iv, greeks)`. `None`/`{}` mean UNKNOWN, never zero — a missing IV
+    must not read as "this option implies no movement". Field names are matched
+    case-insensitively because the REST payload is camelCase while some cached
+    fixtures are snake_case.
+    """
+
+    iv = None
+    for key in ("impliedVolatility", "implied_volatility", "iv"):
+        raw = snap.get(key)
+        if raw is None:
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(val) and val > 0:
+            iv = val
+            break
+    greeks: dict[str, float] = {}
+    for name, val in (snap.get("greeks") or {}).items():
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f):
+            greeks[str(name)] = f
+    return iv, greeks
+
+
 def _quote_timestamp(payload: dict) -> datetime | None:
     """Read the moment the market was observed, or nothing.
 
@@ -357,6 +402,7 @@ def select_option(
             # exactly, so neither does this one.
             _note(f"invalid_quote({exc.__class__.__name__})")
             continue
+        iv, greeks = _snapshot_vol_surface(cand["snap"] or {})
         return (
             {
                 "ticker": ticker, "occ": cand["occ"], "contracts": contracts_n, "mid": mid,
@@ -365,6 +411,9 @@ def select_option(
                 "open_interest": cand["open_interest"], "volume": cand["volume"],
                 "spread": spread, "liquidity_source": cand["liquidity_source"],
                 "band_size": len(ranked),
+                # Decision-time vol surface. Cannot be reconstructed after the
+                # fact, so it is recorded at the only moment it is observable.
+                "iv": iv, "greeks": greeks,
                 # The validated mark. Everything above is the legacy audit view
                 # of the same numbers; this is what the governed path builds
                 # legs from.
