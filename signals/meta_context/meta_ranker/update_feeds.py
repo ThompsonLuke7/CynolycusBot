@@ -69,15 +69,22 @@ def main():
     ap.add_argument("--daily", action="store_true",
                     help="Run the whole-corpus news-catalyst rescore INSTEAD of the per-bar set. "
                          "Production nightly collection already owns this step.")
+    ap.add_argument("--relabel-themes", action="store_true",
+                    help="With --weekly: pass --relabel-all to the theme pipeline (one-shot label "
+                         "repair; Claude-labels every cluster instead of carrying names forward).")
     ap.add_argument("--include-treasury", action="store_true",
                     help="Also try FRED treasury rates. Optional; not part of live-readiness.")
     ap.add_argument("--timeout", type=int, default=1800, help="Per-feed timeout (s).")
     args = ap.parse_args()
 
+    if args.relabel_themes and not args.weekly:
+        ap.error("--relabel-themes requires --weekly")
+    weekly = [(label, argv + (["--relabel-all"] if args.relabel_themes else []))
+              for label, argv in WEEKLY] if args.weekly else []
     if args.daily:
-        jobs = DAILY + (WEEKLY if args.weekly else [])
+        jobs = DAILY + weekly
     else:
-        jobs = PER_BAR + (WEEKLY if args.weekly else [])
+        jobs = PER_BAR + weekly
     if args.include_treasury:
         jobs = jobs + [OPTIONAL_TREASURY]
     results = {label: _run(label, argv, args.timeout) for label, argv in jobs}

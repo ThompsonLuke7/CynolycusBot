@@ -170,13 +170,27 @@ class UniverseDashboardApp:
 
     def _rows(self) -> list[dict]:
         # Daily bars refresh in place; the directory mtime changes on replacement.
-        signature = (_stamp(self.universe), _stamp(self.matrix), _stamp(self.bars), _stamp(self.discovery))
+        # The bar directory mtime changes as individual ticker files are
+        # refreshed, including during a warmup. Use the TTL below for bars;
+        # treating the directory mtime as identity invalidates a just-built
+        # cache and leaves the UI stuck in its loading state.
+        signature = (_stamp(self.universe), _stamp(self.matrix), _stamp(self.discovery))
         with self._lock:
             if self._cache and self._cache[1] == signature and time.monotonic() - self._cache[0] < 300:
                 return self._cache[2]
-            rows = _load_rows(self.universe, self.matrix, self.bars, self.discovery)
+        # Do the expensive parquet/bar scan outside the lock. State polling and
+        # the search/facet endpoints must remain responsive while this warms.
+        rows = _load_rows(self.universe, self.matrix, self.bars, self.discovery)
+        with self._lock:
             self._cache = (time.monotonic(), signature, rows)
             return rows
+
+    def _cached_rows(self) -> list[dict] | None:
+        signature = (_stamp(self.universe), _stamp(self.matrix), _stamp(self.discovery))
+        with self._lock:
+            if self._cache and self._cache[1] == signature:
+                return self._cache[2]
+        return None
 
     def _warm(self) -> None:
         with self._warm_lock:
@@ -192,8 +206,7 @@ class UniverseDashboardApp:
             self._warm_thread.start()
 
     def state(self) -> dict:
-        signature = (_stamp(self.universe), _stamp(self.matrix), _stamp(self.bars),
-                     _stamp(self.discovery))
+        signature = (_stamp(self.universe), _stamp(self.matrix), _stamp(self.discovery))
         cached = self._cache
         if cached is None:
             self._warm()
@@ -214,7 +227,11 @@ class UniverseDashboardApp:
         def one(key: str) -> str:
             return (q.get(key) or [""])[0].strip()
 
-        rows = self._rows()
+        rows = self._cached_rows()
+        if rows is None:
+            self._warm()
+            return {"building": True, "message": "Loading tradable universe…",
+                    "rows": [], "total": 0, "offset": 0, "limit": 100}
         needle = one("q").upper()
         theme = one("theme").lower()
         cap = one("cap")
@@ -275,7 +292,10 @@ class UniverseDashboardApp:
                            "matrix_at": datetime.fromtimestamp(self.matrix.stat().st_mtime, timezone.utc).isoformat() if self.matrix.exists() else None}}
 
     def facets(self) -> dict:
-        rows = self._rows()
+        rows = self._cached_rows()
+        if rows is None:
+            self._warm()
+            return {"building": True, "caps": [], "themes": []}
         return {"caps": sorted({r["cap_bucket"] for r in rows}),
                 "themes": sorted({r["theme"] for r in rows if r.get("theme")})}
 
@@ -339,7 +359,7 @@ const $=s=>document.querySelector(s), fmt=(v,d=0)=>v==null?'—':Number(v).toLoc
 let offset=0, total=0, timer, selected='';
 function date(v){return v?new Date(v).toLocaleString():'—'}
 async function load(){let p=new URLSearchParams();document.querySelectorAll('.filters [name]').forEach(e=>{if(e.value)p.set(e.name,e.value)});p.set('offset',offset);p.set('limit',100);
-try{let resp=await fetch('/api/search?'+p);let data=await resp.json();if(!resp.ok)throw Error(data.error||'Request failed');total=data.total;$('#error').textContent='';
+try{let resp=await fetch('/api/search?'+p);let data=await resp.json();if(!resp.ok)throw Error(data.error||'Request failed');if(data.building){$('#summary').textContent=data.message||'Loading tradable universe…';$('#rows').innerHTML='<tr><td colspan=12>Loading universe data…</td></tr>';setTimeout(load,500);return;}total=data.total;$('#error').textContent='';
 $('#summary').innerHTML='<span><b>'+fmt(total)+'</b> matching tickers</span><span>Universe updated '+esc(date(data.source.universe_at))+'</span><span>Score file updated '+esc(date(data.source.matrix_at))+'</span>';
 $('#rows').innerHTML=data.rows.map(r=>'<tr data-ticker="'+esc(r.ticker)+'" class="'+(r.ticker===selected?'selected':'')+'"><td><b>'+esc(r.ticker)+'</b></td><td>'+esc(r.theme||'—')+'</td><td>'+esc(r.cap_bucket)+'</td><td class=num title="'+esc(r.market_cap_at||'Date unavailable')+'">'+fmt(r.market_cap)+'</td><td>'+esc(r.sector||'—')+'</td><td class=num>'+fmt(r.price,2)+'</td><td class=num>'+fmt(r.volume)+'</td><td class=num>'+fmt(r.avg_volume_20d)+'</td><td class=num>'+fmt(r.momentum_score,3)+'</td><td class=num>'+fmt(r.htf_score,3)+'</td><td class=num>'+fmt(r.catalyst_score,3)+'</td><td>'+esc(r.score_at?date(r.score_at):'—')+'</td></tr>').join('')||'<tr><td colspan=12>No matching tickers</td></tr>';
 $('#page').textContent=total?(offset+1)+'–'+Math.min(offset+100,total)+' of '+total:'0 of 0';$('#prev').disabled=offset===0;$('#next').disabled=offset+100>=total;
@@ -350,7 +370,7 @@ let scores=[['Momentum',r.momentum_score],['HTF Swing',r.htf_score],['News catal
 let news=d.news.rows.map(n=>'<div class=news><div class=small>'+esc(date(n.timestamp))+' · '+esc(n.source||'source unknown')+' · '+esc(n.catalyst_family||'')+'</div><a href="'+esc(/^https?:\/\//.test(n.url||'')?n.url:'#')+'" target=_blank rel="noopener noreferrer">'+esc(n.headline||'Untitled')+'</a><div class=small>Model: '+esc(n.predicted_direction||'—')+' · score '+fmt(n.record_catalyst_score,3)+'</div></div>').join('');
 $('#detail').innerHTML='<h2>'+esc(t)+'</h2><div class=small>'+esc(r.sector||'Sector unknown')+' · '+esc(r.theme||'Theme unknown')+' · '+esc(r.cap_bucket)+' cap bucket</div><div class=score><span>Eligible / Momentum / Swing</span><b>'+[r.eligible,r.momentum_universe,r.swing_universe].map(x=>x?'Yes':'No').join(' / ')+'</b></div><div class=score><span>Recorded market cap</span><b>'+fmt(r.market_cap)+'</b></div><div class=small>Cap observed: '+esc(r.market_cap_at||'unknown')+'</div><div class=score><span>Last close</span><b>$'+fmt(r.price,2)+'</b></div><div class=small>Price bar: '+esc(date(r.price_at))+' · Volume: '+fmt(r.volume)+' shares · 20d average: '+fmt(r.avg_volume_20d)+' shares ('+fmt(r.volume_days)+' sessions)</div><h3>Module scores</h3>'+scores+'<div class=small>Score observation: '+esc(date(r.score_at))+'</div><h3>Recent news</h3>'+(d.news_index_available?((d.news_index_current?'':'<div class=small>News index refresh pending; showing the last built snapshot.</div>')+(news||'<div class=small>No indexed records.</div>')):'<div class=small>News index unavailable. Open Library for current status.</div>')+'<p><a href="http://'+location.hostname+':8775/?ticker='+encodeURIComponent(t)+'">Open '+esc(t)+' in Library →</a></p>';
 }catch(e){$('#detail').textContent=e.message}}
-async function facets(){try{let f=await(await fetch('/api/facets')).json();for(let [name,values] of [['cap',f.caps],['theme',f.themes]]){let el=$('[name='+name+']');el.innerHTML='<option value="">All '+name+'s</option>'+values.map(v=>'<option value="'+esc(v)+'">'+esc(v)+'</option>').join('')}}catch(e){$('#error').textContent=e.message}}
+async function facets(){try{let f=await(await fetch('/api/facets')).json();if(f.building){setTimeout(facets,500);return;}for(let [name,values] of [['cap',f.caps||[]],['theme',f.themes||[]]]){let el=$('[name='+name+']');el.innerHTML='<option value="">All '+name+'s</option>'+values.map(v=>'<option value="'+esc(v)+'">'+esc(v)+'</option>').join('')}}catch(e){$('#error').textContent=e.message}}
 document.querySelectorAll('.filters [name]').forEach(e=>e.addEventListener(e.tagName==='SELECT'?'change':'input',()=>{clearTimeout(timer);offset=0;timer=setTimeout(load,250)}));$('#prev').onclick=()=>{offset=Math.max(0,offset-100);load()};$('#next').onclick=()=>{offset+=100;load()};facets();load();
 </script></body></html>'''
 

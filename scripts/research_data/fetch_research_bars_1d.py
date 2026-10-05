@@ -6,6 +6,7 @@ never reads this directory.
 
     .venv/bin/python -m scripts.research_data.fetch_research_bars_1d            # universe + ETFs
     .venv/bin/python -m scripts.research_data.fetch_research_bars_1d --tickers META NVDA
+    .venv/bin/python -m scripts.research_data.fetch_research_bars_1d --tickers-file syms.txt --out-dir Data/research/bars_1d_sip_adj_extra
 
 Output: Data/research/bars_1d_sip_adj/{TICKER}.parquet + _manifest.json
 Adjustment "all" means historic prices change whenever a new split/dividend
@@ -50,13 +51,13 @@ def universe_tickers() -> list[str]:
     return sorted(set(u["ticker"].dropna().astype(str).str.upper()) | set(ETFS))
 
 
-def fetch_ticker(ticker: str, end: str, force: bool) -> tuple[str, int | str]:
-    out = OUT_DIR / f"{ticker}.parquet"
+def fetch_ticker(ticker: str, end: str, force: bool, out_dir: Path = OUT_DIR, start: str = START) -> tuple[str, int | str]:
+    out = out_dir / f"{ticker}.parquet"
     if out.exists() and not force:
         return ticker, "cached"
     for attempt in range(1, 6):
         try:
-            df = fetch_intraday(ticker=ticker, start=START, end=end, timeframe="1Day",
+            df = fetch_intraday(ticker=ticker, start=start, end=end, timeframe="1Day",
                                 limit=10_000, adjustment=ADJUSTMENT, feed=FEED, save_path="")
             break
         except Exception as exc:  # noqa: BLE001 - classify then retry or report
@@ -77,18 +78,24 @@ def fetch_ticker(ticker: str, end: str, force: bool) -> tuple[str, int | str]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tickers", nargs="*")
+    ap.add_argument("--tickers-file", type=Path, help="one symbol per line (e.g. delisted names from build_pit_universe)")
+    ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--force", action="store_true", help="refetch files that already exist")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     logging.getLogger("core").setLevel(logging.WARNING)
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    tickers = [t.upper() for t in args.tickers] if args.tickers else universe_tickers()
+    out_dir = args.out_dir if args.out_dir.is_absolute() else REPO / args.out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.tickers_file:
+        tickers = [t.strip().upper() for t in args.tickers_file.read_text().split() if t.strip()]
+    else:
+        tickers = [t.upper() for t in args.tickers] if args.tickers else universe_tickers()
     end = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
     results: dict[str, int | str] = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = [ex.submit(fetch_ticker, t, end, args.force) for t in tickers]
+        futs = [ex.submit(fetch_ticker, t, end, args.force, out_dir) for t in tickers]
         for i, fut in enumerate(as_completed(futs), 1):
             t, r = fut.result()
             results[t] = r
@@ -97,7 +104,7 @@ def main() -> None:
 
     ok = [t for t, r in results.items() if isinstance(r, int) or r == "cached"]
     bad = {t: r for t, r in results.items() if t not in ok}
-    manifest_path = OUT_DIR / "_manifest.json"
+    manifest_path = out_dir / "_manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {"runs": []}
     manifest["runs"].append({
         "fetched_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),

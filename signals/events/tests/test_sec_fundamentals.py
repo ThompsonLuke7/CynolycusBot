@@ -39,14 +39,27 @@ def test_q4_derived_from_annual_and_available_at_10k_filing():
     assert q4.iloc[0]["period_end"] == pd.Timestamp("2024-12-31")
 
 
-def test_higher_priority_tag_wins_per_period():
+def test_higher_priority_tag_wins_within_one_filing():
     cf = {"facts": {"us-gaap": {
         "Revenues": {"units": {"USD": [_fact("2024-01-01", "2024-03-31", 5.0, "2024-05-01")]}},
         "RevenueFromContractWithCustomerExcludingAssessedTax": {
-            "units": {"USD": [_fact("2024-01-01", "2024-03-31", 7.0, "2024-05-02")]}},
+            "units": {"USD": [_fact("2024-01-01", "2024-03-31", 7.0, "2024-05-01")]}},
     }}}
     out = extract_quarterly_facts(cf, "TST", "0000000001")
     assert out[out["metric"] == "revenue"]["value"].tolist() == [7.0]
+
+
+def test_earliest_filing_wins_across_tags():
+    # NVDA shape: the 10-Q used Revenues; the ASC 606 tag first carried the quarter as a
+    # comparative in the 10-K ~15 months later. The quarter was known at the 10-Q date.
+    cf = {"facts": {"us-gaap": {
+        "Revenues": {"units": {"USD": [_fact("2017-07-31", "2017-10-29", 2636.0, "2017-11-21")]}},
+        "RevenueFromContractWithCustomerExcludingAssessedTax": {
+            "units": {"USD": [_fact("2017-07-31", "2017-10-29", 2636.0, "2019-02-21", form="10-K")]}},
+    }}}
+    row = extract_quarterly_facts(cf, "TST", "0000000001").query("metric == 'revenue'").iloc[0]
+    assert row["available_at"] == pd.Timestamp("2017-11-21")
+    assert row["tag"] == "Revenues"
 
 
 def test_earnings_8k_filter_and_exhibit_pick():

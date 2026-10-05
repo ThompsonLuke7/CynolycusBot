@@ -38,3 +38,33 @@ Findings:
 
 ## 3. Next testable variant
 Pre-register arm H (leader pullback to EMA100 + hammer + coil) as a **shadow watch**. Evaluate it prospectively and on a survivorship-clean universe. Also add EMA-distance, candle-shape, and leader-base features to an ablation of the HTF ranker. Do not wire into live sizing on this evidence.
+
+## 4. Feature-matrix review (2026-09-25 follow-up)
+
+Correction to §1: the Momentum (106 features) and HTF (111 features) matrices **do** include MA distance and coil features. MA distance: `ema_dist_10/20/50/100` in ATR units, `ema_stack_4`, `daily_ema_stack`, `daily_dist_200dma_atr`. Coil: `compression_5_20`, `is_compressed_5_20`, `compression_count_20`, `range_contraction_20_60`, `close_tightness_10`, `base_range_60_atr`, `base_position_60`. Both share `FEATURE_COLUMNS_4H` (`strategies/momentum_expansion/features/feature_matrix_4h.py`), which uses pandas-ta only for ADX/RSI/MACD. The SPY-intraday "all pandas-ta indicators" path (`strategies/spy_intraday/Features/feature_sets/pandas_ta_indicators.py`) was never ported to these modules.
+
+Actually missing:
+- The **daily** 100 EMA. The 4H `ema_dist_100` is roughly a daily EMA50, and daily bars only get a 200DMA distance.
+- Any candle-shape feature (wick/body ratios, hammer/engulfing).
+- A 3-6 month "leader" return. The longest window is `weekly_ret_4`.
+
+## 5. Stop-based execution (`stop_exit_study.py`)
+
+Entry at open t+1. Stop 0.2% under the signal-day low. Exit: time15 (close t+15), or trail20 (close below EMA20, armed only after the first close above EMA20; max 40d). Raw returns, no costs.
+
+| Arm | exit | n | mean ret | 95% CI | win | mean R |
+|---|---|---|---|---|---|---|
+| C touch100 (control) | time15 | 14,541 | +0.11% | [-0.16, +0.37] | 24% | +0.25 |
+| F hammer+coil | time15 | 396 | -0.04% | [-0.63, +0.59] | 22% | -0.20 |
+| F hammer+coil | trail20 | 397 | -0.33% | [-0.74, +0.12] | 25% | -0.20 |
+| H F+leader | time15 | 39 | +0.54% | [-2.09, +3.72] | 31% | -0.13 |
+| H F+leader | trail20 | 39 | -0.23% | [-1.79, +1.23] | 38% | -0.27 |
+
+The tight stop under the hammer low (~2%) is hit by 70-78% of trades, and the median outcome is -1R. No arm beats the control. Stop-and-trail execution does not create the edge that fixed-horizon returns lacked. H's +3.5% fixed-horizon mean does not survive a stop, so its winners typically dipped first.
+
+## 6. Theme labels scrambled by a carry-forward off-by-one (FIXED 2026-09-25)
+Correction: dense membership (every ticker scored against every theme) is by design. For non-noise tickers the argmax agrees with the hard HDBSCAN cluster 97.6% of the time, and the clusters are coherent. The real bug was in the labels. Step05 names this week's clusters by matching them to last week's centroids (`LABEL_STABILITY_THRESHOLD` 0.90). `_load_prior_centroids` built those centroids from last week's cluster ids, but named them from the registry snapshot *before the newest*. Step05 runs before this week's registry is written, so that snapshot was two runs old, and the ids pointed at different groups. Names therefore random-walked week to week.
+- Proof: the 9/21 "liberty_media_formula1" centroid was 9/14 cluster 69, which was `memory_storage`. So the semis cluster (AMD, ARM, INTC, MU, SNDK, STX, WDC, SMCI, DELL, MCHP) inherited the F1 name.
+- Scale on 9/21: 55 of 138 clusters (40%) whose description names tickers contain none of them. Examples: petroleum_refining = hotel REITs; precious_metals_mining = medical devices; latam_airport_operators = bitcoin miners/AI datacenters.
+- Fix: `step06_discovery._load_prior_centroids` names prior clusters from the registry snapshot with the same date as the `.prior` clusters file, and returns {} if there is none. Also added `--relabel-all` (`weekly_run(relabel_all=True)`) to skip carry-forward once. Current names are wrong and would otherwise be carried forward indefinitely. Three regression tests were added, two of which fail on the old code; dynamic_theme suite 104 pass.
+- NOT yet run: one weekly run with `--relabel-all` (~188 Claude labeling calls) is needed to repair the names.

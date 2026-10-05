@@ -599,7 +599,14 @@ def compute_memberships(
     from themes.dynamic_theme.seed_themes import seed_centroids
 
     seed_cents, seed_names = seed_centroids(tickers, matrix)
-    existing_names = {canonical_theme_id(name) for name in id_to_theme.values()}
+    # Only names backed by a real cluster centroid count as "emerged". step05
+    # gap-fills the seed's own registry row (reserved negative id, no centroid);
+    # counting it here skipped injection and left the seed with zero members.
+    existing_names = {
+        canonical_theme_id(name)
+        for cluster_id, name in id_to_theme.items()
+        if cluster_id in centroids_by_id
+    }
     for cluster_id, name in seed_names.items():
         raw_label = _theme_label(name)
         semantic_name = canonical_theme_id(raw_label)

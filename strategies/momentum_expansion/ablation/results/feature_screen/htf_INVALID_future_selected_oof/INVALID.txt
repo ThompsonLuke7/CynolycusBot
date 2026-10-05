@@ -1,0 +1,2 @@
+INVALID 2026-09-30: HTF OOF keeps only rows with a future-defined swing target (48.8% of matrix rows).
+ret_3 IC -0.10 here vs ~0 on all rows = selection on the future. Do not use. See research/feature_screen_2026-09-29/README.md

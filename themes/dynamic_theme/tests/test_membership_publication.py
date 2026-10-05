@@ -163,3 +163,39 @@ def test_shared_theme_name_produces_one_row_per_ticker_theme(tmp_path, monkeypat
     assert not out.duplicated(["ticker", "theme"]).any()
     assert out["theme"].nunique() == 1
     assert history_path.exists(), "history must be written on a successful run"
+
+
+def test_gap_filled_seed_row_still_gets_members(tmp_path, monkeypatch):
+    """2026-09-21/28: step05 gap-fills the seed's registry row (reserved id, no
+    centroid). step08 read that row as "already emerged", skipped injection, and
+    memory_storage published zero members. The seed must be scored anyway."""
+    from themes.dynamic_theme.seed_themes import seed_registry_rows
+
+    monkeypatch.setattr(step08, "TICKER_MEMBERSHIP_PATH", tmp_path / "m.parquet")
+    monkeypatch.setattr(step08, "TICKER_MEMBERSHIP_HISTORY_PATH", tmp_path / "h.parquet")
+    monkeypatch.setattr(step08, "ensure_outputs", lambda: None)
+
+    tickers = ["MU", "WDC", "STX", "SNDK", "AMAT"]
+    matrix = np.array(
+        [[1.0, 0.1], [0.9, 0.2], [0.95, 0.15], [0.9, 0.1], [0.2, 1.0]], dtype=np.float32
+    )
+    embeddings = pd.DataFrame({"ticker": tickers, "embedding": [r.tolist() for r in matrix]})
+    clusters = pd.DataFrame({"ticker": tickers, "cluster_id": [0, 0, 0, 0, 1]})
+    as_of = pd.Timestamp("2026-09-28")
+    registry = pd.concat(
+        [
+            pd.DataFrame({"cluster_id": [0, 1], "theme_name": ["semis_misc", "semicap"]}),
+            seed_registry_rows(as_of)[["cluster_id", "theme_name"]],
+        ],
+        ignore_index=True,
+    )
+
+    out = step08.compute_memberships(
+        embeddings_df=embeddings,
+        clusters_df=clusters,
+        registry_df=registry,
+        as_of=pd.Timestamp("2026-09-28", tz="UTC"),
+    )
+
+    seed = out[out["theme"] == "memory_storage"]
+    assert set(seed["ticker"]) >= {"MU", "WDC", "STX", "SNDK"}

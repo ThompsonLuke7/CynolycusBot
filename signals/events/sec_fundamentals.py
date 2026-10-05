@@ -107,9 +107,11 @@ def _metric_periods(companyfacts: dict, tags: tuple[str, ...]) -> tuple[pd.DataF
     if not frames:
         return pd.DataFrame(), pd.DataFrame()
     allf = pd.concat(frames, ignore_index=True)
-    # A period is reported under the highest-priority tag that has it. Its
-    # availability is the earliest filing of THAT tag (checked above per tag).
-    allf = allf.sort_values(["rank", "filed"]).drop_duplicates(["start", "end"], keep="first")
+    # A period takes the EARLIEST filing under ANY tag. Tag priority only breaks ties
+    # within one filing date. Priority-first used to date NVDA's 2017-18 10-Q revenue
+    # (tagged Revenues) to the 2019 10-K (the first filing to use the ASC 606 tag),
+    # which delayed ~18% of company-quarters by more than 120 days.
+    allf = allf.sort_values(["filed", "rank"]).drop_duplicates(["start", "end"], keep="first")
     q = allf[allf["days"].between(*QUARTER_DAYS)]
     y = allf[allf["days"].between(*YEAR_DAYS)]
     return q, y

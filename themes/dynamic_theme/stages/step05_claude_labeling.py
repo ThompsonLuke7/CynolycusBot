@@ -95,6 +95,7 @@ def label_clusters(
     cluster_summaries: list[dict[str, Any]],
     *,
     as_of: pd.Timestamp | None = None,
+    relabel_all: bool = False,
 ) -> pd.DataFrame:
     """Label clusters and write/upsert theme_registry.parquet — *stably*.
 
@@ -104,6 +105,10 @@ def label_clusters(
     clears ``LABEL_STABILITY_THRESHOLD`` the prior label is carried forward (no
     Claude call). Only clusters with no strong prior match get (re)labeled.
     Hand-pinned seed themes are always appended.
+
+    ``relabel_all`` skips carry-forward for one run so every cluster is labeled
+    from its own members — the recovery path when prior names are known to be
+    wrong (they would otherwise be carried forward indefinitely).
     """
     ensure_outputs()
     as_of = (as_of or pd.Timestamp.now(tz="UTC")).normalize().tz_localize(None)
@@ -114,8 +119,10 @@ def label_clusters(
 
     # Build current + prior theme centroids for stability matching. Best-effort:
     # if anything is missing (e.g. first run, no prior), fall back to labeling all.
-    cur_centroids, prior_centroids = _stability_centroids()
+    cur_centroids, prior_centroids = ({}, {}) if relabel_all else _stability_centroids()
     prior_meta = _latest_theme_metadata()  # theme_name -> registry row (carry-forward)
+    if relabel_all:
+        logger.info("relabel_all: carry-forward disabled — labeling every cluster")
 
     n = len(cluster_summaries)
     logger.info("Labeling %d clusters (stable carry-forward + Claude for new only)...", n)

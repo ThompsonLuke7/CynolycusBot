@@ -127,10 +127,15 @@ fi
   [ "$rc" -ne 0 ] && STATUS="$rc"
   record_stage "sector_assignments" "$rc"
 
-  # 5) Meta Ranker feeds + dynamic themes (Claude $).
-  echo "[$(ts)] 5/5 meta feeds + dynamic themes (--weekly, costs Claude \$)"
+  # 5) Meta Ranker feeds + dynamic themes (Claude $). WEEKLY_THEMES_RELABEL_ALL=1
+  #    is a one-shot repair: every cluster is Claude-labeled from its own members
+  #    instead of carrying last week's names forward (use when prior names are
+  #    known to be wrong -- carry-forward would otherwise keep them forever).
+  FEEDS_ARGS=(--weekly)
+  [ "${WEEKLY_THEMES_RELABEL_ALL:-0}" = "1" ] && FEEDS_ARGS+=(--relabel-themes)
+  echo "[$(ts)] 5/5 meta feeds + dynamic themes (${FEEDS_ARGS[*]}, costs Claude \$)"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_FEEDS_TIMEOUT_SECONDS:-21600}s" \
-    "$PYTHON" -u signals/meta_context/meta_ranker/update_feeds.py --weekly
+    "$PYTHON" -u signals/meta_context/meta_ranker/update_feeds.py "${FEEDS_ARGS[@]}"
   rc=$?
   echo "[$(ts)] meta feeds exit=$rc"
   [ "$rc" -ne 0 ] && STATUS="$rc"

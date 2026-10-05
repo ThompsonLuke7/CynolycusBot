@@ -358,6 +358,7 @@ def weekly_run(
     tickers: list[str] | None = None,
     unit_of_work: "UnitOfWork | None" = None,
     valid_until_for: Callable[[datetime], datetime] | None = None,
+    relabel_all: bool = False,
 ) -> None:
     """Run the full weekly theme taxonomy refresh (recluster + Claude labeling)."""
     ensure_outputs()
@@ -381,7 +382,7 @@ def weekly_run(
         return
 
     # Step 5: Claude labeling
-    registry = label_clusters(summaries, as_of=as_of)
+    registry = label_clusters(summaries, as_of=as_of, relabel_all=relabel_all)
 
     # Step 6: discover new themes (labels incremental new clusters not in prior week)
     _new_count, registry = discover_new_themes(
@@ -435,10 +436,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Dynamic Theme Taxonomy Pipeline")
     parser.add_argument("--mode", choices=["daily", "weekly"], default="weekly")
     parser.add_argument("--as-of", default=None, help="Date override YYYY-MM-DD")
+    parser.add_argument(
+        "--relabel-all",
+        action="store_true",
+        help="Weekly only: skip label carry-forward and Claude-label every cluster (recovery)",
+    )
     args = parser.parse_args()
 
     as_of = pd.Timestamp(args.as_of, tz="UTC") if args.as_of else None
     if args.mode == "weekly":
-        weekly_run(as_of=as_of)
+        weekly_run(as_of=as_of, relabel_all=args.relabel_all)
     else:
         daily_run(as_of=as_of)

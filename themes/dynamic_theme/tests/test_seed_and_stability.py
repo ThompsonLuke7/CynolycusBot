@@ -82,6 +82,85 @@ def test_match_prior_theme_reuses_above_threshold_only():
     assert LABEL_STABILITY_THRESHOLD > 0.5
 
 
+def _two_group_embeddings():
+    semis = ["AMD", "MU", "INTC"]
+    banks = ["JPM", "BAC", "WFC"]
+    vecs = [[1.0, 0.0, 0.0]] * 3 + [[0.0, 1.0, 0.0]] * 3
+    emb = pd.DataFrame({"ticker": semis + banks, "embedding": [np.array(v, dtype=np.float32) for v in vecs]})
+    return semis, banks, emb
+
+
+def test_prior_centroids_named_by_the_same_runs_registry(tmp_path, monkeypatch):
+    """Prior cluster ids must be named with the registry of the run that made them.
+
+    Regression: step05 runs before this week's registry exists, and the old
+    "snapshot before the newest" rule then read names from TWO runs back, whose
+    cluster ids pointed at different groups (semis ended up liberty_media_formula1).
+    """
+    import themes.dynamic_theme.stages.step06_discovery as s6
+
+    monkeypatch.setattr(s6, "TICKER_CLUSTERS_PATH", tmp_path / "ticker_clusters.parquet")
+    semis, banks, emb = _two_group_embeddings()
+    last_week, two_weeks = pd.Timestamp("2026-09-14"), pd.Timestamp("2026-09-08")
+    pd.DataFrame({
+        "ticker": semis + banks,
+        "cluster_id": [0, 0, 0, 1, 1, 1],
+        "probability": 1.0,
+        "date": last_week,
+    }).to_parquet(tmp_path / "ticker_clusters.prior.parquet", index=False)
+    registry = pd.DataFrame({
+        "cluster_id": [0, 1, 0, 1],
+        "theme_name": ["regional_banks", "semiconductors", "semiconductors", "regional_banks"],
+        "date": [two_weeks, two_weeks, last_week, last_week],
+    })
+
+    prior = s6._load_prior_centroids(registry, emb)
+
+    assert set(prior) == {"semiconductors", "regional_banks"}
+    assert np.allclose(prior["semiconductors"], [1.0, 0.0, 0.0])
+    assert np.allclose(prior["regional_banks"], [0.0, 1.0, 0.0])
+
+
+def test_prior_centroids_empty_without_matching_registry_snapshot(tmp_path, monkeypatch):
+    import themes.dynamic_theme.stages.step06_discovery as s6
+
+    monkeypatch.setattr(s6, "TICKER_CLUSTERS_PATH", tmp_path / "ticker_clusters.parquet")
+    semis, banks, emb = _two_group_embeddings()
+    pd.DataFrame({
+        "ticker": semis + banks,
+        "cluster_id": [0, 0, 0, 1, 1, 1],
+        "probability": 1.0,
+        "date": pd.Timestamp("2026-09-14"),
+    }).to_parquet(tmp_path / "ticker_clusters.prior.parquet", index=False)
+    stale = pd.DataFrame({
+        "cluster_id": [0, 1],
+        "theme_name": ["regional_banks", "semiconductors"],
+        "date": pd.Timestamp("2026-09-08"),
+    })
+
+    assert s6._load_prior_centroids(stale, emb) == {}
+
+
+def test_relabel_all_skips_carry_forward(tmp_path, monkeypatch):
+    import themes.dynamic_theme.stages.step05_claude_labeling as s5
+
+    monkeypatch.setattr(s5, "THEME_REGISTRY_PATH", tmp_path / "reg.parquet")
+
+    def _no_stability():
+        raise AssertionError("carry-forward must not run when relabel_all=True")
+
+    monkeypatch.setattr(s5, "_stability_centroids", _no_stability)
+    monkeypatch.setattr(
+        s5,
+        "_label_cluster",
+        lambda summary, known: {"theme_name": "semiconductors", "parent_theme": "tech",
+                                "description": "", "related_themes": [], "confidence": 0.9},
+    )
+    out = s5.label_clusters([{"cluster_id": 4}], as_of=pd.Timestamp("2026-09-28"), relabel_all=True)
+    row = out[out["cluster_id"] == 4]
+    assert row["theme_name"].tolist() == ["semiconductors"]
+
+
 def test_write_registry_dedups_seed_against_emergent(tmp_path, monkeypatch):
     """If HDBSCAN already produced 'memory_storage', the seed must NOT duplicate it."""
     import themes.dynamic_theme.stages.step05_claude_labeling as s5

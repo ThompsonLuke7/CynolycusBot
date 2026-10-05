@@ -46,13 +46,23 @@ def _load_prior_centroids(registry: pd.DataFrame, embeddings_df: pd.DataFrame) -
     matrix = np.array(embeddings_df["embedding"].tolist(), dtype=np.float32)
     centroids_by_id = compute_centroids(matrix, tickers, prior_clusters)
 
-    # map cluster_id → theme_name via last week's registry
-    prior_registry = registry[registry["date"] < registry["date"].max()].copy() if not registry.empty else pd.DataFrame()
-    if prior_registry.empty:
-        return {str(cid): c for cid, c in centroids_by_id.items()}
-
-    latest_prior = prior_registry["date"].max()
-    prior_reg = prior_registry[prior_registry["date"] == latest_prior][["cluster_id", "theme_name"]]
+    # HDBSCAN ids only mean something within the run that produced them, so name
+    # the prior clusters with the registry snapshot of THAT run (same date). This
+    # used to take "the registry snapshot before the newest one", which is right
+    # for step06 (this week's registry already written) but one week too old for
+    # step05 (not yet written): every carried-forward name was pinned to a
+    # different week's cluster. By 2026-09-21 the semis cluster (AMD/MU/INTC) was
+    # called liberty_media_formula1 and ~40% of labels named none of their members.
+    if registry.empty or "date" not in prior_clusters.columns:
+        return {}
+    prior_date = pd.to_datetime(prior_clusters["date"]).max()
+    prior_reg = registry[pd.to_datetime(registry["date"]) == prior_date][["cluster_id", "theme_name"]]
+    if prior_reg.empty:
+        logger.warning(
+            "No registry snapshot for prior clusters dated %s — no prior names to carry forward",
+            prior_date.date(),
+        )
+        return {}
     id_to_name = dict(zip(prior_reg["cluster_id"], prior_reg["theme_name"]))
     return {
         id_to_name.get(cid, f"cluster_{cid}"): c

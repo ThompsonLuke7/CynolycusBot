@@ -1,0 +1,81 @@
+=== top-10 winners per calendar year | liquid-1000 at prior year-end | first open -> last close ===
+year    top10    SPY  median  %>SPY rand10 med P(rand10>SPY) mom20 Jan1 winners in mom20 Jan1 held by monthly mom run captured
+2019    +212%   +31%    +30%    47%       +30%           45%       +66%                  3/10               10/10          25%
+2020    +605%   +18%    +10%    40%       +18%           49%      +176%                  3/10                8/10          43%
+2021    +263%   +28%    +20%    40%       +21%           29%        +9%                  1/10                6/10           4%
+2022    +104%   -18%    -19%    49%       -18%           53%       -20%                  1/10                8/10          24%
+2023    +404%   +26%    +13%    33%       +19%           32%       +24%                  1/10                9/10          17%
+2024    +298%   +26%    +10%    30%       +13%           16%      +117%                  6/10                9/10          29%
+2025    +277%   +17%     +8%    37%       +14%           42%       +28%                  0/10                7/10          -2%
+
+per-winner detail (pct = percentile within the liquid-1000 on the prior year-end date):
+  2019 ARWR     +422%  Jan-1 momentum pct 1.00  vol pct 0.99  run captured by monthly momentum 70%
+  2019 ROKU     +334%  Jan-1 momentum pct 0.11  vol pct 0.98  run captured by monthly momentum 79%
+  2019 SHOP     +192%  Jan-1 momentum pct 0.91  vol pct 0.97  run captured by monthly momentum 7%
+  2019 CVNA     +185%  Jan-1 momentum pct 0.99  vol pct 0.98  run captured by monthly momentum 35%
+  2019 SNAP     +184%  Jan-1 momentum pct 0.01  vol pct 0.91  run captured by monthly momentum 12%
+  2019 SEDG     +173%  Jan-1 momentum pct 0.58  vol pct 0.86  run captured by monthly momentum 9%
+  2019 ACAD     +172%  Jan-1 momentum pct 0.03  vol pct 0.99  run captured by monthly momentum -11%
+  2019 NVCR     +154%  Jan-1 momentum pct 0.94  vol pct 0.95  run captured by monthly momentum -9%
+  2019 AMD      +153%  Jan-1 momentum pct 0.98  vol pct 0.99  run captured by monthly momentum 30%
+  2019 VIPS     +151%  Jan-1 momentum pct 0.01  vol pct 0.94  run captured by monthly momentum 25%
+  2020 NIO     +1569%  Jan-1 momentum pct 0.01  vol pct 1.00  run captured by monthly momentum 44%
+  2020 PLUG     +994%  Jan-1 momentum pct 0.99  vol pct 0.98  run captured by monthly momentum 68%
+  2020 TSLA     +723%  Jan-1 momentum pct 0.17  vol pct 0.91  run captured by monthly momentum 94%
+  2020 ENPH     +557%  Jan-1 momentum pct 1.00  vol pct 0.99  run captured by monthly momentum 84%
+  2020 MRNA     +435%  Jan-1 momentum pct 0.65  vol pct 0.94  run captured by monthly momentum -6%
+  2020 SE       +399%  Jan-1 momentum pct 1.00  vol pct 0.92  run captured by monthly momentum 100%
+  2020 BILI     +371%  Jan-1 momentum pct 0.34  vol pct 0.76  run captured by monthly momentum 24%
+  2020 PDD      +353%  Jan-1 momentum pct 0.89  vol pct 0.98  run captured by monthly momentum 18%
+  2020 APPN     +329%  Jan-1 momentum pct 0.83  vol pct 0.91  run captured by monthly momentum 0%
+  2020 ZS       +323%  Jan-1 momentum pct 0.50  vol pct 0.88  run captured by monthly momentum 0%
+  2021 GME      +681%  Jan-1 momentum pct 0.93  vol pct 0.99  run captured by monthly momentum -37%
+  2021 CAR      +450%  Jan-1 momentum pct 0.46  vol pct 0.94  run captured by monthly momentum -15%
+  2021 SIG      +219%  Jan-1 momentum pct 0.84  vol pct 0.86  run captured by monthly momentum 17%
+  2021 AR       +214%  Jan-1 momentum pct 0.79  vol pct 0.95  run captured by monthly momentum 5%
+  2021 BNTX     +202%  Jan-1 momentum pct 0.95  vol pct 0.97  run captured by monthly momentum -32%
+  2021 SYNA     +196%  Jan-1 momentum pct 0.58  vol pct 0.61  run captured by monthly momentum 0%
+  2021 DVN      +192%  Jan-1 momentum pct 0.03  vol pct 0.91  run captured by monthly momentum 0%
+  2021 MARA     +163%  Jan-1 momentum pct 0.99  vol pct 1.00  run captured by monthly momentum 100%
+  2021 RRC      +159%  Jan-1 momentum pct 0.84  vol pct 0.95  run captured by monthly momentum 0%
+  2021 AA       +153%  Jan-1 momentum pct 0.37  vol pct 0.80  run captured by monthly momentum 0%
+  2022 PBF      +212%  Jan-1 momentum pct 0.90  vol pct 0.90  run captured by monthly momentum 14%
+  2022 BTU      +154%  Jan-1 momentum pct 0.99  vol pct 0.97  run captured by monthly momentum 76%
+  2022 OXY      +117%  Jan-1 momentum pct 0.90  vol pct 0.75  run captured by monthly momentum 21%
+  2022 XOM       +87%  Jan-1 momentum pct 0.85  vol pct 0.26  run captured by monthly momentum -0%
+  2022 MPC       +85%  Jan-1 momentum pct 0.85  vol pct 0.47  run captured by monthly momentum -0%
+  2022 SLB       +80%  Jan-1 momentum pct 0.68  vol pct 0.58  run captured by monthly momentum 0%
+  2022 TAL       +79%  Jan-1 momentum pct 0.00  vol pct 0.96  run captured by monthly momentum 0%
+  2022 AR        +79%  Jan-1 momentum pct 0.98  vol pct 0.84  run captured by monthly momentum 107%
+  2022 APA       +75%  Jan-1 momentum pct 0.92  vol pct 0.82  run captured by monthly momentum 15%
+  2022 VLO       +73%  Jan-1 momentum pct 0.59  vol pct 0.57  run captured by monthly momentum 8%
+  2023 CVNA    +1001%  Jan-1 momentum pct 0.00  vol pct 1.00  run captured by monthly momentum 21%
+  2023 MARA     +556%  Jan-1 momentum pct 0.01  vol pct 0.99  run captured by monthly momentum -7%
+  2023 AFRM     +390%  Jan-1 momentum pct 0.01  vol pct 0.99  run captured by monthly momentum 2%
+  2023 COIN     +377%  Jan-1 momentum pct 0.01  vol pct 0.97  run captured by monthly momentum 0%
+  2023 RIOT     +343%  Jan-1 momentum pct 0.01  vol pct 0.94  run captured by monthly momentum 4%
+  2023 MSTR     +333%  Jan-1 momentum pct 0.05  vol pct 0.97  run captured by monthly momentum 1%
+  2023 OPEN     +280%  Jan-1 momentum pct 0.00  vol pct 0.99  run captured by monthly momentum 0%
+  2023 APP      +269%  Jan-1 momentum pct 0.01  vol pct 0.93  run captured by monthly momentum 2%
+  2023 VRT      +247%  Jan-1 momentum pct 0.12  vol pct 0.85  run captured by monthly momentum 49%
+  2023 SMCI     +242%  Jan-1 momentum pct 0.99  vol pct 0.84  run captured by monthly momentum 101%
+  2024 APP      +722%  Jan-1 momentum pct 1.00  vol pct 0.82  run captured by monthly momentum 70%
+  2024 PLTR     +346%  Jan-1 momentum pct 0.98  vol pct 0.94  run captured by monthly momentum -3%
+  2024 MSTR     +318%  Jan-1 momentum pct 0.99  vol pct 0.92  run captured by monthly momentum 38%
+  2024 CVNA     +294%  Jan-1 momentum pct 1.00  vol pct 0.99  run captured by monthly momentum 100%
+  2024 VST      +264%  Jan-1 momentum pct 0.84  vol pct 0.21  run captured by monthly momentum 43%
+  2024 IONQ     +238%  Jan-1 momentum pct 1.00  vol pct 0.97  run captured by monthly momentum -11%
+  2024 CLS      +222%  Jan-1 momentum pct 0.98  vol pct 0.80  run captured by monthly momentum 3%
+  2024 EAT      +209%  Jan-1 momentum pct 0.55  vol pct 0.67  run captured by monthly momentum 0%
+  2024 HOOD     +192%  Jan-1 momentum pct 0.58  vol pct 0.91  run captured by monthly momentum -0%
+  2024 NVDA     +173%  Jan-1 momentum pct 0.99  vol pct 0.61  run captured by monthly momentum 51%
+  2025 LITE     +343%  Jan-1 momentum pct 0.85  vol pct 0.85  run captured by monthly momentum -2%
+  2025 WDC      +325%  Jan-1 momentum pct 0.69  vol pct 0.64  run captured by monthly momentum -3%
+  2025 AU       +293%  Jan-1 momentum pct 0.62  vol pct 0.75  run captured by monthly momentum -1%
+  2025 HL       +289%  Jan-1 momentum pct 0.34  vol pct 0.77  run captured by monthly momentum 0%
+  2025 BE       +289%  Jan-1 momentum pct 0.89  vol pct 0.98  run captured by monthly momentum -5%
+  2025 IREN     +268%  Jan-1 momentum pct 0.25  vol pct 0.98  run captured by monthly momentum -51%
+  2025 OPEN     +258%  Jan-1 momentum pct 0.01  vol pct 0.94  run captured by monthly momentum -2%
+  2025 LEU      +248%  Jan-1 momentum pct 0.73  vol pct 0.99  run captured by monthly momentum 41%
+  2025 MU       +229%  Jan-1 momentum pct 0.45  vol pct 0.87  run captured by monthly momentum 0%
+  2025 STX      +224%  Jan-1 momentum pct 0.50  vol pct 0.41  run captured by monthly momentum 0%

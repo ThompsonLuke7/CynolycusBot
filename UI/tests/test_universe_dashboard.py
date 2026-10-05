@@ -47,8 +47,10 @@ def app(tmp_path, monkeypatch):
                   "record_catalyst_score": float("nan"), "move_1d_pct": 10.0}],
         "total": 1,
     })
-    return watch.UniverseDashboardApp(universe=universe, matrix=matrix, bars=bars,
-                                      discovery=discovery)
+    result = watch.UniverseDashboardApp(universe=universe, matrix=matrix, bars=bars,
+                                        discovery=discovery)
+    result._rows()  # Fixture data is tiny; production startup remains asynchronous.
+    return result
 
 
 def test_filters_and_latest_source_dates(app):
@@ -125,8 +127,16 @@ def test_hub_state_warms_without_blocking(app, monkeypatch):
         release.wait(timeout=2)
         return []
     monkeypatch.setattr(app, "_rows", slow_rows)
+    app._cache = None
     state = app.state()
     assert state["building"] is True
     assert entered.wait(timeout=1)
     release.set()
     app._warm_thread.join(timeout=2)
+
+
+def test_search_and_facets_return_loading_state_before_cache(monkeypatch, app):
+    app._cache = None
+    monkeypatch.setattr(app, "_warm", lambda: None)
+    assert app.search({})["building"] is True
+    assert app.facets()["building"] is True

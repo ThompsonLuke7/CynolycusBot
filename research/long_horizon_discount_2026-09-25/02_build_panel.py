@@ -12,6 +12,12 @@ Inputs (all point-in-time):
   signals/news/data/processed/ticker_earnings_calendar.parquet (EPS surprise; see caveat)
 Output: Data/research/long_horizon/panel_weekly.parquet
 
+--pit (added 2026-10-03) builds panel_weekly_pit.parquet from the point-in-time universe:
+every security in Data/research/bars_1d_sip_adj_pit (scripts/research_data/build_pit_universe.py),
+including delisted names and earlier lives of reused tickers (ids like BBBY~1). The top-1000 rank is
+then taken among everything that traded that week. Fundamentals and earnings join on today's
+tickers only, so they are NaN for dead names; use the PIT panel for price-based arms.
+
 Caveats recorded in README:
   * The universe is today's list, so delisted names are absent and dip-buying is flattered.
   * yfinance eps_estimate is the consensus as Yahoo stores it now and may not be the
@@ -19,6 +25,7 @@ Caveats recorded in README:
 """
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +37,9 @@ FUND = REPO / "Data" / "research" / "fundamentals" / "sec_quarterly_facts.parque
 CAL = REPO / "signals" / "news" / "data" / "processed" / "ticker_earnings_calendar.parquet"
 UNIVERSE_CSV = REPO / "Data" / "shared" / "universe" / "shared_universe.csv"
 OUT = REPO / "Data" / "research" / "long_horizon" / "panel_weekly.parquet"
+PIT_BARS = REPO / "Data" / "research" / "bars_1d_sip_adj_pit"
+PIT_SECURITIES = REPO / "Data" / "research" / "pit_universe" / "securities.parquet"
+PIT_OUT = REPO / "Data" / "research" / "long_horizon" / "panel_weekly_pit.parquet"
 HOLDS = (63, 126)
 TOP_N_DV = 1000
 ETF_SET = {"SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "RSP", "MDY", "VUG", "SCHG", "MGK"}
@@ -154,8 +164,16 @@ def surprise_asof() -> pd.DataFrame:
 
 
 def main() -> None:
-    uni = pd.read_csv(UNIVERSE_CSV)
-    tickers = sorted(uni.loc[uni["type"].fillna("Stock") != "ETF", "ticker"].dropna().astype(str).str.upper())
+    global BARS, OUT
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--pit", action="store_true", help="point-in-time universe (delisted names included)")
+    if ap.parse_args().pit:
+        BARS, OUT = PIT_BARS, PIT_OUT
+        sec = pd.read_parquet(PIT_SECURITIES)
+        tickers = sorted(sec.loc[sec["kind"] == "stock", "sec_id"])
+    else:
+        uni = pd.read_csv(UNIVERSE_CSV)
+        tickers = sorted(uni.loc[uni["type"].fillna("Stock") != "ETF", "ticker"].dropna().astype(str).str.upper())
     spy = load_bars("SPY")
     weekly = spy.index.to_series().groupby(spy.index.to_period("W")).max()
     weekly = pd.DatetimeIndex(weekly.values)

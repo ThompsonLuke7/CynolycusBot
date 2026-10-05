@@ -148,8 +148,11 @@ After the chain finishes:
   — the same rcs in context, for a run that died before stamping.
 - `grep -aiE "error|traceback|failed" signals/news/data/processed/weekly_refresh.log | tail -30`
   — stage 4 can exit 0 with many per-cluster failures inside it.
-- `.venv/bin/python -m core.live_readiness --for-next-session` — must be `ok: true`
-  with a stamp newer than the run.
+- `.venv/bin/python -m core.live_readiness` (no flag — the consumer gate the
+  modules use) — must be `ok: true` with a stamp newer than the run. Do not
+  judge this with `--for-next-session` after midnight: before Monday's open it
+  targets Tuesday and demands a stamp after Monday 16:00, so a fresh Monday
+  01:30 stamp reads `ok: false` (seen 2026-09-28).
 - `cat Data/readiness/last_run_progress.json` — how far the readiness rebuild got.
 - Freshness by mtime of the artifacts the modules actually read:
   `Data/shared/universe/shared_universe.csv`,

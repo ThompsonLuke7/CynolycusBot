@@ -1,0 +1,48 @@
+=== winner traits | liquid-1000 at the first weekly date of each quarter | top/bottom 5% of forward return within the start date ===
+
+--- 1y (252 sessions): 36 start dates 2016-12-30..2025-07-03, 35,982 stock-starts; exits with no price (delisted/merged) are dropped ---
+trait                                           share P(t|win) win lift loss lift med fwd vs univ  win lift by yr min..max
+momentum top decile (12-1)                       9.8%    22.2%     2.26      1.90           -0.8%        1.14..3.06
+within 10% of 52w high                          45.7%    35.2%     0.77      0.57           +1.4%        0.48..1.02
+within 10% of 52w low                           15.3%    13.3%     0.87      1.11           +0.2%        0.52..1.04
+revenue growth > 30% y/y                        11.5%    22.3%     1.94      1.76           -2.0%        0.94..3.00
+revenue accelerating (>15%, +5pp)                9.4%    12.3%     1.31      1.33           -1.2%        0.87..2.14
+gross margin >= 50%                             21.1%    26.3%     1.25      1.07           +0.7%        0.63..2.06
+profitable (net income > 0)                     66.3%    48.1%     0.72      0.69           +0.6%        0.59..0.84
+op margin expanding (+2pp y/y)                  21.8%    28.6%     1.32      1.25           -0.8%        0.62..1.69
+EPS beats, 4q avg > 5%                          51.8%    59.5%     1.15      0.97           +0.7%        0.98..1.43
+compounder (75% above rising 200)               34.1%    30.0%     0.88      0.79           -0.1%        0.59..1.11
+high volatility (top quintile)                  20.1%    51.8%     2.58      2.68           -2.8%        1.94..3.76
+smaller half of liquid-1000                     50.0%    51.6%     1.03      1.12           -1.6%        0.93..1.14
+growth leader: rev>20%, GM>=50%, mom top 20%     2.5%     6.5%     2.62      1.69           +3.2%        0.65..5.33
+NVDA as a start-date example (1y): forward return / percentile / traits held at start
+  2016-12-30  fwd    +91%  pct 0.96  traits: within 10% of 52w high, revenue growth > 30% y/y, revenue accelerating, gross margin >= 50%, profitable, op margin expanding, EPS beats, 4q avg > 5%, high volatility
+  2018-04-06  fwd    -11%  pct 0.23  traits: momentum top decile, revenue growth > 30% y/y, gross margin >= 50%, profitable, op margin expanding, EPS beats, 4q avg > 5%, compounder, high volatility, growth leader: rev>20%, GM>=50%, mom top 20%
+  2019-10-04  fwd   +196%  pct 0.98  traits: gross margin >= 50%, profitable
+  2021-04-01  fwd    +97%  pct 0.98  traits: within 10% of 52w high, revenue growth > 30% y/y, gross margin >= 50%, profitable, EPS beats, 4q avg > 5%, compounder
+  2022-10-07  fwd   +281%  pct 1.00  traits: within 10% of 52w low, profitable, high volatility
+  2024-04-05  fwd     +9%  pct 0.75  traits: momentum top decile, within 10% of 52w high, revenue growth > 30% y/y, revenue accelerating, gross margin >= 50%, profitable, op margin expanding, EPS beats, 4q avg > 5%, compounder, high volatility, growth leader: rev>20%, GM>=50%, mom top 20%
+
+--- 3y (756 sessions): 28 start dates 2016-12-30..2023-07-07, 27,971 stock-starts; exits with no price (delisted/merged) are dropped ---
+trait                                           share P(t|win) win lift loss lift med fwd vs univ  win lift by yr min..max
+momentum top decile (12-1)                       9.7%    16.9%     1.74      2.02          -11.0%        0.79..3.76
+within 10% of 52w high                          46.3%    37.4%     0.81      0.60           +2.4%        0.41..0.98
+within 10% of 52w low                           14.7%    12.6%     0.86      1.03           -0.6%        0.25..1.16
+revenue growth > 30% y/y                        12.6%    18.4%     1.46      1.88           -8.0%        0.92..3.33
+revenue accelerating (>15%, +5pp)               10.0%    11.9%     1.19      1.30           -3.2%        0.89..1.94
+gross margin >= 50%                             20.9%    26.8%     1.28      1.06           +0.5%        0.80..2.21
+profitable (net income > 0)                     65.1%    53.6%     0.82      0.60           +2.8%        0.70..0.92
+op margin expanding (+2pp y/y)                  20.9%    27.1%     1.30      1.25           -3.6%        0.81..2.34
+EPS beats, 4q avg > 5%                          51.6%    59.7%     1.16      0.86           +1.6%        0.93..1.57
+compounder (75% above rising 200)               32.0%    26.8%     0.84      0.78           +1.3%        0.32..1.21
+high volatility (top quintile)                  20.1%    44.9%     2.24      2.76          -16.3%        1.47..3.07
+smaller half of liquid-1000                     50.0%    54.5%     1.09      1.07           -3.7%        0.94..1.28
+growth leader: rev>20%, GM>=50%, mom top 20%     2.5%     6.1%     2.47      1.59           -1.4%        0.38..6.40
+NVDA as a start-date example (3y): forward return / percentile / traits held at start
+  2016-12-30  fwd   +128%  pct 0.90  traits: within 10% of 52w high, revenue growth > 30% y/y, revenue accelerating, gross margin >= 50%, profitable, op margin expanding, EPS beats, 4q avg > 5%, high volatility
+  2017-10-06  fwd   +205%  pct 0.96  traits: momentum top decile, within 10% of 52w high, revenue growth > 30% y/y, revenue accelerating, gross margin >= 50%, profitable, op margin expanding, EPS beats, 4q avg > 5%, high volatility, growth leader: rev>20%, GM>=50%, mom top 20%
+  2018-10-05  fwd   +219%  pct 0.94  traits: within 10% of 52w high, revenue growth > 30% y/y, gross margin >= 50%, profitable, op margin expanding, EPS beats, 4q avg > 5%, compounder, growth leader: rev>20%, GM>=50%, mom top 20%
+  2019-10-04  fwd   +187%  pct 0.97  traits: gross margin >= 50%, profitable
+  2020-10-02  fwd   +239%  pct 0.97  traits: momentum top decile, within 10% of 52w high, revenue growth > 30% y/y, revenue accelerating, gross margin >= 50%, profitable, EPS beats, 4q avg > 5%, compounder, growth leader: rev>20%, GM>=50%, mom top 20%
+  2021-10-01  fwd   +510%  pct 1.00  traits: within 10% of 52w high, revenue growth > 30% y/y, gross margin >= 50%, profitable, op margin expanding, EPS beats, 4q avg > 5%, compounder
+  2022-10-07  fwd  +1398%  pct 1.00  traits: within 10% of 52w low, profitable, high volatility

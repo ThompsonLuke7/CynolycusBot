@@ -113,11 +113,14 @@ def _write_manifest(rows: list[dict]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="SEC 8-K Item 2.02 earnings press releases")
     ap.add_argument("--tickers", nargs="*")
+    ap.add_argument("--min-interval", type=float, default=0.12,
+                    help="seconds between SEC requests; raise it when sharing the 10 req/s budget "
+                         "with the live server's forward-guidance feed (503s otherwise)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     RAW_DIR.mkdir(parents=True, exist_ok=True)
-    meta = SecClient(cache_dir=META_CACHE)
-    sec = SecClient()  # uncached: submissions/index JSON are not worth keeping
+    meta = SecClient(cache_dir=META_CACHE, min_interval_s=args.min_interval)
+    sec = SecClient(min_interval_s=args.min_interval)  # uncached: submissions/index JSON are not worth keeping
     done = set()
     if MANIFEST.exists():
         m = pd.read_parquet(MANIFEST)
