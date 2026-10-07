@@ -67,6 +67,7 @@ from core.live_4h_exec import (
     exit_action as _shared_exit_action,
     managed_key_for_symbol,
     mark_entry_unconfirmed,
+    plan_row_routes,
     record_exit_realized_pnl,
     track_exit_submission,
     shares_for_notional,
@@ -1134,6 +1135,12 @@ def _submit_via_gateway(
         if occ and quote is not None:
             quotes_by_symbol[occ] = quote
 
+    # `_run_options` submits ONE plan holding option and share rows, so
+    # `is_option` only labels rows that carry no route of their own. Booking a
+    # share sale under it recorded EQPT/ACHR/CAVA/LITE/WDAY at the x100 contract
+    # multiplier (2026-09-24..10-02).
+    row_routes = plan_row_routes(plan)
+
     def _record(row) -> None:
         symbol = row.symbol
         verdict, broker_id, detail = gateway_verdict(row)
@@ -1192,7 +1199,7 @@ def _submit_via_gateway(
                         entry_state = new_managed[_tk]
                 item = (symbol, row.side, row.quantity,
                         row.intent.reason_codes[0] if row.intent.reason_codes else "exit",
-                        "option" if is_option else "equity")
+                        row_routes.get(symbol, "option" if is_option else "equity"))
                 track_exit_submission(
                     client, module=module, item=item, resp={"id": broker_id},
                     new_managed=new_managed, exit_context=exit_context,

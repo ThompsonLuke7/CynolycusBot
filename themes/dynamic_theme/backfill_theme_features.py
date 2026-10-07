@@ -186,7 +186,7 @@ def run_backfill(
             continue
 
         # Generate meta features for this day (returns df with date=day)
-        features = build_meta_features(memberships_df=memberships, as_of=day)
+        features = build_meta_features(memberships_df=memberships, as_of=day, clusters_df=clusters_df)
         if features is not None and not features.empty:
             appended_chunks.append(features)
 

@@ -8,6 +8,8 @@
 #   2) Rebuild the Momentum Expansion weekly universe snapshot (needs #1 first —
 #      it scores off daily bars, so new names without bars would be dropped).
 #   3) Refresh Meta Ranker feeds + the dynamic theme taxonomy (Claude API $).
+#   Last) Momentum shadow ledger (research only, no orders): records a decision
+#      every 4th week and marks the ledger every week. Any run day works.
 #
 # It does NOT (and cannot) re-auth Schwab — that needs an interactive browser
 # login — so it prints a reminder + the exact command at the end.
@@ -62,7 +64,7 @@ fi
   }
 
   # 1) Backfill bars for the whole universe (incl. newly promoted names).
-  echo "[$(ts)] 1/5 catch up shared bars (1H/4H/1D, full universe)"
+  echo "[$(ts)] 1/6 catch up shared bars (1H/4H/1D, full universe)"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_BARS_TIMEOUT_SECONDS:-21600}s" \
     "$PYTHON" -u scripts/catchup_shared_bars.py --workers 6
   rc=$?
@@ -71,7 +73,7 @@ fi
   record_stage "catchup" "$rc"
 
   # 2) Momentum weekly universe snapshot (must follow #1 to include new names).
-  echo "[$(ts)] 2/5 momentum universe snapshot"
+  echo "[$(ts)] 2/6 momentum universe snapshot"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_UNIVERSE_TIMEOUT_SECONDS:-7200}s" \
     "$PYTHON" -u -m strategies.momentum_expansion.main --refresh-universe
   rc=$?
@@ -85,7 +87,7 @@ fi
   #    incremental embed/cluster + rebuilds news_catalyst_signal so the broad
   #    corpus the Meta ranker reads is current. (This is the ~3h tail moved off
   #    the nightly path.)
-  echo "[$(ts)] 3/5 full-universe news: collect (scope=full) → embed → signal"
+  echo "[$(ts)] 3/6 full-universe news: collect (scope=full) → embed → signal"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_NEWS_COLLECT_TIMEOUT_SECONDS:-43200}s" \
     "$PYTHON" -u -m scripts.collect_news_scope --scope full
   rc=$?
@@ -119,7 +121,7 @@ fi
   #    script exits immediately when the current month is already cached, so
   #    this costs ~2 minutes once a month and seconds otherwise. It MERGES --
   #    earlier months are the point-in-time record and are never overwritten.
-  echo "[$(ts)] 4/5 empirical sector assignments (monthly snapshot; skips if current)"
+  echo "[$(ts)] 4/6 empirical sector assignments (monthly snapshot; skips if current)"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_SECTOR_TIMEOUT_SECONDS:-3600}s" \
     "$PYTHON" -u scripts/build_sector_assignments.py
   rc=$?
@@ -133,13 +135,33 @@ fi
   #    known to be wrong -- carry-forward would otherwise keep them forever).
   FEEDS_ARGS=(--weekly)
   [ "${WEEKLY_THEMES_RELABEL_ALL:-0}" = "1" ] && FEEDS_ARGS+=(--relabel-themes)
-  echo "[$(ts)] 5/5 meta feeds + dynamic themes (${FEEDS_ARGS[*]}, costs Claude \$)"
+  echo "[$(ts)] 5/6 meta feeds + dynamic themes (${FEEDS_ARGS[*]}, costs Claude \$)"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_FEEDS_TIMEOUT_SECONDS:-21600}s" \
     "$PYTHON" -u signals/meta_context/meta_ranker/update_feeds.py "${FEEDS_ARGS[@]}"
   rc=$?
   echo "[$(ts)] meta feeds exit=$rc"
   [ "$rc" -ne 0 ] && STATUS="$rc"
   record_stage "meta_feeds_and_themes" "$rc"
+
+  # 6) Momentum shadow ledger (research only: no orders, no account access).
+  #    Decisions fall on the last session of every 4th week from 2026-10-02. The
+  #    script does not ask "is today the day": it records every scheduled decision
+  #    that has closed and is missing from the ledger, using bars up to that date
+  #    only. So Friday evening through Monday, or a week late, writes the same row,
+  #    and a missed weekend is caught up by the next run. In the three off-weeks it
+  #    only re-marks the ledger (~40 tickers, seconds). A due week fetches the
+  #    universe's daily bars (~15 min).
+  #
+  #    Runs LAST and does not change STATUS: it is research, and a failure here
+  #    must not make the live stack's weekly data look unready. Its exit code is
+  #    still in the stamp, and a failed decision stays due for the next run.
+  echo "[$(ts)] 6/6 momentum shadow ledger (4-weekly decision; records only when one is due)"
+  timeout --signal=TERM --kill-after=60s "${WEEKLY_SHADOW_TIMEOUT_SECONDS:-3600}s" \
+    "$PYTHON" -u scripts/shadow/momentum_shadow_ledger.py --auto
+  rc=$?
+  echo "[$(ts)] momentum shadow ledger exit=$rc"
+  [ "$rc" -ne 0 ] && echo "[$(ts)] WARNING: momentum shadow ledger failed (exit=$rc); any due decision will be retried on the next run"
+  record_stage "momentum_shadow_ledger" "$rc"
 
   echo ""
   echo "----------------------------------------------------------------"

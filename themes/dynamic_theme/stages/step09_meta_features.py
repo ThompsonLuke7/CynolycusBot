@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -36,11 +37,17 @@ from themes.dynamic_theme.config import (
     HEAT_WINDOW_DAYS,
     TICKER_THEME_FEATURES_PATH,
     TOP_Q_STRENGTH,
+    UNCLASSIFIED_THEME,
     ensure_outputs,
 )
+from themes.dynamic_theme.profiles import country_by_ticker, industry_by_ticker
 from themes.dynamic_theme.stages.step05_claude_labeling import _load_registry_or_empty
 from themes.dynamic_theme.stages.step07_relationships import load_relationships
-from themes.dynamic_theme.stages.step08_memberships import get_primary_theme, load_memberships
+from themes.dynamic_theme.stages.step08_memberships import (
+    assign_primary_themes,
+    get_primary_theme,
+    load_memberships,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -272,8 +279,18 @@ def build_meta_features(
     memberships_df: pd.DataFrame | None = None,
     *,
     as_of: pd.Timestamp | None = None,
+    clusters_df: pd.DataFrame | None = None,
+    industries: Mapping[str, str] | None = None,
+    countries: Mapping[str, str] | None = None,
 ) -> pd.DataFrame:
-    """Build ticker-level theme features and write ticker_theme_features.parquet."""
+    """Build ticker-level theme features and write ticker_theme_features.parquet.
+
+    With the run's cluster assignments (``clusters_df``), tickers that have no
+    confident cluster are placed by industry peers or marked unclassified (see
+    ``assign_primary_themes``; ``industries``/``countries`` default to the profile tables).
+    Unclassified tickers get a row with NaN theme-level features. Without
+    ``clusters_df`` the primary theme is simply the nearest published theme.
+    """
     ensure_outputs()
     as_of = (as_of or pd.Timestamp.now(tz="UTC")).normalize().tz_localize(None)
 
@@ -305,7 +322,15 @@ def build_meta_features(
     relationships = load_relationships(latest_only=True)
 
     # primary theme per ticker
-    primary = get_primary_theme(memberships_df)  # ticker | primary_theme | membership_score
+    # primary theme per ticker: ticker | primary_theme | membership_score
+    if clusters_df is not None:
+        primary = assign_primary_themes(
+            memberships_df, clusters_df, registry_today,
+            industry_by_ticker() if industries is None else industries,
+            country_by_ticker() if countries is None else countries,
+        )
+    else:
+        primary = get_primary_theme(memberships_df)
 
     all_tickers = primary["ticker"].tolist()
     all_themes = memberships_df["theme"].unique().tolist()
@@ -315,6 +340,8 @@ def build_meta_features(
     # full market. This prevents all themes sharing identical breadth values.
     theme_members: dict[str, list[str]] = {}
     for theme, grp in primary.groupby("primary_theme"):
+        if theme == UNCLASSIFIED_THEME:
+            continue  # not a theme: no heat/breadth/rank for it
         theme_members[str(theme)] = grp["ticker"].tolist()
 
     # Load price returns for all tickers in the universe

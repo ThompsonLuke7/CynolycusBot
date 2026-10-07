@@ -99,6 +99,15 @@ Stages, in the order the script runs them (the order is load-bearing):
 | 3 | `collect_news_scope --scope full` → `signals.news.main --stage incremental` → `meta_context.build_news_signal` | nightly only collects the ~1.25k PRIORITY scope; this is the ~2.9k full sweep |
 | 4 | `build_sector_assignments.py` | empirical sector map over the universe #2 just refreshed; snapshots per CALENDAR MONTH and exits in seconds when the month is already cached, so it only really runs once a month |
 | 5 | `meta_ranker/update_feeds.py --weekly` | Meta feeds + dynamic theme taxonomy; **costs Claude API $** |
+| 6 | `scripts/shadow/momentum_shadow_ledger.py --auto` | research-only forward record of the momentum blends (no orders); runs last so it can never delay a live-critical stage, and does NOT affect the overall status |
+
+Stage 6 records a decision only every 4th week (the last session of the week,
+counted from 2026-10-02) and otherwise just re-marks the ledger in seconds. It
+is safe on any run day: it records every scheduled decision that has closed and
+is missing from the ledger, using bars up to that decision date only, so Friday
+evening through Monday (or a week late) writes the same row and a missed
+weekend is caught up by the next run. A due week adds ~15 minutes (a
+full-universe daily-bar fetch).
 
 Stage 4 is usually a no-op. It matters because the curated `SECTOR_MAP` covers
 95 of 2,903 live names (3.3%), and under that map the nervous system's sector
@@ -148,6 +157,11 @@ After the chain finishes:
   — the same rcs in context, for a run that died before stamping.
 - `grep -aiE "error|traceback|failed" signals/news/data/processed/weekly_refresh.log | tail -30`
   — stage 4 can exit 0 with many per-cluster failures inside it.
+- `PYTHONPATH=. .venv/bin/python scripts/shadow/momentum_shadow_ledger.py --status`
+  — no network. `due now []` is the pass condition; a date listed there means
+  stage 6 failed or has not run, and that decision is still owed (rerun with
+  `--auto`). Its exit code is in the stamp as `momentum_shadow_ledger` but is
+  deliberately not folded into the overall status.
 - `.venv/bin/python -m core.live_readiness` (no flag — the consumer gate the
   modules use) — must be `ok: true` with a stamp newer than the run. Do not
   judge this with `--for-next-session` after midnight: before Monday's open it

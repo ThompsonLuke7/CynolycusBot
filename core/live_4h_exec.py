@@ -596,11 +596,14 @@ def build_mixed_plan(
                 "status": "confirmed_flat" if info_present else "not_found",
                 "was_unconfirmed_entry": bool(st.get("pending_fill"))}
             continue
-        held = int(owned_quantity(st, route, held))
         # The broker confirms the position exists, so an entry flagged
-        # unconfirmed by execute_plan has now settled.
-        st.pop("pending_fill", None)
-        st.pop("entry_order_id", None)
+        # unconfirmed by execute_plan has now settled. Its size is read from the
+        # order first: `owned_quantity` below caps every sell at it.
+        if st.get("pending_fill"):
+            settle_entry_fill(client, st)
+        else:
+            st.pop("entry_order_id", None)
+        held = int(owned_quantity(st, route, held))
         info = pos_info.get(sym, {})
         # Validate the mark BEFORE it can drive an exit, and before the bar
         # counters advance. `last_mark_price` is the mark this loop persisted on
@@ -1499,6 +1502,28 @@ _PENDING_EXIT_MAX_ATTEMPTS = 3
 _OCC_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
 
 
+def route_for_symbol(symbol) -> str:
+    """Route implied by an order symbol: an OCC contract is "option", else "equity".
+
+    The fallback for an exit whose own route did not travel with it. That
+    fallback used to be a bare "option", which books a share sale at the x100
+    contract multiplier: five Meta equity exits between 2026-09-24 and
+    2026-10-02 (EQPT, ACHR, CAVA, LITE, WDAY) were recorded 100x too large.
+    """
+    return "option" if _OCC_RE.match(str(symbol or "").strip().upper()) else "equity"
+
+
+def plan_row_routes(plan) -> dict[str, str]:
+    """Each plan row's own route, keyed by order symbol.
+
+    `build_mixed_plan` puts option and share rows in ONE plan, so a plan-level
+    "this is an options run" flag cannot say what a given row is. Rows are
+    (symbol, side, qty, reason, route); a 4-field row carries no route and is
+    left for the caller to label.
+    """
+    return {str(row[0]): str(row[4]) for row in plan if len(row) > 4}
+
+
 def parse_occ_expiry(symbol: str):
     """Expiration date embedded in an OCC symbol, or None if it is not one.
 
@@ -1931,6 +1956,47 @@ def _order_is_working(client, order_id) -> bool:
     return not observe_order(client, order_id).terminal
 
 
+def settle_entry_fill(client, st: dict) -> bool:
+    """Size a flagged entry from what its one order filled. True once it is settled.
+
+    `mark_entry_unconfirmed` reads the order about a second after it is sent. A
+    market buy of a thin name is often only partly filled by then, and that
+    first reading used to become the position's permanent size: MYGN was
+    ordered at 1,264 shares on 2026-09-22, read at 51, and filled in full
+    moments later. Every later sell is capped at the recorded size
+    (`owned_quantity`), so the module exits its 51 and strands the rest as
+    shares nothing owns. 56 positions were short of the broker this way on
+    2026-10-05.
+
+    The entry ladder keeps every fill on one order, so that order is the whole
+    truth about the entry and is read again here, when the broker first reports
+    the position. Whatever has already been sold is carried over. An order
+    still working keeps its flag and is read again next pass. An order that
+    cannot be read at all settles as before, on the broker position alone.
+    """
+    order_id = broker_order_id({"id": st.get("entry_order_id")})
+    obs = (observe_order(client, order_id)
+           if order_id and hasattr(client, "get_order") else None)
+    if obs is not None and obs.known:
+        if obs.filled_qty:
+            recorded, remaining = number(st.get("entry_filled_qty")), number(st.get("remaining_qty"))
+            sold = (max(0.0, recorded - remaining)
+                    if recorded is not None and remaining is not None else 0.0)
+            size_key = "contracts" if st.get("route", "option") == "option" else "shares"
+            st["entry_filled_qty"] = obs.filled_qty
+            st["remaining_qty"] = st[size_key] = max(0.0, obs.filled_qty - sold)
+            if obs.average_price is not None:
+                st["entry_fill_price"] = obs.average_price
+        if not obs.terminal:
+            return False
+    elif obs is not None:
+        logger.warning("entry order %s could not be read; %s keeps its recorded size",
+                       order_id, st.get("occ") or st.get("symbol"))
+    st.pop("pending_fill", None)
+    st.pop("entry_order_id", None)
+    return True
+
+
 def mark_exit_unconfirmed(new_managed: dict | None, sym: str, resp, *, item, exit_context,
                           pos_lookup, bar) -> None:
     """Record that an EXIT order was ACCEPTED but has not filled.
@@ -1963,13 +2029,14 @@ def mark_exit_unconfirmed(new_managed: dict | None, sym: str, resp, *, item, exi
     basis = st.get("entry_fill_price") or (pos_lookup or {}).get(sym, {}).get("avg_entry")
     if basis is None:
         basis = st.get("entry_avg_price")
+    route = item[4] if len(item) > 4 else route_for_symbol(sym)
     st["exit_pending"] = {
         "order_id": str((resp or {}).get("id", "")) or None,
         "reason": item[3] if len(item) > 3 else "exit",
-        "route": item[4] if len(item) > 4 else "option",
+        "route": route,
         "qty": float(item[2]),
         "position_qty": max(float(item[2]), number(st.get("remaining_qty")) or number(st.get(
-            "contracts" if (item[4] if len(item) > 4 else "option") == "option" else "shares")) or float(item[2])),
+            "contracts" if route == "option" else "shares")) or float(item[2])),
         "full_exit": bool(exit_context and sym in exit_context),
         "entry_avg_price": float(basis) if basis else None,
         "submitted_bar": str(bar),
@@ -2001,7 +2068,7 @@ def reconcile_pending_exit(client, *, module, ticker, symbol, state, bar,
     previous = read_evidence(root, module, oid) or {}
     prior = previous.get("state", {}).get("exit_pending", {})
     requested = float(pending.get("qty") or 0)
-    route = pending.get("route", state.get("route", "option"))
+    route = pending.get("route", state.get("route", route_for_symbol(symbol)))
     position_qty = float(pending.setdefault("position_qty", max(
         requested, number(state.get("remaining_qty")) or number(state.get(
             "contracts" if route == "option" else "shares")) or requested)))
@@ -2128,7 +2195,7 @@ def track_exit_submission(client, *, module, item, resp, new_managed,
         # can still prove its owner or block the report instead of losing the fill.
         register_order_ownership(
             order_id=pending["order_id"], module=module, symbol=sym,
-            side=item[1], qty=item[2], route=pending.get("route", "option"),
+            side=item[1], qty=item[2], route=pending.get("route") or route_for_symbol(sym),
             entry_avg_price=pending.get("entry_avg_price"),
             reason=pending.get("reason"), root=root,
             account_label=account_label_for_client(client),

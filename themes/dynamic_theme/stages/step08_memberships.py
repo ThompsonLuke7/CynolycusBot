@@ -27,12 +27,18 @@ from themes.dynamic_theme.config import (
     HDBSCAN_METRIC,
     HDBSCAN_MIN_CLUSTER_SIZE,
     HDBSCAN_MIN_SAMPLES,
+    HOME_COUNTRY,
+    MIN_CLUSTER_LABEL_CONFIDENCE,
+    MIN_INDUSTRY_PEER_SHARE,
+    MIN_INDUSTRY_PEERS_IN_THEME,
     SEED_THEMES,
     TICKER_CLUSTERS_PATH,
+    TICKER_PEER_PINS,
     TICKER_EMBEDDINGS_PATH,
     TICKER_MEMBERSHIP_PATH,
     TICKER_MEMBERSHIP_HISTORY_PATH,
     UMAP_METRIC,
+    UNCLASSIFIED_THEME,
     UMAP_MIN_DIST,
     UMAP_N_COMPONENTS,
     UMAP_N_NEIGHBORS,
@@ -602,10 +608,16 @@ def compute_memberships(
     # Only names backed by a real cluster centroid count as "emerged". step05
     # gap-fills the seed's own registry row (reserved negative id, no centroid);
     # counting it here skipped injection and left the seed with zero members.
+    grab_bags = grab_bag_cluster_ids(registry_df)
+    if grab_bags:
+        logger.info(
+            "Not publishing %d grab-bag cluster(s) as themes (label confidence < %.2f)",
+            len(grab_bags & set(centroids_by_id)), MIN_CLUSTER_LABEL_CONFIDENCE,
+        )
     existing_names = {
         canonical_theme_id(name)
         for cluster_id, name in id_to_theme.items()
-        if cluster_id in centroids_by_id
+        if cluster_id in centroids_by_id and cluster_id not in grab_bags
     }
     for cluster_id, name in seed_names.items():
         raw_label = _theme_label(name)
@@ -617,7 +629,10 @@ def compute_memberships(
         id_to_theme[cluster_id] = raw_label
 
     valid_ids = sorted(
-        (cluster_id for cluster_id in centroids_by_id if cluster_id in id_to_theme),
+        (
+            cluster_id for cluster_id in centroids_by_id
+            if cluster_id in id_to_theme and cluster_id not in grab_bags
+        ),
         key=lambda cluster_id: canonical_theme_id(id_to_theme[cluster_id]),
     )
     if not valid_ids:
@@ -699,8 +714,133 @@ def get_primary_theme(memberships_df: pd.DataFrame) -> pd.DataFrame:
     return top.reset_index(drop=True)
 
 
+def grab_bag_cluster_ids(registry_df: pd.DataFrame | None) -> set:
+    """Cluster ids the labeler could not confidently name as one business.
+
+    Empty when the registry carries no confidence column; a missing confidence
+    on a row is treated as unknown, not as low.
+
+    Only the LATEST registry date is read. HDBSCAN reuses cluster ids every
+    week and the weekly pipeline passes the full multi-date registry, so judging
+    ids across history unpublishes nearly everything (2026-10-05: 181 of 191
+    clusters dropped, 9 themes published, because 184 ids had been low-confidence
+    in SOME past week; the real count that week was 28).
+    """
+    if registry_df is None or registry_df.empty or "confidence" not in registry_df.columns:
+        return set()
+    if "date" in registry_df.columns and registry_df["date"].notna().any():
+        registry_df = registry_df[registry_df["date"] == registry_df["date"].max()]
+    conf = pd.to_numeric(registry_df["confidence"], errors="coerce")
+    return set(registry_df.loc[conf < MIN_CLUSTER_LABEL_CONFIDENCE, "cluster_id"].tolist())
+
+
+def assign_primary_themes(
+    memberships_df: pd.DataFrame,
+    clusters_df: pd.DataFrame | None,
+    registry_df: pd.DataFrame | None,
+    industries: Mapping[str, str] | None,
+    countries: Mapping[str, str] | None = None,
+    peer_pins: Mapping[str, Iterable[str]] | None = None,
+) -> pd.DataFrame:
+    """{ticker, primary_theme, membership_score, source} placed by business type.
+
+    * A ticker in a confidently-named cluster (or a seed anchor) keeps its
+      nearest published theme -- unless it is the only company of its industry
+      there                                                     -> source "cluster"
+    * Any other ticker (HDBSCAN noise, grab-bag member, industry singleton) gets
+      its best-matching theme among those holding clustered companies of its own
+      industry; a home-market ticker counts home-market peers only
+                                                                -> source "industry"
+    * and is UNCLASSIFIED_THEME when no theme does              -> source "unclassified"
+    * ``peer_pins`` (default TICKER_PEER_PINS) then override: the ticker takes
+      the theme most of its listed peers were given             -> source "pinned"
+
+    Without cluster assignments this is plain nearest-theme (source "similarity").
+    """
+    best = get_primary_theme(memberships_df)
+    if best.empty or clusters_df is None or clusters_df.empty:
+        return best.assign(source="similarity")
+
+    grab_bags = grab_bag_cluster_ids(registry_df)
+    hard = clusters_df.assign(ticker=clusters_df["ticker"].astype(str)).set_index("ticker")["cluster_id"]
+    seed_anchors = {t for members in _default_seed_members().values() for t in members}
+    anchored = set(hard.index[(hard >= 0) & ~hard.isin(grab_bags)]) | seed_anchors
+
+    industry = pd.Series(dict(industries or {}), dtype=object)
+    home = pd.Series(dict(countries or {}), dtype=object).eq(HOME_COUNTRY)
+
+    kept = best[best["ticker"].astype(str).isin(anchored)].assign(source="cluster")
+    kept = kept.assign(industry=kept["ticker"].map(industry))
+    # An industry singleton has no business-type support in its theme.
+    n_same = kept.groupby(["primary_theme", "industry"])["ticker"].transform("size")
+    alone = n_same.eq(1) & kept["industry"].notna() & ~kept["ticker"].isin(seed_anchors)
+    kept = kept[~alone]
+
+    def _eligible(peers: pd.DataFrame) -> pd.MultiIndex:
+        """(industry, theme) pairs where that industry's clustered names sit."""
+        counts = peers.groupby(["industry", "primary_theme"]).size()
+        share = counts / counts.groupby(level="industry").transform("sum")
+        return counts.index[
+            (counts >= MIN_INDUSTRY_PEERS_IN_THEME) & (share >= MIN_INDUSTRY_PEER_SHARE)
+        ]
+
+    peers = kept.dropna(subset=["industry"])
+    eligible_any = _eligible(peers)
+    eligible_home = _eligible(peers[peers["ticker"].map(home).eq(True)])
+
+    loose = memberships_df[~memberships_df["ticker"].astype(str).isin(set(kept["ticker"]))]
+    loose = loose.assign(industry=loose["ticker"].map(industry))
+    pair = pd.MultiIndex.from_frame(loose[["industry", "theme"]])
+    is_home = loose["ticker"].map(home).eq(True).to_numpy()
+    backed = loose[np.where(is_home, pair.isin(eligible_home), pair.isin(eligible_any))]
+    placed = (
+        backed.loc[backed.groupby("ticker")["membership_score"].idxmax(),
+                   ["ticker", "theme", "membership_score"]]
+        .rename(columns={"theme": "primary_theme"})
+        .assign(source="industry")
+    )
+    settled = set(kept["ticker"]) | set(placed["ticker"])
+    rest = best.loc[~best["ticker"].isin(settled), ["ticker"]].assign(
+        primary_theme=UNCLASSIFIED_THEME, membership_score=np.nan, source="unclassified"
+    )
+    out = pd.concat([kept.drop(columns="industry"), placed, rest], ignore_index=True)
+    out = _apply_peer_pins(out, memberships_df, TICKER_PEER_PINS if peer_pins is None else peer_pins)
+    logger.info(
+        "Primary themes: %s (industry singletons re-placed: %d)",
+        out["source"].value_counts().to_dict(), int(alone.sum()),
+    )
+    return out.sort_values("ticker").reset_index(drop=True)
+
+
+def _apply_peer_pins(
+    out: pd.DataFrame,
+    memberships_df: pd.DataFrame,
+    peer_pins: Mapping[str, Iterable[str]],
+) -> pd.DataFrame:
+    """Move each pinned ticker to the theme most of its peers were given."""
+    theme_of = out.set_index("ticker")["primary_theme"]
+    score = memberships_df.set_index(["ticker", "theme"])["membership_score"]
+    out = out.set_index("ticker")
+    for ticker, peer_list in peer_pins.items():
+        if ticker not in out.index:
+            continue
+        votes = theme_of.reindex([p for p in peer_list if p != ticker]).dropna()
+        votes = votes[votes != UNCLASSIFIED_THEME]
+        if votes.empty:
+            logger.warning("Peer pin for %s: none of its peers has a theme -- left as %s",
+                           ticker, out.loc[ticker, "primary_theme"])
+            continue
+        theme = votes.value_counts().index[0]
+        out.loc[ticker, ["primary_theme", "membership_score", "source"]] = [
+            theme, float(score.get((ticker, theme), np.nan)), "pinned"
+        ]
+    return out.reset_index()
+
+
 __all__ = [
     "append_membership_history",
+    "assign_primary_themes",
+    "grab_bag_cluster_ids",
     "assert_publishable_memberships",
     "canonical_taxonomy_json",
     "canonical_theme_id",

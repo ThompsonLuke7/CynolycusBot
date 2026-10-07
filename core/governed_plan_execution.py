@@ -28,6 +28,7 @@ from core.live_4h_exec import (
     drop_failed_entry,
     managed_key_for_symbol,
     mark_entry_unconfirmed,
+    plan_row_routes,
     track_exit_submission,
 )
 from core.nervous_system.contracts.enums import PolicyMode
@@ -99,6 +100,11 @@ def submit_plan_via_router(
         if occ and quote is not None:
             quotes_by_symbol[occ] = quote
 
+    # A mixed plan labels each row; `is_option` only labels rows that carry no
+    # route of their own. Booking a share sale under the plan-level flag is what
+    # recorded five Meta equity exits at the x100 contract multiplier.
+    row_routes = plan_row_routes(plan)
+
     def _record(row) -> None:
         symbol = row.symbol
         verdict, broker_id, detail = gateway_verdict(row)
@@ -158,7 +164,7 @@ def submit_plan_via_router(
                     row.side,
                     row.quantity,
                     row.intent.reason_codes[0] if row.intent.reason_codes else "exit",
-                    "option" if is_option else "equity",
+                    row_routes.get(symbol, "option" if is_option else "equity"),
                 )
                 track_exit_submission(
                     client,

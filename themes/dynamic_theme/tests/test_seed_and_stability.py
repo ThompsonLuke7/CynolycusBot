@@ -61,8 +61,8 @@ def test_seed_centroid_makes_anchor_its_primary_theme():
 def test_seed_centroid_skipped_when_no_anchor_present():
     from themes.dynamic_theme.seed_themes import seed_centroids
 
-    cents, names = seed_centroids(["AAPL", "MSFT"], np.eye(2, dtype=np.float32))
-    assert cents == {} and names == {}  # no memory anchors in this universe
+    cents, names = seed_centroids(["XOM", "JPM"], np.eye(2, dtype=np.float32))
+    assert cents == {} and names == {}  # no seed anchors in this universe
 
 
 def test_match_prior_theme_reuses_above_threshold_only():

@@ -397,5 +397,267 @@ Research only: no orders and no account access. Arms were fixed on 2026-10-03, b
 `core_sat_300` (primary: 70% SPY + 30% top-20 momentum among the 300 most liquid), `core_sat_1000`, the two sleeves
 alone, and SPY. First decision: **2026-10-02** (entry at the 2026-10-05 open). The top-300 sleeve holds
 SNDK AXTI MRNA MU LITE AAOI WDC DELL STX AMD INTC MRVL TER BE COHR CIEN VLO HUT TWLO HPE, which is mostly one
-AI-hardware theme. Cadence: run `--snapshot` every 4 weeks after a Friday close, and `--mark` any time. It is not wired
-to any scheduler. Each snapshot fetches ~620 days of bars (~15 min) into `Data/research/shadow_bars/{date}/`.
+AI-hardware theme. **Updated 2026-10-06:** the code moved to `scripts/shadow/momentum_shadow_ledger.py` (`12_shadow_ledger.py` is a
+shim) and runs as stage 6 of `scripts/weekly_refresh.sh`. See Part 7 for the schedule.
+
+---
+
+# Part 5: can ML improve momentum inside the liquid-300? (2026-10-04)
+
+**Question (user):** the surviving edge is "current momentum leaders, restricted to the few hundred most liquid
+names". Can ML do better inside that universe?
+
+## 13: ML vs plain momentum, liquid-300, point-in-time (`13_ml_top300.py`, `13_results*.txt`)
+Walk-forward 2019-2026 with a 21-session label, to match the monthly rebalance. Inputs are 14 technical features as
+within-date percentiles. Arms were fixed before the first run. Each holds the top 20 within the liquid-300 and is run
+through 05's simulator. The verdict column is the PAIRED active return against plain `mom_top300`
+(39.7% CAGR, Sharpe 0.95, MDD −53%).
+
+| arm | rank label (pre-registered) | raw-return label (exploratory) | top-decile classifier (exploratory) |
+|---|---|---|---|
+| LightGBM trained on liquid-300 | 19.7%, **−20.1%/yr [−31.1, −8.4]** | 21.1%, −16.0% [−26.9, −5.3] | 24.2%, −10.7% [−24.1, +3.3] |
+| LightGBM trained on liquid-1000 | 22.3%, −18.9% [−32.6, −5.1] | 23.7%, −13.5% [−23.3, −4.3] | 27.2%, −5.1% [−14.8, +6.4] |
+| ridge, liquid-300 | 10.8%, −28.7% [−44.7, −13.9] | 10.9%, −25.9% [−39.8, −13.7] | 25.0%, −7.7% [−21.0, +4.5] |
+| top-60 momentum leaders re-ranked by ML | 24.6%, −16.4% [−27.3, −4.6] | 31.5%, −7.9% [−16.0, −1.2] | 34.8%, −2.0% [−6.4, +2.2] |
+| permuted-label control | 12.3% | 13.8% | 20.6% |
+
+- **No ML arm beats plain momentum: 12 arms across 3 labels.** On the pre-registered rank label every arm is
+  significantly WORSE. The ridge model is no better than the permuted control and puts a negative weight on 12-1 momentum.
+- The top-decile classifier comes closest, but it does so by buying volatility: rv_63 carries 52% of the gain, its picks
+  sit at the 92nd-94th vol percentile, and its drawdowns are −72% to −80%.
+- Re-ranking the leaders with ML loses to simply taking the 20 strongest.
+
+## 14: why (`14_momentum_profile.py`, `14_results.txt`)
+Next-21-session return minus the liquid-300 mean, by momentum rank, 399 weekly dates:
+
+| momentum rank | mean excess / month [CI] | median | P(next month in top decile) |
+|---|---|---|---|
+| 1-5 | **+4.01% [+1.68, +6.46]** | +0.07% | 29% |
+| 6-10 | +2.14% [+0.38, +3.86] | +0.29% | 26% |
+| 11-20 | +1.41% [+0.05, +2.65] | +0.22% | 20% |
+| 21-40 | +0.33% [−0.45, +1.14] | −0.34% | 14% |
+| 41-300 | −0.3% to +0.2% | −0.4% | 7-11% |
+
+The edge is a right-tail effect in the extreme top ranks. The MEDIAN leader does not beat the group (hit rate
+50%), but it is ~3x as likely to have a top-decile month. Across the whole liquid-300, momentum's IC is only +0.011. So a
+model fitted to the cross-section has almost nothing to learn, and a model fitted to "big month" learns volatility,
+which predicts big losses equally well. The momentum rank already IS the tail signal.
+
+## 15: is 300 / 20 a lucky spot? (`15_liquidity_grid.py`, `15_results.txt`)
+Top-N momentum among the L most liquid, monthly, point-in-time. CAGR / Sharpe / median MDD:
+
+| L \ N | 5 | 10 | 20 | 30 |
+|---|---|---|---|---|
+| 100 | 33.4% / 0.79 / −78% | 33.1% / 0.84 / −63% | 26.6% / 0.80 / −49% | 23.2% / 0.79 / −45% |
+| 200 | 46.0% / 0.92 / −71% | 40.0% / 0.91 / −66% | 33.5% / 0.88 / −58% | 27.3% / 0.81 / −49% |
+| 300 | 52.8% / 0.98 / −73% | 43.3% / 0.94 / −66% | **39.7% / 0.95 / −53%** | 34.2% / 0.92 / −46% |
+| 500 | 62.5% / 1.06 / −64% | 46.0% / 0.96 / −65% | 39.2% / 0.92 / −55% | 35.9% / 0.92 / −52% |
+| 1000 | 26.6% / 0.68 / −72% | 33.0% / 0.79 / −61% | 30.1% / 0.78 / −58% | 31.3% / 0.82 / −57% |
+
+**A plateau, not a spike.** L = 300-500 is flat. L = 100 is too narrow (few leaders to choose from) and L = 1000
+admits the junk that crashes. The active-return CI excludes zero for L = 300 and 500 at every N. Fewer names raise the
+return and deepen the drawdown at a roughly constant Sharpe, so N is a risk dial, not an edge.
+
+## Verdict and next testable variant
+The hypothesis class "ML on price-derived features to select inside the liquid universe" is exhausted at this sample:
+12 arms, 3 labels, permuted controls, none above plain momentum. Selection is not where the remaining gain is.
+1. **Size the sleeve, do not re-pick it.** The problem with momentum is its −53% drawdown. Test a volatility-managed
+   sleeve (scale the momentum weight by target vol ÷ its trailing realized vol; the rest in SPY) against the fixed 70/30.
+2. **Only new information can improve selection:** the miss+flat exclusion (Part 4, small but real), and signals not
+   derived from price (options/dealer positioning, news/themes) once they have enough history. Track them in the shadow.
+
+---
+
+# Part 6: risk overlays from the existing system (2026-10-05)
+
+**Question (user):** the sleeve works; risk is the problem. The system already has a lot of risk management. What transfers?
+
+## 16: overlays on the top-300 sleeve (`16_risk_overlays.py`, `16_results.txt`)
+Point-in-time, monthly, 4 phases. It reuses `portfolio_lab/covariance.ledoit_wolf_asof`, `sizing.correlation_penalty`,
+`sizing.portfolio_vol_scale`, the 12% position cap, and the two stop shapes of `core/live_4h_exec`. Parameters were fixed
+before the run. The overlay simulator is asserted equal to 05's on the no-overlay arm.
+
+Daily-return mean / vol: **SPY +17.8% / 18.9%; sleeve +44.9% / 45.8%; correlation 0.62.** The sleeve earned 2.5x the
+return at 2.4x the volatility, which is why the Sharpe ratios are nearly equal (0.95 vs 0.92).
+
+| overlay (sleeve alone) | CAGR | Sharpe | MDD med / worst | vs plain sleeve /yr [95% CI] |
+|---|---|---|---|---|
+| none (plain sleeve) | 39.7% | 0.95 | −53% / −57% | — |
+| correlation-penalised weights, 12% cap | 40.1% | 0.96 | −52% / −57% | +0.2% [−1.0, +1.1] |
+| vol target 30% (78% invested on average) | 26.8% | 0.89 | −43% / −46% | −14.8% [−23.0, −6.6] |
+| vol target 20% (56% invested) | 17.9% | 0.83 | −34% / −35% | −24.8% [−37.5, −12.2] |
+| stop 10% from entry (36% of positions stopped) | 27.8% | 0.89 | −48% / −61% | −14.5% [−22.6, −7.1] |
+| stop 20% from entry (15% stopped) | 33.5% | 0.92 | −55% / −63% | −6.2% [−12.3, −0.9] |
+| trailing stop 25% from peak (15% stopped) | 33.6% | 0.91 | −54% / −58% | −6.3% [−11.0, −1.6] |
+| cash while the sleeve is ≥ 25% below its peak | 19.7% | 0.67 | −54% / −57% | −19.9% [−29.8, −10.3] |
+
+| overlay (70/30 blend) | CAGR | Sharpe | MDD | vs fixed 70/30 /yr [95% CI] |
+|---|---|---|---|---|
+| fixed 70/30 | 25.0% | 1.04 | −34% | — |
+| correlation weights | 25.0% | 1.04 | −34% | +0.1% [−0.3, +0.4] |
+| vol-managed sleeve share (10-50%) | 22.3% | 0.99 | −34% | −2.6% [−4.4, −0.5] |
+| stop 20% on sleeve names | 23.7% | 1.03 | −35% | −1.2% [−2.4, −0.1] |
+| all three together | 21.7% | 0.99 | −35% | −3.3% [−5.5, −1.1] |
+
+- **No overlay helps, and stops, vol scaling and the drawdown breaker measurably hurt.** The paired CIs are tight and
+  negative, so this is a real cost, not an underpowered null.
+- **Stops do not even cut the drawdown.** Momentum's payoff is a right tail (Part 5): leaders are volatile, so a stop
+  sells them before the big month and the rule re-buys them at the next rebalance.
+- **The drawdown breaker is the worst rule.** It sat out the recoveries (2023: 0%, 2024: −3% vs +71%).
+- **Vol scaling only slides down the same line.** Less sleeve means less return at an equal-or-lower Sharpe. In this
+  window the high-vol periods (2020, 2025-26) were also the best ones for long-only momentum.
+- Correlation weighting is neutral, because the 20 leaders are one cluster anyway.
+- Caveats: cash earns 0% here (T-bills would add ~1%/yr to the partly-in-cash arms, not enough to flip any sign);
+  stops are close-based daily; one 7.7-year window.
+
+## The control that works: how much goes in the sleeve
+Plain sleeve at X% of the account, the rest in SPY (added after the overlays failed; same two assets, different mix):
+
+| sleeve share | 0% (SPY) | 10% | 20% | 30% | 40% | 50% | 70% | 100% |
+|---|---|---|---|---|---|---|---|---|
+| CAGR | 16.9% | 19.7% | 22.4% | 25.0% | 27.5% | 29.9% | 34.3% | 39.7% |
+| Sharpe | 0.92 | 0.99 | 1.03 | 1.04 | 1.04 | 1.03 | 1.00 | 0.95 |
+| MDD median / worst phase | −34% | −34% | −34% | −34% | −34% / −34% | −34% / −35% | −40% / −44% | −53% / −57% |
+
+Up to ~50% in the sleeve the worst drawdown stays at SPY's −34%: the sleeve's own crash (2021-22) and SPY's (2020) fall
+in different years. Sharpe is flat from 20% to 50%. Above 50% the sleeve's crash takes over.
+
+## Verdict and next testable variant
+The swing system's risk controls (stops, vol targeting, breakers) do not transfer to a monthly right-tail strategy.
+The risk control for this sleeve is the allocation split, plus the per-name cap that equal weighting already gives
+(5% of the sleeve = 1.5% of the account at a 30% share). The hypothesis class "per-position and vol-based overlays on
+the sleeve" is exhausted on this window. What remains is evidence, not rules: the forward shadow (Part 4) and a
+pre-2016 window from a delisting-aware vendor.
+
+---
+
+# Part 7: the last 12 months, and the shadow on the weekly schedule (2026-10-06)
+
+## 17: the last 12 months, month by month (`17_last_12_months.py`, `17_results.txt`, `17_last_12_months.png`)
+A BACKTEST replay on the point-in-time universe, on the live ledger's own 4-week grid: 13 decisions from 2025-10-03,
+entries 2025-10-06 to 2026-09-08, marked to 2026-09-24, after 20 bp round-trip costs.
+
+| | return | max drawdown | worst day |
+|---|---|---|---|
+| momentum sleeve, rotated every 4 weeks | **+32.4%** | −40.1% | −11.1% |
+| month-0 leaders bought once and held | −15.1% | −47.6% | −9.8% |
+| 50% SPY + 50% sleeve | +27.1% | −23.1% | −7.0% |
+| 70% SPY + 30% sleeve | +23.0% | −15.7% | −5.3% |
+| SPY buy & hold | +15.4% | −8.9% | −2.7% |
+
+- **The rotation is the strategy.** Month 0's leaders (RGTI QBTS OKLO BE IONQ RKLB HOOD ...: the quantum / nuclear /
+  retail-favourite theme) lost 15% held for the year. Re-picking every 4 weeks moved the sleeve into
+  memory, storage and optics (MU, STX, SNDK, LITE, WDC), which supplied most of the gain. 63 names were held;
+  4.8 of 20 changed per rebalance.
+- **It was a rough ride.** Two periods lost more than 20% (Nov 2025 −22%, Jun-Jul 2026 −21%), and the sleeve was
+  ~25% under water in November before it made anything. It beat SPY in 9 of 13 periods.
+- **In a calm year for SPY the blend's drawdown is the sleeve's, not SPY's:** 70/30 fell 15.7% against SPY's 8.9%.
+  The "blend keeps SPY's drawdown" result of Parts 4 and 6 is about 2020, when SPY itself fell 34%.
+- **One year depends heavily on which weeks the rebalances fall.** The four possible weekly schedules give
+  +21.4% / +23.3% / +31.6% / +32.4% over the same months (SPY +15.4% to +17.3%; drawdown ~−40% on all four).
+  Quote the range, not one schedule.
+
+## The shadow ledger on the weekly refresh (`scripts/shadow/momentum_shadow_ledger.py`, stage 6 of `scripts/weekly_refresh.sh`)
+- **Schedule:** a decision on the last trading session of every 4th week, counted from the week of 2026-10-02
+  (next: 2026-10-30, then 11-27, 12-24).
+- **Any run day works.** A run records every scheduled decision that has closed and is missing from the ledger,
+  using bars up to that decision date only. Friday evening, Saturday, Sunday, Monday before or after the open, or a
+  week late all write the same row. A week counts as closed at 16:30 ET on its last session, so a Friday run before
+  that records nothing and leaves the decision due for the next run. A missed period is caught up, never skipped.
+- **Off-weeks** only re-mark the ledger (~32 tickers, ~6 s). A due week fetches the universe's daily bars (~15 min);
+  only the 2 newest bar snapshots are kept (~83 MB each).
+- **Research stage:** it runs last and does not change the weekly refresh's overall status; its exit code is in the
+  stamp as `momentum_shadow_ledger`, and `--status` prints what is still owed with no network call.
+- **Verified:** 23 unit tests (every run day Fri-Wed, Friday before the close, off-weeks, one and two missed periods,
+  a holiday Friday, late recording cannot see later bars). The new code path reproduces the original 10-02 ledger
+  row for row from the 10-03 bars, and again from a fresh 10-06 fetch (late recording). The orchestrator's
+  exact call was rehearsed for an off-week.
+
+---
+
+# Part 8: which picks hurt, why whole months go red, and what can be done about it (2026-10-07)
+
+**Questions (user, from the Part 7 chart):** why was BBAI picked three times while it fell; do pump-and-dump names get
+in; are bad months a few bad stocks or everything at once; can we switch toward SPY or sell into strength so less is given back?
+
+## 18: anatomy of the sleeve (`18_sleeve_anatomy.py`, `18_results.txt`). Diagnostic; 8,060 picks, 2019-2026, point-in-time
+- **A pick is chosen on its PAST year, not on what it does next.** BBAI ranked 14th, 13th and 17th of 300 on trailing
+  12-1 return (+257%, +311%, +207%; $1.49 → $7.19 in a year) at the three decisions it was held, and left when it fell
+  to 33rd. One pick over 4 weeks: mean +3.4%, median +1.6%, **loses money 46% of the time**, worse than −20% in 10%,
+  better than +20% in 15%. A losing streak lasts 1 period in 66% of cases, 2 in 24%, 3 or more in 10%.
+- **Price features do not separate good picks from bad.** Thirds by volatility, distance above the 200 SMA, last-3-month
+  return, smoothness or liquidity rank show no difference in mean (all CIs include zero). More extreme momentum is
+  better (+1.9% [+0.03, +3.9] top third vs bottom third). High volatility brings more of BOTH tails (−20%: 16% vs 5%).
+- **"Pump" picks are worse, and profitability splits them.** Pump = more than doubled in 3 months, or price above 2x its
+  200-day average (13% of picks; 29% of picks in the last 12 months).
+
+  | pick | n | mean | median | worse than −20% |
+  |---|---|---|---|---|
+  | pump, last filed quarter profitable | 366 | +3.8% | +0.7% | 17% |
+  | pump, last filed quarter a net loss | 429 | **−1.0%** | **−9.1%** | 29% |
+  | pump, no filing on record | 256 | −0.3% | −3.6% | 29% |
+  | not pump, profitable | 3,824 | +3.8% | +2.2% | 5% |
+  | not pump, loss-making | 1,703 | +4.3% | +1.4% | 13% |
+
+  Loss-making pump minus every other pick: **−4.8% per period [−8.8, −1.2]** (194 dates). Profitability makes no
+  difference outside the pump group. Last 12 months: loss-making pumps (OPEN, RGTI, QBTS, APLD, IREN, ...) −9.1% a
+  period; profitable pumps (SNDK, MU, WDC, LITE, STX, ...) +7.6%.
+- **Bad periods are everything at once.** The sleeve's period return and the share of its names that rose correlate
+  0.88. In the worst 10% of periods only 7% of names rose and the median name lost 20.4%; removing each period's 3 worst
+  names in hindsight still leaves −16.3% of −19.5%. In those periods SPY −4.6%, QQQ −6.3%, SMH −9.6%, ARKK −14.1%.
+- **The common factor is the theme the leaders belong to.** Daily R²: SPY 0.38, SMH 0.47 over the full history; over the
+  last 12 months **SMH 0.65** (beta 1.34) and SPY beta 3.3. The two all-red months of Part 7 were semiconductor/growth
+  sell-offs that SPY barely registered (decision 2026-06-12: sleeve −21.3%, 0 of 20 names up, SMH −7.1%, SPY +0.3%;
+  2025-10-31: −22.3%, 0 of 20 up, ARKK −12.9%, SPY −1.0%). The 20 names average 0.32 pairwise correlation (0.41 lately)
+  against 0.25 for random liquid-300 names; 213 of the last 260 picks map to XLK.
+- **Froth is a weak warning.** After the sleeve's trailing 3-month return was in its top fifth, the next period's edge
+  over SPY averaged −0.4%; after the bottom fifth, +5.5% (rank correlation −0.10; ±0.20 is needed with ~100
+  independent periods). Its drawdown, the picks' correlation and their volatility warn of nothing.
+
+## 19: rules tested (`19_quality_and_timing.py`, `19_results.txt`). Point-in-time, monthly, 4 offsets, paired against the plain version
+IN-SAMPLE: `no_pump`, `no_lossy_pump`, `b_trim`, `b_add` were prompted by 18 on this same history.
+
+| sleeve alone | CAGR | Sharpe | MDD med / worst | vs plain /yr [95% CI] | last 12m |
+|---|---|---|---|---|---|
+| plain top 20 | 39.7% | 0.95 | −53% / −57% | — | +34.8% |
+| drop pumps | 41.6% | 1.03 | −47% / −51% | +0.3% [−4.0, +4.4] | +20.2% |
+| drop pumps with a reported loss | 41.0% | 1.00 | −56% / −57% | −0.2% [−5.6, +3.7] | +46.8% |
+| drop the most volatile 10% | 29.9% | 0.93 | −34% / −35% | −11.9% [−24.1, −0.9] | +26.0% |
+| drop names up >50% last month | 42.4% | 1.02 | −51% / −60% | +0.3% [−3.0, +3.2] | +14.7% |
+| steady climbers only | 27.6% | 0.85 | −42% / −45% | −13.1% [−24.3, −2.6] | +54.6% |
+| risk-adjusted momentum | 33.7% | 0.95 | −42% / −44% | −7.6% [−18.9, +2.6] | +31.3% |
+| sector cap 30% | 34.8% | 0.94 | −45% / −51% | −5.7% [−14.8, +2.2] | +4.9% |
+
+| 70/30 blend | CAGR | Sharpe | MDD | vs fixed 70/30 /yr [95% CI] | last 12m (MDD) |
+|---|---|---|---|---|---|
+| fixed 70/30, reset monthly | 25.0% | 1.04 | −34% | — | +24.2% (−15.7%) |
+| never reset (drift) | 26.8% | 0.96 | −34% | +2.8% [−0.2, +5.6] | +27.4% (−28.7%) |
+| sleeve 15% after a hot 3 months | 25.1% | 1.08 | −34% | −0.2% [−1.8, +1.3] | +30.2% (−13.4%) |
+| sleeve 45% after a cold 3 months | 26.6% | 1.07 | −34% | **+1.3% [+0.2, +2.3]** | +29.2% (−15.7%) |
+| both (band) | 26.5% | **1.10** | −34% | +1.0% [−1.1, +2.8] | +35.5% (−13.4%) |
+| sleeve 15% while below its 100-day average | 22.5% | 0.99 | −34% | −2.1% [−3.5, −0.5] | +16.8% |
+| take profit per name at +30% | 24.0% | 1.03 | −34% | −1.0% [−1.8, −0.4] | +23.5% |
+| take profit per name at +50% | 25.0% | 1.05 | −34% | −0.1% [−0.8, +0.4] | +24.0% |
+| drop pumps with a reported loss | 25.3% | 1.07 | −34% | +0.0% [−1.4, +1.1] | +26.7% |
+
+**Reading**
+1. **Selling strength works at the portfolio level and fails at the stock level.** Trimming the whole sleeve after its
+   hottest 3 months and adding after its coldest is the only timing rule that does not cost return; per-name
+   profit-taking, trend-following the sleeve, stops and breakers (Part 6) all do. The monthly reset to 70/30 is already
+   a form of it: without the reset the sleeve drifts to 42% of the account and last year's drawdown is −28.7%, not −15.7%.
+2. **The band's size is small and unproven.** Across 12 settings (look-back 42/63/126 days, top/bottom 20% or 30%, two
+   share pairs) it is positive every time, +0.0% to +1.0% a year, Sharpe 1.06-1.11 against 1.04, and no CI excludes zero.
+   The first setting tried is the best of the twelve, so expect the average (~+0.4%/yr). Last year it was hot before both
+   −20% months (and before two good ones) and cold before two good ones.
+3. **The loss-making-pump rule is real at the pick level and unmeasurable at the portfolio level.** It changes 1.1 of 20
+   names per rebalance, so the expected gain (~1-2%/yr) sits inside a ±4.6%/yr CI. Dropping ALL pumps cuts the
+   drawdown a little but throws out the year's biggest winners with the losers.
+4. **Diversifying the sleeve costs return.** The sector cap and the volatility cap lower CAGR more than they lower risk;
+   the edge is the concentrated theme.
+5. **A red month cannot be avoided, only sized.** It is a theme-wide fall that the 20 leaders amplify about 3x.
+
+## Next testable variants
+1. Add two arms to the forward shadow, dated when added: the band (15% / 30% / 45% on the sleeve's trailing 3-month
+   return against fixed thresholds frozen from 2019-2026) and the loss-making-pump exclusion (needs the latest SEC
+   filing for each candidate). Forward data is the only clean test left for both.
+2. Fundamentals for delisted names (SEC by CIK) would remove the "unknown" group and let the pump rule be tested fairly.

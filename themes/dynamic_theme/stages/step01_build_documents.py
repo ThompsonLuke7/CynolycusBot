@@ -24,8 +24,10 @@ from themes.dynamic_theme.config import (
     TICKER_DOCUMENTS_PATH,
     TICKER_PROFILES_CACHE_DIR,
     TICKER_PROFILES_PATH,
+    TICKER_PROFILES_SUPPLEMENT_PATH,
     ensure_outputs,
 )
+from themes.dynamic_theme.profiles import load_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +38,10 @@ def _load_descriptions() -> dict[str, str]:
     """Return {ticker: description} preferring the parquet profile, then JSON cache."""
     descs: dict[str, str] = {}
 
-    # 1) parquet ticker profiles (news module)
-    if TICKER_PROFILES_PATH.exists():
+    # 1) parquet ticker profiles (shared news table + theme supplement)
+    if TICKER_PROFILES_PATH.exists() or TICKER_PROFILES_SUPPLEMENT_PATH.exists():
         try:
-            profiles = pd.read_parquet(TICKER_PROFILES_PATH)
+            profiles = load_profiles()
             for col in ["business_summary", "longBusinessSummary", "description", "summary"]:
                 if col in profiles.columns and "ticker" in profiles.columns:
                     for _, row in profiles[["ticker", col]].dropna().iterrows():

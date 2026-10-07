@@ -1,0 +1,35 @@
+=== last 12 months of the top-20 momentum sleeve in the liquid-300 | BACKTEST, point-in-time universe | 2025-10-06 open .. 2026-09-24 close | 20 bp round trip ===
+                                       12m return max drawdown worst day
+momentum sleeve (rotated every 4 weeks)     +32.4%       -40.1%    -11.1%
+month-0 leaders, held all year             -15.1%       -47.6%     -9.8%
+50% SPY + 50% sleeve                       +27.1%       -23.1%     -7.0%
+70% SPY + 30% sleeve                       +23.0%       -15.7%     -5.3%
+SPY buy & hold                             +15.4%        -8.9%     -2.7%
+
+the same 12 months on each of the four possible weekly schedules (all marked to the same last close):
+  first decision 2025-10-03 (244 sessions) <- live schedule, charted   sleeve +32.4%  max drawdown -40.1%  month-0 leaders held -15.1%  SPY +15.4%
+  first decision 2025-09-26 (249 sessions)                             sleeve +23.3%  max drawdown -40.8%  month-0 leaders held  -9.1%  SPY +16.6%
+  first decision 2025-10-17 (234 sessions)                             sleeve +21.4%  max drawdown -41.7%  month-0 leaders held -19.1%  SPY +16.1%
+  first decision 2025-10-10 (239 sessions)                             sleeve +31.6%  max drawdown -39.6%  month-0 leaders held -18.7%  SPY +17.3%
+
+per 4-week period on the live schedule (sleeve and SPY are before costs here; the totals above include costs):
+mo      entry       exit   sleeve     SPY    diff kept  best / worst / changes
+ 0 2025-10-06 2025-11-03    +7.6%   +2.1%   +5.5%   20  CLS +44% / ALAB -16%
+ 1 2025-11-03 2025-12-01   -22.3%   -1.0%  -21.3%   15  OPEN -2% / RGTI -44% | in: APLD JOBY LEU NBIS QUBT | out: ALAB RBLX RDDT SMR SOFI
+ 2 2025-12-01 2025-12-29    -5.7%   +1.6%   -7.3%   15  ASTS +30% / CIFR -23% | in: ASTS CIFR ONDS QS WDC | out: APP IONQ JOBY QUBT RKLB
+ 3 2025-12-29 2026-01-26   +23.7%   +0.4%  +23.3%   14  APLD +64% / INSM -13% | in: B INSM LITE MU STX WULF | out: BBAI CRDO LEU PLTR QS RGTI
+ 4 2026-01-26 2026-02-23    -3.3%   -0.4%   -2.9%   15  LITE +97% / QBTS -31% | in: CIEN NEM PLTR RKLB WBD | out: HOOD INSM NBIS OKLO WULF
+ 5 2026-02-23 2026-03-23    -2.7%   -4.1%   +1.3%   13  ASTS +16% / AG -34% | in: AG CDE ECHO FIX HL SNDK WULF | out: B CIEN CLS NEM OPEN PLTR WBD
+ 6 2026-03-23 2026-04-20   +21.9%   +7.7%  +14.2%   17  CIFR +35% / ONDS -5% | in: CIEN NBIS TER | out: ASTS MP QBTS
+ 7 2026-04-20 2026-05-18   +24.3%   +4.4%  +19.9%   15  MU +64% / TER -12% | in: AAOI ASTS AXTI COHR VRT | out: AG CDE CIFR HL RKLB
+ 8 2026-05-18 2026-06-15    +9.9%   +1.6%   +8.2%   17  SNDK +47% / ECHO -20% | in: AG CIFR TSEM | out: ASTS FIX VRT
+ 9 2026-06-15 2026-07-13   -21.3%   +0.3%  -21.7%   16  CIEN -5% / AXTI -49% | in: DOCN HUT INTC PL | out: AG APLD NBIS TER
+10 2026-07-13 2026-08-10    +3.2%   +2.7%   +0.5%   16  AXTI +63% / SNDK -33% | in: APLD NBIS RVMD TER | out: CIFR ECHO IREN PL
+11 2026-08-10 2026-09-08    +1.9%   -0.5%   +2.3%   15  SNDK +47% / AXTI -28% | in: ASX CIFR ECHO LRCX MKSI | out: APLD COHR ONDS RVMD TER
+12 2026-09-08 2026-09-24    +5.6%   +0.0%   +5.6%   14  AMD +29% / AAOI -7% | in: AMAT AMD COHR DELL MRVL TER | out: ASX CIFR DOCN ECHO TSEM WULF
+
+periods the sleeve beat SPY: 9 of 13 | names held at some point: 63 | average names replaced per rebalance: 4.8 of 20
+largest contributors (sum of 1/20 x period return; months held):  MU +8.3% (10)  BE +7.2% (13)  STX +6.9% (10)  SNDK +6.9% (8)  LITE +6.3% (10)  WDC +6.2% (11)  ASTS +4.6% (5)  NBIS +4.1% (9)
+largest detractors:  QBTS -2.5% (6)  OPEN -2.4% (5)  RGTI -2.1% (3)  DOCN -1.9% (3)  IONQ -1.8% (2)  HOOD -1.7% (4)  OKLO -1.6% (4)  QUBT -1.6% (1)
+month-0 leaders (2025-10-03): RGTI QBTS OKLO BE IONQ RKLB HOOD CRDO CLS PLTR APP ALAB MP BBAI RDDT IREN SOFI OPEN SMR RBLX
+final-month leaders (2026-09-04): AXTI SNDK MU LITE AAOI WDC STX BE INTC HUT DELL COHR CIEN AMAT MRVL TER LRCX AMD NBIS MKSI

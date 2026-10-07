@@ -1,0 +1,1601 @@
+{
+  "managed": {
+    "TXG": {
+      "route": "equity",
+      "symbol": "TXG",
+      "shares": 67.0,
+      "runs_held": 50,
+      "bars_out": 40,
+      "trimmed": true,
+      "entry_bar": "2026-08-24 18:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "TXG",
+        "side": "long",
+        "score": 0.1789810210466385,
+        "score_bucket": "score_0.15_0.20",
+        "rank": 7,
+        "rank_pct": 0.4,
+        "rank_bucket": "rank_0.40_0.45",
+        "signal_ts": "2026-08-24T18:00:00+00:00",
+        "extra": {
+          "trigger_rule": "break_body_prev_high",
+          "bar_close": 63.78,
+          "stop_atr": 1.1,
+          "note": "broke prev 1H high=63.95 with green body",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "TXG",
+        "side": "buy",
+        "qty": 79,
+        "reason": "entry",
+        "reference_price": 63.63,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "TXG",
+          "side": "long",
+          "score": 0.1789810210466385,
+          "score_bucket": "score_0.15_0.20",
+          "rank": 7,
+          "rank_pct": 0.4,
+          "rank_bucket": "rank_0.40_0.45",
+          "signal_ts": "2026-08-24T18:00:00+00:00",
+          "extra": {
+            "trigger_rule": "break_body_prev_high",
+            "bar_close": 63.78,
+            "stop_atr": 1.1,
+            "note": "broke prev 1H high=63.95 with green body",
+            "entry_triggered": true
+          }
+        }
+      },
+      "entry_avg_price": 64.946456,
+      "last_mark_price": 98.0,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": 0.5089352989484137,
+      "peak_gain": 0.5089352989484137,
+      "remaining_qty": 67.0,
+      "trim_remaining_qty": 0.0,
+      "exit_reconciled_ids": [
+        "3087a434-ea46-404f-beec-2017d9050093"
+      ]
+    },
+    "RUM": {
+      "route": "equity",
+      "symbol": "RUM",
+      "shares": 519,
+      "runs_held": 50,
+      "bars_out": 42,
+      "trimmed": false,
+      "entry_bar": "2026-08-24 18:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "RUM",
+        "side": "long",
+        "score": 0.1726941466331482,
+        "score_bucket": "score_0.15_0.20",
+        "rank": 8,
+        "rank_pct": 0.30000000000000004,
+        "rank_bucket": "rank_0.30_0.35",
+        "signal_ts": "2026-08-24T18:00:00+00:00",
+        "extra": {
+          "trigger_rule": "pullback_continuation",
+          "bar_close": 9.36,
+          "stop_atr": 1.0,
+          "note": "pullback=2.14ATR",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "RUM",
+        "side": "buy",
+        "qty": 519,
+        "reason": "entry",
+        "reference_price": 9.635,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "RUM",
+          "side": "long",
+          "score": 0.1726941466331482,
+          "score_bucket": "score_0.15_0.20",
+          "rank": 8,
+          "rank_pct": 0.30000000000000004,
+          "rank_bucket": "rank_0.30_0.35",
+          "signal_ts": "2026-08-24T18:00:00+00:00",
+          "extra": {
+            "trigger_rule": "pullback_continuation",
+            "bar_close": 9.36,
+            "stop_atr": 1.0,
+            "note": "pullback=2.14ATR",
+            "entry_triggered": true
+          }
+        }
+      },
+      "entry_avg_price": 9.38,
+      "last_mark_price": 7.3614,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": -0.2152025586353945,
+      "peak_gain": 0.11396588486140713
+    },
+    "ETON": {
+      "route": "equity",
+      "symbol": "ETON",
+      "shares": 77,
+      "runs_held": 50,
+      "bars_out": 50,
+      "trimmed": false,
+      "entry_bar": "2026-08-24 18:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "ETON",
+        "side": "long",
+        "score": 0.15794377028942108,
+        "score_bucket": "score_0.15_0.20",
+        "rank": 9,
+        "rank_pct": 0.19999999999999996,
+        "rank_bucket": "rank_0.15_0.20",
+        "signal_ts": "2026-08-24T18:00:00+00:00",
+        "extra": {
+          "trigger_rule": "pullback_continuation",
+          "bar_close": 64.43,
+          "stop_atr": 1.0,
+          "note": "pullback=2.37ATR",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "ETON",
+        "side": "buy",
+        "qty": 77,
+        "reason": "entry",
+        "reference_price": 64.9,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "ETON",
+          "side": "long",
+          "score": 0.15794377028942108,
+          "score_bucket": "score_0.15_0.20",
+          "rank": 9,
+          "rank_pct": 0.19999999999999996,
+          "rank_bucket": "rank_0.15_0.20",
+          "signal_ts": "2026-08-24T18:00:00+00:00",
+          "extra": {
+            "trigger_rule": "pullback_continuation",
+            "bar_close": 64.43,
+            "stop_atr": 1.0,
+            "note": "pullback=2.37ATR",
+            "entry_triggered": true
+          }
+        }
+      },
+      "entry_avg_price": 65.49,
+      "last_mark_price": 55.59,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": -0.15116811726981205,
+      "peak_gain": -0.03725759657963046
+    },
+    "FDMT": {
+      "route": "equity",
+      "symbol": "FDMT",
+      "shares": 317,
+      "runs_held": 49,
+      "bars_out": 47,
+      "trimmed": false,
+      "entry_bar": "2026-08-25 14:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "FDMT",
+        "side": "long",
+        "score": 0.24143542349338531,
+        "score_bucket": "score_0.20_0.25",
+        "rank": 9,
+        "rank_pct": 0.19999999999999996,
+        "rank_bucket": "rank_0.15_0.20",
+        "signal_ts": "2026-08-25T14:00:00+00:00",
+        "extra": {
+          "trigger_rule": "break_body_prev_high",
+          "bar_close": 15.775,
+          "stop_atr": 1.1,
+          "note": "broke prev 1H high=15.78 with green body",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "FDMT",
+        "side": "buy",
+        "qty": 317,
+        "reason": "entry",
+        "reference_price": 15.775,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "FDMT",
+          "side": "long",
+          "score": 0.24143542349338531,
+          "score_bucket": "score_0.20_0.25",
+          "rank": 9,
+          "rank_pct": 0.19999999999999996,
+          "rank_bucket": "rank_0.15_0.20",
+          "signal_ts": "2026-08-25T14:00:00+00:00",
+          "extra": {
+            "trigger_rule": "break_body_prev_high",
+            "bar_close": 15.775,
+            "stop_atr": 1.1,
+            "note": "broke prev 1H high=15.78 with green body",
+            "entry_triggered": true
+          }
+        }
+      },
+      "entry_avg_price": 15.75,
+      "last_mark_price": 12.8,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": -0.1873015873015873,
+      "peak_gain": 0.019047619047619202
+    },
+    "INBX": {
+      "route": "equity",
+      "symbol": "INBX",
+      "shares": 40,
+      "runs_held": 48,
+      "bars_out": 33,
+      "trimmed": false,
+      "entry_bar": "2026-08-25 18:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "INBX",
+        "side": "long",
+        "score": 0.21085117757320404,
+        "score_bucket": "score_0.20_0.25",
+        "rank": 9,
+        "rank_pct": 0.19999999999999996,
+        "rank_bucket": "rank_0.15_0.20",
+        "signal_ts": "2026-08-25T18:00:00+00:00",
+        "extra": {
+          "trigger_rule": "break_body_prev_high",
+          "bar_close": 125.59,
+          "stop_atr": 1.1,
+          "note": "broke prev 1H high=122.45 with green body",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "INBX",
+        "side": "buy",
+        "qty": 40,
+        "reason": "entry",
+        "reference_price": 125.59,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "INBX",
+          "side": "long",
+          "score": 0.21085117757320404,
+          "score_bucket": "score_0.20_0.25",
+          "rank": 9,
+          "rank_pct": 0.19999999999999996,
+          "rank_bucket": "rank_0.15_0.20",
+          "signal_ts": "2026-08-25T18:00:00+00:00",
+          "extra": {
+            "trigger_rule": "break_body_prev_high",
+            "bar_close": 125.59,
+            "stop_atr": 1.1,
+            "note": "broke prev 1H high=122.45 with green body",
+            "entry_triggered": true
+          }
+        }
+      },
+      "entry_avg_price": 122.03,
+      "last_mark_price": 94.56,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": -0.22510857985741206,
+      "peak_gain": 0.061706137834958596
+    },
+    "GRAL": {
+      "route": "equity",
+      "symbol": "GRAL",
+      "shares": 50.0,
+      "runs_held": 45,
+      "bars_out": 6,
+      "trimmed": true,
+      "entry_bar": "2026-08-27 14:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "GRAL",
+        "side": "long",
+        "score": 0.2559419870376587,
+        "score_bucket": "score_0.25_0.30",
+        "rank": 7,
+        "rank_pct": 0.4,
+        "rank_bucket": "rank_0.40_0.45",
+        "signal_ts": "2026-08-27T14:00:00+00:00",
+        "extra": {
+          "trigger_rule": "pullback_continuation",
+          "bar_close": 84.05,
+          "stop_atr": 1.0,
+          "note": "pullback=1.56ATR",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "GRAL",
+        "side": "buy",
+        "qty": 59,
+        "reason": "entry",
+        "reference_price": 84.05,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "GRAL",
+          "side": "long",
+          "score": 0.2559419870376587,
+          "score_bucket": "score_0.25_0.30",
+          "rank": 7,
+          "rank_pct": 0.4,
+          "rank_bucket": "rank_0.40_0.45",
+          "signal_ts": "2026-08-27T14:00:00+00:00",
+          "extra": {
+            "trigger_rule": "pullback_continuation",
+            "bar_close": 84.05,
+            "stop_atr": 1.0,
+            "note": "pullback=1.56ATR",
+            "entry_triggered": true
+          }
+        }
+      },
+      "entry_avg_price": 83.89,
+      "last_mark_price": 154.08,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": 0.8366909047562285,
+      "peak_gain": 0.8445583502205269,
+      "remaining_qty": 50.0,
+      "trim_remaining_qty": 0.0,
+      "exit_reconciled_ids": [
+        "14d27433-c31a-4ea7-83fc-f194437e6e34"
+      ]
+    },
+    "PD": {
+      "route": "equity",
+      "symbol": "PD",
+      "shares": 364,
+      "runs_held": 42,
+      "bars_out": 37,
+      "trimmed": false,
+      "entry_bar": "2026-08-28 18:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "PD",
+        "side": "long",
+        "score": 0.18729998171329498,
+        "score_bucket": "score_0.15_0.20",
+        "rank": 9,
+        "rank_pct": 0.19999999999999996,
+        "rank_bucket": "rank_0.15_0.20",
+        "signal_ts": "2026-08-28T18:00:00+00:00",
+        "extra": {
+          "trigger_rule": "pullback_continuation",
+          "bar_close": 13.73,
+          "stop_atr": 1.0,
+          "note": "pullback=1.47ATR",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "PD",
+        "side": "buy",
+        "qty": 364,
+        "reason": "entry",
+        "reference_price": 13.73,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "PD",
+          "side": "long",
+          "score": 0.18729998171329498,
+          "score_bucket": "score_0.15_0.20",
+          "rank": 9,
+          "rank_pct": 0.19999999999999996,
+          "rank_bucket": "rank_0.15_0.20",
+          "signal_ts": "2026-08-28T18:00:00+00:00",
+          "extra": {
+            "trigger_rule": "pullback_continuation",
+            "bar_close": 13.73,
+            "stop_atr": 1.0,
+            "note": "pullback=1.47ATR",
+            "entry_triggered": true
+          }
+        }
+      },
+      "entry_avg_price": 14.08,
+      "last_mark_price": 15.59,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": 0.10724431818181812,
+      "peak_gain": 0.10724431818181812
+    },
+    "TWST": {
+      "route": "equity",
+      "symbol": "TWST",
+      "shares": 31.0,
+      "runs_held": 40,
+      "bars_out": 22,
+      "trimmed": true,
+      "entry_bar": "2026-08-31 18:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "TWST",
+        "side": "long",
+        "score": 0.18615873157978058,
+        "score_bucket": "score_0.15_0.20",
+        "rank": 5,
+        "rank_pct": 0.6,
+        "rank_bucket": "rank_0.55_0.60",
+        "signal_ts": "2026-08-31T18:00:00+00:00",
+        "extra": {
+          "trigger_rule": "break_body_prev_high",
+          "bar_close": 137.95,
+          "stop_atr": 1.1,
+          "note": "broke prev 1H high=138.15 with green body",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "TWST",
+        "side": "buy",
+        "qty": 36,
+        "reason": "entry",
+        "reference_price": 137.95,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "TWST",
+          "side": "long",
+          "score": 0.18615873157978058,
+          "score_bucket": "score_0.15_0.20",
+          "rank": 5,
+          "rank_pct": 0.6,
+          "rank_bucket": "rank_0.55_0.60",
+          "signal_ts": "2026-08-31T18:00:00+00:00",
+          "extra": {
+            "trigger_rule": "break_body_prev_high",
+            "bar_close": 137.95,
+            "stop_atr": 1.1,
+            "note": "broke prev 1H high=138.15 with green body",
+            "entry_triggered": true
+          }
+        }
+      },
+      "u_entry": 137.95,
+      "u_atr": 4.214685714285712,
+      "u_basis_source": "entry",
+      "entry_avg_price": 136.98,
+      "last_mark_price": 205.98,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": 0.5037231712658783,
+      "peak_gain": 0.5037231712658783,
+      "remaining_qty": 31.0,
+      "trim_remaining_qty": 0.0,
+      "exit_reconciled_ids": [
+        "3a76b0d5-9fad-40ec-ad9b-ad479a967ae1"
+      ]
+    },
+    "ANF": {
+      "route": "equity",
+      "symbol": "ANF",
+      "shares": 35,
+      "runs_held": 38,
+      "bars_out": 34,
+      "trimmed": false,
+      "entry_bar": "2026-09-01 18:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "ANF",
+        "side": "long",
+        "score": 0.15952160954475403,
+        "score_bucket": "score_0.15_0.20",
+        "rank": 7,
+        "rank_pct": 0.4,
+        "rank_bucket": "rank_0.40_0.45",
+        "signal_ts": "2026-09-01T18:00:00+00:00",
+        "extra": {
+          "trigger_rule": "break_body_prev_high",
+          "bar_close": 141.7,
+          "stop_atr": 1.1,
+          "note": "broke prev 1H high=141.51 with green body",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "ANF",
+        "side": "buy",
+        "qty": 35,
+        "reason": "entry",
+        "reference_price": 141.7,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "ANF",
+          "side": "long",
+          "score": 0.15952160954475403,
+          "score_bucket": "score_0.15_0.20",
+          "rank": 7,
+          "rank_pct": 0.4,
+          "rank_bucket": "rank_0.40_0.45",
+          "signal_ts": "2026-09-01T18:00:00+00:00",
+          "extra": {
+            "trigger_rule": "break_body_prev_high",
+            "bar_close": 141.7,
+            "stop_atr": 1.1,
+            "note": "broke prev 1H high=141.51 with green body",
+            "entry_triggered": true
+          }
+        }
+      },
+      "u_entry": 141.7,
+      "u_atr": 4.0096357142857135,
+      "u_basis_source": "entry",
+      "entry_avg_price": 137.39,
+      "last_mark_price": 141.02,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": 0.026421136909527743,
+      "peak_gain": 0.1053206201324699
+    },
+    "VEEV": {
+      "route": "equity",
+      "symbol": "VEEV",
+      "shares": 18,
+      "runs_held": 38,
+      "bars_out": 38,
+      "trimmed": false,
+      "entry_bar": "2026-09-01 18:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "VEEV",
+        "side": "long",
+        "score": 0.1536557525396347,
+        "score_bucket": "score_0.15_0.20",
+        "rank": 9,
+        "rank_pct": 0.19999999999999996,
+        "rank_bucket": "rank_0.15_0.20",
+        "signal_ts": "2026-09-01T18:00:00+00:00",
+        "extra": {
+          "trigger_rule": "break_body_prev_high",
+          "bar_close": 279.5,
+          "stop_atr": 1.1,
+          "note": "broke prev 1H high=279.84 with green body",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "VEEV",
+        "side": "buy",
+        "qty": 18,
+        "reason": "entry",
+        "reference_price": 279.5,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "VEEV",
+          "side": "long",
+          "score": 0.1536557525396347,
+          "score_bucket": "score_0.15_0.20",
+          "rank": 9,
+          "rank_pct": 0.19999999999999996,
+          "rank_bucket": "rank_0.15_0.20",
+          "signal_ts": "2026-09-01T18:00:00+00:00",
+          "extra": {
+            "trigger_rule": "break_body_prev_high",
+            "bar_close": 279.5,
+            "stop_atr": 1.1,
+            "note": "broke prev 1H high=279.84 with green body",
+            "entry_triggered": true
+          }
+        }
+      },
+      "u_entry": 279.5,
+      "u_atr": 6.45785,
+      "u_basis_source": "entry",
+      "entry_avg_price": 279.62,
+      "last_mark_price": 283.45,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": 0.013697160432014854,
+      "peak_gain": 0.022584221443387342
+    },
+    "PRE": {
+      "route": "equity",
+      "symbol": "PRE",
+      "shares": 184,
+      "runs_held": 37,
+      "bars_out": 33,
+      "trimmed": false,
+      "entry_bar": "2026-09-02 14:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "PRE",
+        "side": "long",
+        "score": 0.2458341270685196,
+        "score_bucket": "score_0.20_0.25",
+        "rank": 2,
+        "rank_pct": 0.9,
+        "rank_bucket": "rank_0.90_0.95",
+        "signal_ts": "2026-09-02T14:00:00+00:00",
+        "extra": {
+          "trigger_rule": "break_body_prev_high",
+          "bar_close": 27.12,
+          "stop_atr": 1.1,
+          "note": "broke prev 1H high=26.35 with green body",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "PRE",
+        "side": "buy",
+        "qty": 184,
+        "reason": "entry",
+        "reference_price": 27.12,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "PRE",
+          "side": "long",
+          "score": 0.2458341270685196,
+          "score_bucket": "score_0.20_0.25",
+          "rank": 2,
+          "rank_pct": 0.9,
+          "rank_bucket": "rank_0.90_0.95",
+          "signal_ts": "2026-09-02T14:00:00+00:00",
+          "extra": {
+            "trigger_rule": "break_body_prev_high",
+            "bar_close": 27.12,
+            "stop_atr": 1.1,
+            "note": "broke prev 1H high=26.35 with green body",
+            "entry_triggered": true
+          }
+        }
+      },
+      "u_entry": 27.12,
+      "u_atr": 1.0796499999999993,
+      "u_basis_source": "entry",
+      "entry_submitted_at": "2026-09-02T18:32:32.15636827Z",
+      "entry_fill_price": 26.62,
+      "entry_filled_at": "2026-09-02T18:32:33.200505478Z",
+      "entry_filled_qty": 4.0,
+      "entry_avg_price": 26.62,
+      "last_mark_price": 20.96,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": -0.21262208865514653,
+      "peak_gain": -0.021412471825694945
+    },
+    "DAVE": {
+      "route": "equity",
+      "symbol": "DAVE",
+      "shares": 13,
+      "runs_held": 33,
+      "bars_out": 33,
+      "trimmed": false,
+      "entry_bar": "2026-09-04 14:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "DAVE",
+        "side": "long",
+        "score": 0.16478611528873444,
+        "score_bucket": "score_0.15_0.20",
+        "rank": 10,
+        "rank_pct": 0.09999999999999998,
+        "rank_bucket": "rank_0.05_0.10",
+        "signal_ts": "2026-09-04T14:00:00+00:00",
+        "extra": {
+          "trigger_rule": "pullback_continuation",
+          "bar_close": 390.74,
+          "stop_atr": 1.0,
+          "note": "pullback=0.97ATR",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "DAVE",
+        "side": "buy",
+        "qty": 13,
+        "reason": "entry",
+        "reference_price": 390.74,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "DAVE",
+          "side": "long",
+          "score": 0.16478611528873444,
+          "score_bucket": "score_0.15_0.20",
+          "rank": 10,
+          "rank_pct": 0.09999999999999998,
+          "rank_bucket": "rank_0.05_0.10",
+          "signal_ts": "2026-09-04T14:00:00+00:00",
+          "extra": {
+            "trigger_rule": "pullback_continuation",
+            "bar_close": 390.74,
+            "stop_atr": 1.0,
+            "note": "pullback=0.97ATR",
+            "entry_triggered": true
+          }
+        }
+      },
+      "u_entry": 390.74,
+      "u_atr": 11.252135714285714,
+      "u_basis_source": "entry",
+      "entry_submitted_at": "2026-09-04T18:31:53.648765484Z",
+      "entry_fill_price": 392.74,
+      "entry_filled_at": "2026-09-04T18:31:53.894290496Z",
+      "entry_filled_qty": 13.0,
+      "entry_avg_price": 392.74,
+      "last_mark_price": 368.94,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": -0.06059988796659366,
+      "peak_gain": -0.03068187605031325
+    },
+    "TH": {
+      "route": "equity",
+      "symbol": "TH",
+      "shares": 258,
+      "runs_held": 32,
+      "bars_out": 32,
+      "trimmed": false,
+      "entry_bar": "2026-09-04 18:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "TH",
+        "side": "long",
+        "score": 0.1476062387228012,
+        "score_bucket": "score_0.10_0.15",
+        "rank": 9,
+        "rank_pct": 0.19999999999999996,
+        "rank_bucket": "rank_0.15_0.20",
+        "signal_ts": "2026-09-04T18:00:00+00:00",
+        "extra": {
+          "trigger_rule": "break_body_prev_high",
+          "bar_close": 19.375,
+          "stop_atr": 1.1,
+          "note": "broke prev 1H high=19.34 with green body",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "TH",
+        "side": "buy",
+        "qty": 258,
+        "reason": "entry",
+        "reference_price": 19.375,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "TH",
+          "side": "long",
+          "score": 0.1476062387228012,
+          "score_bucket": "score_0.10_0.15",
+          "rank": 9,
+          "rank_pct": 0.19999999999999996,
+          "rank_bucket": "rank_0.15_0.20",
+          "signal_ts": "2026-09-04T18:00:00+00:00",
+          "extra": {
+            "trigger_rule": "break_body_prev_high",
+            "bar_close": 19.375,
+            "stop_atr": 1.1,
+            "note": "broke prev 1H high=19.34 with green body",
+            "entry_triggered": true
+          }
+        }
+      },
+      "u_entry": 19.375,
+      "u_atr": 0.6924999999999996,
+      "u_basis_source": "entry",
+      "entry_avg_price": 19.73,
+      "last_mark_price": 18.91,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": -0.04156107450582869,
+      "peak_gain": 0.09528636594019257
+    },
+    "FEIM": {
+      "route": "equity",
+      "symbol": "FEIM",
+      "shares": 52.0,
+      "runs_held": 31,
+      "bars_out": 31,
+      "trimmed": true,
+      "entry_bar": "2026-09-08 14:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "FEIM",
+        "side": "long",
+        "score": 0.2756458818912506,
+        "score_bucket": "score_0.25_0.30",
+        "rank": 2,
+        "rank_pct": 0.9,
+        "rank_bucket": "rank_0.90_0.95",
+        "signal_ts": "2026-09-08T14:00:00+00:00",
+        "extra": {
+          "trigger_rule": "break_body_prev_high",
+          "bar_close": 65.38,
+          "stop_atr": 1.1,
+          "note": "broke prev 1H high=65.05 with green body",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "FEIM",
+        "side": "buy",
+        "qty": 76,
+        "reason": "entry",
+        "reference_price": 65.38,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "FEIM",
+          "side": "long",
+          "score": 0.2756458818912506,
+          "score_bucket": "score_0.25_0.30",
+          "rank": 2,
+          "rank_pct": 0.9,
+          "rank_bucket": "rank_0.90_0.95",
+          "signal_ts": "2026-09-08T14:00:00+00:00",
+          "extra": {
+            "trigger_rule": "break_body_prev_high",
+            "bar_close": 65.38,
+            "stop_atr": 1.1,
+            "note": "broke prev 1H high=65.05 with green body",
+            "entry_triggered": true
+          }
+        }
+      },
+      "u_entry": 65.38,
+      "u_atr": 1.6265785714285717,
+      "u_basis_source": "entry",
+      "entry_submitted_at": "2026-09-08T18:33:11.467228818Z",
+      "entry_fill_price": 65.71,
+      "entry_filled_at": "2026-09-08T18:33:12.79531537Z",
+      "entry_filled_qty": 76.0,
+      "entry_avg_price": 65.71,
+      "last_mark_price": 85.46,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": 0.30056308020088274,
+      "peak_gain": 0.3556536295845383,
+      "remaining_qty": 52.0,
+      "trim_remaining_qty": 0.0,
+      "exit_reconciled_ids": [
+        "ef4a4c33-ec5b-4166-9ce2-39ed0b0ba63f"
+      ]
+    },
+    "FSLY": {
+      "route": "equity",
+      "symbol": "FSLY",
+      "shares": 188,
+      "runs_held": 18,
+      "bars_out": 14,
+      "trimmed": false,
+      "entry_bar": "2026-09-22 18:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "FSLY",
+        "side": "long",
+        "score": 0.3457839787006378,
+        "score_bucket": "score_0.30_0.35",
+        "rank": 2,
+        "rank_pct": 0.6666666666666667,
+        "rank_bucket": "rank_0.65_0.70",
+        "signal_ts": "2026-09-22T18:00:00+00:00",
+        "extra": {
+          "trigger_rule": "break_body_prev_high",
+          "bar_close": 26.63,
+          "stop_atr": 1.1,
+          "note": "broke prev 1H high=26.14 with green body",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "FSLY",
+        "side": "buy",
+        "qty": 188,
+        "reason": "entry",
+        "reference_price": 26.63,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "FSLY",
+          "side": "long",
+          "score": 0.3457839787006378,
+          "score_bucket": "score_0.30_0.35",
+          "rank": 2,
+          "rank_pct": 0.6666666666666667,
+          "rank_bucket": "rank_0.65_0.70",
+          "signal_ts": "2026-09-22T18:00:00+00:00",
+          "extra": {
+            "trigger_rule": "break_body_prev_high",
+            "bar_close": 26.63,
+            "stop_atr": 1.1,
+            "note": "broke prev 1H high=26.14 with green body",
+            "entry_triggered": true
+          }
+        }
+      },
+      "u_entry": 26.63,
+      "u_atr": 1.3652500000000003,
+      "u_basis_source": "entry",
+      "entry_avg_price": 25.04,
+      "last_mark_price": 25.992,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": 0.038019169329073454,
+      "peak_gain": 0.18829872204472853
+    },
+    "NUAI": {
+      "route": "equity",
+      "symbol": "NUAI",
+      "shares": 707,
+      "runs_held": 14,
+      "bars_out": 8,
+      "trimmed": false,
+      "entry_bar": "2026-09-24 18:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "NUAI",
+        "side": "long",
+        "score": 0.35566723346710205,
+        "score_bucket": "score_0.35_0.40",
+        "rank": 2,
+        "rank_pct": 0.6666666666666667,
+        "rank_bucket": "rank_0.65_0.70",
+        "signal_ts": "2026-09-24T18:00:00+00:00",
+        "extra": {
+          "trigger_rule": "pullback_continuation",
+          "bar_close": 7.075,
+          "stop_atr": 1.0,
+          "note": "pullback=1.60ATR",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "NUAI",
+        "side": "buy",
+        "qty": 707,
+        "reason": "entry",
+        "reference_price": 7.075,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "NUAI",
+          "side": "long",
+          "score": 0.35566723346710205,
+          "score_bucket": "score_0.35_0.40",
+          "rank": 2,
+          "rank_pct": 0.6666666666666667,
+          "rank_bucket": "rank_0.65_0.70",
+          "signal_ts": "2026-09-24T18:00:00+00:00",
+          "extra": {
+            "trigger_rule": "pullback_continuation",
+            "bar_close": 7.075,
+            "stop_atr": 1.0,
+            "note": "pullback=1.60ATR",
+            "entry_triggered": true
+          }
+        }
+      },
+      "u_entry": 7.075,
+      "u_atr": 0.2994785714285714,
+      "u_basis_source": "entry",
+      "entry_avg_price": 6.829307,
+      "last_mark_price": 6.08,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": -0.10971933169793069,
+      "peak_gain": 0.04476193558145791
+    },
+    "KOD": {
+      "route": "equity",
+      "symbol": "KOD",
+      "shares": 2.0,
+      "runs_held": 1,
+      "bars_out": 0,
+      "trimmed": false,
+      "entry_bar": "2026-10-05 14:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "KOD",
+        "side": "long",
+        "score": 0.38593921065330505,
+        "score_bucket": "score_0.35_0.40",
+        "rank": 3,
+        "rank_pct": 0.33333333333333337,
+        "rank_bucket": "rank_0.30_0.35",
+        "signal_ts": "2026-10-05T14:00:00+00:00",
+        "extra": {
+          "trigger_rule": "pullback_continuation",
+          "bar_close": 95.28,
+          "stop_atr": 1.0,
+          "note": "pullback=2.46ATR",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "KOD",
+        "side": "buy",
+        "qty": 52,
+        "reason": "entry",
+        "reference_price": 95.28,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "KOD",
+          "side": "long",
+          "score": 0.38593921065330505,
+          "score_bucket": "score_0.35_0.40",
+          "rank": 3,
+          "rank_pct": 0.33333333333333337,
+          "rank_bucket": "rank_0.30_0.35",
+          "signal_ts": "2026-10-05T14:00:00+00:00",
+          "extra": {
+            "trigger_rule": "pullback_continuation",
+            "bar_close": 95.28,
+            "stop_atr": 1.0,
+            "note": "pullback=2.46ATR",
+            "entry_triggered": true
+          }
+        }
+      },
+      "u_entry": 95.28,
+      "u_atr": 5.378071428571429,
+      "u_basis_source": "entry",
+      "entry_submitted_at": "2026-10-05T18:32:41.349482415Z",
+      "entry_fill_price": 95.63,
+      "entry_filled_at": "2026-10-05T18:32:42.307003899Z",
+      "entry_filled_qty": 2.0,
+      "remaining_qty": 2.0,
+      "entry_avg_price": 95.619231,
+      "last_mark_price": 93.35,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": -0.023731951996141865,
+      "peak_gain": -0.023731951996141865
+    },
+    "ADUR": {
+      "route": "equity",
+      "symbol": "ADUR",
+      "shares": 307,
+      "runs_held": 53,
+      "bars_out": 53,
+      "trimmed": false,
+      "entry_bar": "2026-08-21 14:00:00+00:00",
+      "signal_audit": {
+        "schema_version": "signal_audit_v1",
+        "module": "momentum_expansion",
+        "ticker": "ADUR",
+        "side": "long",
+        "score": 0.24504348635673523,
+        "score_bucket": "score_0.20_0.25",
+        "rank": 6,
+        "rank_pct": 0.5,
+        "rank_bucket": "rank_0.50_0.55",
+        "signal_ts": "2026-08-21T14:00:00+00:00",
+        "extra": {
+          "trigger_rule": "break_body_prev_high",
+          "bar_close": 16.39,
+          "stop_atr": 1.1,
+          "note": "broke prev 1H high=16.42 with green body",
+          "entry_triggered": true
+        }
+      },
+      "order_audit": {
+        "schema_version": "order_audit_v1",
+        "instrument": "equity",
+        "symbol": "ADUR",
+        "side": "buy",
+        "qty": 307,
+        "reason": "entry",
+        "reference_price": 16.2901,
+        "signal_audit": {
+          "schema_version": "signal_audit_v1",
+          "module": "momentum_expansion",
+          "ticker": "ADUR",
+          "side": "long",
+          "score": 0.24504348635673523,
+          "score_bucket": "score_0.20_0.25",
+          "rank": 6,
+          "rank_pct": 0.5,
+          "rank_bucket": "rank_0.50_0.55",
+          "signal_ts": "2026-08-21T14:00:00+00:00",
+          "extra": {
+            "trigger_rule": "break_body_prev_high",
+            "bar_close": 16.39,
+            "stop_atr": 1.1,
+            "note": "broke prev 1H high=16.42 with green body",
+            "entry_triggered": true
+          }
+        }
+      },
+      "entry_avg_price": 16.43,
+      "last_mark_price": 12.21,
+      "last_mark_bar": "2026-10-05 18:00:00+00:00",
+      "unrealized_gain": -0.25684723067559334,
+      "peak_gain": -0.0237370663420573
+    }
+  },
+  "history": [
+    {
+      "ts": "2026-07-13T18:31:23.747567+00:00",
+      "bar": "2026-07-13 14:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-07-13T20:30:44.672096+00:00",
+      "bar": "2026-07-13 18:00:00+00:00",
+      "orders": 5
+    },
+    {
+      "ts": "2026-07-14T18:31:44.214039+00:00",
+      "bar": "2026-07-14 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-07-14T20:31:31.220466+00:00",
+      "bar": "2026-07-14 18:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-07-15T18:31:02.841322+00:00",
+      "bar": "2026-07-15 14:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-07-15T20:30:49.745231+00:00",
+      "bar": "2026-07-15 18:00:00+00:00",
+      "orders": 5
+    },
+    {
+      "ts": "2026-07-16T18:31:12.340515+00:00",
+      "bar": "2026-07-16 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-07-16T20:30:34.542887+00:00",
+      "bar": "2026-07-16 18:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-07-17T18:31:03.492085+00:00",
+      "bar": "2026-07-17 14:00:00+00:00",
+      "orders": 5
+    },
+    {
+      "ts": "2026-07-17T20:30:58.856831+00:00",
+      "bar": "2026-07-17 18:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-07-20T18:31:54.430894+00:00",
+      "bar": "2026-07-20 14:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-07-20T20:31:49.114436+00:00",
+      "bar": "2026-07-20 18:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-07-21T18:31:07.048491+00:00",
+      "bar": "2026-07-21 14:00:00+00:00",
+      "orders": 5
+    },
+    {
+      "ts": "2026-07-22T18:31:12.474054+00:00",
+      "bar": "2026-07-22 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-07-22T20:31:03.506645+00:00",
+      "bar": "2026-07-22 18:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-07-23T18:30:32.744466+00:00",
+      "bar": "2026-07-23 14:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-07-24T18:32:06.758521+00:00",
+      "bar": "2026-07-24 14:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-07-24T20:31:45.230137+00:00",
+      "bar": "2026-07-24 18:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-07-28T18:32:44.282130+00:00",
+      "bar": "2026-07-28 14:00:00+00:00",
+      "orders": 6
+    },
+    {
+      "ts": "2026-07-28T20:32:14.823437+00:00",
+      "bar": "2026-07-28 18:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-07-29T18:31:44.462114+00:00",
+      "bar": "2026-07-29 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-07-29T20:31:26.603850+00:00",
+      "bar": "2026-07-29 18:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-08-03T18:32:28.475991+00:00",
+      "bar": "2026-08-03 14:00:00+00:00",
+      "orders": 6
+    },
+    {
+      "ts": "2026-08-03T20:32:43.735702+00:00",
+      "bar": "2026-08-03 18:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-08-04T18:31:23.361377+00:00",
+      "bar": "2026-08-04 14:00:00+00:00",
+      "orders": 8
+    },
+    {
+      "ts": "2026-08-04T20:31:12.040999+00:00",
+      "bar": "2026-08-04 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-08-05T18:31:25.675973+00:00",
+      "bar": "2026-08-05 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-08-05T20:31:10.435229+00:00",
+      "bar": "2026-08-05 18:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-08-06T18:31:30.414266+00:00",
+      "bar": "2026-08-06 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-08-06T20:31:14.816532+00:00",
+      "bar": "2026-08-06 18:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-08-07T18:31:25.718091+00:00",
+      "bar": "2026-08-07 14:00:00+00:00",
+      "orders": 6
+    },
+    {
+      "ts": "2026-08-10T18:32:02.730550+00:00",
+      "bar": "2026-08-10 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-08-10T20:31:34.408783+00:00",
+      "bar": "2026-08-10 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-08-11T18:31:56.596947+00:00",
+      "bar": "2026-08-11 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-08-11T20:31:32.550984+00:00",
+      "bar": "2026-08-11 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-08-12T18:31:18.590298+00:00",
+      "bar": "2026-08-12 14:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-08-13T18:31:22.842205+00:00",
+      "bar": "2026-08-13 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-08-13T20:30:59.744796+00:00",
+      "bar": "2026-08-13 18:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-08-14T18:31:26.115869+00:00",
+      "bar": "2026-08-14 14:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-08-14T20:31:02.732774+00:00",
+      "bar": "2026-08-14 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-08-17T18:32:31.129501+00:00",
+      "bar": "2026-08-17 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-08-18T18:31:40.633872+00:00",
+      "bar": "2026-08-18 14:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-08-18T20:32:15.103129+00:00",
+      "bar": "2026-08-18 18:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-08-20T18:31:16.129632+00:00",
+      "bar": "2026-08-20 14:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-08-20T20:31:03.055933+00:00",
+      "bar": "2026-08-20 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-08-21T18:31:51.402182+00:00",
+      "bar": "2026-08-21 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-08-21T20:31:16.853517+00:00",
+      "bar": "2026-08-21 18:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-08-24T20:32:46.604065+00:00",
+      "bar": "2026-08-24 18:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-08-25T18:33:58.858184+00:00",
+      "bar": "2026-08-25 14:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-08-25T20:32:49.434738+00:00",
+      "bar": "2026-08-25 18:00:00+00:00",
+      "orders": 6
+    },
+    {
+      "ts": "2026-08-27T18:32:13.254145+00:00",
+      "bar": "2026-08-27 14:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-08-28T18:33:33.109741+00:00",
+      "bar": "2026-08-28 14:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-08-28T20:33:04.702326+00:00",
+      "bar": "2026-08-28 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-08-31T18:33:15.811918+00:00",
+      "bar": "2026-08-31 14:00:00+00:00",
+      "orders": 5
+    },
+    {
+      "ts": "2026-08-31T20:33:42.858674+00:00",
+      "bar": "2026-08-31 18:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-09-01T18:32:59.349581+00:00",
+      "bar": "2026-09-01 14:00:00+00:00",
+      "orders": 5
+    },
+    {
+      "ts": "2026-09-01T20:32:56.134438+00:00",
+      "bar": "2026-09-01 18:00:00+00:00",
+      "orders": 5
+    },
+    {
+      "ts": "2026-09-02T18:32:33.789886+00:00",
+      "bar": "2026-09-02 14:00:00+00:00",
+      "orders": 9
+    },
+    {
+      "ts": "2026-09-02T20:31:42.671426+00:00",
+      "bar": "2026-09-02 18:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-09-03T18:32:31.116353+00:00",
+      "bar": "2026-09-03 14:00:00+00:00",
+      "orders": 8
+    },
+    {
+      "ts": "2026-09-03T20:32:18.504067+00:00",
+      "bar": "2026-09-03 18:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-09-04T18:31:54.172170+00:00",
+      "bar": "2026-09-04 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-09-04T20:31:27.492190+00:00",
+      "bar": "2026-09-04 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-09-08T18:33:12.779259+00:00",
+      "bar": "2026-09-08 14:00:00+00:00",
+      "orders": 6
+    },
+    {
+      "ts": "2026-09-08T20:33:07.546833+00:00",
+      "bar": "2026-09-08 18:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-09-10T18:31:38.715410+00:00",
+      "bar": "2026-09-10 14:00:00+00:00",
+      "orders": 6
+    },
+    {
+      "ts": "2026-09-11T20:32:40.414673+00:00",
+      "bar": "2026-09-11 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-09-17T18:31:47.508363+00:00",
+      "bar": "2026-09-17 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-09-18T18:31:56.511371+00:00",
+      "bar": "2026-09-18 14:00:00+00:00",
+      "orders": 6
+    },
+    {
+      "ts": "2026-09-18T20:31:07.372741+00:00",
+      "bar": "2026-09-18 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-09-21T18:32:54.405830+00:00",
+      "bar": "2026-09-21 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-09-21T20:33:00.224278+00:00",
+      "bar": "2026-09-21 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-09-22T18:32:14.779242+00:00",
+      "bar": "2026-09-22 14:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-09-22T20:31:35.076393+00:00",
+      "bar": "2026-09-22 18:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-09-23T18:32:28.132690+00:00",
+      "bar": "2026-09-23 14:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-09-24T18:31:37.935895+00:00",
+      "bar": "2026-09-24 14:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-09-24T20:31:30.112711+00:00",
+      "bar": "2026-09-24 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-09-25T18:32:05.805475+00:00",
+      "bar": "2026-09-25 14:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-09-29T18:32:25.659227+00:00",
+      "bar": "2026-09-29 14:00:00+00:00",
+      "orders": 4
+    },
+    {
+      "ts": "2026-09-30T18:32:03.458706+00:00",
+      "bar": "2026-09-30 14:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-10-01T18:31:53.213618+00:00",
+      "bar": "2026-10-01 14:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-10-01T20:31:51.371075+00:00",
+      "bar": "2026-10-01 18:00:00+00:00",
+      "orders": 2
+    },
+    {
+      "ts": "2026-10-02T18:32:10.743183+00:00",
+      "bar": "2026-10-02 14:00:00+00:00",
+      "orders": 3
+    },
+    {
+      "ts": "2026-10-02T20:31:51.341412+00:00",
+      "bar": "2026-10-02 18:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-10-05T18:32:43.002248+00:00",
+      "bar": "2026-10-05 14:00:00+00:00",
+      "orders": 1
+    },
+    {
+      "ts": "2026-10-05T20:31:53.360869+00:00",
+      "bar": "2026-10-05 18:00:00+00:00",
+      "orders": 1
+    }
+  ]
+}

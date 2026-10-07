@@ -57,6 +57,7 @@ from core.live_4h_exec import (
     parse_occ_expiry,
     resolve_settled_exit,
     reconcile_pending_exit,
+    settle_entry_fill,
     take_profit_reason,
     trim_quantity,
     underlying_basis,
@@ -283,8 +284,7 @@ def evaluate_risk_exits(
         # dealer_ranker's MRNA and NEM sat flagged from 08-20 15:52 to 08-21
         # 15:52. This pass already reads broker positions every ~5 minutes, so
         # it is the cheapest place to make the state honest.
-        if st.pop("pending_fill", None):
-            st.pop("entry_order_id", None)
+        if st.get("pending_fill") and settle_entry_fill(client, st):
             out.confirmed_entries[tkr] = {"symbol": sym, "route": route, "qty": held}
 
         held = int(owned_quantity(st, route, held))

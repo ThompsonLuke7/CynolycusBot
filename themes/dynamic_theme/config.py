@@ -15,6 +15,13 @@ NEWS_RECORDS_PATH = REPO_ROOT / "signals" / "news" / "data" / "processed" / "new
 
 # Yahoo Finance ticker profiles (from news module)
 TICKER_PROFILES_PATH = REPO_ROOT / "signals" / "news" / "data" / "processed" / "ticker_profiles.parquet"
+# Theme-owned profiles for universe names the shared table lacks. Kept separate
+# because the live news-catalyst scorer reads the shared table as model input.
+TICKER_PROFILES_SUPPLEMENT_PATH = (
+    REPO_ROOT / "signals" / "news" / "data" / "processed" / "ticker_profiles_theme_supplement.parquet"
+)
+PROFILE_RETRY_DAYS = 30            # re-request a ticker Yahoo returned nothing for
+WEEKLY_PROFILE_FETCH_CAP = 300     # new-name top-up per weekly run (~0.7s each)
 
 # Per-ticker JSON profile cache (from legacy theme_expansion)
 TICKER_PROFILES_CACHE_DIR = REPO_ROOT / "themes" / "theme_expansion_legacy" / "data" / "ticker_profiles_cache"
@@ -134,7 +141,65 @@ SEED_THEMES = [
         "anchor_tickers": ["MU", "WDC", "STX", "SNDK"],
         "related_themes": ["semiconductor_capital_equipment", "ai_infrastructure", "data_centers"],
     },
+    {
+        # theme_map_v4 gives AAPL no business theme, only this bucket, and nothing
+        # embeds near it (best centroid 0.79 vs a 0.90 median). A similarity seed
+        # cannot hold several mega caps -- size is not a business likeness (dry-run
+        # 2026-10-03: only one name landed in it) -- so it anchors on AAPL alone;
+        # MSFT/ORCL/NVDA are placed with their industry peers instead.
+        "theme_name": "mega_cap_platforms",
+        "parent_theme": "technology",
+        "description": (
+            "Diversified mega-cap platform companies with no single business-line "
+            "peer group (hand-pinned from theme_map_v4)."
+        ),
+        "anchor_tickers": ["AAPL"],
+        "related_themes": [],
+    },
 ]
+
+# ── Business-type assignment ──────────────────────────────────────────────────
+# A cluster the labeler could not confidently name as one line of business
+# ("heterogeneous cluster ... no single sector theme") is a grab-bag, not a
+# theme. Below this label confidence a cluster is not published as a theme.
+# 2026-09-28: 46 of 193 clusters / 396 tickers sit under 0.50 (0.18-0.47, e.g.
+# mixed_small_cap_value, mid_cap_mixed_services); at 0.52 the clusters are real
+# business groups (light metals, EMS, fintech, gaming).
+MIN_CLUSTER_LABEL_CONFIDENCE = 0.50
+UNCLASSIFIED_THEME = "unclassified"
+# A ticker with no confident cluster of its own (HDBSCAN noise, or a grab-bag
+# member) is placed in its best-matching theme AMONG those that already hold
+# clustered companies from its own Yahoo industry -- at least this many, and at
+# least this share of that industry's clustered names. No such theme ->
+# UNCLASSIFIED_THEME. Nearest-centroid alone is not trusted for these names.
+# Thresholds chosen 2026-10-04 against theme_map_v4 (435 unclustered names on the
+# hand-curated map; score = share of the assigned theme's clustered members that
+# share a curated theme with the ticker): nearest-centroid 0.32 (0.36 on the
+# same tickers); this rule at (3, 0.20) 0.54, level with confidently clustered
+# names in their own theme (0.53), placing 74% of unclustered names. (2, 0.10)
+# scored 0.47; (3, 0.50) 0.60 but placed only 51%.
+MIN_INDUSTRY_PEERS_IN_THEME = 3
+MIN_INDUSTRY_PEER_SHARE = 0.20
+# Two refinements, both measured the same way on the 2026-10-05 clusters
+# (agreement over all placed names 0.52 -> 0.58, unclassified 227 -> 348):
+#  * A clustered ticker that is the ONLY company of its industry in its theme is
+#    treated as unclustered: such singletons agreed with the curated map 0.15 in
+#    their own cluster (0.63 for other members) and 0.40 once re-placed.
+#    Industries with two members in a theme showed no gain (0.32 vs 0.33) and stay.
+#  * A home-market ticker is placed only with home-market industry peers, so US
+#    names are not pulled into country baskets (GOOGL/META/AMZN had landed in
+#    chinese_internet_stocks: 7 of the 12 clustered names in their industry are
+#    Chinese ADRs). Foreign tickers may join any industry peers.
+HOME_COUNTRY = "United States"
+# Hand placements that must survive whatever the week's clustering does: the
+# ticker takes the theme most of its listed peers land in this run (so the pin
+# follows the business group through renames). User decision 2026-10-04: MSFT and
+# ORCL go with enterprise software. Needed in practice: on 2026-10-05 HDBSCAN put
+# ORCL in a confident "quantum_computing" cluster beside two quantum-software names.
+TICKER_PEER_PINS: dict[str, list[str]] = {
+    "MSFT": ["CRM", "NOW", "ADBE", "INTU", "WDAY", "SNOW", "DDOG"],
+    "ORCL": ["CRM", "NOW", "ADBE", "INTU", "WDAY", "SNOW", "DDOG"],
+}
 
 # ── News window ───────────────────────────────────────────────────────────────
 NEWS_LOOKBACK_DAYS = 30

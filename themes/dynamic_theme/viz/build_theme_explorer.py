@@ -29,6 +29,7 @@ _PENDING_REGISTRY_PATH = _OUTPUTS / "pending_theme_registry.parquet"
 _PENDING_MEMBERSHIP_PATH = _OUTPUTS / "pending_theme_membership.parquet"
 _PENDING_PROFILES_PATH = _OUTPUTS / "pending_theme_profiles.parquet"
 _ASSIGNMENTS_CSV = _OUTPUTS / "ticker_theme_assignments.csv"
+_FEATURES_PATH = _OUTPUTS / "ticker_theme_features.parquet"
 _PROFILES_PATH = _REPO / "signals" / "news" / "data" / "processed" / "ticker_profiles.parquet"
 _HTML_OUT = Path(__file__).resolve().parent / "theme_explorer.html"
 
@@ -53,6 +54,20 @@ def _latest(df: pd.DataFrame) -> pd.DataFrame:
     if "date" in df.columns and df["date"].notna().any():
         return df[df["date"] == df["date"].max()].copy()
     return df
+
+
+def _published_primary() -> dict[str, tuple[str, float]]:
+    """{ticker: (primary_theme, score)} as published by step09 -- the same
+    business-type assignment every other consumer reads. Unclassified tickers
+    map to a theme that is not a node, so they are primary members of nothing.
+    Empty when the features file is absent (caller falls back to nearest theme)."""
+    if not _FEATURES_PATH.exists():
+        return {}
+    feats = _latest(pd.read_parquet(_FEATURES_PATH, columns=["ticker", "date", "primary_theme", "membership_score"]))
+    return {
+        str(t): (str(theme), float(score) if pd.notna(score) else 0.0)
+        for t, theme, score in zip(feats["ticker"], feats["primary_theme"], feats["membership_score"])
+    }
 
 
 def _membership_from_parquet(valid_themes: set[str]) -> dict[str, list[tuple[str, float]]]:
@@ -118,12 +133,14 @@ def build_graph_payload() -> dict:
     primary_members: dict[str, list[tuple[str, float]]] = {}
     total_count: dict[str, int] = {}
     theme_mcap: dict[str, float] = {}
+    published = _published_primary()
     for ticker, pairs in ticker_memberships.items():
-        for rank, (theme, score) in enumerate(pairs):
+        for theme, _score in pairs:
             total_count[theme] = total_count.get(theme, 0) + 1
-            if rank == 0:
-                primary_members.setdefault(theme, []).append((ticker, score))
-                theme_mcap[theme] = theme_mcap.get(theme, 0.0) + caps.get(ticker.upper(), 0.0)
+        primary = published.get(ticker) or (pairs[0] if pairs else None)
+        if primary and primary[0] in valid_themes:
+            primary_members.setdefault(primary[0], []).append((ticker, primary[1]))
+            theme_mcap[primary[0]] = theme_mcap.get(primary[0], 0.0) + caps.get(ticker.upper(), 0.0)
 
     siblings: dict[str, list[str]] = {}
     for _parent, grp in registry.groupby(registry["parent_theme"].fillna("uncategorized")):
@@ -166,8 +183,14 @@ def build_graph_payload() -> dict:
                           "relationship": str(r.get("relationship") or "related"),
                           "strength": float(r.get("strength") or 0.5)})
 
+    def _primary_first(ticker: str, pairs: list[tuple[str, float]]) -> list[tuple[str, float]]:
+        primary = published.get(ticker)
+        if not primary or primary[0] not in valid_themes:
+            return pairs
+        return [primary] + [(th, sc) for th, sc in pairs if th != primary[0]]
+
     ticker_index = {
-        t: [{"theme": th, "score": round(sc, 3)} for th, sc in pairs]
+        t: [{"theme": th, "score": round(sc, 3)} for th, sc in _primary_first(t, pairs)]
         for t, pairs in ticker_memberships.items()
     }
 

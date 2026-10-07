@@ -39,8 +39,10 @@ except ImportError:
 from core.nervous_system.contracts.quality import LineageRef
 from themes.dynamic_theme.config import (
     THEME_REGISTRY_PATH,
+    TICKER_CLUSTERS_PATH,
     TICKER_MEMBERSHIP_HISTORY_PATH,
     TICKER_THEME_FEATURES_PATH,
+    WEEKLY_PROFILE_FETCH_CAP,
     ensure_outputs,
 )
 from themes.dynamic_theme.nervous_system_adapter import persist_theme_states
@@ -57,6 +59,7 @@ from themes.dynamic_theme.stages.step06b_theme_dedup import (
     find_duplicate_groups,
 )
 from themes.dynamic_theme.stages.step07_relationships import build_relationship_graph
+from themes.dynamic_theme.profiles import fetch_missing_profiles, tickers_needing_profiles
 from themes.dynamic_theme.stages.step08_memberships import compute_memberships
 from themes.dynamic_theme.stages.step09_meta_features import build_meta_features
 
@@ -337,8 +340,10 @@ def daily_run(
 
     docs = build_ticker_documents(tickers, as_of=as_of)
     embeddings = generate_embeddings(docs, as_of=as_of)
-    memberships = compute_memberships(embeddings_df=embeddings, as_of=as_of)
-    features = build_meta_features(memberships_df=memberships, as_of=as_of)
+    # No reclustering on the daily run: reuse the week's published clusters.
+    clusters = pd.read_parquet(TICKER_CLUSTERS_PATH)
+    memberships = compute_memberships(embeddings_df=embeddings, clusters_df=clusters, as_of=as_of)
+    features = build_meta_features(memberships_df=memberships, as_of=as_of, clusters_df=clusters)
     feature_completion_at = _utc_now()
     _publish_completed_theme_outputs(
         memberships,
@@ -366,6 +371,17 @@ def weekly_run(
     tickers = tickers or _get_tickers()
 
     logger.info("=== Dynamic Theme Weekly Run [%s] — %d tickers ===", as_of.date(), len(tickers))
+
+    # Top up company profiles for names added to the universe since the last run:
+    # the description anchors the embedding and the industry places unclustered
+    # names. Yahoo being down must not cost the week's taxonomy, so warn and go on.
+    try:
+        fetch_missing_profiles(tickers, max_tickers=WEEKLY_PROFILE_FETCH_CAP)
+        lacking = len(tickers_needing_profiles(tickers))
+        if lacking:
+            logger.warning("%d of %d universe tickers still have no company profile", lacking, len(tickers))
+    except Exception as exc:  # network / yfinance / unreadable profile file
+        logger.warning("Profile top-up failed (%s) — continuing with existing profiles", exc)
 
     # Step 1 + 2: documents + embeddings (pass as_of for price co-movement lookback)
     docs = build_ticker_documents(tickers, as_of=as_of)
@@ -416,7 +432,7 @@ def weekly_run(
     )
 
     # Step 9: meta features
-    features = build_meta_features(memberships_df=memberships, as_of=as_of)
+    features = build_meta_features(memberships_df=memberships, as_of=as_of, clusters_df=clusters)
     feature_completion_at = _utc_now()
     _publish_completed_theme_outputs(
         memberships,

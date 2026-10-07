@@ -104,3 +104,87 @@ Fix: HTF must be trained and OOF-scored on all rows. The L1/L2 arms are defined 
 2. HTF: rebuild the labels as L1/L2 on all rows, and regenerate the OOF over all rows before any HTF result is trusted.
 3. Harness (can run locally): sizing/stop-width backtest using the score-augmented range forecast vs trailing ATR.
 4. Optional: the block-5 pandas-ta pool through the same screen; a PIT market cap to replace `market_cap_bucket`; a survivor-free universe to test the low-price vol premium at all.
+
+---
+
+# Addendum 2026-10-06: which horizon, what HTF's pivot idea is worth, and the Stage-2 bundle
+
+Code: `ablation/run_horizon_study.py`, `ablation/stage2_labels.py`, `ablation/export_stage2.py`, `ablation/colab/stage2_train_colab.py`. All training-free locally; results in `ablation/results/feature_screen/horizon/`.
+
+## A. Horizon: no search needed, and 10 vs 20 is the wrong pair
+
+Three signal families with signs fixed in advance were scored against the vol-matched target L2(h) for h = 1..60 sessions (momentum panel, 875 sessions, executable entry):
+- **trend**: above the 52w low and 200DMA, EMA stack, 6-12 month return;
+- **reversal**: minus the 1-5 day return and RSI;
+- **pullback**: trend plus reversal.
+
+| h (sessions) | 1 | 3 | 5 | 10 | 20 | 30 | 40 | 60 |
+|---|---|---|---|---|---|---|---|---|
+| trend IC | 0.012 | 0.022 | 0.026 | 0.034 | 0.045 | 0.053 | 0.058 | 0.065 |
+| trend annualised IR (non-overlapping bars) | 1.14 | 1.24 | 1.20 | 1.21 | 1.28 | 1.35 | 1.39 | 1.57 |
+| trend top-quintile excess per trade | 0.01% | 0.06% | 0.10% | 0.21% | 0.44% | 0.69% | 0.79% | 1.05% |
+| the same per day (bp) | 1.1 | 1.9 | 2.0 | 2.1 | 2.2 | 2.3 | 2.0 | 1.8 |
+| reversal IC | -0.001 | 0.002 | 0.000 | -0.006 | -0.012 | -0.018 | -0.021 | -0.023 |
+| pullback IC | 0.008 | 0.019 | 0.021 | 0.024 | 0.030 | 0.030 | 0.033 | 0.039 |
+
+- **Horizon and gross edge.** Gross edge per day is flat (~2 bp/day for the top quintile) from 3 to 30 sessions. Horizon does not create or destroy edge, so it is not worth a Colab hyper-parameter search.
+- **Costs set the horizon.** A 0.15-0.30% round trip eats most of a 10-session trade (0.21%) and a third to two thirds of a 20-session one. On a top-quintile basket, net edge per day peaks around 30-40 sessions.
+- **Target overlap.** Rank overlap between L2 targets: 10 vs 20 = 0.68, 10 vs 40 = 0.47, 5 vs 40 = 0.32. Two models trained on 10 and 20 with the same features would be largely the same model.
+- **Caveats.** A model's top 3 will earn more per trade than a top-quintile basket, so the cost crossover moves shorter; Stage 2 measures that. The universe is survivor-shaped, and that bias grows with horizon.
+
+## B. The pivot idea, tested causally
+
+HTF is meant to catch the end of a down swing. Two tests on all rows:
+
+1. **Simple weakness (reversal family above).** No edge at any horizon 1-60 sessions, including in range-bound names (ADX bottom third: IC -0.003 at 3-5 sessions).
+2. **A real swing low, entered at the first bar it is knowable** (3 bars after the low, the same fractal as HTF's label). 20% of rows are flagged.
+
+| pivot low confirmed, forward vol-matched excess vs unflagged | 1 | 3 | 5 | 10 | 20 |
+|---|---|---|---|---|---|
+| all | -0.01% | -0.02% | 0.00% | -0.10% | -0.15% |
+| range-bound (ADX bottom third) | +0.01% | +0.01% | +0.01% | -0.03% | -0.09% |
+| above 200DMA | -0.01% | -0.03% | -0.04% | -0.11% | -0.21% |
+
+- **Result.** MDE is 0.10% per trade at h=5, so this is a well-powered null. A confirmed pivot has no edge, and by confirmation price has already bounced a median 2.7% off the low. Confirmed pivot highs are null as well.
+- **Next testable variant, now in the bundle.** Predict the pivot before it confirms. That is HTF's original target, but trained and scored on every row with non-pivot rows as negatives (arm `PIV`), and judged on realized returns.
+
+## C. Stage-2 bundle (built and verified, not yet trained)
+
+Files in `strategies/momentum_expansion/data/training_export_stage2/`: `stage2_matrix.parquet` (2.69 GB), `stage2_manifest.json`, `stage2_train_colab.py`. No tar is written: the tar step doubled the footprint, filled C:, and crashed WSL on 2026-10-06 00:26. The trainer reads the loose files.
+
+**Matrix.** Built from the current momentum feature file with no feature rebuild; HTF's features are a subset of it.
+- 8,736,934 rows, 2,888 tickers, every 4H bar 2020-01-02..2026-10-02, both bars per session.
+- Verified after the crash: footer and all row groups readable, no infinities.
+
+**Labels.** Executable entry is the next 4H bar's open (10:00 or 14:00 ET in this cache); exit is the last bar's close N sessions later. Windows containing a split gap are void, no fill is assumed across a missing session, and non-positive prints count as missing.
+
+**Arms.** 15 trainings; each label arm has a within-bar-shuffled control.
+
+| arm | target | usable rows |
+|---|---|---|
+| L0 | deployed: 25-bar MFE >= 20% (matches the deployed training matrix on 2.3M overlapping rows) | 5.38M |
+| L1_10 | forward range, top quintile within its vol decile | 5.38M |
+| L2_10, L2_20, L2_40 | SPY-excess return, top quintile within its vol decile | 5.38M / 5.33M / 5.22M |
+| PIV | HTF swing-low zone on all rows (99.95% agreement with HTF's own zone labels) | 5.43M |
+| L2_20 no-calendar | feature arm | 5.33M |
+| L2_20 no-calendar + leader/base | feature arm | 4.88M |
+| L2_20 no-calendar, no-earnings | feature arm | 6.94M |
+
+**Checks on the full matrix.**
+- Rank correlation with volatility: y_L0 +0.29; L1, L2 and PIV 0.00-0.01.
+- Every vol decile supplies exactly 20.2% positives.
+- Controls keep each bar's label counts and NaN pattern.
+
+**Three design points, each caught by a test or rehearsal.**
+1. "Top quintile of the bar by vol-matched excess" is not vol-neutral (+0.27 with volatility, because volatile names fill both tails). The binary targets rank within the vol decile.
+2. 1.15% of rows sit on stray timestamps holding a handful of illiquid names (late first prints). They are not a cross-section, so the trainer uses only bars with >= 200 names, counted on the whole matrix. The 5% smoke subset would otherwise have dropped every row.
+3. Earnings-timing features are missing on 15-18% of recent rows. With the deployed drop-any-NaN rule that removes a quarter of the universe, and 325 tickers had no complete row in 2025-10..2026-07. `days_to_earnings` more than a few weeks ahead is also hindsight. The no-earnings arm measures what they are worth.
+
+**Trainer.**
+- XGBoost classifier with the deployed settings, 9 walk-forward folds (24m train / 6m test, test windows 2022-04..2026-10).
+- Embargo is at least the label window plus a week (21-63 days), including between inner-train and early-stopping validation.
+- Each fold is saved to Drive and resumable; a smoke pass runs first.
+- Rehearsed end to end on the real matrix with a stub model: loads in 38 s at 4.05 GB (5.5 GB peak), no fold skipped. Folds are unit-tested against the deployed harness.
+- Nothing is trained locally.
+
+**Judging.** Arms are chosen on OOF before 2026-05-15 and confirmed once on 2026-05-15 onward (554k rows): top-k vs a vol-matched control, the gap to the shuffled control, by ADV bucket, net of costs at each horizon. The local evaluator for the returned OOF files is not written yet.

@@ -258,6 +258,30 @@ def test_router_receives_position_keys_for_every_row() -> None:
     assert call["submit"] is True
 
 
+def test_a_mixed_plan_tracks_each_exit_under_its_own_route(monkeypatch) -> None:
+    # `is_option` is a plan-level flag. Labelling every sell with it booked Meta
+    # share exits at the x100 contract multiplier (2026-09-24..10-02).
+    import core.governed_plan_execution as mod
+
+    tracked: list[tuple] = []
+    monkeypatch.setattr(mod, "track_exit_submission",
+                        lambda client, **k: tracked.append(k["item"]))
+    occ = "MXL261016C00095000"
+    router = _Router([_submitted_row(occ, "sell", 6, "o-1"),
+                      _submitted_row("ABCL", "sell", 123, "o-2")])
+
+    submit_plan_via_router(
+        router,
+        [(occ, "sell", 6, "underlying_stop_-1.5atr", "option"),
+         ("ABCL", "sell", 123, "horizon", "equity")],
+        module="momentum_expansion", client=None, bar=None,
+        new_managed={}, exit_context={}, pos_lookup={}, scores_by_ticker={},
+        is_option=True,
+    )
+
+    assert [(item[0], item[4]) for item in tracked] == [(occ, "option"), ("ABCL", "equity")]
+
+
 # ---------------------------------------------------------------------------
 # The runner switch
 # ---------------------------------------------------------------------------

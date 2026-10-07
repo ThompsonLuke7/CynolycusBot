@@ -87,6 +87,9 @@ class FakeClient:
     def submit_order(self, **kw: Any) -> Any:
         return self._answer("submit_order", **kw)
 
+    def submit_option_order(self, **kw: Any) -> Any:
+        return self._answer("submit_option_order", **kw)
+
     def submit_multileg_order(self, **kw: Any) -> Any:
         return self._answer("submit_multileg_order", **kw)
 
@@ -307,6 +310,51 @@ def test_multileg_submit_maps_legs_and_intents() -> None:
             "position_intent": "sell_to_open",
         },
     ]
+
+
+def single_option_request(**overrides: Any) -> OrderRequest:
+    settings: dict[str, Any] = {
+        "instrument_family": InstrumentFamily.SINGLE_OPTION,
+        "legs": (option_leg("200", OrderSide.BUY, PositionIntent.BUY_TO_OPEN),),
+        "parent_quantity": D("4"),
+        "net_limit_price": D("14.08"),
+    }
+    settings.update(overrides)
+    return vertical_request(**settings)
+
+
+def test_a_single_option_entry_is_an_ordinary_order_on_the_contract() -> None:
+    # Alpaca rejects a one-leg "mleg" order with 422. Every Meta option entry
+    # went out that way from 2026-09-14 and none filled.
+    client = FakeClient(submit_option_order=order_payload())
+    adapter(client).submit(single_option_request())
+
+    assert client.called("submit_multileg_order") == []
+    sent = client.called("submit_option_order")[0]
+    assert sent["symbol"] == "AMD260918C00200000"
+    assert (sent["qty"], sent["side"], sent["position_intent"]) == (4, "buy", "buy_to_open")
+    assert (sent["order_type"], sent["time_in_force"], sent["limit_price"]) == ("limit", "day", 14.08)
+    assert len(sent["client_order_id"]) == 48
+
+
+def test_a_single_option_close_sends_the_contracts_own_positive_price() -> None:
+    client = FakeClient(submit_option_order=order_payload())
+    adapter(client).submit(single_option_request(
+        legs=(option_leg("200", OrderSide.SELL, PositionIntent.SELL_TO_CLOSE),),
+        debit_credit=DebitCredit.CREDIT, net_limit_price=D("2.30"),
+        decision_kind=DecisionKind.EXIT, risk_reducing=True,
+        broker_position_key="paper:AMD260918C00200000"))
+
+    sent = client.called("submit_option_order")[0]
+    assert (sent["side"], sent["position_intent"], sent["limit_price"]) == ("sell", "sell_to_close", 2.30)
+
+
+def test_a_single_option_request_with_two_legs_is_refused() -> None:
+    client = FakeClient(submit_option_order=order_payload())
+
+    with pytest.raises(BrokerContractError, match="exactly one leg"):
+        adapter(client).submit(vertical_request(instrument_family=InstrumentFamily.SINGLE_OPTION))
+    assert client.calls == []
 
 
 def test_a_credit_structure_sends_a_negative_limit_price() -> None:

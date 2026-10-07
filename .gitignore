@@ -327,3 +327,6 @@ themes/dynamic_theme/outputs/
 # scripts/execution_quality/ from the broker API and Alpaca bars. The reports
 # above it are the deliverable and stay tracked.
 research/execution_quality/data/
+
+# Colab bundles: multi-GB, never tracked (an untracked one made git hash it into .git, 2026-10-06)
+*.tar

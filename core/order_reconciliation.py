@@ -80,6 +80,29 @@ def read_evidence(root, module, order_id):
     return load_state(path) if path.exists() else None
 
 
+def same_position(current, saved) -> bool:
+    """Is `saved` an earlier snapshot of the very position `current` describes?
+
+    A book's key outlives the position under it. intraday_structure keys its
+    book by setup id, and the same setup trades again another day; its records
+    carry no `entry_bar`, so comparing that alone read None == None as "same
+    position". On 2026-10-05 a BAC261009C00054000 call bought at 11:36 was
+    matched to the 2026-10-01 sale of BAC261002C00054000 under the same setup
+    id, declared closed, and dropped from the book while still held. The same
+    happened to GOOGL and to both QQQ setups, and the 30m swing then adopted and
+    sold what looked like unowned contracts.
+
+    The entry order is the identity when both sides record one. Otherwise only
+    a recorded entry bar can vouch for the match; two unknowns do not.
+    """
+    if current.get("entry_bar") != saved.get("entry_bar"):
+        return False
+    ours, theirs = current.get("entry_order_id"), saved.get("entry_order_id")
+    if ours and theirs:
+        return ours == theirs
+    return current.get("entry_bar") is not None
+
+
 def recover_pending_exits(root, module, managed):
     """Recover an accepted order persisted before the caller's state save.
 
@@ -94,7 +117,7 @@ def recover_pending_exits(root, module, managed):
         oid = saved["exit_pending"].get("order_id")
         if current is None and not record.get("complete"):
             managed[key] = saved
-        elif (current is not None and current.get("entry_bar") == saved.get("entry_bar")
+        elif (current is not None and same_position(current, saved)
               and oid not in current.get("exit_reconciled_ids", []) and "exit_pending" not in current):
             current["exit_pending"] = saved["exit_pending"]
 

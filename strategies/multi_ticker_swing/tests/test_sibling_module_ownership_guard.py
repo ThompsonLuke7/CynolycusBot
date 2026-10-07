@@ -339,3 +339,173 @@ def test_a_readable_empty_book_still_permits_adoption(tmp_path, sibling_books):
 
     assert result["restored"] == 1
     assert "FIG" in swing._positions
+
+
+class _NoOrdersClient(_FakeClient):
+    """Any order this client is asked to place is a test failure."""
+
+    def submit_option_order(self, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError(f"swing submitted an order for a sibling's contract: {kwargs}")
+
+    submit_order = submit_option_order
+
+
+def _adopt(swing, ticker: str) -> None:
+    result = swing.sync_from_broker(
+        universe={ticker: _ticker_config(ticker)},
+        price_lookup=lambda t: 738.0,
+        atr_lookup=lambda t: 2.0,
+    )
+    assert result["restored"] == 1 and ticker in swing._positions
+
+
+def test_a_restored_contract_is_released_once_a_sibling_claims_it(tmp_path, sibling_books,
+                                                                  monkeypatch):
+    """2026-09-29: Intraday Structure bought QQQ260929P00735000 at 11:06:24.
+
+    Swing's reconcile found the contract unclaimed, adopted it at 11:06:53 and
+    sold it at 11:10 as `restored_unknown_expiring`. Whatever made the contract
+    look unowned at the moment of the reconcile, the book said otherwise by the
+    next bar, and nothing looked again.
+    """
+    sibling_books()
+    occ = "QQQ260929P00735000"
+    swing = SwingPositionManager(
+        _NoOrdersClient([{"symbol": occ, "qty": 19, "side": "long", "avg_entry_price": 0.51}]),
+        dry_run=False, auto_flatten_assigned_equities=True)
+    _adopt(swing, "QQQ")
+
+    book = tmp_path / "open_option_positions.json"
+    book.write_text(json.dumps({"open": {"QQQ:short:breakout_continuation": {"occ": occ, "qty": 19}}}))
+    monkeypatch.setattr(op_module, "INTRADAY_STRUCTURE_BOOK_PATH", book)
+    events: list[str] = []
+    swing._sink = lambda kind, payload: events.append(kind)
+
+    swing.on_5m_bar("QQQ", {"close": 738.1})
+
+    assert "QQQ" not in swing._positions
+    assert "restored_position_released_to_sibling" in events
+
+
+def test_a_restored_contract_nobody_else_claims_is_still_managed(tmp_path, sibling_books):
+    sibling_books()
+    swing = SwingPositionManager(
+        _FakeClient([{"symbol": "FIG270115C00022000", "qty": 1, "side": "long",
+                      "avg_entry_price": 0.97}]),
+        dry_run=False, auto_flatten_assigned_equities=True)
+    _adopt(swing, "FIG")
+
+    assert swing._yield_to_sibling(swing._positions["FIG"]) is False
+    assert "FIG" in swing._positions
+
+
+def test_an_unreadable_book_decides_nothing_about_a_restored_contract(tmp_path, sibling_books):
+    sibling_books()
+    swing = SwingPositionManager(
+        _NoOrdersClient([{"symbol": "QQQ260929P00735000", "qty": 19, "side": "long",
+                          "avg_entry_price": 0.51}]),
+        dry_run=False, auto_flatten_assigned_equities=True)
+    _adopt(swing, "QQQ")
+    meta_state = tmp_path / "meta_live_state.json"
+    meta_state.write_text("{not json")
+    sibling_books(meta_ranker=meta_state)
+
+    swing.on_5m_bar("QQQ", {"close": 738.1})
+
+    assert "QQQ" in swing._positions  # kept, and no order was attempted
+
+
+def test_reconcile_adopts_nothing_when_a_sibling_book_is_unreadable(tmp_path, sibling_books):
+    """`reconcile_with_broker` used to index into the None this returns."""
+    meta_state = tmp_path / "meta_live_state.json"
+    meta_state.write_text("{not json")
+    sibling_books(meta_ranker=meta_state)
+    swing = SwingPositionManager(
+        _FakeClient([{"symbol": "FIG270115C00022000", "qty": 1, "side": "long",
+                      "avg_entry_price": 0.97}]),
+        dry_run=False, auto_flatten_assigned_equities=True)
+
+    result = swing.reconcile_with_broker(
+        universe={"FIG": _ticker_config("FIG")},
+        price_lookup=lambda t: 22.0, atr_lookup=lambda t: 1.0)
+
+    assert result["restored"] == 0 and "FIG" not in swing._positions
+    assert {row["reason"] for row in result["ignored_positions"]} == {"sibling_ownership_unknown"}
+
+
+def test_swings_own_contract_is_restored_even_if_a_sibling_holds_the_shares(tmp_path,
+                                                                            sibling_books):
+    """PENG261016C00060000, bought by Swing on 2026-09-30.
+
+    HTF held PENG shares, so its state claimed the ticker. At the 10-01 restart
+    Swing read that as a claim on its own option and refused to restore it; the
+    contract sat unowned for a week.
+    """
+    occ = "PENG261016C00060000"
+    htf_state = tmp_path / "htf_live_state.json"
+    _write_sibling_state(htf_state, {"PENG": {"route": "equity", "symbol": "PENG", "shares": 96}})
+    sibling_books(multi_ticker_swing_htf=htf_state)
+    pm_module._OPEN_POSITION_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    pm_module._OPEN_POSITION_STATE_PATH.write_text(json.dumps({"positions": [
+        {"ticker": "PENG", "option_symbol": occ, "qty": 14, "direction": 1}]}))
+    swing = SwingPositionManager(
+        _FakeClient([{"symbol": occ, "qty": 14, "side": "long", "avg_entry_price": 3.90}]),
+        dry_run=False, auto_flatten_assigned_equities=True)
+
+    result = swing.sync_from_broker(
+        universe={"PENG": _ticker_config("PENG")},
+        price_lookup=lambda t: 62.0, atr_lookup=lambda t: 2.0)
+
+    assert result["restored"] == 1 and "PENG" in swing._positions
+
+
+def test_a_contract_swing_never_opened_is_still_left_alone_on_a_sibling_ticker(tmp_path,
+                                                                               sibling_books):
+    htf_state = tmp_path / "htf_live_state.json"
+    _write_sibling_state(htf_state, {"PENG": {"route": "equity", "symbol": "PENG", "shares": 96}})
+    sibling_books(multi_ticker_swing_htf=htf_state)
+    swing = SwingPositionManager(
+        _FakeClient([{"symbol": "PENG261016C00060000", "qty": 14, "side": "long",
+                      "avg_entry_price": 3.90}]),
+        dry_run=False, auto_flatten_assigned_equities=True)
+
+    result = swing.sync_from_broker(
+        universe={"PENG": _ticker_config("PENG")},
+        price_lookup=lambda t: 62.0, atr_lookup=lambda t: 2.0)
+
+    assert result["restored"] == 0 and "PENG" not in swing._positions
+
+
+def test_every_position_is_restored_from_the_book_as_it_was_saved(tmp_path, sibling_books):
+    """Restoring the first position used to erase the saved record of the rest.
+
+    `_persist_open_position_state` rewrites the book as "what is tracked right
+    now". Called once per restored position, it left one position with its real
+    entry and stop and returned every other one as `broker_snapshot`, which the
+    defensive exit then loss-cut at the open: six closes and -$12,903 in the
+    week of 2026-09-21.
+    """
+    sibling_books()
+    rows = [{"ticker": t, "option_symbol": occ, "qty": 5, "direction": 1,
+             "entry_price": px, "sl_price": px - 4.0, "atr_at_entry": 1.0,
+             "entry_time": "2026-10-05T15:40:00+00:00"}
+            for t, occ, px in (("GOOG", "GOOG261009C00342500", 342.0),
+                               ("FIG", "FIG270115C00022000", 22.0),
+                               ("QQQ", "QQQ261016C00740000", 738.0))]
+    pm_module._OPEN_POSITION_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    pm_module._OPEN_POSITION_STATE_PATH.write_text(json.dumps({"positions": rows}))
+    swing = SwingPositionManager(
+        _FakeClient([{"symbol": r["option_symbol"], "qty": 5, "side": "long",
+                      "avg_entry_price": 1.0} for r in rows]),
+        dry_run=False, auto_flatten_assigned_equities=True)
+
+    result = swing.sync_from_broker(
+        universe={r["ticker"]: _ticker_config(r["ticker"]) for r in rows},
+        price_lookup=lambda t: 500.0, atr_lookup=lambda t: 2.0)
+
+    assert result["restored"] == 3
+    assert {p.restore_source for p in swing._positions.values()} == {"local_state"}
+    assert {t: p.entry_price for t, p in swing._positions.items()} == {
+        "GOOG": 342.0, "FIG": 22.0, "QQQ": 738.0}
+    saved = json.loads(pm_module._OPEN_POSITION_STATE_PATH.read_text())["positions"]
+    assert sorted(p["ticker"] for p in saved) == ["FIG", "GOOG", "QQQ"]

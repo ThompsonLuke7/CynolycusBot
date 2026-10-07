@@ -686,7 +686,7 @@ class SwingPositionManager:
                 ignored.append({"symbol": symbol, "ticker": ticker,
                                 "reason": "sibling_ownership_unknown"})
                 continue
-            if symbol in sibling_owned or ticker in sibling_owned:
+            if self._belongs_to_sibling(symbol, ticker, sibling_owned):
                 ignored.append({"symbol": symbol, "ticker": ticker, "reason": "owned_by_other_module"})
                 continue
 
@@ -700,6 +700,9 @@ class SwingPositionManager:
             if pos is not None:
                 self._apply_deferred_trail_cache(pos)
                 restored.append(pos.to_dict())
+
+        if restored:
+            self._persist_open_position_state()
 
         result = {
             "synced": True,
@@ -730,7 +733,11 @@ class SwingPositionManager:
         # what keeps the flattener from selling another module's equity.
         owned_tickers = set(self._positions.keys()) | set(self._position_state_cache.keys())
         sibling_owned = _sibling_module_owned_symbols()
-        assigned_equities = self._broker_assigned_equity_positions(universe, owned_tickers, sibling_owned)
+        # None means ownership could not be read, not that nothing is owned.
+        # Adopting and flattening both act on positions Swing did not open, so
+        # neither runs this pass.
+        assigned_equities = ([] if sibling_owned is None else
+                             self._broker_assigned_equity_positions(universe, owned_tickers, sibling_owned))
         broker_by_ticker: dict[str, dict[str, Any]] = {}
         duplicates: list[dict[str, Any]] = []
         for broker_pos in broker_positions:
@@ -816,7 +823,11 @@ class SwingPositionManager:
             if ticker in self._positions:
                 continue
             broker_symbol = str(broker_pos.get("option_symbol", "")).upper()
-            if broker_symbol in sibling_owned or ticker in sibling_owned:
+            if sibling_owned is None:
+                ignored.append({"symbol": broker_symbol, "ticker": ticker,
+                                "reason": "sibling_ownership_unknown"})
+                continue
+            if self._belongs_to_sibling(broker_symbol, ticker, sibling_owned):
                 ignored.append({"symbol": broker_symbol, "ticker": ticker, "reason": "owned_by_other_module"})
                 continue
             pos = self._restore_broker_position(
@@ -1104,10 +1115,16 @@ class SwingPositionManager:
         if cached:
             self._restore_cached_tracking_state(pos, cached, latest_price=float(latest_price))
         self._apply_deferred_trail_cache(pos)
-        self.open_position(pos)
+        # Not persisted here. Persisting rewrites the saved book as "what is
+        # tracked right now", and mid-restore that is one position: the first
+        # one restored kept its entry and stop, and every other position lost
+        # its saved record before its turn, came back as `broker_snapshot`, and
+        # was loss-cut at the open as restored_unknown. The caller persists once,
+        # after every position has been read against the book as it was saved.
+        self.open_position(pos, persist=False)
         return pos
 
-    def open_position(self, pos: SwingPosition) -> None:
+    def open_position(self, pos: SwingPosition, *, persist: bool = True) -> None:
         """Register a newly entered position."""
         self._positions[pos.ticker] = pos
         logger.info(
@@ -1117,7 +1134,53 @@ class SwingPositionManager:
             pos.option_symbol, pos.qty,
         )
         self._emit("position_opened", pos.to_dict())
+        if persist:
+            self._persist_open_position_state()
+
+    def _belongs_to_sibling(self, symbol: str, ticker: str, sibling_owned: set[str]) -> bool:
+        """Should an untracked broker contract be left to another module?
+
+        A sibling claiming the contract itself always wins. A sibling claiming
+        the TICKER holds shares, which says nothing about an option on it, so
+        that only blocks a contract Swing has no record of opening. Without the
+        exception Swing disowned its own position at every restart whenever a
+        4H module held the underlying: PENG261016C00060000, bought 2026-09-30,
+        was refused at the 10-01 restart because HTF held PENG shares, and sat
+        unowned from then on.
+        """
+        if symbol in sibling_owned:
+            return True
+        own = self._cached_position_state(ticker=ticker, symbol=symbol) is not None
+        return ticker in sibling_owned and not own
+
+    def _yield_to_sibling(self, pos: SwingPosition) -> bool:
+        """True when this bar must not act on a contract Swing merely found.
+
+        A position restored from the broker snapshot was never opened by this
+        process, so the only thing vouching for it is that no sibling claimed
+        the contract at the instant of the reconcile. That can be wrong for a
+        few seconds around a sibling's own fill, and the defensive exit below
+        then sells its contract: Intraday Structure lost QQQ, AMZN and IWM
+        positions this way between 2026-09-29 and 2026-10-05, one to three
+        minutes after buying them. Ownership is read again here, every bar,
+        before anything is decided. A contract a sibling now claims is dropped
+        from tracking without an order; an unreadable book decides nothing.
+        """
+        if not pos.entry_price_is_synthetic:
+            return False
+        sibling_owned = _sibling_module_owned_symbols()
+        if sibling_owned is None:
+            return True
+        if str(pos.option_symbol).upper() not in sibling_owned:
+            return False
+        self._positions.pop(pos.ticker, None)
+        logger.warning(
+            "[%s] releasing restored %s x%d: a sibling module claims it. No order sent.",
+            pos.ticker, pos.option_symbol, int(pos.qty),
+        )
+        self._emit("restored_position_released_to_sibling", pos.to_dict())
         self._persist_open_position_state()
+        return True
 
     def on_5m_bar(self, ticker: str, bar: dict) -> None:
         """
@@ -1131,6 +1194,9 @@ class SwingPositionManager:
         pending = self._pending_close_orders.get(pos.ticker)
         if pending is not None and not self._dry_run:
             self._close_position(pos, str(pending.get("reason") or "pending_close_reconcile"), bar)
+            return
+
+        if self._yield_to_sibling(pos):
             return
 
         restored_reason = _restored_unknown_exit_reason(pos, bar)

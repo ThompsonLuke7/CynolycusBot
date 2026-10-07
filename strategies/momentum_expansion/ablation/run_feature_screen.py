@@ -99,19 +99,33 @@ def _daily_block(ticker: str) -> pd.DataFrame | None:
     out["close_d"] = d["close"]
     # Liquidity for subset buckets only; use per-date RANKS (IEX->SIP volume switch).
     out["adv20_d"] = (d["close"] * d["volume"]).rolling(20, min_periods=10).mean()
-    # Non-organic flag at row p contaminates any window whose prices span p-1 -> p.
+    for h, ret in exec_forward_returns(d, HORIZONS).items():
+        out[f"fret_{h}"] = ret
+    out["ticker"] = ticker
+    return out
+
+
+def exec_forward_returns(d: pd.DataFrame, horizons) -> dict[int, pd.Series]:
+    """{h: return from the NEXT session's open to the close h sessions ahead}.
+
+    Row D enters at open D+1 and exits at close D+h, so prices span rows
+    D+1..D+h. A non-organic corporate-action flag at row p is a gap between
+    p-1 and p; one at D+2..D+h falls inside the window and voids it (a flag at
+    D+1 precedes the entry and does not).
+    """
     flags = suspect_sessions(d)
     flag_pos = np.zeros(len(d), dtype=bool)
     if not flags.empty:
         flags = flags[~flags["organic"].astype(bool)]
         flag_pos[flags["idx"].astype(int).to_numpy()] = True
     entry = d["open"].shift(-1)
-    for h in HORIZONS:
-        out[f"fret_{h}"] = d["close"].shift(-h) / entry - 1.0
-        # window prices span rows D+1..D+h; a flag at D+2..D+h breaks it
-        bad = pd.Series(flag_pos).rolling(h - 1, min_periods=1).max().shift(-h).fillna(0).astype(bool)
-        out.loc[bad.to_numpy(), f"fret_{h}"] = np.nan
-    out["ticker"] = ticker
+    out: dict[int, pd.Series] = {}
+    for h in horizons:
+        ret = d["close"].shift(-h) / entry - 1.0
+        if h > 1:
+            bad = pd.Series(flag_pos).rolling(h - 1, min_periods=1).max().shift(-h).fillna(0).astype(bool)
+            ret = ret.mask(bad.to_numpy())
+        out[int(h)] = ret
     return out
 
 

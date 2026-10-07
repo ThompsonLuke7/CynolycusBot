@@ -244,12 +244,43 @@ class AlpacaPaperAdapter:
             if request.equity_symbol is None or request.equity_side is None:
                 raise BrokerContractError("an equity request requires symbol and side")
             payload = self._submit_equity(request, client_order_id)
+        elif request.instrument_family is InstrumentFamily.SINGLE_OPTION:
+            if len(request.legs) != 1:
+                raise BrokerContractError("a single-option request requires exactly one leg")
+            payload = self._submit_single_option(request, client_order_id)
         else:
             payload = self._submit_multileg(request, client_order_id)
 
         if not isinstance(payload, Mapping):
             raise BrokerContractError("submit response is not an object")
         return self._to_order(payload)
+
+    def _submit_single_option(self, request: OrderRequest, client_order_id: str) -> Any:
+        """One contract is an ordinary order on the option symbol.
+
+        Alpaca's multi-leg order class takes two to four legs. Every single
+        long call Meta sent through it came back 422 "mleg orders must have at
+        least 2 legs and at most 4 legs": no governed option entry filled from
+        2026-09-14 until this branch existed. The limit is the contract's own
+        price, never signed the way a net debit or credit is.
+        """
+        leg = request.legs[0]
+        return self._call_write(
+            lambda: self._client.submit_option_order(
+                symbol=leg.symbol,
+                qty=int(request.parent_quantity * leg.ratio),
+                side=_SIDE_MAP[leg.side],
+                order_type=request.order_type,
+                time_in_force=request.time_in_force,
+                limit_price=(
+                    float(request.net_limit_price)
+                    if request.net_limit_price is not None
+                    else None
+                ),
+                position_intent=leg.position_intent.value.lower(),
+                client_order_id=client_order_id,
+            )
+        )
 
     def _submit_equity(self, request: OrderRequest, client_order_id: str) -> Any:
         return self._call_write(
