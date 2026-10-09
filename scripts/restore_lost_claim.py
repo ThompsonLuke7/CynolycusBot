@@ -25,6 +25,16 @@ The restored entry carries that entry bar, the broker's average entry price,
 the number of passes the module has logged since the entry, which is what the
 counter would read had the claim never been lost. Equities only.
 
+It also carries `exit_reconciled_ids`: every exit order this position already
+settled. Without it the restore undoes itself. The engine keeps each exit
+order's evidence on disk and replays it onto any position with the same entry
+bar that does not list the order as reconciled, which is how a crash between a
+fill and a state save is recovered. The first version of this tool left the
+list off; on 2026-10-07 at 09:33 Meta's risk pass replayed the 09-24, 09-28 and
+10-02 horizon exits onto the restored AMLX, SGMT and TENX, found them filled,
+and dropped all three claims again. (BE survived only because its exit predates
+the evidence files.)
+
 Default is a dry run against the live paper account; pass --apply to write.
 
     scripts/restore_lost_claim.py --module meta_ranker \\
@@ -73,6 +83,24 @@ def same_lot_sellers(root: Path, symbol: str, basis: float) -> dict[str, list[st
             if (row.get("order_symbol") == symbol and row.get("realized_pnl") is not None
                     and price and math.isclose(float(price), basis, rel_tol=1e-6)):
                 out.setdefault(path.parent.name, []).append(str(row.get("order_id")))
+    return out
+
+
+def settled_exit_ids(root: Path, module: str, symbol: str, entry_bar) -> list[str]:
+    """Exit orders of `symbol` this module has already settled for this position.
+
+    Read from the engine's own exit evidence (`<module>/exit_orders/*.json`),
+    matched on symbol and entry bar: exactly the records
+    `core.order_reconciliation.recover_pending_exits` would replay.
+    """
+    out: list[str] = []
+    for path in sorted((root / module / "exit_orders").glob("*.json")):
+        record = json.loads(path.read_text())
+        saved = record.get("state") or {}
+        order_id = (saved.get("exit_pending") or {}).get("order_id")
+        if (order_id and record.get("symbol") == symbol
+                and str(saved.get("entry_bar")) == str(entry_bar) and order_id not in out):
+            out.append(str(order_id))
     return out
 
 
@@ -136,13 +164,15 @@ def main(argv: list[str] | None = None) -> int:
         planned, passes = audit_history(root, module, symbol, entry_bar)
         if not planned:
             raise SystemExit(f"{symbol}: {module} planned no buy on {entry_bar}")
+        settled = settled_exit_ids(root, module, symbol, entry_bar)
         entries[symbol] = {
             "route": "equity", "symbol": symbol, "shares": qty, "runs_held": passes,
             "bars_out": passes, "trimmed": True, "entry_bar": str(entry_bar),
-            "entry_avg_price": basis,
+            "entry_avg_price": basis, "exit_reconciled_ids": settled,
         }
         print(f"  RESTORE {module} {symbol}: {qty:g} sh @ {basis:g}, entered {entry_bar}, "
-              f"{passes} passes since; same-lot sell {sellers[module][0][:8]} in its ledger")
+              f"{passes} passes since; same-lot sell {sellers[module][0][:8]} in its ledger; "
+              f"{len(settled)} settled exit(s) marked reconciled")
 
     if not args.apply:
         print("DRY RUN — nothing written. Re-run with --apply to write.")

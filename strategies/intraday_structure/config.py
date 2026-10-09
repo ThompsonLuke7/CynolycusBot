@@ -117,6 +117,19 @@ class ExecutionPolicy:
     max_new_positions_per_session: int = 20
     state_path: str = "Data/inference/intraday_structure/open_option_positions.json"
 
+    # A setup confirmed on a bar the engine is only now reading is not a setup
+    # the tape is still offering. On 2026-10-05 the consumer ran hours behind
+    # the stream and bought contracts on midday bars after the close. Measured
+    # from the bar's own timestamp (its OPEN), so a 1-minute bar delivered on
+    # time is already about 60s old: 180s is that bar plus two minutes of
+    # slack. 0 disables the gate.
+    max_entry_bar_age_seconds: float = 180.0
+    # Broker upkeep (exit reconciliation, the expiring flatten) runs on the
+    # clock. It used to run once per BAR, and with an exit pending each run is
+    # a positions read plus an order read -- about 0.4s against ~23 bars a
+    # second arriving, which is how the queue filled.
+    maintenance_interval_seconds: float = 5.0
+
 
 @dataclass(frozen=True)
 class RegimePolicy:

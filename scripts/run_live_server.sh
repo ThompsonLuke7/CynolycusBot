@@ -26,7 +26,7 @@
 #   DEALER_RANKER_TIME=15:40 scripts/run_live_server.sh  # override the dealer run time
 #   VERBOSE=1 scripts/run_live_server.sh       # unfiltered console mirror
 #   QUIET=1 scripts/run_live_server.sh         # no console mirror at all
-#   ACE_CANDIDATE_TAPE=1 scripts/run_live_server.sh  # research-only IEX candidate recorder
+#   ACE_CANDIDATE_TAPE=0 scripts/run_live_server.sh  # opt out of research-only IEX candidate recorder
 #   (any extra args are passed straight through to combined_server)
 #
 # Stop: Ctrl-C (stops the watchdog and the server together), or kill this script.
@@ -139,12 +139,12 @@ if [ -f "$REPO_ROOT/scripts/wsl_crash_logger.sh" ]; then
   log "WSL crash logger started (PID $CRASHLOG_PID -> C:\\Users\\<you>\\wsl_crashlog)"
 fi
 
-# --- ACE research candidate tape (explicit opt-in; never affects orders) -----
-# This writes immutable research evidence only. Normal launches are unchanged
-# unless ACE_CANDIDATE_TAPE=1 is supplied.
+# --- ACE research candidate tape (on by default; never affects orders) --------
+# This writes immutable research evidence only. Set ACE_CANDIDATE_TAPE=0 to opt
+# out for a specific server launch.
 ACE_TAPE_PID=""
 ACE_TAPE_OWNED=0
-if [ "${ACE_CANDIDATE_TAPE:-0}" = "1" ]; then
+if [ "${ACE_CANDIDATE_TAPE:-1}" = "1" ]; then
   if [ -f "$ACE_TAPE_PID_FILE" ] && kill -0 "$(cat "$ACE_TAPE_PID_FILE")" 2>/dev/null; then
     ACE_TAPE_PID="$(cat "$ACE_TAPE_PID_FILE")"
     log "ACE candidate tape already running (PID $ACE_TAPE_PID, log $ACE_TAPE_LOG)"

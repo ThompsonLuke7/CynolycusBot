@@ -94,8 +94,12 @@ def test_the_response_price_is_still_used_when_it_has_one(ledger):
     assert ledger[0]["realized_pnl"] == pytest.approx(36.0)
 
 
-def test_a_genuinely_unfilled_close_still_records_null(ledger):
-    """No invented price when neither source knows one."""
+def test_a_close_that_has_not_filled_is_not_booked_yet(ledger):
+    """No row, and no invented price, until the broker reports the fill.
+
+    This used to write a row with a null price; see
+    test_close_booked_after_fill.py for what happens to the close instead.
+    """
 
     pol = _policy()
     result = {
@@ -111,5 +115,5 @@ def test_a_genuinely_unfilled_close_still_records_null(ledger):
     pol._append_closed_trade_ledger(
         symbol=SYMBOL, qty=1, result=result, logger=lambda _m: None)
 
-    assert ledger[0]["exit_fill_price"] is None
-    assert ledger[0]["realized_pnl"] is None
+    assert ledger == []
+    assert [c["order_id"] for c in pol._unsettled_closes] == ["abc"]

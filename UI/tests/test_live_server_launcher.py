@@ -19,9 +19,9 @@ def test_live_server_dealer_ranker_flags_are_supported_by_combined_server() -> N
     )
 
 
-def test_ace_candidate_tape_is_explicitly_opt_in_and_owned_by_launcher() -> None:
+def test_ace_candidate_tape_defaults_on_and_is_owned_by_launcher() -> None:
     launcher = (REPO_ROOT / "scripts/run_live_server.sh").read_text()
-    assert 'ACE_CANDIDATE_TAPE:-0' in launcher
+    assert 'ACE_CANDIDATE_TAPE:-1' in launcher
     assert '-m scripts.discord_ledger.capture_ace_candidate_tape' in launcher
     assert 'ACE_TAPE_OWNED=1' in launcher
     assert 'kill "$ACE_TAPE_PID"' in launcher

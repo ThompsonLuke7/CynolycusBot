@@ -661,3 +661,193 @@ IN-SAMPLE: `no_pump`, `no_lossy_pump`, `b_trim`, `b_add` were prompted by 18 on 
    return against fixed thresholds frozen from 2019-2026) and the loss-making-pump exclusion (needs the latest SEC
    filing for each candidate). Forward data is the only clean test left for both.
 2. Fundamentals for delisted names (SEC by CIK) would remove the "unknown" group and let the pump rule be tested fairly.
+
+---
+
+# Part 9: can a theme sell-off be sidestepped? Daily exits, puts, rotation (2026-10-07)
+
+**Question (user):** the June 2026 drop looked overextended beforehand and broke down in its first days. Why hold for the
+whole month? Could we exit, buy puts on the theme index, or rotate out? Parts 6 and 8 tested per-name stops and
+month-end checks only; this tests daily portfolio/theme exits, hedges and rotation (`20_theme_mitigation.py`,
+`20_results.txt`). 70/30 blend, point-in-time 2019-2026, 4 offsets, paired against the fixed 70/30 (25.0% CAGR,
+Sharpe 1.04, MDD −34%). The theme index is the ETF (of 45) that best matches the 20-name basket over 60 days:
+ARKQ 17% of decisions, IGV 14%, XLE 12%, QTUM 10%, BLOK 9%. "Extended" = that ETF more than 15% above its 100-day
+average (24% of decisions).
+
+| rule | CAGR | Sharpe | MDD | vs fixed 70/30 /yr [95% CI] | acted | last 12m (MDD) |
+|---|---|---|---|---|---|---|
+| fixed 70/30 | 25.0% | 1.04 | −34% | — | — | +24.2% (−15.7%) |
+| leave when the sleeve is down 10% since entry | 24.1% | 1.05 | −34% | −1.2% [−2.7, +0.2] | 21% of periods | +20.3% (−14.2%) |
+| leave on a theme-ETF breakdown | 16.8% | 0.85 | −35% | **−8.0% [−11.5, −3.6]** | 70% | +9.8% |
+| the same, only if the theme was extended | 23.2% | 1.00 | −34% | −1.5% [−4.3, +1.2] | 18% | +24.0% (−15.0%) |
+| leave when the sleeve is below its 20-day average | 17.9% | 0.91 | −35% | −6.8% [−11.0, −1.6] | 82% | +14.9% |
+| puts on the theme ETF, every period (model) | 22.9% | **1.11** | **−28.5%** | −2.3% [−3.8, −0.2] | 100% | +14.9% (−13.0%) |
+| puts only when extended (model) | 24.8% | 1.06 | −34% | −0.2% [−1.4, +1.0] | 24% | +23.1% (−15.2%) |
+| short the theme ETF when extended (idealised) | 23.2% | 1.03 | −34% | −2.0% [−6.6, +1.8] | 24% | +10.5% |
+| skip names whose theme ETF is below its 50-day average | 23.3% | 1.02 | −34% | −1.4% [−3.1, +0.1] | — | +22.4% |
+| cap the theme at 6 names when extended | 25.5% | 1.06 | −34% | +0.3% [−0.0, +0.7] | — | +24.2% |
+
+Sensitivity: exit at −8% −2.5% [−4.5, −0.6]; at −15% −1.3% [−2.8, −0.1]. Puts-when-extended with vol 20% lower
++0.5% [−0.5, +1.5]; 20% higher −0.9% [−2.4, +0.4].
+
+**Reading**
+1. **Leaving after the breakdown starts loses, because most breakdowns reverse inside the month.** The last 12
+   months, sleeve return held vs with the −10% exit: Nov 2025 −22.3% → −9.5% and Jun 2026 −21.3% → −7.5% (the
+   exit saved 13-14 points each time, as the user saw). But Mar 2026 +21.9% → −0.5% (it was down 13% in week one), Jul 2026
+   +3.2% → −10.7% (down 21% mid-month) and Jan 2026 −3.3% → −6.2%. Net over the year: −11.9 points. Helped in 3
+   periods, hurt in 3.
+2. **"Overextended" is a weak warning, not a signal.** The theme was extended at 5 of the last 13 decisions: it then
+   fell twice (−7%, −9%) and rose three times (+4%, +24%, +15%). Over the full history the sleeve's next 4 weeks average
+   +1.8% after an extended decision against +4.0% otherwise, and lose more than 10% in 15% of cases against 10%.
+   That supports holding less (Part 8's band), not leaving.
+3. **Theme-level breakdown signals fire constantly** (70-82% of periods) and are the most expensive rules tested.
+4. **Puts are the only thing that cut the worst drawdown** (−34% → −28.5%, because they paid in March 2020), at ~2.3% a
+   year: fairly priced insurance in this model. Bought only when the theme is extended they are roughly free
+   (−0.2%/yr) and protect little (−15.2% vs −15.7% last year). **These are Black-Scholes estimates, not quotes.**
+   Real costs are higher where it matters: most theme ETFs chosen here (QTUM, ARKQ, BLOK) have thin option markets,
+   so a real hedge would use SMH or QQQ puts and carry basis risk.
+5. **Rotating out does not help.** Skipping names in a broken theme costs 1.4% a year; the cap rarely binds.
+
+**Verdict:** the hypothesis class "act on a sell-off once it is visible" (exits and trend signals on names, the sleeve
+or its theme, at monthly or daily frequency) is exhausted on this history: every form costs return. What survives is
+decided BEFORE the drop: the sleeve's share of the account, the monthly reset, a smaller share when it is hot or
+extended, and optionally puts as paid insurance.
+
+**Next testable variant:** real option quotes. Capture nightly SMH/QQQ put prices in the existing IV-surface job, so
+the put arms can be priced from quotes in the forward shadow instead of from a model.
+
+---
+
+# Part 10: puts on the single names, bought on the first red day or on bad news (2026-10-07)
+
+**Question (user, with an NVDA chart):** instead of index puts, buy puts on the stocks themselves when they are
+overextended or running out of momentum, on the first red day or on bad news. The drop "usually lasts a few days",
+so the put should protect. Script `21_single_name_puts.py`, output `21_results.txt`. Liquid-300, point-in-time,
+2019-01-04..2026-09-24. Signal on a daily close, entry at the next open.
+
+"Extended" = close 15% or more above its 50-day average (a second definition in volatility units is in the results
+file and agrees). Triggers, all requiring the name to be extended the day before:
+- **first red day**: the day after a 20-day closing high closes down (also a version that needs a 3%+ fall),
+- **fade**: the first close below the 10-day average after 10 or more sessions above it,
+- **gap**: opens 3%+ below the prior close and closes down. This is the price proxy for bad news; the catalyst feed
+  does not reach back to 2019.
+
+The thresholds were fixed before the run and not tuned.
+
+## A. What the shares do over the next 10 sessions (no option model)
+
+| after | cases | mean | median | lower 10 sessions later | fell >10% | rose >10% | vs other extended names the same day [95% CI] |
+|---|---|---|---|---|---|---|---|
+| any day, any name | 578,755 | +0.61% | +0.56% | 46% | 7% | 8% | — |
+| any day the name was extended | 39,415 | +0.83% | +0.23% | 49% | 14% | 16% | — |
+| first red day | 8,470 | +0.75% | +0.24% | 49% | 12% | 14% | +0.12% [−0.19, +0.41] |
+| first red day, down 3%+ | 2,293 | +0.94% | +0.23% | 49% | 18% | 20% | +0.32% [−0.33, +0.89] |
+| fade | 2,961 | +0.86% | +0.38% | 48% | 12% | 14% | −0.04% [−0.37, +0.31] |
+| gap down 3%+ | 1,953 | −0.24% | −1.67% | 55% | 28% | 22% | +0.15% [−1.07, +1.51] |
+| gap down, no earnings report | 1,772 | −0.36% | −1.84% | 55% | 28% | 22% | +0.31% [−0.85, +1.56] |
+| first red day, name held by the sleeve | 1,574 | +1.07% | +0.49% | 48% | 20% | 22% | +0.32% [−0.78, +1.23] |
+| gap down, name held by the sleeve | 612 | +1.30% | −0.29% | 50% | 31% | 32% | +0.64% [−1.55, +2.92] |
+
+## B. What a 2-week at-the-money put costs: real quotes
+
+The nightly IV-surface capture holds closing bid/ask for 882 names on 11 sessions (2026-09-11..10-05). This is the
+only real option pricing in the study.
+
+| liquid-300 names by realized vol | implied vol | realized vol | implied / realized | half of the bid/ask, % of premium | premium, % of share price |
+|---|---|---|---|---|---|
+| under 30% | 25% | 25% | 1.00 | 12.9% | 1.8% |
+| 30-50% | 34% | 37% | 0.90 | 9.9% | 2.5% |
+| 50-80% | 51% | 66% | 0.78 | 7.4% | 3.7% |
+| over 80% | 67% | 92% | 0.70 | 4.9% | 4.9% |
+| extended names | 60% | 79% | 0.76 | 4.9% | 4.2% |
+| the 20 sleeve names | 64% | 85% | 0.75 | 5.0% | 4.6% |
+
+- **The implied/realized ratio is not constant**, so Part 9's single 0.82 multiple was too crude. This part prices
+  with a fitted line, implied = 0.119 + 0.590 x realized (R² 0.78). A single name sits 0.89x to 1.11x that line
+  (middle half of names), which is why the ±20% rows below matter.
+- **Puts were about 5% dearer than the line on a gap-down day** (42 name-days), and no dearer than the day before on
+  trigger days (−3% to −4%, 66 name-days). Small samples from one calm month.
+- SPY, QQQ and SMH are not in the capture. Single names are.
+
+## C. Does the put pay? Model premium against what the shares delivered
+
+Payback = payoff per $1 of premium, 10-session at-the-money put. 1.00 is a fair price. A put needs about 1.10 to
+cover the bid/ask both ways.
+
+| put bought | premium | payoff | payback [95% CI] | after bid/ask |
+|---|---|---|---|---|
+| any day, any name | 2.97% | 2.57% | 0.87 [0.77, 0.97] | 0.78 |
+| any day the name was extended | 4.30% | 3.88% | 0.90 [0.79, 1.03] | 0.82 |
+| first red day | 3.95% | 3.53% | 0.89 [0.76, 1.04] | 0.81 |
+| first red day, down 3%+ | 4.74% | 4.66% | 0.98 [0.84, 1.14] | 0.89 |
+| fade | 3.87% | 3.44% | 0.89 [0.77, 1.04] | 0.81 |
+| gap down 3%+, priced at the line | 5.73% | 6.61% | 1.15 [1.00, 1.34] | 1.05 |
+| gap down 3%+, priced as quoted on gap days | 6.04% | 6.61% | 1.10 [0.95, 1.27] | 0.99 |
+| any trigger, name held by the sleeve | 5.05% | 5.48% | 1.09 [0.90, 1.29] | 0.98 |
+
+By year the gap put paid back 0.99 to 1.41 at the line (2019-2026, every year); the first-red-day put 0.66 to 1.31
+(above 1.00 only in 2021 and 2022).
+
+## D. On the portfolio: fixed 70/30 plus a put on each held name when its trigger fires
+
+One put per share held, at the money, 10 sessions, one open put per name. Monthly, 4 offsets, paired against the
+fixed 70/30. Model premiums plus 4.9% of premium each way.
+
+| put on a held name when | CAGR | Sharpe | MDD | vs fixed 70/30 /yr [95% CI] | puts a year | premium a year (of the account) | last 12m (MDD) |
+|---|---|---|---|---|---|---|---|
+| none (fixed 70/30) | 25.0% | 1.04 | −33.8% | — | — | — | +24.2% (−15.7%) |
+| first red day | 25.1% | 1.08 | −33.3% | −0.3% [−1.8, +1.2] | 104 | 8.8% | +27.2% (−13.5%) |
+| first red day, down 3%+ | 24.8% | 1.06 | −33.7% | −0.4% [−1.4, +0.5] | 59 | 5.4% | +27.3% (−13.8%) |
+| fade | 24.7% | 1.05 | −33.5% | −0.5% [−1.7, +0.7] | 60 | 4.7% | +22.7% (−15.9%) |
+| gap down 3%+ | 25.8% | 1.09 | −33.0% | +0.4% [−0.6, +1.3] | 48 | 4.9% | +26.7% (−14.5%) |
+| any of the three | 25.4% | 1.10 | −32.8% | −0.3% [−2.1, +1.7] | 121 | 10.4% | +28.5% (−12.6%) |
+| **no trigger: a put whenever the name is extended** | 25.6% | 1.13 | −32.4% | −0.2% [−2.2, +1.9] | 151 | 13.3% | +26.0% (−13.2%) |
+| any of the three, puts 20% cheaper | 28.0% | 1.19 | −32.8% | +1.8% [−0.1, +4.0] | 121 | 8.3% | +32.7% (−12.2%) |
+| any of the three, puts 20% dearer | 22.8% | 1.01 | −32.9% | −2.3% [−4.3, −0.5] | 121 | 12.5% | +24.6% (−13.1%) |
+| Part 9 reference: theme-ETF puts every period | 22.9% | 1.11 | −28.5% | −2.3% [−3.8, −0.2] | — | — | +14.9% (−13.0%) |
+
+Last 12 months, "any of the three": the puts added +2.2% of the account in the Nov 2025 sell-off (sleeve −22%) and
++1.4% in June 2026 (sleeve −21%), and cost 0.9%, 0.6% and 1.5% in the three months the sleeve rose 22-24%.
+
+## E. The NVDA chart
+
+Every first red day off a 20-day closing high in NVDA over the last 12 months, with no "extended" filter: 18
+occasions. NVDA was lower 10 sessions later in **14 of 18**, by 1.6% on average. A 10-session at-the-money put at
+NVDA's own quoted price level cost 2.19% of the share price each time and paid back 2.33%; it made money on 9 of 18.
+
+## Reading
+1. **The chart is read correctly, and the pattern is too small to pay for a put.** On NVDA the first red day was
+   followed by lower prices 14 times in 18, and the puts roughly broke even, because the typical fall (1.6%) is
+   smaller than the premium (2.2%).
+2. **Across all liquid names the first red day is a coin flip.** Lower 10 sessions later in 49% of 8,470 cases, with a
+   +0.75% average, the same as any other day the name was extended. Names the sleeve holds do better still (+1.07%).
+   The fade trigger is the same. As put triggers both are **rejected, not just unmeasured**: the top of the payback
+   range (1.04) is below the ~1.10 needed after the bid/ask.
+3. **Bad news is the one trigger with follow-through.** After a 3%+ gap down the name is lower 10 sessions later 55%
+   of the time and falls more than 10% in 28% of cases. Priced as quoted on gap days the put pays back 1.10 before
+   the bid/ask and 0.99 after: **break-even, so protection at no expected cost, not a profit**. This is unresolved,
+   not rejected: the gap-day price rests on 42 quoted name-days.
+4. **The trigger adds nothing over simply insuring extended names.** Buying a put whenever a held name is extended,
+   with no trigger at all, scores the same or slightly better (Sharpe 1.13, MDD −32.4%).
+5. **It does not cut the worst drawdown.** −33.8% → −32.8%. The worst drop (March 2020) started with nothing
+   extended, so no puts were on. Index puts held all the time cut it to −28.5%, at about 2% a year.
+6. **It tracks the portfolio better than index puts.** Last year the single-name puts took the 70/30 from +24.2% to
+   +28.5% and the drawdown from −15.7% to −12.6%, while theme-ETF puts bought only when extended did nothing (+23.1%,
+   −15.2%). The sleeve fell 21-22% in those months and the theme ETF only 7-9%.
+7. **The answer depends on the price paid.** About 10% of the account goes out in premium each year and about 10%
+   comes back. A 20% error in the put price moves the result from +1.8% to −2.3% a year, and one name's real price is
+   routinely 10% off the fitted line.
+
+**Limits.** Premiums in C and D are Black-Scholes at a line fitted to 11 sessions of quotes from one calm month.
+Earnings dates inside a put's life are not priced (real puts cost more into a report). The gap is a price proxy for
+bad news. One option contract covers 100 shares, so a 1:1 hedge needs a position of at least 100 shares per name;
+at 1.5% of the account per name that is roughly a $330k account for a $50 stock. Drawdowns mark the puts at a constant vol.
+
+**Verdict:** first-red-day and fade puts are rejected. Single-name puts are insurance at about a fair price that
+fits the portfolio better than index puts but does not cover a crash from a non-extended start. The gap/bad-news
+put is the only open question.
+
+**Next testable variant:** price it from real quotes going forward. The nightly capture already holds bid/ask for
+the single names, so add a put arm to the forward shadow: on each trigger on a held name, record the closing ask of
+the 2-week at-the-money put and settle it at the bid or intrinsic value at expiry. Use the live catalyst feed for
+"bad news" next to the gap proxy. Index puts still need SPY/QQQ/SMH added to the capture (Part 9).

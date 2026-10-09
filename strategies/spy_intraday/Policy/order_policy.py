@@ -289,6 +289,10 @@ class OptionOrderPolicy:
         self._meta_entry_structure: dict[str, dict[str, Any] | None] = {"long": None, "short": None}
         self._meta_side_reason: dict[str, str | None] = {"long": None, "short": None}
         self._pending_broker_reconcile: dict[str, Any] | None = None
+        # Closes submitted but not yet known to have filled; see
+        # settle_unsettled_closes. Loaded from disk on first use.
+        self._unsettled_closes: list[dict[str, Any]] = []
+        self._unsettled_closes_loaded = False
         self._last_broker_reconcile_monotonic: float = 0.0
         self._entry_lockout_until: datetime | None = None
         self._entry_lockout_reason: str | None = None
@@ -1326,6 +1330,7 @@ class OptionOrderPolicy:
         }
         broker_state = self._read_broker_position_state()
         self._last_broker_reconcile_monotonic = now_mono
+        self._settle_closes_quietly(logger)
         if bool(broker_state.get("ownership_unknown")):
             # Applying this view could adopt — and then exit — a contract a
             # sibling module opened. Local state is the safer of the two
@@ -2680,6 +2685,7 @@ class OptionOrderPolicy:
         deadline = float(pending.get("deadline_monotonic", 0.0) or 0.0)
 
         sync_result = self.sync_from_broker(logger=logger)
+        self._settle_closes_quietly(logger)
         resolved = False
         try:
             has_pos = self._has_open_long_position(symbol=symbol)
@@ -2953,10 +2959,22 @@ class OptionOrderPolicy:
 
     def _append_closed_trade_ledger(self, *, symbol, qty, result,
                                     logger: Callable[[str], None] = print) -> None:
-        """One closed-trade row per close, in the shared cross-module schema."""
-        try:
-            from core.live_4h_exec import append_closed_trade, closed_trade_record
+        """Book a close in the shared ledger once its fill is known.
 
+        A close used to be booked the moment it was submitted. Whenever the
+        order had not filled yet -- an urgent market close returns straight
+        from the acknowledgement, a final attempt can time out and rest for up
+        to `verify_final_attempt_grace_sec` -- the row went in with
+        `exit_fill_price: null`, and if that order was then cancelled the retry
+        booked the same position a second time. Ten such rows had to be
+        repaired by hand on 2026-10-05.
+
+        Now a close whose order is still working is held (see
+        `settle_unsettled_closes`) and booked at the quantity and price the
+        broker reports, or not at all if it never fills.
+        """
+        self._settle_closes_quietly(logger)
+        try:
             side_key = self._side_key_for_symbol(symbol)
             if side_key is None:
                 return
@@ -2964,52 +2982,176 @@ class OptionOrderPolicy:
                              else self._short_avg_entry_price)
             entry_premium = float(entry_premium) if math.isfinite(entry_premium) else None
             resp = (result or {}).get("response") or {}
-            # The submission response is the *acknowledgement*, and on this
-            # path it comes back `pending_new`/`new` with no fill price — the
-            # fill is established a moment later by the verification poll. The
-            # ledger read only the acknowledgement, so every close on
-            # 2026-09-08 recorded `exit_fill_price: null` and
-            # `realized_pnl: null` despite ORDER VERIFIED status=filled. Prefer
-            # the verified order, exactly as the option-mark capture does.
             verification = (result or {}).get("verification") or {}
-            fill_val = self._extract_filled_avg_price(verification.get("order"))
-            if not math.isfinite(fill_val):
-                fill_val = self._extract_filled_avg_price(resp)
-            fill = float(fill_val) if math.isfinite(fill_val) else None
             order_qty = int(qty) if qty is not None else int(self.cfg.qty)
-            realized = (round((fill - entry_premium) * 100.0 * order_qty, 2)
-                        if (fill is not None and entry_premium) else None)
             trail = self._trail_state(side_key)
-            entry_state = {
-                "entry_bar": trail.entry_ts.isoformat() if trail.entry_ts else None,
-                "entry_fill_price": entry_premium,
-                "entry_filled_qty": float(order_qty),
-                # The UNDERLYING at entry and its ATR — the pair that lets an
-                # option row be compared against the move it was a bet on.
-                "u_entry": (float(trail.entry_price)
-                            if math.isfinite(trail.entry_price) else None),
-                "u_atr": (float(trail.entry_atr)
-                          if math.isfinite(trail.entry_atr) else None),
+            # Everything the row needs is captured here: the caller clears the
+            # side's entry state as soon as this returns.
+            close = {
+                "order_id": str(resp.get("id", "")) or None,
+                "symbol": symbol,
+                "qty": order_qty,
+                "option_side": side_key,
+                "exit_reason": str((result or {}).get("exit_reason") or "close"),
+                "simulated": bool((result or {}).get("simulated")),
+                "bar": datetime.now(timezone.utc).isoformat(),
+                "entry_premium": entry_premium,
+                "entry_state": {
+                    "entry_bar": trail.entry_ts.isoformat() if trail.entry_ts else None,
+                    "entry_fill_price": entry_premium,
+                    "entry_filled_qty": float(order_qty),
+                    # The UNDERLYING at entry and its ATR — the pair that lets an
+                    # option row be compared against the move it was a bet on.
+                    "u_entry": (float(trail.entry_price)
+                                if math.isfinite(trail.entry_price) else None),
+                    "u_atr": (float(trail.entry_atr)
+                              if math.isfinite(trail.entry_atr) else None),
+                },
             }
-            record = closed_trade_record(
-                module=_LEDGER_MODULE,
-                bar=datetime.now(timezone.utc).isoformat(),
-                ticker=self.cfg.underlying,
-                order_symbol=symbol,
-                route="option",
-                qty=order_qty,
-                exit_reason=str((result or {}).get("exit_reason") or "close"),
-                entry_avg_price=entry_premium,
-                exit_fill_price=fill,
-                realized_pnl=realized,
-                entry_state=entry_state,
-                order_id=str(resp.get("id", "")) or None,
-            )
-            record["option_side"] = side_key
-            record["simulated"] = bool((result or {}).get("simulated"))
-            append_closed_trade(_LEDGER_MODULE, record)
+            # The submission response is the *acknowledgement*; the fill is
+            # established by the verification poll, so read that first.
+            outcomes = [self._close_fill(order, order_qty)
+                        for order in (verification.get("order"), resp)]
+            filled = next((o for o in outcomes if o[0] == "filled"), None)
+            if filled is not None:
+                from core.live_4h_exec import append_closed_trade
+
+                append_closed_trade(_LEDGER_MODULE, self._closed_trade_row(close, filled[1], filled[2]))
+            elif all(o[0] == "dead" for o in outcomes):
+                logger(f"[order_policy] close order {close['order_id']} for {symbol} ended "
+                       "unfilled; no closed trade booked")
+            elif close["order_id"] is None:
+                # Nothing to look the fill up by. An unpriced row is the most
+                # that can honestly be said, and it is flagged as such.
+                from core.live_4h_exec import append_closed_trade
+
+                row = self._closed_trade_row(close, None, order_qty)
+                row["settle_outcome"] = "fill_unknown_no_order_id"
+                append_closed_trade(_LEDGER_MODULE, row)
+            else:
+                self._load_unsettled_closes()
+                self._unsettled_closes.append(close)
+                self._save_unsettled_closes()
+                logger(f"[order_policy] close order {close['order_id']} for {symbol} is not "
+                       "filled yet; the closed trade is booked when it settles")
         except Exception as exc:  # noqa: BLE001 - a ledger write must not stop trading
             logger(f"[order_policy] closed-trade ledger write failed: {exc}")
+
+    def _close_fill(self, order_like: Any, requested_qty: int) -> tuple[str, float | None, float]:
+        """('filled', price, qty) | ('open', None, 0) | ('dead', None, 0) for a close order.
+
+        'dead' is a terminal order that sold nothing. A cancelled order that
+        had partly filled is 'filled' for the part it sold.
+        """
+        if not isinstance(order_like, dict):
+            return "dead", None, 0.0
+        status = self._status_key(order_like.get("status"))
+        price = self._extract_filled_avg_price(order_like)
+        filled_qty = _as_float(order_like.get("filled_qty"))
+        has_qty = math.isfinite(filled_qty) and filled_qty > 0.0
+        if status == "filled" and math.isfinite(price):
+            return "filled", float(price), float(filled_qty if has_qty else requested_qty)
+        if self._order_is_terminal_fail(status):
+            if has_qty and math.isfinite(price):
+                return "filled", float(price), float(filled_qty)
+            return "dead", None, 0.0
+        return "open", None, 0.0
+
+    def _closed_trade_row(self, close: dict[str, Any], fill: float | None, qty: float) -> dict[str, Any]:
+        """One closed-trade row, in the shared cross-module schema."""
+        from core.live_4h_exec import closed_trade_record
+
+        entry_premium = close.get("entry_premium")
+        realized = (round((fill - entry_premium) * 100.0 * qty, 2)
+                    if (fill is not None and entry_premium) else None)
+        record = closed_trade_record(
+            module=_LEDGER_MODULE,
+            bar=close["bar"],
+            ticker=self.cfg.underlying,
+            order_symbol=close["symbol"],
+            route="option",
+            qty=qty,
+            exit_reason=close["exit_reason"],
+            entry_avg_price=entry_premium,
+            exit_fill_price=fill,
+            realized_pnl=realized,
+            entry_state=close.get("entry_state"),
+            order_id=close.get("order_id"),
+        )
+        record["option_side"] = close["option_side"]
+        record["simulated"] = bool(close.get("simulated"))
+        return record
+
+    def _unsettled_closes_path(self):
+        from pathlib import Path
+
+        import core.live_4h_exec as exec_mod
+
+        # Read at call time: the test suite redirects the ledger root.
+        return (Path(exec_mod.DEFAULT_LEDGER_ROOT) / _LEDGER_MODULE
+                / f"unsettled_closes_{self.cfg.underlying}.json")
+
+    def _load_unsettled_closes(self) -> None:
+        """Read the held closes from disk once; an unreadable file raises."""
+        if self._unsettled_closes_loaded:
+            return
+        from core.live_state import load_state
+
+        path = self._unsettled_closes_path()
+        self._unsettled_closes = list(load_state(path).get("closes") or []) if path.exists() else []
+        self._unsettled_closes_loaded = True
+
+    def _settle_closes_quietly(self, logger: Callable[[str], None]) -> None:
+        try:
+            self.settle_unsettled_closes(logger=logger)
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not stop the loop
+            logger(f"[order_policy] settling held closes failed: {exc}")
+
+    def _save_unsettled_closes(self) -> None:
+        from core.live_state import save_state
+
+        save_state(self._unsettled_closes_path(), {"closes": self._unsettled_closes})
+
+    def settle_unsettled_closes(self, *, logger: Callable[[str], None] = print) -> int:
+        """Book every held close whose order has since filled. Returns rows booked.
+
+        Runs on each broker maintenance tick and before each new close. The
+        held closes are on disk, so a restart between a close and its fill
+        still books it; `append_once` keys each row on the order id, so a crash
+        between the ledger write and the file update cannot book it twice. A
+        broker read that fails leaves the close held for the next tick.
+        """
+        self._load_unsettled_closes()
+        if not self._unsettled_closes:
+            return 0
+        from core.live_state import append_once
+
+        ledger = self._unsettled_closes_path().with_name("closed_trades.jsonl")
+        keep: list[dict[str, Any]] = []
+        booked = 0
+        for close in self._unsettled_closes:
+            try:
+                order = self._client.get_order(close["order_id"])
+            except Exception as exc:  # noqa: BLE001 - try again next tick
+                logger(f"[order_policy] could not read close order {close['order_id']}: {exc}")
+                keep.append(close)
+                continue
+            outcome, fill, qty = self._close_fill(order, int(close["qty"]))
+            if outcome == "open":
+                keep.append(close)
+            elif outcome == "filled":
+                row = self._closed_trade_row(close, fill, qty)
+                row["settle_outcome"] = "exit_filled"
+                booked += bool(append_once(ledger, row, identity=f"{close['order_id']}:close"))
+                logger(f"[order_policy] CLOSED TRADE BOOKED order_id={close['order_id']} "
+                       f"symbol={close['symbol']} qty={qty:g} fill={fill:.2f}")
+            else:
+                logger(f"[order_policy] close order {close['order_id']} for {close['symbol']} "
+                       "ended unfilled; no closed trade booked")
+        if len(keep) != len(self._unsettled_closes):
+            self._unsettled_closes = keep
+            self._save_unsettled_closes()
+        return booked
 
     def _submit_order_inner(
         self,

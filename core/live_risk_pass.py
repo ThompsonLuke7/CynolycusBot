@@ -219,6 +219,10 @@ def evaluate_risk_exits(
     from core.live_4h_exec import DEFAULT_LEDGER_ROOT
     if cfg.settle_pending_exits:
         recover_pending_exits(ledger_root or DEFAULT_LEDGER_ROOT, module, managed)
+    # Before the loop: a renamed symbol would otherwise sit here unheld, with no
+    # stop on it, until the module's next 4H pass.
+    from core.symbol_changes import follow_symbol_changes
+    follow_symbol_changes(client, managed, pos_info, module=module, today=now_et.date())
     for tkr, st in managed.items():
         route = st.get("route", "option")
         sym = st.get("occ") if route == "option" else st.get("symbol", tkr)

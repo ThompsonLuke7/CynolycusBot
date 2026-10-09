@@ -219,6 +219,15 @@ class AlpacaOptionsClient:
         """Read settlement evidence; pagination is explicit to the caller."""
         return self._request("GET", f"{self._trading_base}/v2/account/activities", params=params)
 
+    def get_corporate_actions(self, **params: Any) -> Any:
+        """
+        GET /v1/corporate-actions (market-data API)
+
+        Example params:
+          symbols="PSKY", types="name_change", start="2026-10-01", end="2026-10-07"
+        """
+        return self._request("GET", f"{self._data_base}/v1/corporate-actions", params=params)
+
     def get_orders(self, **params: Any) -> Any:
         """
         GET /v2/orders

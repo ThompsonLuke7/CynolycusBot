@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from dataclasses import asdict
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from strategies.intraday_structure.candidate_sources import (
@@ -35,6 +37,7 @@ from strategies.intraday_structure.state_store import JsonStateStore
 
 logger = logging.getLogger(__name__)
 _ET = ZoneInfo("America/New_York")
+LAG_REPORT_INTERVAL_SECONDS = 60.0
 
 
 class IntradayStructureRunner:
@@ -109,11 +112,26 @@ class IntradayStructureRunner:
         self._archive_session: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._maintenance_interval = float(config.execution.maintenance_interval_seconds)
+        self._next_maintenance = 0.0
+        self._next_lag_report = 0.0
 
     def _flatten_expiring(self) -> None:
-        """Close any position expiring today once the cut-off passes."""
+        """Reconcile pending exits and close anything expiring today.
+
+        Called from every pass of the consumer loop but acts at most once per
+        `maintenance_interval_seconds`. With an exit pending each run is a
+        positions read and an order read (measured 2026-10-07: about 250ms and
+        170ms), and it used to run once per bar against roughly 23 bars a
+        second arriving. The queue filled at 12:38 on 2026-10-05 and at 10:46
+        on 2026-10-07.
+        """
         if self.executor is None:
             return
+        now = time.monotonic()
+        if now < self._next_maintenance:
+            return
+        self._next_maintenance = now + self._maintenance_interval
         try:
             self.executor.reconcile_exits()
             self.executor.maybe_flatten_expiring()
@@ -228,6 +246,27 @@ class IntradayStructureRunner:
         self._archive_session = session
         self.bar_archive.record(payload)
 
+    def _report_lag(self, bar: Bar) -> None:
+        """Say so, once a minute, while the consumer is behind the stream.
+
+        The shared stream only reports a subscriber once its queue is FULL, by
+        which point this engine is already ~50,000 bars behind. Entries on old
+        bars are refused by the executor; this is what tells an operator why.
+        """
+        limit = float(self.config.execution.max_entry_bar_age_seconds)
+        if limit <= 0:
+            return
+        lag = (datetime.now(timezone.utc) - bar.timestamp).total_seconds()
+        now = time.monotonic()
+        if lag <= limit or now < self._next_lag_report:
+            return
+        self._next_lag_report = now + LAG_REPORT_INTERVAL_SECONDS
+        logger.warning(
+            "Intraday Structure is %.0fs behind the tape (bar %s %s, queue=%d); "
+            "entries are refused until it catches up",
+            lag, bar.symbol, bar.timestamp.isoformat(), self.bar_queue.qsize(),
+        )
+
     def _write_archive_manifest(self, session: str) -> None:
         if self.bar_archive is None:
             return
@@ -285,6 +324,7 @@ class IntradayStructureRunner:
                 self._record_archive(payload)
             try:
                 bar = Bar.from_mapping(payload)
+                self._report_lag(bar)
                 if self.opening_feed is not None:
                     for candidate in self.opening_feed.observe(bar):
                         self._register(candidate)

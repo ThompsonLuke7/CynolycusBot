@@ -301,17 +301,43 @@ class IntradayOptionExecutor:
     # -- entry ---------------------------------------------------------------
 
     def on_entry(self, setup: SetupRecord, *, spot: float | None = None,
-                 atr: float | None = None) -> dict[str, Any] | None:
-        """A setup just went RUNNING. Buy the contract. Never raises."""
+                 atr: float | None = None,
+                 bar_time: datetime | None = None) -> dict[str, Any] | None:
+        """A setup just went RUNNING. Buy the contract. Never raises.
+
+        `bar_time` is the timestamp of the bar that triggered the entry. When
+        given, an entry on a bar older than `max_entry_bar_age_seconds` is
+        refused: the engine is behind the tape and the price it confirmed on is
+        no longer the price it would pay.
+        """
         try:
             with self._lock:
-                return self._on_entry(setup, spot=spot, atr=atr)
+                return self._on_entry(setup, spot=spot, atr=atr, bar_time=bar_time)
         except Exception:  # noqa: BLE001 - execution must never break detection
             logger.exception("intraday execution: entry failed for %s", getattr(setup, "setup_id", "?"))
             return None
 
-    def _on_entry(self, setup, *, spot, atr):
+    def _stale_bar_age(self, bar_time) -> float | None:
+        """The entry bar's age in seconds when it exceeds the limit, else None."""
+        limit = float(getattr(self._policy, "max_entry_bar_age_seconds", 0) or 0)
+        if bar_time is None or limit <= 0:
+            return None
+        age = (self._now() - bar_time).total_seconds()
+        return age if age > limit else None
+
+    def _on_entry(self, setup, *, spot, atr, bar_time=None):
         setup_id = str(setup.setup_id)
+        stale = self._stale_bar_age(bar_time)
+        if stale is not None:
+            setup.metadata["execution_skip"] = "stale_bar"
+            setup.metadata["execution_bar_age_seconds"] = round(stale, 1)
+            logger.warning(
+                "intraday execution: skipped %s — its entry bar %s is %.0fs old "
+                "(limit %.0fs); the engine is behind the tape",
+                setup_id, bar_time.isoformat(), stale,
+                float(self._policy.max_entry_bar_age_seconds),
+            )
+            return None
         ok, why = self._has_capacity(setup_id)
         if not ok:
             logger.info("intraday execution: skipped %s (%s)", setup_id, why)

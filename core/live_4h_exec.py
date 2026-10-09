@@ -29,6 +29,7 @@ import pandas as pd
 from core.corporate_actions import recent_corporate_action
 from core.live_state import append_once
 from core.broker_fill_reconciliation import account_label_for_client, register_order_ownership
+from core.symbol_changes import follow_symbol_changes
 from core.order_reconciliation import (observe_order, owned_quantity, number,
     read_evidence, save_evidence, recover_pending_exits, settlement_activity)
 
@@ -570,6 +571,10 @@ def build_mixed_plan(
 
     if module:
         recover_pending_exits(ledger_root or DEFAULT_LEDGER_ROOT, module, managed)
+    # A renamed symbol reads below as a position that is gone. Move the claim
+    # to the new symbol first, so it is managed rather than dropped.
+    follow_symbol_changes(client, managed, pos_info, module=module or "unknown",
+                          today=_now_et().date())
 
     # 1) manage existing positions (option OR share) with one exit machine.
     for tkr, st in managed.items():
@@ -595,6 +600,15 @@ def build_mixed_plan(
             out.dropped[tkr] = {"symbol": sym, "route": route,
                 "status": "confirmed_flat" if info_present else "not_found",
                 "was_unconfirmed_entry": bool(st.get("pending_fill"))}
+            if not st.get("pending_fill"):
+                # Not an unfilled entry: a position this module held is gone and
+                # no exit of its own explains it. Nothing books its P&L.
+                logger.error(
+                    "build_mixed_plan: %s %s (%s) is no longer at the broker and no exit "
+                    "of this module accounts for it — dropping the claim with NO ledger "
+                    "row (recorded size %s, entry %s). Find where it went before trusting "
+                    "this module's P&L.",
+                    module or "unknown", tkr, sym, st.get(_size_key(route)), st.get("entry_bar"))
             continue
         # The broker confirms the position exists, so an entry flagged
         # unconfirmed by execute_plan has now settled. Its size is read from the

@@ -667,6 +667,7 @@ class IntradayStructureEngine:
                 # quoted in. SetupRecord has no `risk_points` field — it is
                 # derived at ledger time — so it is computed here.
                 atr=self._risk_distance(setup, bar),
+                bar_time=bar.timestamp,
             )
         except Exception:  # noqa: BLE001 - detection must survive a broker outage
             logger.exception("intraday structure execution entry failed for %s", setup.setup_id)
