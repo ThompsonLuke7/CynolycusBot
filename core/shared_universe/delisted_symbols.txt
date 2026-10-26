@@ -1,0 +1,84 @@
+# Symbols that no longer trade. Data providers skip these BEFORE making an API call
+# (Alpaca bars, news sources, earnings calendar, CBOE, Schwab chains).
+#
+# This only stops wasted requests. It does NOT change the universe, eligibility or any
+# module score: shared_universe.csv still lists these names and their cached bars stay
+# exactly as they are. Loader: core/shared_universe/delisted.py.
+#
+# One symbol per line; anything after '#' is a note. Built 2026-10-19 from universe names
+# that are absent from Alpaca's active asset list, each confirmed inactive or not found
+# (none of them was active). Refresh: .venv/bin/python scripts/build_delisted_symbols.py
+#
+ACVA   # inactive at Alpaca; last daily bar 2026-10-15; ACV Auctions Inc.
+ALOT   # inactive at Alpaca; last daily bar 2026-08-26; AstroNova, Inc. Common Stock
+APGE   # inactive at Alpaca; last daily bar 2026-09-02; Apogee Therapeutics, Inc. Common Stock
+ATAI   # inactive at Alpaca; last daily bar 2026-09-11; AtaiBeckley Inc. Common Stock
+ATKR   # inactive at Alpaca; last daily bar 2026-10-15; Atkore Inc.
+AVB    # inactive at Alpaca; last daily bar 2026-08-14; AvalonBay Communities, Inc.
+AVNS   # inactive at Alpaca; last daily bar 2026-07-24; Avanos Medical, Inc.
+AXIA   # inactive at Alpaca; last daily bar 2026-08-06; AXIA Energia American Depositary Shares 
+BBBY   # not found at Alpaca; last daily bar 2026-08-14
+BCAR   # inactive at Alpaca; last daily bar 2026-08-27; D. Boral ARC Acquisition I Corp. Class A
+BLD    # inactive at Alpaca; last daily bar 2026-06-30; TopBuild Corp. Common Stock
+BLFS   # inactive at Alpaca; last daily bar 2026-10-05; BioLife Solutions, Inc. Common Stock
+CCRN   # inactive at Alpaca; last daily bar 2026-07-20; Cross Country Healthcare, Inc. Common St
+CEPT   # inactive at Alpaca; last daily bar 2026-07-01; Cantor Equity Partners II, Inc. Class A 
+CNTA   # inactive at Alpaca; last daily bar 2026-06-23; Centessa Pharmaceuticals plc American De
+CPRX   # inactive at Alpaca; last daily bar 2026-07-14; Catalyst Pharmaceuticals, Inc. Common St
+CRNX   # inactive at Alpaca; last daily bar 2026-08-31; Crinetics Pharmaceuticals, Inc. Common S
+CTRA   # inactive at Alpaca; last daily bar 2026-05-06; Coterra Energy Inc.
+CWAN   # inactive at Alpaca; last daily bar 2026-06-24; Clearwater Analytics Holdings, Inc.
+DBRG   # inactive at Alpaca; last daily bar 2026-09-29; DigitalBridge Group, Inc.
+EA     # inactive at Alpaca; last daily bar 2026-08-04; Electronic Arts Inc. Common Stock
+EQR    # not found at Alpaca; last daily bar 2026-08-17
+ESPR   # inactive at Alpaca; last daily bar 2026-07-10; Esperion Therapeutics, Inc. Common Stock
+FBRX   # inactive at Alpaca; last daily bar 2026-08-26; Forte Biosciences, Inc. Common Stock
+FDP    # not found at Alpaca; last daily bar 2026-06-26
+FGMC   # inactive at Alpaca; last daily bar 2026-07-17; FG Merger II Corp. Common stock
+GBTG   # inactive at Alpaca; last daily bar 2026-09-28; Global Business Travel Group, Inc.
+GTLS   # inactive at Alpaca; last daily bar 2026-07-15; Chart Industries, Inc.
+HLX    # not found at Alpaca; last daily bar 2026-09-01
+HOLX   # inactive at Alpaca; last daily bar 2026-04-06; Hologic, Inc. Common Stock
+IAC    # inactive at Alpaca; last daily bar 2026-06-03; IAC Inc. Common Stock
+ISSC   # not found at Alpaca; last daily bar 2026-08-17
+JHG    # inactive at Alpaca; last daily bar 2026-06-30; Janus Henderson Group plc Ordinary Share
+LBRDA  # inactive at Alpaca; last daily bar 2026-08-19; Liberty Broadband Corporation Class A Co
+LC     # not found at Alpaca; last daily bar 2026-06-18
+LEG    # inactive at Alpaca; last daily bar 2026-08-26; Leggett & Platt, Inc.
+LOKV   # inactive at Alpaca; last daily bar 2026-06-22; Live Oak Acquisition Corp. V Class A Ord
+LPRO   # inactive at Alpaca; last daily bar 2026-07-29; Open Lending Corporation Common Stock
+MBAV   # not found at Alpaca; last daily bar 2026-07-21
+MRO    # inactive at Alpaca; last daily bar 2024-11-21; Marathon Oil Corporation
+NFBK   # inactive at Alpaca; last daily bar 2026-07-20; Northfield Bancorp, Inc. Common Stock (D
+NHIC   # inactive at Alpaca; last daily bar 2026-09-21; NewHold Investment Corp III Class A Ordi
+NSA    # inactive at Alpaca; last daily bar 2026-07-21; National Storage Affiliates Trust
+NUVL   # inactive at Alpaca; last daily bar 2026-07-14; Nuvalent, Inc. Class A Common Stock
+ORLA   # inactive at Alpaca; last daily bar 2026-07-30; Orla Mining Ltd.
+PRA    # inactive at Alpaca; last daily bar 2026-06-25; ProAssurance Corporation
+PSKY   # not found at Alpaca; last daily bar 2026-10-05
+PSTG   # not found at Alpaca; last daily bar 2026-04-16
+QRVO   # inactive at Alpaca; last daily bar 2026-10-02; Qorvo, Inc. Common Stock
+RAAQ   # inactive at Alpaca; last daily bar 2026-07-01; Real Asset Acquisition Corp. Class A Ord
+SATS   # old SATS stopped trading (last daily bar in cache 2026-10-09); the ticker now belongs to a different security (Strive Inc. 15% Series A preferred, ~$95): keep listed so its prices are never spliced onto this history
+SEM    # inactive at Alpaca; last daily bar 2026-06-30; SELECT MEDICAL HOLDINGS CORP
+SILA   # inactive at Alpaca; last daily bar 2026-06-30; Sila Realty Trust, Inc.
+SKYT   # inactive at Alpaca; last daily bar 2026-07-31; SkyWater Technology, Inc. Common Stock
+SLP    # inactive at Alpaca; last daily bar 2026-10-05; Simulations Plus, Inc. Common Stock
+SQ     # not found at Alpaca; last daily bar 2025-01-17
+SSSS   # inactive at Alpaca; last daily bar 2026-06-30; SuRo Capital Corp. Common Stock
+STEL   # inactive at Alpaca; last daily bar 2026-06-30; Stellar Bancorp, Inc.
+TALK   # inactive at Alpaca; last daily bar 2026-08-14; Talkspace, Inc. Common Stock
+TBPH   # inactive at Alpaca; last daily bar 2026-09-23; Theravance Biopharma, Inc. Ordinary Shar
+TBRG   # inactive at Alpaca; last daily bar 2026-07-08; TruBridge, Inc. Common Stock
+TMHC   # inactive at Alpaca; last daily bar 2026-07-23; Taylor Morrison Home Corporation Common 
+TOI    # not found at Alpaca; last daily bar 2026-08-03
+TWO    # inactive at Alpaca; last daily bar 2026-08-24; Two Harbors Investment Corp.
+UDMY   # inactive at Alpaca; last daily bar 2026-05-08; Udemy, Inc. Common Stock
+VSCO   # not found at Alpaca; last daily bar 2026-06-01
+WBD    # inactive at Alpaca; last daily bar 2026-10-05; Warner Bros. Discovery, Inc. Series A Co
+WBS    # inactive at Alpaca; last daily bar 2026-08-19; Webster Financial Corporation Waterbury
+WSR    # inactive at Alpaca; last daily bar 2026-07-13; Whitestone REIT
+XOMA   # inactive at Alpaca; last daily bar 2026-07-13; XOMA Royalty Corporation Common Stock
+# added 2026-10-25 by scripts/build_delisted_symbols.py
+ACA    # inactive at Alpaca 2026-10-25; last Alpaca daily bar 2026-10-22; Arcosa, Inc.
+BZH    # inactive at Alpaca 2026-10-25; last Alpaca daily bar 2026-10-19 (pinned ~$33.4); Beazer Homes USA

@@ -59,6 +59,64 @@ _COMOVEMENT_PCA_COMPONENTS = 20
 _COMOVEMENT_WEIGHT = 0.4
 
 
+def _article_embeddings_by_ticker_streaming(tickers: list[str]) -> dict[str, np.ndarray] | None:
+    """Per-ticker mean embedding, reading the news embeddings one batch at a time.
+
+    Same rows, same order and the same float32 mean as the whole-file path
+    below, so the vectors are bit-identical; but the file stores every vector as
+    a ~8.5 KB JSON string, and loading all ~950k of them (plus their text) into
+    pandas is what took the nightly news stage to 18 GB. Only the four columns
+    used are read. Returns None for a layout the batched read cannot handle
+    (no ticker, embedding or text column), which leaves it to the whole-file path.
+    """
+    import json
+
+    import pyarrow.parquet as pq
+
+    names = pq.read_schema(_NEWS_EMBEDDINGS_PATH).names
+    if not {"ticker", "embedding", "text"} <= set(names):
+        return None
+    text_col = "text"
+    columns = ["ticker", "embedding", "text"] + [c for c in ("embedding_available",) if c in names]
+
+    ticker_set = set(tickers)
+    vectors: dict[str, list[np.ndarray]] = {}
+    spam: dict[str, list[bool]] = {}
+    pf = pq.ParquetFile(_NEWS_EMBEDDINGS_PATH, buffer_size=8 << 20, pre_buffer=False)
+    for batch in pf.iter_batches(batch_size=20_000, columns=columns):
+        sub = batch.to_pandas()
+        sub["ticker"] = sub["ticker"].astype(str).str.upper()
+        sub = sub[sub["ticker"].isin(ticker_set)]
+        if "embedding_available" in sub.columns:
+            sub = sub[sub["embedding_available"].fillna(True).astype(bool)]
+        if sub.empty:
+            continue
+        flags = sub[text_col].fillna("").map(_is_spam)
+        for ticker, raw, is_spam in zip(sub["ticker"], sub["embedding"], flags):
+            value = json.loads(raw) if isinstance(raw, str) else raw
+            vectors.setdefault(ticker, []).append(np.asarray(value, dtype=np.float32))
+            spam.setdefault(ticker, []).append(bool(is_spam))
+
+    result: dict[str, np.ndarray] = {}
+    n_filtered = 0
+    for ticker in sorted(vectors):
+        rows, flags = vectors[ticker], spam[ticker]
+        kept = [v for v, f in zip(rows, flags) if not f]
+        if not kept:  # all spam → fall back to using everything for coverage
+            kept = rows
+        else:
+            n_filtered += len(rows) - len(kept)
+        mean_vec = np.array(kept, dtype=np.float32).mean(axis=0)
+        norm = np.linalg.norm(mean_vec)
+        result[ticker] = mean_vec / norm if norm > 0 else mean_vec
+
+    logger.info(
+        "Fast path: aggregated article embeddings for %d / %d tickers (dropped %d spam articles)",
+        len(result), len(tickers), n_filtered,
+    )
+    return result
+
+
 def _load_article_embeddings_by_ticker(tickers: list[str]) -> dict[str, np.ndarray]:
     """Average existing per-article embeddings into one vector per ticker.
 
@@ -66,6 +124,10 @@ def _load_article_embeddings_by_ticker(tickers: list[str]) -> dict[str, np.ndarr
     """
     if not _NEWS_EMBEDDINGS_PATH.exists():
         return {}
+
+    streamed = _article_embeddings_by_ticker_streaming(tickers)
+    if streamed is not None:
+        return streamed
 
     try:
         emb_df = pd.read_parquet(_NEWS_EMBEDDINGS_PATH)

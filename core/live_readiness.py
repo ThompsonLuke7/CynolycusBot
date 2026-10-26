@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
-from core.calendar import next_trading_day, prev_trading_day
+from core.calendar import is_trading_day, next_trading_day, prev_trading_day
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_READINESS_PATH = _REPO_ROOT / "Data/readiness/latest_success.json"
@@ -112,7 +112,19 @@ def readiness_status(
         # to Monday 16:00 and that stamp is stale, so the session opens dark.
         # Asking the question the job is actually for closes that gap: it
         # skipped on 07-28, 08-05, 08-07, 08-10, 08-12, and 08-14.
-        target_session = next_trading_day(now_et.date())
+        #
+        # "Next" is the next session that has not OPENED yet. Before today's
+        # open on a trading day that is today: next_trading_day() would skip to
+        # tomorrow and demand a stamp newer than a close that has not happened,
+        # which no stamp can satisfy. Every server start between midnight and
+        # the open then re-ran the whole rebuild whatever the stamp said -- on
+        # 2026-10-12 a 09:26 start rebuilt until 10:09, through the open, over
+        # a stamp written at 07:27. Pre-open this is now the consumer question.
+        today = now_et.date()
+        if is_trading_day(today) and now_et.time() < time(9, 30):
+            target_session = today
+        else:
+            target_session = next_trading_day(today)
         prior_session = prev_trading_day(target_session)
     else:
         prior_session = prev_trading_day(now_et.date())

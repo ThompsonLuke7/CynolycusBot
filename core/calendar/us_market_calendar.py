@@ -109,6 +109,22 @@ def prev_trading_day(d: date) -> date:
     return prev
 
 
+def latest_session_date(now: datetime | None = None) -> date:
+    """Date of the most recent trading session that has opened as of `now`.
+
+    This is the session a market snapshot taken at `now` describes: today once
+    the 09:30 ET open has passed on a trading day, otherwise the previous
+    trading day. Use it, not the wall-clock date, to key a capture: a catch-up
+    run after midnight or over a weekend still reads the last session's close,
+    and filing it under "today" both mislabels it and lets that evening's real
+    capture overwrite it.
+    """
+    et = (now or datetime.now(_ET)).astimezone(_ET)
+    if is_trading_day(et.date()) and et.time() >= _RTH_OPEN:
+        return et.date()
+    return prev_trading_day(et.date())
+
+
 def is_market_open_now(now: datetime | None = None) -> bool:
     """True during US equity/options regular trading hours (09:30-16:00 ET) on a
     real trading day (weekday, minus full-day NYSE holidays).

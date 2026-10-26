@@ -81,7 +81,8 @@ def test_incremental_append_writes_despite_string_timestamps(tmp_path, monkeypat
     # The regression was a write failure, so the artifact on disk is the assertion.
     saved = pd.read_parquet(out_path)
     assert set(saved["record_id"]) == {"r0", "r1", "r2"}
-    assert len(out) == 3
+    # The incremental append returns only what it embedded; it never loads the prior vectors.
+    assert set(out["record_id"]) == {"r1", "r2"}
 
 
 def test_appended_timestamps_land_as_utc_datetimes(tmp_path, monkeypatch):

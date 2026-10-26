@@ -54,13 +54,20 @@ def bars(tmp_path):
 
 @pytest.fixture()
 def stale_stamp(monkeypatch, tmp_path):
-    """A global stamp that exists but predates the last completed session."""
+    """A global stamp that exists but predates the last completed session.
+
+    Ten days back, relative to now, for the same reason as `current_bar`: the
+    fixed 2026-07-28 date this used aged past the tests' 999h `max_age_hours`
+    in September, after which the gate refused it as "too old" instead of
+    "predates latest completed trading session" and the reason assertion broke.
+    Ten days always spans a completed session and stays far inside 999h.
+    """
     monkeypatch.delenv("CYNOLYCUS_READINESS_REQUIRED", raising=False)
     stamp = tmp_path / "latest_success.json"
     stamp.write_text(json.dumps({
         "job": "nightly_data_readiness",
         "status": "success",
-        "completed_at_utc": datetime(2026, 7, 28, 2, 5, tzinfo=timezone.utc).isoformat(),
+        "completed_at_utc": (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(),
     }))
     monkeypatch.setattr("core.live_readiness.DEFAULT_READINESS_PATH", stamp)
     return stamp

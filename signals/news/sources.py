@@ -12,6 +12,7 @@ from typing import Callable, Iterable
 
 import pandas as pd
 
+from core.shared_universe.delisted import drop_delisted
 from signals.news.config import SEC_ADMIN_DESCRIPTION_PATTERNS, SEC_ALPHA_FORMS, SEC_LOW_SIGNAL_FORMS
 from signals.news.schema import records_from_frame
 
@@ -38,7 +39,14 @@ def _json_url(url: str, timeout: int = 30) -> object:
 
 
 def _clean_tickers(tickers: Iterable[str]) -> list[str]:
-    return [str(t).upper().replace("$", "").strip() for t in tickers if str(t).strip()]
+    """Normalized tickers for a provider loop, minus delisted symbols.
+
+    Every per-ticker provider in this module goes through here, so this is where
+    a symbol that no longer trades (core/shared_universe/delisted_symbols.txt)
+    is dropped before any request is made for it.
+    """
+    cleaned = [str(t).upper().replace("$", "").strip() for t in tickers if str(t).strip()]
+    return drop_delisted(cleaned, context="signals.news.sources")
 
 
 def is_alpha_relevant_sec_filing(row: pd.Series, wanted_forms: set[str]) -> bool:
@@ -1225,6 +1233,64 @@ def fetch_finra_short_volume_day(
         except (ValueError, IndexError):
             continue
     return pd.DataFrame(rows)
+
+
+def fill_missing_finra_daily_files(
+    daily_dir: object,
+    *,
+    end: str | pd.Timestamp,
+    lookback_sessions: int = 10,
+    fetch: Callable[[pd.Timestamp], pd.DataFrame] = fetch_finra_short_volume_day,
+) -> dict[str, list[str]]:
+    """Fetch every trading day in the trailing window that has no daily file.
+
+    The nightly stage used to fetch a single day, so a run that was missed,
+    died early, or hit a network error (``fetch_finra_short_volume_day`` returns
+    an empty frame for any failure, indistinguishable from a holiday) left a
+    hole no later run revisited: seven sessions between 2026-08-18 and
+    2026-10-08. Walking the last ``lookback_sessions`` trading days ending at
+    ``end`` makes the stage self-healing. Existing files are never refetched or
+    rewritten, and non-trading days are skipped without a request.
+
+    Returns ``{"written": [...], "empty": [...]}`` as YYYYMMDD keys, oldest
+    first. An ``empty`` day got no rows back and is retried on the next run.
+    """
+    from datetime import timedelta
+    from pathlib import Path
+
+    from core.calendar import is_trading_day
+
+    if lookback_sessions < 1:
+        raise ValueError("lookback_sessions must be >= 1")
+    daily_dir = Path(daily_dir)
+    daily_dir.mkdir(parents=True, exist_ok=True)
+
+    sessions = []
+    day = pd.Timestamp(end).date()
+    while len(sessions) < lookback_sessions:
+        if is_trading_day(day):
+            sessions.append(day)
+        day -= timedelta(days=1)
+
+    written: list[str] = []
+    empty: list[str] = []
+    for session in reversed(sessions):
+        key = session.strftime("%Y%m%d")
+        out_path = daily_dir / f"{key}.parquet"
+        if out_path.exists():
+            continue
+        df = fetch(pd.Timestamp(session))
+        if df.empty:
+            empty.append(key)
+            continue
+        got = set(pd.to_datetime(df["date"]).dt.strftime("%Y%m%d"))
+        if got != {key}:
+            raise ValueError(f"FINRA file requested for {key} carries dates {sorted(got)}")
+        tmp_path = out_path.with_suffix(".parquet.tmp")
+        df.to_parquet(tmp_path, index=False)
+        os.replace(tmp_path, out_path)
+        written.append(key)
+    return {"written": written, "empty": empty}
 
 
 def backfill_finra_short_volume(

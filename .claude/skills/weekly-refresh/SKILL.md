@@ -163,10 +163,12 @@ After the chain finishes:
   `--auto`). Its exit code is in the stamp as `momentum_shadow_ledger` but is
   deliberately not folded into the overall status.
 - `.venv/bin/python -m core.live_readiness` (no flag — the consumer gate the
-  modules use) — must be `ok: true` with a stamp newer than the run. Do not
-  judge this with `--for-next-session` after midnight: before Monday's open it
-  targets Tuesday and demands a stamp after Monday 16:00, so a fresh Monday
-  01:30 stamp reads `ok: false` (seen 2026-09-28).
+  modules use) — must be `ok: true` with a stamp newer than the run.
+  `--for-next-session` agrees with it before the open (fixed 2026-10-13; until
+  then it targeted the day AFTER today once midnight passed, so a fresh Monday
+  01:30 stamp read `ok: false` and every pre-open server start re-ran the whole
+  rebuild). From the open onward it asks about tomorrow and correctly refuses a
+  same-day stamp.
 - `cat Data/readiness/last_run_progress.json` — how far the readiness rebuild got.
 - Freshness by mtime of the artifacts the modules actually read:
   `Data/shared/universe/shared_universe.csv`,
@@ -197,9 +199,25 @@ never guessed.
   `ticker_clusters.parquet` and `theme_registry.parquet` for today's date), resume at
   step 8 instead — `compute_memberships()` then `build_meta_features()` read those
   artifacts straight off disk, which skips the ~40 min of paid Claude labeling.
+  The 2026-10-05 `exit=1` was a different cause: `update_feeds.py` re-ran the news
+  incremental that stage 3 had just finished, and it hit the 1,800 s per-feed
+  timeout (themes were fine). The weekly script now passes `--skip-news-incremental`;
+  when rerunning the stage by hand right after stage 3, pass it too.
+- **A killed nightly is resumed, not rerun.** If `nightly_market_data.sh` died
+  part-way (WSL shutdown), read its stage lines in `nightly_cron.log` and run only
+  the stages that did not finish, with the script's own commands and lock, then
+  write `Data/readiness/nightly_market_data_latest.json` — without a fresh stamp
+  the server's startup check may launch the whole 6-7 h job. Done this way on
+  2026-10-13 (stages 6-9 took over from a 21:41 kill).
 - **`exit=75`** — lock contention; another heavy job held
   `Data/runtime/live_data_jobs.lock`. Reschedule, do not force.
 - **`exit=143`** — SIGTERM from the stage `timeout`. Overridable per stage via
   `WEEKLY_{BARS,UNIVERSE,NEWS_COLLECT,NEWS_PROCESS,NEWS_SIGNAL,FEEDS}_TIMEOUT_SECONDS`.
 - **`exit=76`** on the readiness script — blocked by the live-window guard
   (Mon-Fri 07:45-16:40 ET). Expected if the chain ran long; see step 4.
+- **Catch-up after a missed week** — exit 0 but a silent news hole: the news
+  collector looks back only 3 days. Set `WEEKLY_NEWS_LOOKBACK_DAYS` (and
+  `NIGHTLY_NEWS_LOOKBACK_DAYS` if also running the nightly) to reach back past
+  the last successful collect; overlap is de-duped. On 2026-10-25 a serial
+  nightly (11 d, dealer/IV off until Schwab re-auth) → weekly (15 d) → forced
+  readiness chain ran 01:24-12:50 ET with every stage exit 0.

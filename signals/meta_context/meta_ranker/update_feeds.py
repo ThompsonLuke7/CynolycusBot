@@ -33,8 +33,9 @@ PY = sys.executable
 # DAILY:   whole-corpus news-catalyst rescore for explicit/manual maintenance.
 #   Production nightly_market_data.sh already rebuilds this signal after its
 #   priority news collection. Earnings are separately bounded there.
+NEWS_INCREMENTAL = ("news: incremental", [PY, "-m", "signals.news.main", "--stage", "incremental"])
 PER_BAR = [
-    ("news: incremental",      [PY, "-m", "signals.news.main", "--stage", "incremental"]),
+    NEWS_INCREMENTAL,
     ("news: economic-calendar", [PY, "-m", "signals.news.main", "--stage", "economic-calendar"]),
     ("forward-guidance signal", [PY, "signals/meta_context/build_forward_guidance_signal.py"]),
 ]
@@ -74,6 +75,10 @@ def main():
                          "repair; Claude-labels every cluster instead of carrying names forward).")
     ap.add_argument("--include-treasury", action="store_true",
                     help="Also try FRED treasury rates. Optional; not part of live-readiness.")
+    ap.add_argument("--skip-news-incremental", action="store_true",
+                    help="Leave out the news incremental feed. For a caller that has just run "
+                         "`signals.news.main --stage incremental` itself (weekly_refresh.sh): a second "
+                         "pass embeds nothing new but still costs ~30 min, right at the per-feed timeout.")
     ap.add_argument("--timeout", type=int, default=1800, help="Per-feed timeout (s).")
     args = ap.parse_args()
 
@@ -85,6 +90,8 @@ def main():
         jobs = DAILY + weekly
     else:
         jobs = PER_BAR + weekly
+    if args.skip_news_incremental:
+        jobs = [job for job in jobs if job is not NEWS_INCREMENTAL]
     if args.include_treasury:
         jobs = jobs + [OPTIONAL_TREASURY]
     results = {label: _run(label, argv, args.timeout) for label, argv in jobs}

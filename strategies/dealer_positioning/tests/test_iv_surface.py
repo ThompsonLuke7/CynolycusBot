@@ -187,3 +187,26 @@ def test_capture_writes_features_contracts_and_isolates_failures(tmp_path):
     capture_iv_surface(symbols=["AAA"], client=client, output_root=tmp_path, sleep_seconds=0, now=now)
     assert len(pd.read_parquet(out / "iv_contracts.parquet")) == 324
     assert len(pd.read_parquet(out / "iv_surface_features.parquet")) == 1
+
+
+@pytest.mark.parametrize(
+    ("now", "session"),
+    [
+        (datetime(2026, 9, 11, 1, 49, tzinfo=_ET), "2026-09-10"),   # post-midnight catch-up
+        (datetime(2026, 9, 12, 10, 0, tzinfo=_ET), "2026-09-11"),   # Saturday
+        (datetime(2026, 9, 14, 8, 0, tzinfo=_ET), "2026-09-11"),    # Monday pre-open
+        (datetime(2026, 9, 14, 15, 15, tzinfo=_ET), "2026-09-14"),  # intraday
+    ],
+)
+def test_capture_keys_on_the_session_not_the_wall_clock(tmp_path, now, session):
+    client = _FakeClient()
+
+    result = capture_iv_surface(symbols=["AAA"], client=client, output_root=tmp_path, sleep_seconds=0, now=now)
+
+    assert result.output_dir == tmp_path / session.replace("-", "")
+    features = pd.read_parquet(result.output_dir / "iv_surface_features.parquet")
+    assert features["snapshot_date"].item() == session
+    # The wall-clock capture time is kept, and the live chain is still requested from today.
+    assert pd.Timestamp(features["captured_at"].item()) == pd.Timestamp(now)
+    assert client.calls[0][1] == now.date()
+

@@ -104,7 +104,9 @@ def html_messages(path: Path) -> list[dict[str, Any]]:
 def normalized_messages(path: Path) -> list[dict[str, Any]]:
     """Read the normalizer's JSONL when available, tolerating field aliases."""
     rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # JSONL separators are physical newlines, not Unicode line separators
+    # which may legitimately occur inside an unescaped JSON string.
+    for line in path.read_text(encoding="utf-8").split("\n"):
         if not line.strip():
             continue
         src = json.loads(line)

@@ -12,6 +12,7 @@ from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from ..core.config import AlpacaConfig
+from core.shared_universe.delisted import is_delisted
 from Data.load_data import get_ticker_raw_dir
 from Data.retrieve_data import normalize_ticker
 
@@ -93,6 +94,10 @@ def fetch_intraday(
         max_pages: optional page cap to avoid overly large downloads.
     """
     clean_ticker = normalize_ticker(ticker)
+    if is_delisted(clean_ticker):
+        # No request for a symbol that no longer trades; callers already treat an
+        # empty frame as "no new bars" and keep their cache.
+        return pd.DataFrame()
     cfg = AlpacaConfig.from_env()
     client = StockHistoricalDataClient(
         api_key=cfg.key_id,

@@ -440,21 +440,24 @@ def fetch_alpaca_assets(cfg: DiscoveryConfig, *, env_file: str = ".env") -> pd.D
     from core.API.Alpaca_API.core.config import AlpacaConfig
 
     creds = AlpacaConfig.from_env(env_file)
-    client = TradingClient(creds.key_id, creds.secret_key, paper=True)
+    # raw_data: alpaca-py validates every asset against a closed exchange enum,
+    # so one listing on a venue it does not know yet (TXSE, 2026-10) failed the
+    # whole response and the broad screen discovered nothing.
+    client = TradingClient(creds.key_id, creds.secret_key, paper=True, raw_data=True)
     request = GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
     rows = []
     for asset in client.get_all_assets(request):
-        symbol = clean_ticker(asset.symbol)
+        symbol = clean_ticker(asset.get("symbol"))
         if not VALID_SYMBOL_RE.match(symbol):
             continue
-        if not getattr(asset, "tradable", False):
+        if not asset.get("tradable", False):
             continue
-        exchange = normalize_exchange(getattr(asset, "exchange", "") or "")
+        exchange = normalize_exchange(asset.get("exchange") or "")
         if cfg.benchmark_exchanges and exchange not in cfg.benchmark_exchanges:
             continue
         if any(sub in symbol for sub in cfg.exclude_substrings):
             continue
-        rows.append({"ticker": symbol, "name": getattr(asset, "name", ""), "exchange": exchange})
+        rows.append({"ticker": symbol, "name": asset.get("name") or "", "exchange": exchange})
     df = pd.DataFrame(rows).drop_duplicates("ticker")
     logger.info("Alpaca assets: %d tradable US equities after filter", len(df))
     return df

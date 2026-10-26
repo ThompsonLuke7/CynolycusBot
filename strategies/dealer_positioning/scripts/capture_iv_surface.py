@@ -12,7 +12,10 @@ Writes Data/dealer_positioning/iv_surface/YYYYMMDD/:
   iv_contracts.parquet         raw contract quotes (bid/ask/mark/IV/delta/OI)
   errors.jsonl                 one line per symbol that failed
 
-There is deliberately no --snapshot-date: a live chain can only be today's.
+There is deliberately no --snapshot-date: a live chain can only be the latest
+session's. The folder and ``snapshot_date`` are that session's date, so a
+catch-up run after midnight or on a weekend lands on the close it actually
+read; ``captured_at`` keeps the wall-clock time.
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ REPO = Path(__file__).resolve().parents[3]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from core.calendar import latest_session_date
 from strategies.dealer_positioning.iv_surface import surface_features
 from strategies.dealer_positioning.scripts.capture_historical_snapshots import (
     DEFAULT_MIN_ADV,
@@ -74,7 +78,7 @@ def capture_iv_surface(
     now: datetime | None = None,
 ) -> IvSurfaceCaptureResult:
     now = now or datetime.now(tz=_ET)
-    snapshot_date = now.date().isoformat()
+    snapshot_date = latest_session_date(now).isoformat()
     output_dir = output_root / snapshot_date.replace("-", "")
     output_dir.mkdir(parents=True, exist_ok=True)
 

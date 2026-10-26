@@ -32,3 +32,20 @@ def test_relabel_themes_without_weekly_is_rejected(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         _jobs(monkeypatch, "--relabel-themes")
     assert exc.value.code == 2
+
+
+_INCREMENTAL = ["-m", "signals.news.main", "--stage", "incremental"]
+
+
+def test_weekly_runs_the_news_incremental_by_default(monkeypatch):
+    assert _INCREMENTAL in _jobs(monkeypatch, "--weekly")
+
+
+def test_skip_news_incremental_drops_only_that_feed(monkeypatch):
+    default = _jobs(monkeypatch, "--weekly")
+    skipped = _jobs(monkeypatch, "--weekly", "--skip-news-incremental")
+
+    assert _INCREMENTAL not in skipped
+    assert skipped == [c for c in default if c != _INCREMENTAL]
+    assert ["themes/dynamic_theme/pipeline.py", "--mode", "weekly"] in skipped
+

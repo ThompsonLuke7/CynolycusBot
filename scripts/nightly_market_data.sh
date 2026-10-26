@@ -3,8 +3,8 @@
 # Nightly market-data refresh for the catalyst module.
 #
 # Pulls today's CBOE per-ticker options snapshot (appends to
-# cboe_options_summary.parquet) and yesterday's FINRA short-volume CSV
-# (appends to a per-day file under signals/news/data/processed/finra_daily/),
+# cboe_options_summary.parquet) and any missing recent FINRA short-volume CSVs
+# (one per-day file under signals/news/data/processed/finra_daily/),
 # runs ticker discovery, then collects + processes the day's catalyst news and
 # rebuilds the per-(ticker, day) news_catalyst_signal the meta-ranker consumes.
 #
@@ -138,31 +138,34 @@ fi
     echo "[$(ts)] IV surface disabled by IV_SURFACE_ENABLED=0"
   fi
 
-  # 2) FINRA prior-trading-day short volume (appends a single day's parquet)
-  echo "[$(ts)] FINRA — pulling yesterday's CSV"
-  timeout --signal=TERM --kill-after=30s "${NIGHTLY_FINRA_TIMEOUT_SECONDS:-900}s" "$PYTHON" -u <<'PYEOF'
-from pathlib import Path
-import pandas as pd
+  # 2) FINRA short volume: one parquet per trading day. Fetches every session
+  #    in the trailing window that has no file yet, not just "yesterday": the
+  #    single-day version never revisited a day it missed, so each skipped or
+  #    late run, and each swallowed network error, left a permanent hole (seven
+  #    sessions between 2026-08-18 and 2026-10-08). The window still ENDS at the
+  #    prior UTC day, so the usual one-day publication lag is unchanged.
+  echo "[$(ts)] FINRA — pulling missing daily CSVs (trailing ${NIGHTLY_FINRA_LOOKBACK_SESSIONS:-10} sessions)"
+  NIGHTLY_FINRA_LOOKBACK_SESSIONS="${NIGHTLY_FINRA_LOOKBACK_SESSIONS:-10}" \
+    timeout --signal=TERM --kill-after=30s "${NIGHTLY_FINRA_TIMEOUT_SECONDS:-900}s" "$PYTHON" -u <<'PYEOF'
+import os
 import sys
+import pandas as pd
 sys.path.insert(0, ".")
-from signals.news.sources import fetch_finra_short_volume_day
+from signals.news.sources import fill_missing_finra_daily_files
 
-target = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=1)
-while target.weekday() >= 5:
-    target -= pd.Timedelta(days=1)
-
-out_path = Path(f"signals/news/data/processed/finra_daily/{target.strftime('%Y%m%d')}.parquet")
-if out_path.exists():
-    print(f"  {out_path} already exists — skipping")
-    sys.exit(0)
-
-df = fetch_finra_short_volume_day(target)
-if df.empty:
-    print(f"  no rows for {target.date()} (likely market holiday)")
-    sys.exit(0)
-
-df.to_parquet(out_path, index=False)
-print(f"  wrote {len(df):,} rows to {out_path}")
+end = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=1)
+daily_dir = "signals/news/data/processed/finra_daily"
+result = fill_missing_finra_daily_files(
+    daily_dir,
+    end=end,
+    lookback_sessions=int(os.environ["NIGHTLY_FINRA_LOOKBACK_SESSIONS"]),
+)
+for key in result["written"]:
+    print(f"  wrote {daily_dir}/{key}.parquet")
+for key in result["empty"]:
+    print(f"  no rows for {key} (not published yet, or a fetch failure; retried next run)")
+if not result["written"] and not result["empty"]:
+    print(f"  no missing sessions through {end.date()}")
 PYEOF
   finra_exit=$?
   echo "[$(ts)] FINRA fetch exit=$finra_exit"
@@ -225,9 +228,11 @@ PYEOF
   #    The broad full-universe sweep is the weekly job's responsibility — that's
   #    the ~3h tail we moved off the nightly path. Breaking news on tradeable
   #    names still flows through the same incremental embed/cluster + signal below.
-  echo "[$(ts)] news — collecting headlines (PRIORITY scope: swing ∪ top-300 momentum)"
+  #    NIGHTLY_NEWS_LOOKBACK_DAYS widens the default 3-day window after missed
+  #    nights (overlap is de-duped on merge).
+  echo "[$(ts)] news — collecting headlines (PRIORITY scope: swing ∪ top-300 momentum, lookback=${NIGHTLY_NEWS_LOOKBACK_DAYS:-3}d)"
   timeout --signal=TERM --kill-after=60s "${NIGHTLY_NEWS_COLLECT_TIMEOUT_SECONDS:-14400}s" \
-    "$PYTHON" -u -m scripts.collect_news_scope --scope priority
+    "$PYTHON" -u -m scripts.collect_news_scope --scope priority --lookback-days "${NIGHTLY_NEWS_LOOKBACK_DAYS:-3}"
   news_collect_exit=$?
   echo "[$(ts)] news collect exit=$news_collect_exit"
   [ "$news_collect_exit" -ne 0 ] && STATUS="$news_collect_exit"

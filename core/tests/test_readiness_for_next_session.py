@@ -88,3 +88,66 @@ def test_a_stale_stamp_is_still_refused_by_both_modes(tmp_path):
 
     assert not lr.readiness_status(path=stamp, now=now)[0]
     assert not lr.readiness_status(path=stamp, now=now, for_next_session=True)[0]
+
+
+def test_before_the_open_the_next_session_is_today(tmp_path):
+    """After midnight the session being authorized is today's, not tomorrow's.
+
+    2026-10-12: a stamp written at 07:27 was refused at the 09:26 startup check
+    ("predates ... 2026-10-12 16:00"), a close that had not happened, and the
+    full rebuild ran until 10:09, through the open.
+    """
+    stamp = _stamp(tmp_path, datetime(2026, 10, 12, 7, 27, tzinfo=ET))
+
+    for now in (
+        datetime(2026, 10, 12, 7, 30, tzinfo=ET),
+        datetime(2026, 10, 12, 9, 26, tzinfo=ET),
+    ):
+        ok_next, reason, _ = lr.readiness_status(path=stamp, now=now, for_next_session=True)
+        assert ok_next, reason
+        assert lr.readiness_status(path=stamp, now=now)[0], "pre-open it is the consumer question"
+
+
+def test_before_the_open_a_pre_close_stamp_is_still_refused(tmp_path):
+    """Tuesday 01:16 needs proof generated after Monday's close, in both modes."""
+    stale = _stamp(tmp_path, datetime(2026, 10, 12, 10, 9, tzinfo=ET))
+    now = datetime(2026, 10, 13, 1, 16, tzinfo=ET)
+
+    ok_next, reason, _ = lr.readiness_status(path=stale, now=now, for_next_session=True)
+    assert not ok_next
+    assert "2026-10-12 16:00" in reason
+    assert not lr.readiness_status(path=stale, now=now)[0]
+
+    fresh = _stamp(tmp_path, datetime(2026, 10, 13, 3, 5, tzinfo=ET))
+    assert lr.readiness_status(path=fresh, now=datetime(2026, 10, 13, 3, 9, tzinfo=ET), for_next_session=True)[0]
+
+
+def test_once_the_session_opens_next_means_tomorrow_again(tmp_path):
+    """From the open onward a same-morning stamp cannot authorize the next day."""
+    stamp = _stamp(tmp_path, datetime(2026, 10, 13, 3, 5, tzinfo=ET))
+
+    for now in (
+        datetime(2026, 10, 13, 9, 30, tzinfo=ET),
+        datetime(2026, 10, 13, 16, 30, tzinfo=ET),
+        datetime(2026, 10, 13, 22, 15, tzinfo=ET),
+    ):
+        ok_next, reason, _ = lr.readiness_status(path=stamp, now=now, for_next_session=True)
+        assert not ok_next
+        assert "2026-10-13 16:00" in reason
+
+
+def test_before_the_open_after_a_weekend_or_holiday(tmp_path):
+    """Monday pre-open looks back to Friday; a holiday morning looks ahead."""
+    friday_night = _stamp(tmp_path, datetime(2026, 10, 9, 22, 54, tzinfo=ET))
+    assert lr.readiness_status(
+        path=friday_night, now=datetime(2026, 10, 12, 1, 0, tzinfo=ET), for_next_session=True
+    )[0]
+
+    # Labor Day (Mon 2026-09-07) is not a session: Tuesday is the target, and a
+    # Friday-night stamp already postdates the last close before it.
+    assert lr.readiness_status(
+        path=_stamp(tmp_path, datetime(2026, 9, 4, 22, 54, tzinfo=ET)),
+        now=datetime(2026, 9, 7, 8, 0, tzinfo=ET),
+        for_next_session=True,
+    )[0]
+

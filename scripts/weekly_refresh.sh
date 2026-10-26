@@ -87,9 +87,12 @@ fi
   #    incremental embed/cluster + rebuilds news_catalyst_signal so the broad
   #    corpus the Meta ranker reads is current. (This is the ~3h tail moved off
   #    the nightly path.)
-  echo "[$(ts)] 3/6 full-universe news: collect (scope=full) → embed → signal"
+  #    WEEKLY_NEWS_LOOKBACK_DAYS: the collector's default window is 3 days, so a
+  #    missed weekend leaves a permanent hole unless the window reaches back to
+  #    the last full sweep (overlap is de-duped on merge).
+  echo "[$(ts)] 3/6 full-universe news: collect (scope=full, lookback=${WEEKLY_NEWS_LOOKBACK_DAYS:-3}d) → embed → signal"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_NEWS_COLLECT_TIMEOUT_SECONDS:-43200}s" \
-    "$PYTHON" -u -m scripts.collect_news_scope --scope full
+    "$PYTHON" -u -m scripts.collect_news_scope --scope full --lookback-days "${WEEKLY_NEWS_LOOKBACK_DAYS:-3}"
   rc=$?
   echo "[$(ts)] news collect (full) exit=$rc"
   [ "$rc" -ne 0 ] && STATUS="$rc"
@@ -133,7 +136,13 @@ fi
   #    is a one-shot repair: every cluster is Claude-labeled from its own members
   #    instead of carrying last week's names forward (use when prior names are
   #    known to be wrong -- carry-forward would otherwise keep them forever).
-  FEEDS_ARGS=(--weekly)
+  #
+  #    --skip-news-incremental: stage 3 above has just run the same
+  #    `signals.news.main --stage incremental`. Repeating it here embedded nothing
+  #    new yet took 1,330s, 1,508s, then timed out at 1,800s on 2026-10-05 (the
+  #    whole stage read as exit=1 with the themes fine) and scraped through at
+  #    1,845s on 10-12. A standalone `update_feeds.py --weekly` still runs it.
+  FEEDS_ARGS=(--weekly --skip-news-incremental)
   [ "${WEEKLY_THEMES_RELABEL_ALL:-0}" = "1" ] && FEEDS_ARGS+=(--relabel-themes)
   echo "[$(ts)] 5/6 meta feeds + dynamic themes (${FEEDS_ARGS[*]}, costs Claude \$)"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_FEEDS_TIMEOUT_SECONDS:-21600}s" \

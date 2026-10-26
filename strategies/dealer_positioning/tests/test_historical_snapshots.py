@@ -11,7 +11,9 @@ import pytest
 from strategies.dealer_positioning.scripts.capture_historical_snapshots import (
     _load_prior_summary,
     _matrix_features,
+    _strike_row,
     _summary_row,
+    capture_snapshots,
     count_candidate_symbols,
     load_symbols,
 )
@@ -126,3 +128,47 @@ def test_load_prior_summary_no_future_warning_with_an_empty_day(tmp_path):
 def test_load_prior_summary_missing_root_returns_empty_frame(tmp_path):
     out = _load_prior_summary(output_root=tmp_path / "missing", before_date="2026-07-15")
     assert out.empty
+
+
+
+@pytest.mark.parametrize(
+    ("now", "session"),
+    [
+        (datetime(2026, 10, 7, 1, 56, tzinfo=ZoneInfo("America/New_York")), "20261006"),   # post-midnight catch-up
+        (datetime(2026, 7, 12, 6, 14, tzinfo=ZoneInfo("America/New_York")), "20260710"),   # Sunday
+        (datetime(2026, 10, 12, 15, 15, tzinfo=ZoneInfo("America/New_York")), "20261012"),  # intraday refresh
+        (datetime(2026, 10, 12, 18, 0, tzinfo=ZoneInfo("America/New_York")), "20261012"),   # nightly slot
+    ],
+)
+def test_capture_keys_on_the_session_not_the_wall_clock(tmp_path, now, session):
+    result = capture_snapshots(
+        symbols=[],
+        output_root=tmp_path / "out",
+        universe_path=tmp_path / "missing.csv",
+        publish_states=False,
+        now=now,
+    )
+
+    assert result.output_dir == tmp_path / "out" / session
+
+
+def test_explicit_snapshot_date_still_wins(tmp_path):
+    result = capture_snapshots(
+        symbols=[],
+        output_root=tmp_path / "out",
+        universe_path=tmp_path / "missing.csv",
+        publish_states=False,
+        snapshot_date="2026-07-02",
+        now=datetime(2026, 10, 12, 18, 0, tzinfo=ZoneInfo("America/New_York")),
+    )
+
+    assert result.output_dir == tmp_path / "out" / "20260702"
+
+
+def test_strike_row_default_date_is_the_session():
+    captured = datetime(2026, 10, 13, 1, 49, tzinfo=ZoneInfo("America/New_York"))
+
+    row = _strike_row(grid={"symbol": "TST"}, row={"strike": 100.0}, scope="daily_week", captured_at=captured)
+
+    assert row["snapshot_date"] == "2026-10-12"
+    assert row["captured_at"] == captured.isoformat()

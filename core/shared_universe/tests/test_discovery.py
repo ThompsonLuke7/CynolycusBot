@@ -111,6 +111,36 @@ def test_normalize_exchange_handles_alpaca_enum():
     assert normalize_exchange(AssetExchange.NYSEARCA) == "ARCA"
 
 
+def test_fetch_alpaca_assets_survives_unknown_exchange(monkeypatch):
+    """A venue missing from alpaca-py's enum (TXSE) must not fail the whole list."""
+    import alpaca.trading.client as alpaca_client
+
+    from core.API.Alpaca_API.core.config import AlpacaConfig
+
+    raw_assets = [
+        {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "tradable": True},
+        {"symbol": "TXCO", "name": "Texas Co", "exchange": "TXSE", "tradable": True},
+        {"symbol": "XOM", "name": "Exxon", "exchange": "NYSE", "tradable": False},
+    ]
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            assert kwargs.get("raw_data") is True
+
+        def get_all_assets(self, request):
+            return raw_assets
+
+    monkeypatch.setattr(alpaca_client, "TradingClient", FakeClient)
+    monkeypatch.setattr(
+        AlpacaConfig, "from_env",
+        classmethod(lambda cls, env_file: type("C", (), {"key_id": "k", "secret_key": "s"})()),
+    )
+
+    df = disc.fetch_alpaca_assets(CFG)
+    assert df["ticker"].tolist() == ["AAPL"]
+    assert df["exchange"].tolist() == ["NASDAQ"]
+
+
 def test_merge_pending_upsert_and_source_union():
     existing = pd.DataFrame(
         [{"ticker": "ABCD", "source": "catalyst", "status": "pending", "first_seen": "2026-06-01", "last_seen": "2026-06-01"}]

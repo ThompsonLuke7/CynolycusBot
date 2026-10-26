@@ -26,7 +26,7 @@ DISCORD_EPOCH_MS = 1_420_070_400_000
 FIXED_EXPORT_OFFSET = timezone(timedelta(hours=-5), name="UTC-5")
 DISPLAY_ZONE = ZoneInfo("America/New_York")
 MESSAGE_ID_RE = re.compile(r"chatlog__message-container-(\d+)")
-CHANNEL_ID_RE = re.compile(r"\[(\d+)\]\.html$")
+CHANNEL_ID_RE = re.compile(r"\[(\d+)\](?:\d+)?\.html$")
 SCROLL_TO_MESSAGE_RE = re.compile(r"scrollToMessage\(event,\s*['\"](\d+)")
 FILE_TITLE_RE = re.compile(r"^(?P<guild>.+?)\s+-\s+(?P<channel>.+)$")
 
@@ -408,6 +408,7 @@ def normalize_file(path: Path, input_root: Path) -> tuple[ExportContext, list[di
 
 def build_manifest(contexts: list[ExportContext], records: list[dict[str, Any]]) -> dict[str, Any]:
     by_channel = Counter(record["channel_id"] for record in records)
+    by_file = Counter(Path(record['source_file']).name for record in records)
     by_author = Counter((record["author_id"], record["author_name"]) for record in records)
     timestamp_methods = Counter(record["timestamp_utc_method"] for record in records)
     missing_author = sum(1 for record in records if not record["author_id"] and not record["author_name"])
@@ -438,9 +439,9 @@ def build_manifest(contexts: list[ExportContext], records: list[dict[str, Any]])
                 "footer_entries": context.footer_entries,
                 "timezone_footer": context.timezone_footer,
                 "declared_exported_message_count": context.declared_exported_message_count,
-                "message_count": by_channel[context.channel_id],
+                "message_count": by_file[context.path.name],
                 "declared_count_matches_normalized": (
-                    context.declared_exported_message_count == by_channel[context.channel_id]
+                    context.declared_exported_message_count == by_file[context.path.name]
                     if context.declared_exported_message_count is not None
                     else None
                 ),
@@ -450,7 +451,7 @@ def build_manifest(contexts: list[ExportContext], records: list[dict[str, Any]])
         "totals": {
             "file_count": len(contexts),
             "message_count": len(records),
-            "empty_channel_count": sum(1 for context in contexts if by_channel[context.channel_id] == 0),
+            "empty_channel_count": sum(1 for context in contexts if by_file[context.path.name] == 0),
             "channels": [
                 {
                     "channel_id": context.channel_id,
@@ -461,7 +462,7 @@ def build_manifest(contexts: list[ExportContext], records: list[dict[str, Any]])
             ],
             "authors": [
                 {"author_id": author_id, "author_name": author_name, "message_count": count}
-                for (author_id, author_name), count in sorted(by_author.items(), key=lambda item: (-item[1], item[0]))
+                for (author_id, author_name), count in sorted(by_author.items(), key=lambda item: (-item[1], str(item[0][0] or ''), str(item[0][1] or '')))
             ],
         },
         "timestamp_diagnostics": {

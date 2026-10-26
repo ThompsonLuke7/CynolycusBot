@@ -61,3 +61,22 @@ def test_empty_export_is_recorded_in_manifest(tmp_path: Path) -> None:
 def test_rendered_display_time_uses_new_york_dst_not_fixed_utc_minus_five() -> None:
     assert parse_export_timestamp("Wednesday, July 8, 2026 11:47 AM") == "2026-07-08T15:47:00Z"
     assert parse_export_timestamp("Thursday, January 29, 2026 1:20 PM") == "2026-01-29T18:20:00Z"
+
+
+def test_numbered_duplicate_channel_export_has_correct_channel_and_per_file_count(tmp_path):
+    source=tmp_path/'exports';source.mkdir()
+    (source/'Guild - alerts [123].html').write_text(HTML)
+    (source/'Guild - alerts [123]2.html').write_text(HTML)
+    manifest=normalize_export(source,tmp_path/'out')
+    assert all(f['channel_id']=='123' for f in manifest['source_files'])
+    assert all(f['message_count']==2 for f in manifest['source_files'])
+    assert all(f['declared_count_matches_normalized'] for f in manifest['source_files'])
+
+
+def test_missing_author_id_is_preserved_without_breaking_manifest_sort(tmp_path):
+    source=tmp_path/'exports';source.mkdir()
+    (source/'Guild - alerts [123].html').write_text(HTML)
+    (source/'Guild - alerts [123]2.html').write_text(HTML.replace('data-user-id="1"',''))
+    manifest=normalize_export(source,tmp_path/'out')
+    assert manifest['timestamp_diagnostics']['missing_author_count']==0  # name still present
+    assert any(a['author_id'] is None for a in manifest['totals']['authors'])

@@ -26,6 +26,8 @@ REPO = Path(__file__).resolve().parents[3]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from core.calendar import latest_session_date
+from core.shared_universe.delisted import drop_delisted
 from UI.dealer_positioning_dashboard import DealerDashboardApp
 
 _ET = ZoneInfo("America/New_York")
@@ -73,7 +75,7 @@ def load_symbols(
             min_market_cap=min_market_cap,
         )
         symbols = frame["ticker"].dropna().astype(str).str.upper().tolist()
-    symbols = sorted(dict.fromkeys(symbols))
+    symbols = drop_delisted(sorted(dict.fromkeys(symbols)), context="dealer_positioning.load_symbols")
     if limit is not None:
         symbols = symbols[: max(0, int(limit))]
     return symbols
@@ -165,9 +167,12 @@ def capture_snapshots(
     ref_date: str | None = None,
     workers: int = 1,
     publish_states: bool = True,
+    now: datetime | None = None,
 ) -> CaptureResult:
-    now = datetime.now(tz=_ET)
-    snapshot_date_value = snapshot_date or now.date().isoformat()
+    now = now or datetime.now(tz=_ET)
+    # Key on the session the chain describes, not the wall clock: a catch-up
+    # after midnight or on a weekend still reads the last session's close.
+    snapshot_date_value = snapshot_date or latest_session_date(now).isoformat()
     ref_date_value = _parse_capture_date(ref_date or snapshot_date_value)
     output_dir = output_root / snapshot_date_value.replace("-", "")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -347,7 +352,7 @@ def _summary_row(
     floor = put_wall
     return {
         "captured_at": captured_at.isoformat(),
-        "snapshot_date": snapshot_date or captured_at.date().isoformat(),
+        "snapshot_date": snapshot_date or latest_session_date(captured_at).isoformat(),
         "symbol": grid.get("symbol"),
         "scope": scope,
         "scope_label": grid.get("expiration_scope_label"),
@@ -417,7 +422,7 @@ def _strike_row(
 ) -> dict[str, Any]:
     out = {
         "captured_at": captured_at.isoformat(),
-        "snapshot_date": snapshot_date or captured_at.date().isoformat(),
+        "snapshot_date": snapshot_date or latest_session_date(captured_at).isoformat(),
         "symbol": grid.get("symbol"),
         "scope": scope,
         "spot": grid.get("spot"),
@@ -939,7 +944,7 @@ def main() -> int:
     parser.add_argument("--min-market-cap", type=float, default=DEFAULT_MIN_MARKET_CAP)
     parser.add_argument("--no-liquidity-prefilter", action="store_true")
     parser.add_argument("--count-only", action="store_true", help="Print universe/liquidity prefilter counts without API calls.")
-    parser.add_argument("--snapshot-date", default=None, help="Storage/evaluation date, YYYY-MM-DD. Defaults to today ET.")
+    parser.add_argument("--snapshot-date", default=None, help="Storage/evaluation date, YYYY-MM-DD. Defaults to the latest session that has opened (ET).")
     parser.add_argument("--ref-date", default=None, help="Expiration-reference date, YYYY-MM-DD. Defaults to snapshot date.")
     parser.add_argument("--workers", type=int, default=1, help="Parallel symbol/scope fetch workers (default 1).")
     parser.add_argument(

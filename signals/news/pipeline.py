@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from signals.news.config import (
     LABEL_HORIZON_DAYS,
@@ -214,6 +219,147 @@ def _as_utc_timestamps(values: pd.Series, *, label: str) -> pd.Series:
     return converted
 
 
+# The embeddings artifact stores each 384-float vector as a JSON string (~8.5 KB
+# a record), so loading it into pandas costs ~8 GB of Python strings plus the
+# Arrow buffers on read and again on write. The incremental pass used to do that
+# in three of its four steps and rewrite the file twice: it peaked at 18.4 GB of
+# a 19.5 GB box, and two nightly runs (2026-10-12 21:41, 10-16 06:43) died inside
+# it. The helpers below keep the incremental steps to a light column read plus
+# batched passes, measured at ~0.26 GB and ~0.8 GB on the 951k-row file.
+_STREAM_BATCH_ROWS = 20_000
+
+
+def _iter_parquet_batches(path: Path | str, *, columns: list[str] | None = None):
+    pf = pq.ParquetFile(path, buffer_size=8 << 20, pre_buffer=False)
+    yield from pf.iter_batches(batch_size=_STREAM_BATCH_ROWS, columns=columns)
+
+
+def _rewrite_parquet_in_batches(
+    path: Path | str,
+    *,
+    edit: Callable[[pa.Table], pa.Table] | None = None,
+    tail: pa.Table | None = None,
+    expected_rows: int | None = None,
+) -> int:
+    """Rewrite ``path`` one batch at a time with its own schema, then swap it in.
+
+    ``edit`` may modify or filter each batch; ``tail`` is appended after the
+    last one. The replacement is atomic and happens only after the row count
+    matches ``expected_rows``, so a crash or a miscount leaves the old file.
+    """
+    path = Path(path)
+    schema = pq.read_schema(path)
+    tmp = path.with_name(path.name + ".tmp")
+    rows = 0
+    try:
+        with pq.ParquetWriter(tmp, schema, compression="snappy") as writer:
+            for batch in _iter_parquet_batches(path):
+                table = pa.Table.from_batches([batch]).replace_schema_metadata(schema.metadata)
+                if edit is not None:
+                    table = edit(table)
+                if table.num_rows:
+                    writer.write_table(table)
+                    rows += table.num_rows
+            if tail is not None and tail.num_rows:
+                writer.write_table(tail.replace_schema_metadata(schema.metadata))
+                rows += tail.num_rows
+        if expected_rows is not None and rows != expected_rows:
+            raise RuntimeError(f"{path.name}: batched rewrite produced {rows:,} rows, expected {expected_rows:,}")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return rows
+
+
+def _frame_to_schema(frame: pd.DataFrame, schema: pa.Schema) -> pa.Table:
+    """``frame`` as a table with exactly ``schema``; absent columns become nulls."""
+    arrays = []
+    for field in schema:
+        if field.name in frame.columns:
+            arrays.append(pa.array(frame[field.name], type=field.type, from_pandas=True))
+        else:
+            arrays.append(pa.nulls(len(frame), type=field.type))
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:16] if text else ""
+
+
+def _embed_rows(to_embed: pd.DataFrame, *, generate_embeddings: bool, generate_finbert: bool) -> pd.DataFrame:
+    """BGE vectors (as JSON strings), FinBERT tone and the text hash for ``to_embed``."""
+    to_embed = to_embed.reset_index(drop=True)
+    to_embed["embedding"] = None
+    to_embed["embedding_available"] = 0.0
+    if generate_embeddings:
+        try:
+            vectors = embed_texts_bge(to_embed["text"].fillna("").tolist())
+            to_embed["embedding"] = [json.dumps(v.astype(float).tolist()) for v in vectors]
+            to_embed["embedding_available"] = 1.0
+        except ImportError:
+            to_embed["embedding_available"] = 0.0
+
+    no_tone = {
+        "finbert_positive_score": np.nan,
+        "finbert_negative_score": np.nan,
+        "finbert_neutral_score": np.nan,
+        "finbert_available": 0.0,
+    }
+    if generate_finbert:
+        try:
+            tone_rows = finbert_scores_batch(to_embed["text"].fillna("").tolist())
+            for scores in tone_rows:
+                scores["finbert_available"] = 1.0
+        except ImportError:
+            tone_rows = [dict(no_tone) for _ in range(len(to_embed))]
+    else:
+        tone_rows = [dict(no_tone) for _ in range(len(to_embed))]
+    to_embed = pd.concat([to_embed, pd.DataFrame(tone_rows)], axis=1)
+    # Ensure _text_hash is persisted so future incremental runs can detect changes
+    if "_text_hash" not in to_embed.columns:
+        to_embed["_text_hash"] = to_embed["text"].fillna("").astype(str).apply(_text_hash)
+    return to_embed
+
+
+def _changed_or_new(full: pd.DataFrame, prior_ids: pd.Series, prior_hashes: dict[str, str]) -> pd.DataFrame:
+    """Rows of ``full`` that are new or whose text hash moved, with the usual log line."""
+    full = full.copy()
+    full["_text_hash"] = full["text"].fillna("").astype(str).apply(_text_hash)
+    current_hashes = dict(zip(full["record_id"].astype(str), full["_text_hash"]))
+    changed_or_new = [rid for rid, h in current_hashes.items() if prior_hashes.get(rid) != h]
+    to_embed = full[full["record_id"].astype(str).isin(set(changed_or_new))].copy()
+    new_count = sum(1 for rid in changed_or_new if rid not in prior_hashes)
+    print(
+        f"  incremental: {len(prior_ids):,} prior, {len(to_embed):,} to embed "
+        f"({new_count:,} new + {len(changed_or_new) - new_count:,} text changed)"
+    )
+    return to_embed
+
+
+def _prior_hashes(prior: pd.DataFrame) -> dict[str, str]:
+    ids = prior["record_id"].astype(str)
+    if "_text_hash" in prior.columns:
+        return dict(zip(ids, prior["_text_hash"].fillna("").astype(str)))
+    # First migration — derive prior hashes from cached text column if present
+    if "text" in prior.columns:
+        return dict(zip(ids, prior["text"].fillna("").astype(str).apply(_text_hash)))
+    return {rid: "<unknown>" for rid in ids}
+
+
+def _can_stream(path: Path | str, required: set[str]) -> bool:
+    try:
+        schema = pq.read_schema(path)
+    except Exception:
+        return False
+    if not required <= set(schema.names):
+        return False
+    if "timestamp" in schema.names:
+        ts_type = schema.field("timestamp").type
+        if not (pa.types.is_timestamp(ts_type) and ts_type.tz is not None):
+            return False  # the full-load path normalizes legacy string timestamps
+    return True
+
+
 def build_news_embeddings(
     news_path: Path | str = NEWS_RECORDS_PATH,
     *,
@@ -225,12 +371,20 @@ def build_news_embeddings(
     """Compute BGE + FinBERT for news_records.
 
     With ``incremental=True`` (default), only records whose ``record_id`` is
-    not yet present in the existing embeddings parquet are embedded; the new
-    rows are appended to the saved file. With ``incremental=False`` the full
-    parquet is rewritten from scratch (the legacy behavior).
+    not yet present in the existing embeddings parquet, or whose text changed,
+    are embedded; they are appended to the saved file and returned. The prior
+    embeddings are never loaded: only their ids and text hashes are read, and
+    the append is a batched rewrite (nothing is written when nothing is new).
+    With ``incremental=False`` the full parquet is rewritten from scratch and
+    returned (the legacy behavior).
     """
     ensure_data_dirs()
-    news = pd.read_parquet(news_path) if Path(news_path).exists() else empty_news_frame()
+    if Path(news_path).exists():
+        # Only these feed the embedding text and row identity; the other ~30 columns are not needed.
+        wanted = ("record_id", "ticker", "timestamp", "text", "catalyst_family", "catalyst_subtype", "earnings_embedding_text")
+        news = pd.read_parquet(news_path, columns=[c for c in wanted if c in pq.read_schema(news_path).names])
+    else:
+        news = empty_news_frame()
     if news.empty:
         out = pd.DataFrame(columns=["record_id", "embedding", "embedding_available", "finbert_available"])
         out.to_parquet(output_path, index=False)
@@ -245,9 +399,22 @@ def build_news_embeddings(
     if "earnings_embedding_text" in news.columns:
         enriched_text = news["earnings_embedding_text"].fillna("").astype(str)
         full["text"] = np.where(enriched_text.str.len() > 0, enriched_text, full["text"].fillna("").astype(str))
+    del news
 
-    # Incremental: embed records that aren't yet in the parquet OR whose text
-    # has changed since the prior embedding (e.g. after a body backfill).
+    if incremental and Path(output_path).exists() and _can_stream(output_path, {"record_id"}):
+        names = pq.read_schema(output_path).names
+        light_cols = ["record_id"] + [c for c in ("_text_hash",) if c in names]
+        if "_text_hash" not in names and "text" in names:
+            light_cols.append("text")
+        prior = pq.read_table(output_path, columns=light_cols).to_pandas()
+        if prior["record_id"].astype(str).is_unique:
+            return _append_embeddings_streaming(
+                full, prior, output_path=output_path,
+                generate_embeddings=generate_embeddings, generate_finbert=generate_finbert,
+            )
+
+    # Full-load path: first build, legacy layouts, or a prior file with
+    # duplicate ids (which the concat + drop_duplicates below also repairs).
     prior = pd.DataFrame()
     to_embed = full
     if incremental and Path(output_path).exists():
@@ -258,92 +425,14 @@ def build_news_embeddings(
         if not prior.empty and "timestamp" in prior.columns:
             prior["timestamp"] = _as_utc_timestamps(prior["timestamp"], label="news_embeddings")
         if not prior.empty and "record_id" in prior.columns:
-            # Hash current text to compare against prior. If the embedded text
-            # changed (e.g. body was filled in), re-embed.
-            import hashlib
-
-            def _text_hash(s: str) -> str:
-                return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()[:16] if s else ""
-
-            full = full.copy()
-            full["_text_hash"] = full["text"].fillna("").astype(str).apply(_text_hash)
-            if "_text_hash" in prior.columns:
-                prior_hashes = dict(zip(prior["record_id"].astype(str), prior["_text_hash"].fillna("").astype(str)))
-            else:
-                # First migration — derive prior hashes from cached text column if present
-                if "text" in prior.columns:
-                    prior_hashes = dict(
-                        zip(
-                            prior["record_id"].astype(str),
-                            prior["text"].fillna("").astype(str).apply(_text_hash),
-                        )
-                    )
-                else:
-                    prior_hashes = {rid: "<unknown>" for rid in prior["record_id"].astype(str)}
-
-            current_hashes = dict(zip(full["record_id"].astype(str), full["_text_hash"]))
-            changed_or_new = []
-            for rid, h in current_hashes.items():
-                prior_h = prior_hashes.get(rid)
-                if prior_h is None or prior_h != h:
-                    changed_or_new.append(rid)
-            to_embed = full[full["record_id"].astype(str).isin(set(changed_or_new))].copy()
-            new_count = sum(1 for rid in changed_or_new if rid not in prior_hashes)
-            changed_count = len(changed_or_new) - new_count
-            print(
-                f"  incremental: {len(prior):,} prior, {len(to_embed):,} to embed "
-                f"({new_count:,} new + {changed_count:,} text changed)"
-            )
+            to_embed = _changed_or_new(full, prior["record_id"], _prior_hashes(prior))
 
     if to_embed.empty:
         print("  nothing new to embed — re-saving prior parquet")
         prior.to_parquet(output_path, index=False)
         return prior
 
-    to_embed = to_embed.reset_index(drop=True)
-    to_embed["embedding"] = None
-    to_embed["embedding_available"] = 0.0
-    if generate_embeddings:
-        try:
-            vectors = embed_texts_bge(to_embed["text"].fillna("").tolist())
-            to_embed["embedding"] = [json.dumps(v.astype(float).tolist()) for v in vectors]
-            to_embed["embedding_available"] = 1.0
-        except ImportError:
-            to_embed["embedding_available"] = 0.0
-
-    if generate_finbert:
-        try:
-            tone_rows = finbert_scores_batch(to_embed["text"].fillna("").tolist())
-            for scores in tone_rows:
-                scores["finbert_available"] = 1.0
-        except ImportError:
-            tone_rows = [
-                {
-                    "finbert_positive_score": np.nan,
-                    "finbert_negative_score": np.nan,
-                    "finbert_neutral_score": np.nan,
-                    "finbert_available": 0.0,
-                }
-                for _ in range(len(to_embed))
-            ]
-    else:
-        tone_rows = [
-            {
-                "finbert_positive_score": np.nan,
-                "finbert_negative_score": np.nan,
-                "finbert_neutral_score": np.nan,
-                "finbert_available": 0.0,
-            }
-            for _ in range(len(to_embed))
-        ]
-    to_embed = pd.concat([to_embed, pd.DataFrame(tone_rows)], axis=1)
-    # Ensure _text_hash is persisted so future incremental runs can detect changes
-    if "_text_hash" not in to_embed.columns:
-        import hashlib
-        to_embed["_text_hash"] = (
-            to_embed["text"].fillna("").astype(str)
-            .apply(lambda s: hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()[:16] if s else "")
-        )
+    to_embed = _embed_rows(to_embed, generate_embeddings=generate_embeddings, generate_finbert=generate_finbert)
 
     if not prior.empty:
         # Align columns; new rows will inherit NaN for cluster fields until refit/predict
@@ -359,6 +448,50 @@ def build_news_embeddings(
         out = to_embed
     out.to_parquet(output_path, index=False)
     return out
+
+
+def _append_embeddings_streaming(
+    full: pd.DataFrame,
+    prior: pd.DataFrame,
+    *,
+    output_path: Path | str,
+    generate_embeddings: bool,
+    generate_finbert: bool,
+) -> pd.DataFrame:
+    """The incremental append without loading the prior vectors (see above)."""
+    to_embed = _changed_or_new(full, prior["record_id"], _prior_hashes(prior))
+    if to_embed.empty:
+        print("  nothing new to embed — prior parquet unchanged")
+        return to_embed
+    to_embed = _embed_rows(to_embed, generate_embeddings=generate_embeddings, generate_finbert=generate_finbert)
+    to_embed = to_embed.drop_duplicates(subset=["record_id"], keep="last").reset_index(drop=True)
+
+    schema = pq.read_schema(output_path)
+    extra = [c for c in to_embed.columns if c not in schema.names]
+    if extra:
+        # A new column needs a schema change; take the full-load route once.
+        prior_full = pd.read_parquet(output_path)
+        for col in set(prior_full.columns) | set(to_embed.columns):
+            if col not in to_embed.columns:
+                to_embed[col] = np.nan
+            if col not in prior_full.columns:
+                prior_full[col] = np.nan
+        out = pd.concat([prior_full, to_embed[prior_full.columns]], ignore_index=True)
+        out.drop_duplicates(subset=["record_id"], keep="last").to_parquet(output_path, index=False)
+        return to_embed
+
+    replaced = pa.array(sorted(set(to_embed["record_id"].astype(str)) & set(prior["record_id"].astype(str))), type=pa.string())
+
+    def _drop_replaced(table: pa.Table) -> pa.Table:
+        if len(replaced) == 0:
+            return table
+        return table.filter(pc.invert(pc.is_in(table["record_id"], value_set=replaced)))
+
+    _rewrite_parquet_in_batches(
+        output_path, edit=_drop_replaced, tail=_frame_to_schema(to_embed, schema),
+        expected_rows=len(prior) - len(replaced) + len(to_embed),
+    )
+    return to_embed
 
 
 def parse_embedding(value: object) -> np.ndarray | None:
@@ -396,6 +529,20 @@ def cluster_news_embeddings(
     ``{family: (KMeans, base_cluster_id)}``.
     """
     import pickle
+
+    if (
+        incremental
+        and Path(models_path).exists()
+        and Path(embeddings_path) == Path(output_path)
+        and _can_stream(embeddings_path, {"record_id", "embedding", "news_cluster_id"})
+    ):
+        try:
+            with open(models_path, "rb") as fh:
+                saved_models = pickle.load(fh)
+        except Exception:
+            saved_models = {}
+        if saved_models:
+            return _assign_clusters_streaming(embeddings_path, saved_models)
 
     df = pd.read_parquet(embeddings_path) if Path(embeddings_path).exists() else pd.DataFrame()
     if df.empty or "embedding" not in df.columns:
@@ -490,6 +637,89 @@ def cluster_news_embeddings(
     return df
 
 
+def _assign_clusters_streaming(embeddings_path: Path | str, saved_models: dict[str, tuple]) -> pd.DataFrame:
+    """Incremental cluster assignment that never loads the whole embeddings file.
+
+    Same rules as the in-memory incremental path: only rows with a missing
+    ``news_cluster_id`` and a parseable embedding are assigned, grouped by
+    ``catalyst_family`` (rows with no family stay unassigned, as ``groupby``
+    drops them); a family absent from the saved models gets the ``-1``
+    placeholder; a single-row family model maps to its base id. Nothing is
+    rewritten when nothing is assigned. Returns the assigned rows' ids.
+    """
+    names = pq.read_schema(embeddings_path).names
+    has_family = "catalyst_family" in names
+    light = pq.read_table(embeddings_path, columns=["record_id", "news_cluster_id"]).to_pandas()
+    pending = set(light.loc[light["news_cluster_id"].isna(), "record_id"].astype(str))
+    if not pending:
+        print("  cluster: no unassigned rows, nothing to do")
+        return pd.DataFrame(columns=["record_id", "news_cluster_id", "news_cluster_key"])
+
+    # Pass 1: pull only the pending rows' vectors.
+    wanted = pa.array(sorted(pending), type=pa.string())
+    cols = ["record_id", "embedding"] + (["catalyst_family"] if has_family else [])
+    ids: list[str] = []
+    families: list[object] = []
+    vectors: list[np.ndarray] = []
+    for batch in _iter_parquet_batches(embeddings_path, columns=cols):
+        table = pa.Table.from_batches([batch])
+        table = table.filter(pc.is_in(table["record_id"], value_set=wanted))
+        if not table.num_rows:
+            continue
+        frame = table.to_pandas()
+        for i, rid in enumerate(frame["record_id"].astype(str)):
+            vector = parse_embedding(frame["embedding"].iat[i])
+            if vector is None:
+                continue
+            ids.append(rid)
+            families.append(frame["catalyst_family"].iat[i] if has_family else "all")
+            vectors.append(vector)
+
+    assigned: dict[str, tuple[float, str]] = {}
+    if ids:
+        frame = pd.DataFrame({"record_id": ids, "catalyst_family": families, "pos": range(len(ids))})
+        print(f"  cluster: {len(ids):,} rows need assignment via saved KMeans")
+        for family, group in frame.groupby("catalyst_family", sort=True):
+            group_ids = group["record_id"].tolist()
+            if family not in saved_models:
+                # Family seen for the first time post-refit — assign a placeholder cluster
+                assigned.update({rid: (-1.0, f"{family}:unassigned") for rid in group_ids})
+                continue
+            km, base_id = saved_models[family]
+            if km is None:
+                assigned.update({rid: (float(base_id), f"{family}:0") for rid in group_ids})
+                continue
+            labels = km.predict(np.vstack([vectors[i] for i in group["pos"]]))
+            assigned.update({
+                rid: (float(int(base_id) + int(label)), f"{family}:{label}")
+                for rid, label in zip(group_ids, labels)
+            })
+    if not assigned:
+        print("  cluster: no unassigned rows, nothing to do")
+        return pd.DataFrame(columns=["record_id", "news_cluster_id", "news_cluster_key"])
+
+    # Pass 2: write the assignments, touching only batches that hold one.
+    keys = pa.array(sorted(assigned), type=pa.string())
+    schema = pq.read_schema(embeddings_path)
+
+    def _apply(table: pa.Table) -> pa.Table:
+        if not pc.any(pc.is_in(table["record_id"], value_set=keys)).as_py():
+            return table
+        frame = table.to_pandas()
+        hit = frame["record_id"].astype(str).map(assigned)
+        mask = hit.notna()
+        frame.loc[mask, "news_cluster_id"] = [v[0] for v in hit[mask]]
+        if "news_cluster_key" in frame.columns:
+            frame.loc[mask, "news_cluster_key"] = [v[1] for v in hit[mask]]
+        return _frame_to_schema(frame, schema)
+
+    _rewrite_parquet_in_batches(embeddings_path, edit=_apply, expected_rows=len(light))
+    return pd.DataFrame(
+        [(rid, cid, key) for rid, (cid, key) in assigned.items()],
+        columns=["record_id", "news_cluster_id", "news_cluster_key"],
+    )
+
+
 def refine_news_records_from_clusters(
     news_path: Path | str = NEWS_RECORDS_PATH,
     embeddings_path: Path | str = NEWS_EMBEDDINGS_PATH,
@@ -509,7 +739,11 @@ def refine_news_records_from_clusters(
     if news.empty:
         news.to_parquet(output_path, index=False)
         return news
-    emb = pd.read_parquet(embeddings_path) if Path(embeddings_path).exists() else pd.DataFrame()
+    emb = pd.DataFrame()
+    if Path(embeddings_path).exists():
+        # Only the id and cluster columns are joined; the vectors are never needed.
+        wanted = [c for c in ("record_id", "news_cluster_id", "news_cluster_key") if c in pq.read_schema(embeddings_path).names]
+        emb = pd.read_parquet(embeddings_path, columns=wanted)
     if emb.empty or "news_cluster_id" not in emb.columns:
         news.to_parquet(output_path, index=False)
         return news
@@ -655,18 +889,89 @@ def build_winner_loser_libraries(
     winner_path: Path | str = WINNER_LIBRARY_PATH,
     loser_path: Path | str = LOSER_LIBRARY_PATH,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    emb = pd.read_parquet(embeddings_path) if Path(embeddings_path).exists() else pd.DataFrame()
+    keys = ["record_id", "ticker", "timestamp"]
     labels = pd.read_parquet(labels_path) if Path(labels_path).exists() else pd.DataFrame()
+    if (
+        not labels.empty
+        and Path(embeddings_path).exists()
+        and _can_stream(embeddings_path, set(keys))
+        and set(keys + ["expansion_label"]) <= set(labels.columns)
+    ):
+        streamed = _build_libraries_streaming(embeddings_path, labels, keys=keys,
+                                              winner_path=winner_path, loser_path=loser_path)
+        if streamed is not None:
+            return streamed
+
+    emb = pd.read_parquet(embeddings_path) if Path(embeddings_path).exists() else pd.DataFrame()
     if emb.empty or labels.empty:
         winners = pd.DataFrame()
         losers = pd.DataFrame()
     else:
-        lib = emb.merge(labels, on=["record_id", "ticker", "timestamp"], how="inner")
+        lib = emb.merge(labels, on=keys, how="inner")
         winners = lib.loc[lib["expansion_label"].eq(1.0)].reset_index(drop=True)
         losers = lib.loc[lib["expansion_label"].eq(0.0)].reset_index(drop=True)
     winners.to_parquet(winner_path, index=False)
     losers.to_parquet(loser_path, index=False)
     return winners, losers
+
+
+def _build_libraries_streaming(
+    embeddings_path: Path | str,
+    labels: pd.DataFrame,
+    *,
+    keys: list[str],
+    winner_path: Path | str,
+    loser_path: Path | str,
+) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    """Winner/loser libraries one embeddings batch at a time.
+
+    An inner merge keeps the left frame's order, so merging batch by batch and
+    appending gives the same rows in the same order as one whole-file merge,
+    without holding ~770k embedding strings at once. Returns light frames (ids,
+    timestamps and labels, no vectors); the libraries on disk are complete.
+    Returns None when the label columns would collide with embedding columns,
+    leaving that rare layout to the full-load path.
+    """
+    emb_schema = pq.read_schema(embeddings_path)
+    label_extra = [c for c in labels.columns if c not in keys]
+    if any(c in emb_schema.names for c in label_extra):
+        return None
+    label_schema = pa.Schema.from_pandas(labels[label_extra], preserve_index=False)
+    out_schema = pa.schema(list(emb_schema) + list(label_schema))
+
+    outputs = {}
+    tmp_paths = {}
+    light: dict[str, list[pd.DataFrame]] = {"winner": [], "loser": []}
+    try:
+        for name, path in (("winner", Path(winner_path)), ("loser", Path(loser_path))):
+            tmp_paths[name] = path.with_name(path.name + ".tmp")
+            outputs[name] = pq.ParquetWriter(tmp_paths[name], out_schema, compression="snappy")
+        for batch in _iter_parquet_batches(embeddings_path):
+            frame = batch.to_pandas()
+            lib = frame.merge(labels, on=keys, how="inner")
+            if lib.empty:
+                continue
+            for name, value in (("winner", 1.0), ("loser", 0.0)):
+                part = lib.loc[lib["expansion_label"].eq(value)]
+                if len(part):
+                    outputs[name].write_table(_frame_to_schema(part, out_schema))
+                    light[name].append(part[keys + label_extra].copy())
+        for writer in outputs.values():
+            writer.close()
+        os.replace(tmp_paths["winner"], winner_path)
+        os.replace(tmp_paths["loser"], loser_path)
+    finally:
+        for writer in outputs.values():
+            if writer.is_open:
+                writer.close()
+        for path in tmp_paths.values():
+            path.unlink(missing_ok=True)
+
+    def _light(name: str) -> pd.DataFrame:
+        parts = light[name]
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=keys + label_extra)
+
+    return _light("winner"), _light("loser")
 
 
 def max_cosine_similarity(vector: np.ndarray | None, library_embeddings: list[np.ndarray]) -> float:
