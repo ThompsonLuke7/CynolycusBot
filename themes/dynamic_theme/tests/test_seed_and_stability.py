@@ -152,9 +152,13 @@ def test_relabel_all_skips_carry_forward(tmp_path, monkeypatch):
     monkeypatch.setattr(s5, "_stability_centroids", _no_stability)
     monkeypatch.setattr(
         s5,
-        "_label_cluster",
-        lambda summary, known: {"theme_name": "semiconductors", "parent_theme": "tech",
-                                "description": "", "related_themes": [], "confidence": 0.9},
+        "_label_batch",
+        lambda summaries, known: {
+            s["cluster_id"]: {"cluster_id": s["cluster_id"], "theme_name": "semiconductors",
+                              "parent_theme": "tech", "description": "", "related_themes": [],
+                              "confidence": 0.9}
+            for s in summaries
+        },
     )
     out = s5.label_clusters([{"cluster_id": 4}], as_of=pd.Timestamp("2026-09-28"), relabel_all=True)
     row = out[out["cluster_id"] == 4]

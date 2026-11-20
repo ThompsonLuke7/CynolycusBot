@@ -27,6 +27,8 @@ try:
 except ImportError:  # pragma: no cover - only relevant for the HTML fallback
     BeautifulSoup = None
 
+from scripts.discord_ledger.identities import ACE_ID, CALLERS  # noqa: F401  (ACE_ID is re-exported for tests)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 RESEARCH = ROOT / "research" / "discord_ledger_2026-09-21"
@@ -35,9 +37,6 @@ DEFAULT_OUTPUT = RESEARCH / "annotations" / "context.jsonl"
 DEFAULT_REVIEW = RESEARCH / "context_review.md"
 RAW_DIR = ROOT / "VaultOfAceDiscordLogs"
 
-ACE_ID = "1079391263083733072"
-FT_ID = "720901855995101225"
-CALLERS = {ACE_ID: "ACE", FT_ID: "FT"}
 CHANNELS = {
     "1443663553239449770": "free-watchlists",
     "1521796664052940870": "free-chat",

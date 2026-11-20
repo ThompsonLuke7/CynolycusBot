@@ -30,6 +30,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from core.decision_state_archive import archive_decision_state, utc_now
 from strategies.multi_ticker_swing.config.pipeline_config import MODULE_ROOT
 from strategies.multi_ticker_swing.live.universe import TickerConfig, load_universe
 from strategies.multi_ticker_swing.live.feature_builder import LiveSwingFeatureBuilder
@@ -144,6 +145,7 @@ class RankerSwingScanner:
 
         tickers_batch = [r[0] for r in rows]
         feat_df = pd.DataFrame([r[1] for r in rows], index=tickers_batch)
+        inference_start = utc_now()
         try:
             p_long_win, p_short_win = self._raw_p(feat_df)
         except Exception as exc:
@@ -151,6 +153,8 @@ class RankerSwingScanner:
             return []
 
         signals: list[Signal] = []
+        # Per-name record for the decision-state archive (every scored name).
+        rec: dict[str, dict[str, Any]] = {}
         for idx, ticker in enumerate(tickers_batch):
             cfg = self._universe[ticker]
             pl, ps = float(p_long_win[idx]), float(p_short_win[idx])
@@ -158,17 +162,24 @@ class RankerSwingScanner:
             # Direction = stronger raw side; conviction = its calibrated P(win). Skip when even
             # the best side is weak (neutral bar). max_entries sorting below does the top-K.
             p_dir = max(pl, ps)
+            direction = 1 if pl >= ps else -1
+            r = rec[ticker] = {"p_long_win": pl, "p_short_win": ps, "p_dir": p_dir,
+                               "direction": direction, "conviction": p_dir >= self._min_conviction,
+                               "positive_ev": False, "ev_score_base": np.nan, "ev_score": np.nan}
             if p_dir < self._min_conviction:
                 continue
-            direction = 1 if pl >= ps else -1
 
             ev = cfg.ev_score(p_dir)
+            r["ev_score_base"] = float(ev)
             if ev <= 0:
                 continue
+            r["positive_ev"] = True
 
             hit = self._catalyst.for_ticker(ticker) if self._catalyst is not None else None
             ev_base = ev
             ev = ev_base * catalyst_ev_multiplier(hit, direction, alpha=self._cat_alpha)
+            r["ev_score"] = float(ev)
+            r["catalyst_score"] = hit.score if hit is not None else np.nan
 
             feat = feat_df.iloc[idx]
             bar = self._fb.get_last_bar(ticker)
@@ -198,6 +209,8 @@ class RankerSwingScanner:
 
         signals.sort(key=lambda s: s.ev_score, reverse=True)
         top = signals[: self._max_entries]
+        self._archive_scan(feat_df, rec, signals, top, skipped=len(skip),
+                           inference_start=inference_start)
         if top:
             logger.info(
                 "30m ranker scan: %d signals → top %d  [%s]",
@@ -206,6 +219,58 @@ class RankerSwingScanner:
                          f"p={s.p_dir:.2f} ev={s.ev_score:.4f}" for s in top),
             )
         return top
+
+    def _archive_scan(self, feat_df: pd.DataFrame, rec: dict[str, dict[str, Any]],
+                      signals: list[Signal], top: list[Signal], *, skipped: int,
+                      inference_start) -> None:
+        """Every scored name in this scan -> decision-state archive. Never raises.
+
+        Bar time is each ticker's last 30m bar; a naive timestamp is read as UTC,
+        the same rule the runner's own freshness check applies."""
+        try:
+            tickers = list(feat_df.index)
+            cand = pd.DataFrame.from_dict(rec, orient="index").reindex(tickers)
+            cand.index.name = "ticker"
+            bars = []
+            for t in tickers:
+                bar = self._fb.get_last_bar(t) or {}
+                ts = pd.Timestamp(bar.get("timestamp")) if bar.get("timestamp") is not None else pd.NaT
+                if ts is not pd.NaT and ts.tzinfo is None:
+                    ts = ts.tz_localize("UTC")
+                bars.append(ts)
+            ranked = {s.ticker: i for i, s in enumerate(signals, start=1)}
+            cand["scan_rank"] = [ranked.get(t, np.nan) for t in tickers]
+            picks = {s.ticker for s in top}
+            feats = feat_df.reindex(columns=self._feats)
+            frame = pd.concat([cand, feats], axis=1)
+            frame.index.name = "ticker"
+            archive_decision_state(
+                module="multi_ticker_swing_30m",
+                candidates=frame.reset_index(),
+                bar_ts=pd.Series(bars),
+                score_col="ev_score",
+                rank_col="scan_rank",
+                feature_cols=list(self._feats),
+                gates={
+                    "conviction": cand["conviction"].fillna(False).to_numpy(dtype=bool),
+                    "positive_ev": cand["positive_ev"].fillna(False).to_numpy(dtype=bool),
+                    "top_k": [t in picks for t in tickers],
+                },
+                selected=sorted(picks),
+                side=pd.Series(np.where(cand["direction"].to_numpy() > 0, "long", "short")),
+                extra_cols=["p_long_win", "p_short_win", "p_dir", "ev_score_base", "catalyst_score"],
+                model_paths=[_BUNDLE / "model_ranker_long.joblib", _BUNDLE / "model_ranker_short.joblib",
+                             _BUNDLE / "calib_long.joblib", _BUNDLE / "calib_short.joblib",
+                             _BUNDLE / "meta.json"],
+                run_meta={"max_entries": self._max_entries, "min_conviction": self._min_conviction,
+                          "catalyst_alpha": self._cat_alpha if self._catalyst is not None else None,
+                          "skipped_busy": int(skipped),
+                          "downstream": "signals still pass signal/risk policy and 5m confirmation"},
+                inference_start=inference_start,
+                inference_end=utc_now(),
+            )
+        except Exception:  # noqa: BLE001 - archiving must never stop the scan
+            logger.exception("30m swing: decision-state archive failed (scan continues)")
 
     def get_directional_p(self, ticker: str) -> tuple[float, float]:
         """(p_long_dir, p_short_dir) for one ticker — directional ratio, kept for any legacy

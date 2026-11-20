@@ -8,6 +8,7 @@
 #   2) Rebuild the Momentum Expansion weekly universe snapshot (needs #1 first —
 #      it scores off daily bars, so new names without bars would be dropped).
 #   3) Refresh Meta Ranker feeds + the dynamic theme taxonomy (Claude API $).
+#   Then) Emerging themes + theme explorer (provisional themes, UI only).
 #   Last) Momentum shadow ledger (research only, no orders): records a decision
 #      every 4th week and marks the ledger every week. Any run day works.
 #
@@ -64,7 +65,7 @@ fi
   }
 
   # 1) Backfill bars for the whole universe (incl. newly promoted names).
-  echo "[$(ts)] 1/6 catch up shared bars (1H/4H/1D, full universe)"
+  echo "[$(ts)] 1/7 catch up shared bars (1H/4H/1D, full universe)"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_BARS_TIMEOUT_SECONDS:-21600}s" \
     "$PYTHON" -u scripts/catchup_shared_bars.py --workers 6
   rc=$?
@@ -73,7 +74,7 @@ fi
   record_stage "catchup" "$rc"
 
   # 2) Momentum weekly universe snapshot (must follow #1 to include new names).
-  echo "[$(ts)] 2/6 momentum universe snapshot"
+  echo "[$(ts)] 2/7 momentum universe snapshot"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_UNIVERSE_TIMEOUT_SECONDS:-7200}s" \
     "$PYTHON" -u -m strategies.momentum_expansion.main --refresh-universe
   rc=$?
@@ -90,7 +91,7 @@ fi
   #    WEEKLY_NEWS_LOOKBACK_DAYS: the collector's default window is 3 days, so a
   #    missed weekend leaves a permanent hole unless the window reaches back to
   #    the last full sweep (overlap is de-duped on merge).
-  echo "[$(ts)] 3/6 full-universe news: collect (scope=full, lookback=${WEEKLY_NEWS_LOOKBACK_DAYS:-3}d) → embed → signal"
+  echo "[$(ts)] 3/7 full-universe news: collect (scope=full, lookback=${WEEKLY_NEWS_LOOKBACK_DAYS:-3}d) → embed → signal"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_NEWS_COLLECT_TIMEOUT_SECONDS:-43200}s" \
     "$PYTHON" -u -m scripts.collect_news_scope --scope full --lookback-days "${WEEKLY_NEWS_LOOKBACK_DAYS:-3}"
   rc=$?
@@ -124,7 +125,7 @@ fi
   #    script exits immediately when the current month is already cached, so
   #    this costs ~2 minutes once a month and seconds otherwise. It MERGES --
   #    earlier months are the point-in-time record and are never overwritten.
-  echo "[$(ts)] 4/6 empirical sector assignments (monthly snapshot; skips if current)"
+  echo "[$(ts)] 4/7 empirical sector assignments (monthly snapshot; skips if current)"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_SECTOR_TIMEOUT_SECONDS:-3600}s" \
     "$PYTHON" -u scripts/build_sector_assignments.py
   rc=$?
@@ -142,9 +143,15 @@ fi
   #    new yet took 1,330s, 1,508s, then timed out at 1,800s on 2026-10-05 (the
   #    whole stage read as exit=1 with the themes fine) and scraped through at
   #    1,845s on 10-12. A standalone `update_feeds.py --weekly` still runs it.
-  FEEDS_ARGS=(--weekly --skip-news-incremental)
+  #    --timeout is update_feeds' PER-FEED limit (its default 1800 s). Since
+  #    2026-11-18 a re-fit week labels every group in Sonnet 5.5 batches (thinking
+  #    included) plus the relationship call, which can run past 30 min.
+  FEEDS_ARGS=(--weekly --skip-news-incremental --timeout "${WEEKLY_FEEDS_PER_FEED_TIMEOUT_SECONDS:-5400}")
   [ "${WEEKLY_THEMES_RELABEL_ALL:-0}" = "1" ] && FEEDS_ARGS+=(--relabel-themes)
-  echo "[$(ts)] 5/6 meta feeds + dynamic themes (${FEEDS_ARGS[*]}, costs Claude \$)"
+  #    WEEKLY_THEMES_REFIT=1 re-fits the fixed theme groups now (they re-fit by
+  #    themselves every THEME_REFIT_DAYS or when the identity recipe changes).
+  [ "${WEEKLY_THEMES_REFIT:-0}" = "1" ] && FEEDS_ARGS+=(--refit-themes)
+  echo "[$(ts)] 5/7 meta feeds + dynamic themes (${FEEDS_ARGS[*]}, costs Claude \$)"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_FEEDS_TIMEOUT_SECONDS:-21600}s" \
     "$PYTHON" -u signals/meta_context/meta_ranker/update_feeds.py "${FEEDS_ARGS[@]}"
   rc=$?
@@ -152,7 +159,33 @@ fi
   [ "$rc" -ne 0 ] && STATUS="$rc"
   record_stage "meta_feeds_and_themes" "$rc"
 
-  # 6) Momentum shadow ledger (research only: no orders, no account access).
+  # 6) Emerging themes (moved from the nightly job 2026-11-17): enrich a bounded
+  #    pending-ticker shortlist, map strong matches into the established themes
+  #    stage 5 just refreshed, cluster the novel residuals and Claude-label them
+  #    as provisional themes, then rebuild and publish the theme explorer.
+  #    Research/UI output only -- production theme features are untouched -- so
+  #    like the shadow ledger it is recorded but does not change STATUS.
+  echo "[$(ts)] 6/7 emerging themes + theme explorer"
+  timeout --signal=TERM --kill-after=60s "${WEEKLY_THEME_TIMEOUT_SECONDS:-3600}s" \
+    "$PYTHON" -u -m themes.dynamic_theme.emerging --limit 300
+  rc=$?
+  echo "[$(ts)] emerging themes exit=$rc"
+  record_stage "emerging_themes" "$rc"
+  if [ "$rc" -eq 0 ]; then
+    timeout --signal=TERM --kill-after=30s 1200s \
+      "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_explorer
+    rc=$?
+    echo "[$(ts)] theme explorer build exit=$rc"
+    if [ "$rc" -eq 0 ]; then
+      timeout --signal=TERM --kill-after=30s 300s \
+        "$PYTHON" -u scripts/publish_theme_explorer.py
+      rc=$?
+      echo "[$(ts)] theme explorer publication exit=$rc"
+    fi
+    record_stage "theme_explorer" "$rc"
+  fi
+
+  # 7) Momentum shadow ledger (research only: no orders, no account access).
   #    Decisions fall on the last session of every 4th week from 2026-10-02. The
   #    script does not ask "is today the day": it records every scheduled decision
   #    that has closed and is missing from the ledger, using bars up to that date
@@ -164,7 +197,7 @@ fi
   #    Runs LAST and does not change STATUS: it is research, and a failure here
   #    must not make the live stack's weekly data look unready. Its exit code is
   #    still in the stamp, and a failed decision stays due for the next run.
-  echo "[$(ts)] 6/6 momentum shadow ledger (4-weekly decision; records only when one is due)"
+  echo "[$(ts)] 7/7 momentum shadow ledger (4-weekly decision; records only when one is due)"
   timeout --signal=TERM --kill-after=60s "${WEEKLY_SHADOW_TIMEOUT_SECONDS:-3600}s" \
     "$PYTHON" -u scripts/shadow/momentum_shadow_ledger.py --auto
   rc=$?

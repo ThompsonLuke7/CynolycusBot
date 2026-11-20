@@ -117,3 +117,20 @@ def test_mark_prices_entry_open_to_last_close_and_needs_enough_history(tmp_path)
     want = px["2026-10-06"] * 1.01 / px["2026-10-05"] - 1          # Monday open -> Tuesday close
     assert f"{want:+.2%}" in txt and "marked through 2026-10-06" in txt
     assert "has not completed" in msl.mark(ledger, at(2026, 10, 3, 9, 0), tmp_path)   # Saturday: nothing to price yet
+
+
+def test_saved_cross_section_is_the_ranking_the_arms_pick_from(tmp_path):
+    rng = np.random.default_rng(5)
+    days = pd.bdate_range("2025-06-02", "2026-10-30")
+    tickers = [f"T{i:02d}" for i in range(40)]
+    for t in tickers + ["SPY"]:
+        _write_bars(tmp_path / f"{t}.parquet", days, 50 * np.exp(np.cumsum(rng.normal(0.001, 0.02, len(days)))))
+    asof = date(2026, 10, 30)
+    xs = msl.momentum_cross_section(tmp_path, asof, tickers + ["SPY"], min_tradable=30)
+    out = msl.write_cross_section(xs, asof, tmp_path, tmp_path / "xs")
+    saved = pd.read_parquet(out)
+    assert out.name == "2026-10-30.parquet" and len(saved) == 40 and set(saved["decision_date"]) == {"2026-10-30"}
+    targets = msl.compute_targets(tmp_path, asof, tickers + ["SPY"], min_tradable=30, xs=saved)
+    top = saved[saved["dv_rank"] <= 300].nlargest(msl.N_TOP, "mom_12_1")["ticker"]
+    assert set(targets.loc[targets["arm"] == "mom_top300", "ticker"]) == set(top)
+    pd.testing.assert_frame_equal(targets, msl.compute_targets(tmp_path, asof, tickers + ["SPY"], min_tradable=30))

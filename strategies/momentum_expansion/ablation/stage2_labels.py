@@ -71,10 +71,16 @@ def ticker_forward(
     horizons: tuple[int, ...],
     *,
     flagged: set[pd.Timestamp] | None = None,
+    exit_at_last_bar: bool = False,
 ) -> pd.DataFrame:
     """Forward labels for one ticker's 4H bars (UTC DatetimeIndex, oldest first).
 
     ``calendar`` is the ordered list of market session dates (from SPY).
+
+    ``exit_at_last_bar`` is for a security that STOPPED trading (point-in-time
+    data): a window running past its last bar exits at its last close instead of
+    having no label, and ``clamped_h`` marks those rows. Leaving them unlabelled
+    would drop exactly the rows a delisting hits, which is survivorship again.
     """
     b = bars.sort_index()
     b = b[~b.index.duplicated(keep="last")]
@@ -112,17 +118,32 @@ def ticker_forward(
         res[ok] = arr[k[ok].astype(int)]
         return res
 
+    if exit_at_last_bar:
+        last_s = np.nanmax(s) if valid.any() else np.nan
+        # max session high from session k to the end of the ticker's data
+        suffix_high = pd.Series(sess_high[::-1]).fillna(-np.inf).cummax().to_numpy()[::-1]
+        suffix_high = np.where(np.isinf(suffix_high), np.nan, suffix_high)
+
     for h in horizons:
         exit_s = s + h
+        clamped = np.zeros(n, dtype=bool)
+        if exit_at_last_bar:
+            clamped = ~np.isnan(entry) & (exit_s > last_s)
+            exit_s = np.where(clamped, last_s, exit_s)
         exit_close = _at(sess_close, exit_s)
         # max session high over sessions s+1 .. s+h (market calendar; missing sessions skipped)
         roll = pd.Series(sess_high).rolling(h, min_periods=1).max().to_numpy()
         fwd_high = np.fmax(_at(roll, exit_s), same_sess_next_high)
+        if clamped.any():
+            # the h-session window would reach back before the entry; take s+1 .. last instead
+            fwd_high = np.where(clamped, np.fmax(_at(suffix_high, s + 1), same_sess_next_high), fwd_high)
         # non-organic gap strictly after the entry session, up to the exit session
         void = (_at(cum_flag, exit_s + 1) - _at(cum_flag, entry_s + 1)) > 0
         ok = ~np.isnan(entry) & ~np.isnan(exit_close) & ~void
         out[f"fret_{h}"] = np.where(ok, exit_close / entry - 1.0, np.nan)
         out[f"fmfe_{h}"] = np.where(ok, fwd_high / entry - 1.0, np.nan)
+        if exit_at_last_bar:
+            out[f"clamped_{h}"] = (clamped & ok).astype(float)
 
     # Deployed label input: 25-bar max high from the decision close (bar counts, as in expansion_labels)
     h_s = pd.Series(hi, index=b.index)
@@ -139,7 +160,8 @@ def ticker_forward(
         lo_piv, hi_piv = _fractal_pivots(b.rename(columns=str.lower), left, right)
         long_zone = _zone(_shift_core(lo_piv, shift), win)
         short_zone = _zone(_shift_core(hi_piv, shift), win)
-        piv = (long_zone & ~short_zone).astype(float).to_numpy()
+        # copy=True: importing pandas_ta turns copy-on-write on, and to_numpy() is then read-only
+        piv = (long_zone & ~short_zone).astype(float).to_numpy(copy=True)
         piv[max(0, n - (right + shift + win)):] = np.nan               # pivots there are not yet knowable
         out["piv_long"] = piv
     else:

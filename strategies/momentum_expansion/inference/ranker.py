@@ -116,18 +116,24 @@ def _enforce_universe(df_scored: pd.DataFrame, snapshot: pd.DataFrame) -> pd.Dat
     return df_scored
 
 
-def top_n_at(
+CROSS_SECTION_GATES = ("in_universe", "candidate_filter", "complete_features", "top_n", "min_score")
+
+
+def score_cross_section(
     *,
     bar_ts: pd.Timestamp,
     features: pd.DataFrame,
     ranker: ExpansionRanker,
     cfg: dict | None = None,
 ) -> pd.DataFrame:
-    """
-    Compute top-N candidates for the given 4H bar timestamp.
+    """Every name on ``bar_ts`` with its gate outcomes, score and rank.
 
-    `features` should be the combined (timestamp, ticker) MultiIndex
-    feature DataFrame produced by build_all_features_4h.
+    One row per ticker on the bar (index = ticker). Columns: ``expansion_score``
+    (NaN when a model feature is missing), ``rank`` (1 = best among names that
+    pass universe, candidate filter and feature completeness; NaN otherwise), a
+    boolean per gate in ``CROSS_SECTION_GATES`` (True = passed) and
+    ``selected`` (passed every gate). ``top_n_at`` is exactly the selected rows;
+    the rest is what the decision-state archive needs to record the misses.
     """
     cfg = {**RANKING_CONFIG, **(cfg or {})}
 
@@ -135,36 +141,82 @@ def top_n_at(
         raise ValueError("features must have (timestamp, ticker) MultiIndex")
     ts_level = features.index.names[0]
     rows = features.xs(bar_ts, level=ts_level)
+    out = pd.DataFrame(index=rows.index)
+    out["expansion_score"] = np.nan
+    out["rank"] = np.nan
+    for gate in CROSS_SECTION_GATES:
+        out[gate] = False
+    out["selected"] = False
     if rows.empty:
-        return pd.DataFrame(columns=["ticker", "expansion_score", "rank"])
+        return out
 
     snapshot = load_snapshot_for(bar_ts)
     if not snapshot.empty:
         allowed = set(snapshot["ticker"].astype(str).tolist())
-        rows = rows[rows.index.isin(allowed)]
-    if rows.empty:
-        return pd.DataFrame(columns=["ticker", "expansion_score", "rank"])
-
+        out["in_universe"] = rows.index.isin(allowed)
+    else:
+        out["in_universe"] = True
     if cfg.get("use_momentum_candidate_filter", True):
-        rows = filter_momentum_candidates(rows)
-    if rows.empty:
-        return pd.DataFrame(columns=["ticker", "expansion_score", "rank"])
+        passed = filter_momentum_candidates(rows).index
+        out["candidate_filter"] = rows.index.isin(passed)
+    else:
+        out["candidate_filter"] = True
+    model_cols = [c for c in ranker.feature_columns if c in rows.columns]
+    complete = (rows[model_cols].notna().all(axis=1).to_numpy(dtype=bool) if model_cols
+                else np.ones(len(rows), dtype=bool))
+    out["complete_features"] = complete
 
-    rows = rows.dropna(subset=[c for c in ranker.feature_columns if c in rows.columns])
-    if rows.empty:
-        return pd.DataFrame(columns=["ticker", "expansion_score", "rank"])
+    # Positional throughout. Scores stay float32 (the booster's dtype) and the
+    # eligible rows are sorted in their original row order with the same sort
+    # call as before this refactor, so even ties resolve exactly as they did.
+    scores = np.full(len(rows), np.nan, dtype=np.float32)
+    if complete.any():
+        scores[complete] = ranker.score(rows.loc[complete]).to_numpy(dtype=np.float32)
+    eligible = (out["in_universe"].to_numpy(dtype=bool) & out["candidate_filter"].to_numpy(dtype=bool)
+                & complete)
+    elig_pos = np.flatnonzero(eligible)
+    order = pd.DataFrame({"pos": elig_pos, "expansion_score": scores[elig_pos]}).sort_values(
+        "expansion_score", ascending=False)["pos"].to_numpy()
+    rank = np.full(len(rows), np.nan)
+    rank[order] = np.arange(1, len(order) + 1)
 
-    scores = ranker.score(rows)
-    out = pd.DataFrame({"ticker": rows.index, "expansion_score": scores.values})
-    out = out.sort_values("expansion_score", ascending=False).reset_index(drop=True)
-    out["rank"] = np.arange(1, len(out) + 1)
-
-    n_pct = max(1, int(cfg["top_pct"] * len(out)))
+    n_pct = max(1, int(cfg["top_pct"] * len(order)))
     n_eff = min(int(cfg["top_n"]), n_pct)
     floor = float(cfg["min_score"])
-    keep = out.head(n_eff)
-    keep = keep[keep["expansion_score"] >= floor]
-    return keep.reset_index(drop=True)
+    out["expansion_score"] = scores
+    out["rank"] = rank
+    out["top_n"] = rank <= n_eff
+    out["min_score"] = scores >= floor
+    out["selected"] = eligible & out["top_n"].to_numpy() & out["min_score"].to_numpy()
+    return out
+
+
+def top_n_at(
+    *,
+    bar_ts: pd.Timestamp,
+    features: pd.DataFrame,
+    ranker: ExpansionRanker,
+    cfg: dict | None = None,
+    cross_section: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    Compute top-N candidates for the given 4H bar timestamp.
+
+    `features` should be the combined (timestamp, ticker) MultiIndex
+    feature DataFrame produced by build_all_features_4h. Pass a precomputed
+    ``cross_section`` (from ``score_cross_section``) to avoid scoring twice.
+    """
+    xs = cross_section if cross_section is not None else score_cross_section(
+        bar_ts=bar_ts, features=features, ranker=ranker, cfg=cfg)
+    keep = xs.loc[xs["selected"]].sort_values("rank")
+    if keep.empty:
+        return pd.DataFrame(columns=["ticker", "expansion_score", "rank"])
+    out = pd.DataFrame({
+        "ticker": keep.index.to_numpy(),
+        "expansion_score": keep["expansion_score"].to_numpy(dtype=np.float32),
+        "rank": keep["rank"].to_numpy(dtype=np.int64),
+    })
+    return out.reset_index(drop=True)
 
 
 def rank_over_range(

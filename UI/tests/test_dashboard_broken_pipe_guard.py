@@ -40,6 +40,7 @@ from UI.live_dashboard import DashboardHandler
 from UI.meta_ranker_dashboard import MetaRankerHandler
 from UI.momentum_dashboard import MomentumHandler
 from UI.trade_library_dashboard import Handler as TradeLibraryHandler
+from UI.decision_replay_dashboard import Handler as DecisionReplayHandler
 from UI.ui_chrome import serve_theme_css
 
 
@@ -75,6 +76,7 @@ def _bare_handler(cls):
         (AmethystHandler, "_send", lambda h: h._send(b"{}")),
         (MomentumHandler, "_send", lambda h: h._send(b"{}")),
         (TradeLibraryHandler, "_send", lambda h: h._send(b"{}")),
+        (DecisionReplayHandler, "_send", lambda h: h._send(b"{}")),
         (IntradayStructureHandler, "_send", lambda h: h._send(b"{}")),
         (HubHandler, "_send", lambda h: h._send(b"{}")),
         (ForwardGuidanceDashboardHandler, "_write_json", lambda h: h._write_json({})),
@@ -92,7 +94,8 @@ def test_write_path_swallows_broken_pipe(cls, method, call):
 
 
 @pytest.mark.parametrize("cls", [DealerRankerHandler, MetaRankerHandler, HTFHandler,
-                                AmethystHandler, MomentumHandler, TradeLibraryHandler])
+                                AmethystHandler, MomentumHandler, TradeLibraryHandler,
+                                DecisionReplayHandler])
 def test_send_still_sets_headers_on_success(cls):
     class _OkWfile:
         def __init__(self):

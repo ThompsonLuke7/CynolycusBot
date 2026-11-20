@@ -265,6 +265,36 @@ fi
   else
     echo "[$(ts)] readiness aborted; stamp NOT updated (status=$STATUS)"
   fi
+  # POST-STAMP, NON-FATAL: decision-state outcomes + research/live feature parity
+  # (research/year_two_experiment_checklist_2026-11-04.md item 0.2). After the
+  # stamp on purpose: neither may delay or block the next session's readiness.
+  # parity_check exits 1 when archived live feature vectors disagree with the
+  # research files; that is logged loudly here and written to
+  # Data/research/decision_state_parity/, never folded into STATUS.
+  run_timed "post: attach decision-state outcomes" \
+    "${READINESS_DECISION_OUTCOMES_TIMEOUT_SECONDS:-1800}" \
+    "$PYTHON" -u -m scripts.decision_state.attach_outcomes --days 45
+  OUTCOMES_STATUS=$?
+  if [ "$OUTCOMES_STATUS" -ne 0 ]; then
+    echo "[$(ts)] WARNING: decision-state outcomes failed (exit=$OUTCOMES_STATUS); archive itself is unaffected"
+  fi
+  # Shadow scores of the frozen Stage 3 momentum pick on archived live decisions
+  # (forward evidence; nothing trades on them). A no-op until the final
+  # boosters are delivered to Data/research/stage3_final/.
+  run_timed "post: Stage 3 shadow scores on archived momentum decisions" \
+    "${READINESS_STAGE3_SHADOW_TIMEOUT_SECONDS:-900}" \
+    "$PYTHON" -u -m strategies.momentum_expansion.ablation.score_archive_stage3 --days 45
+  SHADOW_STATUS=$?
+  if [ "$SHADOW_STATUS" -ne 0 ]; then
+    echo "[$(ts)] WARNING: Stage 3 shadow scoring failed (exit=$SHADOW_STATUS)"
+  fi
+  run_timed "post: research/live feature parity on archived decisions" \
+    "${READINESS_PARITY_TIMEOUT_SECONDS:-1800}" \
+    "$PYTHON" -u -m scripts.decision_state.parity_check --days 7
+  PARITY_STATUS=$?
+  if [ "$PARITY_STATUS" -ne 0 ]; then
+    echo "[$(ts)] WARNING: PARITY FAIL or error (exit=$PARITY_STATUS) -- see Data/research/decision_state_parity/"
+  fi
   echo "[$(ts)] nightly_data_readiness.sh complete status=$STATUS"
 } >> "$LOG_FILE" 2>&1
 

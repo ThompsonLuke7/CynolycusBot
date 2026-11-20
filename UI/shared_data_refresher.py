@@ -7,8 +7,9 @@ replaces the old design where each Meta pass ran bars -> feeds -> matrix inline
 
 Each cycle (during the RTH-ish window) runs, as subprocesses:
   1. catch up shared bars for the eligible set  (incremental; ``--no-1d``)
-  2. light per-bar feeds, throttled to ``feeds_interval``  (news/econ/guidance)
-  3. rebuild the Meta Ranker matrix  (incremental append)
+  2. refresh the 4H context caches (SPY/QQQ/IWM/VIXY/sectors; ``--context-only``)
+  3. light per-bar feeds, throttled to ``feeds_interval``  (news/econ/guidance)
+  4. rebuild the Meta Ranker matrix  (incremental append)
 
 Daily enrichment (earnings calendar, news collection/rescore, dealer snapshots)
 is NOT run here — it lives in ``nightly_market_data.sh`` and is deliberately
@@ -135,6 +136,16 @@ class SharedDataRefresher(threading.Thread):
                 [self._python, "scripts/catchup_shared_bars.py",
                  "--workers", "6", "--eligible-only", "--no-1d"],
                 timeout=1800,
+            )
+            # Context 4H caches (SPY/QQQ/IWM/VIXY/sector ETFs) are not universe
+            # names, so the catch-up above never touched them: intraday the 4H
+            # loops scored on last night's VIXY (regime_vix_z off by up to ~1 sigma
+            # vs research, parity check 2026-11-19). Before the matrix step,
+            # which builds the same context features for Meta/HTF.
+            self._run_step(
+                "context",
+                [self._python, "scripts/refresh_shared_context_bars.py", "--context-only"],
+                timeout=600,
             )
             if with_feeds and self._feeds_enabled:
                 self._run_step(

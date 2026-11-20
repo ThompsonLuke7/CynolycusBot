@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 
 from scripts.discord_ledger.build import available_at, read_jsonl, write_jsonl
 from scripts.discord_ledger.curate import source_contracts
+from scripts.discord_ledger.identities import ACE_IDS
 
-ACE_ID = "1079391263083733072"
 NY = ZoneInfo("America/New_York")
 CONTRACT = re.compile(r"\b(?P<symbol>[A-Z]{2,5})\s*\$?\s*(?P<strike>[\d,]+(?:\.\d+)?)\s*(?P<side>Call|Put)s?\b", re.I)
 PRICE_LINE = re.compile(r"^\s*\$(\d+(?:\.\d+)?)\s*$")
@@ -58,7 +58,7 @@ def screenshot_contracts(ocr_text: str) -> list[dict]:
 
 
 def candidates_for(message: dict, ocr: dict, trades: list[dict]) -> list[dict]:
-    if message.get("author_id") != ACE_ID:
+    if message.get("author_id") not in ACE_IDS:
         return []
     action = action_kind(message.get("text") or "")
     if not action:
@@ -81,7 +81,7 @@ def candidates_for(message: dict, ocr: dict, trades: list[dict]) -> list[dict]:
             continue
         symbol = "SPX" if contract["symbol"] == "SPXW" else contract["symbol"]
         matches = [trade for trade in trades
-                   if trade["author_id"] == ACE_ID and trade.get("entry_event_id")
+                   if trade["author_id"] in ACE_IDS and trade.get("entry_event_id")
                    and trade.get("symbol") == symbol and trade.get("strike") == contract["strike"]
                    and trade.get("option_type") == contract["option_type"]
                    and trade.get("entry_available_at_utc") and trade["entry_available_at_utc"] < when

@@ -1,0 +1,684 @@
+<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Decision Replay — Cynolycus</title>__THEME__
+<style>
+[hidden]{display:none!important}
+.wrap{padding:12px 16px;max-width:1760px;margin:0 auto}
+.card{margin:10px 0}
+.card-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.card-body{padding:10px 12px}
+.sp{flex:1}
+.mono,td.num,.num{font-variant-numeric:tabular-nums}
+.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.filters input,.filters select,.card-head select,.card-head input,.tools select{padding:4px 8px;font-size:12px}
+.tabs button{padding:3px 10px;font-size:11px}
+.tabs button.on{background:var(--accent);color:#102a24;border-color:var(--accent)}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th,td{padding:4px 8px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-weight:600;font-size:11px;position:sticky;top:0;background:var(--panel)}
+td.num,th.num{text-align:right}
+.scroll{max-height:260px;overflow:auto}
+#posRows tr,#logRows tr{cursor:pointer}
+#posRows tr:hover,#logRows tr:hover{background:var(--panel2)}
+#posRows tr.sel,#logRows tr.here{background:#1d2f35}
+#logRows tr.future td{opacity:.35}
+.ev{display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;border:1px solid var(--line);color:var(--muted)}
+.ev.archive{border-color:#2f6b5a;color:var(--green)}
+.ev.audit{border-color:#6b5a2f;color:var(--yellow)}
+.ev.transitions{border-color:#4b5a6b;color:#a8c4e0}
+.ev.open{border-color:#5a4b8a;color:#bfa8f0}
+canvas{display:block;width:100%;touch-action:none}
+#chart{height:440px;background:var(--bg);cursor:crosshair}
+#strip{height:92px;background:var(--bg);border-top:1px solid var(--line)}
+#pane{height:120px;background:var(--bg);border-top:1px solid var(--line)}
+.chartwrap{position:relative}
+.tip{position:absolute;pointer-events:none;background:#0e1519;border:1px solid var(--line);border-radius:6px;
+  padding:6px 8px;font-size:11px;line-height:1.5;white-space:nowrap;z-index:5}
+.tools{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid var(--line)}
+.tools button{padding:3px 9px;font-size:12px;min-width:30px}
+.ovbar{display:flex;gap:6px 12px;flex-wrap:wrap;align-items:center;padding:6px 12px;border-bottom:1px solid var(--line);font-size:11px}
+.ovgrp{color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-size:10px;margin-left:6px}
+.ovchip{display:inline-flex;align-items:center;gap:4px;cursor:pointer;color:var(--text);user-select:none}
+.ovchip input{margin:0}
+.ovchip i{display:inline-block;width:14px;height:3px;border-radius:2px}
+.ovchip .mi{font-size:9px;color:var(--green);border:1px solid #2f6b5a;border-radius:6px;padding:0 4px}
+.transport{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:8px 12px;border-top:1px solid var(--line)}
+.transport button{min-width:34px;padding:4px 8px}
+#slider{flex:1;min-width:160px;accent-color:var(--accent)}
+.jumps{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:0 12px 8px;color:var(--muted);font-size:11px}
+.jumps button{padding:2px 8px;font-size:11px}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted);padding:6px 12px 10px}
+.legend i{display:inline-block;width:9px;height:9px;margin-right:4px;vertical-align:middle;border-radius:50%}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media (max-width:980px){.grid2{grid-template-columns:1fr}}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:3px 14px;font-size:12px}
+.kv .k{color:var(--muted)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.chip{padding:3px 9px;border-radius:12px;border:1px solid var(--line);background:var(--panel2);font-size:11px;cursor:pointer}
+.chip.on{border-color:var(--accent);color:var(--accent)}
+.gates{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
+.gate{padding:2px 8px;border-radius:9px;font-size:11px;border:1px solid var(--line)}
+.gate.pass{color:var(--green);border-color:#2f6b5a}
+.gate.fail{color:var(--red);border-color:#6b2f2f}
+.note{background:#2a2412;border:1px solid #5a4a1c;color:var(--yellow);padding:6px 10px;border-radius:6px;font-size:11px;margin:6px 12px}
+.note.info{background:#12222a;border-color:#1c4a5a;color:#a8c4e0}
+.bar{position:relative;height:10px;background:var(--panel2);border-radius:3px;min-width:120px}
+.bar b{position:absolute;top:0;bottom:0;left:0;border-radius:3px;background:#3c5a66}
+.bar b.hi{background:#2f8a6e}.bar b.lo{background:#8a3c3c}
+.bar s{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--yellow)}
+.feat td:first-child{max-width:420px;overflow:hidden;text-overflow:ellipsis}
+.tag{font-size:9px;padding:0 5px;border-radius:7px;border:1px solid #2f6b5a;color:var(--green);margin-left:4px}
+.sub{color:var(--muted);font-size:11px;margin:10px 0 4px;text-transform:uppercase;letter-spacing:.4px}
+.list{font-size:12px;line-height:1.7}
+.empty{color:var(--muted);padding:6px 0}
+.warnc{color:var(--yellow)}
+</style></head><body>
+__NAV__
+<div class=wrap>
+ <section class=card>
+  <div class=card-head>Decision replay
+   <span class=tabs><button id=tabPos class=on>positions</button> <button id=tabFree>any ticker</button></span>
+   <span class=sp></span><span class=muted id=pickInfo></span></div>
+  <div class=card-body>
+   <div id=posPane>
+    <div class=filters>
+     <select id=f_module><option value="">all modules</option></select>
+     <input id=f_ticker placeholder=ticker size=8>
+     <select id=f_status><option value="">open + closed</option><option value=open>open</option><option value=closed>closed</option></select>
+     <select id=f_outcome><option value="">win + loss</option><option value=win>winners</option><option value=loss>losers</option></select>
+     <select id=f_evidence><option value="">any evidence</option><option value=archive>full decision archive</option>
+      <option value=audit>picks + order plans</option><option value=transitions>setup transitions</option><option value="fills only">fills only</option></select>
+    </div>
+    <div class=scroll style=margin-top:8px><table><thead><tr><th>module</th><th>ticker</th><th>route</th><th>status</th>
+     <th>contract</th><th>evidence</th><th>entry bar</th><th>last sell</th><th class=num>hold d</th><th class=num>realized</th><th>exit reason</th>
+     </tr></thead><tbody id=posRows></tbody></table></div>
+   </div>
+   <div id=freePane hidden>
+    <div class=filters>
+     <select id=q_module></select><input id=q_ticker placeholder=ticker size=8>
+     <input id=q_start type=date><input id=q_end type=date><button class=primary id=freeGo>replay</button>
+    </div>
+    <p class=muted style="margin:8px 0 0">Bars plus every archived or audited decision for any ticker, including names the model scored but never bought.</p>
+   </div>
+  </div>
+ </section>
+
+ <section class=card id=stage hidden>
+  <div class=card-head><span id=title></span><span class=sp></span>
+   <label class=muted><input type=checkbox id=ghost> show future bars (hindsight)</label>
+   <select id=tf title="chart timeframe"></select></div>
+  <div class=tools>
+   <button id=zOut title="zoom out (-)">−</button><button id=zIn title="zoom in (+)">+</button><button id=zFit title="show all bars (0)">fit</button>
+   <label class=muted><input type=checkbox id=follow checked> follow cursor</label>
+   <span class=muted>wheel to zoom · drag to pan · double-click to fit · click a bar to move the cursor</span>
+   <span class=sp></span>
+   <span class=muted>lower pane</span><select id=paneSel></select>
+  </div>
+  <div class=ovbar id=ovbar></div>
+  <div class=chartwrap><canvas id=chart></canvas><div id=tip class=tip hidden></div></div>
+  <canvas id=strip></canvas>
+  <canvas id=pane hidden></canvas>
+  <div class=transport>
+   <button id=bStart title="first bar (Home)">|&lt;</button><button id=bPrev title="previous bar (left arrow)">&lt;</button>
+   <button id=bPlay class=primary title="play / pause (space)">play</button>
+   <button id=bNext title="next bar (right arrow)">&gt;</button><button id=bEnd title="last bar (End)">&gt;|</button>
+   <select id=speed title="play speed"><option value=900>slow</option><option value=400 selected>normal</option><option value=120>fast</option></select>
+   <input type=range id=slider min=0 max=0 value=0 aria-label="replay position">
+   <span id=frameLbl class=mono></span>
+  </div>
+  <div class=jumps>jump to
+   <button data-j=entryDec>entry decision</button><button data-j=entry>entry fill</button><button data-j=exit>exit</button>
+   <button data-j=prevDec title="shift + left arrow">previous decision</button><button data-j=nextDec title="shift + right arrow">next decision</button>
+   <button data-j=prevEv>previous event</button><button data-j=nextEv>next event</button></div>
+  <div class=legend id=legend></div>
+  <div id=notes></div>
+ </section>
+
+ <div class=grid2 id=panels hidden>
+  <section class=card><div class=card-head>Position at this bar</div><div class=card-body id=posState></div></section>
+  <section class=card><div class=card-head>Model at this bar <span class=sp></span><span id=decSrc></span></div><div class=card-body id=modelState></div></section>
+ </div>
+
+ <section class=card id=featCard hidden>
+  <div class=card-head><span id=featHead>What the model saw</span> <span id=featTitle class=muted></span><span class=sp></span>
+   <input id=fq placeholder="filter" size=16>
+   <select id=fsort><option value=model>model order</option><option value=extreme>most extreme percentile</option>
+    <option value=drift>largest change since entry</option><option value=name>name</option></select>
+   <label id=fmiLbl class=muted hidden><input type=checkbox id=fmi> model inputs only</label></div>
+  <div class=card-body>
+   <div class=grid2 id=runCtx></div>
+   <div class=scroll style="max-height:520px;margin-top:10px"><table class=feat><thead id=featHeadRow></thead><tbody id=featRows></tbody></table></div>
+  </div>
+ </section>
+
+ <section class=card id=logCard hidden><div class=card-head>Event log <span class=muted>(click a row to jump; faded rows are after the cursor; audit runs where the ticker was not in top-K appear only as strip ticks)</span></div>
+  <div class="card-body scroll" style=max-height:300px><table><tbody id=logRows></tbody></table></div></section>
+</div>
+<script id=cfg type=application/json>__CONFIG__</script>
+<script>
+(function(){
+'use strict';
+var CFG=JSON.parse(document.getElementById('cfg').textContent);
+var $=function(i){return document.getElementById(i)};
+var S={R:null,q:null,hash:'',cur:0,timer:null,sel:null,carried:false,runs:new Map(),pos:[],posId:null,feat:null,
+  v0:0,v1:0,ov:new Set(),pane:'',paneData:null,eng:new Map(),engTimer:null,drag:null};
+var css=getComputedStyle(document.documentElement);
+var C={green:css.getPropertyValue('--green').trim()||'#91ddc5',red:css.getPropertyValue('--red').trim()||'#f49b9b',
+  yellow:css.getPropertyValue('--yellow').trim()||'#e7c38c',muted:css.getPropertyValue('--muted').trim()||'#94a4a9',
+  line:css.getPropertyValue('--line').trim()||'#263238',text:css.getPropertyValue('--text').trim()||'#edf3f1',
+  bg:css.getPropertyValue('--bg').trim()||'#0b1014',blue:'#8fb6ee',violet:'#bfa8f0',hold:'rgba(145,221,197,0.06)'};
+// Overlay colours: one per series, stable across modules.
+var OVC={ema_10:'#f2d06b',ema_20:'#8fb6ee',ema_50:'#c39ef0',ema_100:'#e59a6b',high_20:'#7fc9b6',low_20:'#7fc9b6',
+  high_60:'#a8b0bd',low_60:'#a8b0bd',high_52w:'#d9888f',low_52w:'#d9888f',session_vwap:'#f2d06b',ema_9:'#8fb6ee',
+  opening_range_high:'#7fc9b6',opening_range_low:'#7fc9b6',prior_day_high:'#d9888f',prior_day_low:'#d9888f',
+  micro_swing_high:'#a8b0bd',micro_swing_low:'#a8b0bd',_levels:'#e7c38c',_implied:'#ffffff',_engine:'#a8c4e0'};
+var STEP_KEYS=/^(high_|low_|opening_range_|prior_day_|micro_swing_)/;
+var LEVEL_COL={stop:C.red,u_stop:C.red,invalidation:C.red,take_profit:C.green,pivot:C.violet,entry:C.yellow,u_entry:C.yellow};
+var ETF=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+var ETD=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',year:'2-digit',month:'2-digit',day:'2-digit'});
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function et(iso){if(!iso)return '';var d=new Date(iso);return isNaN(d)?esc(iso):ETF.format(d).replace(',','')+' ET'}
+function etd(iso){if(!iso)return '';var d=new Date(iso);return isNaN(d)?'':ETD.format(d)}
+function num(v,p){if(v==null||!isFinite(v))return '—';var a=Math.abs(v);
+  if(p!=null)return Number(v).toFixed(p);return a>=1000?Number(v).toFixed(0):a>=1?Number(v).toFixed(3):Number(v).toPrecision(3)}
+function pct(v,p){return v==null||!isFinite(v)?'—':(v>0?'+':'')+(v*100).toFixed(p==null?1:p)+'%'}
+function money(v){if(v==null)return '';var s=(v<0?'−$':'$')+Math.abs(v).toLocaleString(undefined,{maximumFractionDigits:0});
+  return '<span class="'+(v>0?'good':(v<0?'bad':''))+'">'+s+'</span>'}
+function tone(v){return v==null?'':(v>0?'good':(v<0?'bad':''))}
+function mod(m){return String(m||'').replace(/_/g,' ')}
+function getJSON(u){return fetch(u,{cache:'no-store'}).then(function(r){return r.json()})}
+function lsGet(k,d){try{var v=localStorage.getItem(k);return v==null?d:JSON.parse(v)}catch(_){return d}}
+function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(_){}}
+
+// ------------------------------------------------------------------ picker
+(function initPicker(){
+  CFG.modules.forEach(function(m){var o=document.createElement('option');o.value=m;o.textContent=mod(m);$('q_module').appendChild(o)});
+  var today=new Date(),ago=new Date(Date.now()-14*864e5);
+  $('q_end').value=today.toISOString().slice(0,10);$('q_start').value=ago.toISOString().slice(0,10);
+  $('tabPos').onclick=function(){$('tabPos').classList.add('on');$('tabFree').classList.remove('on');$('posPane').hidden=false;$('freePane').hidden=true};
+  $('tabFree').onclick=function(){$('tabFree').classList.add('on');$('tabPos').classList.remove('on');$('posPane').hidden=true;$('freePane').hidden=false};
+  ['f_module','f_status','f_outcome','f_evidence'].forEach(function(i){$(i).onchange=loadPositions});
+  $('f_ticker').oninput=function(){clearTimeout(S.tt);S.tt=setTimeout(loadPositions,250)};
+  $('freeGo').onclick=function(){var t=$('q_ticker').value.trim().toUpperCase();if(!t)return;
+    openReplay({module:$('q_module').value,ticker:t,start:$('q_start').value,end:$('q_end').value})};
+})();
+function loadPositions(){
+  var p=new URLSearchParams();[['module','f_module'],['ticker','f_ticker'],['status','f_status'],['outcome','f_outcome']]
+    .forEach(function(x){var v=$(x[1]).value.trim();if(v)p.set(x[0],v)});
+  return getJSON('/api/positions?'+p).then(function(r){
+    if($('f_module').options.length<=1)(r.modules||[]).forEach(function(m){var o=document.createElement('option');o.value=m;o.textContent=mod(m);$('f_module').appendChild(o)});
+    var ev=$('f_evidence').value;S.pos=(r.positions||[]).filter(function(x){return !ev||x.evidence===ev});
+    $('pickInfo').textContent=S.pos.length+' positions';renderPositions()})}
+function renderPositions(){
+  $('posRows').innerHTML=S.pos.map(function(p,i){return '<tr data-i='+i+(p.id===S.posId?' class=sel':'')+'><td class=muted>'+esc(mod(p.module))+'</td><td><b>'+esc(p.ticker)+'</b></td>'
+    +'<td class=muted>'+esc(p.route)+'</td><td>'+(p.status==='open'?'<span class="ev open">open</span>':'closed')+'</td>'
+    +'<td>'+(p.contract?esc(contractShort(p.contract)):'<span class=muted>—</span>')+'</td>'
+    +'<td><span class="ev '+esc(p.evidence.split(' ')[0])+'">'+esc(p.evidence)+'</span></td><td>'+etd(p.entry_bar)+'</td><td>'+etd(p.last_sell)+'</td>'
+    +'<td class=num>'+num(p.hold_days,1)+'</td><td class=num>'+money(p.realized)+'</td><td class=muted>'+esc(p.final_reason||'')+'</td></tr>'}).join('')
+    ||'<tr><td colspan=11 class=empty>no positions match</td></tr>';
+  [].forEach.call($('posRows').querySelectorAll('tr[data-i]'),function(tr){tr.onclick=function(){openReplay({id:S.pos[+tr.dataset.i].id})}})}
+
+// ------------------------------------------------------------------ replay load
+function contractShort(c){if(!c||!c.occ)return '';var d=c.expiry.slice(5).replace('-','/');
+  return c.underlying+' '+d+' '+(c.strike%1?c.strike:c.strike.toFixed(0))+(c.right==='put'?'P':'C')+(c.dte_at_entry!=null?' ('+c.dte_at_entry+'DTE at entry)':'')}
+function openReplay(q,tf,startFrame){
+  stop();var p=new URLSearchParams(q);if(tf)p.set('tf',tf);
+  $('stage').hidden=false;$('title').textContent='loading…';
+  return getJSON('/api/replay?'+p).then(function(R){
+    if(R.error&&!(R.bars||[]).length){$('title').textContent='';$('notes').innerHTML='<div class=note>'+esc(R.error)+'</div>';return}
+    S.R=R;S.q=q;S.posId=q.id||null;S.runs.clear();S.eng.clear();S.paneData=null;renderPositions();S.hash=p.toString();
+    var sb=R.subject,ps=R.position,ct=R.contract;
+    $('title').innerHTML='<b>'+esc(sb.ticker)+'</b> · '+esc(mod(sb.module))+(sb.route?' · '+esc(sb.route):'')
+      +(ct&&ct.occ?' · <b>'+esc(contractShort(ct))+'</b>':'')
+      +(ps?' · '+(ps.status==='open'?'<span class="ev open">open</span>':'closed '+etd(ps.last_sell)+' · '+money(ps.realized)):' · ad-hoc window');
+    $('tf').innerHTML=sb.tf_options.map(function(t){return '<option'+(t===sb.tf?' selected':'')+'>'+t+'</option>'}).join('');
+    $('slider').max=Math.max(0,R.bars.length-1);
+    var notes=(R.notes||[]).map(function(n){return '<div class="note info">'+esc(n)+'</div>'});
+    if(R.error)notes.unshift('<div class=note>'+esc(R.error)+'</div>');
+    var cv=R.coverage||{},a=cv.archive||{},u=cv.audit||{};
+    notes.push('<div class="note info">Evidence in this window: '+(a.rows_in_window||0)+' archived decision rows (full features'
+      +(a.first?', archive '+esc(a.first)+' to '+esc(a.last):'')+'), '+(u.rows_in_window||0)+' audit rows (picks only)'
+      +(cv.transitions?', '+cv.transitions+' setup transitions':'')+(cv.off_chart?', '+cv.off_chart+' outside the drawn bars':'')
+      +'. Every decision and fill sits on the bar during which it happened (audit rows, which log no time, at the end of the bar they scored), so nothing appears before it existed; the bar a decision scored is marked "model\'s last bar".</div>');
+    var ov=R.overlays||{};if(ov.source)notes.push('<div class="note info">Overlays: '+esc(ov.source)+'</div>');
+    if(ov.error)notes.push('<div class=note>Overlays failed: '+esc(ov.error)+'</div>');
+    $('notes').innerHTML=notes.join('');
+    $('legend').innerHTML=legend(sb.module);
+    buildOverlayBar();buildPaneSelect();
+    ['panels','featCard','logCard'].forEach(function(i){$(i).hidden=false});
+    var start=startFrame!=null?startFrame:frameOf(R.entry_decision);if(start==null)start=R.entry_frame;if(start==null)start=0;
+    fitPosition();setCursor(start)})}
+function frameOf(key){if(!key||!S.R)return null;var d=S.R.decisions.find(function(x){return x.run_key===key});return d?d.frame:null}
+$('tf').onchange=function(){if(S.q)openReplay(S.q,$('tf').value)};
+$('ghost').onchange=function(){drawAll()};
+
+// ------------------------------------------------------------------ overlays
+function ovKey(){return 'cyno-replay-ov:'+(S.R.subject.tf==='1m'?'1m':'bars')}
+function buildOverlayBar(){
+  var R=S.R,meta=(R.overlays||{}).meta||{},groups={},defaults;
+  Object.keys(meta).forEach(function(k){var m=meta[k];if(m.kind!=='price')return;var g=m.group||'other';(groups[g]=groups[g]||[]).push(k)});
+  defaults=R.subject.tf==='1m'?['session_vwap','ema_9','ema_20','opening_range_high','opening_range_low','prior_day_high','prior_day_low','_levels','_engine']
+    :['ema_20','ema_50','high_20','low_20','_levels','_implied'];
+  S.ov=new Set(lsGet(ovKey(),defaults));
+  var h='';
+  Object.keys(groups).forEach(function(g){h+='<span class=ovgrp>'+esc(g)+'</span>';groups[g].forEach(function(k){h+=chip(k,meta[k].label,meta[k].model_input)})});
+  h+='<span class=ovgrp>trade</span>'+chip('_levels','position + setup levels (right of cursor)');
+  if(R.decisions.some(function(d){return d.implied}))h+=chip('_implied','model-implied levels (archived features)',true);
+  if(R.subject.module==='intraday_structure'&&R.subject.tf==='1m')h+=chip('_engine','engine level map at cursor',true);
+  $('ovbar').innerHTML=h;
+  [].forEach.call($('ovbar').querySelectorAll('input'),function(cb){cb.onchange=function(){cb.checked?S.ov.add(cb.dataset.k):S.ov.delete(cb.dataset.k);lsSet(ovKey(),Array.from(S.ov));drawAll();if(cb.dataset.k==='_engine')renderFeatures()}})}
+function chip(k,label,mi){var col=OVC[k]||C.muted;return '<label class=ovchip title="'+esc(label)+'"><input type=checkbox data-k="'+k+'"'+(S.ov.has(k)?' checked':'')+'>'
+  +'<i style="background:'+col+(STEP_KEYS.test(k)?';height:0;border-top:2px dashed '+col+';background:none':'')+'"></i>'+esc(label)+(mi?' <span class=mi>model input</span>':'')+'</label>'}
+function buildPaneSelect(){
+  var R=S.R,meta=(R.overlays||{}).meta||{},o='<option value="">none</option>';
+  var osc=Object.keys(meta).filter(function(k){return meta[k].kind==='osc'});
+  if(osc.length)o+='<optgroup label="indicators (recomputed from bars)">'+osc.map(function(k){return '<option value="ind:'+k+'">'+esc(meta[k].label)+(meta[k].model_input?' · model input':'')+'</option>'}).join('')+'</optgroup>';
+  var af=R.archive_features||[];
+  if(af.length)o+='<optgroup label="archived live features (decision runs only)">'+af.map(function(k){return '<option value="arc:'+esc(k)+'">'+esc(k)+'</option>'}).join('')+'</optgroup>';
+  $('paneSel').innerHTML=o;var keep=S.forcePane||lsGet('cyno-replay-pane:'+R.subject.tf,'');S.forcePane=null;
+  if(keep&&$('paneSel').querySelector('option[value="'+keep.replace(/"/g,'')+'"]'))$('paneSel').value=keep;else $('paneSel').value='';
+  S.pane=$('paneSel').value;loadPane()}
+$('paneSel').onchange=function(){S.pane=$('paneSel').value;lsSet('cyno-replay-pane:'+S.R.subject.tf,S.pane);loadPane()};
+function loadPane(){S.paneData=null;$('pane').hidden=!S.pane;
+  if(S.pane.indexOf('arc:')===0){var R=S.R,p=new URLSearchParams({module:R.subject.module,ticker:R.subject.ticker,
+      start:R.bars[0].t,end:R.bars[R.bars.length-1].t,name:S.pane.slice(4)});
+    getJSON('/api/feature_series?'+p).then(function(x){S.paneData=x;drawAll()})}
+  drawAll()}
+
+// ------------------------------------------------------------------ view (zoom / pan)
+function nBars(){return S.R?S.R.bars.length:0}
+function setView(a,b){var n=nBars();var span=Math.max(Math.min(b-a,n-1),Math.min(9,n-1));a=Math.round(a);b=a+Math.round(span);
+  if(a<0){b-=a;a=0}if(b>n-1){a-=b-(n-1);b=n-1}S.v0=Math.max(0,a);S.v1=Math.max(S.v0,b)}
+function fitAll(){setView(0,nBars()-1)}
+function fitPosition(){var R=S.R,n=nBars();var a=R.entry_frame!=null?R.entry_frame:0,b=R.exit_frame!=null?R.exit_frame:n-1;
+  var fd=frameOf(R.entry_decision);if(fd!=null)a=Math.min(a,fd);var pad=Math.max(6,Math.round((b-a)*0.35));
+  if(!R.position)fitAll();else setView(a-Math.max(pad,R.subject.tf==='1m'?30:6),b+Math.max(pad,R.subject.tf==='1m'?45:6))}
+function zoom(f,center){var span=S.v1-S.v0,c=center==null?(S.v0+S.v1)/2:center;var ns=Math.max(9,span*f);
+  var r=span?(c-S.v0)/span:0.5;setView(c-ns*r,c-ns*r+ns);drawAll()}
+function ensureVisible(i){if(!$('follow').checked)return;var span=S.v1-S.v0;
+  if(i>S.v1-Math.max(1,span*0.08)||i<S.v0)setView(i-span*0.7,i-span*0.7+span)}
+$('zIn').onclick=function(){zoom(1/1.5)};$('zOut').onclick=function(){zoom(1.5)};$('zFit').onclick=function(){fitAll();drawAll()};
+
+// ------------------------------------------------------------------ cursor / transport
+function setCursor(i){if(!S.R)return;var n=nBars();S.cur=Math.max(0,Math.min(n-1,i|0));ensureVisible(S.cur);pickDecision();render();
+  try{history.replaceState(null,'','#'+S.hash+'&f='+S.cur+(S.pane?'&pane='+encodeURIComponent(S.pane):''))}catch(_){}}
+function stop(){if(S.timer){clearInterval(S.timer);S.timer=null}$('bPlay').textContent='play'}
+function play(){if(S.timer){stop();return}if(!S.R)return;if(S.cur>=nBars()-1)setCursor(0);
+  $('bPlay').textContent='pause';S.timer=setInterval(function(){if(S.cur>=nBars()-1){stop();return}setCursor(S.cur+1)},+$('speed').value)}
+$('bPlay').onclick=play;$('bStart').onclick=function(){stop();setCursor(0)};$('bEnd').onclick=function(){stop();setCursor(1e9)};
+$('bPrev').onclick=function(){stop();setCursor(S.cur-1)};$('bNext').onclick=function(){stop();setCursor(S.cur+1)};
+$('slider').oninput=function(){stop();setCursor(+$('slider').value)};
+$('speed').onchange=function(){if(S.timer){stop();play()}};
+function jump(kind){if(!S.R)return;var R=S.R,c=S.cur,f=null;
+  var dec=R.decisions.map(function(d){return d.frame}),ev=R.events.filter(function(e){return e.frame!=null}).map(function(e){return e.frame});
+  if(kind==='entryDec')f=frameOf(R.entry_decision);else if(kind==='entry')f=R.entry_frame;else if(kind==='exit')f=R.exit_frame;
+  else if(kind==='nextDec')f=dec.find(function(x){return x>c});else if(kind==='prevDec')f=dec.slice().reverse().find(function(x){return x<c});
+  else if(kind==='nextEv')f=ev.find(function(x){return x>c});else if(kind==='prevEv')f=ev.slice().reverse().find(function(x){return x<c});
+  if(f!=null){stop();setCursor(f)}}
+[].forEach.call(document.querySelectorAll('.jumps button'),function(b){b.onclick=function(){jump(b.dataset.j)}});
+document.addEventListener('keydown',function(e){
+  if(!S.R||/INPUT|SELECT|TEXTAREA/.test((e.target||{}).tagName||''))return;
+  if(e.key==='ArrowRight'){e.preventDefault();e.shiftKey?jump('nextDec'):(stop(),setCursor(S.cur+1))}
+  else if(e.key==='ArrowLeft'){e.preventDefault();e.shiftKey?jump('prevDec'):(stop(),setCursor(S.cur-1))}
+  else if(e.key===' '){e.preventDefault();play()}else if(e.key==='Home'){stop();setCursor(0)}else if(e.key==='End'){stop();setCursor(1e9)}
+  else if(e.key==='+'||e.key==='='){zoom(1/1.5,S.cur)}else if(e.key==='-'){zoom(1.5,S.cur)}else if(e.key==='0'){fitAll();drawAll()}});
+
+// The decision shown for the cursor: one on this bar (archive first, the latest
+// run, the position's own setup), else the latest earlier one ("carried").
+function pickDecision(){var R=S.R,c=S.cur;
+  var here=R.decisions.filter(function(d){return d.frame===c});
+  if(here.length){var best=here.filter(function(d){return d.position_setup});if(!best.length)best=here;
+    var arch=best.filter(function(d){return d.source==='archive'});var pool=arch.length?arch:best;S.sel=pool[pool.length-1];S.carried=false;return}
+  var prev=R.decisions.filter(function(d){return d.frame<c});S.sel=prev.length?prev[prev.length-1]:null;S.carried=!!S.sel}
+
+function visibleLast(){return $('ghost').checked?nBars()-1:S.cur}
+function render(){$('slider').value=S.cur;var b=S.R.bars[S.cur];
+  $('frameLbl').textContent='bar '+(S.cur+1)+'/'+nBars()+' · opened '+et(b.t)+' · showing the market as of this bar\'s close';
+  queueEngine();drawAll();renderPos();renderModel();renderFeatures();renderLog()}
+function drawAll(){if(!S.R)return;drawChart();drawStrip();drawPane()}
+
+// ------------------------------------------------------------------ engine view at the cursor (intraday)
+function engineOn(){return S.R&&S.R.subject.module==='intraday_structure'&&S.R.subject.tf==='1m'}
+function queueEngine(){if(!engineOn())return;var f=S.cur;if(S.eng.has(f))return;clearTimeout(S.engTimer);
+  S.engTimer=setTimeout(function(){if(S.eng.has(f))return;var p=new URLSearchParams({ticker:S.R.subject.ticker,at:S.R.bars[f].t});
+    if(S.posId)p.set('id',S.posId);S.eng.set(f,{pending:true});
+    getJSON('/api/engine?'+p).then(function(x){S.eng.set(f,x);if(S.cur===f){drawAll();renderFeatures()}})},S.timer?400:120)}
+function engineAt(f){var x=S.eng.get(f);return x&&!x.pending&&!x.error?x:null}
+
+// ------------------------------------------------------------------ chart
+var G=null;
+function sizeCanvas(c){var b=c.getBoundingClientRect(),d=window.devicePixelRatio||1;c.width=Math.max(1,b.width*d);c.height=Math.max(1,b.height*d);
+  var g=c.getContext('2d');g.setTransform(d,0,0,d,0,0);g.clearRect(0,0,b.width,b.height);return {g:g,w:b.width,h:b.height}}
+function geom(w){var L=60,Rm=66,W=w-L-Rm,n=S.v1-S.v0+1,cw=W/n;
+  return {L:L,Rm:Rm,W:W,cw:cw,x:function(i){return L+(i-S.v0+0.5)*cw},idx:function(px){return Math.floor((px-L)/cw)+S.v0}}}
+function seriesOf(k){var s=((S.R.overlays||{}).series||{})[k];return s||null}
+function drawChart(){
+  var R=S.R,bars=R.bars,cv=sizeCanvas($('chart')),g=cv.g,vis=visibleLast(),cur=S.cur;
+  var gm=geom(cv.w),L=gm.L,W=gm.W,cw=gm.cw,x=gm.x,T=14,B=24,H=cv.h-T-B,i;
+  var hiI=Math.min(S.v1,vis),lo=Infinity,hi=-Infinity;
+  for(i=S.v0;i<=hiI;i++){lo=Math.min(lo,bars[i].l);hi=Math.max(hi,bars[i].h)}
+  var active=S.ov.has('_levels')?(R.levels||[]).filter(function(lv){return lv.from_frame!=null&&lv.from_frame<=cur&&cur<=lv.to_frame}):[];
+  active.forEach(function(lv){lo=Math.min(lo,lv.price);hi=Math.max(hi,lv.price)});
+  if(!isFinite(lo)){G=null;g.fillStyle=C.muted;g.font='12px ui-monospace,monospace';g.fillText('future bars hidden in this view — move the cursor or press "fit"',L+10,T+20);return}
+  var pad=(hi-lo)*0.06||Math.abs(hi)*0.01||1;lo-=pad;hi+=pad;
+  var y=function(v){return T+H-(v-lo)/(hi-lo)*H};
+  G={gm:gm,T:T,H:H,y:y,lo:lo,hi:hi};
+  g.font='10px ui-monospace,monospace';g.lineWidth=1;
+  for(var k=0;k<=5;k++){var v=lo+(hi-lo)*k/5,yy=y(v);g.strokeStyle=C.line;g.beginPath();g.moveTo(L,yy);g.lineTo(L+W,yy);g.stroke();g.fillStyle=C.muted;g.fillText(num(v,2),6,yy+3)}
+  g.save();g.beginPath();g.rect(L,T,W,H);g.clip();
+  if(R.entry_frame!=null&&R.entry_frame<=vis){var hx0=x(R.entry_frame)-cw/2,hx1=x(Math.min(R.exit_frame!=null?R.exit_frame:nBars()-1,vis))+cw/2;
+    g.fillStyle=C.hold;g.fillRect(hx0,T,Math.max(0,hx1-hx0),H)}
+  for(i=S.v0;i<=hiI;i++){var b=bars[i],up=b.c>=b.o,px=x(i);g.globalAlpha=i>cur?0.28:1;
+    g.strokeStyle=up?C.green:C.red;g.fillStyle=g.strokeStyle;g.beginPath();g.moveTo(px,y(b.h));g.lineTo(px,y(b.l));g.stroke();
+    var bw=Math.max(1,cw*0.62);g.fillRect(px-bw/2,Math.min(y(b.o),y(b.c)),bw,Math.max(1,Math.abs(y(b.o)-y(b.c))))}
+  g.globalAlpha=1;
+  // overlay series up to the cursor (or every bar when future bars are shown)
+  var meta=(R.overlays||{}).meta||{};
+  Object.keys(meta).forEach(function(kk){if(meta[kk].kind!=='price'||!S.ov.has(kk))return;var s=seriesOf(kk);if(!s)return;
+    var col=OVC[kk]||C.muted,step=STEP_KEYS.test(kk);g.strokeStyle=col;g.lineWidth=step?1:1.4;g.setLineDash(step?[4,3]:[]);g.beginPath();var on=false;
+    for(var j=S.v0;j<=hiI;j++){var vv=s[j];if(vv==null){on=false;continue}var px2=x(j),py=y(vv);
+      if(step){if(on)g.lineTo(px2-cw/2,py);else g.moveTo(px2-cw/2,py);g.lineTo(px2+cw/2,py)}else{if(on)g.lineTo(px2,py);else g.moveTo(px2,py)}on=true}
+    g.stroke();g.setLineDash([]);g.lineWidth=1});
+  // model-implied levels at each archived decision's scored bar
+  if(S.ov.has('_implied'))R.decisions.forEach(function(d){if(!d.implied||d.frame>cur||d.scored_frame==null||d.scored_frame<S.v0||d.scored_frame>S.v1)return;
+    Object.keys(d.implied).forEach(function(kk){if(kk!=='close'&&!S.ov.has(kk))return;var px=x(d.scored_frame),py=y(d.implied[kk]);
+      g.strokeStyle=kk==='close'?C.text:(OVC[kk]||C.text);g.lineWidth=1.6;g.beginPath();g.moveTo(px-4,py-4);g.lineTo(px+4,py+4);g.moveTo(px+4,py-4);g.lineTo(px-4,py+4);g.stroke();g.lineWidth=1})});
+  if(S.sel&&S.sel.scored_frame!=null&&S.sel.scored_frame<=vis&&S.sel.scored_frame>=S.v0&&S.sel.scored_frame<=S.v1){
+    var mx=x(S.sel.scored_frame)+cw/2;g.strokeStyle=C.violet;g.setLineDash([2,3]);g.beginPath();g.moveTo(mx,T);g.lineTo(mx,T+H);g.stroke();g.setLineDash([]);
+    g.fillStyle=C.violet;var ml="model's last bar",mw=g.measureText(ml).width;g.fillText(ml,mx+3+mw>L+W?mx-3-mw:mx+3,T+10)}
+  var ef=frameOf(R.entry_decision);if(ef!=null&&ef<=vis&&ef>=S.v0&&ef<=S.v1){g.fillStyle=C.violet;var ex=x(ef);g.beginPath();g.moveTo(ex,T+22);g.lineTo(ex+5,T+28);g.lineTo(ex,T+34);g.lineTo(ex-5,T+28);g.fill();g.fillText('pick',ex+7,T+31)}
+  R.events.forEach(function(e){if(e.frame==null||e.frame>vis||e.frame<S.v0||e.frame>S.v1)return;var b=bars[e.frame],px=x(e.frame);
+    if(e.kind==='order_plan'){var d=e.detail||{},buy=d.side==='buy';g.fillStyle=C.yellow;var yy=buy?T+H-4:T+4;
+      g.beginPath();g.moveTo(px,yy);g.lineTo(px-4,yy+(buy?-7:7));g.lineTo(px+4,yy+(buy?-7:7));g.fill();return}
+    var col=e.kind==='entry'?C.blue:e.kind==='trim'?C.green:C.red;
+    var py=e.on_chart_scale&&e.price!=null?y(e.price):(e.kind==='entry'?y(b.l)+12:y(b.h)-12);
+    g.strokeStyle=col;g.fillStyle=col;g.lineWidth=1.6;g.beginPath();g.arc(px,py,5,0,6.2832);e.kind==='trim'?g.stroke():g.fill();g.lineWidth=1;
+    g.fillText(e.kind==='entry'?'entry':e.kind==='trim'?'trim':String(e.label||'exit').slice(0,22),px+7,py+3)});
+  g.restore();
+  // cursor, then levels that apply at the cursor, drawn from the cursor to the right edge
+  var cx=x(cur);g.strokeStyle=C.text;g.globalAlpha=.55;g.beginPath();g.moveTo(cx,T);g.lineTo(cx,T+H);g.stroke();g.globalAlpha=1;
+  var lines=active.map(function(lv){return {price:lv.price,label:lv.label,col:LEVEL_COL[lv.key]||(String(lv.key).indexOf('target')===0?C.green:C.yellow),dash:[6,4],w:1.3}});
+  var eng=S.ov.has('_engine')?engineAt(cur):null;
+  if(eng)eng.levels.forEach(function(l){lines.push({price:l.price,label:l.type.replace(/\+/g,' + ').slice(0,60)+' · '+num(l.strength,2),col:OVC._engine,dash:[2,3],w:1,faint:true})});
+  drawRightLevels(g,lines,cx,L,W,T,H,y,cv.w);
+  g.fillStyle=C.muted;var span=S.v1-S.v0,ticks=Math.min(6,span+1);
+  for(k=0;k<ticks;k++){var ti=S.v0+Math.round(k*span/Math.max(1,ticks-1));var lab=et(bars[ti].t).replace(' ET','');var tw=g.measureText(lab).width;
+    g.fillText(lab,Math.max(L,Math.min(x(ti)-tw/2,L+W-tw)),cv.h-7)}
+  if(vis<S.v1&&cx<L+W-240){g.fillStyle=C.muted;g.fillText('future bars hidden',L+W-110,T+10)}
+}
+function drawRightLevels(g,lines,cx,L,W,T,H,y,totalW){
+  var x0=Math.max(cx,L),labels=[];
+  lines.forEach(function(ln){var py=y(ln.price);if(py<T||py>T+H)return;g.strokeStyle=ln.col;g.globalAlpha=ln.faint?0.65:1;g.lineWidth=ln.w;g.setLineDash(ln.dash);
+    g.beginPath();g.moveTo(x0,py);g.lineTo(L+W,py);g.stroke();g.setLineDash([]);g.lineWidth=1;g.globalAlpha=1;labels.push({py:py,ln:ln})});
+  // labels just right of the cursor, nudged apart so they never stack
+  labels.sort(function(a,b){return a.py-b.py});var last=-1e9;g.font='10px ui-monospace,monospace';
+  labels.forEach(function(it){var ly=Math.max(it.py-3,last+11);last=ly;var tw=g.measureText(it.ln.label).width,lx=x0+6;
+    if(lx+tw>L+W-2)lx=Math.max(L+2,x0-6-tw);g.fillStyle=C.bg;g.globalAlpha=.75;g.fillRect(lx-2,ly-9,tw+4,11);g.globalAlpha=1;
+    g.fillStyle=it.ln.col;g.fillText(it.ln.label,lx,ly);
+  });
+  // price tags on the right axis, nudged apart the same way
+  var lastTag=-1e9;labels.forEach(function(it){var ty=Math.max(it.py,lastTag+14);lastTag=ty;
+    var tag=num(it.ln.price,2),tgw=g.measureText(tag).width+8;g.fillStyle=it.ln.col;g.globalAlpha=it.ln.faint?0.5:0.9;g.fillRect(L+W+2,ty-7,tgw,14);g.globalAlpha=1;
+    if(ty!==it.py){g.strokeStyle=it.ln.col;g.beginPath();g.moveTo(L+W,it.py);g.lineTo(L+W+2,ty);g.stroke()}
+    g.fillStyle='#0b1014';g.fillText(tag,L+W+6,ty+3)})}
+var STATE_Y={WATCHING:.15,SETUP_DETECTED:.3,ARMED:.45,CONFIRMED:.7,RUNNING:.85,TARGET_REACHED:.95,EXHAUSTED:.55,INVALIDATED:.1,CLOSED:.05};
+function stripY(d){if(d.source==='archive')return d.scored&&d.score_pct!=null?d.score_pct:null;
+  if(d.source==='audit')return d.in_targets?(d.rank_pct!=null?d.rank_pct:0.97):null;
+  if(d.source==='transitions')return STATE_Y[d.to_state]!=null?STATE_Y[d.to_state]:.5;return null}
+function drawStrip(){
+  var R=S.R,cv=sizeCanvas($('strip')),g=cv.g,vis=visibleLast(),gm=geom(cv.w),L=gm.L,W=gm.W,x=gm.x;
+  var T=8,H=cv.h-18,y=function(v){return T+H-v*H},tr=R.subject.module==='intraday_structure';
+  g.font='10px ui-monospace,monospace';g.fillStyle=C.muted;g.fillText(tr?'setup':'score',4,T+H-12);g.fillText(tr?'state':'pct',4,T+H-1);
+  (tr?[]:[.5,.9]).forEach(function(v){g.strokeStyle=C.line;g.setLineDash([3,3]);g.beginPath();g.moveTo(L,y(v));g.lineTo(L+W,y(v));g.stroke();g.setLineDash([]);g.fillText(String(v),30,y(v)+3)});
+  g.save();g.beginPath();g.rect(L,0,W,cv.h);g.clip();
+  R.decisions.forEach(function(d){if(d.frame>vis||d.frame<S.v0||d.frame>S.v1)return;var px=x(d.frame),v=stripY(d);g.globalAlpha=d.frame>S.cur?0.3:1;
+    if(v==null){g.strokeStyle=d.run_skip?C.red:C.muted;g.beginPath();g.moveTo(px,T+H);g.lineTo(px,T+H-5);g.stroke();g.globalAlpha=1;return}
+    var py=y(v),col;
+    if(d.source==='archive'){col=d.selected?C.green:d.eligible?C.green:C.muted;g.fillStyle=col;g.strokeStyle=col;g.beginPath();g.arc(px,py,3.2,0,6.2832);d.eligible&&!d.selected?g.stroke():g.fill()}
+    else if(d.source==='audit'){g.fillStyle=C.yellow;g.beginPath();g.moveTo(px,py-4);g.lineTo(px+4,py);g.lineTo(px,py+4);g.lineTo(px-4,py);g.fill()}
+    else{g.fillStyle=d.position_setup?C.violet:C.muted;g.beginPath();g.arc(px,py,3,0,6.2832);g.fill()}
+    if(S.sel===d){g.strokeStyle=C.text;g.lineWidth=1.4;g.beginPath();g.arc(px,py,6,0,6.2832);g.stroke();g.lineWidth=1}
+    g.globalAlpha=1});
+  g.restore();var cx=x(S.cur);g.strokeStyle=C.text;g.globalAlpha=.55;g.beginPath();g.moveTo(cx,0);g.lineTo(cx,cv.h);g.stroke();g.globalAlpha=1}
+function drawPane(){
+  if(!S.pane){return}var R=S.R,cv=sizeCanvas($('pane')),g=cv.g,vis=visibleLast(),gm=geom(cv.w),L=gm.L,W=gm.W,x=gm.x,T=10,H=cv.h-22;
+  var pts=[],k=S.pane.slice(4),isArc=S.pane.indexOf('arc:')===0,label=k;
+  if(isArc){if(!S.paneData){g.fillStyle=C.muted;g.font='11px ui-monospace,monospace';g.fillText('loading '+k+'…',L+6,T+14);return}
+    var byRun={};R.decisions.forEach(function(d){if(d.source==='archive')byRun[d.run_id]=d});
+    (S.paneData.rows||[]).forEach(function(r){var d=byRun[r.run_id];if(d&&r.value!=null)pts.push({i:d.frame,v:r.value})})}
+  else{var s=seriesOf(k)||[];var meta=((R.overlays||{}).meta||{})[k];if(meta)label=meta.label;
+    for(var i=S.v0;i<=Math.min(S.v1,vis);i++)if(s[i]!=null)pts.push({i:i,v:s[i]})}
+  var inView=pts.filter(function(p){return p.i>=S.v0&&p.i<=S.v1&&p.i<=vis});
+  g.font='10px ui-monospace,monospace';g.fillStyle=C.muted;g.fillText(label+(isArc?' (archived, at each decision)':''),L+4,T+2);
+  if(!inView.length){g.fillText('no values in view',L+4,T+16);return}
+  var lo=Math.min.apply(null,inView.map(function(p){return p.v})),hi=Math.max.apply(null,inView.map(function(p){return p.v}));
+  if(lo===hi){lo-=1;hi+=1}var pad=(hi-lo)*0.1;lo-=pad;hi+=pad;var y=function(v){return T+H-(v-lo)/(hi-lo)*H};
+  [lo+pad,(lo+hi)/2,hi-pad].forEach(function(v){g.strokeStyle=C.line;g.beginPath();g.moveTo(L,y(v));g.lineTo(L+W,y(v));g.stroke();g.fillStyle=C.muted;g.fillText(num(v),6,y(v)+3)});
+  if(lo<0&&hi>0){g.strokeStyle=C.muted;g.setLineDash([2,3]);g.beginPath();g.moveTo(L,y(0));g.lineTo(L+W,y(0));g.stroke();g.setLineDash([])}
+  g.save();g.beginPath();g.rect(L,0,W,cv.h);g.clip();g.strokeStyle=C.blue;g.fillStyle=C.blue;
+  if(isArc){inView.forEach(function(p){g.beginPath();g.arc(x(p.i),y(p.v),3,0,6.2832);g.fill()})}
+  else{g.lineWidth=1.3;g.beginPath();var prev=null;inView.forEach(function(p){if(prev!=null&&p.i===prev+1)g.lineTo(x(p.i),y(p.v));else g.moveTo(x(p.i),y(p.v));prev=p.i});g.stroke();g.lineWidth=1}
+  g.restore();var cx=x(S.cur);g.strokeStyle=C.text;g.globalAlpha=.55;g.beginPath();g.moveTo(cx,0);g.lineTo(cx,cv.h);g.stroke();g.globalAlpha=1;
+  var here=pts.filter(function(p){return p.i<=S.cur});if(here.length){var lp=here[here.length-1];g.fillStyle=C.text;g.fillText('at cursor: '+num(lp.v)+(lp.i!==S.cur?' (bar '+(lp.i+1)+')':''),L+W-170,T+2)}}
+function legend(m){var it=[['entry fill',C.blue],['trim (partial)',C.green],['full exit',C.red],['order planned (top: sell, bottom: buy)',C.yellow],["model's last bar / pick",C.violet]];
+  var s=it.map(function(x){return '<span><i style="background:'+x[1]+'"></i>'+x[0]+'</span>'}).join('');
+  s+='<span>× = level implied by the model\'s archived features at the bar it scored</span>';
+  s+=m==='intraday_structure'?'<span>strip: setup state transitions (violet = this position\'s setup)</span>'
+    :'<span>strip: score percentile among the run\'s candidates · <i style="background:'+C.green+'"></i>picked · hollow = passed gates · grey = gated · <i style="background:'+C.yellow+'"></i>in top-K (audit, pre-archive) · tick = not in top-K / not scored</span>';
+  return s}
+
+// mouse: wheel zoom, drag pan, click to move the cursor, hover tooltip
+['chart','strip','pane'].forEach(function(id){var el=$(id);
+  el.addEventListener('wheel',function(e){if(!S.R)return;e.preventDefault();var r=el.getBoundingClientRect(),gm=geom(r.width);
+    zoom(e.deltaY>0?1.25:0.8,Math.max(S.v0,Math.min(S.v1,gm.idx(e.clientX-r.left))))},{passive:false});
+  el.addEventListener('mousedown',function(e){if(!S.R)return;S.drag={x:e.clientX,v0:S.v0,v1:S.v1,moved:false,el:el}});
+  el.addEventListener('dblclick',function(){if(!S.R)return;fitAll();drawAll()})});
+window.addEventListener('mousemove',function(e){var d=S.drag;if(!d)return;var r=d.el.getBoundingClientRect(),gm=geom(r.width);
+  var di=Math.round((d.x-e.clientX)/gm.cw);if(Math.abs(e.clientX-d.x)>3)d.moved=true;if(d.moved){setView(d.v0+di,d.v1+di);drawAll()}});
+window.addEventListener('mouseup',function(e){var d=S.drag;S.drag=null;if(!d||d.moved||!S.R)return;var r=d.el.getBoundingClientRect(),gm=geom(r.width),i=gm.idx(e.clientX-r.left);
+  if(i>=S.v0&&i<=S.v1){stop();var keep=$('follow').checked;$('follow').checked=false;setCursor(i);$('follow').checked=keep}});
+$('chart').addEventListener('mousemove',function(e){if(!S.R||!G||S.drag)return;var r=$('chart').getBoundingClientRect(),i=G.gm.idx(e.clientX-r.left);
+  if(i<S.v0||i>S.v1||i>visibleLast()){$('tip').hidden=true;return}var b=S.R.bars[i];
+  var evs=S.R.events.filter(function(x){return x.frame===i}).map(function(x){return esc(x.kind)+': '+esc(x.label||'')});
+  var meta=(S.R.overlays||{}).meta||{},ovs=Object.keys(meta).filter(function(k){return meta[k].kind==='price'&&S.ov.has(k)}).map(function(k){var s=seriesOf(k);return s&&s[i]!=null?esc(meta[k].label)+' '+num(s[i],2):null}).filter(Boolean);
+  $('tip').innerHTML='<b>'+et(b.t)+'</b> (open)<br>O '+num(b.o,2)+' H '+num(b.h,2)+' L '+num(b.l,2)+' C '+num(b.c,2)+(ovs.length?'<br>'+ovs.join('<br>'):'')+(evs.length?'<br>'+evs.join('<br>'):'');
+  $('tip').hidden=false;var tx=e.clientX-r.left+14;$('tip').style.left=Math.min(tx,r.width-260)+'px';$('tip').style.top=(e.clientY-r.top+10)+'px'});
+$('chart').addEventListener('mouseleave',function(){$('tip').hidden=true});
+window.addEventListener('resize',function(){drawAll()});
+
+// ------------------------------------------------------------------ position panel
+function kv(rows){return '<div class=kv>'+rows.filter(Boolean).map(function(r){return '<span class=k>'+r[0]+'</span><span>'+r[1]+'</span>'}).join('')+'</div>'}
+function contractRows(c){if(!c)return [];if(!c.occ)return [['contract','<span class=muted>'+esc(c.note||'not recorded')+'</span>']];
+  var m=c.otm_pct_at_entry,mon=m==null?'—':Math.abs(m)<0.0015?'at the money':(Math.abs(m)*100).toFixed(2)+'% '+(m>0?'out of':'in')+' the money';
+  return [['contract','<b>'+esc(c.underlying)+' '+esc(c.expiry)+' '+num(c.strike,2)+' '+esc(c.right.toUpperCase())+'</b> <span class=muted>'+esc(c.occ)+'</span>'],
+    ['days to expiry at entry',c.dte_at_entry!=null?String(c.dte_at_entry)+(c.dte_at_entry===0?' (expires that day)':''):'—'],
+    ['moneyness at entry',mon+(c.underlying_at_entry?' <span class=muted>(underlying '+num(c.underlying_at_entry,2)+')</span>':'')],
+    ['premium',num(c.entry_premium,2)+(c.exit_premium_avg!=null?' → '+num(c.exit_premium_avg,2)+' <span class='+tone(c.premium_return)+'>('+pct(c.premium_return)+')</span>':'')
+      +(c.contracts?' · '+num(c.contracts,0)+' contract'+(c.contracts===1?'':'s'):'')+(c.cost?' · cost $'+Number(c.cost).toLocaleString():'')]]}
+function setupRows(s){if(!s)return [];var fin=s.final_invalidation;
+  return [['setup','<b>'+esc(s.setup_type)+'</b> · '+esc(s.direction)+(s.context_regime?' · regime '+esc(s.context_regime):'')],
+    ['level it traded',num(s.pivot,2)],
+    ['invalidation',num(s.initial_invalidation,2)+(fin!=null?' → trailed to '+num(fin,2)+' by the exit':'')],
+    ['targets',(s.targets||[]).map(function(t){return num(t,2)}).join(' · ')+(s.target_level_type?' <span class=muted>('+esc(String(s.target_level_type).replace(/\+/g,' + '))+')</span>':'')],
+    ['reward : risk','expected '+num(s.expected_reward_risk,2)+' · realized R after costs '+num(s.realized_r_after_costs,2)],
+    ['confidence / runway',num(s.confidence,2)+' / '+num(s.runway_score,2)],
+    ['best / worst excursion',num(s.mfe_points,2)+' / '+num(s.mae_points,2)+' points'],
+    (s.warnings||[]).length?['warnings','<span class=warnc>'+esc(s.warnings.join(', '))+'</span>']:null]}
+function renderPos(){
+  var R=S.R,c=S.cur,b=R.bars[c],p=R.position,ef=R.entry_frame,xf=R.exit_frame,ref=R.ref||{},rows=[];
+  var evs=R.events.filter(function(e){return e.frame===c});
+  if(!p){rows.push(['mode','ad-hoc window, no position']);rows.push(['close',num(b.c,2)]);rows.push(['since window start',pct(b.c/R.bars[0].c-1)])}
+  else{
+    var phase=ef==null?'entry not on the chart':c<ef?'before entry (fill in '+(ef-c)+(ef-c===1?' bar)':' bars)'):(xf!=null&&c>xf)?'after exit (hindsight)':(xf!=null&&c===xf)?'exit bar':'held';
+    rows.push(['phase','<b>'+phase+'</b>']);rows=rows.concat(contractRows(R.contract));
+    rows.push(['close (bar)',num(b.c,2)]);
+    if(ref.price!=null&&ef!=null&&c>=ef){
+      var px=R.subject.route==='option'?'underlying ':'';
+      rows.push([px+'vs entry ref','<span class='+tone(b.c/ref.price-1)+'>'+pct(b.c/ref.price-1,2)+'</span> <span class=muted>(ref '+num(ref.price,2)+', '+esc(ref.basis)+')</span>']);
+      var to=xf!=null?Math.min(c,xf):c,mfe=-Infinity,mae=Infinity,peak=-Infinity;
+      for(var i=ef;i<=to;i++){mfe=Math.max(mfe,R.bars[i].h/ref.price-1);mae=Math.min(mae,R.bars[i].l/ref.price-1);peak=Math.max(peak,R.bars[i].c)}
+      rows.push(['high / low vs ref so far','<span class=good>'+pct(mfe,2)+'</span> / <span class=bad>'+pct(mae,2)+'</span> <span class=muted>(bar highs/lows)</span>']);
+      if(c<=to||xf==null){
+        var pol=R.policy;
+        rows.push(['bars since fill',String(c-ef)]);
+        // The horizon counts the module's own runs_held, which the logs cannot reproduce bar by bar.
+        if(p.runs_held!=null)rows.push(['runs held (module count)',p.runs_held+(pol?' of horizon '+pol.horizon_runs:'')+' <span class=muted>('+(p.status==='open'?'as of now':'at the exit')+')</span>']);
+        (R.levels||[]).forEach(function(lv){if(lv.key==='entry'||lv.key==='u_entry')return;var d=lv.price/b.c-1;
+          var atr=(p.entry_anchor||{}).u_atr||p.u_atr;var extra=atr?' · '+num((lv.price-b.c)/atr,2)+' ATR':'';
+          rows.push([esc(lv.label.split(' (')[0]),num(lv.price,2)+' <span class=muted>('+pct(d,2)+' from the close'+extra+')</span>'])});
+        if(pol&&pol.trail_stop&&R.subject.route==='equity'){var tl=peak*(1-pol.trail_stop);
+          rows.push(['trail -'+Math.round(pol.trail_stop*100)+'% of peak close',num(tl,2)+' <span class=muted>(the risk pass uses 5-minute marks, not bar closes)</span>'])}
+      }
+      if(xf!=null&&c>xf){var xe=R.events.filter(function(e){return e.kind==='exit'&&e.frame===xf})[0];
+        if(xe&&xe.on_chart_scale&&xe.price)rows.push(['close vs exit fill','<span class='+tone(b.c/xe.price-1)+'>'+pct(b.c/xe.price-1)+'</span> <span class=muted>(what holding on would have done)</span>'])}
+    }
+    if(R.policy){var q=R.policy;rows.push(['exit policy',esc('stop '+(q.stop_loss!=null?'-'+Math.round(q.stop_loss*100)+'%':'off')+' · take profit +'+Math.round(q.take_profit*100)+'% (sell '+Math.round(q.scale_frac*100)+'%) · trail '+(q.trail_stop?'-'+Math.round(q.trail_stop*100)+'%':'off')+' · horizon '+q.horizon_runs+' runs · option underlying stop '+(q.underlying_stop_atr||'off')+' ATR')+' <span class=muted>('+esc(q.source)+')</span>'])}
+  }
+  var html=kv(rows);
+  if(R.setup)html+='<div class=sub>engine setup record</div>'+kv(setupRows(R.setup));
+  if(evs.length)html+='<div class=sub>events on this bar</div><div class=list>'+evs.map(evLine).join('<br>')+'</div>';
+  $('posState').innerHTML=html}
+function evLine(e){
+  if(e.kind==='order_plan'){var d=e.detail||{},rt=d.routing||null;
+    return '<span class=muted>'+et(e.t)+'</span> order planned: <b>'+esc(d.side)+'</b> '+num(d.qty,0)+' '+esc(d.symbol)+' · '+esc(d.reason||'')
+      +' → <b>'+esc(d.disposition||'not recorded')+'</b>'+(rt?' <span class=muted>(route '+esc(rt.action||'')+(rt.reason?': '+esc(rt.reason):'')+(rt.ref_price?' @ '+num(rt.ref_price,2):'')+(rt.occ?' · '+esc(rt.occ):'')+')</span>':'')}
+  var s='<span class=muted>'+et(e.t)+'</span> <b>'+esc(e.kind)+'</b> '+esc(e.label||'');
+  if(e.price!=null)s+=' @ '+num(e.price,2)+(e.on_chart_scale?'':' <span class=muted>(premium)</span>');
+  if(e.qty!=null)s+=' × '+num(e.qty,0);if(e.pnl!=null)s+=' · '+money(e.pnl);
+  if(e.decision_gain!=null)s+=' · gain at decision '+pct(e.decision_gain)+(e.fill_gain!=null?', at fill '+pct(e.fill_gain):'');
+  if(e.submitted_at)s+=' <span class=muted>(submitted '+et(e.submitted_at)+')</span>';
+  if(e.approx)s+=' <span class=muted>(placed by '+esc(e.approx)+')</span>';return s}
+
+// ------------------------------------------------------------------ model panel
+function parityRows(d){if(!d.implied)return '';var R=S.R,f=d.scored_frame,rows=[];
+  Object.keys(d.implied).forEach(function(k){var mv=d.implied[k],cvv=k==='close'?R.bars[f].c:(seriesOf(k)||[])[f];
+    var dlt=cvv?mv/cvv-1:null,bad=dlt!=null&&Math.abs(dlt)>0.0005;
+    rows.push('<tr><td>'+esc(k)+'</td><td class=num>'+num(mv,3)+'</td><td class=num>'+num(cvv,3)+'</td><td class="num '+(bad?'warnc':'muted')+'">'+(dlt==null?'—':pct(dlt,3))+'</td></tr>')});
+  return '<div class=sub>levels the model saw vs this chart (scored bar)</div><table><thead><tr><th>level</th><th class=num>model saw</th><th class=num>chart now</th><th class=num>diff</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>'
+    +'<div class=muted style="font-size:11px;margin-top:4px">Back-solved from the archived features (e.g. EMA20 = close − ema_dist_20 × ATR14). A diff means the bar the model scored differs from the bar now in the cache.</div>'}
+function renderModel(){
+  var R=S.R,c=S.cur,here=R.decisions.filter(function(d){return d.frame===c}),d=S.sel,h='';
+  if(here.length>1){h+='<div class=chips>'+here.map(function(x,i){var t=x.decision_ts||x.bar_ts;
+    return '<span class="chip'+(x===d?' on':'')+'" data-i='+i+'>'+esc(x.source)+' · '+et(t).replace(' ET','')+(x.to_state?' · '+esc(x.to_state):'')+'</span>'}).join('')+'</div>'}
+  $('decSrc').innerHTML=d?'<span class="ev '+esc(d.source)+'">'+esc(d.source)+'</span>':'';
+  if(!d){$('modelState').innerHTML=h+'<div class=empty>No decision on or before this bar in the window.</div>';bindChips(here);return}
+  if(S.carried)h+='<div class="note info" style="margin:0 0 8px">No decision on this bar. Showing the latest earlier one ('+(c-d.frame)+' bars ago; it scored the bar opened '+et(d.bar_ts)+').</div>';
+  var rows=[];
+  if(d.decision_ts&&d.source!=='transitions')rows.push(['decided',et(d.decision_ts)]);
+  rows.push([d.source==='transitions'?'at':'scored bar',et(d.bar_ts)]);
+  if(d.source==='archive'){
+    if(d.scored===false){rows.push(['output','<b>not scored</b> <span class=muted>(not among this run\'s '+d.n_candidates+' candidates)</span>'])}
+    else{
+      if(d.score==null)rows.push(['score','<span class=muted>not computed (gated before scoring'+(d.gate_reason?': '+esc(d.gate_reason):'')+')</span>']);
+      else{rows.push(['score',(d.score_name?esc(d.score_name)+' = ':'')+'<b>'+num(d.score)+'</b>']);
+        rows.push(['score rank','#'+d.score_rank+' of '+d.n_scored+' scored <span class=muted>(top '+(d.score_pct!=null?((1-d.score_pct)*100).toFixed(1):'—')+'%)</span>'])}
+      rows.push(['passed every gate',d.eligible?'<span class=good>yes</span>'+(d.rank!=null?' · rank '+d.rank+' of '+d.n_eligible+' eligible':''):'<span class=bad>no</span> · first failure: <b>'+esc(d.gate_reason||'?')+'</b>']);
+      rows.push(['action','<b>'+esc(d.action||'')+'</b>'+(d.selected?' <span class=good>(picked)</span>':'')]);
+      if(d.side)rows.push(['side',esc(d.side)]);
+    }
+    if(d.model_version)rows.push(['model',esc(d.model_version)]);
+  }else if(d.source==='audit'){
+    if(d.run_skip)rows.push(['run','<span class=bad>skipped: '+esc(d.run_skip)+'</span>']);
+    rows.push(['in top-K targets',d.in_targets?'<span class=good>yes</span>':'<span class=muted>no (score not logged before the archive)</span>']);
+    if(d.score!=null)rows.push(['score','<b>'+num(d.score)+'</b>']);
+    if(d.rank!=null)rows.push(['rank',d.rank+(d.rank_pct!=null?' <span class=muted>(rank pct '+num(d.rank_pct,3)+')</span>':'')]);
+    if(d.entry_triggered!=null)rows.push(['entry trigger',d.entry_triggered?'<span class=good>fired</span>':'<span class=muted>not fired</span>'+(d.skip_reason?' · '+esc(d.skip_reason):'')]);
+    if(d.routing)rows.push(['routing',esc(Object.keys(d.routing).map(function(k){return k+'='+d.routing[k]}).join(' · '))]);
+  }else{
+    rows.push(['setup',esc(d.setup_id||'')+(d.position_setup?' <span class=good>(this position)</span>':' <span class=muted>(another setup on this ticker)</span>')]);
+    rows.push(['transition','<b>'+esc(d.action)+'</b>']);rows.push(['reason',esc(d.reason||'')]);
+    if(d.spot!=null)rows.push(['spot',num(d.spot,2)]);
+    rows.push(['evidence',esc((d.evidence||[]).join(', '))]);
+  }
+  h+=kv(rows);
+  if(d.gates&&Object.keys(d.gates).length){h+='<div class=sub>gates (in order)</div><div class=gates>'+Object.keys(d.gates).map(function(k){
+    var ok=d.gates[k];return '<span class="gate '+(ok?'pass':'fail')+'">'+(ok?'pass ':'fail ')+esc(k)+'</span>'}).join('')+'</div>'}
+  var ex=d.extras||{};if(Object.keys(ex).length){h+='<div class=sub>other outputs</div>'+kv(Object.keys(ex).map(function(k){var v=ex[k];return [esc(k),typeof v==='number'?num(v):v==null?'—':esc(v)]}))}
+  h+=parityRows(d);
+  if(d.picks&&d.picks.length){h+='<div class=sub>this run picked</div><div class=list>'+d.picks.map(function(t){return t===R.subject.ticker?'<b class=good>'+esc(t)+'</b>':esc(t)}).join(' · ')+'</div>'}
+  $('modelState').innerHTML=h;bindChips(here)}
+function bindChips(here){[].forEach.call($('modelState').querySelectorAll('.chip'),function(ch){ch.onclick=function(){S.sel=here[+ch.dataset.i];S.carried=false;drawAll();renderModel();renderFeatures()}})}
+
+// ------------------------------------------------------------------ features card
+var FEAT_HEAD='<tr><th>feature</th><th class=num>value</th><th>percentile among this run\'s candidates</th><th class=num>value at entry</th><th class=num>pct change since entry</th></tr>';
+function renderFeatures(){
+  var d=S.sel,R=S.R;$('fsort').hidden=false;$('fmiLbl').hidden=true;
+  if(d&&d.source==='archive'&&d.scored!==false){$('featHead').textContent='What the model saw';$('featHeadRow').innerHTML=FEAT_HEAD;
+    var key=d.run_id+'|'+(R.entry_run_id||'');$('featTitle').textContent='run '+d.run_id.slice(0,12)+' · decided '+et(d.decision_ts);
+    if(S.runs.has(key)){drawFeatures(S.runs.get(key));return}
+    $('featRows').innerHTML='<tr><td colspan=5 class=empty>loading features…</td></tr>';
+    var p=new URLSearchParams({module:R.subject.module,run_id:d.run_id,ticker:R.subject.ticker});if(R.entry_run_id)p.set('ref',R.entry_run_id);
+    getJSON('/api/run?'+p).then(function(x){S.runs.set(key,x);if(S.sel===d)drawFeatures(x)});return}
+  S.feat=null;$('fsort').hidden=true;
+  if(engineOn()){renderEngine();return}
+  renderTechnicals()}
+function renderEngine(){
+  var x=engineAt(S.cur),st=S.eng.get(S.cur);$('featHead').textContent='What the engine saw at this bar';
+  $('featTitle').textContent='compute_features + StructuralLevelProvider on its history up to '+et(S.R.bars[S.cur].t);
+  if(!x){$('runCtx').innerHTML='';$('featHeadRow').innerHTML='';$('featRows').innerHTML='<tr><td class=empty>'+(st&&st.error?esc(st.error):'computing the engine view…')+'</td></tr>';return}
+  var near=x.levels.slice().sort(function(a,b){return Math.abs(a.distance_atr)-Math.abs(b.distance_atr)});
+  $('runCtx').innerHTML='<div><div class=sub>clustered level map (what the detectors compare price against)</div><table><thead><tr><th class=num>price</th><th class=num>ATRs from spot</th><th class=num>strength</th><th>side</th><th>merged level types</th></tr></thead><tbody>'
+    +near.map(function(l){return '<tr><td class=num>'+num(l.price,2)+'</td><td class="num '+(l.distance_atr>0?'good':'bad')+'">'+num(l.distance_atr,2)+'</td><td class=num>'+num(l.strength,2)+'</td><td class=muted>'+esc(l.directionality)+'</td><td style="white-space:normal">'+esc((l.sources||[l.type]).join(' + '))+'</td></tr>'}).join('')
+    +'</tbody></table><div class=muted style="font-size:11px;margin-top:4px">Levels closer than '+num(x.cluster_threshold,3)+' to their neighbour chain into one cluster at the strength-weighted average. '+esc(x.note)+' Prior session used: '+esc(x.prior_session||'none archived')+'.</div></div>'
+    +'<div><div class=sub>spot</div>'+kv([['close',num(x.spot,2)],['ATR (14 x 1m)',num(x.features.atr,3)],['session VWAP',num(x.features.session_vwap,2)],['EMA 9 / 20',num(x.features.ema_9,2)+' / '+num(x.features.ema_20,2)],
+      ['opening range',num(x.features.opening_range_low,2)+' – '+num(x.features.opening_range_high,2)],['prior day range',num(x.features.prior_day_low,2)+' – '+num(x.features.prior_day_high,2)]])+'</div>';
+  var q=$('fq').value.trim().toLowerCase();$('featHeadRow').innerHTML='<tr><th>engine feature</th><th class=num>value</th></tr>';
+  $('featRows').innerHTML=Object.keys(x.features).filter(function(k){return !q||k.indexOf(q)>=0}).map(function(k){return '<tr><td>'+esc(k)+'</td><td class=num>'+num(x.features[k])+'</td></tr>'}).join('')}
+function renderTechnicals(){
+  var R=S.R,ov=R.overlays||{},meta=ov.meta||{},c=S.cur,a=(R.coverage||{}).archive||{};
+  $('featHead').textContent='Indicators at this bar';$('featTitle').textContent='recomputed from the bars, as of '+et(R.bars[c].t);
+  $('runCtx').innerHTML='<div class=muted style="grid-column:1/-1;font-size:12px">The live feature vector is archived only from '+(a.first?esc(a.first):'(no archive for this module)')+'; no archived decision on or before this bar. These are '+esc(ov.source||'indicators recomputed from the bars')+'</div>';
+  var q=$('fq').value.trim().toLowerCase();$('featHeadRow').innerHTML='<tr><th>indicator</th><th class=num>value at this bar</th><th class=num>vs close</th></tr>';
+  $('featRows').innerHTML=Object.keys(meta).filter(function(k){return !q||k.indexOf(q)>=0||String(meta[k].label).toLowerCase().indexOf(q)>=0}).map(function(k){var s=seriesOf(k)||[],v=s[c];
+    var vs=meta[k].kind==='price'&&v?pct(R.bars[c].c/v-1,2):'';return '<tr><td>'+esc(meta[k].label)+(meta[k].model_input?'<span class=tag>model input</span>':'')+'</td><td class=num>'+num(v)+'</td><td class=num>'+vs+'</td></tr>'}).join('')
+    ||'<tr><td class=empty>no indicators for this timeframe</td></tr>'}
+function drawFeatures(x){
+  if(x.error){$('featRows').innerHTML='<tr><td colspan=5 class=empty>'+esc(x.error)+'</td></tr>';$('runCtx').innerHTML='';return}
+  var m=x.meta||{},ctx=[];
+  var inf=(m.inference_start&&m.inference_end)?((new Date(m.inference_end)-new Date(m.inference_start))/1000).toFixed(1)+' s':'—';
+  ctx.push('<div><div class=sub>run</div>'+kv([['decided',et(m.decision_ts)],['inference',inf],['model',esc(m.model_version||m.model_hash||'—')],
+    ['feature schema',esc(m.feature_schema_hash||'—')],['code',esc((m.git_commit||'').slice(0,10))+(m.git_dirty?' <span class=bad>(dirty tree)</span>':'')],
+    ['candidates',m.n_candidates+' · '+m.n_scored+' scored · '+(m.n_eligible!=null?m.n_eligible+' passed every gate':'')],
+    x.ref?['entry reference',x.ref.error?esc(x.ref.error):'run '+esc(String(x.ref.run_id).slice(0,12))+' · decided '+et(x.ref.decision_ts)]:null,
+    x.xsec_note?['note',esc(x.xsec_note)]:null])
+    +'<div class=sub>inputs at decision time</div>'+kv((m.inputs_asof||[]).map(function(a){return [esc(a.input),esc(a.value)+(a.age_h!=null?' <span class='+(a.age_h>24?'bad':'muted')+'>('+num(a.age_h,1)+' h old)</span>':'')]}))
+    +(m.regime?'<div class=sub>regime</div><div class=list>'+esc(JSON.stringify(m.regime))+'</div>':'')+'</div>');
+  var gp=x.gate_pass_rates||{};
+  ctx.push('<div><div class=sub>gate pass rates in this run</div>'+kv(Object.keys(gp).map(function(k){return [esc(k),(gp[k]*100).toFixed(1)+'% of candidates']}))
+    +'<div class=sub>picked</div><div class=list>'+((x.picks||[]).map(function(r){return (r.ticker===x.ticker?'<b class=good>':'<span>')+esc(r.ticker)+' '+num(r.score)+(r.ticker===x.ticker?'</b>':'</span>')}).join(' · ')||'<span class=muted>none</span>')+'</div>'
+    +'<div class=sub>highest scores (any gate state)</div><div class=list>'+(x.leaders||[]).map(function(r){return esc(r.ticker)+' '+num(r.score)+' <span class=muted>'+(r.selected?'picked':r.eligible?'eligible':esc(r.gate_reason||''))+'</span>'}).join('<br>')+'</div></div>');
+  $('runCtx').innerHTML=ctx.join('');
+  var hasMI=(x.features||[]).some(function(f){return f.model_input!=null});$('fmiLbl').hidden=!hasMI;
+  S.feat=x;drawFeatureRows()}
+function drawFeatureRows(){
+  var x=S.feat;if(!x){if(S.R&&engineOn())renderEngine();else if(S.R&&!(S.sel&&S.sel.source==='archive'))renderTechnicals();return}
+  var q=$('fq').value.trim().toLowerCase(),srt=$('fsort').value,mi=$('fmi').checked&&!$('fmiLbl').hidden;
+  var fs=(x.features||[]).filter(function(f){return(!q||f.name.toLowerCase().indexOf(q)>=0)&&(!mi||f.model_input)});
+  var drift=function(f){return f.pct!=null&&f.ref_pct!=null?Math.abs(f.pct-f.ref_pct):-1};
+  if(srt==='extreme')fs.sort(function(a,b){return Math.abs((b.pct==null?.5:b.pct)-.5)-Math.abs((a.pct==null?.5:a.pct)-.5)});
+  else if(srt==='drift')fs.sort(function(a,b){return drift(b)-drift(a)});else if(srt==='name')fs.sort(function(a,b){return a.name<b.name?-1:1});
+  $('featRows').innerHTML=fs.map(function(f){var p=f.pct,cls=p==null?'':p>=.9?'hi':p<=.1?'lo':'';
+    var bar=p==null?'<span class=muted>n/a</span>':'<div class=bar title="'+(p*100).toFixed(1)+' percentile"><b class='+cls+' style="width:'+(p*100).toFixed(1)+'%"></b>'
+      +(f.ref_pct!=null?'<s style="left:calc('+(f.ref_pct*100).toFixed(1)+'% - 1px)" title="at entry"></s>':'')+'</div>';
+    var dp=f.pct!=null&&f.ref_pct!=null?f.pct-f.ref_pct:null;
+    return '<tr><td>'+esc(f.name)+(f.model_input?'<span class=tag>model input</span>':'')+'</td><td class=num>'+(f.value==null?'<span class=muted title="the model received NaN">missing</span>':num(f.value))+'</td><td>'+bar+'</td>'
+      +'<td class=num>'+(f.ref_value!=null?num(f.ref_value):'—')+'</td><td class="num '+(dp==null?'':dp>0?'good':dp<0?'bad':'')+'">'+(dp==null?'—':(dp>0?'+':'')+(dp*100).toFixed(1)+' pts')+'</td></tr>'}).join('')
+    ||'<tr><td colspan=5 class=empty>no features match</td></tr>'}
+['fq','fsort','fmi'].forEach(function(i){$(i).addEventListener(i==='fq'?'input':'change',drawFeatureRows)});
+
+// ------------------------------------------------------------------ log
+function renderLog(){
+  var R=S.R,rows=[];
+  R.events.forEach(function(e){rows.push({f:e.frame,t:e.t,h:evLine(e)})});
+  R.decisions.forEach(function(d){if(d.source==='audit'&&!d.in_targets&&!d.run_skip)return;var what=d.source==='archive'?(d.scored===false?'not scored':esc(d.action||'')+(d.gate_reason?' ('+esc(d.gate_reason)+')':'')+' · pct '+num(d.score_pct,3))
+      :d.source==='audit'?(d.run_skip?'run skipped: '+esc(d.run_skip):d.in_targets?'in top-K · score '+num(d.score):'not in top-K'):esc(d.action)+(d.position_setup?' (this setup)':' <span class=muted>'+esc(d.setup_id||'')+'</span>');
+    rows.push({f:d.frame,t:d.decision_ts||d.bar_ts,h:'<span class=muted>'+et(d.decision_ts||d.bar_ts)+'</span> <span class="ev '+esc(d.source)+'">'+esc(d.source)+'</span> '+what})});
+  rows.sort(function(a,b){return (a.f==null?1e9:a.f)-(b.f==null?1e9:b.f)||(a.t<b.t?-1:1)});
+  $('logRows').innerHTML=rows.map(function(r){return '<tr data-f='+(r.f==null?'':r.f)+' class="'+(r.f===S.cur?'here':(r.f!=null&&r.f>S.cur?'future':''))+'"><td class="num muted">'+(r.f==null?'—':'bar '+(r.f+1))+'</td><td>'+r.h+'</td></tr>'}).join('');
+  [].forEach.call($('logRows').querySelectorAll('tr'),function(tr){tr.onclick=function(){if(tr.dataset.f!==''){stop();setCursor(+tr.dataset.f)}}})}
+
+// ------------------------------------------------------------------ boot
+loadPositions().then(function(){var h=location.hash.slice(1);if(!h)return;var p=new URLSearchParams(h),q={};
+  p.forEach(function(v,k){if(k!=='tf'&&k!=='f'&&k!=='pane')q[k]=v});var f=p.get('f');S.forcePane=p.get('pane');if(q.id||q.ticker)openReplay(q,p.get('tf'),f!=null&&f!==''?+f:null)});
+})();
+</script></body></html>

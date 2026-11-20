@@ -1,7 +1,8 @@
-momentum shadow ledger | marked through 2026-10-23 | 1 decision(s) | next scheduled decision 2026-10-30
+momentum shadow ledger | marked through 2026-11-13 | 2 decision(s) | next scheduled decision 2026-11-27
 period returns (entry open -> next entry open; the open period -> last close):
 arm                          core_sat_1000 core_sat_300 mom_1000 mom_top300     spy
 decision   entry      status                                                       
-2026-10-02 2026-10-05 open          -6.61%       -7.79%  -19.09%    -23.02%  -1.26%
-cumulative since the first entry: core_sat_1000 -6.61%  core_sat_300 -7.79%  mom_1000 -19.09%  mom_top300 -23.02%  spy -1.26%
-vs SPY: core_sat_1000 -5.35%  core_sat_300 -6.53%  mom_1000 -17.83%  mom_top300 -21.76%
+2026-10-02 2026-10-05 closed        -6.14%       -8.46%  -17.36%    -25.09%  -1.33%
+2026-10-30 2026-11-02 open          -4.59%       -4.38%  -13.75%    -13.03%  -0.67%
+cumulative since the first entry: core_sat_1000 -10.45%  core_sat_300 -12.46%  mom_1000 -28.72%  mom_top300 -34.84%  spy -1.99%
+vs SPY: core_sat_1000 -8.46%  core_sat_300 -10.47%  mom_1000 -26.73%  mom_top300 -32.85%

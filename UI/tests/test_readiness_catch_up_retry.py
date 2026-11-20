@@ -89,3 +89,32 @@ def test_gives_up_at_the_deadline_rather_than_spinning(caplog):
     assert len(attempts) == 4
     assert clock.now == 1800.0
     assert "never ran" in caplog.text
+
+
+def test_the_scheduled_slot_retries_past_the_nightly_and_stays_out_of_the_live_window():
+    # 2026-10-26: the nightly held the lock 16:46-22:32, so the 22:15 slot was
+    # skipped and nothing re-ran it; Meta would have dropped every 10-27 entry.
+    clock = _FakeClock()
+    attempts = []
+
+    def runner(*, catch_up):
+        attempts.append(catch_up)
+        return len(attempts) >= 3
+
+    ran = cs._run_scheduled_data_readiness(
+        sleep_fn=clock.sleep, monotonic_fn=clock.monotonic, runner=runner)
+
+    assert ran is True
+    assert attempts == [False, False, False]  # never lifts the live-window block
+
+
+def test_the_evening_scheduler_is_wired_to_the_retrying_slot():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(cs.__file__).read_text())
+    jobs = [call.args[0].id for call in ast.walk(tree)
+            if isinstance(call, ast.Call) and getattr(call.func, "id", None) == "NightlyScheduler"
+            and call.args and isinstance(call.args[0], ast.Name)]
+    assert "_run_scheduled_data_readiness" in jobs
+    assert "_run_data_readiness" not in jobs

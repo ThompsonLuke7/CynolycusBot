@@ -12,7 +12,9 @@
     meta: ['MR', 'Governed · ranking', '#94c8d2', 'trading'],
     intraday_structure: ['IS', 'Intraday · structure', '#b6cda2', 'trading'],
     library: ['LI', 'Research · library', '#a4bbc8', 'research'],
-    trades: ['TR', 'Execution · journal', '#a4bbc8', 'research']
+    trades: ['TR', 'Execution · journal', '#a4bbc8', 'research'],
+    personal: ['PF', 'Personal · Schwab read-only', '#e7c38c', 'research'],
+    replay: ['RP', 'Decisions · replay', '#bfa8f0', 'research']
   };
   const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch (_) { return fallback; } };
   const save = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) { /* Preferences are optional. */ } };

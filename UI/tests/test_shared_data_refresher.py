@@ -46,10 +46,14 @@ def test_run_cycle_issues_bars_then_matrix(monkeypatch):
     r._run_step = lambda label, argv, timeout: calls.append((label, argv)) or True  # type: ignore
 
     r.run_cycle(with_feeds=False)
-    assert [c[0] for c in calls] == ["bars", "matrix"]
+    assert [c[0] for c in calls] == ["bars", "context", "matrix"]
     # bars step must use the fast incremental path
     bars_argv = calls[0][1]
     assert "--eligible-only" in bars_argv and "--no-1d" in bars_argv
+    # context step refreshes the 4H context caches only: an intraday daily fetch
+    # would write today's partial daily bar into the shared 1d cache
+    ctx_argv = calls[1][1]
+    assert ctx_argv[-2:] == ["scripts/refresh_shared_context_bars.py", "--context-only"]
 
 
 def test_run_cycle_with_feeds_inserts_light_feeds(monkeypatch):
@@ -69,4 +73,4 @@ def test_run_cycle_with_feeds_inserts_light_feeds(monkeypatch):
     r._run_step = lambda label, argv, timeout: calls.append(label) or True  # type: ignore
 
     r.run_cycle(with_feeds=True)
-    assert calls == ["bars", "feeds", "matrix"]
+    assert calls == ["bars", "context", "feeds", "matrix"]

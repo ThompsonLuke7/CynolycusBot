@@ -112,6 +112,11 @@ def entry_order_owners(entry: dict, root: Path, logs_dir: Path) -> dict[str, str
     """{module: the record that names it} for every module on record as sending `entry`."""
     owners: dict[str, str] = {}
     modules = sorted(p.name for p in root.iterdir() if (p / "closed_trades.jsonl").exists())
+    # Entries are registered at submission since 2026-10-27 (4H and Dealer).
+    for registry in sorted((root / "broker_reconciliation").glob("*/order_registry.jsonl")):
+        for row in _rows(registry):
+            if row.get("order_id") == entry["id"] and row.get("side") == "buy" and row.get("module"):
+                owners.setdefault(row["module"], f"order registry ({registry.parent.name})")
     for module in modules:
         for path in (root / module / "exit_orders").glob("*.json"):
             if (json.loads(path.read_text()).get("state") or {}).get("entry_order_id") == entry["id"]:

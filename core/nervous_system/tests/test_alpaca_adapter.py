@@ -669,6 +669,31 @@ def test_submit_failures_map_to_typed_errors(code, expected) -> None:
         adapter(client).submit(equity_request())
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        # Alpaca's unfunded-order body as AlpacaOptionsClient folds it in.
+        'Forbidden: {"buying_power":"0","code":40310000,"message":"insufficient buying power"}',
+        # The account-wide trading-controls gate.
+        'Forbidden: {"code": "entries_frozen", "message": "new entries are frozen"}',
+    ],
+)
+def test_a_refused_order_403_is_a_rejection_not_an_auth_failure(reason) -> None:
+    error = urllib.error.HTTPError(PAPER_URL, 403, reason, None, None)
+    client = FakeClient(submit_order=error)
+    with pytest.raises(BrokerRejected, match="403"):
+        adapter(client).submit(equity_request())
+
+
+def test_a_403_without_an_order_rule_code_is_still_auth() -> None:
+    error = urllib.error.HTTPError(
+        PAPER_URL, 403, 'Forbidden: {"code":40110000,"message":"request is not authorized"}', None, None
+    )
+    client = FakeClient(submit_order=error)
+    with pytest.raises(BrokerAuthenticationError):
+        adapter(client).submit(equity_request())
+
+
 def test_a_lost_write_response_is_ambiguous_not_failed() -> None:
     """A 5xx write may already have been accepted; never assume it failed."""
 

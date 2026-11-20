@@ -35,15 +35,24 @@ from themes.dynamic_theme.config import (
     DAILY_BARS_DIR,
     HEAT_PRIOR_WINDOW_DAYS,
     HEAT_WINDOW_DAYS,
+    TICKER_PRIMARY_ANCHOR_PATH,
     TICKER_THEME_FEATURES_PATH,
     TOP_Q_STRENGTH,
     UNCLASSIFIED_THEME,
     ensure_outputs,
 )
+from themes.dynamic_theme.label_checks import (
+    LabelGateError,
+    load_regression_cases,
+    load_v4_map,
+    previous_theme_count,
+    run_label_checks,
+)
 from themes.dynamic_theme.profiles import country_by_ticker, industry_by_ticker
 from themes.dynamic_theme.stages.step05_claude_labeling import _load_registry_or_empty
 from themes.dynamic_theme.stages.step07_relationships import load_relationships
 from themes.dynamic_theme.stages.step08_memberships import (
+    anchor_primary_themes,
     assign_primary_themes,
     get_primary_theme,
     load_memberships,
@@ -275,6 +284,29 @@ def _compute_theme_heat(
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+def _label_gate(primary: pd.DataFrame, countries: Mapping[str, str], as_of, *, enforce: bool) -> dict:
+    """Check the week's primary themes; write the report; raise when enforced and failing."""
+    report = run_label_checks(
+        primary, countries=countries, cases=load_regression_cases(), v4=load_v4_map(),
+        previous_themes=previous_theme_count(TICKER_THEME_FEATURES_PATH), as_of=as_of,
+    )
+    report["enforced"] = enforce
+    path = TICKER_THEME_FEATURES_PATH.with_name("label_check_latest.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2, default=str))
+    m = report["metrics"]
+    logger.info("Label gate %s: v4 agreement %s, regression %s, unclassified %s, %d themes",
+                "PASS" if report["ok"] else "FAIL", m["v4_agreement"], m["regression_match_rate"],
+                m["unclassified_share"], m["themes"])
+    if not report["ok"]:
+        msg = "Theme label gate failed: " + " | ".join(report["failures"])
+        if enforce:
+            raise LabelGateError(f"{msg}. Features NOT written (last run's stay); report {path}. "
+                                 "Override once with pipeline --no-label-gate.")
+        logger.warning("%s (not enforced)", msg)
+    return report
+
+
 def build_meta_features(
     memberships_df: pd.DataFrame | None = None,
     *,
@@ -282,8 +314,13 @@ def build_meta_features(
     clusters_df: pd.DataFrame | None = None,
     industries: Mapping[str, str] | None = None,
     countries: Mapping[str, str] | None = None,
+    enforce_label_gate: bool = True,
 ) -> pd.DataFrame:
     """Build ticker-level theme features and write ticker_theme_features.parquet.
+
+    With ``clusters_df`` the primary themes first pass the label gate (``label_checks``);
+    on failure this raises ``LabelGateError`` before writing, unless ``enforce_label_gate``
+    is False (then it only logs). The report lands beside the features file.
 
     With the run's cluster assignments (``clusters_df``), tickers that have no
     confident cluster are placed by industry peers or marked unclassified (see
@@ -324,13 +361,19 @@ def build_meta_features(
     # primary theme per ticker
     # primary theme per ticker: ticker | primary_theme | membership_score
     if clusters_df is not None:
+        countries = country_by_ticker() if countries is None else countries
         primary = assign_primary_themes(
             memberships_df, clusters_df, registry_today,
             industry_by_ticker() if industries is None else industries,
-            country_by_ticker() if countries is None else countries,
+            countries,
         )
+        # Freeze primaries for the life of the re-fit (fixed groups); see anchor_primary_themes.
+        primary, primary_anchor = anchor_primary_themes(primary, memberships_df, clusters_df, registry_today)
+        # Before anything is written: a failed gate leaves last run's features in place.
+        _label_gate(primary, countries, as_of, enforce=enforce_label_gate)
     else:
         primary = get_primary_theme(memberships_df)
+        primary_anchor = None
 
     all_tickers = primary["ticker"].tolist()
     all_themes = memberships_df["theme"].unique().tolist()
@@ -496,6 +539,8 @@ def build_meta_features(
     out = out.sort_values(["date", "taxonomy_version", "ticker"]).reset_index(drop=True)
     out.attrs["taxonomy_version"] = taxonomy_version
     out.to_parquet(TICKER_THEME_FEATURES_PATH, index=False)
+    if primary_anchor is not None:  # only once the features it describes are written
+        primary_anchor.to_parquet(TICKER_PRIMARY_ANCHOR_PATH, index=False)
     current_rows = out[
         (out["date"] == as_of)
         & (out["taxonomy_version"] == taxonomy_version)

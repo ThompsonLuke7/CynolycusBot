@@ -87,6 +87,28 @@ def test_alpaca_bar_fetch_makes_no_request_for_a_delisted_symbol(listfile, monke
     assert isinstance(out, pd.DataFrame) and out.empty
 
 
+def test_point_in_time_research_can_still_fetch_a_delisted_symbol(listfile, monkeypatch):
+    import importlib
+    from types import SimpleNamespace
+
+    fi = importlib.import_module("core.API.Alpaca_API.market_data.fetch_intraday")
+    bars = pd.DataFrame({"open": [70.0], "high": [71.0], "low": [69.0], "close": [70.5], "volume": [1e6]},
+                        index=pd.MultiIndex.from_tuples([("HOLX", pd.Timestamp("2019-03-01", tz="UTC"))],
+                                                        names=["symbol", "timestamp"]))
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_stock_bars(self, request):
+            return SimpleNamespace(df=bars, next_page_token=None)
+
+    monkeypatch.setattr(fi, "StockHistoricalDataClient", _Client)
+    monkeypatch.setattr(fi.AlpacaConfig, "from_env", classmethod(lambda cls: SimpleNamespace(key_id="k", secret_key="s")))
+    out = fi.fetch_intraday(ticker="HOLX", start="2019-03-01", timeframe="1Day", save_path="", skip_delisted=False)
+    assert out["close"].tolist() == [70.5]
+
+
 def test_bar_cache_is_left_untouched_for_a_delisted_symbol(listfile, monkeypatch, tmp_path):
     from strategies.momentum_expansion.data import bars
 

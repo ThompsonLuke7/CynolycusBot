@@ -55,22 +55,39 @@ from strategies.momentum_expansion.live.gateway_execution import (
 from strategies.momentum_expansion.live.ticker_state_publication import (
     publish_momentum_ticker_states,
 )
+from core.decision_state_archive import (
+    archive_decision_state,
+    file_asof,
+    new_run_id,
+    utc_now,
+)
 from core.live_signal_audit import append_jsonl, build_signal_audit
 from signals.meta_context.meta_ranker.options_exec import equity_order_tif, route_option_or_shares
 from strategies.momentum_expansion.data.load_bars import load_1d, load_1h, load_4h
+from strategies.momentum_expansion.data.session_open import (
+    append_session_open,
+    fetch_session_opens,
+    session_day,
+)
 from strategies.momentum_expansion.data.universe import (
+    filter_context_only_tickers,
     get_candidate_pool,
     list_snapshots,
     load_snapshot_for,
     write_weekly_snapshot,
 )
-from strategies.momentum_expansion.features.feature_matrix_4h import build_ticker_features_4h
+from strategies.momentum_expansion.features.feature_matrix_4h import build_ticker_features_4h, research_ticker_meta
 from strategies.momentum_expansion.features.live_feature_panel_4h import (
     assert_manifest_coverage,
     build_live_feature_panel_4h,
 )
 from strategies.momentum_expansion.inference.entry_rules import evaluate_entry
-from strategies.momentum_expansion.inference.ranker import ExpansionRanker, top_n_at
+from strategies.momentum_expansion.inference.ranker import (
+    CROSS_SECTION_GATES,
+    ExpansionRanker,
+    score_cross_section,
+    top_n_at,
+)
 from strategies.momentum_expansion.policy.momentum_option_policy import (
     MomentumOptionConfig,
     MomentumOptionPolicy,
@@ -151,6 +168,70 @@ def _load_daily(ticker: str) -> pd.DataFrame | None:
         return None
 
 
+class SessionOpenDailyLoader:
+    """Daily loader that adds today's official open as a partial daily row.
+
+    Training's daily_gap_pct / daily_gap_z_60 use the session's own open; intraday
+    the daily cache has no row for today, so without this the live edge falls back
+    to the previous session's gap. The opens are fetched once, lazily, the first
+    time a ticker's daily bars lack today (so a pre-open pass or a preview scan on
+    a fake panel makes no request). Every other daily feature is correct without
+    it (see feature_matrix_4h._with_live_edge_daily_rows).
+    """
+
+    def __init__(self, tickers, base=None, fetch=None, day=None):
+        self._tickers = list(tickers)
+        self._base = base or _load_daily
+        self._fetch = fetch or fetch_session_opens
+        self._day = day if day is not None else session_day()
+        self.opens: dict[str, float] | None = None
+
+    def __call__(self, ticker: str) -> pd.DataFrame | None:
+        daily = self._base(ticker)
+        if daily is None or daily.empty:
+            return daily
+        if self.opens is None:
+            try:
+                self.opens = self._fetch(self._tickers)
+            except Exception as exc:  # noqa: BLE001 - degrade to the previous gap
+                logger.warning("momentum: session opens unavailable (%s); daily_gap_* use the "
+                               "previous session's gap", exc)
+                self.opens = {}
+            logger.info("momentum: session opens for %s: %d/%d tickers",
+                        self._day.date(), len(self.opens), len(self._tickers))
+        return append_session_open(daily, self.opens.get(str(ticker).upper()), self._day)
+
+
+def _ticker_meta_or_none():
+    """The research build's metadata encodings (sector/cap/type/ETF), or None,
+    which leaves those four model features at 0 as before, if metadata is unreadable."""
+    try:
+        return research_ticker_meta()
+    except Exception as exc:  # noqa: BLE001 - degrade to the previous behaviour
+        logger.warning("momentum: candidate metadata unavailable (%s); metadata features stay 0", exc)
+        return None
+
+
+def feature_universe(snapshot_tickers: list[str]) -> list[str]:
+    """Tickers to build features for: the research build's universe (shared
+    eligible, minus context-only) plus the snapshot.
+
+    The xsec_* ranks are computed over whatever panel is built. The nightly
+    research file (what training saw) ranks over the shared eligible universe,
+    about 2.8k names on a bar, while the snapshot is about 2.6k, so ranking over the
+    snapshot alone shifted every xsec value (parity check 2026-11-19). The snapshot
+    still gates which names can be picked (score_cross_section's in_universe).
+    """
+    try:
+        from core.shared_universe.universe import shared_tickers
+
+        shared = shared_tickers(eligible_only=True, rebuild=False)
+    except Exception as exc:  # noqa: BLE001 - fall back to the old (snapshot-only) ranks
+        logger.warning("momentum: shared universe unavailable (%s); xsec ranks use the snapshot only", exc)
+        shared = []
+    return filter_context_only_tickers([*shared, *snapshot_tickers])
+
+
 # ---------------------------------------------------------------------------
 # Alerts
 # ---------------------------------------------------------------------------
@@ -213,10 +294,76 @@ class MomentumLiveRunner:
         # Populated by evaluate_now for run_pass (shared 4H engine).
         self._last_gate: dict | None = None
 
+    # ---- decision-state archive ----
+    def _archive_cross_section(
+        self,
+        *,
+        run_id: str,
+        ts_used: pd.Timestamp,
+        live_features: pd.DataFrame,
+        cross_section: pd.DataFrame,
+        entry_ok: dict[str, bool],
+        actions: dict[str, str],
+        inference_start,
+        pass_kind: str,
+        panel_stats: dict,
+    ) -> None:
+        """Archive every scored name on this bar (core.decision_state_archive).
+        Never raises: a failed archive must not stop the pass."""
+        try:
+            panel = live_features.xs(ts_used, level=0)
+            cand = panel.copy()
+            cand.index.name = "ticker"
+            feature_cols = [c for c in panel.columns if pd.api.types.is_numeric_dtype(panel[c])]
+            # Same xs() of the same frame, so rows line up positionally.
+            cand["expansion_score"] = cross_section["expansion_score"].to_numpy()
+            cand["live_rank"] = cross_section["rank"].to_numpy()
+            tickers = [str(t) for t in cand.index]
+            gates = {g: cross_section[g].to_numpy(dtype=bool) for g in CROSS_SECTION_GATES}
+            gates["entry_trigger"] = [bool(entry_ok.get(t, False)) for t in tickers]
+            # Same normalisation evaluate_now applies for its staleness check.
+            bar_utc = pd.Timestamp(ts_used)
+            bar_utc = bar_utc.tz_localize("UTC") if bar_utc.tzinfo is None else bar_utc.tz_convert("UTC")
+            archive_decision_state(
+                module="momentum_expansion",
+                run_id=run_id,
+                candidates=cand,
+                bar_ts=bar_utc,
+                score_col="expansion_score",
+                rank_col="live_rank",
+                feature_cols=feature_cols,
+                gates=gates,
+                selected=[t for t, ok in entry_ok.items() if ok],
+                side="long",
+                action=actions,
+                model_paths=[self.ranker.booster_path],
+                inputs_asof={
+                    "feature_bar": ts_used,
+                    "booster_file": file_asof(self.ranker.booster_path),
+                    **panel_stats,
+                },
+                run_meta={
+                    "pass_kind": pass_kind,
+                    "auto_trade": self.auto_trade,
+                    "governed": self.governed,
+                    "model_features": list(self.ranker.feature_columns),
+                },
+                inference_start=inference_start,
+                inference_end=utc_now(),
+            )
+        except Exception:  # noqa: BLE001 - archiving must never stop trading
+            logger.exception("momentum: decision-state archive failed (pass continues)")
+
     # ---- one-shot scoring + alerting at a 4H/1H bar ----
-    def evaluate_now(self, *, bar_ts: pd.Timestamp | None = None) -> list[dict]:
+    def evaluate_now(self, *, bar_ts: pd.Timestamp | None = None, archive: bool = False,
+                     pass_kind: str = "scheduled") -> list[dict]:
+        """Score, gate, audit. ``archive=True`` (scheduled passes only, never the
+        dashboard's preview scans) also writes the full scored cross-section to
+        the decision-state archive."""
         bar_ts = bar_ts or pd.Timestamp.now(tz="UTC")
         self._last_gate = None
+        inference_start = utc_now()
+        run_id = new_run_id() if archive else None
         snapshot = load_snapshot_for(bar_ts)
         if snapshot.empty:
             logger.warning("No universe snapshot available — refresh required")
@@ -231,9 +378,11 @@ class MomentumLiveRunner:
         # 2026-07-19 audit in LIVING_SUMMARY.md). assert_manifest_coverage is
         # the structural check that would have caught it immediately.
         ctx_4h = _load_context_4h()
+        panel_tickers = feature_universe(tickers)
+        daily_loader = SessionOpenDailyLoader(panel_tickers)
         result = build_live_feature_panel_4h(
-            tickers=tickers, load_4h_bars=load_4h, load_1d_bars=_load_daily,
-            ctx_4h=ctx_4h, tail=1,
+            tickers=panel_tickers, load_4h_bars=load_4h, load_1d_bars=daily_loader,
+            ctx_4h=ctx_4h, tail=1, ticker_meta=_ticker_meta_or_none(),
         )
         if result.panel.empty:
             logger.warning("Momentum: no feature rows built (bar cache empty?)")
@@ -281,8 +430,25 @@ class MomentumLiveRunner:
                 "max_staleness_days": SIGNAL_MAX_STALENESS_DAYS,
             })
             return []
-        ranked = top_n_at(bar_ts=ts_used, features=live_features, ranker=self.ranker)
+        cross_section = score_cross_section(bar_ts=ts_used, features=live_features, ranker=self.ranker)
+        ranked = top_n_at(bar_ts=ts_used, features=live_features, ranker=self.ranker,
+                          cross_section=cross_section)
+        panel_stats = {"panel_tickers_built": int(result.tickers_built),
+                       "panel_tickers_requested": int(result.tickers_requested),
+                       "universe_snapshot_rows": int(len(snapshot)),
+                       "session_opens": None if daily_loader.opens is None else len(daily_loader.opens)}
+
+        def _stamp(audit: dict) -> dict:
+            if run_id:
+                audit["decision_run_id"] = run_id
+            return audit
+
         if ranked.empty:
+            if run_id:
+                self._archive_cross_section(
+                    run_id=run_id, ts_used=ts_used, live_features=live_features,
+                    cross_section=cross_section, entry_ok={}, actions={},
+                    inference_start=inference_start, pass_kind=pass_kind, panel_stats=panel_stats)
             print(f"momentum: no candidates after ranking (scored {len(live_features)} names)")
             append_jsonl(DEFAULT_SIGNAL_AUDIT_LOG, {
                 "event": "signal_decision", "module": "momentum_expansion", "bar": ts_used,
@@ -301,12 +467,13 @@ class MomentumLiveRunner:
         # held positions are still managed regardless).
         targets = [str(t) for t in ranked["ticker"]]
         entry_ok: dict[str, bool] = {}
+        actions: dict[str, str] = {}
         sa_map: dict[str, dict] = {}
         emitted: list[dict] = []
         for _, row in ranked.iterrows():
             ticker = row["ticker"]
             rank_count = max(1, len(ranked))
-            signal_audit = build_signal_audit(
+            signal_audit = _stamp(build_signal_audit(
                 module="momentum_expansion",
                 ticker=ticker,
                 score=row["expansion_score"],
@@ -315,12 +482,13 @@ class MomentumLiveRunner:
                 rank_pct=1.0 - ((int(row["rank"]) - 1) / rank_count),
                 signal_ts=ts_used,
                 extra={"entry_triggered": False},
-            )
+            ))
             sa_map[ticker] = signal_audit
             try:
                 df_1h = load_1h(ticker)
             except FileNotFoundError:
                 entry_ok[ticker] = False
+                actions[ticker] = "missing_1h_bars"
                 append_jsonl(DEFAULT_SIGNAL_AUDIT_LOG, {
                     "event": "signal_decision", "module": "momentum_expansion", "bar": ts_used,
                     "ticker": ticker, "entry_triggered": False, "skip_reason": "missing_1h_bars",
@@ -330,6 +498,7 @@ class MomentumLiveRunner:
             triggers = evaluate_entry(df_1h=df_1h.tail(60))
             if not triggers:
                 entry_ok[ticker] = False
+                actions[ticker] = "no_entry_trigger"
                 append_jsonl(DEFAULT_SIGNAL_AUDIT_LOG, {
                     "event": "signal_decision", "module": "momentum_expansion", "bar": ts_used,
                     "ticker": ticker, "entry_triggered": False, "skip_reason": "no_entry_trigger",
@@ -337,7 +506,7 @@ class MomentumLiveRunner:
                 })
                 continue
             trig = triggers[0]
-            signal_audit = build_signal_audit(
+            signal_audit = _stamp(build_signal_audit(
                 module="momentum_expansion",
                 ticker=ticker,
                 score=row["expansion_score"],
@@ -350,9 +519,10 @@ class MomentumLiveRunner:
                     "stop_atr": trig.suggested_stop_atr, "note": trig.note,
                     "entry_triggered": True,
                 },
-            )
+            ))
             sa_map[ticker] = signal_audit
             entry_ok[ticker] = True
+            actions[ticker] = f"entry_trigger:{trig.rule}"
             append_jsonl(DEFAULT_SIGNAL_AUDIT_LOG, {
                 "event": "signal_decision", "module": "momentum_expansion", "bar": ts_used,
                 "ticker": ticker, "entry_triggered": True, "signal_audit": signal_audit,
@@ -371,6 +541,12 @@ class MomentumLiveRunner:
             }
             _emit_alert(payload)
             emitted.append(payload)
+
+        if run_id:
+            self._archive_cross_section(
+                run_id=run_id, ts_used=ts_used, live_features=live_features,
+                cross_section=cross_section, entry_ok=entry_ok, actions=actions,
+                inference_start=inference_start, pass_kind=pass_kind, panel_stats=panel_stats)
 
         # Execution + exits now run through the shared 4H engine in run_pass();
         # this method stays display/alert-only (used by the dashboard).
@@ -516,7 +692,9 @@ class MomentumLiveRunner:
         manage held positions with the hold-based TP/horizon/grace machine ->
         execute + persist state + audit. Replaces MomentumOptionPolicy execution."""
         bar_ts = bar_ts or pd.Timestamp.now(tz="UTC")
-        self.evaluate_now(bar_ts=bar_ts)  # ranks, gates, audits, alerts -> self._last_gate
+        # ranks, gates, audits, alerts -> self._last_gate; archives the scored cross-section
+        self.evaluate_now(bar_ts=bar_ts, archive=True,
+                          pass_kind="flush_pending_open" if flush_pending_open else "scheduled")
         gate = self._last_gate
         if not gate:
             # No ranking this pass (no snapshot / no feature rows / nothing survived

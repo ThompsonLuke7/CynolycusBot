@@ -243,6 +243,29 @@ def _adapt_trades(s: dict) -> dict:
     return {"state": "warming" if gaps else "ready", "detail": detail}
 
 
+def _adapt_personal(s: dict) -> dict:
+    """Counts only. The personal account is real money and separate from the paper book, so this
+    adapter never returns an ``acct`` block: its positions must not enter the hub's account totals."""
+    if s.get("state") == "error":
+        return {"state": "error", "detail": f"sync failed: {str(s.get('error') or '')[:80]}"}
+    if s.get("n_positions") is None:
+        return {"state": "idle", "detail": "read-only · syncs when the page is open"}
+    flags = s.get("n_flags") or {}
+    detail = f"{s['n_positions']} positions · {s.get('n_watchlist', 0)} watchlist"
+    if flags.get("high") or flags.get("warn"):
+        detail += f" · {flags.get('high', 0)} high / {flags.get('warn', 0)} warn flags"
+    return {"state": "warming" if s.get("state") == "syncing" else "ready", "detail": detail}
+
+
+def _adapt_replay(s: dict) -> dict:
+    """Read-only page. The archive's last date bounds which decisions can be replayed with features."""
+    n = s.get("positions")
+    if n is None:
+        return {"state": "idle", "detail": "no positions"}
+    last = max((d for d in (s.get("archive") or {}).values() if d), default=None)
+    return {"state": "ready", "detail": f"{n:,} positions · decision archive through {last or 'none'}"}
+
+
 def _adapt_intraday_structure(s: dict) -> dict:
     active = len(s.get("active_signals") or [])
     candidates = int(s.get("candidate_count") or 0)
@@ -261,7 +284,9 @@ class HubDashboardApp:
                  port_intraday_structure: int | None = None,
                  port_library: int | None = 8775,
                  port_trades: int | None = 8776,
-                 port_universe: int | None = 8777) -> None:
+                 port_universe: int | None = 8777,
+                 port_personal: int | None = None,
+                 port_replay: int | None = None) -> None:
         self.host = host
         self.dashboards: list[_Dash] = [
             _Dash("spy", "SPY Intraday", port_spy, startable=True, stoppable=True, tradeable=True,
@@ -319,6 +344,18 @@ class HubDashboardApp:
                 _Dash("trades", "Trade Library", port_trades,
                       startable=False, stoppable=False, tradeable=False,
                       start_path=None, start_body=lambda live: {}, adapt=_adapt_trades)
+            )
+        if port_personal is not None:
+            self.dashboards.append(
+                _Dash("personal", "Personal Portfolio", port_personal,
+                      startable=False, stoppable=False, tradeable=False,
+                      start_path=None, start_body=lambda live: {}, adapt=_adapt_personal)
+            )
+        if port_replay is not None:
+            self.dashboards.append(
+                _Dash("replay", "Decision Replay", port_replay,
+                      startable=False, stoppable=False, tradeable=False,
+                      start_path=None, start_body=lambda live: {}, adapt=_adapt_replay)
             )
 
     def _by_key(self, key: str) -> _Dash:

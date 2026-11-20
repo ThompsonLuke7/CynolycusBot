@@ -252,7 +252,7 @@ def main() -> None:
 
     uni = pd.read_csv(REPO / "Data/shared/universe/shared_universe.csv",
                       usecols=["ticker", "cap_tier", "avg_dollar_volume_20d"])
-    themes = pd.read_csv(REPO / "theme_expansion/data/theme_map_v4.csv",
+    themes = pd.read_csv(REPO / "themes/theme_expansion_legacy/data/theme_map_v4.csv",
                          usecols=["ticker", "theme_1"])
 
     matrix = pd.read_parquet(

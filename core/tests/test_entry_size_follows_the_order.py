@@ -12,7 +12,7 @@ from __future__ import annotations
 import datetime as dt
 from zoneinfo import ZoneInfo
 
-from core.live_4h_exec import ExecPolicy, build_mixed_plan, settle_entry_fill
+from core.live_4h_exec import ExecPolicy, build_mixed_plan, mark_entry_unconfirmed, settle_entry_fill
 from core.live_risk_pass import RiskPassConfig, evaluate_risk_exits
 
 NOW = dt.datetime(2026, 9, 22, 14, 30, tzinfo=ZoneInfo("America/New_York"))
@@ -103,3 +103,67 @@ def test_the_4h_pass_sizes_the_entry_before_it_plans_an_exit():
 
     sells = [p for p in res.plan if p[0] == "MYGN" and p[1] == "sell"]
     assert [p[2] for p in sells] == [1264]
+
+
+class _SequencedClient:
+    """Answers each get_order with the next reading, then repeats the last."""
+
+    def __init__(self, *readings):
+        self._readings = list(readings)
+
+    def get_order(self, order_id):
+        status, filled, price = self._readings.pop(0) if len(self._readings) > 1 else self._readings[0]
+        return {"id": order_id, "status": status, "filled_qty": str(filled),
+                "filled_avg_price": str(price)}
+
+
+def _uls_planned():
+    return {"ULS": {"route": "equity", "symbol": "ULS", "shares": 71}}
+
+
+def test_the_later_terminal_read_sizes_a_new_entry(monkeypatch):
+    # Dealer's ULS, 2026-10-08: 18 filled at 19:37:20.689 and the other 53 at
+    # 20.936. The fill poll stopped on the 18 (a partial already carries a fill
+    # price); the terminal read that cleared pending_fill had seen 71.
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    managed = _uls_planned()
+    client = _SequencedClient(("partially_filled", 18, 70.43), ("filled", 71, 70.43))
+
+    mark_entry_unconfirmed(managed, "ULS", {"id": "9956c6bb", "status": "pending_new"}, client=client)
+
+    st = managed["ULS"]
+    assert st["shares"] == st["remaining_qty"] == st["entry_filled_qty"] == 71.0
+    assert st["pending_fill"] is False
+
+
+def test_a_later_read_still_working_keeps_the_entry_flagged_for_settlement(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    managed = _uls_planned()
+    client = _SequencedClient(("partially_filled", 18, 70.43), ("partially_filled", 40, 70.44))
+
+    mark_entry_unconfirmed(managed, "ULS", {"id": "9956c6bb", "status": "pending_new"}, client=client)
+
+    st = managed["ULS"]
+    assert st["shares"] == 40.0 and st["entry_fill_price"] == 70.44
+    assert st["pending_fill"] is True
+
+
+def test_a_submitted_entry_is_registered_to_its_module(tmp_path, monkeypatch):
+    # Only exits were registered, so every fill certificate FAILed on its buys
+    # and no repair could prove which module opened a position.
+    import json as _json
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    managed = _uls_planned()
+    client = _SequencedClient(("filled", 71, 70.43))
+    client._trading_base = "https://paper-api.alpaca.markets"
+
+    mark_entry_unconfirmed(managed, "ULS", {"id": "9956c6bb", "status": "pending_new"},
+                           client=client, module="dealer_ranker", ledger_root=str(tmp_path))
+    mark_entry_unconfirmed(_uls_planned(), "ULS", {"id": "unregistered"}, client=client,
+                           ledger_root=str(tmp_path))
+
+    rows = [_json.loads(x) for x in
+            (tmp_path / "broker_reconciliation" / "paper" / "order_registry.jsonl").read_text().splitlines()]
+    assert [(r["order_id"], r["module"], r["side"], r["qty"]) for r in rows] == [
+        ("9956c6bb", "dealer_ranker", "buy", 71.0)]

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 REPO = Path(__file__).resolve().parents[2]
@@ -50,6 +51,13 @@ from core.live_4h_exec import (
     order_plan_audit_record,
     submit_pending_exit_orders,
     submit_pending_open_entries,
+)
+from core.decision_state_archive import (
+    archive_decision_state,
+    file_asof,
+    new_run_id,
+    stamp_run_id,
+    utc_now,
 )
 from core.live_signal_audit import append_jsonl, build_signal_audit
 from core.option_liquidity import contract_liquidity
@@ -755,6 +763,69 @@ def _record_aborted_run(kind: str, detail: str, *, submit: bool) -> None:
         logger.warning("could not record aborted run: %s", exc)
 
 
+DEALER_ARCHIVE_EXTRAS = ("snapshot_date", "captured_at", "dealer_direction", "dealer_change_direction",
+                         "scope_scores_json", "spot")
+
+
+def dealer_cross_section(rankings: pd.DataFrame, *, kept: list[str], skipped: list[str]
+                         ) -> tuple[pd.DataFrame, dict[str, pd.Series], dict[str, str]]:
+    """Every ranked name with the optionable-scan outcome.
+
+    The scan walks ``rankings`` in rank order and stops once top_k names are
+    kept, so every name at or above the deepest kept/skipped position was
+    reached; names it reached but could not evaluate (API errors) count as
+    reached but not tradeable.
+    """
+    cand = rankings.reset_index(drop=True).copy()
+    symbols = cand["symbol"].astype(str).str.upper()
+    kept_set, skipped_set = {t.upper() for t in kept}, {t.upper() for t in skipped}
+    touched = symbols.isin(kept_set | skipped_set)
+    deepest = int(np.flatnonzero(touched.to_numpy()).max()) if touched.any() else -1
+    reached = pd.Series(np.arange(len(cand)) <= deepest, index=cand.index)
+    tradeable = symbols.isin(kept_set)
+    actions = {**{t: "target" for t in kept_set}, **{t: "not_optionable" for t in skipped_set}}
+    return cand, {"scan_reached": reached, "tradeable_screen": tradeable}, actions
+
+
+def archive_dealer_decision(args, *, rankings: pd.DataFrame, ranking_path: Path | None, kept: list[str],
+                            skipped: list[str], spot_map: dict[str, float], bar: str, run_id: str,
+                            inference_start) -> None:
+    """Write every ranked name to the decision-state archive. Never raises."""
+    try:
+        cand, gates, actions = dealer_cross_section(rankings, kept=kept, skipped=skipped)
+        cand["spot"] = cand["symbol"].astype(str).str.upper().map(spot_map)
+        extras = [c for c in DEALER_ARCHIVE_EXTRAS if c in cand.columns]
+        skip = {"dealer_swing_potential_score", "dealer_swing_rank", *extras}
+        features = [c for c in cand.columns
+                    if c not in skip and c != "symbol" and pd.api.types.is_numeric_dtype(cand[c])]
+        path = Path(ranking_path) if ranking_path else RANKING_ROOT / "dealer_swing_rankings_latest.parquet"
+        archive_decision_state(
+            module=MODULE,
+            run_id=run_id,
+            candidates=cand,
+            bar_ts=pd.Timestamp(bar),
+            score_col="dealer_swing_potential_score",
+            rank_col="dealer_swing_rank",
+            feature_cols=features,
+            gates=gates,
+            selected=kept,
+            side=args.side_mode,
+            action=actions,
+            extra_cols=extras,
+            inputs_asof={"rankings_file": file_asof(path),
+                         "snapshot_date": str(cand["snapshot_date"].dropna().iloc[0])
+                         if "snapshot_date" in cand.columns and cand["snapshot_date"].notna().any() else None,
+                         "spot_source": "dealer chain snapshot spot"},
+            run_meta={"submit": bool(args.submit), "route": args.route, "top_k": args.top_k,
+                      "min_dte": args.min_dte, "max_dte": args.max_dte,
+                      "refresh_chain": bool(args.refresh_chain)},
+            inference_start=inference_start,
+            inference_end=utc_now(),
+        )
+    except Exception:  # noqa: BLE001 - archiving must never stop trading
+        logger.exception("dealer_ranker: decision-state archive failed (pass continues)")
+
+
 def _side_for_ticker(ticker: str, *, side_mode: str, top: pd.DataFrame) -> str:
     if side_mode != "dealer_direction":
         return "call"
@@ -836,6 +907,7 @@ def main() -> int:
     else:
         ranking_path = Path(args.ranking_path) if args.ranking_path else None
 
+    inference_start = utc_now()
     rankings = _load_rankings(ranking_path)
     profile = "LIVE" if args.live else "PAPER"
     client = AlpacaOptionsClient(env_file=f".env#{profile}")
@@ -855,6 +927,11 @@ def main() -> int:
     targets = top["symbol"].astype(str).str.upper().tolist()
     bar = now_utc_iso()
     signal_audits = _signal_audits(top, bar=bar, side_mode=args.side_mode)
+    decision_run_id = new_run_id()
+    stamp_run_id(signal_audits, decision_run_id)
+    archive_dealer_decision(args, rankings=rankings, ranking_path=ranking_path, kept=targets,
+                            skipped=skipped_not_optionable, spot_map=spot_map, bar=bar,
+                            run_id=decision_run_id, inference_start=inference_start)
     append_jsonl(AUDIT_LOG, {"event": "signal_decision", "module": MODULE, "bar": bar,
                              "targets": targets, "signal_audits": signal_audits,
                              "skipped_not_optionable": skipped_not_optionable})

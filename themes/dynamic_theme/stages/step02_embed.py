@@ -22,6 +22,7 @@ import pandas as pd
 
 from themes.dynamic_theme.config import (
     BGE_MODEL,
+    COMOVEMENT_WEIGHT,
     DAILY_BARS_DIR,
     DESC_BLEND_WEIGHT,
     NEWS_RECORDS_PATH,
@@ -56,7 +57,7 @@ def _is_spam(text: str) -> bool:
 _COMOVEMENT_LOOKBACK_DAYS = 60
 _COMOVEMENT_PCA_COMPONENTS = 20
 # Weight blending text vs. price vectors (0.0 = text only, 1.0 = price only)
-_COMOVEMENT_WEIGHT = 0.4
+_COMOVEMENT_WEIGHT = COMOVEMENT_WEIGHT  # config; name kept for backfill_theme_features
 
 
 def _article_embeddings_by_ticker_streaming(tickers: list[str]) -> dict[str, np.ndarray] | None:
@@ -210,29 +211,65 @@ def _concat_document(row: pd.Series) -> str:
     return " ".join(p for p in parts if p).strip() or str(row.get("ticker", ""))
 
 
-def _embed_descriptions(docs: pd.DataFrame, *, model_name: str = BGE_MODEL) -> dict[str, np.ndarray]:
-    """Embed each ticker's cleaned business description ("what the company IS").
+def identity_text(description: object, sector: object = None, industry: object = None,
+                  name: object = None) -> str:
+    """The text a ticker is clustered on: "Sector: S. Industry: I. " + business description.
 
-    This is the anchor of the text vector — it is what makes Apple cluster as
-    consumer electronics rather than as institutional-ownership news. Returns
-    {ticker: L2-normalized desc vector} for tickers with a non-empty description.
+    Falls back to the company name when there is no description, so a ticker with
+    only a profile header still embeds as its business, not as nothing.
     """
-    if "description" not in docs.columns:
-        return {}
-    sub = docs[["ticker", "description"]].copy()
-    sub["clean"] = sub["description"].fillna("").map(_clean_text)
-    sub = sub[sub["clean"].str.len() > 0]
-    if sub.empty:
+    def _s(value: object) -> str:
+        text = str(value).strip() if isinstance(value, str) else ""
+        return "" if text.lower() in {"", "nan", "none"} else text
+
+    head = " ".join(f"{label}: {_s(v)}." for label, v in (("Sector", sector), ("Industry", industry)) if _s(v))
+    body = _clean_text(_s(description)) or _s(name)
+    return f"{head} {body}".strip() if body else ""
+
+
+def _embed_descriptions(
+    docs: pd.DataFrame,
+    *,
+    model_name: str = BGE_MODEL,
+    profiles: pd.DataFrame | None = None,
+) -> dict[str, np.ndarray]:
+    """Embed each ticker's identity text ("what the company IS").
+
+    Identity text = sector + industry (company profile) + business description
+    (ticker document, else the profile summary); see ``identity_text``. Returns
+    {ticker: L2-normalized vector} for tickers with any identity text.
+    """
+    if profiles is None:
+        from themes.dynamic_theme.profiles import load_profiles
+
+        profiles = load_profiles()
+    prof = profiles.drop_duplicates("ticker").set_index("ticker") if not profiles.empty else pd.DataFrame()
+
+    def _p(ticker: str, col: str) -> object:
+        return prof[col].get(ticker) if col in prof.columns else None
+
+    texts: dict[str, str] = {}
+    desc = docs.set_index("ticker")["description"] if "description" in docs.columns else pd.Series(dtype=object)
+    for ticker in docs["ticker"].astype(str).unique():
+        description = desc.get(ticker)
+        if not (isinstance(description, str) and _clean_text(description)):
+            description = _p(ticker, "longBusinessSummary")
+        text = identity_text(description, _p(ticker, "sector"), _p(ticker, "industry"),
+                             _p(ticker, "shortName") or _p(ticker, "longName"))
+        if text:
+            texts[ticker] = text
+    if not texts:
         return {}
 
     from signals.news.nlp import embed_texts_bge
 
-    vecs = np.asarray(embed_texts_bge(sub["clean"].tolist(), model_name=model_name), dtype=np.float32)
+    tickers = list(texts)
+    vecs = np.asarray(embed_texts_bge([texts[t] for t in tickers], model_name=model_name), dtype=np.float32)
     out: dict[str, np.ndarray] = {}
-    for ticker, vec in zip(sub["ticker"].astype(str).tolist(), vecs):
+    for ticker, vec in zip(tickers, vecs):
         norm = np.linalg.norm(vec)
         out[ticker] = vec / norm if norm > 0 else vec
-    logger.info("Embedded business descriptions for %d tickers", len(out))
+    logger.info("Embedded identity text (sector/industry/description) for %d tickers", len(out))
     return out
 
 
@@ -332,7 +369,8 @@ def generate_embeddings(
     """Embed ticker documents and write ticker_embeddings.parquet.
 
     The final embedding is a weighted blend of:
-      - text vector  (BGE, 384-dim): "what the company IS" from news + description
+      - text vector  (BGE, 384-dim): "what the company IS" -- sector + industry +
+        business description (news only for tickers with no such text)
       - behavior vector (PCA of 60d return correlations, 20-dim): "how it MOVES"
 
     Both are L2-normalized before blending. Tickers with no bar history get
@@ -360,11 +398,15 @@ def generate_embeddings(
     # ── Text vector = description anchor blended with cleaned news ────────────
     # news_by_ticker : mean of spam-filtered article embeddings ("what it DOES")
     # desc_by_ticker : business-description embedding ("what the company IS")
+    desc_by_ticker = _embed_descriptions(docs, model_name=model_name)
+    # With the identity anchored entirely on business text (DESC_BLEND_WEIGHT 1.0),
+    # news is only a fallback for tickers with no identity text at all, so the
+    # multi-GB article-embedding stream is read only when such tickers exist.
     news_by_ticker: dict[str, np.ndarray] = {}
     if not force_fresh:
-        news_by_ticker = _load_article_embeddings_by_ticker(tickers)
-
-    desc_by_ticker = _embed_descriptions(docs, model_name=model_name)
+        need_news = tickers if float(DESC_BLEND_WEIGHT) < 1.0 else [t for t in tickers if t not in desc_by_ticker]
+        if need_news:
+            news_by_ticker = _load_article_embeddings_by_ticker(need_news)
 
     embeddings_by_ticker: dict[str, np.ndarray] = {}
     w = float(DESC_BLEND_WEIGHT)

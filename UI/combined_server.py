@@ -105,6 +105,8 @@ DEFAULT_PORT_INTRADAY_STRUCTURE = 8774
 DEFAULT_PORT_LIBRARY = 8775
 DEFAULT_PORT_TRADES = 8776
 DEFAULT_PORT_UNIVERSE = 8777
+DEFAULT_PORT_PERSONAL = 8778
+DEFAULT_PORT_REPLAY = 8779
 
 # State book used by the swing real-account (LIVE) policy.
 _SWING_LIVE_BOOK = "Data/inference/multi_ticker_swing/real_account_book_live.json"
@@ -591,6 +593,18 @@ def _run_data_readiness_with_retry(
         sleep_fn(interval_s)
 
 
+def _run_scheduled_data_readiness(**retry_kwargs) -> bool:
+    """The evening readiness slot, retried while another heavy job holds the lock.
+
+    It used to fire once and give up. The nightly runs from 16:45 to about 22:30,
+    so the 22:15 run was skipped on 09-29, 10-01, 10-02, 10-13 (low memory) and
+    10-26, and every readiness run on record since was a startup catch-up after a
+    crash. Without one, Meta drops every entry the next day on a stale stamp.
+    Still blocked in the live window, so retries stop mattering by 07:45 ET.
+    """
+    return _run_data_readiness_with_retry(catch_up=False, **retry_kwargs)
+
+
 def _run_broker_equity_snapshot(*, env_file: str, account_label: str) -> None:
     """Capture read-only broker marks used by the daily briefing attribution."""
     from core.broker_equity_snapshot import capture_from_env
@@ -983,6 +997,10 @@ def run_combined(
     port_trades: int = DEFAULT_PORT_TRADES,
     trades_enabled: bool = True,
     port_universe: int = DEFAULT_PORT_UNIVERSE,
+    port_personal: int = DEFAULT_PORT_PERSONAL,
+    personal_enabled: bool = True,
+    port_replay: int = DEFAULT_PORT_REPLAY,
+    replay_enabled: bool = True,
     intraday_structure_enabled: bool = True,
     intraday_structure_config: str = "strategies/intraday_structure/config/intraday_structure_v1.json",
     meta_ranker_times: str = "14:20,16:20",
@@ -1033,6 +1051,10 @@ def run_combined(
     if trades_enabled:
         dashboard_ports["trades"] = port_trades
     dashboard_ports["universe"] = port_universe
+    if personal_enabled:
+        dashboard_ports["personal"] = port_personal
+    if replay_enabled:
+        dashboard_ports["replay"] = port_replay
     _assert_ports_free(host, dashboard_ports)
 
     # ------------------------------------------------------------------
@@ -1266,6 +1288,29 @@ def run_combined(
                      name="universe-http").start()
     logger.info("Tradable universe:        http://%s:%d", host, port_universe)
 
+    # Personal portfolio (port 8778) — the user's own Schwab account, read-only
+    # (GET endpoints only, no order code). It calls Schwab only while its page is
+    # open, never on hub polls, and keeps its files under Data/personal/.
+    if personal_enabled:
+        from UI.personal_dashboard import make_server as _make_personal_server
+
+        personal_server = _make_personal_server(host, port_personal)
+        threading.Thread(target=personal_server.serve_forever, daemon=True,
+                         name="personal-http").start()
+        logger.info("Personal portfolio:      http://%s:%d", host, port_personal)
+
+    # Decision replay (port 8779) — steps a position bar by bar beside the
+    # module's archived decisions. Read-only: reads ledgers, bar caches and the
+    # decision archive; never writes, never contacts a broker.
+    replay_server = None
+    if replay_enabled:
+        from UI.decision_replay_dashboard import make_server as _make_replay_server
+
+        replay_server = _make_replay_server(host, port_replay)
+        threading.Thread(target=replay_server.serve_forever, daemon=True,
+                         name="replay-http").start()
+        logger.info("Decision replay:         http://%s:%d", host, port_replay)
+
     # ------------------------------------------------------------------
     # 4g. Hub / overview dashboard (port 8764) — links + status + start-all
     # ------------------------------------------------------------------
@@ -1281,6 +1326,8 @@ def run_combined(
         port_library=port_library if library_enabled else None,
         port_trades=port_trades if trades_enabled else None,
         port_universe=port_universe,
+        port_personal=port_personal if personal_enabled else None,
+        port_replay=port_replay if replay_enabled else None,
     )
     hub_server = _make_hub_server(host, port_hub, hub_app)
     hub_thread = threading.Thread(target=hub_server.serve_forever, daemon=True, name="hub-http")
@@ -1305,6 +1352,10 @@ def run_combined(
     if trades_enabled:
         print(f"  Trade library:           http://{host}:{port_trades}  (read-only)")
     print(f"  Tradable universe:       http://{host}:{port_universe}  (read-only)")
+    if personal_enabled:
+        print(f"  Personal portfolio:      http://{host}:{port_personal}  (Schwab, read-only)")
+    if replay_enabled:
+        print(f"  Decision replay:         http://{host}:{port_replay}  (read-only)")
     print(f"  Shared stream:           {len(all_symbols)} symbols")
     print("  Orders default to the PAPER account; LIVE toggle is OFF by default.")
     print("  Press Ctrl+C to stop.")
@@ -1475,7 +1526,7 @@ def run_combined(
                          data_readiness_time, exc)
         else:
             data_readiness_scheduler = NightlyScheduler(
-                _run_data_readiness,
+                _run_scheduled_data_readiness,
                 hour=dr_hour,
                 minute=dr_minute,
                 stop_event=stop_evt,
@@ -1837,6 +1888,8 @@ def run_combined(
     if trades_server is not None:
         trades_server.shutdown()
     universe_server.shutdown()
+    if replay_server is not None:
+        replay_server.shutdown()
     if meta_server is not None:
         meta_server.shutdown()
 
@@ -2023,6 +2076,22 @@ def main() -> None:
                         help="Port for the Intraday Structure dashboard (default 8774).")
     parser.add_argument("--port-universe", type=int, default=DEFAULT_PORT_UNIVERSE,
                         help="Port for the read-only tradable-universe dashboard (default 8777).")
+    parser.add_argument("--port-personal", type=int, default=DEFAULT_PORT_PERSONAL,
+                        help="Port for the read-only personal (Schwab) portfolio page (default 8778).")
+    parser.add_argument(
+        "--personal",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Serve the read-only personal Schwab portfolio page (default; use --no-personal to disable).",
+    )
+    parser.add_argument("--port-replay", type=int, default=DEFAULT_PORT_REPLAY,
+                        help="Port for the read-only decision replay page (default 8779).")
+    parser.add_argument(
+        "--replay",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Serve the read-only decision replay page (default; use --no-replay to disable).",
+    )
     parser.add_argument("--port-trades", type=int, default=DEFAULT_PORT_TRADES,
                         help="Port for the read-only trade library dashboard.")
     parser.add_argument("--port-library", type=int, default=DEFAULT_PORT_LIBRARY,
@@ -2112,6 +2181,10 @@ def main() -> None:
         library_enabled=bool(args.library),
         port_trades=args.port_trades,
         port_universe=args.port_universe,
+        port_personal=args.port_personal,
+        personal_enabled=bool(args.personal),
+        port_replay=args.port_replay,
+        replay_enabled=bool(args.replay),
         intraday_structure_enabled=bool(args.intraday_structure),
         intraday_structure_config=args.intraday_structure_config,
         meta_ranker_times=args.meta_ranker_times,

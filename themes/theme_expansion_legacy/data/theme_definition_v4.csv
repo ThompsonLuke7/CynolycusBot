@@ -1,0 +1,86 @@
+theme,category,min_constituents,max_constituents,allow_etfs,benchmark,is_tradable,is_watchlist_only,sector,industry_group
+additive_manufacturing,Industrials,3,15,False,SPY,True,False,Industrials,Automation
+advanced_packaging,Technology,6,20,False,SMH,True,False,Technology,Semiconductors
+aerospace,Industrials,6,25,False,SPY,True,False,Industrials,Aerospace
+agriculture_food_inputs,Consumer/Materials,6,30,False,MOO,True,False,Consumer,Agriculture
+ai_apps_agents,Technology,8,40,False,IGV,True,False,Technology,Software
+ai_infrastructure,Technology,6,25,False,SPY,True,False,Technology,AI Infrastructure
+airlines_travel,Consumer/Industrials,8,35,False,JETS,True,False,Consumer,Travel
+apparel_beauty_lifestyle,Consumer,8,35,False,XLY,True,False,Consumer,Consumer Brands
+asset_managers_alts,Financials,8,35,False,XLF,True,False,Financials,Asset Management
+autos,Consumer,6,25,False,SPY,True,False,Consumer,Autos
+banks_brokers_exchanges,Financials,12,50,False,XLF,True,False,Financials,Banks
+biotech_innovation,Healthcare,12,50,False,XBI,True,False,Healthcare,Biotech
+business_apps,Technology,6,25,False,SPY,True,False,Technology,Software
+chemicals,Materials,6,30,False,XLB,True,False,Materials,Chemicals
+china_internet,Technology,6,25,True,SPY,True,False,Technology,Internet
+cloud,Technology,6,25,False,XLK,True,False,Technology,Software
+cloud_neocloud,Technology,8,35,False,QQQ,True,False,Technology,AI Infrastructure
+construction_infrastructure,Industrials/Materials,10,40,False,PAVE,True,False,Industrials,Construction
+consumer_internet,Technology,6,25,False,SPY,True,False,Technology,Internet
+consumer_internet_marketplaces,Consumer/Communication,10,45,False,XLC,True,False,Consumer,Internet
+consumer_staples,Consumer,6,25,False,SPY,True,False,Consumer,Staples
+cooling,Industrials,3,15,False,XLI,True,False,Industrials,AI Infrastructure
+copper_metals,Materials,6,30,False,XME,True,False,Materials,Industrial Metals
+creative_software,Technology,6,25,False,SPY,True,False,Technology,Software
+crypto_infrastructure,Financials/Technology,8,35,False,BTC,True,False,Financials,Crypto
+cybersecurity,Technology,6,25,False,SPY,True,False,Technology,Software
+datacenter_infra,Industrials/Real Estate,8,35,False,XLI,True,False,Industrials,AI Infrastructure
+datacenter_reits_towers,Real Estate/Communication,6,25,False,VNQ,True,False,Real Estate,AI Infrastructure
+defense_aerospace,Industrials,10,40,False,ITA,True,False,Industrials,Defense
+dev_tools,Technology,6,25,False,SPY,True,False,Technology,Software
+diagnostics_tools,Healthcare,6,30,False,IHI,True,False,Healthcare,Life Sciences Tools
+digital_ads_media,Communication,8,35,False,XLC,True,False,Communication,Media
+drones_autonomy,Industrials,5,25,False,ITA,True,False,Industrials,Defense
+eda,Technology,3,10,False,SMH,True,False,Technology,Semiconductors
+electronics_components,Technology/Industrials,8,35,False,XLI,True,False,Technology,Hardware
+enterprise_software,Technology,6,25,False,SPY,False,True,Technology,Software
+etf_benchmarks,Benchmark,4,30,True,SPY,False,True,Benchmark,Benchmark
+fintech_payments,Financials/Technology,10,45,False,ARKF,True,False,Financials,Fintech
+foundry,Technology,3,12,False,SMH,True,False,Technology,Semiconductors
+gaming_sports_betting,Consumer/Communication,6,30,False,BETZ,True,False,Consumer,Gaming
+gold_silver_miners,Materials,8,35,False,GDX,True,False,Materials,Precious Metals
+growth,Macro,1,25,True,SPY,False,True,Macro,Macro
+hardware_devices,Technology,4,20,False,SPY,False,True,Technology,Hardware
+healthcare,Healthcare,6,25,False,SPY,True,False,Healthcare,Healthcare
+homebuilders_housing,Consumer/Industrials,8,35,False,XHB,True,False,Consumer,Homebuilders
+industrial_automation,Industrials,10,40,False,XLI,True,False,Industrials,Automation
+insurance,Financials,6,25,False,SPY,True,False,Financials,Insurance
+lithium_battery_materials,Materials,6,30,False,LIT,True,False,Materials,Battery Materials
+long_bonds,Macro,1,25,True,SPY,False,True,Macro,Macro
+managed_care_insurance,Healthcare,6,30,False,XLV,True,False,Healthcare,Healthcare Services
+market,Macro,1,25,True,SPY,False,True,Macro,Macro
+medtech_devices,Healthcare,8,35,False,IHI,True,False,Healthcare,Medtech
+mega_banks,Financials,6,25,False,XLF,True,False,Financials,Banks
+mega_cap_platforms,Technology,5,15,False,QQQ,True,False,Technology,Internet
+memory_storage,Technology,6,25,False,SMH,True,False,Technology,Semiconductors
+natural_gas,Energy,6,25,False,SPY,True,False,Energy,Oil & Gas
+networking_optical,Technology,8,35,False,QQQ,True,False,Technology,Networking
+nuclear_uranium,Energy/Utilities,6,30,False,URA,True,False,Energy,Nuclear
+obesity_glp1_health,Healthcare,5,25,False,XLV,True,False,Healthcare,Pharma
+oil_exploration,Energy,6,25,True,SPY,True,False,Energy,Oil & Gas
+oil_gas,Energy,12,45,False,XLE,True,False,Energy,Oil & Gas
+oil_integrated,Energy,6,25,True,SPY,True,False,Energy,Oil & Gas
+oil_services,Energy,6,25,False,SPY,True,False,Energy,Oil & Gas
+pharma_largecap,Healthcare,8,35,False,XLV,True,False,Healthcare,Pharma
+power_grid_electrification,Utilities/Industrials,10,45,False,XLU,True,False,Utilities,Power
+quantum_computing,Technology,4,20,False,QTUM,True,False,Technology,Emerging Compute
+rare_earth_critical_minerals,Materials,5,25,False,REMX,True,False,Materials,Critical Minerals
+real_estate_reits,Real Estate,8,35,False,VNQ,True,False,Real Estate,Real Estate
+regional_banks,Financials,6,25,False,SPY,True,False,Financials,Banks
+renewables_storage,Energy/Industrials,8,35,False,ICLN,True,False,Energy,Renewables
+restaurants_food,Consumer,8,35,False,XLY,True,False,Consumer,Restaurants
+retail_consumer,Consumer,10,45,False,XLY,True,False,Consumer,Retail
+robotics,Industrials,6,25,False,SPY,True,False,Industrials,Automation
+semicap_equipment,Technology,8,35,False,SMH,True,False,Technology,Semiconductors
+semis_compute,Technology,10,45,False,SMH,True,False,Technology,Semiconductors
+small_caps,Macro,1,25,True,SPY,False,True,Macro,Macro
+solar,Energy,6,25,False,SPY,True,False,Energy,Renewables
+space_satellites,Industrials/Communication,6,30,False,ARKX,True,False,Industrials,Space
+streaming_entertainment,Communication,6,30,False,XLC,True,False,Communication,Media
+telecom,Communication,6,25,False,XLC,True,False,Communication,Telecom
+transport_logistics,Industrials,8,35,False,IYT,True,False,Industrials,Transport
+travel,Consumer,6,25,False,SPY,True,False,Consumer,Travel
+utilities_yield,Utilities,8,35,False,XLU,True,False,Utilities,Utilities
+vertical_software,Technology,6,25,False,SPY,True,False,Technology,Software
+workflow_software,Technology,6,25,False,SPY,True,False,Technology,Software

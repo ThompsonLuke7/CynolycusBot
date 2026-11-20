@@ -18,10 +18,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -46,19 +48,57 @@ ETFS = [
 logger = logging.getLogger("fetch_research_bars_1d")
 
 
+def _us_trading_day_hours(now: datetime | None = None) -> bool:
+    """Weekdays 08:00-17:00 New York: when the live stack needs the same Alpaca quota."""
+    ny = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York"))
+    return ny.weekday() < 5 and 8 <= ny.hour < 17
+
+
+def throttle_http(per_minute: int, market_per_minute: int | None = None) -> None:
+    """Space every HTTP request in this process >= 60/per_minute s apart, shared by all threads
+    (``market_per_minute`` instead on weekdays 08:00-17:00 ET, so the live stack keeps headroom).
+
+    Alpaca allows 200 data requests a minute per account, and a 1Hour history comes back
+    ~2,000 bars a page (~20 requests per symbol). Unthrottled workers trip 429s; the SDK
+    then gives up on the symbol and the retry restarts it from page one, so adding workers
+    LOWERED throughput (2026-11-08: 12 workers fetched 1.75 symbols/min against 5 with 5).
+    """
+    import requests
+
+    lock, last = threading.Lock(), [0.0]
+    original = requests.Session.request
+
+    def request(self, *args, **kwargs):
+        rpm = market_per_minute if market_per_minute and _us_trading_day_hours() else per_minute
+        with lock:
+            wait = last[0] + 60.0 / rpm - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            last[0] = time.monotonic()
+        return original(self, *args, **kwargs)
+
+    requests.Session.request = request
+
+
 def universe_tickers() -> list[str]:
     u = pd.read_csv(UNIVERSE_CSV)
     return sorted(set(u["ticker"].dropna().astype(str).str.upper()) | set(ETFS))
 
 
-def fetch_ticker(ticker: str, end: str, force: bool, out_dir: Path = OUT_DIR, start: str = START) -> tuple[str, int | str]:
+def fetch_ticker(ticker: str, end: str, force: bool, out_dir: Path = OUT_DIR, start: str = START,
+                 timeframe: str = "1Day") -> tuple[str, int | str]:
     out = out_dir / f"{ticker}.parquet"
     if out.exists() and not force:
         return ticker, "cached"
     for attempt in range(1, 6):
         try:
-            df = fetch_intraday(ticker=ticker, start=start, end=end, timeframe="1Day",
-                                limit=10_000, adjustment=ADJUSTMENT, feed=FEED, save_path="")
+            # skip_delisted=False: dead symbols are the point of a point-in-time cache.
+            # limit=None: alpaca-py treats `limit` as a cap on the TOTAL bars and paginates
+            # internally, so limit=10_000 silently returned only the first ~2.5 years of
+            # hourly bars (2026-11-08 probe). None fetches every page.
+            df = fetch_intraday(ticker=ticker, start=start, end=end, timeframe=timeframe,
+                                limit=None, adjustment=ADJUSTMENT, feed=FEED, save_path="",
+                                skip_delisted=False)
             break
         except Exception as exc:  # noqa: BLE001 - classify then retry or report
             msg = str(exc).lower()
@@ -75,14 +115,20 @@ def fetch_ticker(ticker: str, end: str, force: bool, out_dir: Path = OUT_DIR, st
     return ticker, len(df)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+def main(*, description: str = __doc__.splitlines()[0], default_out: Path = OUT_DIR,
+         default_tickers=universe_tickers, timeframe: str = "1Day") -> None:
+    ap = argparse.ArgumentParser(description=description)
     ap.add_argument("--tickers", nargs="*")
     ap.add_argument("--tickers-file", type=Path, help="one symbol per line (e.g. delisted names from build_pit_universe)")
-    ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    ap.add_argument("--out-dir", type=Path, default=default_out)
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--force", action="store_true", help="refetch files that already exist")
+    ap.add_argument("--max-rpm", type=int, default=170, help="HTTP requests per minute for this process "
+                    "(Alpaca's account limit is 200)")
+    ap.add_argument("--max-rpm-market", type=int, default=60,
+                    help="the same on weekdays 08:00-17:00 ET, leaving the live stack most of the quota")
     args = ap.parse_args()
+    throttle_http(args.max_rpm, args.max_rpm_market)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     logging.getLogger("core").setLevel(logging.WARNING)
 
@@ -91,11 +137,11 @@ def main() -> None:
     if args.tickers_file:
         tickers = [t.strip().upper() for t in args.tickers_file.read_text().split() if t.strip()]
     else:
-        tickers = [t.upper() for t in args.tickers] if args.tickers else universe_tickers()
+        tickers = [t.upper() for t in args.tickers] if args.tickers else default_tickers()
     end = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
     results: dict[str, int | str] = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = [ex.submit(fetch_ticker, t, end, args.force, out_dir) for t in tickers]
+        futs = [ex.submit(fetch_ticker, t, end, args.force, out_dir, START, timeframe) for t in tickers]
         for i, fut in enumerate(as_completed(futs), 1):
             t, r = fut.result()
             results[t] = r
@@ -108,7 +154,7 @@ def main() -> None:
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {"runs": []}
     manifest["runs"].append({
         "fetched_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "start": START, "end": end, "feed": FEED, "adjustment": ADJUSTMENT,
+        "start": START, "end": end, "timeframe": timeframe, "feed": FEED, "adjustment": ADJUSTMENT,
         "requested": len(tickers), "ok": len(ok), "failed": bad,
     })
     manifest_path.write_text(json.dumps(manifest, indent=1))

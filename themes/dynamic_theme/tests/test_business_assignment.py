@@ -282,3 +282,40 @@ def test_peer_pin_follows_the_peers_theme_and_overrides_the_cluster():
     got = step08.assign_primary_themes(_memberships(_SCORES), _clusters(), _registry(), _INDUSTRY,
                                        peer_pins={"BK3": ["GB2", "GB3"]}).set_index("ticker")
     assert got.loc["BK3", ["primary_theme", "source"]].tolist() == ["banks", "cluster"]
+
+
+# ── 2026-11-18: own group, cross-industry groups, home fallback ──────────────
+def test_clustered_ticker_takes_its_own_group_not_the_nearest_centroid():
+    # SW4 sits in the software group but scores a hair higher against banks (the
+    # NVDA-in-ai_infrastructure-vs-analog-semis shape): its primary is its own group.
+    scores = dict(_SCORES, SW4=(0.80, 0.81))
+    got = step08.assign_primary_themes(_memberships(scores), _clusters(), _registry(), _INDUSTRY,
+                                       peer_pins={}).set_index("ticker")
+    assert got.loc["SW4", ["primary_theme", "source"]].tolist() == ["software", "cluster"]
+    assert got.loc["SW4", "membership_score"] == pytest.approx(0.80)
+
+
+def test_lone_industry_name_stays_in_a_cross_industry_own_group():
+    # Group 3 spans four industries (an AI-trade shape): its single chip maker stays.
+    reg = pd.concat([_registry(), pd.DataFrame({"cluster_id": [3], "theme_name": ["ai_trade"],
+                                                "confidence": [0.6]})], ignore_index=True)
+    clusters = pd.concat([_clusters(), pd.DataFrame({"ticker": ["CHIP", "NET", "CLD", "SVC"],
+                                                     "cluster_id": [3, 3, 3, 3]})], ignore_index=True)
+    industry = dict(_INDUSTRY, CHIP="Semiconductors", NET="Computer Hardware", CLD="Software", SVC="IT Services")
+    mem = _memberships(_SCORES)
+    mem = pd.concat([mem] + [pd.DataFrame({"ticker": [t] * 3, "theme": ["software", "banks", "ai_trade"],
+                                           "membership_score": [0.7, 0.6, 0.9]}) for t in ("CHIP", "NET", "CLD", "SVC")]
+                    + [pd.DataFrame({"ticker": list(_SCORES), "theme": "ai_trade", "membership_score": 0.1})],
+                    ignore_index=True)
+    got = step08.assign_primary_themes(mem, clusters, reg, industry, peer_pins={}).set_index("ticker")
+    assert got.loc["CHIP", ["primary_theme", "source"]].tolist() == ["ai_trade", "cluster"]
+
+
+def test_home_ticker_uses_a_foreign_backed_theme_when_a_home_peer_is_there():
+    # JPM shape: one US bank (BK1) clustered with foreign banks -- too few US peers on
+    # their own, but enough to admit the unclustered US bank NZ1.
+    countries = {"BK1": "United States", "BK2": "Canada", "BK3": "United Kingdom", "NZ1": "United States"}
+    countries.update({t: "United States" for t in ("SW1", "SW2", "SW3", "SW4", "GB1")})
+    got = step08.assign_primary_themes(_memberships(_SCORES), _clusters(), _registry(), _INDUSTRY,
+                                       countries, peer_pins={}).set_index("ticker")
+    assert got.loc["NZ1", ["primary_theme", "source"]].tolist() == ["banks", "industry"]

@@ -8,8 +8,8 @@ from pathlib import Path
 import re
 
 from scripts.discord_ledger.build import read_jsonl, write_jsonl
+from scripts.discord_ledger.identities import CALLERS
 
-CALLERS = {"1079391263083733072": "ACE", "720901855995101225": "FT"}
 RETURN_LINE = re.compile(r"Total\s*return\s*\n\s*([^\n]{1,100})", re.I)
 PERCENT = re.compile(r"([+-]?\d[\d,]*(?:\.\d+)?)\s*%")
 

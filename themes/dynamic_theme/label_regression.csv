@@ -1,0 +1,66 @@
+ticker,must_match,must_not_match,unclassified_ok,why
+GOOGL,,chin|hong_kong,true,2026-10-05: US mega caps landed in chinese_internet_stocks
+META,,chin|hong_kong,true,2026-10-05: US mega caps landed in chinese_internet_stocks
+AMZN,,chin|hong_kong,true,2026-10-05: US mega caps landed in chinese_internet_stocks
+NBIS,(^|_)ai(_|$)|cloud|data_center|compute|gpu|infra|hyperscal|neocloud,chin|hong_kong,true,2026-11-03: Dutch AI cloud filed under Yandex-era internet industry -> chinese_internet_stocks
+TM,auto|vehicle|(^|_)ev(_|$)|motor|mobility,chin|hong_kong,true,2026-11-03: Japanese automaker in chinese_internet_stocks via NIO/XPEV/LI peers
+HMC,auto|vehicle|(^|_)ev(_|$)|motor|mobility,chin|hong_kong,true,2026-11-03: Japanese automaker in chinese_internet_stocks
+RACE,auto|vehicle|(^|_)ev(_|$)|motor|mobility|luxury,chin|hong_kong,true,2026-11-03: Italian automaker in chinese_internet_stocks
+STLA,auto|vehicle|(^|_)ev(_|$)|motor|mobility,chin|hong_kong,true,2026-11-03: Dutch automaker in chinese_internet_stocks
+RIVN,auto|vehicle|(^|_)ev(_|$)|motor|mobility|speculative|growth,chin|hong_kong,true,2026-11-03: US EV maker in chinese_internet_stocks via nearest theme
+LCID,auto|vehicle|(^|_)ev(_|$)|motor|mobility|speculative|growth,chin|hong_kong,true,2026-11-03: US EV maker in chinese_internet_stocks via nearest theme
+SOUN,,chin|hong_kong,true,2026-11-03: US voice-AI name in chinese_internet_stocks
+YOU,,chin|hong_kong,true,2026-11-03: US identity name in chinese_internet_stocks
+AAPL,mega_cap,,false,seed anchor mega_cap_platforms
+MU,memory|storage,,false,seed anchor memory_storage
+WDC,memory|storage,,false,seed anchor memory_storage
+STX,memory|storage,,false,seed anchor memory_storage
+SNDK,memory|storage,,false,seed anchor memory_storage
+MSFT,software|saas|enterprise|cloud,,false,peer pin to enterprise software (user decision 2026-10-04)
+ORCL,software|saas|enterprise|cloud,,false,peer pin to enterprise software (user decision 2026-10-04)
+NVDA,semi|chip|gpu|(^|_)ai(_|$)|compute|accelerat|data_center|foundry|mega_cap,,true,semiconductors / AI compute
+AMD,semi|chip|gpu|(^|_)ai(_|$)|compute|accelerat|data_center|foundry,,true,semiconductors
+AVGO,semi|chip|gpu|(^|_)ai(_|$)|compute|accelerat|data_center|network,,true,semiconductors / networking
+CRM,software|saas|enterprise|cloud,,true,enterprise software
+NOW,software|saas|enterprise|cloud,,true,enterprise software
+ADBE,software|saas|enterprise|cloud|creative,,true,enterprise software
+JPM,bank|financ|lend|credit,,true,bank
+BAC,bank|financ|lend|credit,,true,bank
+WFC,bank|financ|lend|credit,,true,bank
+XOM,oil|gas|energy|petrol|refin|upstream|integrated|exploration,,true,integrated oil
+CVX,oil|gas|energy|petrol|refin|upstream|integrated|exploration,,true,integrated oil
+COP,oil|gas|energy|petrol|refin|upstream|integrated|exploration,,true,oil and gas E&P
+LLY,pharma|drug|bio|health|medic|obesity|glp|therapeut,,true,pharma
+PFE,pharma|drug|bio|health|medic|vaccin|therapeut,,true,pharma
+MRK,pharma|drug|bio|health|medic|oncolog|therapeut,,true,pharma
+NEE,utilit|power|electric|grid|energy|renewable,,true,utility
+DUK,utilit|power|electric|grid|energy,,true,utility
+SO,utilit|power|electric|grid|energy|nuclear,,true,utility
+MARA,bitcoin|crypto|blockchain|digital_asset|mining,,true,bitcoin miner
+RIOT,bitcoin|crypto|blockchain|digital_asset|mining,,true,bitcoin miner
+CLSK,bitcoin|crypto|blockchain|digital_asset|mining,,true,bitcoin miner
+RTX,defen[cs]e|aerospace|military,,true,defense prime
+LMT,defen[cs]e|aerospace|military,,true,defense prime
+NOC,defen[cs]e|aerospace|military|space,,true,defense prime
+DAL,airline|travel|aviation|(^|_)air(_|$)|transport,,true,airline
+UAL,airline|travel|aviation|(^|_)air(_|$)|transport,,true,airline
+COST,retail|consumer|staple|grocer|discount|warehouse,,true,warehouse retail
+WMT,retail|consumer|staple|grocer|discount|e_?commerce,,true,mass retail
+V,payment|fintech|financ|card|network,,true,payment network
+MA,payment|fintech|financ|card|network,,true,payment network
+KO,beverage|staple|food|drink|consumer|snack,,true,beverages
+PEP,beverage|staple|food|drink|consumer|snack,,true,beverages / snacks
+CAT,machin|industrial|equipment|construction|agri|farm|heavy|mining,,true,heavy machinery
+DE,machin|industrial|equipment|construction|agri|farm|heavy,,true,farm machinery
+HD,home|retail|housing|improvement|consumer|building,,true,home improvement retail
+LOW,home|retail|housing|improvement|consumer|building,,true,home improvement retail
+F,auto|vehicle|(^|_)ev(_|$)|motor|mobility,chin|hong_kong,true,US automaker
+GM,auto|vehicle|(^|_)ev(_|$)|motor|mobility,chin|hong_kong,true,US automaker
+TSLA,auto|vehicle|(^|_)ev(_|$)|motor|mobility|speculative|growth|mega_cap|autonom|robot,chin|hong_kong,true,US EV maker
+BABA,chin|hong_kong|internet|e_?commerce,,true,Chinese internet (the basket itself must keep its home names)
+BIDU,chin|hong_kong|internet|search|(^|_)ai(_|$),,true,Chinese internet
+JD,chin|hong_kong|internet|e_?commerce,,true,Chinese internet
+PDD,chin|hong_kong|internet|e_?commerce,,true,Chinese internet
+NIO,chin|hong_kong|auto|vehicle|(^|_)ev(_|$),,true,Chinese EV maker
+XPEV,chin|hong_kong|auto|vehicle|(^|_)ev(_|$),,true,Chinese EV maker
+LI,chin|hong_kong|auto|vehicle|(^|_)ev(_|$),,true,Chinese EV maker

@@ -1738,6 +1738,7 @@ class LiveMetaXGBAgent:
         p_enter_short = self._entry_short.predict_row(row_df, target_ts=row.name)
         row["p_enter_long_oof"] = p_enter_long
         row["p_enter_short_oof"] = p_enter_short
+        self._last_feature_row = row  # the scored row, for the decision-state archive
         exit_row = self._annotate_current_context(row)
         exit_df = pd.DataFrame([exit_row], index=[row.name])
         p_exit_long = self._exit_long.predict_row(exit_df, target_ts=row.name) if self._state.position > 0 else float("nan")
@@ -1841,6 +1842,10 @@ class LiveMetaXGBAgent:
             "last_prob_sources": self._last_prob_sources,
             "last_vix_status": self._last_vix_status,
         }
+
+    def last_feature_row(self) -> pd.Series | None:
+        """The feature row the models scored on the latest decision (None before one)."""
+        return getattr(self, "_last_feature_row", None)
 
     def last_probs(self) -> dict[str, float | None] | None:
         return self._last_probs
@@ -2429,6 +2434,8 @@ class LiveIndependentMetaXGBAgent:
         out: list[dict[str, object]] = []
         for _, row in rows.iterrows():
             work_row, probs = self._score_row(base_frame, row)
+            # Kept for the decision-state archive: the exact row the models scored.
+            self._last_feature_row = work_row
             self._last_probs = {}
             for key, val in probs.items():
                 try:
@@ -2526,6 +2533,10 @@ class LiveIndependentMetaXGBAgent:
             "last_prob_sources": self._last_prob_sources,
             "last_vix_status": self._base_agent._last_vix_status,
         }
+
+    def last_feature_row(self) -> pd.Series | None:
+        """The feature row the models scored on the latest decision (None before one)."""
+        return getattr(self, "_last_feature_row", None)
 
     def last_probs(self) -> dict[str, float | None] | None:
         return self._last_probs
@@ -3161,6 +3172,10 @@ class LivePPOAgent:
             "last_probs": self._last_probs,
         }
 
+    def last_feature_row(self) -> pd.Series | None:
+        """The feature row the models scored on the latest decision (None before one)."""
+        return getattr(self, "_last_feature_row", None)
+
     def last_probs(self) -> dict[str, float | None] | None:
         return self._last_probs
 
@@ -3226,6 +3241,12 @@ class LiveInferenceEngine:
             return None
         features = self._feature_fn(df_15m)
         return self._predict_fn(features)
+
+    def last_feature_row(self) -> pd.Series | None:
+        if self._agent is None:
+            return None
+        getter = getattr(self._agent, "last_feature_row", None)
+        return getter() if getter is not None else None
 
     def last_probs(self) -> dict[str, float | None] | None:
         if self._agent is None:

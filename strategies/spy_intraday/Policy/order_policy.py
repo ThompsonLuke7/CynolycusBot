@@ -10,10 +10,12 @@ import math
 import pandas as pd
 import re
 import time as time_mod
+import urllib.error
 from zoneinfo import ZoneInfo
 
 from core.live_signal_audit import build_option_order_audit
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+from core.trading_controls import load_controls
 
 
 logger = logging.getLogger(__name__)
@@ -982,7 +984,18 @@ class OptionOrderPolicy:
             return False
         return True
 
+    def _entry_block_label(self) -> str:
+        if load_controls().entries_frozen:
+            return "entries_frozen"
+        cutoff = self._new_entry_cutoff.strftime("%H:%M") if self._new_entry_cutoff else "n/a"
+        return f"new_entry_cutoff_{cutoff}"
+
     def _new_entries_allowed(self, *, local_ts: datetime | None, side: str | None = None) -> bool:
+        if self.cfg.submit_orders and load_controls().entries_frozen:
+            # The account-wide freeze (core/trading_controls.py). The broker
+            # client would refuse the buy anyway; deciding here keeps the
+            # signal audit honest about why no entry was taken.
+            return False
         if local_ts is None:
             return True
         max_lag_sec = max(0.0, float(self.cfg.max_live_entry_lag_sec))
@@ -4071,8 +4084,7 @@ class OptionOrderPolicy:
                 self._meta_side_reason[side_key] = "entry_waiting_for_1m_confirmation"
                 return 0
             if not self._new_entries_allowed(local_ts=local_ts, side=side_key):
-                cutoff = self._new_entry_cutoff.strftime("%H:%M") if self._new_entry_cutoff else "n/a"
-                self._meta_side_reason[side_key] = f"new_entry_cutoff_{cutoff}"
+                self._meta_side_reason[side_key] = self._entry_block_label()
                 return 0
             if self._stale_prior_session_entry_signal(local_ts=local_ts):
                 self._meta_side_reason[side_key] = "waiting_same_day_10m_confirmation"
@@ -4170,8 +4182,7 @@ class OptionOrderPolicy:
             return 0
         if math.isfinite(enter_prob) and math.isfinite(enter_thr) and enter_prob >= enter_thr:
             if not self._new_entries_allowed(local_ts=local_ts, side=side_key):
-                cutoff = self._new_entry_cutoff.strftime("%H:%M") if self._new_entry_cutoff else "n/a"
-                self._meta_side_reason[side_key] = f"new_entry_cutoff_{cutoff}"
+                self._meta_side_reason[side_key] = self._entry_block_label()
                 return 0
             if not bool(self._meta_side_entry_armed.get(side_key, True)):
                 return 0
@@ -4417,13 +4428,25 @@ class OptionOrderPolicy:
             if desired_final <= current_qty:
                 continue
             open_qty = desired_final - current_qty
-            open_resp = self._submit_order(
-                symbol=symbol,
-                side="buy",
-                intent="open",
-                qty=open_qty,
-                logger=logger,
-            )
+            try:
+                open_resp = self._submit_order(
+                    symbol=symbol,
+                    side="buy",
+                    intent="open",
+                    qty=open_qty,
+                    logger=logger,
+                )
+            except urllib.error.HTTPError as exc:
+                # A refused buy (no buying power, the trading-controls freeze)
+                # left nothing open. Raising here unwound on_decision and,
+                # like the 2026-09-03 no-quote 403, killed the SPY loop for the
+                # session, exits included. Record it and hold flat.
+                logger(
+                    "[order_policy] OPEN REFUSED "
+                    f"side={side} qty={open_qty} symbol={symbol}: {exc}"
+                )
+                self._meta_side_reason[side] = "open_refused_by_broker"
+                continue
             orders.append(
                 {
                     "type": f"open_{side}",

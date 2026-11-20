@@ -73,6 +73,9 @@ def main():
     ap.add_argument("--relabel-themes", action="store_true",
                     help="With --weekly: pass --relabel-all to the theme pipeline (one-shot label "
                          "repair; Claude-labels every cluster instead of carrying names forward).")
+    ap.add_argument("--refit-themes", action="store_true",
+                    help="With --weekly: pass --refit to the theme pipeline (re-fit the fixed theme "
+                         "groups now rather than when they are due).")
     ap.add_argument("--include-treasury", action="store_true",
                     help="Also try FRED treasury rates. Optional; not part of live-readiness.")
     ap.add_argument("--skip-news-incremental", action="store_true",
@@ -82,10 +85,10 @@ def main():
     ap.add_argument("--timeout", type=int, default=1800, help="Per-feed timeout (s).")
     args = ap.parse_args()
 
-    if args.relabel_themes and not args.weekly:
-        ap.error("--relabel-themes requires --weekly")
-    weekly = [(label, argv + (["--relabel-all"] if args.relabel_themes else []))
-              for label, argv in WEEKLY] if args.weekly else []
+    if (args.relabel_themes or args.refit_themes) and not args.weekly:
+        ap.error("--relabel-themes / --refit-themes require --weekly")
+    theme_flags = (["--relabel-all"] if args.relabel_themes else []) + (["--refit"] if args.refit_themes else [])
+    weekly = [(label, argv + theme_flags) for label, argv in WEEKLY] if args.weekly else []
     if args.daily:
         jobs = DAILY + weekly
     else:

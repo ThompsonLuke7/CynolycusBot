@@ -45,7 +45,7 @@ def test_run_pass_routes_and_persists(monkeypatch, tmp_path):
 
     runner = mr.MomentumLiveRunner(auto_trade=True)
 
-    def fake_eval(bar_ts=None):
+    def fake_eval(bar_ts=None, **_):
         runner._last_gate = {
             "targets": ["OPTNAME", "SHARENAME", "NOTRIG"],
             "entry_ok": {"OPTNAME": True, "SHARENAME": True, "NOTRIG": False},
@@ -77,7 +77,7 @@ def test_run_pass_routes_and_persists(monkeypatch, tmp_path):
 def test_run_pass_no_targets(monkeypatch, tmp_path):
     monkeypatch.setattr(mr, "STATE_PATH", tmp_path / "state.json")
     runner = mr.MomentumLiveRunner(auto_trade=False)
-    monkeypatch.setattr(runner, "evaluate_now", lambda bar_ts=None: [])  # leaves _last_gate None
+    monkeypatch.setattr(runner, "evaluate_now", lambda bar_ts=None, **_: [])  # leaves _last_gate None
     runner._last_gate = None
     assert runner.run_pass(_FakeClient(), submit=False) == {"orders": 0}
 

@@ -14,6 +14,7 @@ import re
 from zoneinfo import ZoneInfo
 
 from scripts.discord_ledger.build import DEFAULT_STUDY, read_jsonl, write_jsonl
+from scripts.discord_ledger.identities import CALLERS
 
 ACTUAL_ENTRY = re.compile(r"\b(?:BTO|bought|purchased|opened|filled|entered|initiated|i\s+(?:am|'m)\s+in)\b", re.I)
 ALERT_ENTRY = re.compile(r"\b(?:ALERT|BUY|ENTRY|LOTTO|TRADE\s+IDEA|FREE\s+TRADE|taking\s+(?:a|the|\d+)|in\s+[A-Z$]{2,6}\s+\d)\b", re.I)
@@ -241,7 +242,7 @@ def decision(draft: dict, source: dict) -> tuple[dict | None, str]:
 
 def supplement(message: dict) -> dict | None:
     """Recover explicit execution/contract syntax missed by draft classifiers."""
-    if message["author_id"] not in {"1079391263083733072", "720901855995101225"}:
+    if message["author_id"] not in CALLERS:
         return None
     text = message.get("text") or ""
     if not text or NON_MARKET.search(text) or RECAP.search(text) or re.search(r"\bCLOSED\s*:", text, re.I):

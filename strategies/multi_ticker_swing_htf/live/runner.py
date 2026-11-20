@@ -40,6 +40,13 @@ import pandas as pd
 
 from core.live_state import module_state_lock, load_state, save_state
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+from core.decision_state_archive import (
+    archive_decision_state,
+    file_asof,
+    new_run_id,
+    stamp_run_id,
+    utc_now,
+)
 from core.live_signal_audit import (
     append_jsonl,
     build_equity_order_audit,
@@ -144,6 +151,79 @@ def _signal_audits(top: pd.DataFrame, *, bar: pd.Timestamp) -> dict[str, dict]:
     return out
 
 
+HTF_ARCHIVE_EXTRAS = ("mom_score", "s_combo")
+
+
+def htf_cross_section(bar_rows: pd.DataFrame, *, htf_rank_floor: float, liquidity_floor: float,
+                      blacklist: set[str], targets: list[str]) -> tuple[pd.DataFrame, dict[str, pd.Series]]:
+    """Every row on the decision bar with the runner's own gates, in its order:
+    a score exists, within-bar rank floor, liquidity floor, blacklist, top-K."""
+    cand = bar_rows.copy()
+    has_score = cand[SIGNAL].notna()
+    cand["htf_rank_pct"] = cand[SIGNAL].where(has_score).rank(pct=True)
+    rank_ok = cand["htf_rank_pct"] >= htf_rank_floor
+    if "dollar_vol_pctile_252" in cand.columns:
+        liquid = cand["dollar_vol_pctile_252"].fillna(0) >= liquidity_floor
+    else:
+        liquid = pd.Series(True, index=cand.index)
+    allowed = ~cand["ticker"].astype(str).str.upper().isin(blacklist)
+    eligible = has_score & rank_ok & liquid & allowed
+    order = cand.loc[eligible].sort_values(SIGNAL, ascending=False).index
+    cand["htf_live_rank"] = float("nan")
+    cand.loc[order, "htf_live_rank"] = range(1, len(order) + 1)
+    gates = {
+        "has_score": has_score,
+        "htf_rank_floor": rank_ok,
+        "liquidity_floor": liquid,
+        "not_blacklisted": allowed,
+        "top_k": cand["ticker"].isin(set(targets)),
+    }
+    return cand, gates
+
+
+def archive_htf_decision(args, *, bar_rows: pd.DataFrame, bar: pd.Timestamp, blacklist: set[str],
+                         targets: list[str], run_id: str, inference_start) -> None:
+    """Write every row on the decision bar to the decision-state archive.
+    Never raises: a failed archive must not stop the pass."""
+    try:
+        cand, gates = htf_cross_section(bar_rows, htf_rank_floor=args.htf_rank_floor,
+                                        liquidity_floor=args.liquidity_floor,
+                                        blacklist=blacklist, targets=targets)
+        extras = [c for c in HTF_ARCHIVE_EXTRAS if c in cand.columns]
+        skip = {SIGNAL, "htf_rank_pct", "htf_live_rank", *extras}
+        features = [c for c in cand.columns
+                    if c not in skip and c not in ("ticker", "timestamp", "index")
+                    and pd.api.types.is_numeric_dtype(cand[c])]
+        archive_decision_state(
+            module=AUDIT_MODULE,
+            run_id=run_id,
+            candidates=cand.drop(columns=["timestamp"], errors="ignore"),
+            bar_ts=bar,
+            score_col=SIGNAL,
+            rank_col="htf_live_rank",
+            feature_cols=features,
+            gates=gates,
+            selected=targets,
+            side="long",
+            extra_cols=[*extras, "htf_rank_pct"],
+            model_paths=[REPO / "strategies/multi_ticker_swing_htf/models/htf_swing_xgb.json"],
+            inputs_asof={"meta_matrix_file": file_asof(args.matrix), "matrix_bar": bar,
+                         "score_source": "htf_score precomputed in the Meta matrix"},
+            run_meta={
+                "pass_kind": "flush_pending_open" if getattr(args, "flush_pending_open", False) else "scheduled",
+                "submit": bool(getattr(args, "submit", False)),
+                "mode": getattr(args, "mode", None),
+                "top_k": args.top_k,
+                "htf_rank_floor": args.htf_rank_floor,
+                "liquidity_floor": args.liquidity_floor,
+            },
+            inference_start=inference_start,
+            inference_end=utc_now(),
+        )
+    except Exception:  # noqa: BLE001 - archiving must never stop trading
+        logger.exception("htf: decision-state archive failed (pass continues)")
+
+
 def _option_dte(expiry, bar) -> int | None:
     try:
         exp = pd.Timestamp(expiry).date()
@@ -199,6 +279,7 @@ def main():
     print(f"=== HTF Swing {args.mode} runner | account={profile} | mode={run_mode} | top_k={args.top_k} ===")
 
     # --- signal: read htf_score straight off the shared matrix (no re-scoring) ---
+    inference_start = utc_now()
     df = pd.read_parquet(args.matrix).reset_index()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     if SIGNAL not in df.columns:
@@ -224,6 +305,12 @@ def main():
     top = elig.sort_values(SIGNAL, ascending=False).head(args.top_k)
     targets = list(top["ticker"])
     signal_audits = _signal_audits(top, bar=bar)
+    # Archive the whole bar before anything touches a broker; the run id rides
+    # on every signal audit so order records join back to it.
+    decision_run_id = new_run_id()
+    stamp_run_id(signal_audits, decision_run_id)
+    archive_htf_decision(args, bar_rows=df[df["timestamp"] == bar], bar=bar, blacklist=blacklist,
+                         targets=targets, run_id=decision_run_id, inference_start=inference_start)
     print(f"\neligible {len(elig)}/{n0} after filters "
           f"(htf_rank>={args.htf_rank_floor}, liq>={args.liquidity_floor}, blacklist={len(blacklist)})")
     print(f"htf top-{args.top_k}: {targets}")
@@ -456,7 +543,7 @@ def _execute(
                     disp[str(sym)] = "submitted"
                     if str(side).strip().lower() == "buy":
                         # Accepted != filled. See core.live_4h_exec.mark_entry_unconfirmed.
-                        mark_entry_unconfirmed(new_managed, sym, resp, client=client)
+                        mark_entry_unconfirmed(new_managed, sym, resp, client=client, module=module)
                         mark_entry_disposition(disp, new_managed, sym)
                     if str(side).strip().lower() == "sell":
                         es = exit_context.get(sym, (None, None))[1] if exit_context else None

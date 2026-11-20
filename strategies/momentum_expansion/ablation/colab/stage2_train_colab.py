@@ -18,16 +18,17 @@
 #
 # **How to run.**
 # 1. Runtime -> Change runtime type -> GPU (T4 is enough; High-RAM if offered).
-# 2. Put these three files in your Drive at `MyDrive/cynolycus_stage2/`:
-#    `stage2_matrix.parquet` (2.7 GB), `stage2_manifest.json`, and this script.
+# 2. Put these three files in your Drive at `MyDrive/cynolycus_<STAGE>/`:
+#    `<STAGE>_matrix.parquet`, `<STAGE>_manifest.json`, and this script
+#    (<STAGE> is the `STAGE` constant below: stage2 or stage3).
 #    (Uploading them to the Colab session folder also works, but Drive survives
 #    a disconnect.)
 # 3. Run all cells. The first pass is a ~1 minute smoke test; if it prints
 #    `SMOKE OK` the full run starts by itself.
-# 4. Every finished fold is saved to `MyDrive/cynolycus_stage2/out/`. If Colab
+# 4. Every finished fold is saved to `MyDrive/cynolycus_<STAGE>/out/`. If Colab
 #    disconnects, just Run all again: finished folds and arms are skipped.
 # 5. When it prints `ALL ARMS DONE`, download
-#    `MyDrive/cynolycus_stage2/out/stage2_results.tar` and hand it back.
+#    `MyDrive/cynolycus_<STAGE>/out/<STAGE>_results.tar` and hand it back.
 #
 # Nothing here is run locally (project rule: training happens on Colab).
 
@@ -47,9 +48,10 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-MANIFEST_NAME = "stage2_manifest.json"
-BUNDLE_NAME = "stage2_colab_bundle.tar"          # optional: the same files in one tar
-DRIVE_DIR = Path("/content/drive/MyDrive/cynolycus_stage2")
+STAGE = "stage2"          # the Stage 3 export pins this line to "stage3" in its copy
+MANIFEST_NAME = f"{STAGE}_manifest.json"
+BUNDLE_NAME = f"{STAGE}_colab_bundle.tar"        # optional: the same files in one tar
+DRIVE_DIR = Path(f"/content/drive/MyDrive/cynolycus_{STAGE}")
 
 
 # %%
@@ -224,7 +226,7 @@ def run_arm(arm: dict, data: dict, manifest: dict, out_dir: Path, *, seeds: list
 
 
 def pack_results(out_dir: Path) -> Path:
-    tar_path = out_dir / "stage2_results.tar"
+    tar_path = out_dir / f"{STAGE}_results.tar"
     with tarfile.open(tar_path, "w") as tar:
         for p in sorted(out_dir.glob("oof_*.parquet")) + sorted(out_dir.glob("summary_*.json")) + \
                 sorted(out_dir.glob("importance_*.csv")):
@@ -235,9 +237,9 @@ def pack_results(out_dir: Path) -> Path:
 def locate_bundle() -> tuple[Path, Path]:
     """(folder holding the manifest + matrix, output folder). Uses Drive when mounted.
 
-    Looks for ``stage2_manifest.json`` next to ``stage2_matrix.parquet`` in the
+    Looks for ``<STAGE>_manifest.json`` next to the matrix it names in the
     Drive folder, the Colab session folder, or the current folder; failing that,
-    for ``stage2_colab_bundle.tar`` in the same places and extracts it.
+    for ``<STAGE>_colab_bundle.tar`` in the same places and extracts it.
     """
     try:
         from google.colab import drive  # type: ignore
@@ -251,10 +253,10 @@ def locate_bundle() -> tuple[Path, Path]:
         bundle = next((p / BUNDLE_NAME for p in places if (p / BUNDLE_NAME).exists()), None)
         if bundle is None:
             raise FileNotFoundError(
-                f"Put {MANIFEST_NAME} and stage2_matrix.parquet (or {BUNDLE_NAME}) in one of: "
+                f"Put {MANIFEST_NAME} and {STAGE}_matrix.parquet (or {BUNDLE_NAME}) in one of: "
                 f"{[str(p) for p in places]}"
             )
-        work = Path("/content/stage2_work") if Path("/content").exists() else Path("stage2_work")
+        work = Path(f"/content/{STAGE}_work") if Path("/content").exists() else Path(f"{STAGE}_work")
         work.mkdir(parents=True, exist_ok=True)
         with tarfile.open(bundle) as tar:
             tar.extractall(work)
@@ -266,7 +268,7 @@ def locate_bundle() -> tuple[Path, Path]:
 def _local_copy(work: Path) -> Path:
     """On Colab, read the matrix from local disk, not through the Drive mount
     (118 column reads of a 2.7 GB file over Drive are slow and can stall)."""
-    local = Path("/content/stage2_work")
+    local = Path(f"/content/{STAGE}_work")
     if not Path("/content").exists() or work.resolve() == local.resolve():
         return work
     local.mkdir(parents=True, exist_ok=True)
@@ -281,7 +283,7 @@ def _local_copy(work: Path) -> Path:
 
 def main() -> None:
     work, out_dir = locate_bundle()
-    manifest = json.loads((work / "stage2_manifest.json").read_text())
+    manifest = json.loads((work / MANIFEST_NAME).read_text())
     device = "cuda" if shutil.which("nvidia-smi") else "cpu"
     arms = manifest["arms"]
     only = [a.strip() for a in os.environ.get("ARMS", "").split(",") if a.strip()]
@@ -294,7 +296,7 @@ def main() -> None:
     print(f"device={device} arms={[a['name'] for a in arms]} features={len(all_feats)} seeds={seeds} out={out_dir}")
 
     if os.environ.get("SKIP_SMOKE") != "1":
-        smoke_dir = Path("/content/stage2_smoke") if Path("/content").exists() else Path("stage2_smoke")
+        smoke_dir = Path(f"/content/{STAGE}_smoke") if Path("/content").exists() else Path(f"{STAGE}_smoke")
         shutil.rmtree(smoke_dir, ignore_errors=True)
         smoke_dir.mkdir(parents=True)
         small = load_matrix(work / manifest["matrix"], all_feats, targets, ticker_frac=0.05,

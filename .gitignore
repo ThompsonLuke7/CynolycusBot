@@ -258,6 +258,7 @@ core/API/Schwab_API/schwab_tokens.json
 # Re-include live pipeline dependencies (read by shared_universe / dynamic_theme)
 !themes/theme_expansion_legacy/data/*.csv
 !themes/theme_expansion_legacy/outputs/universe_filter.csv
+!themes/dynamic_theme/label_regression.csv
 
 # Re-include trained models distributed via git (loaded by live scorers)
 !strategies/multi_ticker_swing/models/*.json

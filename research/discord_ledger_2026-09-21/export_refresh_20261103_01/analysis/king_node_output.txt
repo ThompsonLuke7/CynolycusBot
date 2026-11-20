@@ -1,0 +1,5 @@
+IBM 2026-10-30 spot=253.00  ACE GEX King=260 VEX King=260  -> {'king_|net_gex|': 260.0, 'king_abs_gex': 260.0, 'king_|net_vex|': 260.0, 'king_oi': 260.0, 'call_oi_max': 260.0}
+IBM 2026-11-20 spot=253.00  ACE GEX King=275 VEX King=275  -> {'king_|net_gex|': 275.0, 'king_abs_gex': 250.0, 'king_|net_vex|': 275.0, 'king_oi': 250.0, 'call_oi_max': 275.0}
+ZETA 2026-10-30 no chain
+CRWD 2026-10-30 spot=258.40  ACE GEX King=270 VEX King=270  -> {'king_|net_gex|': 270.0, 'king_abs_gex': 255.0, 'king_|net_vex|': 270.0, 'king_oi': 255.0, 'call_oi_max': 270.0}
+GILD 2026-10-30 spot=157.70  ACE GEX King=160 VEX King=132  -> {'king_|net_gex|': 160.0, 'king_abs_gex': 160.0, 'king_|net_vex|': 160.0, 'king_oi': 160.0, 'call_oi_max': 160.0}

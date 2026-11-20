@@ -1,0 +1,96 @@
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 2/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 2/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 3/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 2/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 2/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 3/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 2/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 2/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 2/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+options data 429 (attempt 1/5), backing off: https://data.alpaca.markets/v1beta1/options/bars
+sessions 459, contract-entries 5505
+sanity: corr(option 1-min return, SPY 1-min return), ATM 09:45, median by right: {'C': 0.86, 'P': -0.82} ; median bars/contract 390
+
+share of entries whose LATER same-day high is >= 2x entry ("100% banger"), >= 3x, and that expire <= 10% of entry:
+                            peak2x  peak3x   dies
+entry_time moneyness right                       
+09:45      atm       C       0.423   0.150  0.486
+                     P       0.440   0.227  0.551
+           otm2      C       0.448   0.262  0.703
+                     P       0.453   0.277  0.760
+11:00      atm       C       0.383   0.161  0.501
+                     P       0.390   0.229  0.536
+           otm2      C       0.429   0.253  0.771
+                     P       0.416   0.264  0.780
+13:00      atm       C       0.343   0.140  0.522
+                     P       0.373   0.179  0.523
+           otm2      C       0.419   0.238  0.854
+                     P       0.403   0.237  0.847
+
+mean expiry multiple (what holding actually returned), by entry time/moneyness/right:
+entry_time  moneyness  right
+09:45       atm        C       -0.078
+                       P       -0.083
+            otm2       C       -0.162
+                       P       -0.158
+11:00       atm        C       -0.131
+                       P       -0.106
+            otm2       C       -0.317
+                       P       -0.253
+13:00       atm        C       -0.222
+                       P       -0.200
+            otm2       C       -0.488
+                       P       -0.462
+
+ATM: sessions where the call AND the put both print >= 2x after entry: {'09:45': 0.059, '11:00': 0.041, '13:00': 0.037}
+ATM: sessions where at least one side prints >= 2x: {'09:45': 0.804, '11:00': 0.732, '13:00': 0.677}

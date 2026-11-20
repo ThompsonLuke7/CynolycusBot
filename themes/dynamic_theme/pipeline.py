@@ -330,6 +330,7 @@ def daily_run(
     tickers: list[str] | None = None,
     unit_of_work: "UnitOfWork | None" = None,
     valid_until_for: Callable[[datetime], datetime] | None = None,
+    enforce_label_gate: bool = True,
 ) -> None:
     """Run the daily theme feature refresh (no reclustering)."""
     ensure_outputs()
@@ -343,7 +344,8 @@ def daily_run(
     # No reclustering on the daily run: reuse the week's published clusters.
     clusters = pd.read_parquet(TICKER_CLUSTERS_PATH)
     memberships = compute_memberships(embeddings_df=embeddings, clusters_df=clusters, as_of=as_of)
-    features = build_meta_features(memberships_df=memberships, as_of=as_of, clusters_df=clusters)
+    features = build_meta_features(memberships_df=memberships, as_of=as_of, clusters_df=clusters,
+                                   enforce_label_gate=enforce_label_gate)
     feature_completion_at = _utc_now()
     _publish_completed_theme_outputs(
         memberships,
@@ -364,8 +366,13 @@ def weekly_run(
     unit_of_work: "UnitOfWork | None" = None,
     valid_until_for: Callable[[datetime], datetime] | None = None,
     relabel_all: bool = False,
+    enforce_label_gate: bool = True,
+    refit: bool = False,
 ) -> None:
-    """Run the full weekly theme taxonomy refresh (recluster + Claude labeling)."""
+    """Run the weekly theme taxonomy refresh (fixed groups + Claude labeling).
+
+    Groups are re-fit only when due or when ``refit`` is set (see step03).
+    """
     ensure_outputs()
     as_of = as_of or pd.Timestamp.now(tz="UTC")
     tickers = tickers or _get_tickers()
@@ -388,7 +395,7 @@ def weekly_run(
     embeddings = generate_embeddings(docs, as_of=as_of)
 
     # Step 3: cluster
-    clusters = cluster_tickers(embeddings_df=embeddings)
+    clusters = cluster_tickers(embeddings_df=embeddings, refit=refit)
 
     # Step 4: summaries
     summaries = build_cluster_summaries(clusters, docs_df=docs)
@@ -431,8 +438,9 @@ def weekly_run(
         as_of=as_of,
     )
 
-    # Step 9: meta features
-    features = build_meta_features(memberships_df=memberships, as_of=as_of, clusters_df=clusters)
+    # Step 9: meta features (label gate runs inside, before anything is written)
+    features = build_meta_features(memberships_df=memberships, as_of=as_of, clusters_df=clusters,
+                                   enforce_label_gate=enforce_label_gate)
     feature_completion_at = _utc_now()
     _publish_completed_theme_outputs(
         memberships,
@@ -457,10 +465,21 @@ if __name__ == "__main__":
         action="store_true",
         help="Weekly only: skip label carry-forward and Claude-label every cluster (recovery)",
     )
+    parser.add_argument(
+        "--refit",
+        action="store_true",
+        help="Weekly only: re-fit the theme groups now instead of reusing the fixed groups",
+    )
+    parser.add_argument(
+        "--no-label-gate",
+        action="store_true",
+        help="Publish features even if the label gate fails (it still writes label_check_latest.json)",
+    )
     args = parser.parse_args()
 
     as_of = pd.Timestamp(args.as_of, tz="UTC") if args.as_of else None
     if args.mode == "weekly":
-        weekly_run(as_of=as_of, relabel_all=args.relabel_all)
+        weekly_run(as_of=as_of, relabel_all=args.relabel_all, enforce_label_gate=not args.no_label_gate,
+                   refit=args.refit)
     else:
-        daily_run(as_of=as_of)
+        daily_run(as_of=as_of, enforce_label_gate=not args.no_label_gate)

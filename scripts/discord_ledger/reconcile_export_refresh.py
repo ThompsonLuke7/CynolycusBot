@@ -99,7 +99,9 @@ def main() -> int:
         seen.add(key)
         events.append(event)
     text_count = len(events) - legacy_count
-    preserved = {r["message_id"]: r for r in read_jsonl(args.study / "attachments/fetch_attempt_02.jsonl")}
+    # Only image-backed facts need the preserved-attachment index; a text-only refresh has none.
+    preserved = ({r["message_id"]: r for r in read_jsonl(args.study / "attachments/fetch_attempt_02.jsonl")}
+                 if any(fact.get("filename") for fact in facts) else {})
     resolved = []
     for ordinal, fact in enumerate(facts):
         m = messages[fact["message_id"]]

@@ -1,0 +1,57 @@
+bars: 15,482,337 RTH minutes, 33 symbols, 2022-01-03..2026-10-30
+sessions with a late first bar or < 300 minutes (excluded): 515 of 39995 (half-days included in this count)
+
+EM calibration: 241 rows from 19 daily-captioned tables (center within 0.25% of our prior close)
+  median |log(published / proxy) - median| by proxy: {'rv20': 0.196, 'ewma': 0.179, 'atr14': 0.189} -> using ewma
+  scale k = 0.966 (published half-width = k x ewma); per-table medians range 0.65..1.21
+
+candidate sides: 52,472 with >=1R room; within 0.5h of trigger 38,589; after gap-skip 27,110; gap-skipped 11,479
+
+=== PRIMARY: 0.5h proximity, first 30 min, conservative fills, card geometry
+primary (rule)                                 n= 9091 days=1176  mean -0.122R [-0.159, -0.080]  median -1.02R  win 33%  -7.1 bps
+control: random minute, all candidate sides    n=27110 days=1210  mean -0.056R [-0.083, -0.027]  median -0.54R  win 40%  +nan bps
+primary, frictionless (no tick slippage)       n= 9091 days=1176  mean -0.030R [-0.069, +0.011]  median -1.00R  win 34%  -1.7 bps
+exit mix: {'stop': 0.656, 't2': 0.175, 't1_be': 0.07, 'eod': 0.053, 't1_eod': 0.045}
+T1 (2R) reached before the 1R stop on 30.6% of resolved trades; a driftless path gives 33.3%
+sample trades (for hand-checking against the bars):
+symbol       date side  entry_minute  entry        R exit    R_mult
+   XLV 2025-10-08 call            17 144.67 0.385538 stop -1.051875
+  AVGO 2025-11-07  put             0 352.70 2.281660   t2  2.327244
+   XLU 2022-05-25 call             0  37.11 0.101977 stop -1.196123
+   XLK 2024-07-01  put             2 112.95 0.319414   t2  2.733887
+  PLTR 2022-06-15 call             3   7.99 0.107019 stop -1.186883
+   GME 2024-05-31 call             0  22.71 0.966354 stop -1.020696
+1R = 41 bps of price (median); h = 165 bps
+
+=== breakdowns (primary)
+  2022                                         n= 1748 days= 236  mean -0.035R [-0.150, +0.083]  median -1.02R  win 36%  -2.3 bps
+  2023                                         n= 1873 days= 242  mean -0.098R [-0.191, -0.005]  median -1.03R  win 34%  -5.1 bps
+  2024                                         n= 1959 days= 248  mean -0.148R [-0.225, -0.063]  median -1.02R  win 33%  -7.5 bps
+  2025                                         n= 1949 days= 242  mean -0.115R [-0.197, -0.039]  median -1.02R  win 34%  -8.4 bps
+  2026                                         n= 1562 days= 208  mean -0.223R [-0.299, -0.144]  median -1.01R  win 30%  -12.7 bps
+  calls                                        n= 4869 days=1013  mean -0.114R [-0.173, -0.055]  median -1.02R  win 33%  -7.2 bps
+  puts                                         n= 4222 days= 996  mean -0.131R [-0.194, -0.069]  median -1.02R  win 33%  -7.0 bps
+  ETFs                                         n= 4357 days=1085  mean -0.110R [-0.171, -0.051]  median -1.03R  win 34%  -2.8 bps
+  single stocks                                n= 4734 days=1117  mean -0.133R [-0.173, -0.087]  median -1.01R  win 33%  -11.0 bps
+  prior close 0.00-0.20h from trigger          n= 4146 days=1031  mean -0.120R [-0.178, -0.062]  median -1.02R  win 33%  -7.9 bps
+  prior close 0.20-0.35h from trigger          n= 2819 days= 998  mean -0.107R [-0.170, -0.046]  median -1.02R  win 33%  -5.9 bps
+  prior close 0.35-0.50h from trigger          n= 2126 days= 895  mean -0.146R [-0.211, -0.075]  median -1.02R  win 33%  -7.1 bps
+
+=== variants
+optimistic bar ordering                        n= 9091 days=1176  mean -0.032R [-0.070, +0.011]  median -1.02R  win 36%  -2.4 bps
+first 15 min only                              n= 7680 days=1163  mean -0.151R [-0.193, -0.109]  median -1.02R  win 32%  -9.1 bps
+any time of day (no 30-min rule)               n=14158 days=1199  mean -0.092R [-0.123, -0.055]  median -1.02R  win 35%  -4.8 bps
+stop = first 1-min close back through trigger  n= 9091 days=1176  mean -0.140R [-0.158, -0.121]  median -0.22R  win 11%  -8.0 bps
+plus 2 bps/side extra cost                     n= 9091 days=1176  mean -0.232R [-0.274, -0.191]  median -1.10R  win 33%  -11.1 bps
+top 3 calls + top 3 puts per day (closest)     n= 2853 days=1105  mean -0.127R [-0.180, -0.071]  median -1.02R  win 33%  -8.5 bps
+no proximity filter (every name-day with room) n=11455 days=1195  mean -0.135R [-0.170, -0.099]  median -1.02R  win 36%  -7.4 bps
+EM scale x0.75                                 n= 7368 days=1158  mean -0.234R [-0.279, -0.191]  median -1.03R  win 30%  -10.0 bps
+EM scale x1.25                                 n=10434 days=1192  mean -0.058R [-0.096, -0.020]  median -1.01R  win 37%  -4.0 bps
+
+MDE (80% power, two-sided 5%) on the primary mean ~ 0.056R per trade (day-clustered SE 0.020R)
+
+=== the 10/23 card itself (2026-10-23, rows in our universe; the card used option-implied h, here the proxy h is shown)
+  XLF call: open 56.20  no trigger in first 30 min; day H/L 56.35/55.80
+  XLV call: open 180.40  no trigger in first 30 min; day H/L 180.74/178.71
+  QQQ put: triggered 9:30 ET, exit stop, -1.01R (card h 10.13; our proxy h 8.72)
+  XLK put: open 181.82  no trigger in first 30 min; day H/L 184.42/181.55

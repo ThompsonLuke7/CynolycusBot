@@ -48,7 +48,7 @@ from typing import Any, Iterator
 from core.live_4h_exec import (
     ExecPolicy,
     _corroborate_option_exit_mark,
-    _implausible_mark_move,
+    _unexplained_mark_move,
     build_equity_order_audit,
     build_option_order_audit,
     # Defined there, not here: live_4h_exec's pending-exit flush needs it too and
@@ -294,7 +294,7 @@ def evaluate_risk_exits(
         held = int(owned_quantity(st, route, held))
 
         info = pos_info.get(sym, {})
-        anomaly = _implausible_mark_move(route, st.get("last_mark_price"), info.get("current"))
+        anomaly = _unexplained_mark_move(tkr, route, st, info.get("current"))
         if anomaly is not None:
             # Same refusal the 4H runner makes: a mark that moved 10x in one step
             # is a corporate action, not a price. Never stop out on it.

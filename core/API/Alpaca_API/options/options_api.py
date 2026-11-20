@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import time
@@ -12,7 +13,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Mapping
 
+from core.trading_controls import order_refusal
+
 from ..core.config import AlpacaConfig, _profile_env_value, _read_env_file, _split_env_file_profile
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,24 @@ class AlpacaOptionsClient:
         if params:
             query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
             url = f"{url}?{query}"
+        if method.upper() == "POST" and url.endswith("/v2/orders") and json_body is not None:
+            # The account-wide entry gate (core/trading_controls.py). Refused
+            # the way the broker refuses an unfunded buy, so every caller's
+            # existing rejection handling applies unchanged.
+            refusal = order_refusal(
+                json_body, get_position=self.get_position, get_account=self.get_account
+            )
+            if refusal is not None:
+                logger.warning(
+                    "trading controls refused %s %s %s: %s",
+                    json_body.get("side") or json_body.get("order_class"),
+                    json_body.get("qty"),
+                    json_body.get("symbol") or [leg.get("symbol") for leg in json_body.get("legs") or []],
+                    refusal["message"],
+                )
+                raise urllib.error.HTTPError(
+                    url, 403, f"Forbidden: {json.dumps(refusal)}", None, None
+                )
         data = None
         headers = {
             "APCA-API-KEY-ID": self._key,
@@ -204,6 +227,16 @@ class AlpacaOptionsClient:
         """
         url = f"{self._trading_base}/v2/positions"
         return self._request("GET", url, params=params)
+
+    def get_position(self, symbol: str) -> Any:
+        """GET /v2/positions/{symbol}; ``None`` when nothing is held."""
+        url = f"{self._trading_base}/v2/positions/{urllib.parse.quote(str(symbol).strip(), safe='')}"
+        try:
+            return self._request("GET", url)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return None
+            raise
 
     def get_stock_quotes(self, *, symbols: str, feed: str = "iex") -> Any:
         """Latest timestamped stock quotes; feed selection is explicit."""

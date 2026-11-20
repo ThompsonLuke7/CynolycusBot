@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import threading
+import time
 from collections import defaultdict, namedtuple
 from dataclasses import replace
 from datetime import timedelta
@@ -57,6 +58,8 @@ from strategies.intraday_structure.target_manager import (
 
 
 logger = logging.getLogger(__name__)
+# See IntradayStructureEngine._persist_transitions.
+TRANSITION_PERSIST_SECONDS = 30.0
 
 #: Price observed on a setup's own tape, and when. Distinct from the arriving
 #: bar, which may belong to a different ticker entirely.
@@ -124,6 +127,8 @@ class IntradayStructureEngine:
         self.level_provider = StructuralLevelProvider(config.levels)
         self.transitions: list[StateTransition] = []
         self._bar_counts: dict[str, int] = defaultdict(int)
+        self._unsaved_transitions = False
+        self._next_transition_persist = 0.0
         self._detectors = {
             SetupType.V_REVERSAL: VReversalDetector(),
             SetupType.BREAKOUT: BreakoutContinuationDetector(),
@@ -289,7 +294,7 @@ class IntradayStructureEngine:
         # on_price_update() below already only persists on a real transition --
         # this matches that existing pattern.
         if len(self.transitions) > emitted_before:
-            self.persist()
+            self._persist_transitions()
         return self.transitions[emitted_before:]
 
     @_synchronized
@@ -329,7 +334,7 @@ class IntradayStructureEngine:
                     ("intrabar_target_reached",), phase="TARGET_REACHED",
                 )
         if len(self.transitions) > emitted_before:
-            self.persist()
+            self._persist_transitions()
         return self.transitions[emitted_before:]
 
     def read_lock(self) -> threading.RLock:
@@ -387,7 +392,63 @@ class IntradayStructureEngine:
     @_synchronized
     def persist(self) -> None:
         if self.state_store is not None:
+            self.prune_settled_state()
             self.state_store.save(self.snapshot())
+        self._unsaved_transitions = False
+
+    def _persist_transitions(self) -> None:
+        """Save after a transition, at most every TRANSITION_PERSIST_SECONDS.
+
+        Even pruned, a save is ~2.4 s, and the open emits 700-770 transitions an
+        hour (2026-10-30, 11-02): saving each one kept the engine 17-21 minutes
+        behind the tape until 10:15 ET. Losing a window on a crash cannot double
+        an entry: transitions are logged as they happen, and the executor's own
+        book refuses a setup it already holds.
+        """
+        self._unsaved_transitions = True
+        self.flush_if_due()
+
+    @_synchronized
+    def flush_if_due(self, *, force: bool = False) -> None:
+        """Save held transitions once the window has passed (or now, with force)."""
+        if not self._unsaved_transitions:
+            return
+        now = time.monotonic()
+        if force or now >= self._next_transition_persist:
+            self.persist()
+            self._next_transition_persist = now + TRANSITION_PERSIST_SECONDS
+
+    @_synchronized
+    def prune_settled_state(self, *, dormant_after: timedelta = timedelta(days=5)) -> tuple[int, int]:
+        """Drop state that can no longer affect a decision. Returns (setups, histories) dropped.
+
+        Nothing pruned it before, and persist() rewrites the whole state: on
+        2026-10-26 it held 4,623 CLOSED setups and bar histories for 862 symbols
+        against 140 candidates (188 MB, 18-20 s per write, ~1,700 writes a
+        session), which is why the engine ran 50-95 minutes behind the tape.
+
+        * A CLOSED setup whose cooldown is complete is equivalent to an empty
+          slot: register_candidate replaces it on sight. closed_setups.jsonl
+          keeps its record.
+        * A history is dropped only for a symbol with no candidate that is not
+          a context symbol and has had no bar for ``dormant_after``; a later
+          candidate for it is re-seeded or warms up like any new symbol.
+        """
+        settled = [setup_id for setup_id, setup in self.setups.items()
+                   if setup.state == SetupState.CLOSED and self._cooldown_complete(setup)]
+        for setup_id in settled:
+            del self.setups[setup_id]
+        newest = max((bars[-1].timestamp for bars in self.histories.values() if bars), default=None)
+        dormant: list[str] = []
+        if newest is not None:
+            active = {ticker for ticker, _direction in self.candidates}
+            cutoff = newest - dormant_after
+            dormant = [symbol for symbol, bars in self.histories.items()
+                       if symbol not in active and not self._is_context_symbol(symbol)
+                       and (not bars or bars[-1].timestamp < cutoff)]
+            for symbol in dormant:
+                del self.histories[symbol]
+        return len(settled), len(dormant)
 
     @_synchronized
     def write_active_signals(self, path: str | Path | None = None) -> None:

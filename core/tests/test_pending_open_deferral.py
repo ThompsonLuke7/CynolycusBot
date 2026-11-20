@@ -196,3 +196,34 @@ def test_stale_readiness_after_close_queues_entries_instead_of_discarding(monkey
     assert queued == {"AAA", "BBB"}
     # Nothing was bought after hours, and the exit still went out.
     assert ("buy", "AAA") not in client.sent and ("buy", "BBB") not in client.sent
+
+
+def test_a_flushed_entry_is_flagged_unconfirmed_and_registered(monkeypatch, tmp_path):
+    """2026-10-28..11-02: the 09:35/09:37 flushes were the 4H modules' remaining
+    unattributed buys, and a flushed entry kept its planned size unflagged."""
+    monkeypatch.setattr("core.calendar.is_market_open_now", lambda now=None: False)
+    monkeypatch.setattr(
+        ex, "filter_entry_orders_for_readiness",
+        lambda plan, **kwargs: (list(plan), set(), "readiness stamp OK"))
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    defer_entries_if_market_closed(
+        "multi_ticker_swing_htf", "bar", [("PRCH", "buy", 300, "entry", "equity")],
+        {"PRCH": {"route": "equity", "symbol": "PRCH", "shares": 300, "runs_held": 0}},
+        {}, ledger_root=str(tmp_path))
+
+    class _PartlyFilled(_Client):
+        _trading_base = "https://paper-api.alpaca.markets"
+
+        def get_order(self, order_id):
+            return {"id": order_id, "status": "partially_filled",
+                    "filled_qty": "120", "filled_avg_price": "8.10"}
+
+    res = submit_pending_open_entries(_PartlyFilled(), "multi_ticker_swing_htf", targets=["PRCH"],
+                                      equity_tif_fn=lambda: "day", ledger_root=str(tmp_path))
+
+    st = res["submitted"]["PRCH"]
+    assert st["pending_fill"] is True and st["entry_order_id"] == "PRCH-buy"
+    assert st["shares"] == 120.0
+    registry = tmp_path / "broker_reconciliation" / "paper" / "order_registry.jsonl"
+    row = json.loads(registry.read_text().splitlines()[0])
+    assert (row["order_id"], row["module"], row["side"]) == ("PRCH-buy", "multi_ticker_swing_htf", "buy")

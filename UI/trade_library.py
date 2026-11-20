@@ -31,6 +31,7 @@ REPO = Path(__file__).resolve().parents[1]
 LEDGER_ROOT = REPO / "Data/inference"
 BARS_4H_DIR = REPO / "Data/shared/bars/4h"
 BARS_1D_DIR = REPO / "Data/shared/bars/1d"
+BARS_1H_DIR = REPO / "Data/shared/bars/1h"
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,9 @@ def _ts(value) -> datetime | None:
     if t is None or (hasattr(t, "value") and t.value != t.value):  # NaT
         return None
     try:
-        return (t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")).to_pydatetime()
+        # Broker fill stamps carry nanoseconds; datetime holds microseconds. The
+        # truncation is intended, so the per-row warning is silenced.
+        return (t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")).to_pydatetime(warn=False)
     except Exception:
         return None
 
@@ -163,6 +166,17 @@ def read_legs() -> list[dict[str, Any]]:
                 "reason": row.get("exit_reason") or "",
                 "runs_held": row.get("runs_held"),
                 "order_id": row.get("order_id"),
+                # Entry fill and the underlying anchor the runner recorded at entry.
+                # Read by the decision replay; the position fold below ignores them.
+                "entry_filled_at": _ts(row.get("entry_filled_at")),
+                "entry_submitted_at": _ts(row.get("entry_submitted_at")),
+                "entry_fill_price": _f(row.get("entry_fill_price")),
+                "u_entry": _f(row.get("u_entry")),
+                "u_atr": _f(row.get("u_atr")),
+                "decision_gain": _f(row.get("decision_gain")),
+                "fill_gain": _f(row.get("fill_gain")),
+                "exit_submitted_at": _ts(row.get("exit_submitted_at")),
+                "setup_id": row.get("setup_id"),
                 # A FULL take-profit (`take_profit_full_+N%`) closes the position;
                 # only a partial scale-out leaves a runner. Classifying on the
                 # shared predicate keeps this reader in step with the engine.
@@ -304,27 +318,45 @@ def _build_positions_uncached() -> list[dict[str, Any]]:
                               if entry_bar else None),
                 "u_entry": _f((st or {}).get("u_entry")),
                 "u_atr": _f((st or {}).get("u_atr")),
+                # Ledger-recorded facts for the decision replay. Kept separate from
+                # u_entry/u_atr above, which this page reads from live state only.
+                "entry_filled_at": _iso(next((l["entry_filled_at"] for l in legs
+                                              if l["entry_filled_at"]), None)),
+                "entry_submitted_at": _iso(next((l["entry_submitted_at"] for l in legs
+                                                 if l["entry_submitted_at"]), None)),
+                "entry_fill_price": next((l["entry_fill_price"] for l in legs
+                                          if l["entry_fill_price"]), None),
+                "entry_anchor": {"u_entry": next((l["u_entry"] for l in legs if l["u_entry"]), None),
+                                 "u_atr": next((l["u_atr"] for l in legs if l["u_atr"]), None)},
+                "runs_held": last["runs_held"],
+                "setup_id": next((l["setup_id"] for l in legs if l["setup_id"]), None),
                 "legs": [{"ts": _iso(l["ts"]), "qty": l["qty"], "price": l["exit_price"],
                           "pnl": l["pnl"], "reason": l["reason"], "is_trim": l["is_trim"],
-                          "order_id": l["order_id"], "symbol": l["order_symbol"]}
+                          "order_id": l["order_id"], "symbol": l["order_symbol"],
+                          "decision_gain": l["decision_gain"], "fill_gain": l["fill_gain"],
+                          "submitted_at": _iso(l["exit_submitted_at"])}
                          for l in legs],
             })
     positions.sort(key=lambda p: p["last_sell"] or "", reverse=True)
     return positions
 
 
-def price_series(ticker: str, *, timeframe: str = "4h", days: int = 180) -> dict[str, Any]:
+def price_series(ticker: str, *, timeframe: str = "4h", days: int = 180,
+                 start=None, end=None) -> dict[str, Any]:
     """OHLC bars for the chart, read-only from the same cache the modules use.
 
     No resampling, gap-filling, or price adjustment — a missing bar is a
     genuinely missing bar (holiday, halt, or no coverage), and a split the
     pipeline has not processed will show as a real gap rather than be smoothed
     away. The chart must not imply data the strategies did not have.
+
+    ``timeframe`` is ``4h``, ``1h`` or anything else for daily. ``start``/``end``
+    (tz-aware timestamps) bound the bars by their open stamp, inclusive.
     """
     import pandas as pd
 
     sym = (ticker or "").strip().upper()
-    root = BARS_4H_DIR if timeframe == "4h" else BARS_1D_DIR
+    root = {"4h": BARS_4H_DIR, "1h": BARS_1H_DIR}.get(timeframe, BARS_1D_DIR)
     path = root / f"{sym}.parquet"
     if not sym or not path.exists():
         return {"ticker": sym, "timeframe": timeframe, "bars": [],
@@ -341,6 +373,10 @@ def price_series(ticker: str, *, timeframe: str = "4h", days: int = 180) -> dict
     df = df.assign(_t=idx).dropna(subset=["_t"]).sort_values("_t")
     if days and days > 0:
         df = df[df["_t"] >= pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=int(days))]
+    if start is not None:
+        df = df[df["_t"] >= pd.Timestamp(start)]
+    if end is not None:
+        df = df[df["_t"] <= pd.Timestamp(end)]
     need = {"open", "high", "low", "close"}
     if not need <= set(df.columns):
         return {"ticker": sym, "timeframe": timeframe, "bars": [],

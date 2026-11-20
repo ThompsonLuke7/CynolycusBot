@@ -275,32 +275,10 @@ PYEOF
   echo "[$(ts)] library index rebuild exit=$library_index_exit"
   [ "$library_index_exit" -ne 0 ] && STATUS="$library_index_exit"
 
-  # 8) Emerging themes — enrich a bounded pending-ticker shortlist, map strong
-  #    matches into established themes, cluster novel residuals, and regenerate
-  #    the standalone visualizers. Production theme features remain untouched.
-  echo "[$(ts)] themes — pending ticker enrichment + provisional discovery"
-  timeout --signal=TERM --kill-after=60s "${NIGHTLY_THEME_TIMEOUT_SECONDS:-3600}s" \
-    "$PYTHON" -u -m themes.dynamic_theme.emerging --limit 300
-  emerging_theme_exit=$?
-  echo "[$(ts)] emerging themes exit=$emerging_theme_exit"
-
-  if [ "$emerging_theme_exit" -eq 0 ]; then
-    echo "[$(ts)] themes — rebuilding explorer"
-    timeout --signal=TERM --kill-after=30s 1200s \
-      "$PYTHON" -u -m themes.dynamic_theme.viz.build_theme_explorer
-    explorer_build_exit=$?
-    echo "[$(ts)] theme explorer build exit=$explorer_build_exit"
-
-    if [ "$explorer_build_exit" -eq 0 ]; then
-      echo "[$(ts)] themes — publishing explorer"
-      timeout --signal=TERM --kill-after=30s 300s \
-        "$PYTHON" -u scripts/publish_theme_explorer.py
-      explorer_publish_exit=$?
-      echo "[$(ts)] theme explorer publication exit=$explorer_publish_exit"
-    else
-      echo "[$(ts)] theme explorer publication skipped: build failed"
-    fi
-  fi
+  # 8) Emerging themes + theme explorer moved to scripts/weekly_refresh.sh
+  #    (2026-11-17): they build on the weekly theme taxonomy, so a nightly run
+  #    only repeated last night's answer -- and now that provisional clusters
+  #    are actually Claude-labeled, nightly would also pay for that 7x a week.
 
   # 9) Earnings enrichment is useful context, but it is deliberately outside
   #    the entry-readiness critical path.  Each Yahoo ticker request is isolated

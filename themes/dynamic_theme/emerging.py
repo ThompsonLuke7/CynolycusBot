@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import math
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -40,8 +41,8 @@ from themes.dynamic_theme.config import (
     TICKER_EMBEDDINGS_PATH,
     ensure_outputs,
 )
-from themes.dynamic_theme.stages.step02_embed import _clean_text
-from themes.dynamic_theme.stages.step04_cluster_summary import _top_keywords
+from themes.dynamic_theme.stages.step02_embed import _clean_text, identity_text
+from themes.dynamic_theme.stages.step04_cluster_summary import _top_keywords, member_profiles
 from themes.dynamic_theme.stages.step05_claude_labeling import _label_cluster, load_registry
 from themes.dynamic_theme.sklearn_compat import load_hdbscan, load_umap
 
@@ -259,29 +260,27 @@ def build_candidate_documents(
 
 
 def embed_candidate_documents(docs: pd.DataFrame) -> pd.DataFrame:
-    """Build semantic-only vectors compatible with production text dimensions."""
+    """Vectors in the same space as the production text part (step02.identity_text).
+
+    Candidates are compared with the established themes' text centroids (the first
+    384 dims of the production identity vectors), so they must be built from the same
+    text: sector + industry + business description, blending news only if production
+    does (DESC_BLEND_WEIGHT < 1).
+    """
     from signals.news.nlp import embed_texts_bge
 
-    descriptions = docs["description"].fillna("").map(_clean_text)
-    news = docs["recent_news_summary"].fillna("").map(_clean_text)
-    fallback = (
-        docs["sector"].fillna("")
-        + " "
-        + docs["industry"].fillna("")
-        + " "
-        + docs["ticker"].fillna("")
-    ).map(_clean_text)
-
-    desc_text = descriptions.where(descriptions.str.len().gt(20), fallback)
-    news_mask = news.str.len().gt(20)
-    desc_vecs = np.asarray(embed_texts_bge(desc_text.tolist(), model_name=BGE_MODEL), dtype=np.float32)
-    vectors = desc_vecs.copy()
-    if news_mask.any():
-        news_vecs = np.asarray(embed_texts_bge(news[news_mask].tolist(), model_name=BGE_MODEL), dtype=np.float32)
-        vectors[news_mask.to_numpy()] = (
-            float(DESC_BLEND_WEIGHT) * desc_vecs[news_mask.to_numpy()]
-            + (1.0 - float(DESC_BLEND_WEIGHT)) * news_vecs
+    texts = [
+        identity_text(desc, sector, industry, ticker)
+        for desc, sector, industry, ticker in zip(
+            docs["description"], docs["sector"], docs["industry"], docs["ticker"]
         )
+    ]
+    vectors = np.asarray(embed_texts_bge(texts, model_name=BGE_MODEL), dtype=np.float32)
+    news = docs["recent_news_summary"].fillna("").map(_clean_text)
+    news_mask = news.str.len().gt(20).to_numpy()
+    if float(DESC_BLEND_WEIGHT) < 1.0 and news_mask.any():
+        news_vecs = np.asarray(embed_texts_bge(news[news_mask].tolist(), model_name=BGE_MODEL), dtype=np.float32)
+        vectors[news_mask] = float(DESC_BLEND_WEIGHT) * vectors[news_mask] + (1.0 - float(DESC_BLEND_WEIGHT)) * news_vecs
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     vectors = np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms > 0)
     return pd.DataFrame(
@@ -413,6 +412,17 @@ def _fallback_label(cluster_id: int, docs: pd.DataFrame) -> dict:
     }
 
 
+def _established_theme_names() -> set[str]:
+    """Latest registry names, offered to the labeler so it reuses rather than duplicates."""
+    try:
+        registry = load_registry()
+    except Exception as exc:
+        logger.warning("Theme registry unavailable for provisional labeling: %s", exc)
+        return set()
+    names = registry.get("theme_name", pd.Series(dtype=str)).dropna().astype(str)
+    return {name for name in names if not re.fullmatch(r"cluster_-?\d+", name)}
+
+
 def _prior_provisional_labels() -> list[dict]:
     if not PENDING_THEME_REGISTRY_PATH.exists() or not PENDING_THEME_MEMBERSHIP_PATH.exists():
         return []
@@ -437,6 +447,7 @@ def build_outputs(
     residual_clusters: pd.DataFrame,
     *,
     as_of: pd.Timestamp,
+    profiles: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     document_columns = [
         "ticker",
@@ -471,6 +482,9 @@ def build_outputs(
     registry_rows = []
     membership_rows = []
     prior_provisional = _prior_provisional_labels()
+    if profiles is None:
+        profiles = _load_cached_profiles()
+    known_names = _established_theme_names()
     existing_extensions = enriched[enriched["assignment_type"].eq("extension")]
     for theme, group in existing_extensions.groupby("closest_theme"):
         score = float(
@@ -528,6 +542,7 @@ def build_outputs(
                 for headline in str(text).split(" | ")[:2]
                 if headline
             ][:6],
+            "members": member_profiles(group["ticker"].astype(str).tolist(), profiles, group_docs),
         }
         current_tickers = set(group["ticker"].astype(str))
         prior_match = None
@@ -548,11 +563,16 @@ def build_outputs(
             }
         else:
             try:
-                label = _label_cluster(summary)
-            except Exception:
+                # Until 2026-11-17 this passed one argument to a two-argument
+                # function: every call raised TypeError and fell back, so no
+                # provisional theme was ever named by Claude.
+                label = _label_cluster(summary, sorted(known_names))
+            except Exception as exc:
+                logger.warning("Labeling provisional cluster %d failed (%s); using fallback name", cluster_id, exc)
                 label = _fallback_label(cluster_id, group_docs)
         if str(label.get("theme_name", "")).startswith("cluster_"):
             label = _fallback_label(cluster_id, group_docs)
+        known_names.add(str(label.get("theme_name", "")))
         closest_row = group.sort_values("theme_similarity", ascending=False).iloc[0]
         breadth = float(group["return_5d"].fillna(0).gt(0).mean())
         score = float(
@@ -644,6 +664,7 @@ def run(
         assignments,
         residual_clusters,
         as_of=as_of,
+        profiles=profiles,
     )
     return {
         "candidates": len(candidates),

@@ -3494,6 +3494,7 @@ class LiveSession:
                     _timed_phase("persist_policy_cache", symbol,
                                  _persist_policy_runtime_cache_throttled)
 
+                inference_started = lr.utc_now()
                 action = _timed_phase(
                     "inference.on_15m_close", symbol, inference.on_15m_close,
                     df_1m=buffer.to_dataframe(), closed_bar=bar15,
@@ -3548,6 +3549,16 @@ class LiveSession:
                     gate_pending_count = 0
                 probs = agent.last_probs() if agent is not None else None
                 thresholds = inference.last_thresholds() if inference is not None else None
+                # Decision-state archive (core.decision_state_archive): the exact
+                # feature row the models scored, probabilities, thresholds and the
+                # latch outcome. Never raises; the bar handler carries on.
+                lr.archive_spy_decision(
+                    inference=inference, symbol=symbol, bar15=bar15, run_id=lr.new_run_id(),
+                    score=lr._spy_signal_score(probs or {}, raw_action_pos),
+                    raw_action=action_raw, raw_pos=raw_action_pos, exec_pos=selected_action_class,
+                    gate_status=gate_status, probs=probs or {}, thresholds=thresholds or {},
+                    interval_minutes=int(cfg.interval or 10), inference_start=inference_started,
+                )
                 bar_payload = dict(bar15)
                 if probs:
                     bar_payload.update({k: v for k, v in probs.items() if v is not None})

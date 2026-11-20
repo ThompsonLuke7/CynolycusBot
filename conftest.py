@@ -22,6 +22,12 @@ def _isolate_live_ledgers(tmp_path, monkeypatch):
     Redirecting the module default rather than fixing those two call sites means
     a future test cannot reintroduce the leak by forgetting the argument.
     """
+    # The live entry freeze (Data/runtime/trading_controls.json) must not leak
+    # into tests that submit through a mocked AlpacaOptionsClient.
+    monkeypatch.setenv("CYNOLYCUS_TRADING_CONTROLS", str(tmp_path / "trading_controls.json"))
+    # Runner tests score synthetic universes; their decision-state rows must not
+    # land in the real append-only archive (Data/research/decision_state).
+    monkeypatch.setenv("CYNOLYCUS_DECISION_ARCHIVE_ROOT", str(tmp_path / "decision_state"))
     try:
         import core.live_4h_exec as live_4h_exec
     except Exception:  # module not importable in this environment — nothing to guard

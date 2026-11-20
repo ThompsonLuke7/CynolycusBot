@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from alpaca.data.enums import DataFeed
 
+from core.decision_state_archive import archive_decision_state, new_run_id, utc_now
 from core.live_signal_audit import append_jsonl, build_signal_audit
 from .decision_latency import DecisionLatency
 from ..market_data.bar_aggregator import OhlcvAggregator
@@ -38,6 +39,55 @@ from strategies.spy_intraday.Policy.option_mark_capture import OptionMarkCapture
 from strategies.spy_intraday.Policy.regime_probability_filter import RegimeProbabilityCalibrator
 
 META_CONTEXT_SYMBOLS: tuple[str, ...] = ("QQQ", "IWM", "TLT", "UUP")
+
+
+SPY_ARCHIVE_MODULE = "spy_day_trader"
+
+
+def archive_spy_decision(*, inference, symbol: str, bar15: dict, run_id: str, score,
+                         raw_action: float, raw_pos: int, exec_pos: int, gate_status: str,
+                         probs: dict, thresholds: dict, interval_minutes: int,
+                         inference_start) -> None:
+    """One 15m decision -> decision-state archive: the exact feature row the
+    entry/exit models scored, the probabilities, thresholds and latch outcome.
+    Never raises: a failed archive must not stop the bar handler."""
+    try:
+        getter = getattr(inference, "last_feature_row", None)
+        row = getter() if getter is not None else None
+        values: dict = {}
+        if row is not None:
+            values = {str(k): v for k, v in row.items()
+                      if isinstance(v, (int, float, np.integer, np.floating, bool, np.bool_))}
+        features = sorted(values)
+        cand = {"ticker": symbol, "score": score, "raw_action": raw_action, "raw_pos": raw_pos,
+                "exec_pos": exec_pos, "gate_status": gate_status, **values}
+        for k, v in (probs or {}).items():
+            cand.setdefault(f"prob__{k}", v)
+        for k, v in (thresholds or {}).items():
+            cand[f"thr__{k}"] = v
+        extras = ["raw_action", "raw_pos", "exec_pos", "gate_status",
+                  *[c for c in cand if c.startswith(("prob__", "thr__"))]]
+        archive_decision_state(
+            module=SPY_ARCHIVE_MODULE,
+            run_id=run_id,
+            candidates=pd.DataFrame([cand]),
+            bar_ts=pd.Timestamp(bar15.get("timestamp")),
+            score_col="score",
+            feature_cols=features,
+            gates={"execution_latch": [int(exec_pos) == int(raw_pos)]},
+            selected=[symbol] if int(exec_pos) != 0 else [],
+            side="long" if raw_pos > 0 else "short" if raw_pos < 0 else "flat",
+            action={symbol: f"raw={int(raw_pos):+d} exec={int(exec_pos):+d} gate={gate_status}"},
+            extra_cols=extras,
+            inputs_asof={"bar_close_label": bar15.get("timestamp"), "interval_minutes": int(interval_minutes),
+                         "feature_row": "agent.last_feature_row()" if row is not None else "unavailable"},
+            run_meta={"bar": {k: bar15.get(k) for k in ("open", "high", "low", "close", "volume")}},
+            inference_start=inference_start,
+            inference_end=utc_now(),
+        )
+    except Exception:  # noqa: BLE001 - archiving must never stop the bar handler
+        import logging
+        logging.getLogger(__name__).exception("spy: decision-state archive failed (handler continues)")
 
 
 def _spy_signal_score(probs: dict, raw_pos: int) -> float | None:
@@ -768,6 +818,7 @@ def _make_15m_handler(
         if order_policies is not None and symbol in order_policies:
             with _timed(latency, "on_interval_bar"):
                 order_policies[symbol].on_interval_bar(closed_bar=bar15)
+        inference_start = utc_now()
         with _timed(latency, "inference"):
             action = inference.on_15m_close(df_1m=buffer.to_dataframe(), closed_bar=bar15)
         if action is None and latency is not None:
@@ -812,6 +863,16 @@ def _make_15m_handler(
                     "close": bar15.get("close"),
                 },
             )
+            decision_run_id = new_run_id()
+            signal_audit["decision_run_id"] = decision_run_id
+            with _timed(latency, "decision_archive"):
+                archive_spy_decision(
+                    inference=inference, symbol=symbol, bar15=bar15, run_id=decision_run_id,
+                    score=signal_audit.get("score"), raw_action=raw_action, raw_pos=raw_pos,
+                    exec_pos=exec_pos, gate_status=gate_status, probs=probs,
+                    thresholds=thresholds, interval_minutes=int(interval_minutes),
+                    inference_start=inference_start,
+                )
             print(
                 f"{symbol} signal_audit bucket={signal_audit.get('score_bucket')} "
                 f"side={signal_audit.get('side')} exec={exec_pos:+d}"

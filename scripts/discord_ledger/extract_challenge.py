@@ -19,9 +19,9 @@ from typing import Any, Iterable
 
 from bs4 import BeautifulSoup
 
+from scripts.discord_ledger.identities import CALLERS
 
-ACE = "1079391263083733072"
-FT = "720901855995101225"
+
 CHANNEL_ID = "1466557447094403335"
 DEFAULT_HTML = Path(
     "VaultOfAceDiscordLogs/THE VAULT OF ACE - FREE TRADING SECTION - "
@@ -331,7 +331,7 @@ def event_row(message: dict[str, Any], event_type: str, speech_act: str, index: 
 def extract(messages: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for message in messages:
-        if message["author_id"] not in {ACE, FT}:
+        if message["author_id"] not in CALLERS:
             continue
         if message["channel_id"] != CHANNEL_ID:
             continue

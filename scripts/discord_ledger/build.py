@@ -16,9 +16,10 @@ from pathlib import Path
 import re
 from typing import Any
 
+from scripts.discord_ledger.identities import CALLERS
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STUDY = ROOT / "research/discord_ledger_2026-09-21"
-CALLERS = {"1079391263083733072": "ACE", "720901855995101225": "FT"}
 IDENTITY = ("symbol", "direction", "instrument_type", "option_type", "strike", "expiry")
 MANAGEMENT = {"add", "trim", "exit", "stop_adjustment", "invalidation", "order_cancel", "correction", "unknown_management", "position_update"}
 OPENERS = {"entry", "order_pending"}

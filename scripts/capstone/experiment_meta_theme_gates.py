@@ -24,7 +24,7 @@ META_OOF = REPO / "signals/meta_context/meta_ranker/models"
 META_MATRIX = REPO / "signals/meta_context/meta_ranker/meta_ranker_matrix.parquet"
 THEME_SCORES = REPO / "theme_expansion/outputs/theme_scores.parquet"
 THEME_ML_OOF = REPO / "theme_expansion/models/bundle/oof_preds.parquet"
-THEME_MAP = REPO / "theme_expansion/data/theme_map_v4.csv"
+THEME_MAP = REPO / "themes/theme_expansion_legacy/data/theme_map_v4.csv"
 OUT = REPO / "research/capstone/theme_gate_experiment"
 
 VALIDATION_END = pd.Timestamp("2025-12-31", tz="UTC")

@@ -26,8 +26,13 @@ Entry is the first session's open after the decision date.
     PYTHONPATH=. .venv/bin/python scripts/shadow/momentum_shadow_ledger.py --mark      # score the ledger now
     PYTHONPATH=. .venv/bin/python scripts/shadow/momentum_shadow_ledger.py --status    # schedule only, no network
 
+    PYTHONPATH=. .venv/bin/python scripts/shadow/momentum_shadow_ledger.py --cross-section --date 2026-10-30 \
+        --bars-dir Data/research/shadow_bars/2026-11-03                                    # backfill one ranking
+
 Files: research/long_horizon_discount_2026-09-25/shadow/ledger.csv (the record) and marks_latest.txt;
-       Data/research/shadow_bars/{run date}/ (full-universe bars; only the newest 2 are kept) and marks/.
+       Data/research/shadow_bars/{run date}/ (full-universe bars; only the newest 2 are kept) and marks/;
+       Data/research/shadow_cross_sections/{decision}.parquet (every tradable stock's 12-1 momentum + liquidity
+       rank at each decision; read by the personal portfolio page).
 """
 from __future__ import annotations
 
@@ -53,6 +58,7 @@ ANCHOR = date(2026, 10, 2)            # first decision; the 4-week grid is count
 CADENCE_WEEKS = 4
 WEEK_CLOSED_AT = time(16, 30)         # 16:00 ET close + 30 min for the daily bar to be final
 BARS_ROOT = REPO / "Data" / "research" / "shadow_bars"
+CROSS_SECTION_DIR = REPO / "Data" / "research" / "shadow_cross_sections"   # one parquet per decision; never pruned
 SHADOW_DIR = REPO / "research" / "long_horizon_discount_2026-09-25" / "shadow"
 LEDGER = SHADOW_DIR / "ledger.csv"
 N_TOP, SLEEVE = 20, 0.30
@@ -160,8 +166,12 @@ def prune_snapshots(keep: int = KEEP_SNAPSHOTS) -> list[str]:
 
 
 # ---------- decision ----------
-def compute_targets(bars: Path, asof: date, tickers: list[str], min_tradable: int = MIN_TRADABLE) -> pd.DataFrame:
-    """Target weights of every arm for the decision at the close of `asof`, from bars dated <= asof."""
+def momentum_cross_section(bars: Path, asof: date, tickers: list[str], min_tradable: int = MIN_TRADABLE) -> pd.DataFrame:
+    """Every stock tradable at the close of `asof`: ref_close, dv60, mom_12_1 and dv_rank, from bars dated <= asof.
+
+    This is the full ranking the arms pick from. It is also saved per decision (write_cross_section) so read-only
+    consumers such as the personal portfolio page can show where any name sits without re-reading every bar file.
+    """
     spy = load_asof(bars / "SPY.parquet", asof)
     if spy is None or spy.index.max() != pd.Timestamp(asof):
         raise RuntimeError(f"no completed SPY bar for {asof} in {bars} (last: "
@@ -180,7 +190,23 @@ def compute_targets(bars: Path, asof: date, tickers: list[str], min_tradable: in
     if len(u) < min_tradable:
         raise RuntimeError(f"only {len(u)} tradable stocks on {asof}; expected at least {min_tradable}")
     u["dv_rank"] = u["dv60"].rank(ascending=False)
-    spy_close = spy["close"].iloc[-1]
+    return u
+
+
+def write_cross_section(xs: pd.DataFrame, asof: date, bars: Path, out_dir: Path = CROSS_SECTION_DIR) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{asof.isoformat()}.parquet"
+    tmp = out.with_suffix(".parquet.tmp")
+    xs.assign(decision_date=asof.isoformat(), bars_snapshot=bars.name).to_parquet(tmp, index=False)
+    tmp.replace(out)
+    return out
+
+
+def compute_targets(bars: Path, asof: date, tickers: list[str], min_tradable: int = MIN_TRADABLE,
+                    xs: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Target weights of every arm for the decision at the close of `asof`, from bars dated <= asof."""
+    u = momentum_cross_section(bars, asof, tickers, min_tradable) if xs is None else xs
+    spy_close = load_asof(bars / "SPY.parquet", asof)["close"].iloc[-1]
     out = [{"arm": "spy", "ticker": "SPY", "weight": 1.0, "ref_close": spy_close}]
     keep = ["arm", "ticker", "weight", "ref_close", "mom_12_1", "dv_rank"]
     for arm, blend, n_liq in (("mom_1000", "core_sat_1000", 1000), ("mom_top300", "core_sat_300", 300)):
@@ -222,8 +248,10 @@ def record(decisions: list[date], ledger: Path, now: datetime, bars: Path | None
         bars = BARS_ROOT / now.astimezone(ET).strftime("%Y-%m-%d")
         fetch_bars(tickers, bars, now, now - timedelta(days=LOOKBACK_DAYS), force=False)
     for d in decisions:
-        rows = compute_targets(bars, d, tickers)
+        xs = momentum_cross_section(bars, d, tickers)
+        rows = compute_targets(bars, d, tickers, xs=xs)
         append_decision(ledger, rows, bars, now, replace)
+        write_cross_section(xs, d, bars)
         late = (now.astimezone(ET).date() - d).days
         s = rows[rows["arm"] == "mom_top300"]
         print(f"recorded decision {d} ({late} day(s) after it) from {bars.name} bars | top-300 sleeve: "
@@ -300,6 +328,9 @@ def main() -> None:
     ap.add_argument("--snapshot", action="store_true", help="record one decision now: --date, else the latest closed week end")
     ap.add_argument("--mark", action="store_true")
     ap.add_argument("--status", action="store_true", help="print the schedule; no network, no writes")
+    ap.add_argument("--cross-section", action="store_true",
+                    help="write the full momentum cross-section of --date (default: the latest recorded decision) "
+                         "from --bars-dir (default: the newest bar snapshot); the ledger is not touched")
     ap.add_argument("--date", type=date.fromisoformat, help="decision date for --snapshot")
     ap.add_argument("--force", action="store_true", help="replace an existing decision date in the ledger")
     ap.add_argument("--now", type=datetime.fromisoformat, help="pretend this is the current time (ISO; ET if no offset)")
@@ -322,6 +353,11 @@ def main() -> None:
         record([args.date or latest_closed_week_end(now)], args.ledger, now, args.bars_dir, replace=args.force)
     if args.auto or args.mark:
         print(mark(args.ledger, now, args.bars_dir))
+    if args.cross_section:
+        d = args.date or max(recorded_dates(args.ledger))
+        bars = args.bars_dir or max(p for p in BARS_ROOT.iterdir() if re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.name))
+        xs = momentum_cross_section(bars, d, universe_tickers())
+        print(f"wrote {write_cross_section(xs, d, bars)} ({len(xs)} stocks, {bars.name} bars)")
 
 
 if __name__ == "__main__":

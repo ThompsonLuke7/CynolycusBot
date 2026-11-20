@@ -1,0 +1,53 @@
+=== MA reproduction (TradingView-style; EMA seeded on full history) ===
+daily-chart panels: 40/40 MAs within 0.15%; worst {'symbol': 'VST', 'ma': 'sma55', 'panel': 144.75, 'ours': 144.91}
+Empty DataFrame
+Columns: [symbol, as_of, ma, panel, ours, diff_pct, chart]
+Index: []
+
+=== D EM center vs prior close ===
+AFRM  2026-10-09 prior close 77.15  D EM center 77.15  diff +0.00
+MU    2026-10-09 prior close 1035.84  D EM center 1035.84  diff +0.00
+GOOGL 2026-10-09 prior close 348.29  D EM center 348.29  diff +0.00
+CRDO  2026-10-09 prior close 211.86  D EM center 211.86  diff +0.00
+VST   2026-10-15 prior close 151.79  D EM center 151.79  diff +0.00
+IBM   2026-10-29 prior close 253.22  D EM center 253.22  diff +0.00
+SPY   2026-10-19 prior close 763.23  D EM center 763.25  diff +0.02
+
+=== Cycle hypothesis grid ===
+450 hypotheses over 10 daily panels; best:
+ left  right  k    agg  L_match  L_and_due_match
+   20      8  3 median        5                2
+   20     10  3 median        5                2
+   15      8  3 median        4                2
+   15     10  3 median        4                2
+   13      8  3 median        3                2
+   13     10  3 median        3                2
+    8      8  1   mean        2                2
+    8      8  1 median        2                2
+
+best hypothesis per panel (panel L/due -> ours L/due):
+  INTC  2026-10-05   24d /  -35  ->  (36, -11)
+  NBIS  2026-10-05   16d /  -31  ->  (33, -14)
+  ALAB  2026-10-05   36d /   15  ->  (33, 19)
+  ARM   2026-10-05   24d /    1  ->  (23, 2)
+  AFRM  2026-10-09   27d /   -1  ->  (30, 9)
+  MU    2026-10-09   72d /   11  ->  (71, 20)
+  GOOGL 2026-10-09   27d /   -1  ->  (34, 13)
+  CRDO  2026-10-09   34d /    7  ->  (35, 16)
+  VST   2026-10-15   26d /   15  ->  (26, 15)
+  IBM   2026-10-29   48d /   20  ->  (48, 33)
+
+distribution of max matches: L-only 5 / 10 ; L and due 2 / 10
+
+=== Bias vs translation (best hypothesis) ===
+  INTC  peak at 40 of L=36 -> BULL (panel BULL)
+  NBIS  peak at 13 of L=33 -> BEAR (panel BEAR)
+  ALAB  peak at 8 of L=33 -> BEAR (panel BEAR)
+  ARM   peak at 13 of L=23 -> BULL (panel BULL)
+  AFRM  peak at 21 of L=30 -> BULL (panel BULL)
+  MU    peak at 41 of L=71 -> BULL (panel BULL)
+  GOOGL peak at 8 of L=34 -> BEAR (panel BULL)
+  CRDO  peak at 14 of L=35 -> BEAR (panel BEAR)
+  VST   peak at 6 of L=26 -> BEAR (panel BEAR)
+  IBM   peak at 15 of L=48 -> BEAR (panel BULL)
+translation agreement 8/10

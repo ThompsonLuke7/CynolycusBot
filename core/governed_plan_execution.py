@@ -149,7 +149,7 @@ def submit_plan_via_router(
                 # An accepted-but-unfilled entry otherwise persists as a
                 # position the account does not hold.
                 mark_entry_unconfirmed(
-                    new_managed, symbol, {"id": broker_id}, client=client
+                    new_managed, symbol, {"id": broker_id}, client=client, module=module
                 )
             if str(row.side).strip().lower() == "sell":
                 entry_state = exit_context.get(symbol, (None, None))[1]

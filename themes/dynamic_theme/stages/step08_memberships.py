@@ -23,6 +23,7 @@ import pandas as pd
 
 from themes.dynamic_theme.config import (
     BGE_MODEL,
+    GEOGRAPHIC_THEME_PATTERNS,
     HDBSCAN_CLUSTER_SELECTION_METHOD,
     HDBSCAN_METRIC,
     HDBSCAN_MIN_CLUSTER_SIZE,
@@ -31,12 +32,14 @@ from themes.dynamic_theme.config import (
     MIN_CLUSTER_LABEL_CONFIDENCE,
     MIN_INDUSTRY_PEER_SHARE,
     MIN_INDUSTRY_PEERS_IN_THEME,
+    OFFSHORE_DOMICILES,
     SEED_THEMES,
     TICKER_CLUSTERS_PATH,
     TICKER_PEER_PINS,
     TICKER_EMBEDDINGS_PATH,
     TICKER_MEMBERSHIP_PATH,
     TICKER_MEMBERSHIP_HISTORY_PATH,
+    TICKER_PRIMARY_ANCHOR_PATH,
     UMAP_METRIC,
     UNCLASSIFIED_THEME,
     UMAP_MIN_DIST,
@@ -767,14 +770,33 @@ def assign_primary_themes(
     anchored = set(hard.index[(hard >= 0) & ~hard.isin(grab_bags)]) | seed_anchors
 
     industry = pd.Series(dict(industries or {}), dtype=object)
-    home = pd.Series(dict(countries or {}), dtype=object).eq(HOME_COUNTRY)
+    country = pd.Series(dict(countries or {}), dtype=object)
+    home = country.eq(HOME_COUNTRY)
 
     kept = best[best["ticker"].astype(str).isin(anchored)].assign(source="cluster")
+    # A clustered ticker's primary theme is its OWN group's theme (2026-11-18). The nearest
+    # centroid disagreed for 9% of clustered names -- incl. NVDA and ANET, whose own group
+    # is ai_infrastructure, picked as analog semis / memory -- and near-ties made it flip
+    # weekly. Nearest centroid remains only when the own group's theme is not published.
+    kept, own = _own_group_themes(kept, hard, registry_df, memberships_df)
+    # A seed anchor defines its seed theme, so it sits there even when another theme scores a
+    # hair higher (11-03: AAPL 0.775 agricultural_chemicals_fertilizers vs 0.760 mega_cap_platforms).
+    kept = _place_seed_anchors(kept, memberships_df)
     kept = kept.assign(industry=kept["ticker"].map(industry))
-    # An industry singleton has no business-type support in its theme.
+    # An industry singleton has no business-type support in its theme (ORCL in a quantum group,
+    # a software name among banks) -- unless the theme is its own group AND that group is
+    # cross-industry (no industry holds half its members): trade groups such as
+    # ai_infrastructure (NVDA, ANET, NBIS, ... over 6+ industries) hold one chip maker by design.
     n_same = kept.groupby(["primary_theme", "industry"])["ticker"].transform("size")
-    alone = n_same.eq(1) & kept["industry"].notna() & ~kept["ticker"].isin(seed_anchors)
+    in_cross_group = kept["ticker"].isin(own) & kept["ticker"].map(hard).isin(
+        _cross_industry_groups(hard, industry))
+    alone = (n_same.eq(1) & kept["industry"].notna() & ~kept["ticker"].isin(seed_anchors)
+             & ~in_cross_group)
     kept = kept[~alone]
+    # A theme named for a place is closed to other countries' companies on every route:
+    # a clustered ticker whose nearest theme is one is re-placed with industry peers.
+    shut_out = closed_to(kept["primary_theme"], kept["ticker"].map(country))
+    kept = kept[~shut_out]
 
     def _eligible(peers: pd.DataFrame) -> pd.MultiIndex:
         """(industry, theme) pairs where that industry's clustered names sit."""
@@ -793,6 +815,18 @@ def assign_primary_themes(
     pair = pd.MultiIndex.from_frame(loose[["industry", "theme"]])
     is_home = loose["ticker"].map(home).eq(True).to_numpy()
     backed = loose[np.where(is_home, pair.isin(eligible_home), pair.isin(eligible_any))]
+    backed = backed[~closed_to(backed["theme"], backed["ticker"].map(country))]
+    # A home-market ticker with no home-backed theme may use one backed by foreign peers of
+    # its industry, provided at least one home-market peer of that industry sits there too
+    # (JPM/WFC: only BAC and C of the US diversified banks were clustered -- too few on their
+    # own -- both in global_diversified_banks with HSBC/TD/BMO; XOM with CVX). A theme of
+    # foreign peers only stays closed (GOOGL/META into Chinese ADRs, 2026-10-05), as do
+    # place-named themes (closed_to).
+    home_peers = peers[peers["ticker"].map(home).eq(True)].groupby(["industry", "primary_theme"]).size().index
+    homeless = is_home & ~loose["ticker"].isin(set(backed["ticker"])).to_numpy()
+    fallback = loose[homeless & pair.isin(eligible_any) & pair.isin(home_peers)]
+    fallback = fallback[~closed_to(fallback["theme"], fallback["ticker"].map(country))]
+    backed = pd.concat([backed, fallback])
     placed = (
         backed.loc[backed.groupby("ticker")["membership_score"].idxmax(),
                    ["ticker", "theme", "membership_score"]]
@@ -806,10 +840,90 @@ def assign_primary_themes(
     out = pd.concat([kept.drop(columns="industry"), placed, rest], ignore_index=True)
     out = _apply_peer_pins(out, memberships_df, TICKER_PEER_PINS if peer_pins is None else peer_pins)
     logger.info(
-        "Primary themes: %s (industry singletons re-placed: %d)",
-        out["source"].value_counts().to_dict(), int(alone.sum()),
+        "Primary themes: %s (industry singletons re-placed: %d; clustered names shut out of "
+        "place-named themes: %d)",
+        out["source"].value_counts().to_dict(), int(alone.sum()), int(shut_out.sum()),
     )
     return out.sort_values("ticker").reset_index(drop=True)
+
+
+def _cross_industry_groups(hard: pd.Series, industry: pd.Series, max_share: float = 0.5) -> set[int]:
+    """Cluster ids whose largest industry holds less than ``max_share`` of the known members."""
+    df = pd.DataFrame({"cid": hard, "industry": industry.reindex(hard.index)}).dropna()
+    df = df[df["cid"] >= 0]
+    if df.empty:
+        return set()
+    top = df.groupby("cid")["industry"].agg(lambda s: s.value_counts(normalize=True).iloc[0])
+    return {int(c) for c in top.index[top < max_share]}
+
+
+def _own_group_themes(
+    kept: pd.DataFrame,
+    hard: pd.Series,
+    registry_df: pd.DataFrame | None,
+    memberships_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, set[str]]:
+    """Move each clustered ticker to its own group's theme when that theme is published.
+
+    Returns the updated frame and the tickers now sitting in their own group's theme.
+    """
+    if registry_df is None or registry_df.empty or kept.empty:
+        return kept, set()
+    reg = registry_df
+    if "date" in reg.columns and reg["date"].notna().any():
+        reg = reg[reg["date"] == reg["date"].max()]
+    id_to_theme = {int(c): str(n) for c, n in zip(reg["cluster_id"], reg["theme_name"])}
+    published = set(memberships_df["theme"].astype(str))
+    score = memberships_df.set_index(["ticker", "theme"])["membership_score"].to_dict()
+    out = kept.copy()
+    own: set[str] = set()
+    for i, ticker in zip(out.index, out["ticker"].astype(str)):
+        cid = hard.get(ticker)
+        theme = id_to_theme.get(int(cid)) if cid is not None and cid >= 0 else None
+        if theme is None or theme not in published:
+            continue
+        own.add(ticker)
+        if out.at[i, "primary_theme"] != theme:
+            out.at[i, "primary_theme"] = theme
+            out.at[i, "membership_score"] = float(score.get((ticker, theme), np.nan))
+    return out, own
+
+
+def _place_seed_anchors(kept: pd.DataFrame, memberships_df: pd.DataFrame) -> pd.DataFrame:
+    """Put each seed anchor in its seed theme (when that theme was scored this run)."""
+    score = memberships_df.set_index(["ticker", "theme"])["membership_score"]
+    # Same seed source as the anchored set above; its keys are canonical ids ("name--sha256"),
+    # memberships carry the plain name.
+    seed_of = {t: str(key).split("--", 1)[0] for key, members in _default_seed_members().items() for t in members}
+    out = kept.copy()
+    for i, ticker in zip(out.index, out["ticker"].astype(str)):
+        theme = seed_of.get(ticker)
+        if theme is not None and (ticker, theme) in score.index:
+            out.loc[i, ["primary_theme", "membership_score"]] = [theme, float(score.loc[(ticker, theme)])]
+    return out
+
+
+def theme_countries(theme: object) -> frozenset[str] | None:
+    """The countries a place-named theme is for (``latam_banks`` -> Latin America); None if no place."""
+    name = str(theme or "")
+    allowed: set[str] = set()
+    for pattern, countries in GEOGRAPHIC_THEME_PATTERNS:
+        if re.search(pattern, name):
+            allowed |= countries
+    return frozenset(allowed) if allowed else None
+
+
+def closed_to(themes: pd.Series, ticker_country: pd.Series) -> pd.Series:
+    """True where a place-named theme is for other countries than the ticker's.
+
+    An unknown country or an offshore holding domicile is never shut out.
+    """
+    scopes = themes.map(theme_countries)
+    closed = [
+        scope is not None and isinstance(c, str) and c not in OFFSHORE_DOMICILES and c not in scope
+        for scope, c in zip(scopes, ticker_country)
+    ]
+    return pd.Series(closed, index=themes.index, dtype=bool)
 
 
 def _apply_peer_pins(
@@ -837,7 +951,70 @@ def _apply_peer_pins(
     return out.reset_index()
 
 
+def anchor_primary_themes(
+    primary: pd.DataFrame,
+    memberships_df: pd.DataFrame,
+    clusters_df: pd.DataFrame | None,
+    registry_df: pd.DataFrame | None,
+    *,
+    anchor_path: Path = TICKER_PRIMARY_ANCHOR_PATH,
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Freeze each ticker's primary theme for the life of the current re-fit.
+
+    ``primary`` is this week's fresh assignment (``assign_primary_themes``). A ticker
+    already anchored under the same re-fit (``clusters_df.refit_id``) keeps the theme
+    of its anchored cluster id -- whatever that cluster is called this week -- as long
+    as the theme is still published; its source becomes "anchored" when that differs
+    from the fresh pick. Anyone else (new ticker, theme gone, unclassified) takes the
+    fresh pick, which is anchored from then on (unclassified is re-tried weekly).
+    Returns (primary, anchor_to_write); the anchor is None when there is no re-fit id.
+
+    Why: the fresh pick is the nearest centroid, and for ~1 in 5 names the top two
+    themes are within 0.01 cosine, so it flipped with every weekly embedding wobble
+    (19 of the top 20 by market cap changed theme in five weeks).
+    """
+    if clusters_df is None or clusters_df.empty or "refit_id" not in clusters_df.columns \
+            or registry_df is None or registry_df.empty:
+        return primary, None
+    refit_id = str(clusters_df["refit_id"].iloc[0])
+    grab_bags = grab_bag_cluster_ids(registry_df)
+    reg = registry_df[~registry_df["cluster_id"].isin(grab_bags)]
+    id_to_theme = {int(c): str(n) for c, n in zip(reg["cluster_id"], reg["theme_name"])}
+    theme_to_id: dict[str, int] = {}
+    for cid, name in sorted(id_to_theme.items()):
+        theme_to_id.setdefault(name, cid)
+    published = set(memberships_df["theme"].astype(str))
+    score = memberships_df.set_index(["ticker", "theme"])["membership_score"].to_dict()
+
+    anchor = pd.read_parquet(anchor_path) if anchor_path.exists() else pd.DataFrame(
+        columns=["ticker", "cluster_id", "refit_id"])
+    held = {str(t): int(c) for t, c, r in zip(anchor["ticker"], anchor["cluster_id"], anchor["refit_id"])
+            if str(r) == refit_id}
+
+    out = primary.copy()
+    out["ticker"] = out["ticker"].astype(str)
+    keep_rows, changed = [], 0
+    for i, row in out.iterrows():
+        cid = held.get(row["ticker"])
+        theme = id_to_theme.get(cid) if cid is not None else None
+        if theme is not None and theme in published:
+            if row["primary_theme"] != theme:
+                out.at[i, "primary_theme"] = theme
+                out.at[i, "membership_score"] = float(score.get((row["ticker"], theme), np.nan))
+                out.at[i, "source"] = "anchored"
+                changed += 1
+            keep_rows.append((row["ticker"], cid))
+            continue
+        fresh_id = theme_to_id.get(str(row["primary_theme"]))
+        if fresh_id is not None:
+            keep_rows.append((row["ticker"], fresh_id))
+    logger.info("Primary themes: %d held by the re-fit %s anchor against a different fresh pick", changed, refit_id)
+    new_anchor = pd.DataFrame(keep_rows, columns=["ticker", "cluster_id"]).assign(refit_id=refit_id)
+    return out, new_anchor
+
+
 __all__ = [
+    "anchor_primary_themes",
     "append_membership_history",
     "assign_primary_themes",
     "grab_bag_cluster_ids",

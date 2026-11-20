@@ -14,12 +14,10 @@ from pathlib import Path
 import re
 
 from scripts.discord_ledger.build import read_jsonl, stamp, write_jsonl
+from scripts.discord_ledger.identities import CALLERS
 
 
 CHANNEL_ID = "1416374095456632912"
-ACE_ID = "1079391263083733072"
-FT_ID = "720901855995101225"
-CALLERS = {ACE_ID: "ACE", FT_ID: "FT"}
 CONTRACT = re.compile(r"(?<![A-Za-z0-9])\$?(?P<symbol>[A-Z]{2,6})\s+(?P<strike>\d+(?:\.\d+)?)\s*(?P<right>[CP]|calls?|puts?)\b", re.I)
 GENERIC = re.compile(r"(?<![A-Za-z0-9])\$?(?P<symbol>[A-Z]{2,6})\s+(?:(?P<right>calls?|puts?)\s+)?(?P<pct>[+-]?\d+(?:\.\d+)?)%", re.I)
 ARROW = re.compile(r"\$?(?P<entry>\d+(?:\.\d+)?)\s*(?:→|->)\s*\$?(?P<exit>\d+(?:\.\d+)?)")
@@ -28,7 +26,7 @@ LOSS = re.compile(r"\b(?:loss|failed|stop(?:ped)?\s+out|red)\b", re.I)
 
 
 def valid_symbols(trades: list[dict]) -> set[str]:
-    return {trade["symbol"] for trade in trades if trade.get("author_name") in set(CALLERS.values()) and trade.get("symbol")}
+    return {trade["symbol"] for trade in trades if trade.get("author_id") in CALLERS and trade.get("symbol")}
 
 
 def parse_claims(message: dict, symbols: set[str]) -> list[dict]:

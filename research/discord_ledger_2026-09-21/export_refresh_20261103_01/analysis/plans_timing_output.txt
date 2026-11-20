@@ -1,0 +1,164 @@
+=== plans (daily bars; 10 sessions after fill; data end 2026-11-03 )
+ id symbol        kind  filled  prior_close  fill_date    fill nearest_ma  nearest_ma_dist_pct  entry_vs_prior_close_pct  sessions_seen outcome_10  t1_dist_pct t1_hit_10  t1_base_rate  all_targets_hit_10  mfe_10_pct  mae_10_pct  ret_last_pct  spy_ret_pct
+P01    SPY        zone   False       680.52        NaN     NaN        NaN                  NaN                       NaN            NaN        NaN          NaN       NaN           NaN                 NaN         NaN         NaN           NaN          NaN
+P02    APP       above   False       721.63        NaN     NaN        NaN                  NaN                       NaN            NaN        NaN          NaN       NaN           NaN                 NaN         NaN         NaN           NaN          NaN
+P03   RDDT       above   False       233.04        NaN     NaN        NaN                  NaN                       NaN            NaN        NaN          NaN       NaN           NaN                 NaN         NaN         NaN           NaN          NaN
+P04   NFLX        zone    True        77.65 2026-07-06   76.65      ema21                -1.08                     -1.29           10.0       open         7.50     False         0.108                 0.0        2.01      -15.09        -11.81        -0.36
+P05    CVX        zone    True       169.20 2026-07-06  168.86       sma5                 0.49                     -0.20           10.0         t1         2.39      True         0.642                 3.0       12.73        0.68         12.35        -0.36
+P06   ORCL       above    True       140.27 2026-07-06  144.30       sma5                -0.57                      2.87           10.0       open         3.95     False         0.613                 0.0        3.31      -16.82        -15.88        -0.36
+P07   USAR       above    True        19.15 2026-07-06   19.34       sma5                -5.40                      0.99           10.0       open         3.21     False         0.871                 0.0       -0.31      -23.40        -21.25        -0.36
+P08   HNRG       above    True        16.25 2026-07-06   16.50       sma5                -2.82                      1.54           10.0         t1         2.55      True         0.883                 1.0        5.76       -7.21         -4.42        -0.36
+P09   HOOD        zone    True       108.13 2026-08-24  106.86      sma34                 7.41                     -1.18           10.0         t1        12.30      True         0.329                 1.0       17.21       -5.78          9.81         0.03
+P10   COIN        zone    True       186.49 2026-08-24  188.75       sma5                15.67                      1.21           10.0       fail         8.61     False         0.454                 0.0        3.76       -8.86         -5.20         0.03
+P11     LI        zone   False        13.05        NaN     NaN        NaN                  NaN                       NaN            NaN        NaN          NaN       NaN           NaN                 NaN         NaN         NaN           NaN          NaN
+P12   IREN        zone    True        41.88 2026-08-24   40.85      ema21                -1.48                     -2.46           10.0       fail          NaN       NaN           NaN                 NaN       20.66      -14.79         14.88         0.03
+P13   APLD        zone    True        27.21 2026-08-24   26.65       sma5                -7.32                     -2.06           10.0       fail        10.69     False         0.588                 0.0        9.38      -10.58          6.23         0.03
+P14   FSLR        zone    True       205.93 2026-08-28  205.00       sma5                -2.33                     -0.45           10.0       fail          NaN       NaN           NaN                 NaN        7.80       -3.85          1.00        -1.33
+P15    APA         hit    True        41.19 2026-08-27   40.17      ema21                 0.00                     -2.47           10.0  no_levels          NaN       NaN           NaN                 NaN       14.75        4.68         11.34        -0.23
+P16   ALAB   next_open    True       362.34 2026-10-06  376.10       sma5                 5.47                      3.80           11.0         t1         1.22      True         0.904                 1.0        6.82      -26.88        -24.28        -0.75
+P17   COHR   next_open    True       333.64 2026-10-06  336.21       sma5                 7.08                      0.77           11.0       open        11.94     False         0.596                 0.0        1.51      -35.21        -31.05        -0.75
+P18   INTC         hit    True       116.19 2026-10-06  113.00      ema21                 0.32                     -2.75           10.0       open        15.04     False         0.412                 0.0        2.04      -21.44        -18.86        -0.75
+P19    GEV   next_open    True       990.00 2026-10-07 1008.90       sma5                 3.39                      1.91           11.0       open        15.23     False         0.188                 0.0        1.79      -13.65         -8.22        -0.77
+P20    ARM         hit    True       302.56 2026-10-07  298.00       sma5                -0.33                     -1.51           10.0       open         7.18     False         0.613                 0.0       -3.78      -27.09        -23.96        -0.77
+P21   NBIS         hit    True       237.15 2026-10-08  231.88      ema21                -0.09                     -2.22           10.0       open        14.28     False         0.517                 0.0       -2.84      -32.84        -31.36        -1.71
+P22   AFRM        zone    True        80.70 2026-10-12   79.80       sma5                 4.23                     -1.12           10.0       open         7.02     False         0.542                 0.0       -0.46      -14.34        -12.92        -1.70
+P23     MU        zone   False      1029.00        NaN     NaN        NaN                  NaN                       NaN            NaN        NaN          NaN       NaN           NaN                 NaN         NaN         NaN           NaN          NaN
+P24  GOOGL       above    True       351.66 2026-10-13  357.40       sma5                 2.43                      1.63           10.0       open         4.64     False         0.458                 0.0        0.56      -11.42        -10.30        -1.08
+P25   CRDO       above   False       216.55        NaN     NaN        NaN                  NaN                       NaN            NaN        NaN          NaN       NaN           NaN                 NaN         NaN         NaN           NaN          NaN
+P26    VST       above    True       154.17 2026-10-21  156.57       sma5                -0.64                      1.56            9.0       open         4.03     False         0.692                 0.0       -1.47      -14.28        -10.84        -1.91
+P27    CRM        zone    True       242.45 2026-10-21  239.45      sma34                -0.43                     -1.24            9.0         t1         3.04      True         0.621                 2.0        5.42      -10.35         -7.20        -1.91
+P28    TGT close_above   False       152.76        NaN     NaN        NaN                  NaN                       NaN            NaN        NaN          NaN       NaN           NaN                 NaN         NaN         NaN           NaN          NaN
+P29    JPM        zone   False       331.58        NaN     NaN        NaN                  NaN                       NaN            NaN        NaN          NaN       NaN           NaN                 NaN         NaN         NaN           NaN          NaN
+P30   HUBS        zone    True       270.88 2026-10-26  265.00       sma5                 4.06                     -2.17            6.0       open         7.51     False         0.508                 0.0       -1.06      -15.47        -14.65        -0.74
+P31   NTRA        zone    True       403.95 2026-10-26  403.00       sma5                -0.45                     -0.24            6.0         t1         5.46      True         0.596                 1.0        8.24       -6.61         -3.57        -0.74
+P32   COST        zone    True      1003.32 2026-10-26 1001.32       sma5                -0.07                     -0.20            6.0       open         4.96     False         0.242                 0.0        4.12       -2.10          1.79        -0.74
+
+filled 24/32; with T1 21; with full 10-session path 16
+T1 hit within 10 sessions: 4/16; expected from each name's own prior-year base rate 8.7; P(X<=4) = 0.008 (independence assumed; plans cluster on a few dates)
+mean T1 distance 8.0%; median MFE 2.0%, median MAE -14.7%
+mean return over path -11.95% vs SPY -0.62% (median excess -11.34%)
+outcome counts (first of T1 / fail): {'open': 13, 't1': 6, 'fail': 4, 'no_levels': 1}
+entries at/below prior close: 15; within 1.5% of an MA: 10 ({'sma5': 8, 'ema21': 5, 'sma34': 2})
+null: a random pullback level lands within 1.5% of one of the four MAs 47% of the time (expected 7.1 of 15)
+
+=== target levels vs fib levels of trailing N-session (low, high), N = 5..150, tolerance 0.25%
+ id symbol  n_targets  matched          anchor_N_L_H  null_mean_matched
+P01    SPY          4        4    (5, 671.2, 685.74)               3.08
+P02    APP          2        1   (15, 576.67, 731.8)               1.05
+P03   RDDT          3        2   (16, 207.65, 246.0)               1.38
+P04   NFLX          2        1      (43, 71.0, 94.7)               1.27
+P05    CVX          3        2   (6, 164.78, 172.73)               2.25
+P06   ORCL          4        2   (6, 138.83, 157.62)               1.80
+P07   USAR          3        1     (5, 18.54, 21.71)               1.27
+P08   HNRG          3        3     (5, 15.95, 18.44)               1.35
+P09   HOOD          2        2   (79, 70.77, 120.05)               1.15
+P10   COIN          3        1  (11, 145.57, 191.36)               1.27
+P11     LI          3        1    (16, 12.11, 13.65)               1.50
+P13   APLD          3        2     (15, 26.1, 33.04)               1.38
+P16   ALAB          2        1  (48, 244.61, 377.87)               1.27
+P19    GEV          2        2 (35, 868.25, 1099.66)               1.07
+P20    ARM          2        1    (7, 279.2, 318.36)               1.23
+P21   NBIS          2        1   (18, 203.87, 255.1)               1.18
+P22   AFRM          2        1     (5, 70.25, 81.09)               0.95
+P23     MU          2        1 (5, 1011.42, 1089.22)               1.35
+P24  GOOGL          2        1   (6, 341.16, 356.83)               1.57
+P25   CRDO          2        1  (75, 149.14, 290.43)               1.07
+P26    VST          3        1   (6, 145.85, 168.75)               1.62
+P27    CRM          3        2   (7, 226.66, 251.94)               1.68
+P28    TGT          2        2   (6, 151.42, 159.56)               1.73
+P29    JPM          2        2  (49, 325.07, 365.75)               1.73
+P30   HUBS          2        1   (6, 224.88, 271.54)               1.18
+P31   NTRA          2        2  (14, 380.39, 437.41)               1.30
+P32   COST          2        2  (7, 977.24, 1021.45)               1.60
+targets matched 43/67 vs jittered-target null 39.3
+  GEV trailing 20: low 868.25 high 1052.78  (chart: 868.25 / 1099.66)
+  GEV trailing 34: low 868.25 high 1052.78  (chart: 868.25 / 1099.66)
+  GEV trailing 40: low 868.25 high 1099.66  (chart: 868.25 / 1099.66)
+  GEV trailing 45: low 868.25 high 1099.66  (chart: 868.25 / 1099.66)
+  GEV trailing 50: low 868.25 high 1099.66  (chart: 868.25 / 1099.66)
+  GEV trailing 55: low 868.25 high 1140.99  (chart: 868.25 / 1099.66)
+  GEV trailing 60: low 868.25 high 1140.99  (chart: 868.25 / 1099.66)
+
+=== cycle-timing calls: pivot inside the window vs the symbol's own base rate
+ id symbol kind  k                 window  width     hit  base_rate nearest_pivot
+C01    IWM  low  5 2025-12-01..2025-12-03    3.0   False       0.17    2025-11-20
+C01    IWM  low 10 2025-12-01..2025-12-03    3.0   False       0.10    2025-11-20
+C02    FEZ  low  5 2025-12-17..2025-12-26    7.0   False       0.43          None
+C02    FEZ  low 10 2025-12-17..2025-12-26    7.0   False       0.23          None
+C03    IGV  low  5 2026-02-20..2026-03-02    7.0    True       0.44    2026-02-24
+C03    IGV  low 10 2026-02-20..2026-03-02    7.0    True       0.18    2026-02-24
+C04    SPY  low  5 2026-03-11..2026-03-13    3.0   False       0.20    2026-03-30
+C04    SPY  low 10 2026-03-11..2026-03-13    3.0   False       0.09    2026-03-30
+C05    SPY  low  5 2026-07-02..2026-07-13    7.0    True       0.47    2026-07-08
+C05    SPY  low 10 2026-07-02..2026-07-13    7.0   False       0.22    2026-06-26
+C06    SPY  low  5 2026-07-27..2026-08-06    9.0    True       0.60    2026-07-29
+C06    SPY  low 10 2026-07-27..2026-08-06    9.0    True       0.29    2026-07-29
+C07    SPY  low  5 2026-09-14..2026-09-22    7.0    True       0.49    2026-09-16
+C07    SPY  low 10 2026-09-14..2026-09-22    7.0    True       0.22    2026-09-16
+C08    SPY  low  5 2026-10-05..2026-10-07    3.0   False       0.21    2026-10-01
+C08    SPY  low 10 2026-10-05..2026-10-07    3.0   False       0.10    2026-09-16
+C09   NBIS  low  5 2026-10-05..2026-10-07    3.0   False       0.15    2026-09-14
+C09   NBIS  low 10 2026-10-05..2026-10-07    3.0   False       0.11          None
+C10    SPY peak  5 2026-10-20..2026-10-28    NaN pending        NaN           NaN
+C10    SPY peak 10 2026-10-20..2026-10-28    NaN pending        NaN           NaN
+C11    SPY  low  5 2026-10-30..2026-11-09    NaN pending        NaN           NaN
+C11    SPY  low 10 2026-10-30..2026-11-09    NaN pending        NaN           NaN
+C12   ALAB  low  5 2026-10-21..2026-10-29    NaN pending        NaN           NaN
+C12   ALAB  low 10 2026-10-21..2026-10-29    NaN pending        NaN           NaN
+C13    ARM  low  5 2026-10-01..2026-10-09    7.0   False       0.43    2026-09-28
+C13    ARM  low 10 2026-10-01..2026-10-09    7.0   False       0.20          None
+C14   COHR  low  5 2026-10-08..2026-10-16    7.0   False       0.50    2026-10-23
+C14   COHR  low 10 2026-10-08..2026-10-16    7.0   False       0.20          None
+C15    GEV  low  5 2026-10-07..2026-10-15    7.0   False       0.43    2026-10-23
+C15    GEV  low 10 2026-10-07..2026-10-15    7.0   False       0.22          None
+C16   AFRM  low  5 2026-10-05..2026-10-13    7.0   False       0.43    2026-10-01
+C16   AFRM  low 10 2026-10-05..2026-10-13    7.0   False       0.23          None
+C17     MU  low  5 2026-10-21..2026-10-29    NaN pending        NaN           NaN
+C17     MU  low 10 2026-10-21..2026-10-29    NaN pending        NaN           NaN
+C18  GOOGL  low  5 2026-10-05..2026-10-13    7.0   False       0.44    2026-10-01
+C18  GOOGL  low 10 2026-10-05..2026-10-13    7.0   False       0.20    2026-10-01
+C19   CRDO  low  5 2026-10-15..2026-10-23    7.0    True       0.43    2026-10-23
+C19   CRDO  low 10 2026-10-15..2026-10-23    NaN pending        NaN           NaN
+C20    VST  low  5 2026-11-02..2026-11-10    NaN pending        NaN           NaN
+C20    VST  low 10 2026-11-02..2026-11-10    NaN pending        NaN           NaN
+k=5: 5/15 windows contain a pivot; expected 5.8; P(X>=5) = 0.764
+k=10: 3/14 windows contain a pivot; expected 2.6; P(X>=3) = 0.496
+
+=== 63-session return percentile among the 1,000 most liquid names (last session before the post)
+ id symbol       asof  in_top1000  pct21  pct63  pct126  pct252
+P01    SPY 2025-12-19        True   39.3   51.4    59.9    58.0
+P02    APP 2025-12-19        True   98.7   76.9    96.7    95.0
+P03   RDDT 2025-12-19        True   94.4   19.0    92.5    80.1
+P04   NFLX 2026-07-02        True   30.5    6.1    14.8     5.7
+P05    CVX 2026-07-02        True   25.1   10.1    51.3    45.6
+P06   ORCL 2026-07-02        True    0.8   23.1     7.4     7.1
+P07   USAR 2026-07-02       False    NaN    NaN     NaN     NaN
+P08   HNRG 2026-07-02       False    NaN    NaN     NaN     NaN
+P09   HOOD 2026-08-21        True   58.9   94.0    87.1    35.6
+P10   COIN 2026-08-21        True   79.4   27.5    55.3     4.5
+P11     LI 2026-08-21       False    NaN    NaN     NaN     NaN
+P12   IREN 2026-08-21        True   48.8    4.3    47.4    91.0
+P13   APLD 2026-08-21        True   11.9    0.5    27.3    84.1
+P14   FSLR 2026-08-26        True   47.0    7.9    35.4    37.3
+P15    APA 2026-08-26        True   85.8   68.0    89.9    88.3
+P16   ALAB 2026-10-05        True   96.7   43.9    99.5    89.2
+P17   COHR 2026-10-05        True   95.7   69.4    80.2    97.1
+P18   INTC 2026-10-05        True   96.0   67.6    97.2    97.4
+P19    GEV 2026-10-05        True   81.2   35.8    60.2    86.7
+P20    ARM 2026-10-06        True   94.2   57.0    95.9    92.5
+P21   NBIS 2026-10-07        True   57.3   78.1    94.4    91.9
+P22   AFRM 2026-10-09        True   93.5   53.0    91.9    51.6
+P23     MU 2026-10-09        True   75.5   76.2    97.5    99.4
+P24  GOOGL 2026-10-09        True   77.2   56.5    64.5    81.2
+P25   CRDO 2026-10-09        True   98.4   31.6    93.7    82.0
+P26    VST 2026-10-15        True   88.6   52.2    32.5    14.4
+P27    CRM 2026-10-19        True   61.6   96.3    87.6    37.5
+P28    TGT 2026-10-23        True   35.1   74.1    75.7    88.0
+P29    JPM 2026-10-23        True   35.7   36.9    62.3    53.9
+P30   HUBS 2026-10-23        True   96.7   87.7    78.6     6.4
+P31   NTRA 2026-10-23        True   38.2   97.6    96.9    95.1
+P32   COST 2026-10-23        True   84.8   67.2    45.1    46.1
+ 21-session return: 29 names, median percentile 77; top decile 9; top quintile 13; bottom half 10
+ 63-session return: 29 names, median percentile 53; top decile 3; top quintile 4; bottom half 12
+126-session return: 29 names, median percentile 79; top decile 10; top quintile 14; bottom half 7
+252-session return: 29 names, median percentile 81; top decile 8; top quintile 16; bottom half 10

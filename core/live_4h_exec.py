@@ -228,6 +228,57 @@ def _read_4h(ticker: str, bars_dir=None):
     return df if {"high", "low", "close"} <= set(df.columns) else None
 
 
+def _mark_move_carried_by_bars(ticker: str, since, prev_mark, new_mark, *, bars_dir=None,
+                               threshold: float = IMPLAUSIBLE_EQUITY_BAR_MOVE,
+                               tolerance: float = 0.10) -> bool:
+    """True when the shared 4H bars walk the price from the trusted mark to the new
+    one with no single bar moving ``threshold`` or more.
+
+    The mark guard compares against the last mark this module persisted, which
+    after an outage is sessions old: HTF's BETR went 8.19 -> 17.68 between 10-14
+    and 10-26 (largest 4H bar +27%) and was refused on every pass, its stop and
+    take-profit with it. An unprocessed split is a single bar: the cache is
+    unadjusted, so TENX's 13.30 -> 1.42 is one -89% bar here too and stays
+    refused. Bars that are missing, too few, or do not start at the trusted mark
+    and end at the new one are not evidence, and the refusal stands.
+    """
+    df = _read_4h(ticker, bars_dir)
+    if df is None or since is None:
+        return False
+    try:
+        start = pd.Timestamp(since)
+        prev, new = float(prev_mark), float(new_mark)
+    except (TypeError, ValueError):
+        return False
+    if start.tzinfo is None:
+        start = start.tz_localize("UTC")
+    i = df.index.searchsorted(start, side="right") - 1
+    if i < 0:
+        return False
+    closes = df["close"].iloc[i:].astype(float)
+    if len(closes) < 3 or not bool((closes > 0).all()) or prev <= 0 or new <= 0:
+        return False
+    if abs(prev / closes.iloc[0] - 1.0) > tolerance or abs(new / closes.iloc[-1] - 1.0) > tolerance:
+        return False
+    return bool(closes.pct_change().iloc[1:].abs().max() < threshold)
+
+
+def _unexplained_mark_move(ticker: str, route: str, state: dict, current, *,
+                           bars_dir=None) -> dict | None:
+    """The mark guard for both the 4H plan and the risk pass: an implausible move
+    that the shared bars do not carry. See _mark_move_carried_by_bars."""
+    anomaly = _implausible_mark_move(route, state.get("last_mark_price"), current)
+    if anomaly is not None and _mark_move_carried_by_bars(
+            ticker, state.get("last_mark_bar"), state.get("last_mark_price"), current,
+            bars_dir=bars_dir):
+        logger.warning(
+            "mark guard: %s moved %.1f%% since its last trusted mark (%s), carried by the "
+            "4H bars with no single-bar break — treating it as price action",
+            ticker, anomaly["bar_move"] * 100, state.get("last_mark_bar"))
+        return None
+    return anomaly
+
+
 def underlying_basis(ticker: str, at=None, *, bars_dir=None,
                      atr_len: int = UNDERLYING_ATR_LEN) -> tuple[float | None, float | None]:
     """(close, ATR) for `ticker` from the shared 4H cache — at `at`, else latest.
@@ -600,7 +651,16 @@ def build_mixed_plan(
             out.dropped[tkr] = {"symbol": sym, "route": route,
                 "status": "confirmed_flat" if info_present else "not_found",
                 "was_unconfirmed_entry": bool(st.get("pending_fill"))}
-            if not st.get("pending_fill"):
+            expired = (route == "option" and module and not st.get("pending_fill")
+                       and book_unexited_expiry(client, module=module, ticker=tkr, symbol=sym,
+                                                state=st, bar=bar, ledger_root=ledger_root))
+            if expired:
+                out.dropped[tkr]["status"] = "expired_worthless"
+                logger.warning(
+                    "build_mixed_plan: %s %s (%s) expired with no exit sent; booked %s from "
+                    "broker activity %s", module, tkr, sym, expired["realized_pnl"],
+                    expired["activity_id"])
+            elif not st.get("pending_fill"):
                 # Not an unfilled entry: a position this module held is gone and
                 # no exit of its own explains it. Nothing books its P&L.
                 logger.error(
@@ -628,7 +688,7 @@ def build_mixed_plan(
         # evaluate must not age it toward the horizon exit) and last_mark_price
         # NOT overwritten, so the next pass re-tests against the same trusted
         # prior mark and either clears or keeps alerting.
-        anomaly = _implausible_mark_move(route, st.get("last_mark_price"), info.get("current"))
+        anomaly = _unexplained_mark_move(tkr, route, st, info.get("current"))
         if anomaly is not None:
             anomaly.update({"symbol": sym, "route": route,
                             "last_mark_bar": st.get("last_mark_bar"), "bar": str(bar)})
@@ -1310,7 +1370,8 @@ def execute_plan(
             print(f"  OK {side} {qty} {sym}  id={resp.get('id', '?')}")
             disp[str(sym)] = "submitted"
             if str(side).strip().lower() == "buy":
-                mark_entry_unconfirmed(new_managed, sym, resp, client=client)
+                mark_entry_unconfirmed(new_managed, sym, resp, client=client, module=module,
+                                       ledger_root=ledger_root)
                 mark_entry_disposition(disp, new_managed, sym)
             if module and str(side).strip().lower() == "sell":
                 es = exit_context.get(sym, (None, None))[1] if exit_context else None
@@ -1869,7 +1930,8 @@ def record_exit_realized_pnl(client, *, module, item, resp, entry_state, pos_loo
         logger.warning("record_exit_realized_pnl failed (%s %s): %s", module, item, exc)
 
 
-def mark_entry_unconfirmed(new_managed: dict | None, sym: str, resp, *, client=None) -> None:
+def mark_entry_unconfirmed(new_managed: dict | None, sym: str, resp, *, client=None,
+                           module: str | None = None, ledger_root: str | None = None) -> None:
     """Record that an ENTRY order was ACCEPTED, not that a position now exists.
 
     build_mixed_plan writes a new position into managed state when it plans the
@@ -1907,6 +1969,20 @@ def mark_entry_unconfirmed(new_managed: dict | None, sym: str, resp, *, client=N
         st["pending_fill"] = True
         st["entry_order_id"] = str((resp or {}).get("id", "")) or None
         st["entry_submitted_at"] = (resp or {}).get("submitted_at") or now_utc_iso()
+        if module:
+            # Entries were never registered, only exits, so every certificate
+            # FAILed on unattributed buys (26 of 31 on 2026-10-26) and no repair
+            # could prove who opened a position (FSLY261016C00026000, 10-26).
+            route = st.get("route") or route_for_symbol(sym)
+            try:
+                register_order_ownership(
+                    order_id=st["entry_order_id"], module=module, symbol=sym, side="buy",
+                    qty=number(st.get(_size_key(route))) or 0.0, route=route, reason="entry",
+                    root=ledger_root or DEFAULT_LEDGER_ROOT,
+                    account_label=account_label_for_client(client) if client is not None else "paper",
+                )
+            except Exception as exc:  # noqa: BLE001 - instrumentation must not break trading
+                logger.warning("entry %s for %s not registered: %s", st["entry_order_id"], sym, exc)
         fill = _resp_fill_price(resp)
         filled_at = (resp or {}).get("filled_at")
         filled_qty = (resp or {}).get("filled_qty")
@@ -1923,6 +1999,15 @@ def mark_entry_unconfirmed(new_managed: dict | None, sym: str, resp, *, client=N
         except (TypeError, ValueError):
             st["entry_filled_qty"] = None
         obs = observe_order(client, st["entry_order_id"], resp) if client is not None else None
+        if obs is not None and obs.known and obs.filled_qty:
+            # The later read is the size. The poll above stops at the first fill
+            # price, which a partial fill already carries: Dealer's ULS on
+            # 2026-10-08 read 18 of 71, this read saw the order filled at 71, and
+            # taking only its terminal flag cleared pending_fill at 18 shares, so
+            # settle_entry_fill never ran and 53 shares were left unowned.
+            st["entry_filled_qty"] = obs.filled_qty
+            if obs.average_price is not None:
+                fill = st["entry_fill_price"] = obs.average_price
         if fill is not None and st.get("entry_filled_qty"):
             st["pending_fill"] = not (obs and obs.terminal)
             st["remaining_qty"] = st["entry_filled_qty"]
@@ -2063,6 +2148,47 @@ def mark_exit_unconfirmed(new_managed: dict | None, sym: str, resp, *, item, exi
     )
 
 
+def _verified_expiry(activity, symbol, qty, bar) -> bool:
+    """An executed OPEXP for this contract, dated within [expiry, bar], covering
+    ``qty`` at zero proceeds. Anything less does not prove a worthless settlement."""
+    expiry = parse_occ_expiry(symbol)
+    try:
+        expired_qty = -float(activity.get("qty", 0))
+        date = pd.Timestamp(activity.get("date")).date()
+        return (activity.get("activity_type") == "OPEXP" and expiry is not None
+                and expiry <= date <= pd.Timestamp(bar).date()
+                and expired_qty >= qty and float(activity.get("net_amount")) == 0)
+    except (ValueError, TypeError):
+        return False
+
+
+def book_unexited_expiry(client, *, module, ticker, symbol, state, bar, ledger_root=None):
+    """Book a claimed contract that expired with no exit of ours sent. Returns the row.
+
+    The pending-exit path books expiries, but only for a contract it had already
+    tried to sell. HTF's FSLY261016C00026000 x25 expired on 2026-10-16 while the
+    server was down, so no exit existed; the claim was dropped on 10-26 with the
+    $5,000 premium in no ledger (GOOGL261005C00350000 was the same case on 10-05).
+    The broker's OPEXP activity is the only proof accepted, under the same rules.
+    """
+    qty = number(state.get("remaining_qty")) or number(state.get("contracts"))
+    basis = number(state.get("entry_fill_price")) or number(state.get("entry_avg_price"))
+    if not qty or basis is None:
+        return None
+    activity = settlement_activity(client, symbol, state, now=bar)
+    if not activity or not _verified_expiry(activity, symbol, qty, bar):
+        return None
+    row = closed_trade_record(
+        module=module, bar=bar, ticker=state.get("ticker", ticker), order_symbol=symbol,
+        route="option", qty=qty, exit_reason="expired_without_exit", entry_avg_price=basis,
+        exit_fill_price=0.0, realized_pnl=round(-basis * qty * 100.0, 2), entry_state=state,
+        order_id=None)
+    row.update(settle_outcome="expired_worthless", activity_id=activity["id"])
+    append_once(Path(ledger_root or DEFAULT_LEDGER_ROOT) / module / "closed_trades.jsonl", row,
+                identity=f"{symbol}:expiry:{activity['id']}")
+    return row
+
+
 def reconcile_pending_exit(client, *, module, ticker, symbol, state, bar,
                            held_qty=None, response=None, ledger_root=None):
     """Project broker-confirmed fills; returns (closed/pending/retry/unresolved, row).
@@ -2154,16 +2280,7 @@ def reconcile_pending_exit(client, *, module, ticker, symbol, state, bar,
         activity = settlement_activity(client, symbol, state, now=bar)
         if activity:
             pending["settlement_activity"] = activity
-            expiry = parse_occ_expiry(symbol)
-            try:
-                expired_qty = -float(activity.get("qty", 0))
-                date = pd.Timestamp(activity.get("date")).date()
-                verified = (activity.get("activity_type") == "OPEXP" and expiry is not None
-                            and expiry <= date <= pd.Timestamp(bar).date()
-                            and expired_qty >= remaining and float(activity.get("net_amount")) == 0)
-            except (ValueError, TypeError):
-                verified = False
-            if verified and basis is not None:
+            if _verified_expiry(activity, symbol, remaining, bar) and basis is not None:
                 row = closed_trade_record(module=module, bar=bar, ticker=state.get("ticker", ticker),
                     order_symbol=symbol, route=route, qty=remaining, exit_reason=pending.get("reason", "exit"),
                     entry_avg_price=basis, exit_fill_price=0.0, realized_pnl=round(-basis * remaining * mult, 2),
@@ -2841,7 +2958,14 @@ def submit_pending_open_entries(client, module, targets, *, equity_tif_fn,
             logger.info("%s pending-open: submitted %s %s x%s id=%s",
                         module, rec["side"], sym, rec["qty"], (resp or {}).get("id", "?"))
             if tkr and rec.get("managed"):
-                submitted[tkr] = dict(rec["managed"])
+                # The same accepted-not-filled bookkeeping as every other entry
+                # path. Without it a flushed entry kept its planned size with no
+                # pending_fill flag, and was never registered: 2026-10-28..11-02
+                # the 09:35/09:37 flushes were the 4H modules' unattributed buys.
+                entry = {tkr: dict(rec["managed"])}
+                mark_entry_unconfirmed(entry, sym, resp, client=client, module=module,
+                                       ledger_root=ledger_root)
+                submitted[tkr] = entry[tkr]
         except Exception as exc:  # noqa: BLE001
             # A retained entry retries every morning, so a failure that is never
             # logged loops forever invisibly. The deferred-EXIT flush has always

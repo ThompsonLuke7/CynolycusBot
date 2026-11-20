@@ -95,6 +95,23 @@ def test_threshold_is_the_documented_constant():
 _POLICY = ExecPolicy()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_bars(tmp_path, monkeypatch):
+    """The guard consults the shared 4H cache; keep these tests off the real one."""
+    bars = tmp_path / "bars_4h"
+    bars.mkdir()
+    monkeypatch.setattr("core.live_4h_exec.DEFAULT_BARS_4H_DIR", str(bars))
+    return bars
+
+
+def _write_bars(bars_dir, ticker, closes, start="2026-10-14 18:00:00+00:00"):
+    import pandas as pd
+
+    index = pd.date_range(start, periods=len(closes), freq="4h", tz="UTC")
+    pd.DataFrame({"open": closes, "high": closes, "low": closes, "close": closes},
+                 index=index).to_parquet(bars_dir / f"{ticker}.parquet")
+
+
 def _plan(managed, pos_info, targets=()):
     return build_mixed_plan(
         None, targets=list(targets), managed=managed, pos_info=pos_info, bar="2026-08-10 14:00:00+00:00",
@@ -167,3 +184,48 @@ def test_first_sighting_of_a_position_is_never_flagged():
     managed = {"AAA": {"route": "equity", "symbol": "AAA", "runs_held": 0}}
     res = _plan(managed, {"AAA": {"qty": 10, "avg_entry": 100.0, "current": 5.0}})
     assert res.anomalies == {}
+
+
+# --- a move carried by the bars is price action, not a corporate action ---------
+
+_BETR = {"route": "equity", "symbol": "BETR", "runs_held": 20, "entry_avg_price": 9.75,
+         "last_mark_price": 8.1945, "last_mark_bar": "2026-10-14 18:00:00+00:00"}
+
+
+def test_a_rally_across_an_outage_is_evaluated_not_refused(_no_real_bars):
+    """BETR 2026-10-26: 8.19 at the last pass before a nine-session outage, 17.68
+    after it. The 4H bars climb there (largest bar +27%), so it is price action,
+    and the position is past its +30% take-profit."""
+    _write_bars(_no_real_bars, "BETR", [8.12, 10.16, 10.50, 12.12, 15.51, 16.61, 17.12, 17.73])
+
+    res = _plan({"BETR": dict(_BETR)}, {"BETR": {"qty": 517, "avg_entry": 9.75, "current": 17.68}})
+
+    assert res.anomalies == {}
+    assert [(i[0], i[3]) for i in res.plan] == [("BETR", "take_profit_+30%")]
+
+
+def test_a_single_bar_break_in_the_bars_is_still_refused(_no_real_bars):
+    """The raw cache shows TENX's split as one -90% bar; that must stay a refusal."""
+    _write_bars(_no_real_bars, "TENX", [13.25, 14.19, 13.42, 1.37, 1.41, 1.42],
+                start="2026-08-06 14:00:00+00:00")
+    managed = {"TENX": {"route": "equity", "symbol": "TENX", "runs_held": 33,
+                        "last_mark_price": 13.30, "last_mark_bar": "2026-08-07 14:00:00+00:00"}}
+
+    res = _plan(managed, {"TENX": {"qty": 100, "avg_entry": 15.99, "current": 1.42}})
+
+    assert res.plan == [] and "TENX" in res.anomalies
+
+
+@pytest.mark.parametrize("closes", [
+    None,                                    # no bars at all
+    [8.12, 17.73],                           # too few to show a path
+    [8.12, 9.0, 10.0, 11.0],                 # bars end far from the mark
+    [4.00, 8.0, 12.0, 16.0, 17.7],           # bars do not start at the trusted mark
+])
+def test_bars_that_do_not_cover_the_move_leave_the_refusal_in_place(_no_real_bars, closes):
+    if closes is not None:
+        _write_bars(_no_real_bars, "BETR", closes)
+
+    res = _plan({"BETR": dict(_BETR)}, {"BETR": {"qty": 517, "avg_entry": 9.75, "current": 17.68}})
+
+    assert res.plan == [] and "BETR" in res.anomalies

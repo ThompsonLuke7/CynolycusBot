@@ -13,7 +13,7 @@ DEFAULT_WINDOWS = {
     "june_1_5": Path("UI/swing_audit/backtest_june_current_20260607/multiticker_swing_20260601_20260605_replay_trades.csv"),
 }
 FEATURE_DIR = Path("strategies/multi_ticker_swing/data/processed/30m")
-THEME_MAP = Path("theme_expansion/data/theme_map_v4.csv")
+THEME_MAP = Path("themes/theme_expansion_legacy/data/theme_map_v4.csv")
 OUT_DIR = Path("UI/swing_audit/policy_filter_experiments_20260607")
 
 FEATURE_COLS = [

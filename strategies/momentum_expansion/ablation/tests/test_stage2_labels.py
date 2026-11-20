@@ -38,6 +38,24 @@ def test_entry_is_next_bar_open_and_exit_is_session_close():
     assert out["fret_5"].iloc[-2 * h:].isna().all() and out["fret_5"].iloc[: -2 * h - 2].notna().all()
 
 
+def test_a_stopped_security_exits_at_its_last_close():
+    b = _bars(); h = 5
+    cal = pd.DatetimeIndex(list(_cal(b)) + list(pd.bdate_range(_cal(b)[-1] + pd.Timedelta(days=1), periods=10)))
+    plain = L.ticker_forward(b, cal, (h,))
+    out = L.ticker_forward(b, cal, (h,), exit_at_last_bar=True)
+    i_pm = 2 * 57 + 1                          # afternoon of session 57; the data ends in session 59
+    assert np.isnan(plain["fret_5"].iloc[i_pm])
+    assert out["fret_5"].iloc[i_pm] == pytest.approx(b["close"].iloc[-1] / b["open"].iloc[i_pm + 1] - 1, rel=1e-6)
+    # MFE runs from the entry bar to the last bar, never back before the entry
+    assert out["fmfe_5"].iloc[i_pm] == pytest.approx(b["high"].iloc[i_pm + 1:].max() / b["open"].iloc[i_pm + 1] - 1,
+                                                     rel=1e-6)
+    assert out["clamped_5"].iloc[i_pm] == 1.0
+    # windows that fit are untouched; the final bar has no entry, so it stays blank
+    fits = out["clamped_5"] == 0
+    pd.testing.assert_series_equal(out.loc[fits, "fret_5"], plain.loc[fits, "fret_5"])
+    assert np.isnan(out["fret_5"].iloc[-1]) and out["clamped_5"].iloc[-1] == 0.0
+
+
 def test_labels_do_not_change_when_the_past_is_rewritten():
     b = _bars(); cal = _cal(b)
     base = L.ticker_forward(b, cal, (5,))

@@ -131,6 +131,7 @@ def build_live_feature_panel_4h(
     tail: int | None = None,
     since: pd.Timestamp | None = None,
     progress_every: int = 200,
+    ticker_meta: Callable[[str], dict[str, float]] | None = None,
 ) -> FeaturePanelResult:
     """Build the full live 4H feature panel for `tickers`.
 
@@ -145,7 +146,14 @@ def build_live_feature_panel_4h(
                      this step: every panel this function returns has every
                      xsec_*/earnings column the batch build also produces.
 
-    Note: `ticker_meta_lookup` (sector_id/market_cap_bucket/asset_type/is_etf)
+    `ticker_meta` (opt-in, 2026-11-19): ``feature_matrix_4h.research_ticker_meta()``
+    gives sector_id/market_cap_bucket/asset_type/is_etf exactly as the nightly
+    research build encodes them (parity checked on 2,806 names). Without it
+    those four columns are 0, as before. Older note, still true about the
+    TRAINED booster: these encodings are recomputed from current metadata, so
+    they match the research file, not necessarily the booster's training run.
+
+    Original note: `ticker_meta_lookup` (sector_id/market_cap_bucket/asset_type/is_etf)
     is intentionally NOT wired here. Both prior live call sites omitted it too
     (this function doesn't regress that), and fixing it isn't a simple
     "pass the metadata through": the batch path's sector/cap/type integer
@@ -180,8 +188,9 @@ def build_live_feature_panel_4h(
         # Bars are still read every time: they are ~7% of the cost, and reading
         # them is what keeps the skip semantics honest (a ticker whose cache
         # disappeared must still be reported as skipped, memo or no memo).
+        meta_t = ticker_meta(t) if ticker_meta is not None else None
         memo_key = (ctx_fp, _frame_fingerprint(df_4h), _frame_fingerprint(df_1d),
-                    tail, since_key)
+                    tail, since_key, tuple(sorted((meta_t or {}).items())))
         cached = _memo_get(t, memo_key)
         if cached is not None:
             memo_hits += 1
@@ -193,7 +202,8 @@ def build_live_feature_panel_4h(
             continue
 
         try:
-            feats = build_ticker_features_4h(ticker=t, df_4h=df_4h, df_1d=df_1d, ctx_4h=ctx_4h)
+            extra = {"ticker_meta": meta_t} if meta_t is not None else {}
+            feats = build_ticker_features_4h(ticker=t, df_4h=df_4h, df_1d=df_1d, ctx_4h=ctx_4h, **extra)
         except Exception:
             skipped.append(t)   # a build failure may be transient; never memoized
             continue

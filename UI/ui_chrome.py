@@ -29,6 +29,8 @@ NAV_PORTS: list[tuple[str, int]] = [
     ("Library", 8775),
     ("Trades", 8776),
     ("Tradable Universe", 8777),
+    ("Personal", 8778),
+    ("Replay", 8779),
 ]
 
 THEME_CSS = """:root{

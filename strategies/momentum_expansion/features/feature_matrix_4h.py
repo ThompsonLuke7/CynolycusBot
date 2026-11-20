@@ -288,6 +288,22 @@ def _metadata_for_ticker(
     }
 
 
+def research_ticker_meta():
+    """``ticker -> {sector_id, market_cap_bucket, asset_type, is_etf}`` exactly as the
+    nightly batch build (build_all_features_4h) encodes them: the same candidate
+    metadata, the same encodings. Lets a live panel match the research file;
+    checked 2026-11-19: 2,806/2,806 names identical on all four features."""
+    meta = load_candidate_metadata()
+    sector_enc, cap_enc, type_enc = _build_metadata_encodings(meta)
+    lookup = meta.set_index("ticker").to_dict(orient="index") if not meta.empty else {}
+
+    def _for(ticker: str) -> dict[str, float]:
+        return _metadata_for_ticker(ticker=ticker, meta_lookup=lookup, sector_enc=sector_enc,
+                                    cap_enc=cap_enc, type_enc=type_enc)
+
+    return _for
+
+
 # ---------------------------------------------------------------------------
 # Indicator helpers
 # ---------------------------------------------------------------------------
@@ -359,6 +375,59 @@ def _bars_since_true(mask: pd.Series, *, cap: int = 252) -> pd.Series:
 # ---------------------------------------------------------------------------
 # Per-ticker builder
 # ---------------------------------------------------------------------------
+
+LIVE_EDGE_FLAG = "_live_edge_placeholder"
+
+
+def _with_live_edge_daily_rows(d: pd.DataFrame, bars_4h: pd.DataFrame) -> pd.DataFrame:
+    """Append a placeholder daily row for each 4H session date the daily bars do not cover yet.
+
+    WHY. The daily block below lags its series one session (``.shift(1)``), so a
+    4H bar on date D reads D's daily row, which carries D-1's data. Live,
+    intraday, D's daily bar does not exist yet; mapping the bar to the newest row
+    (D-1) then served D-1's *shifted* value, i.e. D-2's data: one session staler
+    than every training row. Found 2026-11-19 by the decision-state parity check
+    (live vs research daily_ret_1 Spearman +0.32).
+
+    A placeholder row for D makes the live edge compute exactly what history
+    computes: every shift(1)-lagged series picks up the last completed session.
+    The placeholder is all-NaN, so a daily cache two or more sessions behind
+    yields NaN rather than silently stale values.
+
+    The two gap features need D's official open, which no 4H bar provides (the
+    first 1H bar starts at 10:00 and its first print can sit far from the 09:30
+    auction: AAPL 2026-11-18 355.79 vs 351.94). A caller that knows it passes a
+    partial daily row for D (open set, close NaN; see
+    ``data.session_open.append_session_open``) and then gets the correct gap.
+    Without it, the gap features keep their previous behaviour at the edge
+    (the last completed session's gap) instead of turning NaN.
+
+    History is untouched: dates the daily bars cover get no placeholder, and
+    every daily series is causal, so earlier rows cannot change.
+    """
+    if d.empty or bars_4h.empty:
+        return d
+    idx = pd.to_datetime(d.index)
+    tz = idx.tz
+    d_days = (idx.tz_convert("America/New_York").tz_localize(None) if tz is not None else idx).normalize()
+    last_day = d_days.max()
+    bar_days = bars_4h.index.tz_convert("America/New_York").tz_localize(None).normalize()
+    missing = sorted(set(bar_days[bar_days > last_day]))
+    if not missing:
+        return d
+    stamps = []
+    for day in missing:
+        ts = pd.Timestamp(day).tz_localize("America/New_York")
+        stamps.append(ts.tz_convert(tz) if tz is not None else ts.tz_localize(None))
+    edge = pd.DataFrame(np.nan, index=pd.DatetimeIndex(stamps, name=d.index.name), columns=d.columns)
+    for col in d.columns:
+        if not pd.api.types.is_numeric_dtype(d[col]):
+            edge[col] = edge[col].astype(object)
+    edge[LIVE_EDGE_FLAG] = True
+    out = pd.concat([d.assign(**{LIVE_EDGE_FLAG: False}), edge])
+    out.index = pd.DatetimeIndex(out.index, name=d.index.name)
+    return out
+
 
 def build_ticker_features_4h(
     *,
@@ -552,6 +621,7 @@ def build_ticker_features_4h(
     if df_1d is not None and len(df_1d) > 60:
         d = df_1d.copy()
         d.columns = [x.lower() for x in d.columns]
+        d = _with_live_edge_daily_rows(d, df)
         dc = d["close"]
         d_ret_1 = dc.pct_change(1, fill_method=None)
         d_ret_5 = dc.pct_change(5, fill_method=None)
@@ -576,6 +646,12 @@ def build_ticker_features_4h(
         d_gap_z_60 = (
             (d_gap - d_gap.rolling(60).mean()) / d_gap.rolling(60).std().replace(0, np.nan)
         ).clip(-10, 10)
+        # Live-edge placeholders (no open known): keep the last completed
+        # session's gap, as before the edge fix. Real rows are never touched.
+        _no_open = d[LIVE_EDGE_FLAG].astype(bool) if LIVE_EDGE_FLAG in d.columns else None
+        if _no_open is not None and _no_open.any():
+            d_gap = d_gap.mask(_no_open).ffill().where(_no_open, d_gap)
+            d_gap_z_60 = d_gap_z_60.mask(_no_open).ffill().where(_no_open, d_gap_z_60)
 
         weekly_close = dc.resample("W-FRI").last()
         weekly_ema10 = _ema(weekly_close, 10)
@@ -601,12 +677,11 @@ def build_ticker_features_4h(
             )
             mapping = mapping[~mapping.index.duplicated(keep="last")].sort_index()
             target = pd.to_datetime(pd.Index(date_index.values))
-            # Backward as-of: a 4H bar whose calendar date has no daily row yet
-            # (the live edge, where today's daily bar isn't cached) carries the most
-            # recent completed daily value instead of NaN. Identical to exact-date
-            # match whenever the daily series covers the bar's date (all historical
-            # dates), so backtest/training features are unchanged. Daily inputs are
-            # already .shift(1)-lagged above, so this stays leak-free.
+            # Exact-date match in practice: _with_live_edge_daily_rows gives every
+            # 4H session date after the daily history a (placeholder) row, so the
+            # backward as-of only acts on a date missing from the MIDDLE of the
+            # daily history (it carries the previous row), and dates before it
+            # starts get NaN. Daily inputs are .shift(1)-lagged above: leak-free.
             pos = mapping.index.searchsorted(target, side="right") - 1
             vals = np.where(pos >= 0, mapping.to_numpy()[pos.clip(min=0)], np.nan)
             return pd.Series(vals, index=df.index, dtype=float)

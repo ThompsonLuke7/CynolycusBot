@@ -71,3 +71,58 @@ def test_on_bar_persists_when_a_transition_actually_fires(tmp_path):
 
     assert len(transitions) > 0
     assert store.saves == saves_after_register + 1
+
+
+def _closing_bar(ticker, minute):
+    # Priced below the configured minimum: every open setup goes straight to CLOSED.
+    return Bar(ticker, datetime(2026, 11, 2, 14, minute, tzinfo=timezone.utc), 0.01, 0.01, 0.01, 0.01, 1_000.0)
+
+
+def test_transitions_inside_the_window_are_saved_once_then_flushed(tmp_path, monkeypatch):
+    """The open emits 700+ transitions an hour; a ~2.4 s save per transition kept
+    the engine 17-21 minutes behind the tape on 2026-10-30 and 11-02."""
+    import strategies.intraday_structure.engine as engine_module
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(engine_module.time, "monotonic", lambda: clock["now"])
+    config = replace(IntradayStructureConfig(), state_path=str(tmp_path / "state.json"))
+    store = _SpyStore()
+    engine = IntradayStructureEngine(config, state_store=store)
+    for ticker in ("AAA", "BBB"):
+        engine.register_candidate(Candidate(
+            ticker, datetime(2026, 11, 2, 14, 30, tzinfo=timezone.utc), Direction.LONG, ("manual",), score=0.8,
+        ))
+    base = store.saves
+
+    assert engine.on_bar(_closing_bar("AAA", 31))
+    assert store.saves == base + 1                     # the first transition saves at once
+    clock["now"] += 5
+    assert engine.on_bar(_closing_bar("BBB", 31))
+    assert store.saves == base + 1                     # held inside the window
+    engine.flush_if_due()
+    assert store.saves == base + 1
+    clock["now"] += engine_module.TRANSITION_PERSIST_SECONDS
+    engine.flush_if_due()
+    assert store.saves == base + 2                     # flushed once the window passed
+    engine.flush_if_due()
+    assert store.saves == base + 2                     # nothing left to save
+
+
+def test_a_forced_flush_saves_held_transitions_immediately(tmp_path, monkeypatch):
+    import strategies.intraday_structure.engine as engine_module
+
+    monkeypatch.setattr(engine_module.time, "monotonic", lambda: 1000.0)
+    config = replace(IntradayStructureConfig(), state_path=str(tmp_path / "state.json"))
+    store = _SpyStore()
+    engine = IntradayStructureEngine(config, state_store=store)
+    for ticker in ("AAA", "BBB"):
+        engine.register_candidate(Candidate(
+            ticker, datetime(2026, 11, 2, 14, 30, tzinfo=timezone.utc), Direction.LONG, ("manual",), score=0.8,
+        ))
+    engine.on_bar(_closing_bar("AAA", 31))
+    engine.on_bar(_closing_bar("BBB", 31))
+    held = store.saves
+
+    engine.flush_if_due(force=True)
+
+    assert store.saves == held + 1

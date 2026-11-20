@@ -214,3 +214,41 @@ def test_a_still_working_exit_order_is_left_resting_not_stacked(tmp_path):
     assert not any(item[0] == _HPE for item in res.plan)
     assert client.submitted == []
     assert _ledger_rows(tmp_path) == []
+
+
+def _plan_with_nothing_held(client, tmp_path, managed):
+    return build_mixed_plan(
+        client, targets=[], managed=managed, pos_info={}, bar="2026-08-17 14:00",
+        signal_audits={}, policy=ExecPolicy(), route_fn=lambda *a, **k: None,
+        ref_price_fn=lambda t: None, verbose=False,
+        module="dealer_ranker", ledger_root=str(tmp_path),
+    )
+
+
+def test_a_contract_that_expired_with_no_exit_sent_is_booked_from_activity(tmp_path):
+    """HTF FSLY261016C00026000 x25: expired 10-16 with the server down, so no exit
+    existed, and the claim was dropped on 10-26 with $5,000 booked nowhere."""
+    client = _Client(activities=[{
+        "id": "expiry-2", "symbol": _HPE, "status": "executed", "activity_type": "OPEXP",
+        "qty": "-52", "net_amount": "0", "date": "2026-08-14",
+    }])
+
+    res = _plan_with_nothing_held(client, tmp_path, _managed())
+    _plan_with_nothing_held(client, tmp_path, _managed())  # a replayed pass books nothing more
+
+    assert res.dropped["HPE"]["status"] == "expired_worthless"
+    rows = _ledger_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["settle_outcome"] == "expired_worthless"
+    assert rows[0]["exit_reason"] == "expired_without_exit"
+    assert rows[0]["realized_pnl"] == -4784.0
+
+
+def test_a_vanished_contract_without_expiry_evidence_books_nothing(tmp_path):
+    for activities in ([], [{"id": "x", "symbol": _HPE, "status": "executed",
+                              "activity_type": "OPASN", "qty": "-52", "net_amount": "0",
+                              "date": "2026-08-14"}]):
+        res = _plan_with_nothing_held(_Client(activities=activities), tmp_path, _managed())
+
+        assert res.dropped["HPE"]["status"] == "not_found"
+        assert _ledger_rows(tmp_path) == []

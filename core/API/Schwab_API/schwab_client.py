@@ -2,19 +2,42 @@
 
 import argparse
 import json
+import os
 import threading
 from pathlib import Path
 from datetime import datetime
 
+from dotenv import dotenv_values
 from schwab.auth import client_from_manual_flow, client_from_token_file
 from schwab.orders.equities import equity_buy_market, equity_sell_market
 import httpx
 
-# === FILL THESE IN ===
-API_KEY = "DodBaa8AR1twJGwT5srKqFUdl6SepUnCwck38IGFlxc8QVt9"          # App Key from Schwab dev portal
-APP_SECRET = "GAq7IMKHL5AiIJrZunI13WP7z7nGgAy0USgUxB0zZA3hTUP260kAJidKxjsAETBj"    # App Secret from Schwab dev portal
 CALLBACK_URL = "https://127.0.0.1"     # EXACTLY matches your app's callback URL
 TOKEN_PATH = Path(__file__).resolve().with_name("schwab_token.json")       # where schwab-py will store the token
+ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
+KEY_VAR, SECRET_VAR = "SCHWAB_API_KEY", "SCHWAB_APP_SECRET"
+
+
+def _app_credentials(env_path: Path | None = None) -> tuple[str, str]:
+    """The Schwab developer app's key and secret: process environment first, then the repo's .env.
+
+    These identify the app and never change on the weekly ``--reauth`` (that only renews
+    ``schwab_token.json``); they change only when regenerated in the Schwab developer portal.
+    Read with python-dotenv rather than a repo helper because this file also runs as a plain
+    script, where ``core`` is not importable.
+    """
+    env_path = ENV_PATH if env_path is None else env_path
+    file_values = dotenv_values(env_path) if env_path.exists() else {}
+
+    def get(name: str) -> str:
+        return str(os.environ.get(name) or file_values.get(name) or "").strip()
+
+    key, secret = get(KEY_VAR), get(SECRET_VAR)
+    missing = [name for name, value in ((KEY_VAR, key), (SECRET_VAR, secret)) if not value]
+    if missing:
+        raise RuntimeError(f"Schwab app credentials missing: set {' and '.join(missing)} in the environment "
+                           f"or in {env_path}")
+    return key, secret
 
 
 def _backup_existing_token() -> Path | None:
@@ -80,26 +103,41 @@ def _create_or_load_client(force_manual: bool = False):
                     f"Schwab token file not found at {TOKEN_PATH}. Interactive login "
                     f"cannot run in an unattended process. Re-auth with: {_reauth_command()}"
                 )
+            api_key, app_secret = _app_credentials()
             _cached_client = client_from_token_file(
                 token_path=str(TOKEN_PATH),
-                api_key=API_KEY,
-                app_secret=APP_SECRET
+                api_key=api_key,
+                app_secret=app_secret
             )
             return _cached_client
 
     # force_manual: an explicit, deliberate reauth request (e.g. `--reauth`).
-    # Back up whatever's on disk and always do a fresh interactive login,
-    # then update the cache so any later non-forced call in this same
-    # process reuses this new client instead of re-reading the file.
-    backup_path = _backup_existing_token()
-    if backup_path is not None:
-        print(f"Backed up existing token file to: {backup_path}")
-    client = client_from_manual_flow(
-        api_key=API_KEY,
-        app_secret=APP_SECRET,
-        callback_url=CALLBACK_URL,
-        token_path=str(TOKEN_PATH)
-    )
+    # The browser login writes to a PENDING file; the live token is backed up and
+    # replaced only once the login has succeeded. Moving the live token aside first
+    # left no token at all whenever a login was abandoned: 2026-08-24, and again
+    # 2026-11-13 00:12, when every Schwab job and the personal page failed until the
+    # moved-aside (still valid) token was restored by hand.
+    api_key, app_secret = _app_credentials()
+    pending = TOKEN_PATH.with_name(f"{TOKEN_PATH.stem}.pending{TOKEN_PATH.suffix}")
+    pending.unlink(missing_ok=True)
+    try:
+        client_from_manual_flow(
+            api_key=api_key,
+            app_secret=app_secret,
+            callback_url=CALLBACK_URL,
+            token_path=str(pending)
+        )
+        if not pending.exists():
+            raise RuntimeError("Schwab login returned without writing a token; the current token was left in place.")
+        backup_path = _backup_existing_token()
+        if backup_path is not None:
+            print(f"Backed up existing token file to: {backup_path}")
+        pending.replace(TOKEN_PATH)
+    finally:
+        pending.unlink(missing_ok=True)   # abandoned or failed login: the live token is untouched
+    # Load from the live path so later access-token refreshes rewrite schwab_token.json,
+    # and cache it so any later non-forced call in this process reuses it.
+    client = client_from_token_file(token_path=str(TOKEN_PATH), api_key=api_key, app_secret=app_secret)
     with _client_lock:
         _cached_client = client
     return client

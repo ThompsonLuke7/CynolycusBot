@@ -12,9 +12,11 @@ import json
 from pathlib import Path
 import sys
 
+from scripts.discord_ledger.identities import CALLERS as CALLER_NAMES
+
 ROOT = Path(__file__).resolve().parents[2]
 STUDY = ROOT / "research/discord_ledger_2026-09-21"
-CALLERS = {"1079391263083733072", "720901855995101225"}
+CALLERS = frozenset(CALLER_NAMES)
 OCR_DEPS = Path("/tmp/cynolycus_discord_ocr")
 _ENGINE = None
 
@@ -43,6 +45,7 @@ def recognize(row: dict) -> dict:
 
 
 def main() -> None:
+    global OCR_DEPS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=STUDY / "attachments/manifest.jsonl")
     parser.add_argument("--out", type=Path, default=STUDY / "attachments/ocr.jsonl")
@@ -50,7 +53,9 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--include-members", action="store_true", help="Also OCR other users' execution screenshots")
     parser.add_argument("--members-only", action="store_true", help="OCR only non-caller attachments, to a separate output")
+    parser.add_argument("--deps-dir", type=Path, default=OCR_DEPS, help="Isolated pip --target directory holding rapidocr")
     args = parser.parse_args()
+    OCR_DEPS = args.deps_dir  # read by forked workers
     if not OCR_DEPS.exists():
         raise RuntimeError("Isolated OCR dependency directory missing; no system package is modified")
     rows = [json.loads(line) for line in args.manifest.open(encoding="utf-8") if line.strip()]
@@ -58,7 +63,7 @@ def main() -> None:
     selected = [r for r in rows if r.get("local_path") and r["attachment_id"] not in existing
                 and ((r.get("author_id") not in CALLERS) if args.members_only else (args.include_members or r.get("author_id") in CALLERS)) and
                 Path(r["local_path"]).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
-    priorities = {"1416372120388243516": 0, "1466557447094403335": 1,
+    priorities = {"1416372120388243516": 0, "1559060301955989554": 0, "1466557447094403335": 1,
                   "1443663553239449770": 2, "1416374095456632912": 3, "1521796664052940870": 4}
     selected.sort(key=lambda r: (priorities.get(r["channel_id"], 9),
                                  0 if not (r.get("message_text") or "").strip() else 1,

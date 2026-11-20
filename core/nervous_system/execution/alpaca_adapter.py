@@ -82,6 +82,32 @@ def sanitize(value: Any) -> Any:
     return value
 
 
+_REJECTION_CODES = ("entries_frozen", "gross_leverage_limit", "margin_cushion_limit",
+                    "risk_limit_unverified", "risk_limit_breached")
+
+
+def _is_business_rejection(reason: str) -> bool:
+    """Whether a 403's folded body is a refusal of the order, not of the keys.
+
+    ``AlpacaOptionsClient`` folds the response body into the error reason.
+    Alpaca's order-rule refusals carry a 4031xxxx code (40310000 is
+    insufficient buying power); the trading-controls gate uses named codes. A
+    403 with neither keeps its old meaning.
+    """
+
+    start = reason.find("{")
+    if start < 0:
+        return False
+    body = reason[start:]
+    if any(f'"{code}"' in body for code in _REJECTION_CODES):
+        return True
+    marker = body.find('"code"')
+    if marker < 0:
+        return False
+    digits = "".join(ch for ch in body[marker + 6:marker + 24] if ch.isdigit())
+    return digits.startswith("4031")
+
+
 def _build(factory: Any, **fields: Any) -> Any:
     """Construct a broker contract, keeping the typed-error boundary intact.
 
@@ -454,6 +480,12 @@ class AlpacaPaperAdapter:
     @staticmethod
     def _http_error(exc: urllib.error.HTTPError, *, ambiguous: bool) -> Exception:
         code = exc.code
+        if code == 403 and _is_business_rejection(str(exc.reason or "")):
+            # Alpaca answers an unfunded order with 403 / 40310000, and the
+            # trading-controls gate refuses the same way. Reporting those as
+            # "broker refused credentials" made the 2026-11-02 $0-buying-power
+            # rejections (IOVA, PTC, CLOV, SEZL, CLYM) read as an auth outage.
+            return BrokerRejected(f"broker rejected the request ({code}): {exc.reason}")
         if code in {401, 403}:
             return BrokerAuthenticationError(f"broker refused credentials ({code})")
         if 500 <= code < 600:

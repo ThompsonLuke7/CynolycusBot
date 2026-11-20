@@ -98,16 +98,26 @@ Stages, in the order the script runs them (the order is load-bearing):
 | 2 | `momentum_expansion.main --refresh-universe` | scores off daily bars, so needs #1 first |
 | 3 | `collect_news_scope --scope full` → `signals.news.main --stage incremental` → `meta_context.build_news_signal` | nightly only collects the ~1.25k PRIORITY scope; this is the ~2.9k full sweep |
 | 4 | `build_sector_assignments.py` | empirical sector map over the universe #2 just refreshed; snapshots per CALENDAR MONTH and exits in seconds when the month is already cached, so it only really runs once a month |
-| 5 | `meta_ranker/update_feeds.py --weekly` | Meta feeds + dynamic theme taxonomy; **costs Claude API $** |
-| 6 | `scripts/shadow/momentum_shadow_ledger.py --auto` | research-only forward record of the momentum blends (no orders); runs last so it can never delay a live-critical stage, and does NOT affect the overall status |
+| 5 | `meta_ranker/update_feeds.py --weekly` | Meta feeds + dynamic theme taxonomy; **costs Claude API $** (~12 batched Sonnet 5.5 calls, ~$1) |
+| 6 | `themes.dynamic_theme.emerging --limit 300` → theme explorer build → publish | provisional themes for pending tickers, mapped against the taxonomy #5 just refreshed (moved from the nightly 2026-11-17); UI/research only, recorded but does NOT affect the overall status |
+| 7 | `scripts/shadow/momentum_shadow_ledger.py --auto` | research-only forward record of the momentum blends (no orders); runs last so it can never delay a live-critical stage, and does NOT affect the overall status |
 
-Stage 6 records a decision only every 4th week (the last session of the week,
+Stage 7 records a decision only every 4th week (the last session of the week,
 counted from 2026-10-02) and otherwise just re-marks the ledger in seconds. It
 is safe on any run day: it records every scheduled decision that has closed and
 is missing from the ledger, using bars up to that decision date only, so Friday
 evening through Monday (or a week late) writes the same row and a missed
 weekend is caught up by the next run. A due week adds ~15 minutes (a
 full-universe daily-bar fetch).
+
+Stage 5's theme groups are FIXED between re-fits (since 2026-11-18,
+`research/theme_stability_2026-11-18/README.md`): step03 reuses
+`themes/dynamic_theme/outputs/ticker_cluster_anchor.parquet` and re-fits only every 91
+days, when the identity recipe changes, or with `WEEKLY_THEMES_REFIT=1`; primary themes
+are frozen per re-fit in `ticker_primary_anchor.parquet`. A re-fit regroups and
+relabels every theme once (~13 Claude calls, ~$1), so it needs API credit. **The first
+weekly run after 2026-11-18 re-fits by itself (no anchor yet).** Check the log for
+`Re-fitting theme groups: <reason>` vs `Fixed groups from re-fit <date>`.
 
 Stage 4 is usually a no-op. It matters because the curated `SECTOR_MAP` covers
 95 of 2,903 live names (3.3%), and under that map the nervous system's sector
@@ -139,7 +149,7 @@ heavy may run alongside it.
 ### 5. Decide about `nightly_market_data.sh` — usually skip it
 
 It is a separate ~5 h job (CBOE options snapshot, dealer snapshots/rankings,
-FINRA short volume, ticker discovery, priority news, emerging themes, earnings
+FINRA short volume, ticker discovery, priority news, earnings
 calendar). Check `grep -aE "nightly_market_data.sh (starting|complete)" signals/news/data/processed/nightly_cron.log | tail`.
 If it completed **after Friday's close**, skip it: no new market data exists
 over a weekend, the weekly full-scope news collect supersedes its priority-scope
@@ -159,7 +169,7 @@ After the chain finishes:
   — stage 4 can exit 0 with many per-cluster failures inside it.
 - `PYTHONPATH=. .venv/bin/python scripts/shadow/momentum_shadow_ledger.py --status`
   — no network. `due now []` is the pass condition; a date listed there means
-  stage 6 failed or has not run, and that decision is still owed (rerun with
+  stage 7 failed or has not run, and that decision is still owed (rerun with
   `--auto`). Its exit code is in the stamp as `momentum_shadow_ledger` but is
   deliberately not folded into the overall status.
 - `.venv/bin/python -m core.live_readiness` (no flag — the consumer gate the
@@ -175,6 +185,8 @@ After the chain finishes:
   `strategies/momentum_expansion/data/processed/features_4h.parquet`,
   `themes/dynamic_theme/outputs/theme_registry.parquet`,
   `signals/meta_context/meta_ranker/meta_ranker_matrix.parquet`.
+- Theme label gate: `themes/dynamic_theme/outputs/label_check_latest.json` must be
+  dated today with `"ok": true` (report its v4 agreement and regression match rate).
 
 State plainly which stages failed. A partial refresh is a normal outcome and the
 user needs to know which feeds are stale going into the week — do not smooth it
@@ -188,6 +200,28 @@ never guessed.
 
 ## Known failure modes
 
+- **`LabelGateError` in step 9** (added 2026-11-12): the week's primary themes failed
+  `themes/dynamic_theme/label_checks.py` (forbidden labels from
+  `themes/dynamic_theme/label_regression.csv`, a company in another country's
+  place-named theme, theme_map_v4 agreement < 0.45, unclassified > 30%, or fewer than
+  half last run's themes). Features were NOT written, so Meta keeps last week's. Read
+  `outputs/label_check_latest.json`, report the failures, and do not override on your
+  own: a real failure means the labels are wrong. If the user accepts them, resume at
+  step 8 and call `build_meta_features(..., enforce_label_gate=False)` (no relabel cost).
+  Since the same date, low-confidence prior labels are not carried forward, so the
+  weekly run Claude-labels those clusters too (up to ~20 more calls).
+
+- **`ClaudeUnavailableError` / "credit balance is too low"** in meta feeds (2026-11-16):
+  the prepaid Anthropic balance ran out (total spend is only ~$1-2/month, so this is a
+  balance problem, not volume — enable auto-reload in the Console). Since that date step05
+  stops on the first such error and writes no registry; `LabelingIncompleteError` means
+  some cluster still ended on a `cluster_<id>` placeholder, also unwritten. Fix the
+  account, then rerun `update_feeds.py --weekly --skip-news-incremental` (paid labeling
+  is redone; it is cents). Before the fix, placeholder rows reached the registry, and
+  step08 checks the WHOLE registry history, so one leftover `cluster_<id>` row aborts every
+  later run at memberships (2026-11-19: 8 rows from 11-16). Quarantine them with
+  `scripts/quarantine_ephemeral_theme_registry_rows.py --apply` (backup + quarantine file),
+  then resume at step 8 if steps 1-7 already ran.
 - **Stage 4 Claude labeling** (`themes/dynamic_theme/stages/step05_claude_labeling.py`):
   `Failed to parse Claude response as JSON` per cluster; on 2026-08-17 this plus a
   carry-forward name collision (187 clusters onto 88 names, seven called

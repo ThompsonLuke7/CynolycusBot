@@ -27,10 +27,10 @@ import numpy as np
 import pandas as pd
 
 from scripts.discord_ledger.build import available_at
+from scripts.discord_ledger.identities import ACE_IDS
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ACE_ID = "1079391263083733072"
 WATCHLIST_WINDOWS = (timedelta(hours=24), timedelta(days=7))
 NEWS_WINDOW = timedelta(hours=24)
 NEWS_SAFE_COLUMNS = (
@@ -75,7 +75,7 @@ def load_watchlists(context_path: Path, messages_path: Path) -> dict[str, list[d
     messages = {str(row["message_id"]): row for row in read_jsonl(messages_path)}
     by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in read_jsonl(context_path):
-        if row.get("author_id") != ACE_ID or row.get("event_type") != "watchlist":
+        if row.get("author_id") not in ACE_IDS or row.get("event_type") != "watchlist":
             continue
         symbol = str(row.get("symbol") or "").upper().strip()
         message = messages.get(str(row.get("message_id")))

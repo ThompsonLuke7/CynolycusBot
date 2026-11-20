@@ -42,6 +42,13 @@ import pandas as pd
 from core.live_state import module_state_lock, load_state, save_state
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 from core.nervous_system.contracts.enums import InstrumentFamily
+from core.decision_state_archive import (
+    archive_decision_state,
+    file_asof,
+    new_run_id,
+    stamp_run_id,
+    utc_now,
+)
 from core.live_signal_audit import (
     append_jsonl,
     build_equity_order_audit,
@@ -236,6 +243,88 @@ def rank_meta_candidates(
     """Public DataFrame ranking interface retained for existing callers."""
 
     return rank_meta_candidates_with_diagnostics(feature_matrix, bar=bar, config=config).ranked
+
+
+# --- decision-state archive ---------------------------------------------------
+META_ARCHIVE_EXTRAS = ("s_upside", "s_quality", "mom_score", "htf_score", "dollar_vol_pctile_252")
+
+
+def meta_feature_names(models_dir: Path | None = None) -> list[str] | None:
+    """Union of the deployed boosters' feature lists (models/<label>/meta.json)."""
+    names: list[str] = []
+    for meta in sorted((models_dir or HERE / "models").glob("*/meta.json")):
+        try:
+            names.extend(json.loads(meta.read_text())["feature_names"])
+        except (OSError, ValueError, KeyError):
+            return None
+    return list(dict.fromkeys(names)) or None
+
+
+def meta_cross_section_gates(result: MetaRankingResult, config: MetaRankingConfig,
+                             entry_ok: Mapping[str, bool]) -> tuple[dict[str, pd.Series], pd.Series]:
+    """Per-name gate outcomes and rank, mirroring rank_meta_candidates_with_diagnostics
+    exactly (same filters, same stable sort), plus the new-entry quality gate."""
+    scored = result.scored
+    combo = pd.to_numeric(scored["s_combo"], errors="coerce")
+    finite = combo.map(math.isfinite).astype(bool)
+    combo_ok = finite & (combo >= config.combo_floor)
+    if "dollar_vol_pctile_252" in scored.columns:
+        liquid = scored["dollar_vol_pctile_252"].fillna(0) >= config.liquidity_floor
+    else:
+        liquid = pd.Series(True, index=scored.index)
+    allowed = ~scored["ticker"].isin(config.blacklist)
+    eligible = combo_ok & liquid & allowed
+    order = scored.loc[eligible].sort_values("s_combo", ascending=False, kind="stable").index
+    rank = pd.Series(float("nan"), index=scored.index)
+    rank.loc[order] = range(1, len(order) + 1)
+    gates = {
+        "combo_floor": combo_ok,
+        "liquidity_floor": liquid,
+        "not_blacklisted": allowed,
+        "top_k": rank <= config.top_k,
+        "quality_floor": scored["ticker"].map(lambda t: bool(entry_ok.get(t, False))),
+    }
+    return gates, rank
+
+
+def archive_meta_decision(args, *, result: MetaRankingResult, config: MetaRankingConfig,
+                          entry_ok: Mapping[str, bool], run_id: str, inference_start) -> None:
+    """Write every scored name on the decision bar to the decision-state archive.
+    Never raises: a failed archive must not stop the pass."""
+    try:
+        gates, rank = meta_cross_section_gates(result, config, entry_ok)
+        cand = result.scored.copy()
+        cand["meta_rank"] = rank
+        features = meta_feature_names()
+        extras = [c for c in META_ARCHIVE_EXTRAS if c in cand.columns and c not in (features or ())]
+        archive_decision_state(
+            module=AUDIT_MODULE,
+            run_id=run_id,
+            candidates=cand,
+            bar_ts=result.decision_bar,
+            score_col="s_combo",
+            rank_col="meta_rank",
+            feature_cols=features,
+            gates=gates,
+            selected=[t for t, ok in entry_ok.items() if ok],
+            side="long",
+            action={t: ("entry" if ok else "quality_gated") for t, ok in entry_ok.items()},
+            extra_cols=extras,
+            model_paths=[HERE / "models"],
+            model_version=model_version(),
+            inputs_asof={"meta_matrix_file": file_asof(args.matrix), "matrix_bar": result.decision_bar},
+            run_meta={
+                "pass_kind": "flush_pending_open" if getattr(args, "flush_pending_open", False) else "scheduled",
+                "submit": bool(getattr(args, "submit", False)),
+                "mode": getattr(args, "mode", None),
+                "config_version": runner_config_version(args),
+                "quality_floor": getattr(args, "quality_floor", None),
+            },
+            inference_start=inference_start,
+            inference_end=utc_now(),
+        )
+    except Exception:  # noqa: BLE001 - archiving must never stop trading
+        logger.exception("meta_ranker: decision-state archive failed (pass continues)")
 
 
 # --- governed-intent lineage -------------------------------------------------
@@ -508,6 +597,7 @@ def main() -> int:
     print(f"=== Meta Ranker {args.mode} runner | account={profile} | mode={run_mode} | top_k={args.top_k} ===")
 
     # --- score + select ---
+    inference_start = utc_now()
     df = pd.read_parquet(args.matrix).reset_index()
     df["timestamp"] = _normalize_timestamp_series(df["timestamp"], field_name="feature-matrix timestamps")
     bar = validate_latest_full_bar(df)
@@ -544,6 +634,12 @@ def main() -> int:
     quality_by_ticker = top.set_index("ticker")["s_quality"].to_dict()
     entry_ok = {t: float(quality_by_ticker.get(t, float("-inf"))) >= args.quality_floor for t in targets}
     signal_audits = _signal_audits(top, bar=bar, entry_ok=entry_ok)
+    # Archive the whole scored bar before anything touches a broker, and carry
+    # the run id on every signal audit so order records join back to it.
+    decision_run_id = new_run_id()
+    stamp_run_id(signal_audits, decision_run_id)
+    archive_meta_decision(args, result=ranking_result, config=ranking_config, entry_ok=entry_ok,
+                          run_id=decision_run_id, inference_start=inference_start)
     print(f"\neligible {eligible_count}/{n0} after filters "
           f"(combo>={args.combo_floor}, liq>={args.liquidity_floor}, blacklist={len(blacklist)})")
     print(f"combo top-{args.top_k}: {targets}")
@@ -1187,7 +1283,7 @@ def _submit_via_gateway(
                 # accepted-but-unfilled entry otherwise persists as a position
                 # the account does not hold.
                 mark_entry_unconfirmed(new_managed, symbol, {"id": broker_id},
-                                       client=client)
+                                       client=client, module=module)
             if str(row.side).strip().lower() == "sell":
                 entry_state = exit_context.get(symbol, (None, None))[1]
                 if entry_state is None and new_managed:

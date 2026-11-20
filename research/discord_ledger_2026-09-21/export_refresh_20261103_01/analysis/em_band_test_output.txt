@@ -1,0 +1,37 @@
+46 tables, 46 usable, 631 rows; kinds {'daily': 28, 'monthly': 3, 'weekly': 15} (caption-labelled tables 39)
+
+center vs prior close (%): median |diff| by kind {'daily': 0.001, 'monthly': 0.021, 'weekly': 0.003} ; share within 0.05%: 0.88
+
+=== all: 631 rows / 46 tables;  final close inside band 74.2% (1-sigma ~68%)
+  scale 0.5   touch  94.8%   rejection|touch  50.5%  (n touches 689)
+  scale 0.75  touch  73.2%   rejection|touch  49.8%  (n touches 482)
+  scale 1.0   touch  51.7%   rejection|touch  50.5%  (n touches 329)
+  scale 1.25  touch  36.9%   rejection|touch  56.0%  (n touches 234)
+  scale 1.5   touch  21.7%   rejection|touch  51.1%  (n touches 137)
+  edge excess vs interpolated neighbours: -2.4pp
+
+=== daily: 288 rows / 28 tables;  final close inside band 74.3% (1-sigma ~68%)
+  scale 0.5   touch  92.0%   rejection|touch  42.7%  (n touches 286)
+  scale 0.75  touch  70.1%   rejection|touch  44.1%  (n touches 204)
+  scale 1.0   touch  50.3%   rejection|touch  49.0%  (n touches 145)
+  scale 1.25  touch  35.8%   rejection|touch  54.4%  (n touches 103)
+  scale 1.5   touch  20.5%   rejection|touch  44.1%  (n touches 59)
+  edge excess vs interpolated neighbours: -0.3pp
+
+=== monthly: 63 rows / 3 tables;  final close inside band 73.0% (1-sigma ~68%)
+  scale 0.5   touch  98.4%   rejection|touch  61.3%  (n touches 75)
+  scale 0.75  touch  66.7%   rejection|touch  47.8%  (n touches 46)
+  scale 1.0   touch  44.4%   rejection|touch  39.3%  (n touches 28)
+  scale 1.25  touch  33.3%   rejection|touch  52.4%  (n touches 21)
+  scale 1.5   touch  20.6%   rejection|touch  69.2%  (n touches 13)
+  edge excess vs interpolated neighbours: -10.8pp
+
+=== weekly: 280 rows / 15 tables;  final close inside band 74.3% (1-sigma ~68%)
+  scale 0.5   touch  96.8%   rejection|touch  54.9%  (n touches 328)
+  scale 0.75  touch  77.9%   rejection|touch  55.2%  (n touches 232)
+  scale 1.0   touch  54.6%   rejection|touch  53.8%  (n touches 156)
+  scale 1.25  touch  38.9%   rejection|touch  58.2%  (n touches 110)
+  scale 1.5   touch  23.2%   rejection|touch  53.8%  (n touches 65)
+  edge excess vs interpolated neighbours: -2.8pp
+
+all kinds: edge excess 95% table-cluster CI [-5.0, +0.3]pp; a CI half-width this size is roughly the detectable effect

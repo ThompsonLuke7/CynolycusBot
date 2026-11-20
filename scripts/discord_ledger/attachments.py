@@ -29,10 +29,10 @@ from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 
+from scripts.discord_ledger.identities import CALLERS
 
-ACE_ID = "1079391263083733072"
-FT_ID = "720901855995101225"
-CALLER_IDS = {ACE_ID, FT_ID}
+
+CALLER_IDS = frozenset(CALLERS)
 DISCORD_HOST = "cdn.discordapp.com"
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 ET = ZoneInfo("America/New_York")
@@ -92,8 +92,12 @@ def attachment_links(message: Any) -> Iterable[tuple[str, str | None, str | None
     scope.
     """
     seen: set[str] = set()
-    for attachment in message.select(":scope > .chatlog__message .chatlog__attachment"):
-        media = attachment.select_one("a[href], source[src], video[src], img[src]")
+    # Forwarded messages carry their media under ``chatlog__forwarded-attachments`` as bare links.
+    for attachment in message.select(
+        ":scope > .chatlog__message .chatlog__attachment, "
+        ":scope > .chatlog__message .chatlog__forwarded-attachments > a[href]"
+    ):
+        media = attachment if attachment.name == "a" else attachment.select_one("a[href], source[src], video[src], img[src]")
         if not media:
             continue
         url = html_module.unescape(media.get("href") or media.get("src") or "")

@@ -38,6 +38,10 @@ from strategies.intraday_structure.state_store import JsonStateStore
 logger = logging.getLogger(__name__)
 _ET = ZoneInfo("America/New_York")
 LAG_REPORT_INTERVAL_SECONDS = 60.0
+# Opening-discovery registrations are saved in batches. Each used to rewrite the
+# whole engine state, and the open registers ~200 of them: 36 of a 54 s replay
+# of the first 8,000 bars on 2026-10-26 went to those saves.
+REGISTRATION_PERSIST_SECONDS = 30.0
 
 
 class IntradayStructureRunner:
@@ -115,6 +119,23 @@ class IntradayStructureRunner:
         self._maintenance_interval = float(config.execution.maintenance_interval_seconds)
         self._next_maintenance = 0.0
         self._next_lag_report = 0.0
+        self._unsaved_registrations = False
+        self._next_registration_persist = 0.0
+
+    def _persist_registrations(self) -> None:
+        """Save opening-feed registrations at most every REGISTRATION_PERSIST_SECONDS.
+
+        Registrations create no decision, so a crash loses at most that window of
+        candidates; stop() still saves on the way out.
+        """
+        if not self._unsaved_registrations:
+            return
+        now = time.monotonic()
+        if now < self._next_registration_persist:
+            return
+        self.engine.persist()
+        self._unsaved_registrations = False
+        self._next_registration_persist = now + REGISTRATION_PERSIST_SECONDS
 
     def _flatten_expiring(self) -> None:
         """Reconcile pending exits and close anything expiring today.
@@ -311,6 +332,8 @@ class IntradayStructureRunner:
                 payload = self.bar_queue.get(timeout=1.0)
             except queue.Empty:
                 self._flatten_expiring()
+                self._persist_registrations()
+                self.engine.flush_if_due()
                 continue
             except Exception as exc:
                 logger.exception("Intraday Structure candidate poll failed: %s", exc)
@@ -327,11 +350,14 @@ class IntradayStructureRunner:
                 self._report_lag(bar)
                 if self.opening_feed is not None:
                     for candidate in self.opening_feed.observe(bar):
-                        self._register(candidate)
+                        self._unsaved_registrations |= self._register(candidate, persist=False)
+                    self._persist_registrations()
                 if self.outcome_tracker is not None:
                     self.outcome_tracker.on_bar(bar)
                 transitions = self.engine.on_bar(bar)
                 if transitions:
                     self.engine.write_active_signals()
+                # Held transitions must not wait for a quiet tape or the next one.
+                self.engine.flush_if_due()
             except Exception as exc:
                 logger.exception("Intraday Structure rejected bar %s: %s", payload, exc)

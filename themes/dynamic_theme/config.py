@@ -35,6 +35,10 @@ OUTPUTS_DIR = REPO_ROOT / "themes" / "dynamic_theme" / "outputs"
 TICKER_DOCUMENTS_PATH   = OUTPUTS_DIR / "ticker_documents.parquet"
 TICKER_EMBEDDINGS_PATH  = OUTPUTS_DIR / "ticker_embeddings.parquet"
 TICKER_CLUSTERS_PATH    = OUTPUTS_DIR / "ticker_clusters.parquet"
+# Fixed groups: the last re-fit's cluster per ticker, reused until the next re-fit.
+TICKER_CLUSTER_ANCHOR_PATH = OUTPUTS_DIR / "ticker_cluster_anchor.parquet"
+# Frozen primary theme per ticker (by cluster id) for the current re-fit.
+TICKER_PRIMARY_ANCHOR_PATH = OUTPUTS_DIR / "ticker_primary_anchor.parquet"
 THEME_REGISTRY_PATH     = OUTPUTS_DIR / "theme_registry.parquet"
 THEME_RELATIONSHIPS_PATH = OUTPUTS_DIR / "theme_relationships.parquet"
 TICKER_MEMBERSHIP_PATH  = OUTPUTS_DIR / "ticker_theme_membership.parquet"
@@ -61,7 +65,22 @@ EMBEDDING_DIM = 384  # bge-small-en-v1.5
 # "AAPL is now Fund X's 9th largest position" 13F spam gets embedded as
 # institutional-ownership news and lands in a junk holdings cluster instead of
 # consumer tech. DESC_BLEND_WEIGHT is the weight on the description vector.
-DESC_BLEND_WEIGHT = 0.6
+#
+# Since 2026-11-18 it is 1.0: the identity text is "Sector: S. Industry: I. " +
+# business description, with no news. research/theme_stability_2026-11-18: that text
+# lifts agreement with the curated v4 map from 0.43 to 0.62, and news (13F spam,
+# one-day stories) was the main source of week-to-week drift. News still reaches the
+# labeler as headlines. Cross-industry trades come from price co-movement instead.
+DESC_BLEND_WEIGHT = 1.0
+IDENTITY_TEXT_VERSION = "sector_industry_description_v1"
+
+# Share of the identity vector given to 60-day price co-movement (PCA-20). This is
+# what lets cross-industry trades form groups (AI compute: NVDA/ORCL/ANET/CRWV; AI
+# power: CEG/VST/NRG/TLN split from regulated DUK/SO/AEP; EV/autonomy:
+# TSLA/RIVN/MBLY). Sweep 0..0.5 (same study): 0.2 raised forward 20-day group
+# cohesion 0.424 -> 0.473; 0.3-0.4 started putting AAPL with toys/autos and made a
+# re-fit reshuffle about half the grouping (re-fit ARI 0.58 vs 0.84 at 0.2). Was 0.4.
+COMOVEMENT_WEIGHT = 0.2
 
 # Headlines/bodies matching these (case-insensitive) are ownership-filing /
 # 13F / analyst-coverage spam or HTML scaffolding — dropped before averaging a
@@ -98,6 +117,16 @@ HDBSCAN_MIN_CLUSTER_SIZE = 5
 HDBSCAN_MIN_SAMPLES = 2
 HDBSCAN_METRIC = "euclidean"  # UMAP output is Euclidean
 HDBSCAN_CLUSTER_SELECTION_METHOD = "leaf"
+
+# ── Fixed groups ──────────────────────────────────────────────────────────────
+# Re-clustering is unstable even on identical inputs: changing only the UMAP seed,
+# or dropping 3% of tickers, keeps just ~0.57 of the grouping (ARI over 15 seed
+# pairs; eom no better than leaf), so a weekly re-fit reshuffled themes every week.
+# Groups are therefore re-fit only every THEME_REFIT_DAYS, or when the identity
+# recipe changes, or on request (weekly_run(refit=True) / WEEKLY_THEMES_REFIT=1).
+# Between re-fits continuing tickers keep their group and their primary theme;
+# new tickers enter unassigned and are placed by industry peers, then frozen.
+THEME_REFIT_DAYS = 91
 
 # ── Discovery engine ─────────────────────────────────────────────────────────
 # Centroid cosine similarity below this → new theme detected
@@ -191,6 +220,40 @@ MIN_INDUSTRY_PEER_SHARE = 0.20
 #    chinese_internet_stocks: 7 of the 12 clustered names in their industry are
 #    Chinese ADRs). Foreign tickers may join any industry peers.
 HOME_COUNTRY = "United States"
+# The mirror case, 2026-11-12: a theme NAMED for a place admits only companies from
+# that place, on every placement route. On the 11-03 run chinese_internet_stocks held
+# NBIS (Netherlands; Yahoo still files it under Yandex's old internet industry), TM,
+# HMC, RACE, STLA (auto peers NIO/XPEV/LI sit there) and US EV names via nearest
+# theme; latam_banks_financials held 7 US, 4 Canadian and 2 Japanese banks. A share
+# rule ("mostly one foreign country") was tried first and rejected: it closed
+# precious_metals_mining (mostly Canadian miners) to NEM/HL and the South Africans,
+# and missed multi-country regions. Unnamed and "global_*" themes stay open, so
+# redomiciled US operators still join industry peers. Offshore holding domiciles and
+# unknown countries are never shut out (the domicile says nothing about operations).
+_LATAM = frozenset({"Mexico", "Brazil", "Argentina", "Chile", "Colombia", "Peru", "Panama", "Uruguay",
+                    "Costa Rica", "Puerto Rico", "Ecuador"})
+_EUROPE = frozenset({"United Kingdom", "Ireland", "Germany", "France", "Netherlands", "Belgium", "Luxembourg",
+                     "Switzerland", "Spain", "Portugal", "Italy", "Austria", "Denmark", "Sweden", "Norway",
+                     "Finland", "Greece", "Poland", "Czech Republic", "Iceland", "Cyprus", "Monaco", "Hungary"})
+_CHINA = frozenset({"China", "Hong Kong", "Macau"})
+GEOGRAPHIC_THEME_PATTERNS: tuple[tuple[str, frozenset[str]], ...] = (
+    (r"chin|hong_kong", _CHINA),
+    (r"latam|latin", _LATAM),
+    (r"argentin", frozenset({"Argentina"})),
+    (r"brazil", frozenset({"Brazil"})),
+    (r"mexic", frozenset({"Mexico"})),
+    (r"canad", frozenset({"Canada"})),
+    (r"japan", frozenset({"Japan"})),
+    (r"korea", frozenset({"South Korea"})),
+    (r"india", frozenset({"India"})),
+    (r"taiwan", frozenset({"Taiwan"})),
+    (r"israel", frozenset({"Israel"})),
+    (r"europ", _EUROPE),
+    (r"(^|_)asia", _CHINA | {"Japan", "South Korea", "Taiwan", "Singapore", "India", "Indonesia", "Malaysia",
+                             "Thailand", "Philippines", "Vietnam"}),
+)
+OFFSHORE_DOMICILES = frozenset({"Cayman Islands", "Bermuda", "British Virgin Islands", "Luxembourg", "Jersey",
+                                "Guernsey", "Isle of Man", "Marshall Islands", "Bahamas", "Curacao", "Gibraltar"})
 # Hand placements that must survive whatever the week's clustering does: the
 # ticker takes the theme most of its listed peers land in this run (so the pin
 # follows the business group through renames). User decision 2026-10-04: MSFT and
@@ -200,6 +263,23 @@ TICKER_PEER_PINS: dict[str, list[str]] = {
     "MSFT": ["CRM", "NOW", "ADBE", "INTU", "WDAY", "SNOW", "DDOG"],
     "ORCL": ["CRM", "NOW", "ADBE", "INTU", "WDAY", "SNOW", "DDOG"],
 }
+
+# ── Publish gate (2026-11-12) ─────────────────────────────────────────────────
+# step09 checks the week's primary themes before writing ticker_theme_features;
+# on failure the previous features stay in place and the run raises. Report:
+# label_check_latest.json beside the features file. Override once: pipeline --no-label-gate.
+#   * label_regression.csv: hand-labeled cases. must_not_match failures are hard;
+#     must_match is scored only on labeled names (unclassified is not "wrong").
+#   * theme_map_v4 agreement, measured as in the 2026-10-04 notes above (0.58 on
+#     10-05). Missing map = not measured.
+LABEL_REGRESSION_PATH = Path(__file__).resolve().parent / "label_regression.csv"
+# The hand-curated v4 map lived only in an untracked top-level theme_expansion/data/ until
+# 2026-11-13, so shared_universe found no v4 rows; it now sits where every live reader looks.
+THEME_MAP_V4_CANDIDATES = (REPO_ROOT / "themes" / "theme_expansion_legacy" / "data" / "theme_map_v4.csv",)
+LABEL_GATE_MIN_MATCH_RATE = 0.75      # must_match pass rate over labeled cases
+LABEL_GATE_MIN_V4_AGREEMENT = 0.45    # floor well under the measured 0.52-0.58
+LABEL_GATE_MAX_UNCLASSIFIED = 0.30    # share of tickers (12-15% normal)
+LABEL_GATE_MIN_THEME_RATIO = 0.50     # published themes vs the previous run (10-05: 9 of 82)
 
 # ── News window ───────────────────────────────────────────────────────────────
 NEWS_LOOKBACK_DAYS = 30
@@ -212,16 +292,30 @@ BREADTH_THRESHOLD = 0.0       # return > 0 = constituent is "up"
 TOP_Q_STRENGTH = 0.75         # top-quartile cutoff for theme_strength
 
 # ── Claude ────────────────────────────────────────────────────────────────────
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = "claude-sonnet-5-5"
+# Server-side refusal fallback for CLAUDE_MODEL (the only model the array form may
+# name for Sonnet 5.5). Theme naming should never trip a classifier; this just keeps
+# a stray refusal from costing a label.
+CLAUDE_FALLBACK_MODEL = "claude-sonnet-5"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-# Labeling: the JSON itself is ~300 tokens, but "plenty" assumed the response
-# is JSON and nothing else. On ambiguous clusters the model reasons through the
-# tickers first, and at 512 the budget is gone before the JSON is emitted — the
-# response ends mid-sentence with no object to parse, and the cluster falls back
-# to an ephemeral `cluster_<id>` name. Same failure the relationship graph hit
-# below. Sized for a preamble plus the object.
-CLAUDE_LABEL_MAX_TOKENS = 2048
+# Labeling sends CLAUDE_LABEL_BATCH_SIZE clusters per call (~8 calls a week instead
+# of ~110). Each call returns schema-checked JSON (structured outputs), so the
+# 2026-08-17 failure (a reasoning preamble ate the budget, no JSON, placeholder
+# name) cannot recur as a parse error. The model thinks before answering
+# (adaptive thinking) and that counts toward max_tokens: budget it for thinking
+# plus ~250 tokens per label. A batch that still fails is retried one cluster per call.
+CLAUDE_LABEL_BATCH_SIZE = 15
+CLAUDE_LABEL_MAX_TOKENS = 32000
+CLAUDE_LABEL_EFFORT = "medium"
+# What the labeler sees per cluster: the largest members by market cap with company
+# name, industry and a one-line business summary, then the rest as bare symbols.
+# Until 2026-11-17 it saw bare symbols, TF-IDF keywords ("solutions, nvidia, yahoo,
+# finance") and 3 headlines, one of them about an unrelated company -- so it had to
+# guess what NBIS or PENG are, and labels followed whatever the news was about.
+CLAUDE_LABEL_MAX_MEMBERS = 12
+CLAUDE_LABEL_MAX_OTHER_TICKERS = 40
+CLAUDE_LABEL_ABOUT_CHARS = 200
 # Relationship graph: ~85 themes × ~5 edges each is a large JSON array. At 8192
 # tokens the response truncated mid-object and the whole graph was discarded,
 # leaving stale edges that no longer matched the relabeled registry. Sonnet

@@ -77,6 +77,7 @@ def fetch_intraday(
     save_path: Optional[str] = None,
     paginate: bool = True,
     max_pages: int | None = None,
+    skip_delisted: bool = True,
 ) -> pd.DataFrame:
     """
     Fetch intraday bars using Alpaca's official SDK (alpaca-py).
@@ -92,9 +93,12 @@ def fetch_intraday(
         save_path: optional path (csv/parquet) to persist results.
         paginate: if True, follow next_page_token until exhausted.
         max_pages: optional page cap to avoid overly large downloads.
+        skip_delisted: return empty for symbols in the delisted registry without a
+            request. Point-in-time research passes False: Alpaca still serves a dead
+            symbol's history, and skipping it silently re-creates survivorship.
     """
     clean_ticker = normalize_ticker(ticker)
-    if is_delisted(clean_ticker):
+    if skip_delisted and is_delisted(clean_ticker):
         # No request for a symbol that no longer trades; callers already treat an
         # empty frame as "no new bars" and keep their cache.
         return pd.DataFrame()

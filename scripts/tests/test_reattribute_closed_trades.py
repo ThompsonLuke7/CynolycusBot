@@ -260,3 +260,32 @@ def test_an_expiry_that_does_not_cover_the_entry_is_refused(adopted):
         assert _run(root, logs, "--book-expiry", f"intraday_structure:{BUY}", "--apply",
                     read_order=read_order, read_activities=activities) == 1
     assert _rows(root, "intraday_structure") == []
+
+
+def _register(root, module, order_id, side="buy"):
+    path = root / "broker_reconciliation" / "paper" / "order_registry.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        fh.write(json.dumps({"order_id": order_id, "module": module, "side": side,
+                             "symbol": NTSK, "qty": 39.0, "route": "option"}) + "\n")
+
+
+def test_a_registered_entry_proves_its_owner_without_a_log_line(books):
+    # Entries are registered at submission since 2026-10-27; FSLY261016C00026000
+    # was refused on 10-26 only because its 09-25 entry predated that.
+    root, logs = books
+    (logs / "server_20260902.log").write_text(f"  OK buy 39 {NTSK}  id={ENTRY}\n")
+    _register(root, "multi_ticker_swing_htf", ENTRY)
+
+    assert _run(root, logs, "--move", MOVE, "--apply") == 0
+    assert [r["module"] for r in _rows(root, "multi_ticker_swing_htf")][-1] == "multi_ticker_swing_htf"
+
+
+def test_a_registry_row_for_another_module_or_a_sell_is_not_ownership(books):
+    root, logs = books
+    (logs / "server_20260902.log").write_text(f"  OK buy 39 {NTSK}  id={ENTRY}\n")
+    _register(root, "meta_ranker", ENTRY)
+    _register(root, "multi_ticker_swing_htf", ENTRY, side="sell")
+
+    assert _run(root, logs, "--move", MOVE, "--apply") == 1
+    assert len(_rows(root, "meta_ranker")) == 2
