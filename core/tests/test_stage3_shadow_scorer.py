@@ -53,3 +53,22 @@ def test_scores_archived_rows_and_flags_pre_fix_runs(tmp_path, monkeypatch):
     assert np.isnan(res.loc["C", "stage3_score"])                          # incomplete row: not scored
     assert not res["pre_parity_fix"].any()                                 # decided after the fix
     assert sa.run(days=5, booster_dir=bdir, out_dir=tmp_path / "shadow")["dates"] == 0
+
+
+def test_forward_eval_recovers_a_known_signal():
+    from strategies.momentum_expansion.ablation import forward_eval_stage3 as fe
+
+    rng = np.random.default_rng(0)
+    rows = []
+    for b in range(3):
+        n = 400
+        xr = rng.normal(0, 0.05, n)
+        rows.append(pd.DataFrame({
+            "bar_ts": pd.Timestamp("2026-11-20", tz="UTC") + pd.Timedelta(days=b), "status_10": "ok",
+            "fret_10": xr, "spy_fret_10": 0.0, "stage3_score": xr, "live_score": -xr,
+            "f__daily_atr_pct": rng.uniform(0.01, 0.05, n), "f__beta_spy_60": rng.normal(1, 0.2, n),
+            "f__close": rng.uniform(5, 100, n), "f__dollar_volume": rng.uniform(1e6, 1e8, n)}))
+    ics = fe.bar_ics(pd.concat(rows), 10)
+    assert len(ics) == 3 and (ics["ic_stage3_neutral"] > 0.9).all() and (ics["ic_live"] < -0.9).all()
+    thin = pd.concat(rows).groupby("bar_ts").head(150)            # under 200 names: skipped
+    assert fe.bar_ics(thin, 10).empty

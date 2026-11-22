@@ -76,6 +76,8 @@ def test_run_pass_routes_and_persists(monkeypatch, tmp_path):
 
 def test_run_pass_no_targets(monkeypatch, tmp_path):
     monkeypatch.setattr(mr, "STATE_PATH", tmp_path / "state.json")
+    # Without this every run appended an empty order_plan row to the LIVE audit log.
+    monkeypatch.setattr(mr, "DEFAULT_SIGNAL_AUDIT_LOG", tmp_path / "audit.jsonl")
     runner = mr.MomentumLiveRunner(auto_trade=False)
     monkeypatch.setattr(runner, "evaluate_now", lambda bar_ts=None, **_: [])  # leaves _last_gate None
     runner._last_gate = None
