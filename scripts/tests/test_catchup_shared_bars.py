@@ -26,7 +26,7 @@ def test_batched_then_fallback_then_stamp(monkeypatch, tmp_path):
     calls, universe = _wire(monkeypatch, tmp_path, status)
     end = "2026-11-20T19:00:30+00:00"
 
-    assert cs.main(["--universe", str(universe), "--no-1d", "--eligible-only", "--end", end]) == 0
+    assert cs.main(["--universe", str(universe), "--no-1d", "--eligible-only", "--threads", "--end", end]) == 0
 
     assert calls["batched"] == [["AAPL", "BAD", "MSFT", "NEWCO"]]
     assert sorted(calls["one"]) == ["BAD", "NEWCO"]           # only the leftovers one by one
@@ -37,12 +37,12 @@ def test_batched_then_fallback_then_stamp(monkeypatch, tmp_path):
 
 def test_ticker_subset_writes_no_stamp(monkeypatch, tmp_path):
     calls, universe = _wire(monkeypatch, tmp_path, {"AAPL": "updated"})
-    assert cs.main(["--tickers", "AAPL", "--no-1d", "--end", "2026-11-20T19:00:30+00:00"]) == 0
+    assert cs.main(["--tickers", "AAPL", "--no-1d", "--threads", "--end", "2026-11-20T19:00:30+00:00"]) == 0
     assert not (tmp_path / "stamp.json").exists()
 
 
 def test_per_ticker_flag_skips_batching(monkeypatch, tmp_path):
     calls, universe = _wire(monkeypatch, tmp_path, {"AAPL": "updated", "MSFT": "fresh"})
-    assert cs.main(["--universe", str(universe), "--no-1d", "--per-ticker",
+    assert cs.main(["--universe", str(universe), "--no-1d", "--per-ticker", "--threads",
                     "--end", "2026-11-20T19:00:30+00:00"]) == 0
     assert calls["batched"] == [] and sorted(calls["one"]) == ["AAPL", "MSFT"]

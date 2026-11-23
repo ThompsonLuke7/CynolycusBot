@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import time as time_mod
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable
 
@@ -58,12 +59,20 @@ def _path_for(ticker: str, kind: str) -> Path:
     return base / f"{ticker}.parquet"
 
 
+def _to_utc(values) -> pd.Series:
+    """``pd.to_datetime(values, utc=True, errors="coerce")`` that skips the per-element
+    cache probe when the column is already datetime (~22% of a catch-up's CPU)."""
+    if isinstance(values, pd.Series) and isinstance(values.dtype, pd.DatetimeTZDtype):
+        return values.dt.tz_convert("UTC")
+    return pd.to_datetime(values, utc=True, errors="coerce", cache=False)
+
+
 def _load_cached(path: Path) -> pd.DataFrame | None:
     if not path.exists():
         return None
     df = pd.read_parquet(path)
     if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        df["timestamp"] = _to_utc(df["timestamp"])
     return df
 
 
@@ -122,7 +131,7 @@ def _complete_bars_only(df: pd.DataFrame, *, timeframe: str, end: str | pd.Times
     bar_len = _intraday_bar_length(timeframe)
     if bar_len is None or df is None or df.empty or "timestamp" not in df.columns:
         return df
-    ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    ts = _to_utc(df["timestamp"])
     return df.loc[(ts + bar_len) <= _as_utc_timestamp(end)].reset_index(drop=True)
 
 
@@ -199,7 +208,7 @@ def _merge_into_cache(cached: pd.DataFrame | None, df_new: pd.DataFrame, out_pat
 def _last_cached_ts(path: Path) -> pd.Timestamp | None:
     if not path.exists():
         return None
-    ts = pd.to_datetime(pd.read_parquet(path, columns=["timestamp"])["timestamp"], utc=True, errors="coerce")
+    ts = _to_utc(pd.read_parquet(path, columns=["timestamp"])["timestamp"])
     last = ts.max()
     return None if pd.isna(last) else last
 
@@ -233,6 +242,8 @@ def fetch_intraday_batched(
     kind: str = "1h",
     end: str,
     batch_size: int = 500,
+    workers: int = 6,
+    executor=None,
     client=None,
 ) -> dict[str, str]:
     """Incremental intraday catch-up for many tickers with multi-symbol requests.
@@ -243,7 +254,7 @@ def fetch_intraday_batched(
     eligible universe one request at a time at the Alpaca rate limit (2026-11-22), which
     made the 14:25 ET 4H passes read bars mid-catch-up.
 
-    Returns ``{ticker: status}``: ``fresh`` | ``updated`` | ``no_new_bars`` |
+    Returns ``{ticker: status}``: ``fresh`` | ``updated`` | ``unchanged`` | ``no_new_bars`` |
     ``uncached`` (no cache: fetch its full history with ``fetch_one``) | ``error``
     (batch request failed: retry with ``fetch_one``).
     """
@@ -287,15 +298,52 @@ def fetch_intraday_batched(
             frame = _complete_bars_only(frame, timeframe=timeframe, end=end_ts)
             by_symbol = ({str(s).upper(): g for s, g in frame.groupby("symbol")}
                          if frame is not None and not frame.empty else {})
-            for t in batch:
-                new = by_symbol.get(t)
-                if new is None or new.empty:
-                    status[t] = "no_new_bars"
-                    continue
-                path = _path_for(t, kind)
-                _merge_into_cache(_load_cached(path), new.reset_index(drop=True), path)
-                status[t] = "updated"
+            # Per-ticker read/merge/write is ~35 ms of mostly GIL-bound pandas work, ~100 s
+            # for the universe serially. Pass a process pool as `executor` to spread it
+            # over cores (catchup_shared_bars does); threads are the default.
+            rows = [by_symbol.get(t) for t in batch]
+            if executor is not None:
+                results = executor.map(_merge_batched_rows, batch, [kind] * len(batch), rows, chunksize=25)
+            else:
+                with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                    results = list(pool.map(_merge_batched_rows, batch, [kind] * len(batch), rows))
+            status.update(zip(batch, results))
     return status
+
+
+def _same_rows(cached: pd.DataFrame | None, new: pd.DataFrame) -> bool:
+    """True when the cache already holds exactly ``new``'s rows from its first timestamp on.
+    Any doubt (dtype mismatch, odd frame) answers False, which just means a rewrite."""
+    if cached is None or cached.empty:
+        return False
+    try:
+        cols = ["timestamp", "open", "high", "low", "close", "volume"]
+        tail = cached.loc[cached["timestamp"] >= new["timestamp"].min(), cols].reset_index(drop=True)
+        fresh = new[cols].reset_index(drop=True)
+        fresh["timestamp"] = _to_utc(fresh["timestamp"])
+        return (len(tail) == len(fresh)
+                and (tail["timestamp"].to_numpy() == fresh["timestamp"].to_numpy()).all()
+                and np.allclose(tail[cols[1:]].to_numpy(float), fresh[cols[1:]].to_numpy(float),
+                                rtol=0, atol=0, equal_nan=True))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _merge_batched_rows(ticker: str, kind: str, new: pd.DataFrame | None) -> str:
+    """Merge one ticker's rows from a batched pull; skip the write when nothing changed."""
+    if new is None or new.empty:
+        return "no_new_bars"
+    path = _path_for(ticker, kind)
+    try:
+        cached = _load_cached(path)
+        new = new.reset_index(drop=True)
+        if _same_rows(cached, new):
+            return "unchanged"
+        _merge_into_cache(cached, new, path)
+        return "updated"
+    except Exception as exc:  # noqa: BLE001 - reported per ticker, caller falls back
+        logger.warning("[%s/%s] batched merge failed: %s", ticker, kind, exc)
+        return "error"
 
 def fetch_one(
     *,
@@ -433,10 +481,10 @@ def build_4h_for(ticker: str, *, force: bool = False) -> pd.DataFrame | None:
             cached_4h = pd.read_parquet(out_path)
             if not src.exists() or cached_4h.empty:
                 return cached_4h
-            cached_4h["timestamp"] = pd.to_datetime(cached_4h["timestamp"], utc=True, errors="coerce")
+            cached_4h["timestamp"] = _to_utc(cached_4h["timestamp"])
             since = _ny_session_start(cached_4h["timestamp"].max())
             df_1h = pd.read_parquet(src)
-            df_1h["timestamp"] = pd.to_datetime(df_1h["timestamp"], utc=True, errors="coerce")
+            df_1h["timestamp"] = _to_utc(df_1h["timestamp"])
             tail_4h = resample_1h_to_4h(df_1h[df_1h["timestamp"] >= since])
             if tail_4h.empty:
                 return cached_4h

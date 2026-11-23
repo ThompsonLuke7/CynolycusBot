@@ -17,7 +17,8 @@ import argparse
 import datetime as dt
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -29,6 +30,13 @@ from strategies.momentum_expansion.data import bars  # noqa: E402
 
 UNIVERSE = REPO / "Data/shared/universe/shared_universe.csv"
 STATUS = Path("/tmp/catchup_bars_status.txt")
+
+
+def _executor(workers: int, *, threads: bool):
+    if threads:
+        return ThreadPoolExecutor(max_workers=workers)
+    # spawn, not fork: the parent holds Alpaca client threads by the time workers start.
+    return ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
 
 
 def _one(ticker: str, end: str, do_1d: bool, fetch_1h: bool = True) -> tuple[str, int, int, str]:
@@ -76,6 +84,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="Only refresh is_eligible names (the tradeable set). Much faster "
                          "for a same-day pre-close catch-up; the full universe is backfilled "
                          "by the nightly readiness job.")
+    ap.add_argument("--threads", action="store_true",
+                    help="Run per-ticker work in threads instead of a process pool (tests, debugging).")
     ap.add_argument("--per-ticker", action="store_true",
                     help="Fetch 1H one request per ticker (the pre-2026-11-22 path) instead of "
                          "multi-symbol batches. Batches take ~3 s per 1,000 symbols; one by one "
@@ -93,14 +103,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     t0 = time.time()
     print(f"catch-up {len(tickers)} tickers through {args.end} (workers={args.workers})")
     one_by_one = set(tickers)
-    if not args.per_ticker:
-        batch_status = bars.fetch_intraday_batched(tickers, kind="1h", end=args.end)
-        # Uncached names need their full history and failed batches a retry: fetch_one.
-        one_by_one = {t for t, s in batch_status.items() if s in ("uncached", "error")}
-        counts = pd.Series(list(batch_status.values()), dtype=object).value_counts().to_dict()
-        print(f"batched 1H in {time.time() - t0:.0f}s: {counts}", flush=True)
     done = errs = 0
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+    # Per-ticker work (merge, 1D, 4H rebuild) is GIL-bound pandas: a spawn process pool
+    # runs it ~4x faster than threads on 6 cores (1,000 tickers' 4H: 10 s vs 45 s).
+    with _executor(args.workers, threads=args.threads) as ex:
+        if not args.per_ticker:
+            batch_status = bars.fetch_intraday_batched(
+                tickers, kind="1h", end=args.end, workers=args.workers,
+                executor=None if args.threads else ex)
+            # Uncached names need their full history and failed batches a retry: fetch_one.
+            one_by_one = {t for t, s in batch_status.items() if s in ("uncached", "error")}
+            counts = pd.Series(list(batch_status.values()), dtype=object).value_counts().to_dict()
+            print(f"batched 1H in {time.time() - t0:.0f}s: {counts}", flush=True)
         futs = {ex.submit(_one, t, args.end, not args.no_1d, t in one_by_one): t for t in tickers}
         for fut in as_completed(futs):
             ticker, n1, n4, err = fut.result()

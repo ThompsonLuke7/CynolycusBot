@@ -172,3 +172,13 @@ def test_batched_fetch_reports_failed_batches_for_fallback(cache):
     status = bars.fetch_intraday_batched(["AAPL"], kind="1h", end="2026-11-20T21:00:00+00:00",
                                          client=_FakeBarsClient({}, fail=True))
     assert status == {"AAPL": "error"}
+
+
+def test_batched_refetch_of_identical_rows_does_not_rewrite(cache):
+    day = _hourly("2026-11-20", HOURS_UTC[:5], FULL_VOL[:5])
+    day.to_parquet(cache / "AAPL_1h.parquet", index=False)
+    before = (cache / "AAPL_1h.parquet").stat().st_mtime_ns
+    client = _FakeBarsClient({"AAPL": day})
+    status = bars.fetch_intraday_batched(["AAPL"], kind="1h", end="2026-11-21T00:00:00+00:00", client=client)
+    assert status == {"AAPL": "unchanged"}
+    assert (cache / "AAPL_1h.parquet").stat().st_mtime_ns == before
