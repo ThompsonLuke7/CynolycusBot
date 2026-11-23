@@ -68,6 +68,22 @@ def is_within_window(
     return open_t <= now < close_t
 
 
+#: Wall-clock ET times a cycle should START: 20 min (SIP delay) plus 30 s after each 4H
+#: bar's last regular-hours hour closes (14:00 and 16:00 ET), so the 14:25/16:25 passes
+#: find that hour fetched (core.live_readiness.wait_for_intraday_bars).
+BAR_READY_ANCHORS: tuple[tuple[int, int, int], ...] = ((14, 20, 30), (16, 20, 30))
+
+
+def seconds_until_next_anchor(now: dt.datetime, anchors=BAR_READY_ANCHORS) -> float | None:
+    """Seconds from ``now`` (tz-aware) to the next anchor later today, or None."""
+    future = [
+        (now.replace(hour=h, minute=m, second=s, microsecond=0) - now).total_seconds()
+        for h, m, s in anchors
+    ]
+    future = [x for x in future if x > 0]
+    return min(future) if future else None
+
+
 class SharedDataRefresher(threading.Thread):
     """Daemon thread that keeps shared bars + Meta matrix fresh during the session."""
 
@@ -184,4 +200,7 @@ class SharedDataRefresher(threading.Thread):
                 self.run_cycle(with_feeds=with_feeds)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[refresher] cycle error: %s", exc)
-            self._sleep(self._interval)
+            # Sleep the normal interval, but wake for the next bar-ready anchor if it
+            # comes first, so a cycle starts right as each 4H bar's last hour is fetchable.
+            until_anchor = seconds_until_next_anchor(self._now())
+            self._sleep(self._interval if until_anchor is None else min(self._interval, until_anchor))

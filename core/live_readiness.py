@@ -137,6 +137,128 @@ def readiness_status(
     return True, f"readiness stamp OK ({age_hours:.1f}h old)", payload
 
 
+# ---------------------------------------------------------------------------
+# Intraday bar completeness for same-day 4H decisions.
+#
+# The stamp above proves the PREVIOUS session; it says nothing about today's
+# bars. The 14:25 ET momentum/HTF passes score the 10:00 ET 4H bar (hourly
+# buckets 10:00-14:00 ET), whose last hour is fetchable only from ~14:20 (SIP
+# delay). On 2026-11-20 the catch-up carrying that hour ran 14:22-14:35 while
+# momentum built its panel 14:25-14:32, and the archived 10:00 bar held ~30% of
+# its volume. catchup_shared_bars.py writes this stamp after a successful
+# universe catch-up; the passes wait for one that fetched through the hour
+# their bar needs, and open nothing if it never comes.
+# ---------------------------------------------------------------------------
+DEFAULT_INTRADAY_BARS_STAMP = _REPO_ROOT / "Data/readiness/bars_catchup_latest.json"
+_RTH_CLOSE = time(16, 0)
+_FIRST_4H_BAR_END = time(14, 0)
+
+
+def write_intraday_bars_stamp(*, end: datetime, tickers: int, errors: int, scope: str,
+                              path: Path | None = None) -> dict:
+    """Record that the shared hourly cache was caught up through ``end``."""
+    path = path or DEFAULT_INTRADAY_BARS_STAMP
+    payload = {
+        "end_utc": end.astimezone(timezone.utc).isoformat(),
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "tickers": int(tickers), "errors": int(errors), "scope": scope, "version": 1,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+    return payload
+
+
+def required_intraday_bars_end(now: datetime | None = None) -> datetime:
+    """Instant the hourly cache must be fetched through for a 4H decision at ``now``.
+
+    From 14:00 ET on a trading day the newest completed 4H bar is today's 10:00 bar
+    (needs the 13:00-14:00 hour); from 16:00 it is today's 14:00 bar, needed through
+    the 16:00 close. The 16:00-17:00 ET bucket the research bar also holds cannot be
+    fetched by a 16:25 pass and is a known, separate parity gap. Before 14:00, or on a
+    non-trading day, it is the previous session through its close.
+    """
+    now_et = (now or datetime.now(timezone.utc)).astimezone(_ET)
+    today = now_et.date()
+    if is_trading_day(today) and now_et.time() >= _RTH_CLOSE:
+        target = datetime.combine(today, _RTH_CLOSE, tzinfo=_ET)
+    elif is_trading_day(today) and now_et.time() >= _FIRST_4H_BAR_END:
+        target = datetime.combine(today, _FIRST_4H_BAR_END, tzinfo=_ET)
+    else:
+        target = datetime.combine(prev_trading_day(today), _RTH_CLOSE, tzinfo=_ET)
+    return target.astimezone(timezone.utc)
+
+
+def four_hour_bar_end(bar_start: datetime) -> datetime:
+    """When a shared 4H bar's regular-hours data is complete.
+
+    The first bar of a session (stamped 10:00 ET: hourly buckets 10-13) ends at
+    14:00 ET; the second (stamped 14:00 ET) at the 16:00 close. Its 16:00-17:00
+    bucket arrives later (the known after-hours parity gap) and is not waited for.
+    """
+    start_et = bar_start.astimezone(_ET)
+    end_t = _FIRST_4H_BAR_END if start_et.time() < time(13, 30) else _RTH_CLOSE
+    return datetime.combine(start_et.date(), end_t, tzinfo=_ET).astimezone(timezone.utc)
+
+
+def required_4h_bar_start(now: datetime | None = None) -> datetime:
+    """Start stamp of the newest 4H bar a decision at ``now`` should score."""
+    end_et = required_intraday_bars_end(now).astimezone(_ET)
+    start_t = time(10, 0) if end_et.time() == _FIRST_4H_BAR_END else _FIRST_4H_BAR_END
+    return datetime.combine(end_et.date(), start_t, tzinfo=_ET).astimezone(timezone.utc)
+
+
+def intraday_bars_fetched_through(path: Path | None = None) -> datetime | None:
+    """``end`` of the last successful universe catch-up, or None without a usable stamp."""
+    path = path or DEFAULT_INTRADAY_BARS_STAMP
+    try:
+        payload = json.loads(path.read_text())
+        end = datetime.fromisoformat(str(payload["end_utc"]).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return end if end.tzinfo is not None else end.replace(tzinfo=timezone.utc)
+
+
+def intraday_bars_status(*, now: datetime | None = None, path: Path | None = None) -> tuple[bool, str]:
+    """Has a universe catch-up fetched the hourly cache through what ``now`` needs?"""
+    path = path or DEFAULT_INTRADAY_BARS_STAMP
+    required = required_intraday_bars_end(now)
+    end = intraday_bars_fetched_through(path)
+    if end is None:
+        return False, f"no usable bar catch-up stamp {path}"
+    if end < required:
+        return False, (f"bar catch-up fetched through {end.astimezone(_ET):%Y-%m-%d %H:%M} ET; "
+                       f"decision needs {required.astimezone(_ET):%Y-%m-%d %H:%M} ET")
+    return True, f"bar catch-up current through {end.astimezone(_ET):%Y-%m-%d %H:%M} ET"
+
+
+def wait_for_intraday_bars(
+    *,
+    timeout_s: float = 900.0,
+    poll_s: float = 20.0,
+    path: Path | None = None,
+    now_fn=None,
+    sleep_fn=None,
+) -> tuple[bool, str, float]:
+    """Poll ``intraday_bars_status`` until it passes or ``timeout_s`` elapses.
+
+    Returns ``(ok, reason, waited_seconds)``. The requirement is re-evaluated on
+    every poll, so a wait that crosses 16:00 ET asks for the newer bar.
+    """
+    import time as _time
+
+    now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+    sleep_fn = sleep_fn or _time.sleep
+    start = now_fn()
+    while True:
+        ok, reason = intraday_bars_status(now=now_fn(), path=path)
+        waited = (now_fn() - start).total_seconds()
+        if ok or waited >= timeout_s:
+            return ok, reason, waited
+        sleep_fn(min(poll_s, max(0.0, timeout_s - waited)))
+
+
 def underlying_for_symbol(symbol: str) -> str:
     """Map an order symbol to the ticker whose data backs the decision.
 

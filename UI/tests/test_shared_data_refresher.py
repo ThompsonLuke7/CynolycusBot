@@ -74,3 +74,10 @@ def test_run_cycle_with_feeds_inserts_light_feeds(monkeypatch):
 
     r.run_cycle(with_feeds=True)
     assert calls == ["bars", "context", "feeds", "matrix"]
+
+
+def test_sleep_wakes_for_the_next_bar_ready_anchor():
+    # 14:17:00 -> the 14:20:30 anchor is 210 s away, sooner than a 300 s interval.
+    assert sdr.seconds_until_next_anchor(_at(2026, 11, 20, 14, 17)) == 210
+    assert sdr.seconds_until_next_anchor(_at(2026, 11, 20, 15, 0)) == 80 * 60 + 30
+    assert sdr.seconds_until_next_anchor(_at(2026, 11, 20, 16, 30)) is None

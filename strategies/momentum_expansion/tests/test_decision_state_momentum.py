@@ -98,9 +98,29 @@ def _wire(monkeypatch, tmp_path, panel):
     monkeypatch.setattr(mr, "_emit_alert", lambda payload, **k: None)
     monkeypatch.setattr(mr, "_load_context_4h", lambda: {})
     monkeypatch.setattr(mr, "load_1h", lambda t: pd.DataFrame({"close": [1.0]}))
+    monkeypatch.setattr(mr, "wait_for_intraday_bars", lambda **k: (True, "bars current", 0.0))
     # Only the best name prints a trigger.
     monkeypatch.setattr(mr, "evaluate_entry", lambda df_1h: [])
     return names
+
+
+def test_scheduled_pass_refuses_when_intraday_bars_incomplete(monkeypatch, tmp_path):
+    ts = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=1)).floor("h")
+    _wire(monkeypatch, tmp_path, _panel(40, 3, ts))
+    monkeypatch.setattr(mr, "wait_for_intraday_bars",
+                        lambda **k: (False, "bar catch-up fetched through 13:25 ET; needs 14:00 ET", 900.0))
+    built = []
+    monkeypatch.setattr(mr, "build_live_feature_panel_4h", lambda **k: built.append(1))
+    runner = mr.MomentumLiveRunner(ranker=_FakeRanker(), auto_trade=False)
+
+    assert runner.evaluate_now(archive=True) == []
+    assert runner._last_gate is None and built == []          # never scored the partial bar
+    audit = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    assert audit[-1]["skip_reason"] == "intraday_bars_incomplete"
+    # A preview scan (archive=False) does not wait or refuse.
+    monkeypatch.setattr(mr, "wait_for_intraday_bars", lambda **k: pytest.fail("preview must not wait"))
+    monkeypatch.setattr(mr, "build_live_feature_panel_4h", lambda **k: _FakeResult(_panel(40, 3, ts)))
+    runner.evaluate_now()
 
 
 def test_scheduled_pass_archives_every_scored_name(monkeypatch, tmp_path):

@@ -126,3 +126,49 @@ def test_incremental_4h_matches_full_rebuild_across_sessions(cache):
         full[["open", "high", "low", "close", "volume"]].sort_index(),
         check_freq=False, check_names=False,
     )
+
+
+class _FakeBarsClient:
+    """Multi-symbol get_stock_bars stub returning a (symbol, timestamp)-indexed frame."""
+
+    def __init__(self, frames: dict[str, pd.DataFrame], fail: bool = False):
+        self.frames, self.fail, self.requests = frames, fail, []
+
+    def get_stock_bars(self, req):
+        self.requests.append(req)
+        if self.fail:
+            raise RuntimeError("boom")
+        start = pd.Timestamp(req.start).tz_convert("UTC") if pd.Timestamp(req.start).tzinfo else pd.Timestamp(req.start, tz="UTC")
+        parts = [f[f["timestamp"] >= start] for s, f in self.frames.items() if s in req.symbol_or_symbols]
+        df = pd.concat(parts) if parts else pd.DataFrame()
+
+        class R:
+            pass
+        r = R()
+        r.df = df.set_index(["symbol", "timestamp"]) if not df.empty else df
+        return r
+
+
+def test_batched_fetch_matches_fetch_one_semantics(cache):
+    # AAPL: stale partial 13:00 ET hour cached; MSFT: cache fresh through end; NVDA: no cache.
+    _hourly("2026-11-20", HOURS_UTC[:4], FULL_VOL[:3] + [3153886]).to_parquet(cache / "AAPL_1h.parquet", index=False)
+    _hourly("2026-11-20", HOURS_UTC[:6], FULL_VOL[:6], "MSFT").to_parquet(cache / "MSFT_1h.parquet", index=False)
+    client = _FakeBarsClient({
+        "AAPL": _hourly("2026-11-20", HOURS_UTC[:6], FULL_VOL[:5] + [4000000]),   # 20:00 UTC forming
+    })
+    end = "2026-11-20T20:00:30+00:00"
+    status = bars.fetch_intraday_batched(["AAPL", "MSFT", "NVDA"], kind="1h", end=end, client=client)
+
+    assert status == {"AAPL": "updated", "MSFT": "fresh", "NVDA": "uncached"}
+    assert len(client.requests) == 1 and client.requests[0].symbol_or_symbols == ["AAPL"]
+    # alpaca-py stores request times as naive UTC.
+    assert pd.Timestamp(client.requests[0].start) == pd.Timestamp("2026-11-20 05:00")
+    vol = pd.read_parquet(cache / "AAPL_1h.parquet").set_index("timestamp")["volume"]
+    assert vol.tolist() == [float(v) for v in FULL_VOL[:5]]          # healed, forming hour dropped
+
+
+def test_batched_fetch_reports_failed_batches_for_fallback(cache):
+    _hourly("2026-11-20", HOURS_UTC[:2], FULL_VOL[:2]).to_parquet(cache / "AAPL_1h.parquet", index=False)
+    status = bars.fetch_intraday_batched(["AAPL"], kind="1h", end="2026-11-20T21:00:00+00:00",
+                                         client=_FakeBarsClient({}, fail=True))
+    assert status == {"AAPL": "error"}

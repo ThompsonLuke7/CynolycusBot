@@ -24,18 +24,21 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+from core.live_readiness import write_intraday_bars_stamp  # noqa: E402
 from strategies.momentum_expansion.data import bars  # noqa: E402
 
 UNIVERSE = REPO / "Data/shared/universe/shared_universe.csv"
 STATUS = Path("/tmp/catchup_bars_status.txt")
 
 
-def _one(ticker: str, end: str, do_1d: bool) -> tuple[str, int, int, str]:
+def _one(ticker: str, end: str, do_1d: bool, fetch_1h: bool = True) -> tuple[str, int, int, str]:
+    """1D (optional) + 4H rebuild for one ticker; its 1H too unless the batch already did it."""
     n1 = n4 = 0
     err = ""
     try:
-        d1 = bars.fetch_one(ticker=ticker, kind="1h", end=end)
-        n1 = 0 if d1 is None else len(d1)
+        if fetch_1h:
+            d1 = bars.fetch_one(ticker=ticker, kind="1h", end=end)
+            n1 = 0 if d1 is None else len(d1)
         if do_1d:
             bars.fetch_one(ticker=ticker, kind="1d", end=end)
         d4 = bars.build_4h_for(ticker, force=False)
@@ -73,6 +76,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="Only refresh is_eligible names (the tradeable set). Much faster "
                          "for a same-day pre-close catch-up; the full universe is backfilled "
                          "by the nightly readiness job.")
+    ap.add_argument("--per-ticker", action="store_true",
+                    help="Fetch 1H one request per ticker (the pre-2026-11-22 path) instead of "
+                         "multi-symbol batches. Batches take ~3 s per 1,000 symbols; one by one "
+                         "the eligible set took ~800 s at the Alpaca rate limit.")
     args = ap.parse_args(argv)
 
     if args.tickers:
@@ -85,9 +92,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         tickers = sorted(u["ticker"].dropna().astype(str).str.upper().unique())
     t0 = time.time()
     print(f"catch-up {len(tickers)} tickers through {args.end} (workers={args.workers})")
+    one_by_one = set(tickers)
+    if not args.per_ticker:
+        batch_status = bars.fetch_intraday_batched(tickers, kind="1h", end=args.end)
+        # Uncached names need their full history and failed batches a retry: fetch_one.
+        one_by_one = {t for t, s in batch_status.items() if s in ("uncached", "error")}
+        counts = pd.Series(list(batch_status.values()), dtype=object).value_counts().to_dict()
+        print(f"batched 1H in {time.time() - t0:.0f}s: {counts}", flush=True)
     done = errs = 0
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(_one, t, args.end, not args.no_1d): t for t in tickers}
+        futs = {ex.submit(_one, t, args.end, not args.no_1d, t in one_by_one): t for t in tickers}
         for fut in as_completed(futs):
             ticker, n1, n4, err = fut.result()
             done += 1
@@ -119,6 +133,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             flush=True,
         )
         return 1
+    if not args.tickers:   # a hand-picked subset proves nothing about the universe
+        end_ts = pd.Timestamp(args.end)
+        end_ts = end_ts.tz_localize("UTC") if end_ts.tzinfo is None else end_ts.tz_convert("UTC")
+        write_intraday_bars_stamp(
+            end=end_ts.to_pydatetime(), tickers=attempted, errors=errs,
+            scope="eligible" if args.eligible_only else "universe",
+        )
     return 0
 
 

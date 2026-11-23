@@ -61,6 +61,7 @@ from core.decision_state_archive import (
     new_run_id,
     utc_now,
 )
+from core.live_readiness import wait_for_intraday_bars
 from core.live_signal_audit import append_jsonl, build_signal_audit
 from signals.meta_context.meta_ranker.options_exec import equity_order_tif, route_option_or_shares
 from strategies.momentum_expansion.data.load_bars import load_1d, load_1h, load_4h
@@ -98,6 +99,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SIGNAL_AUDIT_LOG = REPO_ROOT / "Data/inference/momentum_expansion/live_signal_audit.jsonl"
 STATE_PATH = Path(__file__).resolve().parent / "momentum_live_state.json"
 SIGNAL_MAX_STALENESS_DAYS = float(os.getenv("MOMENTUM_MAX_SIGNAL_STALENESS_DAYS", "0.5"))
+# Scheduled passes wait this long for the shared hourly cache to cover the newest 4H
+# bar (core.live_readiness.wait_for_intraday_bars). 0 = check once, no wait.
+INTRADAY_BARS_WAIT_S = float(os.getenv("MOMENTUM_INTRADAY_BARS_WAIT_S", "900"))
 
 
 def _load_state() -> dict:
@@ -362,6 +366,21 @@ class MomentumLiveRunner:
         the decision-state archive."""
         bar_ts = bar_ts or pd.Timestamp.now(tz="UTC")
         self._last_gate = None
+        if archive:
+            # Scheduled passes score the newest 4H bar from the shared cache; wait for a
+            # catch-up that fetched all its hours (2026-11-20: scored a 10:00 bar holding
+            # ~30% of its volume). No entries on timeout; run_pass still manages exits.
+            bars_ok, bars_reason, waited = wait_for_intraday_bars(timeout_s=INTRADAY_BARS_WAIT_S)
+            logger.info("Momentum: intraday bar check after %.0fs: %s", waited, bars_reason)
+            if not bars_ok:
+                print(f"momentum: entries skipped — {bars_reason}")
+                append_jsonl(DEFAULT_SIGNAL_AUDIT_LOG, {
+                    "event": "signal_decision", "module": "momentum_expansion", "bar": bar_ts,
+                    "ticker": None, "entry_triggered": False,
+                    "skip_reason": "intraday_bars_incomplete", "detail": bars_reason,
+                    "waited_s": waited,
+                })
+                return []
         inference_start = utc_now()
         run_id = new_run_id() if archive else None
         snapshot = load_snapshot_for(bar_ts)

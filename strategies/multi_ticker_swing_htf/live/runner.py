@@ -33,6 +33,7 @@ import argparse
 import json
 import logging
 import math
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -72,7 +73,7 @@ from core.live_4h_exec import (
     submit_pending_exit_orders,
     submit_pending_open_entries,
 )
-from core.live_readiness import filter_entry_orders_for_readiness
+from core.live_readiness import filter_entry_orders_for_readiness, required_4h_bar_start
 from signals.meta_context.meta_ranker.options_exec import (
     equity_order_tif,
     route_option_or_shares,
@@ -126,6 +127,34 @@ def _latest_full_bar(df: pd.DataFrame) -> pd.Timestamp:
     counts = df.groupby("timestamp").size()
     full = counts[counts >= max(MIN_FULL_BAR, int(0.25 * counts.max()))].index
     return full.max()
+
+
+def wait_for_matrix_bar(matrix: str | Path, *, timeout_s: float, poll_s: float = 20.0,
+                        now_fn=None, sleep_fn=None) -> tuple[bool, str]:
+    """Poll the matrix until its latest full bar reaches the newest completed 4H bar.
+
+    Reads only the timestamp column (~0.6 s on the live matrix). The required bar is
+    re-evaluated on each poll (``core.live_readiness.required_4h_bar_start``).
+    """
+    import pyarrow.parquet as pq
+
+    now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+    sleep_fn = sleep_fn or time.sleep
+    start = now_fn()
+    while True:
+        required = pd.Timestamp(required_4h_bar_start(now_fn()))
+        try:
+            ts = pd.to_datetime(pq.read_table(matrix, columns=["timestamp"]).column("timestamp").to_pandas(),
+                                utc=True)
+            latest = _latest_full_bar(pd.DataFrame({"timestamp": ts}))
+        except Exception as exc:  # noqa: BLE001 - the main read reports a broken matrix
+            return False, f"matrix unreadable while waiting: {exc}"
+        waited = (now_fn() - start).total_seconds()
+        if latest >= required:
+            return True, f"latest full bar {latest} covers required {required} (waited {waited:.0f}s)"
+        if waited >= timeout_s:
+            return False, f"latest full bar {latest} < required {required} after {waited:.0f}s"
+        sleep_fn(min(poll_s, max(0.0, timeout_s - waited)))
 
 
 def _signal_audits(top: pd.DataFrame, *, bar: pd.Timestamp) -> dict[str, dict]:
@@ -265,6 +294,10 @@ def main():
     ap.add_argument("--stop-loss", type=float, default=0.39, help="Hard stop: full exit if gain <= -this (premium for options). 0 disables.")
     ap.add_argument("--trail-stop", type=float, default=None, help="Trailing stop: full exit if value gives back this fraction from its peak. Default None = disabled (2026-07-18 cross-module search: no-trail beat trail on mean return per trade).")
     ap.add_argument("--max-staleness-days", type=float, default=0.5)
+    ap.add_argument("--bar-wait-seconds", type=float, default=900.0,
+                    help="Wait up to this long for the shared matrix to hold the newest completed 4H "
+                         "bar before reading it (the refresher appends it only once its hours are "
+                         "all fetched). On timeout the staleness guard decides. 0 disables.")
     ap.add_argument("--allow-stale", action="store_true")
     ap.add_argument("--signal-audit-log", default=str(DEFAULT_AUDIT_LOG),
                     help="Append-only JSONL path for signal/order audit events; set empty to disable.")
@@ -279,6 +312,9 @@ def main():
     print(f"=== HTF Swing {args.mode} runner | account={profile} | mode={run_mode} | top_k={args.top_k} ===")
 
     # --- signal: read htf_score straight off the shared matrix (no re-scoring) ---
+    if args.bar_wait_seconds > 0 and not args.flush_pending_open:
+        ok, why = wait_for_matrix_bar(args.matrix, timeout_s=args.bar_wait_seconds)
+        print(f"matrix bar check: {why}")
     inference_start = utc_now()
     df = pd.read_parquet(args.matrix).reset_index()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)

@@ -21,6 +21,7 @@ from collections.abc import Sequence
 import argparse
 import logging
 import warnings
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,7 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
+from core.live_readiness import four_hour_bar_end, intraday_bars_fetched_through
 from strategies.momentum_expansion.config.momentum_config import CONTEXT_TICKERS, SECTOR_ETFS
 from strategies.momentum_expansion.features.live_feature_panel_4h import (
     assert_manifest_coverage,
@@ -137,6 +139,28 @@ def last_covered_timestamp(
     return covered.index[-1] if len(covered) else None
 
 
+def complete_bars_only(panel: pd.DataFrame, *, fetched_through, now=None) -> pd.DataFrame:
+    """Drop (timestamp, ticker) rows whose 4H bar was not complete when the bars were fetched.
+
+    A matrix bar is appended once and never revisited ("no new reference-market 4H bar"),
+    so appending the 10:00 ET bar from the ~13:45 refresher cycle froze it without its
+    13:00 hour: Meta and HTF then scored that row at 14:20/14:25. Keep a bar only when
+    the last successful universe catch-up (``core.live_readiness`` stamp) fetched through
+    its end. Without a stamp, fall back to the wall clock less the SIP delay.
+    """
+    if panel.empty:
+        return panel
+    if fetched_through is None:
+        fetched_through = (now or datetime.now(timezone.utc)) - timedelta(minutes=20)
+    starts = pd.DatetimeIndex(panel.index.get_level_values(0)).unique()
+    ok = {ts for ts in starts if four_hour_bar_end(pd.Timestamp(ts).to_pydatetime()) <= fetched_through}
+    dropped = [ts for ts in starts if ts not in ok]
+    if dropped:
+        logger.info("matrix: holding back incomplete 4H bar(s) %s (bars fetched through %s)",
+                    [str(t) for t in dropped], fetched_through)
+    return panel[panel.index.get_level_values(0).isin(list(ok))]
+
+
 def _latest_reference_bar_timestamp() -> pd.Timestamp | None:
     latest: list[pd.Timestamp] = []
     for ticker in REFERENCE_BAR_TICKERS:
@@ -200,7 +224,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if result.panel.empty:
         print("no new bars to add — matrix already current.")
         return
-    feat_idx = result.panel
+    feat_idx = complete_bars_only(result.panel, fetched_through=intraday_bars_fetched_through())
+    if feat_idx.empty:
+        print("no COMPLETE new bars yet (the newest bar's hours are still being fetched) — "
+              "matrix left as is.")
+        return 0
     feats = feat_idx.reset_index()
     print(f"new feature rows: {len(feats):,}  bars: {feats['timestamp'].nunique()}  "
           f"range {feats['timestamp'].min()} -> {feats['timestamp'].max()}")

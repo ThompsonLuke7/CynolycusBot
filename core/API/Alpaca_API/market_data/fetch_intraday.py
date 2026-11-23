@@ -17,6 +17,21 @@ from Data.load_data import get_ticker_raw_dir
 from Data.retrieve_data import normalize_ticker
 
 
+def keep_regular_hours(df: pd.DataFrame) -> pd.DataFrame:
+    """Intraday bars whose START is within 09:30-16:00 ET inclusive.
+
+    Bars are stamped at their start, so hourly buckets keep 10:00-16:00: the 09:00
+    bucket (which holds 09:30-10:00) is dropped and the 16:00 bucket (closing print plus
+    after-hours to 17:00) is kept. Long-standing cache definition; models are trained on it.
+    """
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return df
+    ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    ny = ts.dt.tz_convert("America/New_York")
+    minutes = ny.dt.hour * 60 + ny.dt.minute
+    return df.loc[ts.notna() & (minutes >= 570) & (minutes <= 960)].reset_index(drop=True)
+
+
 def _parse_time(ts: dt.datetime | str) -> dt.datetime:
     """Ensure timezone-aware UTC datetime."""
     if isinstance(ts, dt.datetime):
@@ -176,12 +191,8 @@ def fetch_intraday(
         .reset_index(drop=True)
     )
     tf_slug = _timeframe_slug(timeframe)
-    if "timestamp" in df.columns and not tf_slug.endswith("d"):
-        ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-        ny = ts.dt.tz_convert("America/New_York")
-        minutes = ny.dt.hour * 60 + ny.dt.minute
-        regular_mask = ts.notna() & (minutes >= 570) & (minutes <= 960)
-        df = df.loc[regular_mask].reset_index(drop=True)
+    if not tf_slug.endswith("d"):
+        df = keep_regular_hours(df)
 
     if save_path is None:
         slug = clean_ticker.lower()

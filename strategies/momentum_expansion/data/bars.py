@@ -24,7 +24,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from core.API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
+from core.API.Alpaca_API.market_data.fetch_intraday import fetch_intraday, keep_regular_hours
 
 from strategies.momentum_expansion.config.momentum_config import (
     BAR_CONFIG,
@@ -149,28 +149,153 @@ def fetch_with_retry(
 
     ``limit`` caps the TOTAL bars returned (alpaca-py 0.43); pass None for long ranges.
     """
+    return _with_rate_limit_retry(
+        lambda: fetch_intraday(
+            ticker=ticker,
+            start=start,
+            end=end,
+            timeframe=timeframe,
+            limit=limit,
+            adjustment=BAR_CONFIG["adjustment"],
+            feed=BAR_CONFIG.get("feed", "sip"),
+            save_path="",
+        ),
+        label=label or ticker, max_attempts=max_attempts,
+    )
+
+
+def _with_rate_limit_retry(call, *, label: str, max_attempts: int = 5):
+    """Run ``call()``; on an Alpaca rate limit back off 2, 4, 8, 16 s and retry."""
     for attempt in range(1, max_attempts + 1):
         try:
-            return fetch_intraday(
-                ticker=ticker,
-                start=start,
-                end=end,
-                timeframe=timeframe,
-                limit=limit,
-                adjustment=BAR_CONFIG["adjustment"],
-                feed=BAR_CONFIG.get("feed", "sip"),
-                save_path="",
-            )
+            return call()
         except Exception as exc:
             msg = str(exc).lower()
             rate_limited = "429" in msg or "too many requests" in msg or "rate limit" in msg
             if not (rate_limited and attempt < max_attempts):
                 raise
-            backoff = min(60.0, 2.0 ** attempt)  # 2, 4, 8, 16s …
+            backoff = min(60.0, 2.0 ** attempt)
             logger.info("[%s] rate limited (attempt %d/%d) — backing off %.0fs",
-                        label or ticker, attempt, max_attempts, backoff)
+                        label, attempt, max_attempts, backoff)
             time_mod.sleep(backoff)
     raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def _merge_into_cache(cached: pd.DataFrame | None, df_new: pd.DataFrame, out_path: Path) -> pd.DataFrame:
+    """Cached rows plus ``df_new`` (fresh row wins on a duplicate timestamp), written atomically."""
+    if cached is not None and not cached.empty:
+        merged = pd.concat([cached, df_new], axis=0, ignore_index=True)
+    else:
+        merged = df_new
+    merged = (
+        merged.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+              .sort_values("timestamp")
+              .reset_index(drop=True)
+    )
+    _atomic_to_parquet(merged, out_path, index=False)
+    return merged
+
+
+def _last_cached_ts(path: Path) -> pd.Timestamp | None:
+    if not path.exists():
+        return None
+    ts = pd.to_datetime(pd.read_parquet(path, columns=["timestamp"])["timestamp"], utc=True, errors="coerce")
+    last = ts.max()
+    return None if pd.isna(last) else last
+
+
+def _fetch_bars_multi(symbols: list[str], *, timeframe: str, start: str, end: str, client) -> pd.DataFrame:
+    """One multi-symbol Alpaca bar request (all pages), with the cache's adjustment/feed."""
+    from alpaca.data.enums import Adjustment, DataFeed
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+    length = _intraday_bar_length(timeframe)
+    if length is None:
+        raise ValueError(f"batched fetch is intraday-only, got {timeframe!r}")
+    tf = (TimeFrame(int(length / pd.Timedelta(hours=1)), TimeFrameUnit.Hour)
+          if length % pd.Timedelta(hours=1) == pd.Timedelta(0)
+          else TimeFrame(int(length / pd.Timedelta(minutes=1)), TimeFrameUnit.Minute))
+    feed = DataFeed.SIP if str(BAR_CONFIG.get("feed", "sip")).upper() == "SIP" else DataFeed.IEX
+    frame = client.get_stock_bars(StockBarsRequest(
+        symbol_or_symbols=symbols, timeframe=tf,
+        start=_as_utc_timestamp(start).to_pydatetime(), end=_as_utc_timestamp(end).to_pydatetime(),
+        adjustment=Adjustment(BAR_CONFIG["adjustment"]), feed=feed, limit=None,
+    )).df
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    return keep_regular_hours(frame.reset_index())
+
+
+def fetch_intraday_batched(
+    tickers: Iterable[str],
+    *,
+    kind: str = "1h",
+    end: str,
+    batch_size: int = 500,
+    client=None,
+) -> dict[str, str]:
+    """Incremental intraday catch-up for many tickers with multi-symbol requests.
+
+    Same cache semantics as ``fetch_one``: re-fetch the last cached NY session, never
+    cache a bar still forming at ``end``, fresh row wins on a duplicate. Tickers sharing
+    a fetch start go into one request: ~3 s per 1,000 symbols, against ~800 s for the
+    eligible universe one request at a time at the Alpaca rate limit (2026-11-22), which
+    made the 14:25 ET 4H passes read bars mid-catch-up.
+
+    Returns ``{ticker: status}``: ``fresh`` | ``updated`` | ``no_new_bars`` |
+    ``uncached`` (no cache: fetch its full history with ``fetch_one``) | ``error``
+    (batch request failed: retry with ``fetch_one``).
+    """
+    timeframe = {"1h": BAR_CONFIG["primary_timeframe"],
+                 "context": BAR_CONFIG["context_timeframe"]}[kind]
+    end_ts = _as_utc_timestamp(end)
+    status: dict[str, str] = {}
+    groups: dict[str, list[str]] = {}
+    for t in dict.fromkeys(str(x).strip().upper() for x in tickers if str(x).strip()):
+        try:
+            last = _last_cached_ts(_path_for(t, kind))
+        except Exception as exc:  # noqa: BLE001 - unreadable cache: let fetch_one decide
+            logger.warning("[%s/%s] cache unreadable for batched fetch: %s", t, kind, exc)
+            status[t] = "error"
+            continue
+        if last is None:
+            status[t] = "uncached"
+        elif last + pd.Timedelta(minutes=1) >= end_ts:
+            status[t] = "fresh"
+        else:
+            groups.setdefault(_next_fetch_start(kind=kind, start=TRAIN_START, last_ts=last), []).append(t)
+
+    if groups and client is None:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from core.API.Alpaca_API.core.config import AlpacaConfig
+
+        cfg = AlpacaConfig.from_env()
+        client = StockHistoricalDataClient(api_key=cfg.key_id, secret_key=cfg.secret_key)
+
+    for start, members in sorted(groups.items()):
+        for i in range(0, len(members), batch_size):
+            batch = members[i:i + batch_size]
+            try:
+                frame = _with_rate_limit_retry(
+                    lambda: _fetch_bars_multi(batch, timeframe=timeframe, start=start, end=end, client=client),
+                    label=f"batch {kind} {start} [{batch[0]}..{batch[-1]}]")
+            except Exception as exc:  # noqa: BLE001 - reported per ticker, caller falls back
+                logger.warning("[batch %s] %d symbols from %s failed: %s", kind, len(batch), start, exc)
+                status.update({t: "error" for t in batch})
+                continue
+            frame = _complete_bars_only(frame, timeframe=timeframe, end=end_ts)
+            by_symbol = ({str(s).upper(): g for s, g in frame.groupby("symbol")}
+                         if frame is not None and not frame.empty else {})
+            for t in batch:
+                new = by_symbol.get(t)
+                if new is None or new.empty:
+                    status[t] = "no_new_bars"
+                    continue
+                path = _path_for(t, kind)
+                _merge_into_cache(_load_cached(path), new.reset_index(drop=True), path)
+                status[t] = "updated"
+    return status
 
 def fetch_one(
     *,
@@ -224,16 +349,7 @@ def fetch_one(
         logger.info("[%s/%s] no bars returned and no cache", ticker, kind)
         return None
 
-    if cached is not None and not cached.empty:
-        merged = pd.concat([cached, df_new], axis=0, ignore_index=True)
-    else:
-        merged = df_new
-    merged = (
-        merged.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
-              .sort_values("timestamp")
-              .reset_index(drop=True)
-    )
-    _atomic_to_parquet(merged, out_path, index=False)
+    merged = _merge_into_cache(cached, df_new, out_path)
     logger.info("[%s/%s] cached %d bars -> %s", ticker, kind, len(merged), out_path)
     return merged
 
