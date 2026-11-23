@@ -82,7 +82,10 @@ def test_resample_1h_to_4h_shape():
 def test_daily_incremental_fetch_overlaps_last_cached_bar():
     last_ts = pd.Timestamp("2026-07-02T04:00:00Z")
     assert _next_fetch_start(kind="1d", start="2020-01-01", last_ts=last_ts) == "2026-06-27T04:00:00Z"
-    assert _next_fetch_start(kind="1h", start="2020-01-01", last_ts=last_ts) == "2026-07-02T04:01:00Z"
+    # Intraday re-fetches the last cached bar's whole NY session (here 2026-07-02 00:00 EDT).
+    assert _next_fetch_start(kind="1h", start="2020-01-01", last_ts=last_ts) == "2026-07-02T04:00:00Z"
+    assert _next_fetch_start(kind="1h", start="2020-01-01",
+                             last_ts=pd.Timestamp("2026-11-20T20:00:00Z")) == "2026-11-20T05:00:00Z"
 
 
 def test_entry_rules_no_trigger_on_flat_data():

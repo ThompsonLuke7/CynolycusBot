@@ -82,20 +82,95 @@ def _as_utc_timestamp(value: str | pd.Timestamp) -> pd.Timestamp:
     return ts.tz_convert("UTC")
 
 
+def _ny_session_start(ts: pd.Timestamp) -> pd.Timestamp:
+    """UTC instant of NY midnight on ``ts``'s New York calendar date."""
+    return _as_utc_timestamp(ts).tz_convert("America/New_York").normalize().tz_convert("UTC")
+
+
+def _intraday_bar_length(timeframe: str) -> pd.Timedelta | None:
+    """Bar length for an Alpaca intraday timeframe string ("1Hour", "15Min"); None otherwise."""
+    tf = str(timeframe).strip().lower()
+    for suffix, unit in (("hour", "h"), ("min", "min")):
+        if tf.endswith(suffix) and tf[: -len(suffix)].isdigit():
+            return pd.Timedelta(int(tf[: -len(suffix)]), unit=unit)
+    return None
+
+
 def _next_fetch_start(*, kind: str, start: str, last_ts: pd.Timestamp) -> str:
-    """Return the incremental fetch start, overlapping daily bars for revision."""
+    """Return the incremental fetch start; every kind re-fetches an overlap for revision.
+
+    Daily bars overlap 5 days. Intraday bars re-fetch the whole NY session of the last
+    cached bar: before 2026-11-22 the intraday catch-ups cached the still-forming hour and
+    resumed at ``last + 1 min``, so a partial bar was never revised (13:00-15:00 ET hours
+    partial on ~75% of sessions since 2026-07). The overlap heals the latest session.
+    """
     last = _as_utc_timestamp(last_ts)
     start_bound = _as_utc_timestamp(start)
     if kind == "1d":
         fetch_ts = max(start_bound, last - _DAILY_REFRESH_OVERLAP)
     else:
-        fetch_ts = last + pd.Timedelta(minutes=1)
+        fetch_ts = max(start_bound, _ny_session_start(last))
     return fetch_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _complete_bars_only(df: pd.DataFrame, *, timeframe: str, end: str | pd.Timestamp) -> pd.DataFrame:
+    """Drop intraday bars whose interval has not closed by ``end``.
+
+    Alpaca returns the bucket containing ``end`` aggregated from whatever has printed so
+    far; caching it would freeze a partial bar. Daily timeframes pass through unchanged.
+    """
+    bar_len = _intraday_bar_length(timeframe)
+    if bar_len is None or df is None or df.empty or "timestamp" not in df.columns:
+        return df
+    ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    return df.loc[(ts + bar_len) <= _as_utc_timestamp(end)].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
 # Single-ticker fetcher (incremental, resumable)
 # ---------------------------------------------------------------------------
+
+def fetch_with_retry(
+    *,
+    ticker: str,
+    timeframe: str,
+    start: str,
+    end: str,
+    label: str = "",
+    max_attempts: int = 5,
+    limit: int | None = 10_000,
+) -> pd.DataFrame:
+    """One Alpaca bar pull with the cache's adjustment/feed, retrying on rate limits.
+
+    Retry with exponential backoff on rate limits (Alpaca 429 / "too many
+    requests"). A whole-universe catch-up otherwise gives up on hundreds of
+    tickers under load and silently leaves their bars stale. Any other error,
+    or a rate limit on the last attempt, is raised to the caller.
+
+    ``limit`` caps the TOTAL bars returned (alpaca-py 0.43); pass None for long ranges.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fetch_intraday(
+                ticker=ticker,
+                start=start,
+                end=end,
+                timeframe=timeframe,
+                limit=limit,
+                adjustment=BAR_CONFIG["adjustment"],
+                feed=BAR_CONFIG.get("feed", "sip"),
+                save_path="",
+            )
+        except Exception as exc:
+            msg = str(exc).lower()
+            rate_limited = "429" in msg or "too many requests" in msg or "rate limit" in msg
+            if not (rate_limited and attempt < max_attempts):
+                raise
+            backoff = min(60.0, 2.0 ** attempt)  # 2, 4, 8, 16s …
+            logger.info("[%s] rate limited (attempt %d/%d) — backing off %.0fs",
+                        label or ticker, attempt, max_attempts, backoff)
+            time_mod.sleep(backoff)
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 def fetch_one(
     *,
@@ -106,8 +181,9 @@ def fetch_one(
     force: bool = False,
 ) -> pd.DataFrame | None:
     """
-    Fetch a single ticker at the given timeframe. If a cache exists, only
-    new bars are appended (incremental).
+    Fetch a single ticker at the given timeframe. If a cache exists, only a
+    revision overlap plus new bars are fetched (incremental; see
+    ``_next_fetch_start``). Intraday bars still forming at ``end`` are never cached.
 
     kind: "1h", "1d", or "context" (1H bars for context tickers).
     Returns the on-disk DataFrame after merge, or None on failure.
@@ -126,42 +202,22 @@ def fetch_one(
         last_ts = cached["timestamp"].max()
         if pd.notna(last_ts):
             fetch_start = _next_fetch_start(kind=kind, start=start, last_ts=last_ts)
-            if pd.Timestamp(fetch_start) >= pd.Timestamp(end, tz="UTC"):
+            # Intraday starts overlap the last session, so "fresh" means no bar can
+            # follow the cached one before `end`, not "the fetch start is past end".
+            probe = (fetch_start if kind == "1d"
+                     else _as_utc_timestamp(last_ts) + pd.Timedelta(minutes=1))
+            if _as_utc_timestamp(probe) >= _as_utc_timestamp(end):
                 logger.info("[%s/%s] cache fresh (last=%s) — skip", ticker, kind, last_ts)
                 return cached
 
-    # Retry with exponential backoff on rate limits (Alpaca 429 / "too many
-    # requests"). A whole-universe catch-up otherwise gives up on hundreds of
-    # tickers under load and silently leaves their bars stale.
-    df_new = None
-    max_attempts = 5
-    for attempt in range(1, max_attempts + 1):
-        try:
-            df_new = fetch_intraday(
-                ticker=ticker,
-                start=fetch_start,
-                end=end,
-                timeframe=timeframe,
-                limit=10_000,
-                adjustment=BAR_CONFIG["adjustment"],
-                feed=BAR_CONFIG.get("feed", "sip"),
-                save_path="",
-            )
-            break
-        except Exception as exc:
-            msg = str(exc).lower()
-            rate_limited = (
-                "429" in msg or "too many requests" in msg or "rate limit" in msg
-            )
-            if rate_limited and attempt < max_attempts:
-                backoff = min(60.0, 2.0 ** attempt)  # 2, 4, 8, 16s …
-                logger.info("[%s/%s] rate limited (attempt %d/%d) — backing off %.0fs",
-                            ticker, kind, attempt, max_attempts, backoff)
-                time_mod.sleep(backoff)
-                continue
-            logger.warning("[%s/%s] fetch failed: %s", ticker, kind, exc)
-            return cached
+    try:
+        df_new = fetch_with_retry(ticker=ticker, timeframe=timeframe, start=fetch_start,
+                                  end=end, label=f"{ticker}/{kind}")
+    except Exception as exc:
+        logger.warning("[%s/%s] fetch failed: %s", ticker, kind, exc)
+        return cached
 
+    df_new = _complete_bars_only(df_new, timeframe=timeframe, end=end)
     if df_new is None or df_new.empty:
         if cached is not None:
             return cached
@@ -243,11 +299,16 @@ def resample_1h_to_4h(df_1h: pd.DataFrame) -> pd.DataFrame:
 def build_4h_for(ticker: str, *, force: bool = False) -> pd.DataFrame | None:
     """Resample cached 1H bars to 4H and persist.
 
-    Incremental: when a 4H cache already exists, only the tail of the 1H series
-    (from the start of the last cached 4H bar onward) is re-resampled and merged
-    back, instead of re-resampling the whole multi-year history every catch-up.
-    Re-resampling from the last bar's start correctly refreshes that bar if it
-    was still partial when last built.
+    Incremental: when a 4H cache already exists, the 1H bars from the start of the
+    NY session of the last cached 4H bar onward are re-resampled and spliced over
+    that session, instead of re-resampling the whole multi-year history.
+
+    Always re-resample that session. Either of its two bars may have been built
+    from hourly bars that were not yet cached, or were partial and have since been
+    re-fetched (``fetch_one`` overlaps the last session). The old early return
+    (``last_4h >= last_1h - 4h``) skipped exactly the case where hours were still
+    arriving, so a 4H bar built after its first hour kept only that hour: the
+    2026-11-20 14:32 ET momentum pass scored a 10:00 bar with ~30% of its volume.
     """
     out_path = _path_for(ticker, "4h")
     src = _path_for(ticker, "1h")
@@ -256,28 +317,29 @@ def build_4h_for(ticker: str, *, force: bool = False) -> pd.DataFrame | None:
             cached_4h = pd.read_parquet(out_path)
             if not src.exists() or cached_4h.empty:
                 return cached_4h
-            df_1h_head = pd.read_parquet(src, columns=["timestamp"])
-            last_1h = pd.to_datetime(df_1h_head["timestamp"], utc=True, errors="coerce").max()
             cached_4h["timestamp"] = pd.to_datetime(cached_4h["timestamp"], utc=True, errors="coerce")
-            last_4h = cached_4h["timestamp"].max()
-            if pd.notna(last_1h) and pd.notna(last_4h) and last_4h >= last_1h - pd.Timedelta(hours=4):
-                return cached_4h
-            # Incremental rebuild: resample only 1H bars at/after the last 4H bar's
-            # start, then splice over the (possibly partial) tail of the cache.
+            since = _ny_session_start(cached_4h["timestamp"].max())
             df_1h = pd.read_parquet(src)
             df_1h["timestamp"] = pd.to_datetime(df_1h["timestamp"], utc=True, errors="coerce")
-            tail_1h = df_1h[df_1h["timestamp"] >= last_4h]
-            tail_4h = resample_1h_to_4h(tail_1h)
+            tail_4h = resample_1h_to_4h(df_1h[df_1h["timestamp"] >= since])
             if tail_4h.empty:
                 return cached_4h
-            kept = cached_4h[cached_4h["timestamp"] < last_4h]
+            kept = cached_4h[cached_4h["timestamp"] < since]
             merged_4h = (
                 pd.concat([kept, tail_4h.reset_index()], axis=0, ignore_index=True)
                   .drop_duplicates(subset=["timestamp"], keep="last")
                   .sort_values("timestamp")
                   .reset_index(drop=True)
             )
-            _atomic_to_parquet(merged_4h, out_path, index=False)
+            cols = ["timestamp", "open", "high", "low", "close", "volume"]
+            unchanged = (
+                len(merged_4h) == len(cached_4h)
+                and set(cols).issubset(cached_4h.columns)
+                and merged_4h[cols].reset_index(drop=True).equals(
+                    cached_4h.sort_values("timestamp")[cols].reset_index(drop=True))
+            )
+            if not unchanged:
+                _atomic_to_parquet(merged_4h, out_path, index=False)
             return merged_4h.set_index("timestamp")
         except Exception as exc:
             logger.warning("[%s] incremental 4h rebuild failed, full rebuild: %s", ticker, exc)
