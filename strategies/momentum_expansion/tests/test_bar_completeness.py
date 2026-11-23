@@ -182,3 +182,11 @@ def test_batched_refetch_of_identical_rows_does_not_rewrite(cache):
     status = bars.fetch_intraday_batched(["AAPL"], kind="1h", end="2026-11-21T00:00:00+00:00", client=client)
     assert status == {"AAPL": "unchanged"}
     assert (cache / "AAPL_1h.parquet").stat().st_mtime_ns == before
+
+
+def test_batched_fetch_never_requests_delisted_symbols(cache, monkeypatch):
+    _hourly("2026-11-20", HOURS_UTC[:2], FULL_VOL[:2], "DEAD").to_parquet(cache / "DEAD_1h.parquet", index=False)
+    monkeypatch.setattr(bars, "is_delisted", lambda t: t == "DEAD")
+    client = _FakeBarsClient({"DEAD": _hourly("2026-11-20", HOURS_UTC[:5], FULL_VOL[:5], "DEAD")})
+    status = bars.fetch_intraday_batched(["DEAD"], kind="1h", end="2026-11-21T00:00:00+00:00", client=client)
+    assert status == {"DEAD": "delisted"} and client.requests == []

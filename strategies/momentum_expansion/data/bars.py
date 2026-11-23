@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from core.API.Alpaca_API.market_data.fetch_intraday import fetch_intraday, keep_regular_hours
+from core.shared_universe.delisted import is_delisted
 
 from strategies.momentum_expansion.config.momentum_config import (
     BAR_CONFIG,
@@ -254,7 +255,7 @@ def fetch_intraday_batched(
     eligible universe one request at a time at the Alpaca rate limit (2026-11-22), which
     made the 14:25 ET 4H passes read bars mid-catch-up.
 
-    Returns ``{ticker: status}``: ``fresh`` | ``updated`` | ``unchanged`` | ``no_new_bars`` |
+    Returns ``{ticker: status}``: ``fresh`` | ``updated`` | ``unchanged`` | ``no_new_bars`` | ``delisted`` |
     ``uncached`` (no cache: fetch its full history with ``fetch_one``) | ``error``
     (batch request failed: retry with ``fetch_one``).
     """
@@ -264,6 +265,11 @@ def fetch_intraday_batched(
     status: dict[str, str] = {}
     groups: dict[str, list[str]] = {}
     for t in dict.fromkeys(str(x).strip().upper() for x in tickers if str(x).strip()):
+        if is_delisted(t):
+            # fetch_one (via fetch_intraday) never requests these; Alpaca can still serve
+            # bars for a reused symbol, which must not land in the dead name's cache.
+            status[t] = "delisted"
+            continue
         try:
             last = _last_cached_ts(_path_for(t, kind))
         except Exception as exc:  # noqa: BLE001 - unreadable cache: let fetch_one decide
