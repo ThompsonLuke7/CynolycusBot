@@ -171,7 +171,7 @@ var C={green:css.getPropertyValue('--green').trim()||'#91ddc5',red:css.getProper
 var OVC={ema_10:'#f2d06b',ema_20:'#8fb6ee',ema_50:'#c39ef0',ema_100:'#e59a6b',high_20:'#7fc9b6',low_20:'#7fc9b6',
   high_60:'#a8b0bd',low_60:'#a8b0bd',high_52w:'#d9888f',low_52w:'#d9888f',session_vwap:'#f2d06b',ema_9:'#8fb6ee',
   opening_range_high:'#7fc9b6',opening_range_low:'#7fc9b6',prior_day_high:'#d9888f',prior_day_low:'#d9888f',
-  micro_swing_high:'#a8b0bd',micro_swing_low:'#a8b0bd',_levels:'#e7c38c',_implied:'#ffffff',_engine:'#a8c4e0'};
+  micro_swing_high:'#a8b0bd',micro_swing_low:'#a8b0bd',_levels:'#e7c38c',_implied:'#ffffff',_engine:'#a8c4e0',_dealer:'#f08bd0'};
 var STEP_KEYS=/^(high_|low_|opening_range_|prior_day_|micro_swing_)/;
 var LEVEL_COL={stop:C.red,u_stop:C.red,invalidation:C.red,take_profit:C.green,pivot:C.violet,entry:C.yellow,u_entry:C.yellow};
 var ETF=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
@@ -399,7 +399,11 @@ function drawChart(){
   var cx=x(cur);g.strokeStyle=C.text;g.globalAlpha=.55;g.beginPath();g.moveTo(cx,T);g.lineTo(cx,T+H);g.stroke();g.globalAlpha=1;
   var lines=active.map(function(lv){return {price:lv.price,label:lv.label,col:LEVEL_COL[lv.key]||(String(lv.key).indexOf('target')===0?C.green:C.yellow),dash:[6,4],w:1.3}});
   var eng=S.ov.has('_engine')?engineAt(cur):null;
-  if(eng)eng.levels.forEach(function(l){lines.push({price:l.price,label:l.type.replace(/\+/g,' + ').slice(0,60)+' · '+num(l.strength,2),col:OVC._engine,dash:[2,3],w:1,faint:true})});
+  if(eng)eng.levels.forEach(function(l){var dealer=/options_/.test(l.type),zone=l.high!=null&&l.high>l.low;
+    // a cluster that merged several levels is a zone: shade its span, not just its average
+    if(zone){var y1=y(l.high),y2=y(l.low),zx=Math.max(cx,L);g.fillStyle=dealer?OVC._dealer:OVC._engine;g.globalAlpha=.12;g.fillRect(zx,y1,L+W-zx,Math.max(1,y2-y1));g.globalAlpha=1}
+    lines.push({price:l.price,label:l.type.replace(/\+/g,' + ').slice(0,60)+(zone?' ['+num(l.low,2)+'–'+num(l.high,2)+']':'')+' · '+num(l.strength,2),
+      col:dealer?OVC._dealer:OVC._engine,dash:[2,3],w:dealer?1.4:1,faint:!dealer})});
   drawRightLevels(g,lines,cx,L,W,T,H,y,cv.w);
   g.fillStyle=C.muted;var span=S.v1-S.v0,ticks=Math.min(6,span+1);
   for(k=0;k<ticks;k++){var ti=S.v0+Math.round(k*span/Math.max(1,ticks-1));var lab=et(bars[ti].t).replace(' ET','');var tw=g.measureText(lab).width;
@@ -614,16 +618,42 @@ function renderFeatures(){
   renderTechnicals()}
 function renderEngine(){
   var x=engineAt(S.cur),st=S.eng.get(S.cur);$('featHead').textContent='What the engine saw at this bar';
-  $('featTitle').textContent='compute_features + StructuralLevelProvider on its history up to '+et(S.R.bars[S.cur].t);
+  $('featTitle').textContent=x&&x.source==='recorded'?'recorded by the engine when it decided ('+x.kind+': '+x.action+')'
+    :'rebuilt: compute_features + StructuralLevelProvider on its history up to '+et(S.R.bars[S.cur].t)+' (no recorded decision on this bar)';
   if(!x){$('runCtx').innerHTML='';$('featHeadRow').innerHTML='';$('featRows').innerHTML='<tr><td class=empty>'+(st&&st.error?esc(st.error):'computing the engine view…')+'</td></tr>';return}
   var near=x.levels.slice().sort(function(a,b){return Math.abs(a.distance_atr)-Math.abs(b.distance_atr)});
   $('runCtx').innerHTML='<div><div class=sub>clustered level map (what the detectors compare price against)</div><table><thead><tr><th class=num>price</th><th class=num>ATRs from spot</th><th class=num>strength</th><th>side</th><th>merged level types</th></tr></thead><tbody>'
-    +near.map(function(l){return '<tr><td class=num>'+num(l.price,2)+'</td><td class="num '+(l.distance_atr>0?'good':'bad')+'">'+num(l.distance_atr,2)+'</td><td class=num>'+num(l.strength,2)+'</td><td class=muted>'+esc(l.directionality)+'</td><td style="white-space:normal">'+esc((l.sources||[l.type]).join(' + '))+'</td></tr>'}).join('')
+    +near.map(function(l){return '<tr><td class=num>'+num(l.price,2)+'</td><td class="num '+(l.distance_atr>0?'good':'bad')+'">'+num(l.distance_atr,2)+'</td><td class=num>'+num(l.strength,2)+'</td><td class=muted>'+esc(l.directionality)+'</td><td style="white-space:normal'+(/options_/.test(l.type)?';color:'+OVC._dealer:'')+'">'+esc((l.sources||[l.type]).join(' + '))
+      +(l.high!=null&&l.high>l.low?' <span class=muted>[zone '+num(l.low,2)+'–'+num(l.high,2)+', '+l.size+' levels]</span>':'')+'</td></tr>'}).join('')
     +'</tbody></table><div class=muted style="font-size:11px;margin-top:4px">Levels closer than '+num(x.cluster_threshold,3)+' to their neighbour chain into one cluster at the strength-weighted average. '+esc(x.note)+' Prior session used: '+esc(x.prior_session||'none archived')+'.</div></div>'
     +'<div><div class=sub>spot</div>'+kv([['close',num(x.spot,2)],['ATR (14 x 1m)',num(x.features.atr,3)],['session VWAP',num(x.features.session_vwap,2)],['EMA 9 / 20',num(x.features.ema_9,2)+' / '+num(x.features.ema_20,2)],
-      ['opening range',num(x.features.opening_range_low,2)+' – '+num(x.features.opening_range_high,2)],['prior day range',num(x.features.prior_day_low,2)+' – '+num(x.features.prior_day_high,2)]])+'</div>';
+      ['opening range',num(x.features.opening_range_low,2)+' – '+num(x.features.opening_range_high,2)],['prior day range',num(x.features.prior_day_low,2)+' – '+num(x.features.prior_day_high,2)],
+      x.intraday_regime?['intraday regime',esc(x.intraday_regime.regime)]:null,x.instrument_class?['instrument',esc(x.instrument_class)]:null])+'</div>'
+    +contextBlocks(x);
   var q=$('fq').value.trim().toLowerCase();$('featHeadRow').innerHTML='<tr><th>engine feature</th><th class=num>value</th></tr>';
   $('featRows').innerHTML=Object.keys(x.features).filter(function(k){return !q||k.indexOf(q)>=0}).map(function(k){return '<tr><td>'+esc(k)+'</td><td class=num>'+num(x.features[k])+'</td></tr>'}).join('')}
+function contextBlocks(x){
+  var o=x.options||{},st=o.structure||{},d=x.daily_regime||{},nw=x.news||{},out=[];
+  var age=st.snapshot_age_seconds!=null?(st.snapshot_age_seconds<120?num(st.snapshot_age_seconds,0)+' s':num(st.snapshot_age_seconds/3600,1)+' h'):'—';
+  out.push('<div><div class=sub>dealer positioning <span class=muted>('+esc(o.source||'none')+')</span></div>'+(o.source&&o.source!=='none'?kv([
+    ['snapshot age',age],['gamma regime',esc(o.gamma_regime)+' · total GEX '+num(o.local_gamma_exposure)],
+    ['call wall / put wall',num(o.call_wall,2)+' / '+num(o.put_wall,2)],['gamma flip',num(o.gamma_flip,2)],
+    ['vacuum above / below (air gap)',num(st.air_gap_above_score,2)+' / '+num(st.air_gap_below_score,2)],
+    ['vega wall',num(st.vega_wall,2)+' <span class=muted>('+num(st.next_vega_wall_below,2)+' / '+num(st.next_vega_wall_above,2)+')</span>'],
+    (st.per_dte_levels&&st.per_dte_levels.D0)?['0DTE walls / flip',num(st.per_dte_levels.D0.call_wall,2)+' / '+num(st.per_dte_levels.D0.put_wall,2)+' · '+num(st.per_dte_levels.D0.gamma_flip,2)]:null,
+    (o.warnings||[]).length?['warnings','<span class=bad>'+esc(o.warnings.join(', '))+'</span>']:null])
+    :'<div class=muted style="font-size:12px">'+esc((o.warnings||[]).join(', ')||'no dealer snapshot for this symbol')+'</div>')+'</div>');
+  out.push('<div><div class=sub>market regime <span class=muted>(daily table as of '+esc(d.date||'—')+')</span></div>'+(d.date?kv([
+    ['bearish votes',(d.bear_votes_of_5!=null?d.bear_votes_of_5+' of 5':'—')+(d.qqq_below_sma50!=null?' · QQQ '+(d.qqq_below_sma50?'below':'above')+' its 50-day':'')],
+    ['SPY trend',num(d.spy_trend_state,0)],['breadth z',num(d.breadth_z,2)],['risk appetite z',num(d.risk_appetite_z,2)],
+    ['credit z',num(d.credit_risk_z,2)],['SPY 20d vol z',num(d.spy_rv20_z,2)]]):'<div class=muted style="font-size:12px">no regime row before this bar</div>')+'</div>');
+  var lt=nw.latest,mk=x.market_news||[];
+  out.push('<div><div class=sub>news <span class=muted>(scored before this bar closed)</span></div>'
+    +(lt?'<div class=list><b>'+esc(lt.ticker)+'</b> '+num(lt.score,2)+' <span class=muted>'+esc(lt.subtype)+' · '+num(lt.age_min,0)+' min ago</span><br>'+esc(lt.headline)+'</div>'
+        +'<div class=muted style="font-size:11px">'+nw.count+' item(s) in 24 h, scores '+num(nw.min_score,2)+'–'+num(nw.max_score,2)+'</div>'
+      :'<div class=muted style="font-size:12px">no news on this ticker in 24 h</div>')
+    +'<div class=sub>index movers</div><div class=list>'+(mk.length?mk.map(function(n){return '<b>'+esc(n.ticker)+'</b> '+num(n.score,2)+' <span class=muted>'+num(n.age_min,0)+' min</span> '+esc(n.headline)}).join('<br>'):'<span class=muted>none in 18 h</span>')+'</div></div>');
+  return out.join('')}
 function renderTechnicals(){
   var R=S.R,ov=R.overlays||{},meta=ov.meta||{},c=S.cur,a=(R.coverage||{}).archive||{};
   $('featHead').textContent='Indicators at this bar';$('featTitle').textContent='recomputed from the bars, as of '+et(R.bars[c].t);

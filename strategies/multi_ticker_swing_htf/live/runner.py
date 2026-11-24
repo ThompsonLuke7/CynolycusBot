@@ -33,7 +33,6 @@ import argparse
 import json
 import logging
 import math
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -73,7 +72,7 @@ from core.live_4h_exec import (
     submit_pending_exit_orders,
     submit_pending_open_entries,
 )
-from core.live_readiness import filter_entry_orders_for_readiness, required_4h_bar_start
+from core.live_readiness import filter_entry_orders_for_readiness
 from signals.meta_context.meta_ranker.options_exec import (
     equity_order_tif,
     route_option_or_shares,
@@ -131,30 +130,12 @@ def _latest_full_bar(df: pd.DataFrame) -> pd.Timestamp:
 
 def wait_for_matrix_bar(matrix: str | Path, *, timeout_s: float, poll_s: float = 20.0,
                         now_fn=None, sleep_fn=None) -> tuple[bool, str]:
-    """Poll the matrix until its latest full bar reaches the newest completed 4H bar.
+    """Poll the matrix until its latest full bar reaches the newest completed 4H bar
+    (``core.live_readiness.wait_for_matrix_bar`` with this runner's full-bar rule)."""
+    from core.live_readiness import wait_for_matrix_bar as _wait
 
-    Reads only the timestamp column (~0.6 s on the live matrix). The required bar is
-    re-evaluated on each poll (``core.live_readiness.required_4h_bar_start``).
-    """
-    import pyarrow.parquet as pq
-
-    now_fn = now_fn or (lambda: datetime.now(timezone.utc))
-    sleep_fn = sleep_fn or time.sleep
-    start = now_fn()
-    while True:
-        required = pd.Timestamp(required_4h_bar_start(now_fn()))
-        try:
-            ts = pd.to_datetime(pq.read_table(matrix, columns=["timestamp"]).column("timestamp").to_pandas(),
-                                utc=True)
-            latest = _latest_full_bar(pd.DataFrame({"timestamp": ts}))
-        except Exception as exc:  # noqa: BLE001 - the main read reports a broken matrix
-            return False, f"matrix unreadable while waiting: {exc}"
-        waited = (now_fn() - start).total_seconds()
-        if latest >= required:
-            return True, f"latest full bar {latest} covers required {required} (waited {waited:.0f}s)"
-        if waited >= timeout_s:
-            return False, f"latest full bar {latest} < required {required} after {waited:.0f}s"
-        sleep_fn(min(poll_s, max(0.0, timeout_s - waited)))
+    return _wait(matrix, timeout_s=timeout_s, latest_full_bar=_latest_full_bar, poll_s=poll_s,
+                 now_fn=now_fn, sleep_fn=sleep_fn)
 
 
 def _signal_audits(top: pd.DataFrame, *, bar: pd.Timestamp) -> dict[str, dict]:

@@ -32,6 +32,13 @@ say "nothing to report" instead.
    file named for a *previous* date. Always filter by in-file timestamps, not
    by filename, and confirm the actual process start time before assuming which
    log file(s) hold today's data.
+   **Then run the integrity audit** (read-only, ~5 s):
+   `.venv/bin/python -m scripts.integrity_audit --date YYYY-MM-DD`. Every
+   WARN/FAIL goes into Operations And Bugs, with the defect class from
+   `docs/INTEGRITY_CHECKLIST.md`. It finds the slow-burn logic defects
+   (setups stuck for weeks, undated reference prices, clocks counting the wrong
+   interval, fallbacks buying far-OTM contracts, silent refresher failures) that
+   P&L and per-module activity counts do not show.
 3. **Gather each module's data from source, not from memory of past reports.**
    Paths shift as the system evolves — verify each one exists before relying on
    it. As of the last time this skill was refreshed:
@@ -101,3 +108,12 @@ token falling into an interactive re-login prompt that nothing in an
 unattended run can answer, silently blocking every downstream job that needed
 it. Report these even if they didn't affect P&L — operational health is part
 of this review.
+
+Also flag **logic defects that look like quiet days**: a module that traded
+less than the tape offered (check whether its setups were stuck, its revival
+fired, or its reference data was stale before calling it selective), a refusal
+reason that repeats on hundreds of bars for one setup, a reference value with
+no as-of date, or a fallback path taken repeatedly. When the user points at a
+chart and asks "why didn't we trade this?", replay that session through the
+module's own engine before answering (see `docs/INTEGRITY_CHECKLIST.md`,
+question 9).

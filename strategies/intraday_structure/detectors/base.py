@@ -25,6 +25,8 @@ class DetectionContext:
     market: MarketContext
     options: OptionsContext
     config: IntradayStructureConfig
+    #: Every level before clustering; recorded with the decision, read by no detector.
+    raw_levels: Sequence[StructuralLevel] = ()
 
 
 @dataclass(frozen=True)

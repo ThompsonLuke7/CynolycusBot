@@ -12,9 +12,9 @@ import pandas as pd
 
 from strategies.momentum_expansion.config.momentum_config import SECTOR_ETFS
 
-from signals.market_regime.config import CREDIT_DENOMINATOR
+from signals.market_regime.config import CREDIT_DENOMINATOR, TREND_SYMBOL
 
-REQUIRED_TICKERS = sorted({"SPY", "IWM", "HYG", "LQD", "RSP", CREDIT_DENOMINATOR} | set(SECTOR_ETFS))
+REQUIRED_TICKERS = sorted({"SPY", "IWM", "HYG", "LQD", "RSP", TREND_SYMBOL, CREDIT_DENOMINATOR} | set(SECTOR_ETFS))
 
 
 def utc_midnight_et(date) -> pd.Timestamp:

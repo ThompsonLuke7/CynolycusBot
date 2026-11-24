@@ -40,6 +40,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
+from core.calendar import close_relative_time, is_market_open_now
 from core.live_4h_exec import (
     append_closed_trade,
     closed_trade_record,
@@ -49,6 +50,7 @@ from core.live_4h_exec import (
     reconcile_pending_exit,
     submit_option_exit_with_ladder,
 )
+from core.broker_fill_reconciliation import account_label_for_client, register_order_ownership
 from strategies.intraday_structure.config import ExecutionPolicy
 from strategies.intraday_structure.models import SetupRecord
 
@@ -292,6 +294,13 @@ class IntradayOptionExecutor:
     def _has_capacity(self, setup_id: str) -> tuple[bool, str]:
         if setup_id in self._open:
             return False, "already_open"
+        # One position per ticker and direction. Detectors are independent, so
+        # two of them (breakout + VWAP reclaim, say) often confirm on the same
+        # bar; buying both doubles one bet, frequently in the same contract.
+        # Setup ids are "TICKER:direction:detector".
+        ticker_direction = setup_id.rsplit(":", 1)[0] + ":"
+        if any(open_id.startswith(ticker_direction) for open_id in self._open):
+            return False, "ticker_direction_already_open"
         if len(self._open) >= int(self._policy.max_concurrent_positions):
             return False, "max_concurrent_positions"
         if self._opened_this_session >= int(self._policy.max_new_positions_per_session):
@@ -327,6 +336,12 @@ class IntradayOptionExecutor:
 
     def _on_entry(self, setup, *, spot, atr, bar_time=None):
         setup_id = str(setup.setup_id)
+        if not is_market_open_now(self._now()):
+            # The IEX stream keeps printing thin post-market bars after the close
+            # (13:00 on a half-day). An option order then cannot fill this session.
+            setup.metadata["execution_skip"] = "market_closed"
+            logger.info("intraday execution: skipped %s (market closed)", setup_id)
+            return None
         stale = self._stale_bar_age(bar_time)
         if stale is not None:
             setup.metadata["execution_skip"] = "stale_bar"
@@ -365,7 +380,15 @@ class IntradayOptionExecutor:
             return None
 
         occ = str(contract.get("occ") or contract.get("symbol"))
-        premium = _f(contract.get("limit")) or _f(contract.get("mid")) or _f(contract.get("ask"))
+        strike = _f(contract.get("strike"))
+        if strike:
+            # Logged for every pick, filled or not, so the integrity audit can
+            # see far-from-the-money selections even when they never fill: on
+            # 2026-11-23 the 9.5%-OTM QQQ put left no trace outside this log.
+            otm = (strike / price - 1.0) if cp == "call" else (1.0 - strike / price)
+            logger.info("intraday execution: selected %s for %s (spot %.2f, strike %.2f, otm %+.1f%%, pool %s)",
+                        occ, setup_id, price, strike, 100.0 * otm, contract.get("selection_pool", "unknown"))
+        premium =_f(contract.get("limit")) or _f(contract.get("mid")) or _f(contract.get("ask"))
         if premium is None or premium <= 0:
             setup.metadata["execution_skip"] = "no_priced_contract"
             return None
@@ -388,6 +411,18 @@ class IntradayOptionExecutor:
             symbol=occ, qty=qty, side="buy", order_type="limit",
             time_in_force="day", limit_price=premium,
         )
+        # Exits register through track_exit_submission; entries did not, so every
+        # intraday buy was an unattributed broker fill (5 of 7 on 2026-11-24).
+        try:
+            from core.live_4h_exec import DEFAULT_LEDGER_ROOT
+
+            register_order_ownership(
+                order_id=(resp or {}).get("id"), module=LEDGER_MODULE, symbol=occ, side="buy",
+                qty=float(qty), route="option", reason="entry",
+                root=self._ledger_root or DEFAULT_LEDGER_ROOT,
+                account_label=account_label_for_client(self._client))
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not break the entry
+            logger.warning("intraday entry %s not registered: %s", occ, exc)
         # A submit response is not a fill. Reading `filled_avg_price` straight
         # off it left every position in this book recording
         # `entry_filled_qty: 0.0` even when the buy had filled seconds later, so
@@ -567,7 +602,8 @@ class IntradayOptionExecutor:
         if self._dte_cutoff is None:
             return int(self._policy.min_dte)
         now_et = now_et or self._now().astimezone(ET)
-        return 0 if now_et.timetz().replace(tzinfo=None) < self._dte_cutoff else 1
+        cutoff = close_relative_time(self._dte_cutoff, now_et.date())
+        return 0 if now_et.timetz().replace(tzinfo=None) < cutoff else 1
 
     # -- same-day expiry flatten ---------------------------------------------
 
@@ -594,7 +630,7 @@ class IntradayOptionExecutor:
         if self._expiring_exit is None:
             return []
         now_et = now_et or self._now().astimezone(ET)
-        if now_et.timetz().replace(tzinfo=None) < self._expiring_exit:
+        if now_et.timetz().replace(tzinfo=None) < close_relative_time(self._expiring_exit, now_et.date()):
             return []
         today = now_et.date()
         closed = []

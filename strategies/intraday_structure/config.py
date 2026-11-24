@@ -55,7 +55,14 @@ class TargetPolicy:
     partial_profit_fraction: float = 0.50
     move_stop_to_entry_after_target: bool = True
     trailing_structure_atr: float = 0.35
+    #: Longest an UNENTERED thesis may wait, counted from detection (the setup
+    #: leaving WATCHING), not from when its empty shell was created.
     max_setup_bars: int = 180
+    #: A confirmation refused because its stop would sit more than this many
+    #: times ``max_invalidation_atr`` away closes the setup, so a fresh one can
+    #: form at today's levels. Below it the refusal is marginal and the setup
+    #: keeps waiting. QQQ's short sat ARMED 11-12..11-23 at 26-185 ATR.
+    abandon_pivot_risk_multiple: float = 2.0
     time_exit_bars: int = 120
     close_at_session_end: bool = True
 
@@ -220,6 +227,9 @@ class OpeningDiscoveryPolicy:
     min_volume_pace: float = 1.25
     min_relative_strength_pct: float = 0.004
     max_candidates_per_session: int = 60
+    #: Prior-session close and ADV come from here, never from the universe
+    #: file's undated ``px`` (see candidate_sources.load_opening_baselines).
+    daily_bars_dir: str = "Data/shared/bars/1d"
 
 
 @dataclass(frozen=True)
@@ -266,6 +276,29 @@ class EvidencePolicy:
     enabled: bool = False
     event_path: str = "Data/inference/intraday_structure/decision_events.jsonl"
     outcome_horizons_minutes: tuple[int, ...] = (5, 15, 30, 60)
+
+
+@dataclass(frozen=True)
+class DecisionContextPolicy:
+    """Per-decision context record (strategies/intraday_structure/decision_context.py)."""
+
+    enabled: bool = True
+    root: str = "Data/inference/intraday_structure/decision_context"
+    #: A declined confirmation is recorded when its reason changes, else every N bars.
+    refusal_every_bars: int = 15
+    #: Raw (pre-cluster) levels on every managed bar too; off keeps those rows small.
+    raw_levels_on_manage: bool = False
+    regime_path: str = "Data/shared/market_regime/daily_regime.parquet"
+    news_path: str = "signals/news/data/processed/live_catalyst_records.parquet"
+    universe_path: str = "Data/shared/universe/shared_universe.csv"
+    daily_bars_dir: str = "Data/shared/bars/1d"
+    news_lookback_hours: float = 24.0
+    news_refresh_seconds: float = 60.0
+    market_news_lookback_hours: float = 18.0
+    #: The names whose news moves the indices (11-23: an NVDA headline gapped QQQ +7%).
+    market_news_tickers: tuple[str, ...] = (
+        "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "AVGO", "TSLA", "AMD", "NFLX", "SPY", "QQQ",
+    )
 
 
 @dataclass(frozen=True)
@@ -316,6 +349,7 @@ class IntradayStructureConfig:
     candidate_capacity: CandidateCapacityPolicy = field(default_factory=CandidateCapacityPolicy)
     evidence: EvidencePolicy = field(default_factory=EvidencePolicy)
     execution: ExecutionPolicy = field(default_factory=ExecutionPolicy)
+    decision_context: DecisionContextPolicy = field(default_factory=DecisionContextPolicy)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -344,6 +378,10 @@ class IntradayStructureConfig:
             evidence["outcome_horizons_minutes"] = tuple(evidence["outcome_horizons_minutes"])
         known["evidence"] = EvidencePolicy(**evidence)
         known["execution"] = ExecutionPolicy(**known.get("execution", {}))
+        context = dict(known.get("decision_context", {}))
+        if "market_news_tickers" in context:
+            context["market_news_tickers"] = tuple(context["market_news_tickers"])
+        known["decision_context"] = DecisionContextPolicy(**context)
         for key in ("alert_states", "context_symbols", "manual_watchlist", "supported_tickers"):
             if key in known:
                 known[key] = tuple(known[key])

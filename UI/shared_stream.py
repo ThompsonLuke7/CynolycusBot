@@ -189,12 +189,19 @@ class SharedBarStream:
                 self._record_drop(q)
 
     @staticmethod
-    def _is_rth_watch_window() -> bool:
-        now = datetime.now(ZoneInfo("America/New_York"))
-        if now.weekday() >= 5:
+    def _is_rth_watch_window(now: datetime | None = None) -> bool:
+        """Trading days, 09:35 to five minutes after that day's close (13:00 on a
+        half-day). Outside it a quiet feed is expected, not a dead stream: holding
+        the 16:05 window on a half-day would restart the stream every few minutes
+        all afternoon."""
+        from core.calendar import is_trading_day, session_close_time
+
+        now = now or datetime.now(ZoneInfo("America/New_York"))
+        if not is_trading_day(now.date()):
             return False
+        close = session_close_time(now.date())
         minutes = now.hour * 60 + now.minute
-        return (9 * 60 + 35) <= minutes <= (16 * 60 + 5)
+        return (9 * 60 + 35) <= minutes <= (close.hour * 60 + close.minute + 5)
 
     def _start_watchdog(self) -> None:
         if self._watchdog_thread and self._watchdog_thread.is_alive():

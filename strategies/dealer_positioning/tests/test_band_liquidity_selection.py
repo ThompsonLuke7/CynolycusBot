@@ -263,3 +263,30 @@ def test_screening_falls_back_to_the_listing_check_without_a_spot(monkeypatch):
     )
     assert list(top["symbol"]) == ["AAA"]
     assert skipped == []
+
+
+def test_missing_greeks_cannot_reach_a_far_otm_open_interest_pile(monkeypatch):
+    """2026-11-23: 0DTE QQQ, spot 652, no greeks -> the old fallback bought the 590 put.
+
+    The deepest open interest in the ±10% band sat 62 points out of the money.
+    Without greeks the choice must stay among the strikes nearest spot.
+    """
+    strikes = [590.0, 600.0, 640.0, 650.0, 651.0, 652.0, 653.0, 654.0, 660.0, 700.0]
+    oi = {590.0: (90_000, 20_000), 600.0: (50_000, 9_000), 700.0: (60_000, 9_000)}
+    oi.update({s: (3_000, 900) for s in (640.0, 650.0, 651.0, 652.0, 653.0, 654.0, 660.0)})
+
+    def _fake(_underlying, *, expiry, strike, option_type="C"):  # noqa: ARG001
+        hit = oi.get(round(float(strike), 4))
+        return ContractLiquidity(open_interest=hit[0], volume=hit[1], source="test") if hit else None
+
+    monkeypatch.setattr(live_ranked_options, "contract_liquidity", _fake)
+    client = _BandClient(strikes=strikes)
+    client.get_option_snapshots = lambda *a, **k: {  # type: ignore[method-assign]
+        _occ(s): {"latestQuote": {"bp": 2.10, "ap": 2.20}} for s in strikes
+    }
+    order, reason = _select_atm_option(
+        client, "CGNX", 652.13, option_type="call", min_dte=1, max_dte=21, now_et=_now_et(),
+    )
+    assert reason == "ok"
+    assert abs(order["strike"] - 652.13) <= 2.0
+    assert order["selection_pool"] == "nearest_strikes_no_greeks"

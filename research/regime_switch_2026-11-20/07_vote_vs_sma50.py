@@ -3,7 +3,7 @@
 The question (user, 2026-11-22): "i dont want to just use 50ma i want to use a various collection,
 maybe even an ML model for market regime".
 
-Pre-registered 2026-11-22 ~03:00 ET, before any result was computed. No new thresholds: the vote is
+Pre-registered 2026-11-22 ~02:28 ET, before any result was computed. No new thresholds: the vote is
 the one fixed in 05_intraday_structure_by_regime.py (7 bearish votes; BEAR = votes >= 4). The
 stricter BEAR5 (votes >= 5) is the only added variant and is reported whatever it shows.
 

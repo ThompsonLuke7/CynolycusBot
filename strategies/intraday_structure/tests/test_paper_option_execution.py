@@ -147,6 +147,21 @@ def test_the_same_setup_is_not_bought_twice(tmp_path):
     assert len(client.orders) == 1
 
 
+def test_two_detectors_cannot_double_one_ticker_direction(tmp_path):
+    """Breakout and VWAP reclaim confirmed QQQ short on the same bar in the 11-23 replay."""
+    client = _Client()
+    ex = _executor(tmp_path, client)
+    ex.on_entry(_setup("QQQ:short:breakout_continuation", "QQQ", "short"))
+    second = _setup("QQQ:short:vwap_reclaim_continuation", "QQQ", "short")
+    ex.on_entry(second)
+    assert len(client.orders) == 1
+    assert second.metadata["execution_skip"] == "ticker_direction_already_open"
+    # The other side, and other tickers, are separate bets.
+    ex.on_entry(_setup("QQQ:long:breakout_continuation", "QQQ", "long"))
+    ex.on_entry(_setup("QQQM:short:breakout_continuation", "QQQM", "short"))
+    assert len(client.orders) == 3
+
+
 # --- exit -----------------------------------------------------------------------
 
 def test_exit_sells_and_writes_the_shared_ledger_row(tmp_path):
@@ -799,3 +814,52 @@ def test_an_unreadable_account_does_not_block_entries(tmp_path):
 
     assert ex.on_entry(_setup()) is not None
     assert len(client.orders) == 1
+
+
+def _half_day_contract(_c, ticker, price, *, option_type, min_dte, max_dte, allow_0dte=False, **k):
+    return ({"occ": f"{ticker}261127C00010000", "limit": 1.0, "mid": 0.98,
+             "strike": 10.0, "expiry": "2026-11-27"}, "ok")
+
+
+def _half_day(hh, mm):
+    from zoneinfo import ZoneInfo
+    return datetime(2026, 11, 27, hh, mm, tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
+
+
+def test_half_day_moves_the_0dte_cutoff_three_hours_earlier(tmp_path):
+    """2026-11-27 closes at 13:00, so the 13:00 cutoff becomes 10:00."""
+    assert _executor_at(tmp_path, _half_day(9, 55))._min_dte_now() == 0
+    assert _executor_at(tmp_path, _half_day(10, 0))._min_dte_now() == 1
+
+
+def _real_market_gate(monkeypatch):
+    import core.calendar
+    import strategies.intraday_structure.execution as execution
+
+    monkeypatch.setattr(execution, "is_market_open_now", core.calendar.is_market_open_now)
+
+
+def test_entries_are_refused_after_the_half_day_close(tmp_path, monkeypatch):
+    _real_market_gate(monkeypatch)
+    client = _Client()
+    ex = IntradayOptionExecutor(client, ExecutionPolicy(enabled=True, state_path=str(tmp_path / "o.json")),
+                                select_option_fn=_half_day_contract, ledger_root=str(tmp_path),
+                                now_fn=lambda: _half_day(13, 5))
+    setup = _setup()
+    assert ex.on_entry(setup, spot=10.0) is None
+    assert setup.metadata["execution_skip"] == "market_closed"
+    assert client.orders == []
+
+
+def test_half_day_flattens_same_day_expiries_before_the_13h_close(tmp_path, monkeypatch):
+    _real_market_gate(monkeypatch)
+    client = _Client()
+    ex = IntradayOptionExecutor(client, ExecutionPolicy(enabled=True, state_path=str(tmp_path / "o.json")),
+                                select_option_fn=_half_day_contract, ledger_root=str(tmp_path),
+                                now_fn=lambda: _half_day(9, 45))
+    ex.on_entry(_setup(), spot=10.0)
+    ex._now = lambda: _half_day(12, 39)
+    assert ex.maybe_flatten_expiring() == []
+    ex._now = lambda: _half_day(12, 40)            # 15:40 -> 12:40
+    closed = ex.maybe_flatten_expiring()
+    assert len(closed) == 1 and closed[0]["exit_reason"] == "expiring_flatten"

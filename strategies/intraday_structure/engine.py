@@ -11,9 +11,11 @@ from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from zoneinfo import ZoneInfo
 
 from strategies.intraday_structure.config import IntradayStructureConfig
 from strategies.intraday_structure.dealer_plate import evaluate_dealer_plate
+from strategies.intraday_structure.decision_context import BAR_SPAN, build_decision_context
 from strategies.intraday_structure.detectors import (
     BreakoutContinuationDetector,
     ExhaustionDetector,
@@ -53,11 +55,19 @@ from strategies.intraday_structure.regime import (
 from strategies.intraday_structure.regime import RegimeAssessment
 from strategies.intraday_structure.state_store import JsonStateStore, append_jsonl
 from strategies.intraday_structure.target_manager import (
-    TargetPlan, TargetPlanOutcome, build_target_plan, evaluate_extension, manage_running_setup,
+    INVALIDATION_TOO_WIDE, TargetPlan, TargetPlanOutcome, build_target_plan, evaluate_extension,
+    manage_running_setup,
 )
 
 
 logger = logging.getLogger(__name__)
+ET = ZoneInfo("America/New_York")
+#: States that carry a thesis (pivot, invalidation) but no position yet. None
+#: of them may outlive their session or wait forever: setup ids are unique per
+#: ticker/direction/detector, so a stuck one blocks that whole slot. On
+#: 2026-11-23, 102 such setups from earlier sessions (some ARMED since July)
+#: held 53 tickers' slots, QQQ's short among them.
+PRE_ENTRY_STATES = frozenset({SetupState.SETUP_DETECTED, SetupState.ARMED, SetupState.CONFIRMED})
 # See IntradayStructureEngine._persist_transitions.
 TRANSITION_PERSIST_SECONDS = 30.0
 
@@ -101,6 +111,7 @@ class IntradayStructureEngine:
         execution_sink: Any | None = None,
         abstention_sink: Callable[[AbstentionRecord], None] | None = None,
         candidate_event_sink: Callable[[dict], None] | None = None,
+        context_sink: Callable[[dict], None] | None = None,
         max_history_bars: int = 780,
     ) -> None:
         if not config.paper_only:
@@ -119,6 +130,9 @@ class IntradayStructureEngine:
         self.execution_sink = execution_sink
         self.abstention_sink = abstention_sink
         self.candidate_event_sink = candidate_event_sink
+        # Per-decision context records (decision_context.py). None records nothing
+        # and builds nothing, so replays and tests pay no cost for it.
+        self.context_sink = context_sink
         self.max_history_bars = max_history_bars
         self.candidates: dict[tuple[str, Direction], Candidate] = {}
         self.setups: dict[str, SetupRecord] = {}
@@ -225,8 +239,14 @@ class IntradayStructureEngine:
             metadata={**other.metadata, **base.metadata},
         )
 
-    def _ensure_setups(self, candidate: Candidate) -> bool:
+    def _ensure_setups(self, candidate: Candidate, *, now=None) -> bool:
         """Create missing setups, revive cooled-down closed ones, refresh the rest.
+
+        Called on candidate registration AND on every bar the candidate is
+        evaluated on (``now`` = that bar's time). It used to run on registration
+        only, and most candidates register once a session, so a setup that
+        closed at 09:50 stayed dark for the rest of the day: from 2026-11-02 to
+        11-23 only 264 of 4,251 RTH closes (6.2%) re-armed the same session.
 
         Returns whether any setup was created or revived, which is the only part
         the caller needs to persist for.
@@ -238,19 +258,64 @@ class IntradayStructureEngine:
             setup_id = self._setup_id(candidate, setup_type)
             existing = self.setups.get(setup_id)
             if existing is None or (existing.state == SetupState.CLOSED and self._cooldown_complete(existing)):
-                available_at = candidate.available_at or candidate.timestamp
-                self.setups[setup_id] = SetupRecord(
-                    setup_id=setup_id, ticker=candidate.ticker, setup_type=setup_type,
-                    direction=candidate.direction, candidate=candidate,
-                    created_at=available_at, updated_at=available_at,
-                    state_entered_at=available_at, confidence=float(max(0.0, min(1.0, candidate.score * 0.35))),
-                )
-                if candidate.average_dollar_volume is None:
-                    self.setups[setup_id].warnings.append("average_dollar_volume_unverified")
+                self.setups[setup_id] = self._new_setup(candidate, setup_type, now=now)
                 created = True
             elif existing.state != SetupState.CLOSED:
                 existing.candidate = candidate
         return created
+
+    def _new_setup(self, candidate: Candidate, setup_type: SetupType, *, now=None) -> SetupRecord:
+        """An empty WATCHING shell. Born at ``now`` when revived on the bar path."""
+        available_at = candidate.available_at or candidate.timestamp
+        born = max(available_at, now) if now is not None else available_at
+        setup = SetupRecord(
+            setup_id=self._setup_id(candidate, setup_type), ticker=candidate.ticker,
+            setup_type=setup_type, direction=candidate.direction, candidate=candidate,
+            created_at=born, updated_at=born, state_entered_at=born,
+            confidence=float(max(0.0, min(1.0, candidate.score * 0.35))),
+        )
+        if candidate.average_dollar_volume is None:
+            setup.warnings.append("average_dollar_volume_unverified")
+        return setup
+
+    def _reset_prior_session_setups(self, candidate: Candidate, bar: Bar) -> None:
+        """A thesis does not survive the night.
+
+        A pre-entry setup whose state began in an earlier ET session is closed;
+        a WATCHING shell from an earlier session is replaced by a fresh one, so
+        no pivot, invalidation or setup clock carries across the close. Positions
+        (RUNNING and later) are left to the end-of-day and holding-period exits.
+        """
+        session = bar.timestamp.astimezone(ET).date()
+        for setup in self._candidate_setups(candidate):
+            began = setup.state_entered_at or setup.created_at
+            if began is None or began.astimezone(ET).date() >= session:
+                continue
+            if setup.state in PRE_ENTRY_STATES:
+                setup.metadata["exit_reason"] = "carried over from a prior session"
+                self._transition(
+                    setup, SetupState.CLOSED, bar, "carried over from a prior session",
+                    ("session_reset",), phase="CLOSED",
+                )
+            elif setup.state == SetupState.WATCHING:
+                self.setups[setup.setup_id] = self._new_setup(candidate, setup.setup_type, now=bar.timestamp)
+
+    def _pre_entry_age(self, setup: SetupRecord) -> int:
+        """Bars since the setup left WATCHING. Setups from before this clock fall back to bars_alive."""
+        detected = setup.metadata.get("detected_bar_count")
+        if detected is None:
+            return int(setup.bars_alive)
+        return self._bar_counts[setup.ticker] - int(detected)
+
+    def _close_with_cooldown(self, setup: SetupRecord, bar: Bar, reason: str, evidence: str) -> None:
+        """Close a pre-entry setup and hold its slot for ``failure_cooldown_bars``.
+
+        The cooldown stops a setup whose detector keeps re-firing on the same
+        unworkable geometry from churning detect/arm/close on every bar.
+        """
+        setup.metadata["terminal_bar_count"] = self._bar_counts[setup.ticker]
+        setup.metadata["exit_reason"] = reason
+        self._transition(setup, SetupState.CLOSED, bar, reason, (evidence,), phase="CLOSED")
 
     @_synchronized
     def seed_history(self, bars: Iterable[Bar]) -> int:
@@ -465,6 +530,8 @@ class IntradayStructureEngine:
                 if setup.state not in {SetupState.CLOSED, SetupState.INVALIDATED, SetupState.EXHAUSTED}:
                     self._transition(setup, SetupState.CLOSED, bar, "price below configured minimum", ("minimum_price_failed",), phase="CLOSED")
             return
+        self._reset_prior_session_setups(candidate, bar)
+        self._ensure_setups(candidate, now=bar.timestamp)
         if len(bars) < self.config.detector.min_history_bars:
             return
         features = compute_features(
@@ -474,11 +541,17 @@ class IntradayStructureEngine:
             sector_bars=self.market_provider.bars(candidate.sector_etf or "", bar.timestamp) if candidate.sector_etf else (),
         )
         market = self.market_provider.context(candidate, bars)
-        options = self.options_provider.context(bar.symbol, bar.timestamp, bar.close)
-        levels = self.level_provider.levels(
-            bars=bars, candidate=candidate, options=options, features=features.to_dict(),
+        # As of the bar's CLOSE: the engine decides once the bar is complete, so a
+        # dealer snapshot taken during the bar was in hand. Asking as of the open
+        # rejected nearly every live snapshot (see options_context_from_gamma_levels).
+        options = self.options_provider.context(bar.symbol, bar.timestamp + BAR_SPAN, bar.close)
+        feature_values = features.to_dict()
+        raw_levels = self.level_provider.raw_levels(
+            bars=bars, candidate=candidate, options=options, features=feature_values,
         )
-        ctx = DetectionContext(bar, bars, features, levels, market, options, self.config)
+        levels = self.level_provider.cluster(raw_levels, bars=bars, features=feature_values)
+        ctx = DetectionContext(bar, bars, features, levels, market, options, self.config,
+                               raw_levels=tuple(raw_levels))
         for setup in self._candidate_setups(candidate):
             setup.bars_alive += 1
             setup.bars_in_state += 1
@@ -494,26 +567,28 @@ class IntradayStructureEngine:
                 continue
             if setup.state == SetupState.CLOSED:
                 continue
+            # A thesis that waited too long is not entered, and no longer holds
+            # its slot. The clock starts at detection: it used to be bars_alive,
+            # which also counts the hours an empty WATCHING shell sat before
+            # anything was detected, so an afternoon confirmation of a shell
+            # created pre-market was refused as "too old" (221 times from
+            # 10-27 to 11-23), while an ARMED setup was never aged at all.
+            # Refusing at CONFIRMED (rather than entering) also stops a stale
+            # setup being bought and closed on the same bar: HOOD did that on
+            # 2026-09-02 at 15:33:40 -> 15:33:42, a -$35 round trip of spread.
+            if setup.state in PRE_ENTRY_STATES and self._pre_entry_age(setup) >= self.config.target.max_setup_bars:
+                if setup.state == SetupState.CONFIRMED:
+                    self._close_with_cooldown(setup, bar, "setup too old to enter", "stale_at_entry")
+                else:
+                    self._close_with_cooldown(setup, bar, "setup went stale before confirming", "stale_pre_entry")
+                continue
             if setup.state == SetupState.CONFIRMED:
-                # A setup that took too long to confirm is not entered at all.
-                # `max_setup_bars` is a staleness limit on the *setup*, but
-                # `manage_running_setup` also reads it as a reason to close a
-                # *position*, so a setup that confirmed at or past the limit
-                # used to be bought and closed on the same bar. HOOD did that on
-                # 2026-09-02 at 15:33:40 -> 15:33:42, paying the spread both ways
-                # for a -$35 round trip it was never going to hold. Refusing the
-                # entry is the same judgement made two seconds earlier and for
-                # free.
-                if setup.bars_alive >= self.config.target.max_setup_bars:
-                    self._transition(
-                        setup, SetupState.CLOSED, bar,
-                        "setup too old to enter", ("stale_at_entry",), phase="CLOSED",
-                    )
-                    continue
                 setup.entry_price = bar.open
+                setup.metadata["entry_bar_count"] = self._bar_counts[setup.ticker]
                 setup.entry_time = bar.timestamp
                 self._submit_entry(setup, bar)
                 self._transition(setup, SetupState.RUNNING, bar, "next-bar entry delay elapsed", ("running",), phase="RUNNING")
+                self._record_context("entry", "entered", setup, ctx)
                 # Deliberately NOT managed on this bar. The engine sees bars only
                 # once they are complete, so the entry order is actually sent
                 # after this bar closed — the position does not exist during it.
@@ -526,14 +601,15 @@ class IntradayStructureEngine:
                 # honestly be judged on is the next one.
                 continue
             if setup.state == SetupState.TARGET_REACHED:
-                self._apply_decision(setup, evaluate_extension(setup, ctx), ctx)
+                decision = evaluate_extension(setup, ctx)
+                self._record_context("manage", decision.reason if decision.state else "hold", setup, ctx)
+                self._apply_decision(setup, decision, ctx)
                 continue
             if setup.state in {SetupState.RUNNING, SetupState.EXTENDED}:
                 exhaustion = self._exhaustion.evaluate(setup, ctx)
-                if exhaustion.state is not None:
-                    self._apply_decision(setup, exhaustion, ctx)
-                else:
-                    self._apply_decision(setup, manage_running_setup(setup, ctx), ctx)
+                decision = exhaustion if exhaustion.state is not None else manage_running_setup(setup, ctx)
+                self._record_context("manage", decision.reason if decision.state else "hold", setup, ctx)
+                self._apply_decision(setup, decision, ctx)
                 continue
             detector = self._detectors[setup.setup_type]
             self._apply_decision(setup, detector.evaluate(setup, ctx), ctx)
@@ -569,6 +645,12 @@ class IntradayStructureEngine:
             if plan is None:
                 self._abstain(setup, ctx, outcome.reason or "target_plan_unavailable",
                               regime, outcome=outcome)
+                if self._pivot_out_of_reach(outcome):
+                    # Price has left this thesis behind; waiting would only hold
+                    # the slot (and log a refusal on every bar) until it came back.
+                    self._close_with_cooldown(
+                        setup, ctx.bar, "pivot out of reach; a fresh setup can form", "pivot_out_of_reach",
+                    )
                 return
             setup.invalidation = plan.invalidation
             setup.metadata["initial_invalidation"] = plan.invalidation
@@ -602,6 +684,7 @@ class IntradayStructureEngine:
             if self.config.regime.veto_enabled and regime_conflicts(regime.regime, setup.direction.value):
                 self._abstain(setup, ctx, f"regime_conflict_{regime.regime.lower()}", regime, plan=plan)
                 return
+            self._record_context("confirm", "confirmed", setup, ctx, regime=regime, plan=plan)
         if next_state is not None and next_state != setup.state:
             if next_state == SetupState.CONFIRMED:
                 setup.metadata["confirmed_at"] = ctx.bar.timestamp.isoformat()
@@ -613,6 +696,14 @@ class IntradayStructureEngine:
                 setup.metadata["exit_price"] = ctx.bar.close
                 setup.metadata["exit_reason"] = decision.reason
             self._transition(setup, next_state, ctx.bar, decision.reason, decision.evidence, phase=decision.phase)
+
+    def _pivot_out_of_reach(self, outcome: TargetPlanOutcome) -> bool:
+        if outcome.reason != INVALIDATION_TOO_WIDE:
+            return False
+        risk_atr, cap = outcome.proposed_risk_atr, outcome.max_invalidation_atr
+        if risk_atr is None or not cap:
+            return False
+        return risk_atr >= self.config.target.abandon_pivot_risk_multiple * cap
 
     def _abstain(
         self, setup: SetupRecord, ctx: DetectionContext, reason: str,
@@ -627,6 +718,7 @@ class IntradayStructureEngine:
         """
         setup.warnings = list(dict.fromkeys([*setup.warnings, reason]))
         setup.metadata["no_trade_reason"] = reason
+        self._record_refusal(setup, ctx, reason, regime, plan=plan, outcome=outcome)
         if self.abstention_sink is None:
             return
         record = build_abstention_record(
@@ -649,6 +741,47 @@ class IntradayStructureEngine:
             self.abstention_sink(record)
         except Exception:
             logger.exception("intraday structure abstention write failed for %s", setup.setup_id)
+
+    def _record_context(
+        self, kind: str, action: str, setup: SetupRecord, ctx: DetectionContext, *,
+        regime: RegimeAssessment | None = None, plan: TargetPlan | None = None,
+        outcome: TargetPlanOutcome | None = None,
+    ) -> None:
+        """Hand the context of one decision to the context sink (decision_context.py)."""
+        if self.context_sink is None:
+            return
+        try:
+            if regime is None:
+                regime = classify_context(
+                    spot=ctx.bar.close, atr=ctx.features.get("atr"), features=ctx.features.to_dict(),
+                    levels=ctx.levels, policy=self.config.regime,
+                )
+            include_raw = kind != "manage" or self.config.decision_context.raw_levels_on_manage
+            self.context_sink(build_decision_context(
+                kind=kind, action=action, setup=setup, ctx=ctx, engine_version=self.config.version,
+                regime=regime, plan=plan, outcome=outcome, include_raw=include_raw,
+            ))
+        except Exception:  # noqa: BLE001 - a record must never stop a decision
+            logger.exception("intraday structure context record failed for %s", setup.setup_id)
+
+    def _record_refusal(
+        self, setup: SetupRecord, ctx: DetectionContext, reason: str, regime: RegimeAssessment, *,
+        plan: TargetPlan | None, outcome: TargetPlanOutcome | None,
+    ) -> None:
+        """Record a declined confirmation when its reason changes, else every N bars.
+
+        A stuck setup is refused on every bar (QQQ: 1,746 times); one line per
+        reason per stretch keeps the evidence without the volume.
+        """
+        if self.context_sink is None:
+            return
+        now = self._bar_counts[setup.ticker]
+        last = setup.metadata.get("context_refusal")
+        every = max(1, int(self.config.decision_context.refusal_every_bars))
+        if last and last[0] == reason and now - int(last[1]) < every:
+            return
+        setup.metadata["context_refusal"] = [reason, now]
+        self._record_context("refuse", reason, setup, ctx, regime=regime, plan=plan, outcome=outcome)
 
     def _transition(
         self, setup: SetupRecord, state: SetupState, bar: Bar, reason: str,
@@ -675,6 +808,14 @@ class IntradayStructureEngine:
             setup.spot = price
         if state in {SetupState.INVALIDATED, SetupState.EXHAUSTED}:
             setup.metadata["terminal_bar_count"] = self._bar_counts[bar.symbol]
+        if previous == SetupState.WATCHING and state not in TERMINAL_STATES:
+            # Starts the pre-entry clock (see _pre_entry_age). The setup's own
+            # ticker, not bar.symbol: the two differ on the expiry sweep.
+            setup.metadata["detected_bar_count"] = self._bar_counts[setup.ticker]
+        if state in TERMINAL_STATES and setup.metadata.get("entry_bar_count") is not None:
+            setup.metadata.setdefault(
+                "bars_since_entry", self._bar_counts[setup.ticker] - int(setup.metadata["entry_bar_count"]),
+            )
         transition = StateTransition(
             setup_id=setup.setup_id, ticker=setup.ticker, setup_type=setup.setup_type.value,
             timestamp=bar.timestamp, from_state=previous, to_state=state,

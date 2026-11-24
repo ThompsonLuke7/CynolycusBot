@@ -192,6 +192,14 @@ State plainly which stages failed. A partial refresh is a normal outcome and the
 user needs to know which feeds are stale going into the week — do not smooth it
 over.
 
+Then run the integrity audit for the last session
+(`.venv/bin/python -m scripts.integrity_audit --date <last session>`) and report
+its WARN/FAILs. After the refresh, `universe_px_freshness` and
+`bars_1d_freshness` must PASS: Monday's opening gaps are measured from Friday's
+1d bar. A FAIL in `intraday_carried_setups` means setups from before that session
+survived it, i.e. the per-session reset is not running. See
+`docs/INTEGRITY_CHECKLIST.md`.
+
 ### 7. Append a `LIVING_SUMMARY.md` entry
 
 Standard convention: `{YYYY-MM-DD HH:MM ET} {agent} {area}` + up to 3 lines —

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import queue
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -30,10 +30,33 @@ from strategies.intraday_structure.runner import IntradayStructureRunner
 
 
 OPEN = datetime(2026, 8, 27, 13, 30, tzinfo=timezone.utc)
+PRIOR_SESSION = date(2026, 8, 26)
 
 
 def _universe(path, rows) -> None:
+    """Write the universe, plus a 1d bar cache whose last bar is the prior session.
+
+    Opening discovery takes its prior close and ADV from the bar cache; the
+    universe's own px/ADV columns are kept in these rows only because the
+    catalyst feed still reads the ADV.
+    """
     pd.DataFrame(rows).to_csv(path, index=False)
+    bars = path.parent / "bars_1d"
+    bars.mkdir(exist_ok=True)
+    for row in rows:
+        _daily_bars(bars, row["ticker"], close=row["px"], adv=row["avg_dollar_volume_20d"])
+
+
+def _daily_bars(root, ticker, *, close, adv, last_day=PRIOR_SESSION, days=25) -> None:
+    stamps = pd.bdate_range(end=pd.Timestamp(last_day), periods=days).tz_localize("America/New_York")
+    pd.DataFrame({
+        "timestamp": stamps.tz_convert("UTC"), "open": close, "high": close, "low": close,
+        "close": float(close), "volume": float(adv) / float(close),
+    }).to_parquet(root / f"{ticker}.parquet", index=False)
+
+
+def _bars_dir(universe) -> str:
+    return str(universe.parent / "bars_1d")
 
 
 def test_opening_feed_promotes_a_gap_volume_leader_with_separate_clocks(tmp_path) -> None:
@@ -43,7 +66,7 @@ def test_opening_feed_promotes_a_gap_volume_leader_with_separate_clocks(tmp_path
         {"ticker": "SPY", "is_eligible": True, "px": 500.0, "avg_dollar_volume_20d": 1_000_000_000},
     ])
     feed = OpeningMomentumCandidateFeed(OpeningDiscoveryPolicy(
-        universe_path=str(universe), top_n=10, min_volume_pace=1.0,
+        universe_path=str(universe), top_n=10, min_volume_pace=1.0, daily_bars_dir=_bars_dir(universe),
     ))
     observed = OPEN + timedelta(minutes=15)  # delayed feed: do not hide this clock
     got = feed.observe(Bar("CRM", OPEN, 105.0, 106.0, 104.8, 105.5, 20_000), observed_at=observed)
@@ -65,7 +88,7 @@ def test_opening_feed_promotes_a_non_gap_acceleration_leader(tmp_path) -> None:
     ])
     feed = OpeningMomentumCandidateFeed(OpeningDiscoveryPolicy(
         universe_path=str(universe), top_n=10, min_volume_pace=0.5,
-        min_session_range_pct=0.005, min_relative_strength_pct=0.001,
+        min_session_range_pct=0.005, min_relative_strength_pct=0.001, daily_bars_dir=_bars_dir(universe),
     ))
     closes = [9.98, 10.01, 10.04, 10.10]
     got = []
@@ -85,7 +108,7 @@ def test_promoted_candidate_can_be_warmed_with_only_pre_signal_bars(tmp_path) ->
         {"ticker": "CRM", "is_eligible": True, "px": 100.0, "avg_dollar_volume_20d": 10_000_000},
     ])
     feed = OpeningMomentumCandidateFeed(OpeningDiscoveryPolicy(
-        universe_path=str(universe), top_n=10, min_volume_pace=0.5,
+        universe_path=str(universe), top_n=10, min_volume_pace=0.5, daily_bars_dir=_bars_dir(universe),
     ))
     for minute in range(19):
         assert feed.observe(Bar(
@@ -104,6 +127,42 @@ def test_promoted_candidate_can_be_warmed_with_only_pre_signal_bars(tmp_path) ->
     assert engine.register_candidate(candidate)
     engine.on_bar(signal_bar)
     assert len(engine.histories["CRM"]) == 20
+
+
+def test_opening_gap_is_measured_from_the_prior_session_close_not_the_universe_px(tmp_path) -> None:
+    """2026-11-23: px 742.60 vs a real 608.45 close made QQQ's +7% gap read as -11.7%."""
+    universe = tmp_path / "universe.csv"
+    _universe(universe, [{"ticker": "QQQ", "is_eligible": True, "px": 608.45, "avg_dollar_volume_20d": 3e10}])
+    pd.DataFrame([{"ticker": "QQQ", "is_eligible": True, "px": 742.60, "avg_dollar_volume_20d": 1.0}]).to_csv(
+        universe, index=False)  # the stale, undated universe column
+    feed = OpeningMomentumCandidateFeed(OpeningDiscoveryPolicy(
+        universe_path=str(universe), top_n=10, min_volume_pace=0.0, daily_bars_dir=_bars_dir(universe),
+    ))
+    got = feed.observe(Bar("QQQ", OPEN, 651.0, 652.0, 650.0, 651.5, 5_000_000), observed_at=OPEN)
+    assert got and got[0].direction == Direction.LONG
+    assert got[0].metadata["prior_close"] == 608.45
+    assert got[0].metadata["prior_close_date"] == "2026-08-26"
+    assert abs(got[0].metadata["gap_pct"] - (651.0 / 608.45 - 1)) < 1e-9
+
+
+def test_a_name_whose_daily_cache_is_behind_is_skipped_not_mismeasured(tmp_path) -> None:
+    universe = tmp_path / "universe.csv"
+    _universe(universe, [
+        {"ticker": "CRM", "is_eligible": True, "px": 100.0, "avg_dollar_volume_20d": 10_000_000},
+        {"ticker": "LAG", "is_eligible": True, "px": 50.0, "avg_dollar_volume_20d": 90_000_000},
+    ])
+    _daily_bars(universe.parent / "bars_1d", "LAG", close=50.0, adv=90_000_000, last_day=date(2026, 8, 25))
+    feed = OpeningMomentumCandidateFeed(OpeningDiscoveryPolicy(
+        universe_path=str(universe), top_n=10, min_volume_pace=1.0, daily_bars_dir=_bars_dir(universe),
+    ))
+    assert feed.observe(Bar("LAG", OPEN, 55.0, 56.0, 54.8, 55.5, 2_000_000), observed_at=OPEN) == []
+    assert feed.baseline_skips == {"stale_daily_bars": 1}
+    assert "LAG" in feed.symbols(), "a stale cache must not shrink the stream subscription"
+    # The catch-up lands mid-morning: the retry picks it up without a restart.
+    _daily_bars(universe.parent / "bars_1d", "LAG", close=50.0, adv=90_000_000)
+    feed._next_baseline_retry = 0.0
+    got = feed.observe(Bar("LAG", OPEN + timedelta(minutes=1), 55.0, 56.0, 54.8, 55.5, 2_000_000), observed_at=OPEN)
+    assert got and got[0].metadata["prior_close"] == 50.0
 
 
 def test_catalyst_feed_requires_material_relevant_non_recap_news(tmp_path) -> None:

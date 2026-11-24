@@ -14,6 +14,7 @@ def _df(tickers, eligible=True):
 
 def test_every_build_writes_a_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(uni, "PENDING_TICKERS_CSV", tmp_path / "missing.csv")
+    monkeypatch.setattr(uni, "DAILY_BARS_DIR", tmp_path / "no_bars")  # keep the test off the real cache
     out_path = tmp_path / "shared_universe.csv"
     built = uni.build_shared_universe(out_path=out_path)
     snaps = list((tmp_path / "snapshots").glob("shared_universe_*.csv.gz"))
@@ -51,3 +52,22 @@ def test_eligible_only_filters(tmp_path):
     assert list(uni.load_universe_as_of("2026-09-11", snapshot_dir=tmp_path)["ticker"]) == ["IN"]
     assert len(uni.load_universe_as_of("2026-09-11", snapshot_dir=tmp_path,
                                        eligible_only=False)) == 2
+
+
+def test_px_and_adv_are_refreshed_from_the_bar_cache_and_dated(tmp_path):
+    """px came from a legacy filter frozen at 2026-06-01 with no date (QQQ 742.60 vs 608.45)."""
+    bars = tmp_path / "bars"
+    bars.mkdir()
+    stamps = pd.bdate_range(end="2026-11-20", periods=25).tz_localize("America/New_York").tz_convert("UTC")
+    pd.DataFrame({"timestamp": stamps, "close": 608.45, "volume": 1_000_000.0}).to_parquet(bars / "QQQ.parquet")
+    legacy = pd.DataFrame({"ticker": ["QQQ", "NOBARS"], "px": [742.60, 12.0],
+                           "avg_dollar_volume_20d": [1.0, 2.0], "px_as_of": ["2026-06-01", "2026-06-01"]})
+    out = uni._refresh_price_liquidity(legacy, bars_dir=bars).set_index("ticker")
+    assert out.loc["QQQ", "px"] == 608.45
+    assert out.loc["QQQ", "avg_dollar_volume_20d"] == 608.45 * 1_000_000
+    assert out.loc["QQQ", "px_as_of"] == "2026-11-20"
+    assert out.loc["QQQ", "px_source"] == "bars_1d"
+    # No bars: the legacy number stays, but it says what it is and how old.
+    assert out.loc["NOBARS", "px"] == 12.0
+    assert out.loc["NOBARS", "px_source"] == "legacy_theme_filter"
+    assert out.loc["NOBARS", "px_as_of"] == "2026-06-01"

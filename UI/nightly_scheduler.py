@@ -40,13 +40,41 @@ def next_run_at(
     minute: int,
     *,
     weekdays_only: bool = True,
+    close_relative: bool = False,
+    trading_days_only: bool = False,
 ) -> dt.datetime:
     """Next datetime >= now landing on ``hour:minute``.
 
     When ``weekdays_only`` is set, rolls forward past Saturday/Sunday so the job
     only fires on (US) trading weekdays. ``now`` must be timezone-aware; the
     result carries the same tzinfo.
+
+    ``close_relative`` is for near-close jobs (``hour:minute`` is ET): on a
+    13:00 half-day the slot moves to the same distance before that close
+    (15:15 -> 12:15), so the job still runs while the market is open. A slot
+    anchored to the close needs a session, so with ``weekdays_only`` it also
+    skips full-day market holidays.
+
+    ``trading_days_only`` skips full-day market holidays as well as weekends,
+    for jobs that trade or score a new 4H bar. On a holiday such a job would
+    re-score the previous session's bar (ageing every position one phantom bar)
+    and send its orders to a closed market.
     """
+    if close_relative or trading_days_only:
+        from core.calendar import close_relative_time, is_trading_day
+
+        skip_holidays = trading_days_only or weekdays_only
+        day = now.date()
+        for _ in range(14):
+            if not skip_holidays or is_trading_day(day):
+                slot = dt.time(hour, minute)
+                if close_relative:
+                    slot = close_relative_time(slot, day)
+                target = dt.datetime.combine(day, slot, tzinfo=now.tzinfo)
+                if target > now:
+                    return target
+            day += dt.timedelta(days=1)
+        raise RuntimeError("next_run_at: no slot found within 14 days")
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += dt.timedelta(days=1)
@@ -78,6 +106,8 @@ class NightlyScheduler(threading.Thread):
         minute: int,
         tz: str = DEFAULT_TZ,
         weekdays_only: bool = True,
+        close_relative: bool = False,
+        trading_days_only: bool = False,
         stop_event: threading.Event | None = None,
         name: str = "nightly-scheduler",
         poll_seconds: float = 30.0,
@@ -89,6 +119,8 @@ class NightlyScheduler(threading.Thread):
         self._tz = _tz(tz)
         self._tz_name = tz
         self._weekdays_only = weekdays_only
+        self._close_relative = close_relative
+        self._trading_days_only = trading_days_only
         self._stop_evt = stop_event or threading.Event()
         self._poll = poll_seconds
         self._last_run_date: dt.date | None = None
@@ -97,7 +129,11 @@ class NightlyScheduler(threading.Thread):
         return dt.datetime.now(self._tz)
 
     def run(self) -> None:  # noqa: D401 - thread entry
-        nxt = next_run_at(self._now(), self._hour, self._minute, weekdays_only=self._weekdays_only)
+        nxt = next_run_at(
+            self._now(), self._hour, self._minute,
+            weekdays_only=self._weekdays_only, close_relative=self._close_relative,
+            trading_days_only=self._trading_days_only,
+        )
         logger.info(
             "Nightly scheduler armed: next run %s (%s), weekdays_only=%s",
             nxt.isoformat(timespec="minutes"),
@@ -111,7 +147,11 @@ class NightlyScheduler(threading.Thread):
                 if self._last_run_date != now.date():
                     self._last_run_date = now.date()
                     self._fire()
-                nxt = next_run_at(self._now(), self._hour, self._minute, weekdays_only=self._weekdays_only)
+                nxt = next_run_at(
+                    self._now(), self._hour, self._minute,
+                    weekdays_only=self._weekdays_only, close_relative=self._close_relative,
+                    trading_days_only=self._trading_days_only,
+                )
                 logger.info("Nightly scheduler: next run %s (%s)", nxt.isoformat(timespec="minutes"), self._tz_name)
                 continue
             remaining = (nxt - now).total_seconds()

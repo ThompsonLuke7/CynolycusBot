@@ -8,7 +8,7 @@ This needs no backtest. The module ran live (paper) from 2026-08-27 and logged e
 confirmed, long and short, with the engine's own entry/exit. Those rows were written in real time,
 before anyone knew how the selloff would go, so nothing here is fit to the outcome.
 
-Pre-registered 2026-11-22 ~02:40 ET, before any split below was computed.
+Pre-registered 2026-11-22 ~02:25 ET, before any split below was computed.
 
 Data
   A. Data/inference/intraday_structure/closed_setups.jsonl: 3,114 confirmed setups, 678 tickers,

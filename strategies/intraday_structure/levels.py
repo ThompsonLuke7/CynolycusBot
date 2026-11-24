@@ -39,6 +39,20 @@ class StructuralLevelProvider:
     ) -> list[StructuralLevel]:
         if not bars:
             return []
+        raw = self.raw_levels(bars=bars, candidate=candidate, options=options, features=features)
+        return self.cluster(raw, bars=bars, features=features)
+
+    def raw_levels(
+        self,
+        *,
+        bars: Sequence[Bar],
+        candidate: Candidate,
+        options: OptionsContext,
+        features: dict[str, float],
+    ) -> list[StructuralLevel]:
+        """Every level from every source, before clustering (what the decision record keeps)."""
+        if not bars:
+            return []
         current = bars[-1]
         atr = max(float(features.get("atr", 0.0)), current.close * 1e-6)
         raw: list[StructuralLevel] = []
@@ -48,6 +62,14 @@ class StructuralLevelProvider:
         raw.extend(self._round_numbers(current.close, atr))
         raw.extend(options.levels)
         raw.extend(_candidate_levels(candidate))
+        return raw
+
+    def cluster(self, raw: Sequence[StructuralLevel], *, bars: Sequence[Bar],
+                features: dict[str, float]) -> list[StructuralLevel]:
+        if not bars:
+            return []
+        current = bars[-1]
+        atr = max(float(features.get("atr", 0.0)), current.close * 1e-6)
         return cluster_levels(
             raw, spot=current.close, atr=atr,
             atr_threshold=self.policy.cluster_atr,
@@ -194,7 +216,10 @@ def cluster_levels(
             break_status=_strongest_status([x.break_status for x in group], ("broken", "testing", "unbroken")),
             hold_status=_strongest_status([x.hold_status for x in group], ("held", "testing", "untested")),
             distance_from_spot=(price - spot) / spot,
-            metadata={"sources": types, "cluster_size": len(group)},
+            # The zone the cluster spans. A chain-linked cluster can be several
+            # ATR wide (SPY 11-05: 2.3 ATR), which its single price hides.
+            metadata={"sources": types, "cluster_size": len(group),
+                      "low": float(min(x.price for x in group)), "high": float(max(x.price for x in group))},
         ))
     return out
 

@@ -10,7 +10,7 @@ import pandas as pd
 from signals.news.config import (
     CBOE_OPTIONS_SUMMARY_PATH,
     EARNINGS_CALENDAR_PATH,
-    ECONOMIC_CALENDAR_PATH,
+    ECONOMIC_CALENDAR_TV_PATH,
     FINRA_SHORT_VOLUME_PATH,
     NASDAQ_SHORT_INTEREST_PATH,
     NEWS_FEATURE_MATRIX_PATH,
@@ -269,6 +269,9 @@ def main() -> int:
                 if not prior.empty and not summary_df.empty:
                     summary_df = pd.concat([prior, summary_df], ignore_index=True)
                     summary_df = summary_df.drop_duplicates(["ticker", "snapshot_date"], keep="last")
+                elif summary_df.empty:
+                    # An empty run must not overwrite the snapshot history.
+                    summary_df = prior
             except Exception:
                 pass
         summary_df.to_parquet(summary_path, index=False)
@@ -329,7 +332,9 @@ def main() -> int:
     elif args.stage == "economic-calendar":
         from signals.news.sources import fetch_economic_calendar
 
-        out_path = Path(args.output) if args.output else ECONOMIC_CALENDAR_PATH
+        # Never the deterministic calendar's file (config.ECONOMIC_CALENDAR_PATH): the two
+        # schemas do not merge (its rows have no event_date and were deduplicated away).
+        out_path = Path(args.output) if args.output else ECONOMIC_CALENDAR_TV_PATH
         out_path.parent.mkdir(parents=True, exist_ok=True)
         df = fetch_economic_calendar(start=args.start, end=args.end)
         if out_path.exists():

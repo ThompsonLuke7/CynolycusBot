@@ -6,7 +6,7 @@ It monitors candidates from the existing 30-minute swing audit, 4-hour Momentum/
 
 ## Measurement
 
-Three append-only artifacts under `Data/inference/intraday_structure/`:
+Append-only artifacts under `Data/inference/intraday_structure/`:
 
 | File | What it is |
 |---|---|
@@ -14,6 +14,7 @@ Three append-only artifacts under `Data/inference/intraday_structure/`:
 | `abstentions.jsonl` | One row per confirmation the engine **declined**, with the specific reason and the numbers behind it. |
 | `decision_events.jsonl` | One ordered paper funnel: catalyst filtering, candidate registration/capacity eviction, setup transitions/abstentions/closes, and candidate-level 5/15/30/60-minute MFE/MAE even when no setup confirms. These are event-time model outcomes, not fills. |
 | `premarket_plan.json` | The pre-open plan: trigger, invalidation, full target ladder, and an AVOID list with reasons. |
+| `decision_context/<YYYYMMDD>.jsonl` | From 2026-11-24: one row per decision (`confirm`, `refuse` throttled to a new reason or every 15 bars, `entry`, and every managed bar of an open position). It holds everything the engine had at that moment: the 44 tape features, the clustered level map with each zone's span, the raw pre-cluster levels, the dealer snapshot (walls, flip, magnets, GEX regime, air-gap vacuum scores, vega walls, 0DTE/1DTE levels, snapshot age), market context, the intraday regime label, the daily market-regime row and the QQQ-vs-50-day vote, ticker and index-mover news, and the instrument class. Everything is as of `decided_at` (the bar's close). Written by `decision_context.py`; read by the decision replay (`/api/engine`) and the integrity audit. Roughly 7-11 KB a row. |
 | `Data/archive/intraday_1m/bars_*.jsonl` | Every streamed 1-minute bar that arrived, with arrival time separate from event time. Forward-only; the sole input for the D2 counterfactual. Size scales with the streamed universe; each completed session gets a coverage/latency/drop manifest. Disable with `archive_bars: false`. |
 
 Before these existed the module could run for a month and still not answer "did

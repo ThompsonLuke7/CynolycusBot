@@ -248,3 +248,205 @@ ungated, which is 83rd percentile of a random gate.
   in every regime.
 - **The module was dark on 12 of the 27 selloff sessions.** The 1-minute bar archive has no file for
   10-15..10-23, 11-03/04, 11-13, 11-16 or 11-19, so it missed the days the regime first flipped.
+
+### 7.3 QQQ 0DTE/1DTE puts on real 1-minute option prices (`06_qqq_0dte_puts.py`)
+
+The test bought an ATM put at 09:35 after a gap down of 0.5% or more (GAP), or at 10:00 after a red
+first half hour (RED30), and covered at +60 minutes (H60), at 15:50 (EOD), or on a +100%/−50% bracket.
+
+- **Sample:** every session from 2024-02 to 2026-11-20 (699), with 1,252 contract-days priced from
+  expired-contract trade prints.
+- **Price check:** option 1-minute returns correlate a median −0.83 with QQQ. The 37 stale
+  contract-days change no conclusion. Costs are 2% of premium per side.
+
+| QQQ 0DTE ATM put | n | H60 mean / median | EOD mean / median | EOD win |
+|---|---|---|---|---|
+| Every session (cost of owning one) | 694 | −2.5% / −25% | −7.3% / −81% | 30% |
+| GAP, not BEAR | 88 | −10.9% / −45% | −12.5% / −86% | 28% |
+| GAP, BEAR (2024-02..2026-11) | 38 | +0.6% / −24% | +20.7% / −71% (t 0.8, MDE 72%) | 42% |
+| **GAP, BEAR, last two months** | 7 | **+60% / +7%** | **+159% / +65%** | **71%** |
+| GAP, BEAR, all earlier (incl. 2025 tariff selloff) | 31 | −12.8% / −28% | −10.5% / −90% | 35% |
+
+- **The user's trade worked in this selloff.** The seven BEAR gap-down days returned:
+  - winners: 10-22 +289%, 10-30 +65%, 11-05 +632%, 11-16 +36%, 11-20 +280%;
+  - losers: 11-10 −94%, 11-12 −97%.
+  
+  QQQ itself fell 1.4% on average from 09:35 to the close on those days, against about 0% on gap-down
+  days in earlier spells.
+- **The same rule lost in the earlier bearish spells:** 2024 Jul–Sep 3 trades, all lost (−86% mean);
+  2025 Feb–May 17 trades, EOD median −90% (mean +4%). So the edge is this selloff's intraday
+  continuation, not yet a property of bear regimes. The full-sample BEAR cell is underpowered
+  (MDE 72% per trade): **not measurable here, not "no effect".**
+- **Exits decide it.** Every big winner first went more than 50% against, so the −50% stop cut 10-30,
+  11-16 and 11-20 before they ran (bracket mean −11% in the last two months). "Sell after an hour"
+  had a median of +7%; the money came from holding to the close with the premium as the only risk.
+- **The regime gate points the right way.** GAP puts outside BEAR lost (−12.5% EOD) and inside BEAR
+  were positive, but t < 1.
+- **1DTE is smoother, not better.** GAP BEAR 1DTE EOD was +0.6% over the full sample and +80% (n=6) in
+  the last two months.
+
+### 7.4 What this means and next variants
+
+1. **This selloff is different from the 2024 and 2025 ones in one measurable way.** Gap-down days kept
+   falling into the close, and that is what paid 0DTE puts. Whether the next bear tape does the same
+   cannot be known from 7 days. The honest instrument for that is a forward paper shadow with a
+   fixed read date, not more history.
+2. **The intraday structure module cannot capture it as built,** because it exits in 2–5 minutes. The
+   testable variant is: on BEAR days, index shorts (SPY/QQQ/IWM puts) that hold to the close or to
+   a structural level instead of the "extension deteriorated" exit. It can be replayed on the raw
+   1-minute QQQ bars now on disk (2024-02..2026-11).
+3. **The regime vote is a better switch than the 50-day.** It is the baseline any ML regime model has
+   to beat. The ML target that fits this evidence is the *day type*: will a gap-down day keep falling
+   into the close? It is not "bear market". 2016–2026 5-minute bars give roughly 400 such days for a
+   walk-forward classifier, with options priced from 2024.
+4. **Uptime is the cheapest fix.** The module was off on 12 of 27 selloff sessions, including
+   10-15..10-23 when the vote first flipped.
+
+## 8. Why the intraday structure module exits so fast, and whether holding would pay (2026-11-23)
+
+### 8.1 Code facts (`strategies/intraday_structure`)
+
+- **ATR is a 14-minute ATR.** `features.atr` is the mean of the last 14 *one-minute* true ranges,
+  about 0.05% of price (~$0.35 on SPY). Every stop, target and exit threshold is scaled by it.
+- **The exhaustion overlay fires on noise.** It closes a running setup when price sits 0.25 of that
+  ATR (~$0.08 on SPY) on the wrong side of session VWAP. That accounts for 1,528 of the 1,611
+  "extension conditions deteriorated" exits: median 2 minutes after entry, median MFE 0.
+- **The stop trails the last five one-minute bars** (micro swing ± 0.35 ATR). Median initial risk is
+  0.14% of price, so the modeled 12 bp round-trip costs 0.86 R before the trade starts.
+- **The module has no multi-day market regime input.** `market.py` reads SPY/QQQ/VIXY one-minute
+  bars only, and its own regime label (`regime.py`) is an intraday tape label with the veto off.
+
+### 8.2 Same entries, slower exits (`08_intraday_structure_exit_counterfactual.py`)
+
+- **Sample:** 1,851 setups with complete paths in the module's own 1-minute archive. Entry prices
+  match the archive (median gap 0.03%).
+- **Exits compared:** ACTUAL is the engine; STRUCT keeps only the initial stop; T60 is a fixed 60
+  minutes; EOD exits at 15:55. Returns are gross, on the underlying.
+
+| | n | ACTUAL | STRUCT | T60 | EOD |
+|---|---|---|---|---|---|
+| Longs, BEAR days | 645 | −0.03% | −0.13% | −0.16% | **−0.44%** |
+| Longs, not BEAR | 620 | −0.01% | −0.05% | −0.03% | +0.01% |
+| **Shorts, BEAR days** | 259 | +0.01% | +0.04% | +0.17% | **+0.27%** (t 1.1, MDE 0.71%) |
+| Shorts, not BEAR | 327 | +0.02% | +0.03% | −0.10% | −0.07% |
+| SPY/QQQ/IWM shorts, BEAR days | 19 | +0.15% | +0.74% | +0.39% | +1.03% |
+
+- **Overall, the fast exits are not what loses money.** The VWAP-loss exits kept getting worse
+  afterwards (−0.13% at exit, −0.24% by the close). These are entries with no edge being cut early.
+- **The right exit depends on regime and side.** On BEAR days, holding shorts paid and holding longs
+  cost the most; on other days, the fast exit was right for both. A single exit policy is wrong in
+  one regime or the other, which argues for a regime-aware hold policy rather than new entry rules.
+- **The initial stops are too tight to hold with.** 77% are hit before the close, and STRUCT is worse
+  than no stop in most cells. Stops need session-scale structure and volatility, not a 14-minute ATR.
+- **Limits:** one period with one selloff (15 BEAR sessions), t ≈ 1, overlapping setups counted
+  separately. This is direction, not certification.
+
+### 8.3 What the other modules already have
+
+- **Market regime table** (`signals/market_regime`): already a *feature* in Momentum (4H matrix),
+  Meta and the 30m swing context. Adding it to training again would duplicate those columns.
+- **Governed path:** `MarketRegime` and RISK_OFF/CRISIS size multipliers exist, but
+  `adapt_market_row` hard-codes UNKNOWN, so they never fire.
+- **SPY daytrader:**
+  - It has a regime-conditioned threshold policy. In a bearish regime longs need the 98th percentile
+    and shorts the 85th.
+  - That policy is **disabled** in the live session config (`regime_probability_thresholds_enabled =
+    False`, session 2026-11-22).
+  - Its options inputs are *flow* (SPY option volume and put/call ratio at 09:30) plus VIX, not dealer
+    positioning. Its `rsilg_gamma` feature is a fractal-energy price indicator, not options gamma.
+- **Intraday structure:** reads dealer levels (walls, gamma flip, magnets) from the prior night's
+  snapshot (`options_max_age_minutes` 1440). It has no intraday positioning refresh.
+
+### 8.4 Session-scale stops and a regime-aware hold (`09_session_scale_stops_regime_hold.py`, 2026-11-23)
+
+The user asked for two changes: stops scaled to session volatility and levels rather than one-minute
+noise, and a regime-aware hold ("let shorts run in a bearish state, cut longs fast"). Both rules were
+pre-registered before computing. The exits:
+
+- **SESS_k:** stop at k × ATR15, where ATR15 is the session's completed 15-minute bars before entry; k = 1.5 is primary.
+- **LEVEL:** stop beyond the pre-entry session extreme plus 0.25 × ATR15, capped at 3 × ATR15.
+- **REGIME:** BEAR-day shorts use SESS_1.5; every other setup keeps the engine's exit.
+
+Positions are held to 15:55 otherwise. ATR15 needs two completed 15-minute bars, so entries before about
+10:00 ET are excluded (690 setups). Results below are **in-sample** (through 11-20). REGIME was suggested
+by 8.2 on these same setups, so its in-sample number is descriptive only.
+
+| In-sample, gross per trade | n | ACTUAL | EOD (no stop) | SESS_1.5 | LEVEL | REGIME |
+|---|---|---|---|---|---|---|
+| Longs, BEAR | 524 | −0.01% | −0.33% | −0.30% (t −2.4) | −0.28% | = ACTUAL |
+| Longs, not BEAR | 793 | +0.01% | −0.02% | −0.06% | −0.03% | = ACTUAL |
+| Shorts, BEAR | 155 | +0.02% | −0.05% | −0.06% (stop rate 33%) | −0.07% | −0.06% |
+| Shorts, not BEAR | 349 | +0.01% | +0.05% | +0.06% | +0.06% | = ACTUAL |
+| REGIME − ACTUAL, shorts | 726 | | | | | −0.05% (t −1.3, MDE 0.11%) |
+
+- **Session-scale stops do not rescue held positions.** Wider stops cut the stop-out rate from 77% to
+  22–41%. But holding with them is worse than the engine's fast exit in every cell except not-BEAR
+  shorts, which is noise (t 0.5). For longs on BEAR days the loss is measurable (t −2.4).
+- **The regime-aware hold, as specified, does not help after 10:00.** BEAR shorts held to the close make
+  −0.05% gross on this subset.
+- **8.2's "shorts run on BEAR days" lives in the opening half hour.** Splitting 8.2's own trades by entry
+  time:
+  - BEAR shorts entered before 10:00 ET: +0.52% held to the close (n 122, 14 sessions; t 1.08, MDE 0.96%).
+  - BEAR shorts entered after 10:00: +0.02%.
+  - Longs on BEAR days lose by holding at every time of day (−0.37% to −0.45%).
+- **MDE.** Only the BEAR-long rejection is power-adequate. The opening-short cell is underpowered: an
+  effect below about 1% per trade is not measurable here.
+- **Out-of-sample:** one session so far (11-23, a BEAR day). That is too little to judge anything.
+
+**Next testable variant, pre-registered 2026-11-23:**
+- *Rule:* opening-window shorts (entry 09:30–10:00 ET) on BEAR days, held to 15:55, with the stop at the
+  pre-entry session high plus a buffer of 0.25 × the 5-minute ATR.
+- *Test:* evaluate only on sessions from 11-23 on.
+- *Pass:* mean minus ACTUAL > 0, one-sided p < 0.05 (session-clustered), and net of 12 bp > 0.
+- *Earliest read:* the opening-short sample grows by about 9 per BEAR session. Halving the 0.96% MDE
+  needs 4× the sessions, about 56 BEAR sessions. An earlier read is only useful if the effect is large.
+- *Precondition:* the gap-reference fix of 11-23. Until it, opening discovery measured gaps from a
+  stale price and tagged gap direction wrong.
+
+## 9. Adopted: the vote becomes the nervous-system market regime (2026-11-23)
+
+**Change.** The user approved the vote as the regime classifier for now. Files:
+- `signals/market_regime/regime_vote.py`: classifier and mapping, 0–1 RISK_ON, 2–3 NEUTRAL,
+  4 DETERIORATING, 5–6 RISK_OFF, 7 CRISIS. Any missing input gives UNKNOWN, never a partial vote.
+- `daily_regime.py`: gains `qqq_fast_down`, `qqq_below_sma50`, `qqq_trend_n_components` and
+  `qqq_trend_stale_days` (QQQ is added to the required symbols).
+- `nervous_system_adapter.py`: publishes `MarketState.regime` from the vote, with the vote count and
+  flags in `metrics` and every bearish vote in `reason_codes`. Probabilities stay None.
+
+**Versioning.** The model and config version is `market-regime-vote@1` and the feature version is
+`market-regime@2`. The version is part of the state ID, so re-published sessions supersede the
+UNKNOWN states; old states stay as history.
+
+**Validation (read-only, real bar cache)**
+- The rebuilt table changes zero cells in any existing column (1,591 rows).
+- Vote parity with study 05/07 is 99.5% exact and 99.9% on BEAR (1,289 sessions). The ±1 differences
+  come from adjusted vs unadjusted QQQ around dividends.
+- Over 2021-10..2026-11: RISK_ON 40%, NEUTRAL 30%, DETERIORATING 9%, RISK_OFF 13%, CRISIS 9%.
+- The 11-17..11-23 rows read CRISIS (7/7).
+
+**Effect on the governed path (Meta only).** The existing size multipliers now fire: 1.0 risk-on and
+neutral, 0.8 deteriorating, 0.5 risk-off, 0.25 crisis. Before this change Meta got a flat 0.5
+(UNKNOWN). That means Meta's size *doubles* on risk-on and neutral days and halves again in
+crisis. Policy actions beyond size (side bias, hold/exit) are the next step and are not part of
+this change.
+
+### How to test whether regime matters (design, not yet run)
+
+Two questions are tested separately, so no model is asked to learn the regime as part of its job.
+
+- **Model level: does a model's single prediction improve with regime information?**
+  - Keep the label and the walk-forward folds fixed. Compare three arms: (A) base features;
+    (B) base plus vote inputs; (C) separate models per regime state.
+  - Score each arm *within* each regime (IC, AUC, calibration), against a block-shuffled regime
+    control.
+  - Momentum, Meta and the 30m swing already carry the regime-table columns, so for them the test is
+    the ablation that *removes* them.
+  - If B and C do not beat A within regimes out of sample, regime belongs in the policy only.
+- **Policy level: given the same model outputs, does a regime-aware order policy do better?**
+  - Replay the same signals or setups through the current policy and through the regime-aware one
+    (side bias, hold/exit, size), as in §8.
+  - Compare against a placebo that applies the same rules on block-shuffled regime days.
+  - Then run a forward paper shadow that logs both policies for every live decision, with a
+    pre-registered read date and MDE.
+- **Intraday structure** has no ML model: its detectors are the "model output" and everything after
+  confirmation is policy. 0DTE stays allowed; regime changes the side bias, the hold and the size.

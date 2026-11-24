@@ -174,7 +174,10 @@ def build_closed_setup_record(
         realized_r_after_costs=(net / risk) if risk and risk > 0 else None,
         mfe_points=float(setup.max_favorable_excursion),
         mae_points=float(setup.max_adverse_excursion),
-        bars_held=int(setup.bars_alive),
+        # Entry to exit. bars_alive also counts the setup's whole pre-entry life
+        # (median 24 against a 3-minute median hold, 2026-11-23); it is only the
+        # fallback for setups entered before the entry clock existed.
+        bars_held=int(setup.metadata.get("bars_since_entry", setup.bars_alive)),
         candidate_sources=list(setup.candidate.sources),
         candidate_score=float(setup.candidate.score),
         confidence=float(setup.confidence),

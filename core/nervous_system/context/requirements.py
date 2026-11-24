@@ -8,7 +8,7 @@ from collections.abc import Sequence
 import json
 from zoneinfo import ZoneInfo
 
-from core.calendar.us_market_calendar import is_trading_day, prev_trading_day
+from core.calendar.us_market_calendar import close_relative_time, is_trading_day, prev_trading_day
 from core.nervous_system.config.freshness import FreshnessRule, SnapshotProfile
 from core.nervous_system.contracts.context import FreshnessResult, RejectedCandidate
 from core.nervous_system.contracts.enums import MissingStateAction, StateType
@@ -98,9 +98,11 @@ def _profile_boundary(profile: SnapshotProfile, decision_time: datetime) -> date
     et = _aware(decision_time, "decision_time").astimezone(_ET)
     if not is_trading_day(et.date()):
         return None
+    # Session-relative: on a 13:00 half-day the 14:20 boundary is 11:20, so the
+    # near-close dealer capture (moved to 12:15 that day) still qualifies.
     return datetime.combine(
         et.date(),
-        profile.dealer_capture_after_et,
+        close_relative_time(profile.dealer_capture_after_et, et.date()),
         tzinfo=_ET,
     ).astimezone(_UTC)
 

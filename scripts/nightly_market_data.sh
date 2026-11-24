@@ -20,10 +20,11 @@
 # Logs go to signals/news/data/processed/nightly_cron.log
 #
 # STATUS / exit code: the wrapper's status is the FIRST failing stage that
-# something downstream actually depends on. Two stages are deliberately excluded
-# because a miss degrades rather than blocks — ticker discovery (the universe
-# simply does not gain names this run) and the earnings calendar (non-critical
-# to entry readiness). Both still log their own exit and a WARNING, so a
+# something downstream actually depends on. Three stages are deliberately excluded
+# because a miss degrades rather than blocks — the CBOE snapshot (no live
+# consumer), ticker discovery (the universe simply does not gain names this
+# run) and the earnings calendar (non-critical to entry readiness). All still
+# log their own exit and a WARNING, so a
 # persistent failure stays greppable; they just do not turn an otherwise
 # complete nightly into a failed one, the way discovery's timeout did on
 # 2026-08-20.
@@ -70,12 +71,20 @@ fi
   STATUS=0
 
   # 1) CBOE per-ticker options snapshot (full universe, ~30 min)
+  #    NON-FATAL (2026-11-22): no live consumer reads the CBOE outputs (the
+  #    news CatalystScorer loads the summary but never uses it; the rest is
+  #    research), and since 2026-11-19 Cloudflare blocks this client on every
+  #    ticker. In STATUS it timed out at 2h and stamped otherwise complete
+  #    nightlies "failed", so each server start re-ran the whole ~5h job. The
+  #    fetcher now aborts after 25 consecutive HTTP 403s.
   echo "[$(ts)] CBOE snapshot — full universe"
   timeout --signal=TERM --kill-after=60s "${NIGHTLY_CBOE_TIMEOUT_SECONDS:-7200}s" \
     "$PYTHON" -u -m signals.news.main --stage cboe-snapshot
   cboe_exit=$?
   echo "[$(ts)] CBOE snapshot exit=$cboe_exit"
-  [ "$cboe_exit" -ne 0 ] && STATUS="$cboe_exit"
+  if [ "$cboe_exit" -ne 0 ]; then
+    echo "[$(ts)] WARNING: CBOE snapshot failed (exit=$cboe_exit); cboe_options_summary keeps its last snapshot (non-fatal — no live consumer)"
+  fi
 
   # 1b) Dealer-positioning option snapshots (forward collection). This stores
   #     the Amethyst-ready floors/ceilings/magnets/vega walls plus strike rows.

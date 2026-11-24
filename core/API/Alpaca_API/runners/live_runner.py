@@ -282,6 +282,18 @@ def _hhmm_to_minutes(hhmm: str, *, default: int) -> int:
         return int(default)
 
 
+def _session_close_minutes(close_min: int, local_ts: pd.Timestamp) -> int:
+    """The configured close moved to the bar date's real close (13:00 on a half-day)."""
+    from datetime import time as _dtime
+
+    from core.calendar import close_relative_time
+
+    if not 0 <= close_min < 24 * 60:
+        return close_min
+    moved = close_relative_time(_dtime(close_min // 60, close_min % 60), local_ts.date())
+    return moved.hour * 60 + moved.minute
+
+
 def _bar_in_regular_session(
     bar: dict,
     *,
@@ -295,7 +307,7 @@ def _bar_in_regular_session(
     local_ts = ts.tz_convert(tz_name)
     minutes = int(local_ts.hour) * 60 + int(local_ts.minute)
     open_min = _hhmm_to_minutes(session_open, default=570)
-    close_min = _hhmm_to_minutes(session_close, default=960)
+    close_min = _session_close_minutes(_hhmm_to_minutes(session_close, default=960), local_ts)
     return open_min <= minutes < close_min
 
 
@@ -310,7 +322,7 @@ def _bar_is_session_last_minute(
         return False
     local_ts = ts.tz_convert(tz_name)
     minutes = int(local_ts.hour) * 60 + int(local_ts.minute)
-    close_min = _hhmm_to_minutes(session_close, default=960)
+    close_min = _session_close_minutes(_hhmm_to_minutes(session_close, default=960), local_ts)
     return minutes == (close_min - 1)
 
 

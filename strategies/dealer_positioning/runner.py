@@ -6,6 +6,8 @@ import queue
 import threading
 import time
 from datetime import datetime, time as _time, timezone
+
+from core.calendar import is_trading_day, next_trading_day, session_close_time
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -21,7 +23,6 @@ from strategies.dealer_positioning.storage import DealerPositioningWriter
 logger = logging.getLogger(__name__)
 _ET = ZoneInfo("America/New_York")
 _RTH_START = _time(9, 30)
-_RTH_END = _time(16, 0)
 EventSink = Callable[[str, dict[str, Any]], None]
 
 #: Schwab's response when the refresh token has expired or been revoked. This is
@@ -325,25 +326,17 @@ class DealerPositioningRunner:
 
 
 def _is_market_hours(now_et: datetime) -> bool:
-    if now_et.weekday() >= 5:
+    """Trading day (holidays excluded) between the open and that day's close (13:00 on half-days)."""
+    if not is_trading_day(now_et.date()):
         return False
-    local_time = now_et.time()
-    return _RTH_START <= local_time <= _RTH_END
+    return _RTH_START <= now_et.time() <= session_close_time(now_et.date())
 
 
 def _next_market_open(now_et: datetime) -> datetime:
     local_date = now_et.date()
-    local_time = now_et.time()
-
-    if now_et.weekday() < 5 and local_time < _RTH_START:
+    if is_trading_day(local_date) and now_et.time() < _RTH_START:
         return datetime.combine(local_date, _RTH_START, tzinfo=_ET)
-
-    days_ahead = 1
-    while True:
-        candidate = local_date.fromordinal(local_date.toordinal() + days_ahead)
-        if candidate.weekday() < 5:
-            return datetime.combine(candidate, _RTH_START, tzinfo=_ET)
-        days_ahead += 1
+    return datetime.combine(next_trading_day(local_date), _RTH_START, tzinfo=_ET)
 
 
 def _replace_config(config: DealerPositioningConfig, **updates: Any) -> DealerPositioningConfig:

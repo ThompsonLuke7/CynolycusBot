@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import time
 from zoneinfo import ZoneInfo
 
+from core.calendar import close_relative_time
 from strategies.intraday_structure.detectors.base import DetectionContext, DetectionDecision, is_long
 from strategies.intraday_structure.models import SetupRecord, SetupState
 from strategies.intraday_structure.runway import RunwayResult, score_runway
@@ -94,7 +95,8 @@ def build_target_plan(setup: SetupRecord, ctx: DetectionContext) -> TargetPlanOu
 def manage_running_setup(setup: SetupRecord, ctx: DetectionContext) -> DetectionDecision:
     policy = ctx.config.target
     bar = ctx.bar
-    if policy.close_at_session_end and bar.timestamp.astimezone(ET).time() >= time(15, 59):
+    bar_et = bar.timestamp.astimezone(ET)
+    if policy.close_at_session_end and bar_et.time() >= close_relative_time(time(15, 59), bar_et.date()):
         return DetectionDecision(SetupState.CLOSED, "END_OF_DAY", "configured end-of-day close", ("end_of_day",))
     if setup.entry_price is not None:
         favorable = (bar.high - setup.entry_price) if is_long(setup) else (setup.entry_price - bar.low)

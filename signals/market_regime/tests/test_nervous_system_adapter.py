@@ -237,14 +237,59 @@ def test_market_adapter_rejects_nonexclusive_validity_window() -> None:
         adapt_market_row(_market_row(), valid_until=AVAILABLE_AT, lineage=LINEAGE)
 
 
-def test_rule_vector_is_unknown_and_not_a_probability() -> None:
+def test_row_missing_vote_inputs_stays_unknown_and_names_them() -> None:
+    # _market_row carries no QQQ trend / credit / vol inputs: never a partial vote.
     state = adapt_market_row(_market_row(risk_appetite_z=2.5), valid_until=VALID_UNTIL, lineage=LINEAGE)
 
     assert state.regime is MarketRegime.UNKNOWN
-    assert state.reason_codes == ("MARKET_REGIME_UNCLASSIFIED_RULE_VECTOR",)
+    assert state.reason_codes[0] == "MARKET_REGIME_UNCLASSIFIED_RULE_VECTOR"
+    assert "MARKET_REGIME_VOTE_MISSING_QQQ_FAST_DOWN" in state.reason_codes
+    assert "MARKET_REGIME_VOTE_MISSING_CREDIT" in state.reason_codes
     assert state.risk_on_probability is None
     assert state.risk_off_probability is None
     assert state.metrics["risk_appetite_z"] == 2.5
+    assert "regime_vote_count" not in state.metrics
+
+
+def _vote_inputs(**updates: object) -> dict[str, object]:
+    inputs: dict[str, object] = {
+        "qqq_fast_down": 1.0,
+        "qqq_below_sma50": 1.0,
+        "spy_trend_state": -1.0,
+        "breadth_z": -2.0,
+        "risk_appetite_z": -0.9,
+        "credit_risk_z": -3.0,
+        "spy_rv20_z": 3.7,
+    }
+    inputs.update(updates)
+    return inputs
+
+
+def test_full_row_is_classified_by_the_vote_without_probabilities() -> None:
+    # The 2026-11-20 row: every vote bearish.
+    state = adapt_market_row(_market_row(**_vote_inputs()), valid_until=VALID_UNTIL, lineage=LINEAGE)
+
+    assert state.regime is MarketRegime.CRISIS
+    assert state.reason_codes[0] == "MARKET_REGIME_VOTE_7_OF_7"
+    assert state.metrics["regime_vote_count"] == 7.0
+    assert state.metrics["regime_vote_spy_trend"] == 1.0
+    assert state.risk_on_probability is None
+    assert state.risk_off_probability is None
+    assert state.model_version == "market-regime-vote@1"
+
+    calm = adapt_market_row(
+        _market_row(**_vote_inputs(qqq_fast_down=0.0, qqq_below_sma50=0.0, spy_trend_state=1.0,
+                                   breadth_z=0.5, risk_appetite_z=0.3, credit_risk_z=0.2, spy_rv20_z=-0.4)),
+        valid_until=VALID_UNTIL, lineage=LINEAGE,
+    )
+    assert calm.regime is MarketRegime.RISK_ON
+    assert calm.metrics["regime_vote_count"] == 0.0
+    assert calm.reason_codes == ("MARKET_REGIME_VOTE_0_OF_7",)
+
+
+def test_vote_metric_names_cannot_be_shadowed_by_the_producer_row() -> None:
+    with pytest.raises(ValueError, match="vote metric"):
+        adapt_market_row(_market_row(**_vote_inputs(), regime_vote_count=3.0), valid_until=VALID_UNTIL, lineage=LINEAGE)
 
 
 @pytest.mark.parametrize(

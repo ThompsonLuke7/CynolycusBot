@@ -1106,6 +1106,7 @@ def fetch_cboe_options_snapshot(
     timeout: int = 45,
     max_retries: int = 3,
     retry_backoff_s: float = 1.5,
+    max_consecutive_forbidden: int = 25,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Pull per-ticker delayed options chains from CBOE's free CDN.
 
@@ -1114,29 +1115,49 @@ def fetch_cboe_options_snapshot(
       stock volume + put-call ratio + unusual-strike count.
     - records_df: catalyst-shaped records (one per ticker with unusual flow)
       suitable for merging into ``news_records.parquet``.
+
+    HTTP 403 is not retried, and ``max_consecutive_forbidden`` 403s in a row
+    raise ``RuntimeError``: since 2026-11-19 the CDN redirects to
+    cdn-api.cboe.com, where Cloudflare blocks this client for every ticker.
+    Retrying each ticker took ~9.5 s, so the stage hit its 2 h timeout and the
+    whole nightly was stamped failed.
     """
+    import urllib.error
+
     summary_rows: list[dict] = []
     strike_rows: list[dict] = []
     record_rows: list[dict] = []
     last_request = 0.0
+    consecutive_forbidden = 0
     for ticker in _clean_tickers(tickers):
         elapsed = time.monotonic() - last_request
         if elapsed < min_interval_s:
             time.sleep(min_interval_s - elapsed)
         url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/{ticker}.json"
         payload = None
+        forbidden = False
         for attempt in range(max_retries + 1):
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (CynolycusBot research)"})
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     payload = json.loads(resp.read())
                 break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 403:
+                    forbidden = True
+                    break
+                if attempt < max_retries:
+                    time.sleep(retry_backoff_s * (attempt + 1))
             except Exception:
-                if attempt >= max_retries:
-                    payload = None
-                else:
+                if attempt < max_retries:
                     time.sleep(retry_backoff_s * (attempt + 1))
         last_request = time.monotonic()
+        consecutive_forbidden = consecutive_forbidden + 1 if forbidden else 0
+        if consecutive_forbidden >= max_consecutive_forbidden:
+            raise RuntimeError(
+                f"CBOE delayed-quotes CDN returned HTTP 403 for {consecutive_forbidden} "
+                f"consecutive tickers (last: {ticker}); the source is blocking this client"
+            )
         if not payload or "data" not in payload:
             continue
         try:
@@ -1571,6 +1592,25 @@ def _fetch_one_earnings_calendar(ticker: str):
     earn_raw = cal.get("Earnings Date") or cal.get("earningsDate")
     if isinstance(earn_raw, (list, tuple)):
         earn_raw = earn_raw[0] if earn_raw else None
+    # After a report, `calendar` keeps the passed date for weeks (2026-11-23: 64% of the
+    # universe), while `get_earnings_dates` already lists the next one (NVDA: calendar
+    # 2026-11-17, earnings dates 2027-02-24). Ask it only for those names.
+    today = pd.Timestamp.now().normalize()
+    try:
+        stale = earn_raw is None or pd.Timestamp(earn_raw).normalize() < today
+    except Exception:
+        stale = True
+    if stale:
+        try:
+            ed = yf.Ticker(ticker).get_earnings_dates(limit=4)
+            if ed is not None and not ed.empty:
+                idx = pd.DatetimeIndex(ed.index)
+                idx = idx.tz_localize(None) if idx.tz is None else idx.tz_convert("America/New_York").tz_localize(None)
+                future = idx[idx.normalize() >= today]
+                if len(future):
+                    earn_raw = future.min().normalize()
+        except Exception:
+            pass
     return earn_raw
 
 

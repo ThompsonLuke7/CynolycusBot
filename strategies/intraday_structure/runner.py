@@ -18,6 +18,7 @@ from strategies.intraday_structure.candidate_sources import (
 )
 from strategies.intraday_structure.bar_archive import BarArchive
 from strategies.intraday_structure.config import IntradayStructureConfig
+from strategies.intraday_structure.decision_context import DecisionContextRecorder
 from strategies.intraday_structure.engine import IntradayStructureEngine, transition_log_sink
 from strategies.intraday_structure.evidence import (
     CandidateOutcomeTracker,
@@ -101,6 +102,9 @@ class IntradayStructureRunner:
             abstention_sink=declined_sink,
             candidate_event_sink=(
                 self.evidence_ledger.candidate_event if self.evidence_ledger is not None else None
+            ),
+            context_sink=(
+                DecisionContextRecorder(config.decision_context) if config.decision_context.enabled else None
             ),
             execution_sink=self.executor,
         )

@@ -260,3 +260,18 @@ def test_leakage_row_identical_when_future_sessions_appended():
 
     expected = regime_full.iloc[:60].reset_index(drop=True)
     pd.testing.assert_frame_equal(regime_trunc.reset_index(drop=True), expected, check_exact=False, rtol=1e-10)
+
+
+def test_qqq_trend_flags_arithmetic(universe, regime):
+    dates, bars = universe
+    q = pd.Series(_closes(bars, "QQQ"))
+    ema = q.ewm(span=20, adjust=False).mean()
+    sma50 = q.rolling(COMP_LONG, min_periods=COMP_LONG).mean()
+    warm = q.rolling(COMP_LONG, min_periods=COMP_LONG).count() >= COMP_LONG
+    fast = ((q < ema) & (ema < ema.shift(5))).astype(float).where(warm & ema.shift(5).notna())
+    below = (q < sma50).astype(float).where(warm & sma50.notna())
+    np.testing.assert_allclose(regime["qqq_fast_down"].to_numpy(), fast.to_numpy(), equal_nan=True)
+    np.testing.assert_allclose(regime["qqq_below_sma50"].to_numpy(), below.to_numpy(), equal_nan=True)
+    assert set(np.unique(regime["qqq_fast_down"].dropna())) <= {0.0, 1.0}
+    expected_n = fast.notna().astype(int) + below.notna().astype(int)
+    np.testing.assert_array_equal(regime["qqq_trend_n_components"].to_numpy(), expected_n.to_numpy())

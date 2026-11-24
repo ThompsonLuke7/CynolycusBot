@@ -18,6 +18,10 @@ docs/superpowers/plans/2026-07-26-market-regime-and-sector-context.md §4 (WS-A)
                           21d excess return vs SPY
   spy_rv20_z           = trailing z of SPY's 20d realized vol
   spy_trend_state      = sign(EMA20(SPY) - EMA50(SPY))
+  qqq_fast_down        = 1 if QQQ close < EMA20(QQQ) and EMA20 < its value
+                          5 sessions earlier, else 0
+  qqq_below_sma50      = 1 if QQQ close < SMA50(QQQ), else 0
+                          (both feed the regime vote in regime_vote.py)
 
 Every composite carries its raw/leg components plus a companion
 ``*_n_components`` count and ``*_stale_days`` age (time-correctness contract,
@@ -67,6 +71,9 @@ from .config import (
     EXCESS_RETURN_WINDOW,
     SECTOR_ETFS_LIST,
     SETTLE_MARGIN_MINUTES,
+    TREND_FAST_EMA,
+    TREND_SLOPE_LOOKBACK,
+    TREND_SYMBOL,
     ZSCORE_MIN_PERIODS,
     ZSCORE_WINDOW,
 )
@@ -272,6 +279,24 @@ def build_daily_regime(
     out["spy_trend_state_stale_days"] = spy_stale
 
     # ------------------------------------------------------------------
+    # QQQ trend flags (regime-vote inputs). Same warm-up rule as
+    # spy_trend_state: NaN until QQQ has component_window_long closes, so the
+    # EMA seed has washed out and the SMA50 is defined.
+    # ------------------------------------------------------------------
+    qqq_close, qqq_stale = _aligned_close(TREND_SYMBOL)
+    qqq_ema = qqq_close.ewm(span=TREND_FAST_EMA, adjust=False).mean()
+    qqq_sma50 = qqq_close.rolling(component_window_long, min_periods=component_window_long).mean()
+    qqq_warm = qqq_close.rolling(component_window_long, min_periods=component_window_long).count() >= component_window_long
+    qqq_fast_down = (
+        (qqq_close < qqq_ema) & (qqq_ema < qqq_ema.shift(TREND_SLOPE_LOOKBACK))
+    ).astype(float).where(qqq_warm & qqq_ema.shift(TREND_SLOPE_LOOKBACK).notna())
+    qqq_below_sma50 = (qqq_close < qqq_sma50).astype(float).where(qqq_warm & qqq_sma50.notna())
+    out["qqq_fast_down"] = qqq_fast_down
+    out["qqq_below_sma50"] = qqq_below_sma50
+    out["qqq_trend_n_components"] = qqq_fast_down.notna().astype(int) + qqq_below_sma50.notna().astype(int)
+    out["qqq_trend_stale_days"] = qqq_stale
+
+    # ------------------------------------------------------------------
     # Assemble with the time-correctness contract columns first.
     # ------------------------------------------------------------------
     out = out.reset_index()
@@ -292,6 +317,7 @@ def build_daily_regime(
         "sector_dispersion_z_n_components", "sector_dispersion_z_stale_days",
         "spy_rv20_raw", "spy_rv20_z", "spy_rv20_z_n_components", "spy_rv20_z_stale_days",
         "spy_trend_state", "spy_trend_state_n_components", "spy_trend_state_stale_days",
+        "qqq_fast_down", "qqq_below_sma50", "qqq_trend_n_components", "qqq_trend_stale_days",
     ]
     out = out[ordered]
     return out

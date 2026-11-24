@@ -45,12 +45,18 @@ def register_order_ownership(*, order_id: str | None, module: str, symbol: str,
                              side: str, qty: float, route: str,
                              entry_avg_price: float | None = None,
                              reason: str | None = None, account_label: str = "paper",
-                             root: str | Path | None = None) -> bool:
+                             root: str | Path | None = None,
+                             client_order_id: str | None = None,
+                             ledger: str | None = None) -> bool:
     """Durably register an accepted order before its module state can be lost.
 
     The order id is the global identity.  Conflicting duplicate registrations
     are retained as evidence and surfaced by the certificate rather than being
     silently reassigned.
+
+    ``ledger="none"`` marks an owner without an ``exit_fills.jsonl`` ledger (the
+    SPY day trader and 30m swing keep their own books): the certificate attributes
+    its fills but does not compare them with a ledger it does not write.
     """
     oid = str(order_id or "").strip()
     if not oid or oid == "?":
@@ -61,6 +67,10 @@ def register_order_ownership(*, order_id: str | None, module: str, symbol: str,
         "route": str(route), "entry_avg_price": _n(entry_avg_price),
         "reason": reason,
     }
+    if client_order_id:
+        record["client_order_id"] = str(client_order_id)
+    if ledger:
+        record["ledger"] = str(ledger)
     return append_once(_root(root, account_label) / "order_registry.jsonl", record,
                        identity=f"order:{oid}")
 
@@ -151,7 +161,7 @@ def reconcile_account(client, *, account_label: str = "paper", root: str | Path 
             for x in rows
         )
         side = str(owner.get("side", "")).lower()
-        if side == "sell":
+        if side == "sell" and owner.get("ledger") != "none":
             ledger_qty, ledger_proceeds = _module_exit_totals(Path(root or DEFAULT_ROOT), oid)
             # Options exit_fills stores dollar proceeds (already x100); shares do not.
             multiplier = 100.0 if owner.get("route") == "option" else 1.0
@@ -180,6 +190,44 @@ def reconcile_account(client, *, account_label: str = "paper", root: str | Path 
     return certificate
 
 
+def order_fills(*, account_label: str = "paper", root: str | Path | None = None) -> list[dict]:
+    """Each registered order joined with what the broker actually filled. Pure read.
+
+    One row per registered order id (first registration wins, as in the certificate):
+    module, symbol, side, route, reason, when it was registered, the ordered qty, and from
+    the broker FILL journal the filled qty, the volume-weighted fill price, the first and
+    last fill time and the number of fills. ``status`` is ``filled`` / ``partial`` /
+    ``unfilled`` (no fill in the journal, which only reaches the last reconciliation).
+    Fills of unregistered orders are the certificate's ``unattributed_fills``.
+    """
+    base = _root(root, account_label)
+    by_order: dict[str, list[dict]] = {}
+    for row in _read_jsonl(base / "fills.jsonl"):
+        act = row.get("activity") or {}
+        by_order.setdefault(str(act.get("order_id") or ""), []).append(act)
+    out, seen = [], set()
+    for reg in _read_jsonl(base / "order_registry.jsonl"):
+        oid = str(reg.get("order_id") or "")
+        if not oid or oid in seen:
+            continue
+        seen.add(oid)
+        fills = by_order.get(oid, [])
+        qty = sum(_n(f.get("qty")) or 0.0 for f in fills)
+        notional = sum((_n(f.get("qty")) or 0.0) * (_n(f.get("price")) or 0.0) for f in fills)
+        times = sorted(str(f.get("transaction_time")) for f in fills if f.get("transaction_time"))
+        ordered = _n(reg.get("qty")) or 0.0
+        out.append({
+            "order_id": oid, "module": reg.get("module"), "symbol": reg.get("symbol"),
+            "side": reg.get("side"), "route": reg.get("route"), "reason": reg.get("reason"),
+            "registered_at": reg.get("recorded_at"), "ordered_qty": ordered,
+            "filled_qty": qty, "avg_fill_price": (notional / qty) if qty else None,
+            "first_fill_at": times[0] if times else None, "last_fill_at": times[-1] if times else None,
+            "n_fills": len(fills),
+            "status": "unfilled" if not qty else ("filled" if qty >= ordered - 1e-9 else "partial"),
+        })
+    return out
+
+
 def require_clean_certificate(*, account_label: str = "paper", root: str | Path | None = None) -> dict:
     """Reporting guard: final realized-P&L claims require a current PASS."""
     path = _root(root, account_label) / "latest_certificate.json"
@@ -189,3 +237,40 @@ def require_clean_certificate(*, account_label: str = "paper", root: str | Path 
     if certificate.get("status") != "PASS":
         raise RuntimeError("Broker reconciliation failed; report is blocked pending fill review")
     return certificate
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Refresh the certificate from the broker (read-only) and summarize order -> fill.
+
+        .venv/bin/python -m core.broker_fill_reconciliation              # paper account
+        .venv/bin/python -m core.broker_fill_reconciliation --since 2026-11-24
+    """
+    import argparse
+    from collections import Counter
+
+    ap = argparse.ArgumentParser(description="Broker fill reconciliation and order -> fill summary")
+    ap.add_argument("--env-file", default=".env")
+    ap.add_argument("--account", default="paper")
+    ap.add_argument("--since", default=None, help="summarize orders registered on/after this date")
+    ap.add_argument("--no-refresh", action="store_true", help="use the journal as is (no broker read)")
+    args = ap.parse_args(argv)
+    if not args.no_refresh:
+        from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
+
+        cert = reconcile_account(AlpacaOptionsClient(env_file=args.env_file), account_label=args.account)
+        print(f"certificate {cert['status']}: fills={cert['fill_count']} "
+              f"unattributed={len(cert['unattributed_fills'])} mismatches={len(cert['ledger_mismatches'])}")
+        for f in cert["unattributed_fills"]:
+            print(f"  unattributed {f.get('transaction_time')} {f.get('side')} {f.get('qty')} "
+                  f"{f.get('symbol')} @ {f.get('price')}")
+    rows = [r for r in order_fills(account_label=args.account)
+            if not args.since or str(r["registered_at"] or "") >= args.since]
+    counts = Counter((r["module"], r["side"], r["status"]) for r in rows)
+    print(f"{len(rows)} registered orders" + (f" since {args.since}" if args.since else ""))
+    for (module, side, status), n in sorted(counts.items(), key=lambda kv: (str(kv[0][0]), kv[0][1], kv[0][2])):
+        print(f"  {module:<24} {side:<4} {status:<8} {n}")
+    return 0 if args.no_refresh or cert["status"] == "PASS" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

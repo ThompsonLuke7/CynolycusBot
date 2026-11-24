@@ -5,7 +5,7 @@ The question (user, 2026-11-22): "since it's so volatile it seems better to just
 expiry options on it, so why couldn't we just use those ... the backtest would need to be like the
 last month or two on 1 min bars."
 
-Pre-registered 2026-11-22 ~02:55 ET, before any option P&L was computed. (The fitness check below
+Pre-registered 2026-11-22 ~02:27 ET, before any option P&L was computed. (The fitness check below
 was run first on six days, which is allowed: it looks at whether prices track, not at P&L.)
 
 Data
@@ -228,6 +228,28 @@ def main() -> None:
                                 "qqq_short_mean": uq.mean()})
     res = pd.DataFrame(out)
     res.to_csv(OUT / "qqq_puts_summary.csv", index=False)
+
+    # Added after the first results (descriptive, not pre-registered): is the BEAR-day result one
+    # episode? Windows are the corrections in the sample, named by calendar, not by outcome.
+    def episode(d: pd.Timestamp) -> str:
+        if d >= LAST2M[0]:
+            return "D last 2 months"
+        if pd.Timestamp("2024-07-01") <= d <= pd.Timestamp("2024-09-30"):
+            return "A 2024 Jul-Sep"
+        if pd.Timestamp("2025-02-15") <= d <= pd.Timestamp("2025-05-31"):
+            return "B 2025 Feb-May"
+        return "C other"
+    e = t[ok & (t["tenor"] == "0DTE") & (t["BEAR"] == 1)].copy()
+    e["episode"] = e["day"].map(episode)
+    e["excl_last2m"] = e["episode"] != "D last 2 months"
+    ep_rows = []
+    for (rule, grp), g in list(e.groupby(["rule", "episode"])) + [((r_, "ALL except last 2 months"), g_)
+                                                               for r_, g_ in e[e["excl_last2m"]].groupby("rule")]:
+        ep_rows.append({"rule": rule, "episode": grp, "n": len(g), "h60_mean": g["ret_H60"].mean(),
+                        "h60_median": g["ret_H60"].median(), "eod_mean": g["ret_EOD"].mean(),
+                        "eod_median": g["ret_EOD"].median(), "eod_win": (g["ret_EOD"] > 0).mean(),
+                        "bracket_mean": g["ret_BRACKET"].mean(), "qqq_short_eod": g["u_EOD"].mean()})
+    pd.DataFrame(ep_rows).to_csv(OUT / "qqq_puts_by_episode.csv", index=False)
     f = pd.DataFrame(fit_rows)
     print(f"sessions={len(days) - 1} trades={len(t)} ok={int(ok.sum())} "
           f"status={t['status'].value_counts().to_dict()} stale={int(t.loc[ok, 'stale'].sum())} "

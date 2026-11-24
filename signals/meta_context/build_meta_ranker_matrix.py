@@ -302,28 +302,50 @@ def _first_existing(paths: list[Path]) -> Path | None:
     return None
 
 
+def earnings_events_from_calendar(df: pd.DataFrame) -> pd.DataFrame:
+    """(ticker, event_date) earnings events from an earnings-calendar frame. Pure.
+
+    The shared file holds two row kinds: report history (``date``, from
+    ``signals.events.earnings_calendar``: past reports plus Yahoo's scheduled dates) and
+    nightly snapshots (``next_earnings_date``). History is the definition the 30m swing
+    model was trained on (~95% coverage). Snapshot dates are added only beyond each
+    ticker's last history date, i.e. as forward information the history does not have
+    yet. Until 2026-11-24 a file holding both kinds read the snapshots alone, which left
+    every date before 2026-06-21 (the first snapshot) empty.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["ticker", "event_date"])
+    df = df.rename(columns={"symbol": "ticker"})
+    if "ticker" not in df.columns or not ({"date", "next_earnings_date"} & set(df.columns)):
+        raise ValueError(f"unrecognized earnings calendar schema: {list(df.columns)}")
+
+    def _events(col: str) -> pd.DataFrame:
+        if col not in df.columns:
+            return pd.DataFrame(columns=["ticker", "event_date"])
+        out = pd.DataFrame({"ticker": df["ticker"].astype(str).str.upper().str.replace("$", "", regex=False),
+                            "event_date": pd.to_datetime(df[col], errors="coerce")})
+        if getattr(out["event_date"].dt, "tz", None) is not None:
+            out["event_date"] = out["event_date"].dt.tz_localize(None)
+        out["event_date"] = out["event_date"].dt.normalize()
+        return out.dropna(subset=["ticker", "event_date"])
+
+    history, snaps = _events("date"), _events("next_earnings_date")
+    if not history.empty and not snaps.empty:
+        last = history.groupby("ticker")["event_date"].max()
+        snaps = snaps[snaps["event_date"] > snaps["ticker"].map(last).fillna(pd.Timestamp.min)]
+    out = pd.concat([history, snaps], ignore_index=True).drop_duplicates(["ticker", "event_date"])
+    return out.sort_values(["ticker", "event_date"]).reset_index(drop=True)
+
+
 def _load_earnings_events() -> tuple[pd.DataFrame, str | None]:
     path = _first_existing(EARNINGS_CALENDAR_CANDIDATES)
     if path is None:
         return pd.DataFrame(columns=["ticker", "event_date"]), None
-    df = pd.read_parquet(path)
-    if df.empty:
+    try:
+        return earnings_events_from_calendar(pd.read_parquet(path)), str(path)
+    except ValueError as exc:
+        print(f"  WARNING: {exc} at {path}")
         return pd.DataFrame(columns=["ticker", "event_date"]), str(path)
-
-    if {"symbol", "date"}.issubset(df.columns):
-        out = df.rename(columns={"symbol": "ticker", "date": "event_date"})[["ticker", "event_date"]].copy()
-    elif {"ticker", "next_earnings_date"}.issubset(df.columns):
-        out = df.rename(columns={"next_earnings_date": "event_date"})[["ticker", "event_date"]].copy()
-    elif {"ticker", "date"}.issubset(df.columns):
-        out = df.rename(columns={"date": "event_date"})[["ticker", "event_date"]].copy()
-    else:
-        print(f"  WARNING: unrecognized earnings calendar schema at {path}")
-        return pd.DataFrame(columns=["ticker", "event_date"]), str(path)
-
-    out["ticker"] = out["ticker"].astype(str).str.upper().str.replace("$", "", regex=False)
-    out["event_date"] = pd.to_datetime(out["event_date"], errors="coerce").dt.tz_localize(None).dt.normalize()
-    out = out.dropna(subset=["ticker", "event_date"]).drop_duplicates(["ticker", "event_date"])
-    return out.sort_values(["ticker", "event_date"]).reset_index(drop=True), str(path)
 
 
 def _join_earnings_features(spine: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
@@ -367,28 +389,46 @@ def _join_earnings_features(spine: pd.DataFrame) -> tuple[pd.DataFrame, str | No
     return spine, source
 
 
-def _load_economic_events() -> tuple[pd.DataFrame, str | None]:
-    path = _first_existing(ECONOMIC_CALENDAR_CANDIDATES)
-    if path is None:
-        return pd.DataFrame(columns=["event_date", "is_high_impact"]), None
-    df = pd.read_parquet(path)
-    if df.empty:
-        return pd.DataFrame(columns=["event_date", "is_high_impact"]), str(path)
+def economic_events_from_calendar(df: pd.DataFrame) -> pd.DataFrame:
+    """(event_date, is_high_impact) US macro events from an economic-calendar frame. Pure.
 
-    date_col = "event_date" if "event_date" in df.columns else "date"
+    Expects the deterministic FOMC/NFP/CPI schema (``date``, ``impact``) that the 30m swing
+    model was trained on, or a feed with ``event_date`` and ``impact``/``importance``. A file
+    holding both schemas (the TradingView stage merged into the deterministic file until
+    2026-11-24, which deduplicated the deterministic rows down to 3) keeps only its
+    ``date`` rows and warns.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["event_date", "is_high_impact"])
+    if "date" in df.columns and "event_date" in df.columns:
+        print("  WARNING: economic calendar mixes the deterministic and feed schemas; "
+              "using the deterministic (date) rows only")
+        df = df[df["date"].notna()]
+    date_col = "date" if "date" in df.columns else "event_date"
     if date_col not in df.columns:
-        print(f"  WARNING: unrecognized economic calendar schema at {path}")
-        return pd.DataFrame(columns=["event_date", "is_high_impact"]), str(path)
-    out = pd.DataFrame({"event_date": pd.to_datetime(df[date_col], errors="coerce", utc=True).dt.tz_convert(None).dt.normalize()})
-    impact = df.get("impact", df.get("importance", ""))
-    out["impact"] = pd.Series(impact, index=df.index).astype(str).str.lower().values
+        raise ValueError(f"unrecognized economic calendar schema: {list(df.columns)}")
+    dates = pd.to_datetime(df[date_col], errors="coerce", utc=True).dt.tz_convert(None).dt.normalize()
+    out = pd.DataFrame({"event_date": dates.values})
+    impact = df["impact"] if "impact" in df.columns else df.get("importance", pd.Series("", index=df.index))
+    out["impact"] = impact.astype(str).str.lower().values
     country = df.get("country")
     if country is not None:
         out["country"] = country.astype(str).str.upper().values
         out = out[out["country"].isin({"US", "USA", "UNITED STATES"})].copy()
     out["is_high_impact"] = out["impact"].str.contains("high|3", regex=True).astype(float)
     out = out.dropna(subset=["event_date"])
-    return out[["event_date", "is_high_impact"]].reset_index(drop=True), str(path)
+    return out[["event_date", "is_high_impact"]].reset_index(drop=True)
+
+
+def _load_economic_events() -> tuple[pd.DataFrame, str | None]:
+    path = _first_existing(ECONOMIC_CALENDAR_CANDIDATES)
+    if path is None:
+        return pd.DataFrame(columns=["event_date", "is_high_impact"]), None
+    try:
+        return economic_events_from_calendar(pd.read_parquet(path)), str(path)
+    except ValueError as exc:
+        print(f"  WARNING: {exc} at {path}")
+        return pd.DataFrame(columns=["event_date", "is_high_impact"]), str(path)
 
 
 def _join_economic_features(spine: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:

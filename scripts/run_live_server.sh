@@ -217,6 +217,26 @@ trap cleanup INT TERM
 log "supervised launch: MALLOC_ARENA_MAX=$MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_=$MALLOC_TRIM_THRESHOLD_"
 log "combined_server args: ${SERVER_ARGS[*]:-(none)}"
 
+# --- state-store preflight (non-fatal) -----------------------------------------
+# On 2026-11-23 the Docker daemon was not running after the 02:19 restart, so
+# the nervous-system Postgres (127.0.0.1:55432, restart: unless-stopped) stayed
+# down until 21:56 ET. Meta lost 13 actions at 09:35 and nothing said why until
+# the daily review. Try to bring it up; if that fails, say so loudly and launch
+# anyway (the server degrades rather than refusing to trade).
+state_store_up() { (exec 3<>/dev/tcp/127.0.0.1/55432) 2>/dev/null; }
+if ! state_store_up; then
+  log "WARNING: state store 127.0.0.1:55432 is down — trying: docker compose -f compose.nervous-system.yaml up -d postgres"
+  if docker compose -f "$REPO_ROOT/compose.nervous-system.yaml" up -d postgres >> "$SERVER_LOG" 2>&1; then
+    for _ in $(seq 1 30); do state_store_up && break; sleep 2; done
+  fi
+  if state_store_up; then
+    log "state store is up"
+  else
+    log "ERROR: state store still DOWN (is the Docker daemon running?). Meta/governed paths will fail every"
+    log "  context/publication call until it is back: docker compose -f compose.nervous-system.yaml up -d postgres"
+  fi
+fi
+
 # --- restart loop with crash-loop backoff -------------------------------------
 # combined_server exits with this code when another instance already holds the
 # dashboard ports. Kept in sync with EX_PORT_CONFLICT in UI/combined_server.py.

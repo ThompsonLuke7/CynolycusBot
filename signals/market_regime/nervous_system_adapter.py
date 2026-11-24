@@ -3,7 +3,11 @@
 The producer tables remain the canonical research outputs.  This module only
 normalizes an already-persisted row into the reviewed nervous-system state
 contracts and optionally inserts those immutable states in one UOW transaction.
-It deliberately does not classify rule scores as probabilities.
+
+The MARKET state's ``regime`` comes from the seven-signal rule vote in
+``regime_vote.py`` (UNKNOWN when any vote input is missing).  It deliberately
+does not turn rule scores into probabilities: ``risk_on_probability`` and
+``risk_off_probability`` stay None.
 """
 from __future__ import annotations
 
@@ -21,11 +25,12 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from core.nervous_system.contracts.enums import Direction, MarketRegime, StateType
+from core.nervous_system.contracts.enums import Direction, StateType
 from core.nervous_system.contracts.quality import DataQualitySummary, LineageRef
 from core.nervous_system.contracts.states import MarketState, SectorState
 from core.nervous_system.persistence.uow import UnitOfWork as NervousSystemUnitOfWork
 
+from .regime_vote import UNCLASSIFIED_REASON, VOTE_VERSION, classify_row
 from .sector_map import sector_etf_for
 
 
@@ -34,10 +39,14 @@ _EASTERN = ZoneInfo("America/New_York")
 _MARKET_CLOSE = time(16, 0)
 
 _PRODUCER = "signals.market_regime"
-_MODEL_VERSION = "rules@1"
-_FEATURE_VERSION = "market-regime@1"
-_CONFIG_VERSION = "market-regime@1"
-_UNKNOWN_RULE_VECTOR = "MARKET_REGIME_UNCLASSIFIED_RULE_VECTOR"
+# rules@1 published every MARKET row as UNKNOWN.  market-regime-vote@1 adds the
+# vote; the version is part of the stable state_id, so a re-publication of an
+# already-published session is a new state that supersedes the UNKNOWN one (the
+# repository orders same-available_at states by generated_at).
+_MODEL_VERSION = VOTE_VERSION
+_FEATURE_VERSION = "market-regime@2"  # adds the QQQ trend columns
+_CONFIG_VERSION = VOTE_VERSION
+_UNKNOWN_RULE_VECTOR = UNCLASSIFIED_REASON
 FINITE_ROW_PUBLICATION_POLICY = "leading-warmup-finite-required-metrics@1"
 
 # These tuples mirror the producer's ordered output columns.  A row is
@@ -77,6 +86,10 @@ MARKET_REQUIRED_METRICS = (
     "spy_trend_state",
     "spy_trend_state_n_components",
     "spy_trend_state_stale_days",
+    "qqq_fast_down",
+    "qqq_below_sma50",
+    "qqq_trend_n_components",
+    "qqq_trend_stale_days",
 )
 SECTOR_REQUIRED_METRICS = (
     "excess_21d",
@@ -370,7 +383,7 @@ def adapt_market_row(
     valid_until: datetime,
     lineage: tuple[LineageRef, ...],
 ) -> MarketState:
-    """Adapt one persisted daily-regime row without changing its semantics."""
+    """Adapt one persisted daily-regime row; the regime is the rule vote."""
 
     values = _common_state_values(
         row,
@@ -379,13 +392,19 @@ def adapt_market_row(
         entity_id=str(row.get("entity_id") or "US"),
         state_type=StateType.MARKET,
     )
+    metrics = _metric_values(row)
+    vote = classify_row(row)
+    vote_metrics = vote.metrics()
+    clash = set(vote_metrics) & set(metrics)
+    if clash:
+        raise ValueError(f"producer row already carries vote metric names: {sorted(clash)}")
     return MarketState(
         **values,
-        regime=MarketRegime.UNKNOWN,
+        regime=vote.regime,
         risk_on_probability=None,
         risk_off_probability=None,
-        metrics=_metric_values(row),
-        reason_codes=(_UNKNOWN_RULE_VECTOR,),
+        metrics={**metrics, **vote_metrics},
+        reason_codes=vote.reason_codes,
     )
 
 

@@ -24,6 +24,12 @@
     "event_path": "Data/inference/intraday_structure/decision_events.jsonl",
     "outcome_horizons_minutes": [5, 15, 30, 60]
   },
+  "decision_context": {
+    "enabled": true,
+    "root": "Data/inference/intraday_structure/decision_context",
+    "refusal_every_bars": 15,
+    "raw_levels_on_manage": false
+  },
   "archive_bars": true,
   "bar_archive_root": "Data/archive/intraday_1m",
   "detector": {
@@ -63,6 +69,7 @@
     "move_stop_to_entry_after_target": true,
     "trailing_structure_atr": 0.35,
     "max_setup_bars": 180,
+    "abandon_pivot_risk_multiple": 2.0,
     "time_exit_bars": 120,
     "close_at_session_end": true
   },

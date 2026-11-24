@@ -233,6 +233,54 @@ def intraday_bars_status(*, now: datetime | None = None, path: Path | None = Non
     return True, f"bar catch-up current through {end.astimezone(_ET):%Y-%m-%d %H:%M} ET"
 
 
+def wait_for_matrix_bar(
+    matrix: str | Path,
+    *,
+    timeout_s: float,
+    latest_full_bar,
+    poll_s: float = 20.0,
+    now_fn=None,
+    sleep_fn=None,
+) -> tuple[bool, str]:
+    """Poll a 4H feature matrix until its latest full bar reaches the newest completed 4H bar.
+
+    ``latest_full_bar(frame)`` is the caller's own definition of a fully
+    populated bar, applied to a frame holding only the ``timestamp`` column (read
+    on its own, ~0.6 s on the live matrix). The required bar is re-evaluated on
+    every poll (``required_4h_bar_start``). Returns ``(ok, reason)``; on timeout the
+    caller's staleness guard decides.
+
+    WHY: since the complete-bar gate (2026-11-22) the refresher appends the 10:00 ET
+    bar only once a catch-up has fetched through 14:00 ET; that catch-up takes ~20
+    minutes and the matrix step ~8 more, so the bar lands around 14:30-14:37. A
+    14:20 reader that does not wait finds only yesterday's bar: Meta aborted its
+    14:20 pass on 11-23 and 11-24 ("matrix is 1.0d stale") while HTF, which waits,
+    traded the 10:00 bar at 14:37.
+    """
+    import time as _time
+
+    import pandas as pd
+    import pyarrow.parquet as pq
+
+    now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+    sleep_fn = sleep_fn or _time.sleep
+    start = now_fn()
+    while True:
+        required = pd.Timestamp(required_4h_bar_start(now_fn()))
+        try:
+            ts = pd.to_datetime(pq.read_table(matrix, columns=["timestamp"]).column("timestamp").to_pandas(),
+                                utc=True)
+            latest = latest_full_bar(pd.DataFrame({"timestamp": ts}))
+        except Exception as exc:  # noqa: BLE001 - the main read reports a broken matrix
+            return False, f"matrix unreadable while waiting: {exc}"
+        waited = (now_fn() - start).total_seconds()
+        if latest >= required:
+            return True, f"latest full bar {latest} covers required {required} (waited {waited:.0f}s)"
+        if waited >= timeout_s:
+            return False, f"latest full bar {latest} < required {required} after {waited:.0f}s"
+        sleep_fn(min(poll_s, max(0.0, timeout_s - waited)))
+
+
 def wait_for_intraday_bars(
     *,
     timeout_s: float = 900.0,

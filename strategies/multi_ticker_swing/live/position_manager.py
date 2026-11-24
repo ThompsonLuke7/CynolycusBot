@@ -18,13 +18,13 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time as _time, timezone
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
-from core.calendar import is_market_open_now, next_trading_day
+from core.calendar import close_relative_time, is_market_open_now, next_trading_day
 from core.live_4h_exec import append_closed_trade, closed_trade_record
 from strategies.multi_ticker_swing.live.universe import TickerConfig
 
@@ -512,26 +512,17 @@ def _should_defer_trail_exit(bar: dict) -> bool:
     if not isinstance(ts, datetime):
         return False
     local = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=_ET)
-    return (
-        local.hour > _DEFER_TRAIL_AFTER_HOUR
-        or (
-            local.hour == _DEFER_TRAIL_AFTER_HOUR
-            and local.minute >= _DEFER_TRAIL_AFTER_MINUTE
-        )
-    )
+    cutoff = close_relative_time(_time(_DEFER_TRAIL_AFTER_HOUR, _DEFER_TRAIL_AFTER_MINUTE), local.date())
+    return local.time() >= cutoff
 
 
 def _past_expiring_itm_close_cutoff(ts: Any) -> bool:
     if not isinstance(ts, datetime):
         return False
     local = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=_ET)
-    return (
-        local.hour > _EXPIRING_ITM_CLOSE_HOUR
-        or (
-            local.hour == _EXPIRING_ITM_CLOSE_HOUR
-            and local.minute >= _EXPIRING_ITM_CLOSE_MINUTE
-        )
-    )
+    # Minutes-before-close rule: 15:45 on a normal session, 12:45 on a 13:00 half-day.
+    cutoff = close_relative_time(_time(_EXPIRING_ITM_CLOSE_HOUR, _EXPIRING_ITM_CLOSE_MINUTE), local.date())
+    return local.time() >= cutoff
 
 
 def _expiring_itm_exit_reason(pos: SwingPosition, bar: dict) -> str | None:

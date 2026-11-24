@@ -25,6 +25,8 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as _time, timedelta, timezone
+
+from core.calendar import close_relative_time, is_market_open_now
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Callable
@@ -128,10 +130,6 @@ _CHALLENGER_BLOCKED_LONG_ENTRY_TICKERS = {
 
 def _challenger_policy_enabled() -> bool:
     return _LIVE_OPTION_FILTER_POLICY == _CHALLENGER_OPTION_FILTER_POLICY
-
-# Regular trading hours gate for bar aggregation (drop pre/post-market bars entirely)
-_RTH_START = _time(9, 30)
-_RTH_END   = _time(16, 0)
 
 # Stream health: warn if no bar received for this many seconds during RTH.
 _STREAM_STALE_SECS = 300
@@ -485,9 +483,10 @@ def _available_contracts(
 
 def _entry_contract_ref_date(now_et: datetime) -> date:
     ref_date = now_et.date()
-    if now_et.weekday() == 4 and now_et.time() >= _FRIDAY_LATE_EXPIRY_CUTOFF:
+    # Both cutoffs are hours-before-close rules, so a 13:00 half-day moves them to 10:00.
+    if now_et.weekday() == 4 and now_et.time() >= close_relative_time(_FRIDAY_LATE_EXPIRY_CUTOFF, ref_date):
         return ref_date + timedelta(days=4)
-    if now_et.time() >= _ZERO_DTE_CUTOFF:
+    if now_et.time() >= close_relative_time(_ZERO_DTE_CUTOFF, ref_date):
         return ref_date + timedelta(days=1)
     return ref_date
 
@@ -720,7 +719,9 @@ class SwingLiveRunner:
             max_entries_per_bar=max_entries_per_bar,
             catalyst_signal=catalyst_signal,
         )
-        self._client = AlpacaOptionsClient(env_file=env_file)
+        # owner=: every accepted order is registered to this module for the broker
+        # fill reconciliation (both sides were unattributed until 2026-11-24).
+        self._client = AlpacaOptionsClient(env_file=env_file, owner="multi_ticker_swing_30m")
         self._real_policy = RealAccountBookkeeper(
             real_account_policy_from_env(
                 enabled=real_account_policy_enabled,
@@ -1094,7 +1095,7 @@ class SwingLiveRunner:
                 # Health-check: warn if no bar received for >5 min during RTH
                 now_et = datetime.now(_ET)
                 self._maybe_reconcile_broker(reason="idle")
-                if _RTH_START <= now_et.time() < _RTH_END:
+                if is_market_open_now(now_et):
                     if not _rth_anchor_set:
                         # Anchor the stale timer to the RTH open so the expected
                         # overnight/pre-open gap (no bars until 09:30) doesn't fire
@@ -1366,7 +1367,7 @@ class SwingLiveRunner:
 
     def _run_startup_scan_from_warmup(self) -> None:
         now_et = datetime.now(_ET)
-        if not (_CONFIRM_START <= now_et.time() <= _SCAN_END_TS):
+        if not (_CONFIRM_START <= now_et.time() <= close_relative_time(_SCAN_END_TS, now_et.date())):
             self._emit("startup_scan_skipped", {
                 "reason": "outside_scan_window",
                 "now_et": now_et.isoformat(),

@@ -1,22 +1,28 @@
 from __future__ import annotations
 
+import functools
 import json
+import logging
 import math
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dt_time
 from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from core.calendar import is_trading_day, next_trading_day, prev_trading_day
 from signals.news.ticker_relevance import AMBIGUOUS_TICKERS, classify as classify_ticker_relevance
 from strategies.intraday_structure.config import CatalystDiscoveryPolicy, OpeningDiscoveryPolicy
 from strategies.intraday_structure.models import Bar, Candidate, Direction, utc_datetime
 
 _ET = ZoneInfo("America/New_York")
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_AUDIT_SOURCES = {
@@ -273,6 +279,127 @@ class DiscoveryBaseline:
     ticker: str
     prior_close: float
     average_dollar_volume: float
+    #: The session ``prior_close`` belongs to. None only for the catalyst
+    #: feed's universe-file baseline, which uses the ADV and nothing else.
+    prior_close_date: date | None = None
+
+
+def discovery_session_date(now: datetime | None = None) -> date:
+    """The session opening discovery is preparing for.
+
+    Today until the 16:00 ET close on a trading day, otherwise the next
+    session: a server started in the evening or over a weekend is getting ready
+    for the next open, and that session's prior close is the latest one.
+    """
+    et = (now or datetime.now(timezone.utc)).astimezone(_ET)
+    if is_trading_day(et.date()) and et.time() < dt_time(16, 0):
+        return et.date()
+    return next_trading_day(et.date())
+
+
+@functools.lru_cache(maxsize=16384)
+def _daily_reference(
+    path: str, mtime_ns: int, session_date: date, adv_window: int,  # noqa: ARG001 - mtime keys the cache
+) -> tuple[date, float, float] | str:
+    """(last day, its close, ADV) over bars dated before ``session_date``, or why not.
+
+    Only bars before the session are read, so a forming bar for the session
+    itself can never become its own reference. Keyed on the file's mtime, so a
+    re-read touches only files the bar catch-up has rewritten since.
+    """
+    try:
+        frame = pd.read_parquet(path, columns=["timestamp", "close", "volume"])
+    except Exception:  # noqa: BLE001 - an unreadable file is a missing reference
+        return "unreadable_daily_bars"
+    if frame.empty:
+        return "no_daily_bars"
+    days = pd.to_datetime(frame["timestamp"], utc=True).dt.tz_convert(_ET).dt.date
+    keep = (days < session_date).to_numpy()
+    if not keep.any():
+        return "no_prior_session_bar"
+    prior = frame.loc[keep].assign(day=days[keep].to_numpy()).sort_values("day")
+    close = pd.to_numeric(prior["close"], errors="coerce")
+    volume = pd.to_numeric(prior["volume"], errors="coerce")
+    last_close = float(close.iloc[-1])
+    if not math.isfinite(last_close) or last_close <= 0:
+        return "bad_prior_close"
+    dollar_volume = (close * volume).tail(adv_window)
+    if len(dollar_volume) < adv_window or not math.isfinite(float(dollar_volume.mean())):
+        return "short_daily_history"
+    return prior["day"].iloc[-1], last_close, float(dollar_volume.mean())
+
+
+@dataclass(frozen=True)
+class OpeningBaselines:
+    """What opening discovery may measure from, for one session."""
+
+    session_date: date
+    #: Top-N eligible names by ADV, fresh or not: the symbols to stream. Kept
+    #: independent of freshness so a cache still catching up at server start
+    #: does not shrink the stream subscription.
+    symbols: tuple[str, ...]
+    #: The subset whose last cached bar is exactly the previous session.
+    baselines: dict[str, DiscoveryBaseline]
+    #: Names left out or not measurable, by reason ("stale_daily_bars" etc.).
+    skipped: dict[str, int]
+
+
+def load_opening_baselines(
+    universe_path: str | Path,
+    *,
+    top_n: int | None,
+    session_date: date,
+    daily_bars_dir: str | Path,
+    adv_window: int = 20,
+) -> OpeningBaselines:
+    """Prior-session close and ADV for each eligible name, from the 1d bar cache.
+
+    WHY not the universe file: its ``px``/``avg_dollar_volume_20d`` columns
+    were copied from the legacy theme filter, frozen at 2026-06-01, and carried
+    no date. On 2026-11-23 they were a median 19.7% off the last close across
+    the top 750 names; QQQ's 742.60 against a real 608.45 turned a +7% gap up
+    into a "-11.7% gap-down" short candidate. A name whose cache does not reach
+    the previous session is skipped, never measured from an older close.
+    """
+    empty = OpeningBaselines(session_date, (), {}, {})
+    path = Path(universe_path)
+    if not path.exists() or (top_n is not None and top_n <= 0):
+        return empty
+    try:
+        frame = pd.read_csv(path, usecols=lambda name: name in {"ticker", "is_eligible"})
+    except (OSError, ValueError, pd.errors.ParserError):
+        return OpeningBaselines(session_date, (), {}, {"unreadable_universe": 1})
+    if "ticker" not in frame.columns:
+        return OpeningBaselines(session_date, (), {}, {"universe_without_ticker_column": 1})
+    tickers = frame["ticker"].astype(str).str.strip().str.upper()
+    if "is_eligible" in frame.columns:
+        tickers = tickers[frame["is_eligible"].astype(str).str.strip().str.lower().isin({"true", "1", "yes"})]
+    root = Path(daily_bars_dir)
+    skipped: Counter[str] = Counter()
+    measured: list[tuple[str, date, float, float]] = []
+    for ticker in sorted({t for t in tickers if t}):
+        bar_path = root / f"{ticker}.parquet"
+        try:
+            mtime_ns = bar_path.stat().st_mtime_ns
+        except OSError:
+            skipped["no_daily_bars"] += 1
+            continue
+        ref = _daily_reference(str(bar_path), mtime_ns, session_date, int(adv_window))
+        if isinstance(ref, str):
+            skipped[ref] += 1
+            continue
+        measured.append((ticker, *ref))
+    measured.sort(key=lambda row: (-row[3], row[0]))
+    if top_n is not None:
+        measured = measured[: int(top_n)]
+    expected = prev_trading_day(session_date)
+    baselines: dict[str, DiscoveryBaseline] = {}
+    for ticker, day, close, adv in measured:
+        if day != expected:
+            skipped["stale_daily_bars"] += 1
+            continue
+        baselines[ticker] = DiscoveryBaseline(ticker, close, adv, prior_close_date=day)
+    return OpeningBaselines(session_date, tuple(t for t, *_ in measured), baselines, dict(skipped))
 
 
 def load_discovery_baselines(
@@ -280,11 +407,11 @@ def load_discovery_baselines(
     *,
     top_n: int | None,
 ) -> dict[str, DiscoveryBaseline]:
-    """Load the causal-at-startup price/ADV baseline used by discovery.
+    """Eligibility and ADV from the universe file, for the catalyst feed.
 
-    ``shared_universe.csv`` is rebuilt by the guarded data jobs.  Its file mtime
-    is recorded on every emitted candidate; no current-session bar is joined
-    backwards into this baseline.
+    The catalyst feed reads only ``average_dollar_volume`` (and that a row
+    exists). ``prior_close`` here is the file's ``px`` and must not be used as a
+    price reference: opening discovery uses load_opening_baselines instead.
     """
     path = Path(universe_path)
     if not path.exists() or (top_n is not None and top_n <= 0):
@@ -343,25 +470,52 @@ class OpeningMomentumCandidateFeed:
     calculations use the bar at or before the decision and the startup baseline.
     """
 
-    def __init__(self, policy: OpeningDiscoveryPolicy) -> None:
+    def __init__(self, policy: OpeningDiscoveryPolicy, *, now: datetime | None = None) -> None:
         self.policy = policy
-        self.baselines = load_discovery_baselines(policy.universe_path, top_n=policy.top_n)
-        try:
-            self._baseline_mtime = Path(policy.universe_path).stat().st_mtime
-        except OSError:
-            self._baseline_mtime = None
+        self.baselines: dict[str, DiscoveryBaseline] = {}
+        self.baseline_skips: dict[str, int] = {}
+        self._symbols: tuple[str, ...] = ()
+        self._next_baseline_retry: float | None = None
+        self._load_baselines(discovery_session_date(now))
         self._session_date = None
         self._tapes: dict[str, _OpeningTape] = {}
         self._bars: dict[str, list[Bar]] = {}
         self._emitted: set[tuple[str, Direction]] = set()
 
+    #: While any streamed name lacks a fresh prior close, look again this often.
+    BASELINE_RETRY_SECONDS = 600.0
+
+    def _load_baselines(self, session: date) -> None:
+        """(Re)load the prior-session references for ``session``.
+
+        Runs at construction, on the first bar of every session (a server left
+        running across days must not measure today's gap from an older close,
+        and a 02:00 restart can precede the nightly bar catch-up), and every
+        BASELINE_RETRY_SECONDS while streamed names are still stale. Re-reads
+        only files rewritten since, so a retry costs stat calls.
+        """
+        loaded = load_opening_baselines(
+            self.policy.universe_path, top_n=self.policy.top_n,
+            session_date=session, daily_bars_dir=self.policy.daily_bars_dir,
+        )
+        self.baselines, self.baseline_skips = loaded.baselines, loaded.skipped
+        self._symbols = loaded.symbols or self._symbols
+        stale = self.baseline_skips.get("stale_daily_bars", 0)
+        self._next_baseline_retry = (time.monotonic() + self.BASELINE_RETRY_SECONDS) if stale else None
+        if self._symbols and not self.baselines:
+            logger.error(
+                "opening discovery: NO fresh prior-session close for %s among %d streamed names "
+                "(%s); discovery is idle until the 1d bar cache reaches %s",
+                session, len(self._symbols), self.baseline_skips, prev_trading_day(session),
+            )
+        elif stale:
+            logger.warning("opening discovery: %d/%d names have a fresh prior close for %s; skipped %s",
+                           len(self.baselines), len(self._symbols), session, self.baseline_skips)
+
     def symbols(self) -> list[str]:
-        return list(self.baselines)
+        return list(self._symbols)
 
     def observe(self, bar: Bar, *, observed_at: datetime | None = None) -> list[Candidate]:
-        baseline = self.baselines.get(bar.symbol)
-        if baseline is None:
-            return []
         et = bar.timestamp.astimezone(_ET)
         minute = et.hour * 60 + et.minute
         if et.weekday() >= 5:
@@ -371,6 +525,12 @@ class OpeningMomentumCandidateFeed:
             self._tapes.clear()
             self._bars.clear()
             self._emitted.clear()
+            self._load_baselines(et.date())
+        elif self._next_baseline_retry is not None and time.monotonic() >= self._next_baseline_retry:
+            self._load_baselines(et.date())
+        baseline = self.baselines.get(bar.symbol)
+        if baseline is None:
+            return []
         # Retain a bounded, already-arrived warmup for any later opening,
         # catalyst or ranker promotion. The engine receives only bars strictly
         # before the signal bar, so this cannot include the decision bar twice.
@@ -477,8 +637,9 @@ class OpeningMomentumCandidateFeed:
                 "volume_pace": volume_pace,
                 "market_return_pct": market_return,
                 "relative_strength_pct": relative_strength,
-                "baseline_path": str(self.policy.universe_path),
-                "baseline_file_mtime": self._baseline_mtime,
+                "prior_close_date": baseline.prior_close_date.isoformat() if baseline.prior_close_date else None,
+                "baseline_source": "bars_1d",
+                "baseline_universe_path": str(self.policy.universe_path),
                 "market_data_lag_seconds": max(0.0, (available_at - bar.timestamp).total_seconds()),
             },
         )]

@@ -49,10 +49,17 @@ RISK_APPETITE_SYMBOLS: tuple[str, ...] = ("XLY", "XLP", "IWM", "SPY", "HYG", CRE
 LIQUIDITY_STRESS_SYMBOLS: tuple[str, ...] = ("SPY", "HYG", CREDIT_DENOMINATOR)
 CREDIT_RISK_SYMBOLS: tuple[str, ...] = ("HYG", CREDIT_DENOMINATOR)
 
+# QQQ feeds the two QQQ trend columns (qqq_fast_down, qqq_below_sma50) that
+# the regime vote (regime_vote.py) uses; the AI/tech tape leads SPY in
+# rotations like Oct-Nov 2026, where QQQ flagged 3 weeks before SPY EMA20/50.
+TREND_SYMBOL: str = "QQQ"
+TREND_FAST_EMA = 20
+TREND_SLOPE_LOOKBACK = 5
+
 # Every ticker daily_regime.py / sector_state.py need cached daily bars for.
 # LQD is retained only to compute the diagnostic credit_risk_hyg_lqd_z column.
 REQUIRED_REGIME_SYMBOLS: tuple[str, ...] = tuple(
-    sorted({"SPY", "IWM", "HYG", "LQD", "RSP", CREDIT_DENOMINATOR} | set(SECTOR_ETFS))
+    sorted({"SPY", "IWM", "HYG", "LQD", "RSP", TREND_SYMBOL, CREDIT_DENOMINATOR} | set(SECTOR_ETFS))
 )
 
 # Backfilled per plan defect D4 so the risk-appetite / short-history

@@ -4,7 +4,7 @@ import json
 import math
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -40,40 +40,125 @@ class DealerSnapshotOptionsProvider:
             return OptionsContext(timestamp=timestamp, source="none", warnings=("dealer_snapshot_missing",))
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            snapshot_ts = utc_datetime(raw["timestamp"])
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError, json.JSONDecodeError):
             return OptionsContext(timestamp=timestamp, source="none", warnings=("dealer_snapshot_invalid",))
+        return options_context_from_gamma_levels(raw, timestamp, max_age=self.max_age)
+
+
+#: Gamma-levels fields that become StructuralLevels: (key, level_type, directionality, strength).
+_GAMMA_LEVEL_SPECS = (
+    ("put_wall", "options_put_wall", "support", 0.90),
+    ("call_wall", "options_call_wall", "resistance", 0.90),
+    ("gamma_flip", "options_gamma_flip", "both", 0.82),
+    ("nearest_magnet", "options_gamma_magnet", "both", 0.78),
+    ("next_magnet_above", "options_gamma_magnet_above", "resistance", 0.70),
+    ("next_magnet_below", "options_gamma_magnet_below", "support", 0.70),
+)
+#: Carried in OptionsContext.structure for the record, never read by a detector.
+_GAMMA_STRUCTURE_KEYS = (
+    "spot", "total_gex", "air_gap_above_score", "air_gap_below_score", "vega_wall",
+    "next_vega_wall_above", "next_vega_wall_below", "magnet_threshold_abs_net_gex",
+    "vega_threshold_total_vex", "per_dte_levels", "per_bucket_levels", "term_structure", "expirations",
+)
+
+
+def options_context_from_gamma_levels(raw: dict, timestamp: datetime, *, max_age: timedelta,
+                                      source: str = "dealer_positioning_static") -> OptionsContext:
+    """A dealer gamma-levels payload (live_gamma_levels.json, or one rebuilt from an
+    archived ladder) as the OptionsContext the engine decides on at ``timestamp``.
+
+    ``timestamp`` is the DECISION time. The engine decides on a bar once it has
+    closed, so callers pass the bar's close, not its open: a snapshot taken
+    during the bar was in hand when the decision was made. Comparing against
+    the open instead rejected nearly every live snapshot during RTH (the poller
+    writes ~48 s into each minute), so from 2026-10-01 to 11-23, 41 of 102
+    index-ETF setups had no dealer levels at all.
+    """
+    try:
+        snapshot_ts = utc_datetime(raw["timestamp"])
+    except (KeyError, TypeError, ValueError):
+        return OptionsContext(timestamp=timestamp, source="none", warnings=("dealer_snapshot_invalid",))
+    decision_ts = utc_datetime(timestamp)
+    if snapshot_ts > decision_ts:
+        return OptionsContext(timestamp=decision_ts, source="none", warnings=("future_dealer_snapshot_rejected",))
+    age = decision_ts - snapshot_ts
+    if age > max_age:
+        # Enforced, not just flagged. It used to be a warning nobody read, so on
+        # Monday 2026-11-23 the opening setups decided on Friday's walls (put 600,
+        # call 610) with QQQ at 650, until the poller's first ladder at 09:52 ET.
+        return OptionsContext(timestamp=snapshot_ts, source="none", warnings=("dealer_snapshot_stale",),
+                              structure={"stale_snapshot_timestamp": snapshot_ts.isoformat(),
+                                         "snapshot_age_seconds": round(age.total_seconds(), 1)})
+    warnings: list[str] = []
+    total_gex = _optional_float(raw.get("total_gex"))
+    gamma_regime = "positive" if total_gex is not None and total_gex >= 0 else "negative" if total_gex is not None else "unknown"
+    levels = tuple(
+        StructuralLevel(price=value, level_type=kind, strength=strength, directionality=direction,
+                        metadata={"snapshot_timestamp": snapshot_ts.isoformat(), "estimated_positioning": True})
+        for key, kind, direction, strength in _GAMMA_LEVEL_SPECS
+        if (value := _optional_float(raw.get(key))) is not None and value > 0
+    )
+    structure = {key: raw.get(key) for key in _GAMMA_STRUCTURE_KEYS if key in raw}
+    structure["snapshot_age_seconds"] = round(age.total_seconds(), 1)
+    return OptionsContext(
+        timestamp=snapshot_ts, source=source,
+        gamma_regime=gamma_regime, gamma_flip=_optional_float(raw.get("gamma_flip")),
+        call_wall=_optional_float(raw.get("call_wall")), put_wall=_optional_float(raw.get("put_wall")),
+        local_gamma_exposure=total_gex,
+        strike_congestion_score=float(np.clip(len(levels) / 6.0, 0.0, 1.0)),
+        levels=levels, warnings=tuple(warnings), structure=structure,
+    )
+
+
+class ArchivedLadderOptionsProvider:
+    """Dealer levels as of a past moment, rebuilt from the archived per-minute ladders.
+
+    ``Data/dealer_positioning/<SYM>/snapshots/gamma_ladder_<UTC>_*.csv`` is what
+    the live poller saved each minute; the core levels come from the same
+    ``_core_levels_from_ladder`` that writes live_gamma_levels.json, so a replay
+    sees what the engine was handed (per-expiry levels are not rebuilt). For the
+    replay and research, not the live engine.
+    """
+
+    _STAMP = "%Y%m%dT%H%M%S.%f"
+
+    def __init__(self, root: str | Path = "Data/dealer_positioning", max_age_minutes: int = 1440) -> None:
+        self.root = Path(root)
+        self.max_age = timedelta(minutes=max_age_minutes)
+        self._index: dict[str, tuple[list[datetime], list[Path]]] = {}
+
+    def _files(self, symbol: str) -> tuple[list[datetime], list[Path]]:
+        if symbol not in self._index:
+            stamps, paths = [], []
+            for path in sorted((self.root / symbol / "snapshots").glob("gamma_ladder_*.csv")):
+                try:
+                    stamp = datetime.strptime(path.name.split("_")[2], self._STAMP)
+                except (IndexError, ValueError):
+                    continue
+                stamps.append(stamp.replace(tzinfo=timezone.utc))
+                paths.append(path)
+            self._index[symbol] = (stamps, paths)
+        return self._index[symbol]
+
+    def context(self, symbol: str, timestamp: datetime, spot: float) -> OptionsContext:
+        import bisect
+
+        from strategies.dealer_positioning.levels import _core_levels_from_ladder
+
+        stamps, paths = self._files(symbol.upper())
         decision_ts = utc_datetime(timestamp)
-        if snapshot_ts > decision_ts:
-            return OptionsContext(timestamp=decision_ts, source="none", warnings=("future_dealer_snapshot_rejected",))
-        age = decision_ts - snapshot_ts
-        warnings: list[str] = []
-        if age > self.max_age:
-            warnings.append("dealer_snapshot_stale")
-        total_gex = _optional_float(raw.get("total_gex"))
-        gamma_regime = "positive" if total_gex is not None and total_gex >= 0 else "negative" if total_gex is not None else "unknown"
-        level_specs = [
-            ("put_wall", "options_put_wall", "support", 0.90),
-            ("call_wall", "options_call_wall", "resistance", 0.90),
-            ("gamma_flip", "options_gamma_flip", "both", 0.82),
-            ("nearest_magnet", "options_gamma_magnet", "both", 0.78),
-            ("next_magnet_above", "options_gamma_magnet_above", "resistance", 0.70),
-            ("next_magnet_below", "options_gamma_magnet_below", "support", 0.70),
-        ]
-        levels = tuple(
-            StructuralLevel(price=value, level_type=kind, strength=strength, directionality=direction,
-                            metadata={"snapshot_timestamp": snapshot_ts.isoformat(), "estimated_positioning": True})
-            for key, kind, direction, strength in level_specs
-            if (value := _optional_float(raw.get(key))) is not None and value > 0
-        )
-        return OptionsContext(
-            timestamp=snapshot_ts, source="dealer_positioning_static",
-            gamma_regime=gamma_regime, gamma_flip=_optional_float(raw.get("gamma_flip")),
-            call_wall=_optional_float(raw.get("call_wall")), put_wall=_optional_float(raw.get("put_wall")),
-            local_gamma_exposure=total_gex,
-            strike_congestion_score=float(np.clip(len(levels) / 6.0, 0.0, 1.0)),
-            levels=levels, warnings=tuple(warnings),
-        )
+        i = bisect.bisect_right(stamps, decision_ts) - 1
+        if i < 0:
+            return OptionsContext(timestamp=decision_ts, source="none", warnings=("dealer_ladder_missing",))
+        try:
+            ladder = pd.read_csv(paths[i])
+            ladder_spot = float(ladder["spot"].iloc[0])
+            raw = {**_core_levels_from_ladder(ladder, ladder_spot, 0.90),
+                   "timestamp": str(ladder["timestamp"].iloc[0]), "spot": ladder_spot}
+        except Exception:  # noqa: BLE001 - an unreadable ladder is a missing snapshot
+            return OptionsContext(timestamp=decision_ts, source="none", warnings=("dealer_ladder_invalid",))
+        return options_context_from_gamma_levels(raw, timestamp, max_age=self.max_age,
+                                                 source="dealer_positioning_archived_ladder")
 
 
 class DealerLevelSummaryOptionsProvider:
@@ -368,7 +453,12 @@ class CompositeOptionsProvider:
         if not available:
             warnings = tuple(dict.fromkeys(w for ctx in contexts for w in ctx.warnings))
             return OptionsContext(timestamp=timestamp, source="none", warnings=warnings or ("options_unavailable",))
-        static = next((ctx for ctx in available if "static" in ctx.source or "dealer" in ctx.source), available[0])
+        # The FRESHEST positioning supplies the scalars (walls, flip, regime).
+        # First-listed used to win, and the nightly summary is listed first, so
+        # an index ETF with a live intraday snapshot decided on the prior
+        # close's walls whenever both were present. Levels from all are kept.
+        positioning = [ctx for ctx in available if "static" in ctx.source or "dealer" in ctx.source] or available
+        static = max(positioning, key=lambda ctx: utc_datetime(ctx.timestamp) if ctx.timestamp else datetime.min.replace(tzinfo=timezone.utc))
         flow = next((ctx for ctx in available if "flow" in ctx.source), None)
         return OptionsContext(
             timestamp=max((ctx.timestamp for ctx in available if ctx.timestamp), default=utc_datetime(timestamp)),
@@ -383,6 +473,7 @@ class CompositeOptionsProvider:
             short_dated_flow_ratio=flow.short_dated_flow_ratio if flow else 0.0,
             levels=tuple(level for ctx in available for level in ctx.levels),
             warnings=tuple(dict.fromkeys(w for ctx in available for w in ctx.warnings)),
+            structure=dict(static.structure),
         )
 
 

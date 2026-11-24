@@ -6,8 +6,12 @@ holiday rules (fixed-date holidays roll to the nearest weekday; the floating one
 This is enough for "is the market open on day X / what's the next session" logic
 used by the option-expiry-before-closure guard.
 
-Half-days (1:00pm early closes) are NOT modeled here — those days are still
-trading days, which is all the expiry guard needs.
+Half-days (13:00 ET early closes) are modeled by rule as well: the day after
+Thanksgiving, Dec 24 when it falls Mon-Thu, and Jul 3 when Jul 4 falls Tue-Fri.
+They are trading days with an earlier ``session_close_time``. Session-relative
+cutoffs ("flatten 20 min before the close") go through ``close_relative_time``
+so the same rule fires the same distance before the real close. The rule matched
+Alpaca's /v2/calendar for every early close 2018-2027 (21 days, all 13:00).
 
 If you'd rather use the maintained library instead, install pandas_market_calendars
 and swap next_trading_day for mcal.get_calendar("XNYS").valid_days(...). This module
@@ -22,6 +26,7 @@ from zoneinfo import ZoneInfo
 _ET = ZoneInfo("America/New_York")
 _RTH_OPEN = time(9, 30)
 _RTH_CLOSE = time(16, 0)
+_EARLY_CLOSE = time(13, 0)
 
 
 def _nearest_weekday(d: date) -> date:
@@ -88,6 +93,42 @@ def is_market_holiday(d: date) -> bool:
     return d in market_holidays(d.year)
 
 
+@lru_cache(maxsize=64)
+def early_closes(year: int) -> frozenset[date]:
+    """13:00 ET early-close sessions for a calendar year."""
+    days: set[date] = {_nth_weekday(year, 11, 3, 4) + timedelta(days=1)}  # day after Thanksgiving
+    dec24 = date(year, 12, 24)
+    if dec24.weekday() <= 3:  # Mon-Thu; a Friday Dec 24 is the observed Christmas closure
+        days.add(dec24)
+    jul3 = date(year, 7, 3)
+    if jul3.weekday() <= 3:  # Jul 4 on Tue-Fri; otherwise the observed holiday or a weekend
+        days.add(jul3)
+    return frozenset(d for d in days if d not in market_holidays(year))
+
+
+def is_early_close(d: date) -> bool:
+    return d in early_closes(d.year)
+
+
+def session_close_time(d: date) -> time:
+    """Regular-session close (ET) for trading day `d`: 13:00 on early closes, else 16:00."""
+    return _EARLY_CLOSE if is_early_close(d) else _RTH_CLOSE
+
+
+def close_relative_time(t: time, d: date) -> time:
+    """Move a regular-session clock time to the same distance before `d`'s close.
+
+    Cutoffs written for a 16:00 close ("stop new entries at 15:00", "flatten
+    expiring options at 15:40") keep their meaning on a 13:00 half-day: 15:40
+    becomes 12:40. Unchanged on a normal session; never earlier than the open.
+    """
+    if not is_early_close(d):
+        return t
+    shift = datetime.combine(d, _RTH_CLOSE) - datetime.combine(d, session_close_time(d))
+    moved = (datetime.combine(d, t) - shift).time()
+    return max(moved, _RTH_OPEN)
+
+
 def is_trading_day(d: date) -> bool:
     """Weekday that isn't a full-day market closure."""
     return d.weekday() < 5 and not is_market_holiday(d)
@@ -126,16 +167,15 @@ def latest_session_date(now: datetime | None = None) -> date:
 
 
 def is_market_open_now(now: datetime | None = None) -> bool:
-    """True during US equity/options regular trading hours (09:30-16:00 ET) on a
-    real trading day (weekday, minus full-day NYSE holidays).
+    """True during US equity/options regular trading hours (09:30 to the
+    session close, 16:00 or 13:00 on a half-day) on a real trading day.
 
     Single source of truth for "is RTH open right now" — previously hand-rolled
     independently in a couple of live-trading modules, both of which checked
     only weekday + time-of-day and so reported the market open on a holiday
-    weekday. Half-days (1pm early closes) are still not modeled (see module
-    docstring); on those days this can report open past the actual 1pm close.
+    weekday.
     """
     et = (now or datetime.now(_ET)).astimezone(_ET)
     if not is_trading_day(et.date()):
         return False
-    return _RTH_OPEN <= et.time() < _RTH_CLOSE
+    return _RTH_OPEN <= et.time() < session_close_time(et.date())

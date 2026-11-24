@@ -118,6 +118,9 @@ _MAX_ENTRY_SPREAD_PCT_MID = float(
 # request, so stop after a handful rather than walking a whole dead band.
 # Mirrors meta_ranker.options_exec._MAX_QUOTE_ATTEMPTS.
 _MAX_QUOTE_ATTEMPTS = 5
+# Without greeks, liquidity ranking chooses among this many strikes nearest
+# spot (about two either side), never the whole ±10% band.
+_NO_GREEKS_NEAREST_STRIKES = 4
 
 
 def _rank_band_by_liquidity(
@@ -667,9 +670,18 @@ def _select_atm_option(
         delta = _as_float(greeks.get("delta"))
         if delta is not None and _DELTA_LO <= abs(delta) <= _DELTA_HI:
             delta_pool.append(contract)
-    # No usable greeks at all -> fall back to the strike band rather than
-    # reporting a name untradeable because the snapshot was thin.
-    candidates = delta_pool or same_exp
+    # No usable greeks at all -> fall back to the strikes nearest the money
+    # rather than reporting a name untradeable because the snapshot was thin.
+    # NOT the whole ±10% band: ranked by open interest, that hands the pick to
+    # the deepest-OI strike anywhere in it, which on a same-day expiry is a
+    # delta-zero lottery ticket. 0DTE snapshots often carry no greeks, and on
+    # 2026-11-23 this fallback sent the intraday module to QQQ 590P with spot at
+    # 652 (9.5% OTM), SPY 690P (4% OTM) and AVGO 337.5C (5.6% OTM). The nearest
+    # strikes approximate the 0.35-0.60 delta band the greeks would have enforced.
+    pool = "delta_band" if delta_pool else "nearest_strikes_no_greeks"
+    candidates = delta_pool or sorted(
+        same_exp, key=lambda c: abs((_contract_strike(c) or 0.0) - current_price),
+    )[:_NO_GREEKS_NEAREST_STRIKES]
 
     # Alpaca's snapshot carries neither OI nor volume (see core.option_liquidity);
     # Schwab's chain does. `None` means unknown and must not read as zero.
@@ -729,6 +741,9 @@ def _select_atm_option(
                 "spread": ((ask - bid) / mid) if mid > 0 else None,
                 "option_type": cp,
                 "selection_method": "band_liquidity_ranked_non_0dte",
+                # Which pool the liquidity ranking chose from; the audit checks
+                # how often greeks were missing and how far from spot we bought.
+                "selection_pool": pool,
                 "atm_offset_pct": ((strike - current_price) / current_price) if current_price else None,
                 "dte": dte,
             },

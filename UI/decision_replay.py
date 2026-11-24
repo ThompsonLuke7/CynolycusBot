@@ -1131,22 +1131,117 @@ def engine_series(ticker: str, bars: list[dict]) -> dict:
                        + "; ".join(priors) + ".")}
 
 
-def engine_view(*, ticker: str, at: Any, setup: dict | None, direction: str | None) -> dict:
-    """The engine's features and clustered level map as of the bar opened at ``at``.
+DECISION_CONTEXT_DIR = REPO / "Data/inference/intraday_structure/decision_context"
+DEALER_ROOT = REPO / "Data/dealer_positioning"
 
-    Built with the engine's own compute_features and StructuralLevelProvider
-    on its history up to that bar. Options-derived levels (walls, gamma
-    magnets) need the dealer snapshot the engine held then and are not rebuilt.
+
+@lru_cache(maxsize=16)
+def _context_rows_cached(ticker: str, session: str, key: tuple) -> tuple[dict, ...]:
+    from strategies.intraday_structure.decision_context import read_session
+
+    return tuple(read_session(DECISION_CONTEXT_DIR, session, ticker=ticker))
+
+
+def recorded_context(ticker: str, bar_open: pd.Timestamp, setup_id: str | None = None) -> dict | None:
+    """The engine's own record of a decision on the bar that opened at ``bar_open``, if it made one.
+
+    Records exist only for bars the engine decided on (confirm, refuse, entry,
+    manage) and only from 2026-11-24. The position's own setup is preferred
+    when several setups on the ticker decided on the same bar.
+    """
+    session = bar_open.tz_convert(ET).strftime("%Y-%m-%d")
+    path = DECISION_CONTEXT_DIR / f"{session.replace('-', '')}.jsonl"
+    rows = [r for r in _context_rows_cached(ticker, session, _file_key(path)) if _utc(r.get("bar_ts")) == bar_open]
+    if not rows:
+        return None
+    mine = [r for r in rows if setup_id and r.get("setup_id") == setup_id]
+    return (mine or rows)[-1]
+
+
+@lru_cache(maxsize=1)
+def _enricher():
+    from strategies.intraday_structure.config import load_config
+    from strategies.intraday_structure.decision_context import DecisionContextRecorder
+
+    return DecisionContextRecorder(load_config().decision_context)
+
+
+_ARCHIVED_LADDERS: dict[str, Any] = {}
+
+
+def _dealer_context(ticker: str, decided_at: pd.Timestamp):
+    """Dealer levels as of ``decided_at`` from the archived per-minute ladders (index ETFs etc.)."""
+    from strategies.intraday_structure.config import load_config
+    from strategies.intraday_structure.models import OptionsContext
+    from strategies.intraday_structure.options import ArchivedLadderOptionsProvider
+
+    if not (DEALER_ROOT / ticker / "snapshots").exists():
+        return OptionsContext(timestamp=decided_at.to_pydatetime(), source="none", warnings=("no_archived_ladders",))
+    provider = _ARCHIVED_LADDERS.get("p")
+    if provider is None:
+        provider = _ARCHIVED_LADDERS["p"] = ArchivedLadderOptionsProvider(
+            DEALER_ROOT, max_age_minutes=load_config().levels.options_max_age_minutes)
+    return provider.context(ticker, decided_at.to_pydatetime(), 0.0)
+
+
+def _view_level(lv: dict) -> dict:
+    """A recorded (compact) level in the shape the page draws."""
+    out = {"price": lv.get("price"), "type": lv.get("type"), "strength": lv.get("strength"),
+           "directionality": lv.get("dir"), "sources": str(lv.get("type") or "").split("+"),
+           "distance_atr": lv.get("dist_atr")}
+    if lv.get("size"):
+        out.update({"low": lv.get("low"), "high": lv.get("high"), "size": lv.get("size")})
+    return out
+
+
+def _options_view(options: Any) -> dict:
+    if isinstance(options, dict):
+        keep = ("source", "timestamp", "gamma_regime", "gamma_flip", "call_wall", "put_wall",
+                "local_gamma_exposure", "warnings", "structure")
+        return {k: options.get(k) for k in keep}
+    return {"source": options.source, "timestamp": _iso(options.timestamp), "gamma_regime": options.gamma_regime,
+            "gamma_flip": options.gamma_flip, "call_wall": options.call_wall, "put_wall": options.put_wall,
+            "local_gamma_exposure": options.local_gamma_exposure, "warnings": list(options.warnings),
+            "structure": options.structure}
+
+
+def engine_view(*, ticker: str, at: Any, setup: dict | None, direction: str | None) -> dict:
+    """The engine's features, clustered level map, dealer positioning, regime and news at the bar opened at ``at``.
+
+    ``recorded``: the engine's own decision record for that bar (exactly what it
+    decided on). Otherwise ``rebuilt``: the engine's compute_features and
+    StructuralLevelProvider on its archived history, with dealer levels rebuilt
+    as of the bar's close from the archived ladders where they exist, and the
+    regime and news as of the same moment. A rebuild cannot know setup state
+    (pivots, candidate timing), so it is the map the engine would have drawn.
     """
     from strategies.intraday_structure.config import load_config
+    from strategies.intraday_structure.decision_context import BAR_SPAN, compact_level
     from strategies.intraday_structure.features import compute_features
     from strategies.intraday_structure.levels import StructuralLevelProvider
-    from strategies.intraday_structure.models import Candidate, OptionsContext
+    from strategies.intraday_structure.models import Candidate
 
     t = _utc(at)
     ticker = (ticker or "").strip().upper()
     if t is None or not _TICKER_RE.match(ticker):
         return {"error": "bad ticker or time"}
+    decided_at = t + pd.Timedelta(BAR_SPAN)
+    rec = recorded_context(ticker, t, (setup or {}).get("setup_id"))
+    if rec is not None:
+        feats = rec.get("features") or {}
+        return {
+            "source": "recorded", "kind": rec.get("kind"), "action": rec.get("action"),
+            "setup_id": rec.get("setup_id"), "at": rec.get("bar_ts"), "decided_at": rec.get("decided_at"),
+            "spot": (rec.get("bar") or {}).get("c"), "features": feats,
+            "levels": [_view_level(x) for x in rec.get("levels") or []],
+            "raw_level_count": len(rec.get("raw_levels") or []),
+            "options": _options_view(rec.get("options") or {}),
+            "intraday_regime": rec.get("intraday_regime"), "daily_regime": rec.get("daily_regime"),
+            "news": rec.get("news"), "market_news": rec.get("market_news"),
+            "instrument_class": rec.get("instrument_class"),
+            "cluster_threshold": None, "prior_session": None,
+            "note": f"Recorded by the engine when it decided ({rec.get('kind')}: {rec.get('action')}).",
+        }
     hist, spy, qqq, prior = engine_history(ticker, t)
     hist = [b for b in hist if b.timestamp <= t.to_pydatetime()][-ENGINE_HISTORY_BARS:]
     if len(hist) < 2:
@@ -1157,19 +1252,29 @@ def engine_view(*, ticker: str, at: Any, setup: dict | None, direction: str | No
     cand_t = _utc((setup or {}).get("candidate_timestamp")) or hist[0].timestamp
     candidate = Candidate(ticker=ticker, timestamp=cand_t, direction=direction or (setup or {}).get("direction") or "long",
                           sources=tuple((setup or {}).get("candidate_sources") or ("replay",)))
+    options = _dealer_context(ticker, decided_at)
     provider = StructuralLevelProvider(load_config().levels)
-    levels = provider.levels(bars=hist, candidate=candidate, options=OptionsContext(), features=feats)
+    levels = provider.levels(bars=hist, candidate=candidate, options=options, features=feats)
     spot = hist[-1].close
+    atr = feats.get("atr") or 0.0
+    try:
+        extra = _enricher().enrich(ticker, decided_at.to_pydatetime())
+    except Exception as exc:  # noqa: BLE001 - context is an annotation
+        extra = {"error": str(exc)}
+    dealer_note = ("Dealer levels rebuilt from the archived ladder as of the bar's close."
+                   if options.source != "none" else
+                   "No dealer levels: " + ", ".join(options.warnings or ("none archived",)) + ".")
     return {
-        "at": hist[-1].timestamp.isoformat(), "spot": spot, "prior_session": prior,
+        "source": "rebuilt", "at": hist[-1].timestamp.isoformat(), "decided_at": decided_at.isoformat(),
+        "spot": spot, "prior_session": prior,
         "features": {k: _num(v) for k, v in feats.items()},
-        "levels": [{"price": round(x.price, 4), "type": x.level_type, "strength": round(x.strength, 3),
-                    "directionality": x.directionality, "sources": (x.metadata or {}).get("sources"),
-                    "distance_atr": round((x.price - spot) / feats["atr"], 3) if feats.get("atr") else None}
-                   for x in levels],
-        "cluster_threshold": round(max(feats.get("atr", 0) * provider.policy.cluster_atr,
-                                       spot * provider.policy.cluster_pct), 4),
-        "note": "Options-derived levels are not rebuilt (they need the dealer snapshot the engine held then).",
+        "levels": [_view_level(compact_level(x, spot=spot, atr=atr)) for x in levels],
+        "options": _options_view(options),
+        "daily_regime": extra.get("daily_regime"), "news": extra.get("news"),
+        "market_news": extra.get("market_news"), "instrument_class": extra.get("instrument_class"),
+        "cluster_threshold": round(max(atr * provider.policy.cluster_atr, spot * provider.policy.cluster_pct), 4),
+        "note": "Rebuilt, not recorded: the engine made no decision on this bar, or it predates recording "
+                "(2026-11-24). " + dealer_note,
     }
 
 

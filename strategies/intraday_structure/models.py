@@ -193,6 +193,10 @@ class OptionsContext:
     short_dated_flow_ratio: float = 0.0
     levels: tuple[StructuralLevel, ...] = ()
     warnings: tuple[str, ...] = ()
+    #: The rest of the dealer snapshot, carried for the decision record and
+    #: the replay, not read by any detector: air-gap (vacuum) scores, vega
+    #: walls, per-expiry (0DTE/1DTE) levels and the gamma term structure.
+    structure: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)

@@ -26,7 +26,11 @@ TICKER_PROFILE_PATH = PROCESSED_DIR / "ticker_profiles.parquet"
 FINRA_SHORT_VOLUME_PATH = PROCESSED_DIR / "finra_short_volume.parquet"
 CBOE_OPTIONS_SUMMARY_PATH = PROCESSED_DIR / "cboe_options_summary.parquet"
 EARNINGS_CALENDAR_PATH = PROCESSED_DIR / "ticker_earnings_calendar.parquet"
+# Deterministic FOMC/NFP/CPI calendar (signals.events.economic_calendar --build): the macro
+# definition the 30m swing model was trained on. The TradingView feed (every US release,
+# ~33/day) lives in its own file; merging it into this one collapsed the deterministic rows.
 ECONOMIC_CALENDAR_PATH = PROCESSED_DIR / "economic_calendar.parquet"
+ECONOMIC_CALENDAR_TV_PATH = PROCESSED_DIR / "economic_calendar_tradingview.parquet"
 NASDAQ_SHORT_INTEREST_PATH = PROCESSED_DIR / "nasdaq_short_interest.parquet"
 USASPENDING_CONTRACTS_PATH = PROCESSED_DIR / "usaspending_contracts.parquet"
 

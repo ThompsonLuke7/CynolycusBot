@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from core.live_signal_audit import build_option_order_audit
 from core.API.Alpaca_API.options.options_api import AlpacaOptionsClient
 from core.trading_controls import load_controls
+from core.calendar import close_relative_time, next_trading_day
 
 
 logger = logging.getLogger(__name__)
@@ -61,11 +62,11 @@ def _parse_hhmm(hhmm: str) -> time:
 
 
 def _next_business_day(d: date, *, n: int = 1) -> date:
+    """n-th trading session after `d` (skips weekends AND market holidays: a 1DTE
+    pick on the eve of Thanksgiving must not target a closed day)."""
     out = d
     for _ in range(max(0, int(n))):
-        out = out + timedelta(days=1)
-        while out.weekday() >= 5:
-            out = out + timedelta(days=1)
+        out = next_trading_day(out)
     return out
 
 
@@ -247,7 +248,9 @@ class OptionOrderPolicy:
             if str(config.option_new_entry_cutoff_hhmm or "").strip()
             else None
         )
-        self._client = AlpacaOptionsClient(env_file=config.env_file)
+        # owner=: every accepted order is registered to this module for the broker
+        # fill reconciliation (both sides were unattributed until 2026-11-24).
+        self._client = AlpacaOptionsClient(env_file=config.env_file, owner="spy_day_trader")
 
         self._long_contracts = 0
         self._short_contracts = 0
@@ -896,7 +899,7 @@ class OptionOrderPolicy:
         return edge if int(desired_pos) > 0 else -edge
 
     def _resolve_expiration(self, local_ts: datetime) -> date:
-        dte = 0 if local_ts.time() < self._cutoff else 1
+        dte = 0 if local_ts.time() < close_relative_time(self._cutoff, local_ts.date()) else 1
         session_day = local_ts.date()
         return session_day if dte == 0 else _next_business_day(session_day, n=1)
 
@@ -976,7 +979,9 @@ class OptionOrderPolicy:
             return False
         if setup_ts.date() != local_ts.date():
             return False
-        if setup_ts.time().replace(second=0, microsecond=0) > self._new_entry_cutoff:
+        if setup_ts.time().replace(second=0, microsecond=0) > close_relative_time(
+            self._new_entry_cutoff, setup_ts.date()
+        ):
             return False
 
         expires_at = self._meta_intrabar_entry_expires_at.get(side_key)
@@ -987,7 +992,11 @@ class OptionOrderPolicy:
     def _entry_block_label(self) -> str:
         if load_controls().entries_frozen:
             return "entries_frozen"
-        cutoff = self._new_entry_cutoff.strftime("%H:%M") if self._new_entry_cutoff else "n/a"
+        cutoff = (
+            close_relative_time(self._new_entry_cutoff, datetime.now(self._tz).date()).strftime("%H:%M")
+            if self._new_entry_cutoff
+            else "n/a"
+        )
         return f"new_entry_cutoff_{cutoff}"
 
     def _new_entries_allowed(self, *, local_ts: datetime | None, side: str | None = None) -> bool:
@@ -1008,9 +1017,11 @@ class OptionOrderPolicy:
             return True
         if side is not None and self._armed_intrabar_entry_can_continue(side=side, local_ts=local_ts):
             return True
-        if bool(self.cfg.use_wall_clock_entry_cutoff) and datetime.now(self._tz).time() >= cutoff:
-            return False
-        return local_ts.time() < cutoff
+        if bool(self.cfg.use_wall_clock_entry_cutoff):
+            wall = datetime.now(self._tz)
+            if wall.time() >= close_relative_time(cutoff, wall.date()):
+                return False
+        return local_ts.time() < close_relative_time(cutoff, local_ts.date())
 
     def _set_entry_lockout(self, *, local_ts: datetime, reason: str) -> None:
         end_of_day = datetime.combine(local_ts.date(), time(23, 59), tzinfo=self._tz)
@@ -1402,7 +1413,9 @@ class OptionOrderPolicy:
             preserve_bars_held=True,
             local_ts=local_ts,
         )
-        if self._expiring_position_exit_cutoff and local_ts.time() >= self._expiring_position_exit_cutoff:
+        if self._expiring_position_exit_cutoff and local_ts.time() >= close_relative_time(
+            self._expiring_position_exit_cutoff, local_ts.date()
+        ):
             if (
                 expiring_long_was_open
                 and int(broker_state.get("long_contracts", 0) or 0) <= 0
@@ -2743,7 +2756,7 @@ class OptionOrderPolicy:
         logger: Callable[[str], None] = print,
     ) -> dict[str, Any] | None:
         cutoff = self._expiring_position_exit_cutoff
-        if cutoff is None or local_ts.time() < cutoff:
+        if cutoff is None or local_ts.time() < close_relative_time(cutoff, local_ts.date()):
             return None
 
         # Escalation past the pending-reconcile guard: a sell-to-close that was

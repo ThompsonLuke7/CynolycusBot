@@ -4,10 +4,12 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -18,6 +20,8 @@ from core.trading_controls import order_refusal
 from ..core.config import AlpacaConfig, _profile_env_value, _read_env_file, _split_env_file_profile
 
 logger = logging.getLogger(__name__)
+
+_OCC_SYMBOL = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,8 @@ class AlpacaOptionsClient:
       - POST /v2/orders (with option symbol)
     """
 
+    owner: str | None = None   # class default: clients built without __init__ (tests) stay unowned
+
     def __init__(
         self,
         *,
@@ -58,7 +64,15 @@ class AlpacaOptionsClient:
         trading_base_url: str | None = None,
         data_base_url: str | None = None,
         timeout_sec: int = 30,
+        owner: str | None = None,
     ) -> None:
+        """``owner``: the module this client trades for. When set, every accepted
+        order is registered to it in the broker fill reconciliation
+        (``order_registry.jsonl``) and carries a ``<owner>-<uuid>`` client order id
+        unless the caller supplies one, so the broker record names its owner too.
+        Leave it unset for a client whose caller registers its own orders (the
+        shared 4H engine) or that never submits."""
+        self.owner = str(owner) if owner else None
         cfg = AlpacaConfig.from_env(env_file)
         defaults = OptionsClientConfig.from_env(env_file)
         self._key = cfg.key_id
@@ -384,6 +398,8 @@ class AlpacaOptionsClient:
         changes shape.
         """
         url = f"{self._trading_base}/v2/orders"
+        if client_order_id is None and self.owner:
+            client_order_id = f"{self.owner}-{uuid.uuid4().hex[:24]}"
         payload = {
             "symbol": symbol,
             "qty": int(qty),
@@ -401,7 +417,27 @@ class AlpacaOptionsClient:
             payload["client_order_id"] = str(client_order_id)
         if extended_hours:
             payload["extended_hours"] = True
-        return self._request("POST", url, json_body=payload)
+        resp = self._request("POST", url, json_body=payload)
+        if self.owner:
+            self._register_owner(resp, symbol=symbol, side=side, qty=qty, client_order_id=client_order_id)
+        return resp
+
+    def _register_owner(self, resp: Any, *, symbol: str, side: str, qty: Any,
+                        client_order_id: str | None) -> None:
+        """Register an accepted order to ``self.owner``. Never raises: bookkeeping
+        must not turn an accepted order into an error the caller retries."""
+        try:
+            from core.broker_fill_reconciliation import account_label_for_client, register_order_ownership
+
+            order_id = resp.get("id") if isinstance(resp, Mapping) else None
+            register_order_ownership(
+                order_id=order_id, module=self.owner, symbol=symbol, side=side, qty=float(qty),
+                route="option" if _OCC_SYMBOL.match(str(symbol)) else "equity", reason="client_submit",
+                account_label=account_label_for_client(self), client_order_id=client_order_id,
+                ledger="none")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("order %s %s %s accepted but not registered to %s: %s",
+                           side, qty, symbol, self.owner, exc)
 
     def submit_option_order(
         self,

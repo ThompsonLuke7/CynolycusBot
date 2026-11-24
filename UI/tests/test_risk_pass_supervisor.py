@@ -28,18 +28,20 @@ def one_pass(monkeypatch):
     regression fails the assertion instead of hanging the suite.
     """
 
+    import core.calendar
     import UI.combined_server as server
-    import UI.intraday_poller as poller
 
     calls: list[object] = []
     stop = threading.Event()
 
-    def _is_market_hours(now, **_):
+    def _is_market_open_now(now=None):
         calls.append(now)
         stop.set()
         return False  # never actually fire a risk pass from a test
 
-    monkeypatch.setattr(poller, "is_market_hours", _is_market_hours)
+    # The supervisor imports the calendar gate inside run(), so patching the
+    # module attribute is what it sees.
+    monkeypatch.setattr(core.calendar, "is_market_open_now", _is_market_open_now)
 
     # The loop swallows Exception and continues, so a regression inside the body
     # would spin forever instead of failing. Release the loop on that path too.
@@ -61,13 +63,13 @@ def test_the_loop_body_reaches_the_market_hours_check(one_pass) -> None:
     supervisor = RiskPassSupervisor(interval=60, stop_event=stop, submit=False)
     supervisor.run()
 
-    assert calls, "the loop never reached is_market_hours"
+    assert calls, "the loop never reached the market-hours check"
 
 
 def test_the_time_it_checks_is_timezone_aware(one_pass) -> None:
-    """is_market_hours compares in the supplied zone and documents that a naive
-    datetime is not acceptable; a naive one would silently read as UTC and put
-    the RTH window four or five hours out."""
+    """The market-hours check converts to ET, so the time handed to it must be
+    aware; a naive one would silently read as local/UTC and put the RTH window
+    four or five hours out."""
 
     calls, stop = one_pass
 

@@ -26,6 +26,9 @@ SNAPSHOT_DIR = DATA_DIR / "snapshots"
 _SNAPSHOT_PREFIX = "shared_universe_"
 _SNAPSHOT_STAMP = "%Y%m%dT%H%M%SZ"
 
+#: px and avg_dollar_volume_20d are refreshed from here on every build.
+DAILY_BARS_DIR = REPO_ROOT / "Data" / "shared" / "bars" / "1d"
+
 THEME_MAP_V4 = REPO_ROOT / "themes" / "theme_expansion_legacy" / "data" / "theme_map_v4.csv"
 THEME_ELIGIBLE = REPO_ROOT / "themes" / "theme_expansion_legacy" / "outputs" / "universe_filter.csv"
 SWING_TRAIN = REPO_ROOT / "strategies" / "multi_ticker_swing" / "config" / "swing_trader_universe_v3.csv"
@@ -70,11 +73,53 @@ def _load_theme_eligibility() -> pd.DataFrame:
     if df.empty or "is_eligible" not in df.columns:
         return pd.DataFrame(columns=["ticker", "is_eligible"])
     keep = ["ticker", "is_eligible"]
-    for col in ["px", "avg_dollar_volume_20d", "market_cap"]:
+    for col in ["px", "avg_dollar_volume_20d", "market_cap", "date"]:
         if col in df.columns:
             keep.append(col)
     out = df[keep].copy()
     out["is_eligible"] = out["is_eligible"].astype(bool)
+    # The legacy filter's own as-of date travels with its numbers, so a value
+    # that cannot be refreshed from the bar cache is visibly old, not silently.
+    return out.rename(columns={"date": "px_as_of"})
+
+
+def _refresh_price_liquidity(out: pd.DataFrame, *, bars_dir: Path | None = None,
+                             adv_window: int = 20) -> pd.DataFrame:
+    """Overwrite px / avg_dollar_volume_20d from the 1d bar cache, and date them.
+
+    These two columns used to come only from the legacy theme filter, whose
+    output was last written 2026-06-20 (as of 2026-06-01) and carried no date
+    into this file. By 2026-11-23 px was a median 19.7% off the last close
+    across the top 750 names, and intraday discovery measured gaps from it.
+    Names with no cached bars keep the legacy value, labelled as such.
+    """
+    root = DAILY_BARS_DIR if bars_dir is None else bars_dir
+    out = out.copy()
+    for col in ("px", "avg_dollar_volume_20d"):
+        if col not in out.columns:
+            out[col] = float("nan")
+    if "px_as_of" not in out.columns:
+        out["px_as_of"] = None
+    out["px_source"] = out["px"].notna().map({True: "legacy_theme_filter", False: ""})
+    for idx, ticker in out["ticker"].items():
+        path = root / f"{ticker}.parquet"
+        if not path.exists():
+            continue
+        try:
+            bars = pd.read_parquet(path, columns=["timestamp", "close", "volume"])
+        except Exception:  # noqa: BLE001 - an unreadable cache keeps the labelled legacy value
+            continue
+        close = pd.to_numeric(bars["close"], errors="coerce")
+        valid = close.notna() & (close > 0)
+        if not valid.any():
+            continue
+        bars, close = bars[valid], close[valid]
+        volume = pd.to_numeric(bars["volume"], errors="coerce")
+        last = pd.to_datetime(bars["timestamp"], utc=True).max().tz_convert("America/New_York")
+        out.at[idx, "px"] = float(close.iloc[-1])
+        out.at[idx, "avg_dollar_volume_20d"] = float((close * volume).tail(adv_window).mean())
+        out.at[idx, "px_as_of"] = last.date().isoformat()
+        out.at[idx, "px_source"] = "bars_1d"
     return out
 
 
@@ -177,6 +222,7 @@ def build_shared_universe(*, out_path: Path = SHARED_UNIVERSE_CSV) -> pd.DataFra
             out[col] = False
         out[col] = out[col].where(out[col].notna(), False).astype(bool)
     out["is_eligible"] = out["is_eligible"] | out["manual_eligible"] | out["discovered_eligible"]
+    out = _refresh_price_liquidity(out)
     if "asset_type" not in out.columns:
         out["asset_type"] = ""
     if "type" in out.columns:

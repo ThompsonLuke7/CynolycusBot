@@ -860,8 +860,9 @@ def _run_risk_pass(*, submit: bool, live: bool, trailing_stop: bool = False,
 class RiskPassSupervisor(threading.Thread):
     """Daemon thread that runs the 4H risk pass on an interval during RTH.
 
-    Reuses UI.intraday_poller.is_market_hours (pure and unit-tested) for the
-    window, and waits in small chunks so shutdown stays immediate.
+    The window is core.calendar.is_market_open_now: trading days only, closing
+    at 13:00 on half-days, so no exit is fired at a closed market on a holiday
+    or after an early close. Waits in small chunks so shutdown stays immediate.
     """
 
     def __init__(self, *, interval: int = 300, stop_event: threading.Event,
@@ -881,12 +882,13 @@ class RiskPassSupervisor(threading.Thread):
     def run(self) -> None:
         from datetime import datetime
 
-        from UI.intraday_poller import _tz, is_market_hours
+        from core.calendar import is_market_open_now
+        from UI.intraday_poller import _tz
 
         tz = _tz(self._tz_name)
         while not self._stop.is_set():
             try:
-                if is_market_hours(datetime.now(tz)):
+                if is_market_open_now(datetime.now(tz)):
                     self._tick()
             except Exception:
                 logger.exception("risk pass supervisor: tick failed; continuing")
@@ -1632,6 +1634,7 @@ def run_combined(
                     mode=meta_ranker_mode, submit=True, live=False),
                 hour=mh, minute=mm, stop_event=stop_evt,
                 name=f"meta-ranker-scheduler-{hhmm}",
+                trading_days_only=True,
             )
             sched.start()
             meta_schedulers.append(sched)
@@ -1647,7 +1650,8 @@ def run_combined(
     #     they read the bars/matrix Meta just refreshed.
     # ------------------------------------------------------------------
     def _schedule_loop(times: str, job, *, label: str, tag: str,
-                       weekdays_only: bool = True) -> list:
+                       weekdays_only: bool = True, close_relative: bool = False,
+                       trading_days_only: bool = False) -> list:
         scheds: list = []
         if not times:
             return scheds
@@ -1665,7 +1669,9 @@ def run_combined(
                 continue
             sched = NightlyScheduler(job, hour=hh, minute=mm, stop_event=stop_evt,
                                      name=f"{label}-scheduler-{hhmm}",
-                                     weekdays_only=weekdays_only)
+                                     weekdays_only=weekdays_only,
+                                     close_relative=close_relative,
+                                     trading_days_only=trading_days_only)
             sched.start()
             scheds.append(sched)
             fired.append(hhmm)
@@ -1678,13 +1684,13 @@ def run_combined(
     htf_schedulers = _schedule_loop(
         htf_times,
         lambda: _run_htf_loop(mode=htf_mode, submit=True, live=htf_live),
-        label="HTF Swing", tag=htf_tag,
+        label="HTF Swing", tag=htf_tag, trading_days_only=True,
     )
     mom_tag = f"options/{'LIVE' if momentum_live else 'paper'}/SUBMIT"
     momentum_schedulers = _schedule_loop(
         momentum_times,
         lambda: _run_momentum_loop(submit=True, live=momentum_live),
-        label="Momentum", tag=mom_tag,
+        label="Momentum", tag=mom_tag, trading_days_only=True,
     )
     dealer_ranker_tag = f"options/{'LIVE' if dealer_ranker_live else 'paper'}/SUBMIT"
     dealer_ranker_schedulers = _schedule_loop(
@@ -1698,6 +1704,9 @@ def run_combined(
         ),
         label="Dealer Ranker",
         tag=dealer_ranker_tag,
+        # Near-close entry pass: on a 13:00 half-day it fires 3h earlier
+        # (15:15 -> 12:15) so it still trades into an open market.
+        close_relative=True,
     )
 
     # ------------------------------------------------------------------
@@ -1781,7 +1790,7 @@ def run_combined(
             lambda: _run_startup_queue(
                 env_file=env_file, account_label=startup_queue_account,
             ),
-            label="Startup queue (market hours)", tag="ORDERS",
+            label="Startup queue (market hours)", tag="ORDERS", trading_days_only=True,
         )
 
     # Shadow tracker: 10 min after each Momentum/HTF/Meta cycle (14:20/16:20 and
@@ -1809,24 +1818,27 @@ def run_combined(
     #     survivors as normal day orders, then exit — matching the "next_open" fill
     #     that backtest_exits.py validated. Staggered so Meta re-scores first.
     # ------------------------------------------------------------------
+    # Trading jobs below run on trading days only: on a full holiday the 4H
+    # loops would re-score the previous session's bar (ageing every position
+    # a phantom bar) and the flushes would send orders to a closed market.
     flush_schedulers: list = []
     if meta_ranker_times:
         flush_schedulers += _schedule_loop(
             "09:35",
             lambda: _run_meta_ranker_loop(mode=meta_ranker_mode, submit=True, live=False, flush=True),
-            label="Meta pre-open flush", tag=_tag,
+            label="Meta pre-open flush", tag=_tag, trading_days_only=True,
         )
     if htf_times:
         flush_schedulers += _schedule_loop(
             "09:37",
             lambda: _run_htf_loop(mode=htf_mode, submit=True, live=htf_live, flush=True),
-            label="HTF pre-open flush", tag=htf_tag,
+            label="HTF pre-open flush", tag=htf_tag, trading_days_only=True,
         )
     if momentum_times:
         flush_schedulers += _schedule_loop(
             "09:37",
             lambda: _run_momentum_loop(submit=True, live=momentum_live, flush=True),
-            label="Momentum pre-open flush", tag=mom_tag,
+            label="Momentum pre-open flush", tag=mom_tag, trading_days_only=True,
         )
 
     # Optional boot-time equivalent of clicking Hub -> Start All. Keep this

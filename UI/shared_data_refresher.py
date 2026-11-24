@@ -48,6 +48,15 @@ def _tz(name: str):
         return dt.timezone.utc
 
 
+def _output_tail(text, lines: int = 25) -> str:
+    """Last ``lines`` lines of a step's combined output (bytes or str), for the log."""
+    if not text:
+        return "(no output)"
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    return "\n".join(text.rstrip().splitlines()[-lines:])
+
+
 def is_within_window(
     now: dt.datetime,
     *,
@@ -124,16 +133,30 @@ class SharedDataRefresher(threading.Thread):
 
         env = {**os.environ, "PYTHONPATH": str(self._repo)}
         t0 = time.time()
+        tail = ""
         try:
-            rc = subprocess.run(
+            # Output is captured, not discarded: on 2026-11-23 the matrix step
+            # failed three times running (13:46-14:22 ET), Meta's 14:20 pass
+            # aborted on a 3-day-old matrix, and the log said only "FAILED"
+            # because both streams went to /dev/null. Only a failure's tail is
+            # logged, so a healthy run adds nothing.
+            proc = subprocess.run(
                 argv, cwd=str(self._repo), env=env, timeout=timeout,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            ).returncode
-            ok = rc == 0
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+            )
+            ok = proc.returncode == 0
+            if not ok:
+                tail = _output_tail(proc.stdout)
+                tail = f"exit={proc.returncode}\n{tail}"
+        except subprocess.TimeoutExpired as exc:
+            ok = False
+            tail = f"timeout after {timeout}s\n{_output_tail(exc.stdout)}"
         except Exception as exc:  # noqa: BLE001
             logger.warning("[refresher] %s raised %s: %s", label, type(exc).__name__, exc)
             ok = False
         logger.info("[refresher] %s %s (%.0fs)", label, "OK" if ok else "FAILED", time.time() - t0)
+        if tail:
+            logger.warning("[refresher] %s failure output (last lines):\n%s", label, tail)
         return ok
 
     def run_cycle(self, *, with_feeds: bool) -> None:

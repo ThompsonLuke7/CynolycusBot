@@ -81,7 +81,7 @@ from core.live_4h_exec import (
     submit_pending_exit_orders,
     submit_pending_open_entries,
 )
-from core.live_readiness import filter_entry_orders_for_readiness
+from core.live_readiness import filter_entry_orders_for_readiness, wait_for_matrix_bar
 from signals.meta_context.meta_ranker.options_exec import (
     equity_order_tif,
     route_option_or_shares,
@@ -571,6 +571,13 @@ def main() -> int:
     # Refuse to trade on stale data: if the latest full bar is older than this,
     # abort. Tight (half a day) so a missed nightly refresh can't trade yesterday.
     ap.add_argument("--max-staleness-days", type=float, default=0.5)
+    ap.add_argument("--bar-wait-seconds", type=float, default=1500.0,
+                    help="Wait up to this long for the shared matrix to hold the newest completed 4H "
+                         "bar before reading it. The refresher appends it only once its hours are all "
+                         "fetched: the 10:00 bar landed at 14:38:05 (11-23) and 14:37:20 (11-24), so a "
+                         "14:20 pass needs >17 min (HTF's 900 s works only because it starts at 14:25). "
+                         "Must stay below run_4h_loop's RUNNER_TIMEOUT_SEC (1800). On timeout the "
+                         "staleness guard decides. 0 disables.")
     ap.add_argument("--allow-stale", action="store_true")
     ap.add_argument("--signal-audit-log", default=str(DEFAULT_AUDIT_LOG),
                     help="Append-only JSONL path for signal/order audit events; set empty to disable.")
@@ -597,6 +604,13 @@ def main() -> int:
     print(f"=== Meta Ranker {args.mode} runner | account={profile} | mode={run_mode} | top_k={args.top_k} ===")
 
     # --- score + select ---
+    if args.bar_wait_seconds > 0 and not getattr(args, "flush_pending_open", False):
+        # Same wait HTF has run since 2026-11-22. Without it the 14:20 pass read the
+        # matrix before the refresher could append the 10:00 bar and aborted as stale
+        # (11-23, 11-24) while HTF, five minutes later, waited and traded it.
+        _ok, why = wait_for_matrix_bar(args.matrix, timeout_s=args.bar_wait_seconds,
+                                       latest_full_bar=_latest_full_bar)
+        print(f"matrix bar check: {why}")
     inference_start = utc_now()
     df = pd.read_parquet(args.matrix).reset_index()
     df["timestamp"] = _normalize_timestamp_series(df["timestamp"], field_name="feature-matrix timestamps")

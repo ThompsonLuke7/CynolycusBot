@@ -81,3 +81,35 @@ def test_sleep_wakes_for_the_next_bar_ready_anchor():
     assert sdr.seconds_until_next_anchor(_at(2026, 11, 20, 14, 17)) == 210
     assert sdr.seconds_until_next_anchor(_at(2026, 11, 20, 15, 0)) == 80 * 60 + 30
     assert sdr.seconds_until_next_anchor(_at(2026, 11, 20, 16, 30)) is None
+
+
+def test_a_failed_step_logs_its_output_tail(tmp_path, caplog):
+    """2026-11-23: three matrix failures logged only 'FAILED'; the cause went to /dev/null."""
+    import logging
+    import sys
+
+    from UI import shared_data_refresher as mod
+
+    r = mod.SharedDataRefresher.__new__(mod.SharedDataRefresher)
+    r._repo = tmp_path
+    with caplog.at_level(logging.INFO, logger=mod.logger.name):
+        ok = r._run_step("matrix", [sys.executable, "-c",
+                                    "import sys; print('step one'); sys.exit('ABORT: bars incomplete')"],
+                         timeout=30)
+    assert ok is False
+    text = caplog.text
+    assert "matrix FAILED" in text
+    assert "exit=1" in text and "ABORT: bars incomplete" in text and "step one" in text
+
+
+def test_a_successful_step_logs_no_output(tmp_path, caplog):
+    import logging
+    import sys
+
+    from UI import shared_data_refresher as mod
+
+    r = mod.SharedDataRefresher.__new__(mod.SharedDataRefresher)
+    r._repo = tmp_path
+    with caplog.at_level(logging.INFO, logger=mod.logger.name):
+        assert r._run_step("bars", [sys.executable, "-c", "print('noise')"], timeout=30)
+    assert "noise" not in caplog.text
