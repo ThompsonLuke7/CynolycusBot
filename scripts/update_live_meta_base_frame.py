@@ -61,7 +61,46 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ga-dataset-name", default="10min", help="Dataset name for GA feature list fallback.")
     parser.add_argument("--ga-pivot-label-dir", default="swing", help="Pivot GA label dir.")
     parser.add_argument("--ga-tb-label-dir", default="tb", help="TB GA label dir.")
+    parser.add_argument(
+        "--no-fresh-topup",
+        action="store_true",
+        help=(
+            "Build from the prefill file alone. By default, minutes after its end are "
+            "pulled fresh (IEX, the cache's feed) and appended IN MEMORY: the runtime "
+            "cache is only rewritten at a server start, so without this the nightly "
+            "matrix stopped at the last restart (2026-11-23: cache ended 11-20)."
+        ),
+    )
     return parser.parse_args()
+
+
+def fresh_topup(raw_df: pd.DataFrame, *, symbol: str, now: pd.Timestamp | None = None,
+                fetch=None) -> tuple[pd.DataFrame, int]:
+    """``raw_df`` (UTC-indexed 1m) plus fresh complete minutes after its last row.
+
+    Same rule as the cache: IEX feed, bar starts 09:30-16:00 ET. A minute still forming
+    at ``now`` is dropped. Nothing is written back to the cache."""
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now).tz_convert("UTC")
+    if raw_df.empty:
+        return raw_df, 0
+    last = pd.DatetimeIndex(raw_df.index).max()
+    if fetch is None:
+        from core.API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
+
+        def fetch(start, end):
+            return fetch_intraday(ticker=symbol, start=start, end=end, timeframe="1Min", limit=None,
+                                  feed="IEX", save_path="")
+    new = fetch((last + pd.Timedelta(minutes=1)).isoformat(), now.isoformat())
+    if new is None or new.empty:
+        return raw_df, 0
+    new = new.copy()
+    new["timestamp"] = pd.to_datetime(new["timestamp"], utc=True)
+    new = new[(new["timestamp"] > last) & (new["timestamp"] + pd.Timedelta(minutes=1) <= now)]
+    if new.empty:
+        return raw_df, 0
+    new = new.set_index("timestamp")[[c for c in raw_df.columns if c in new.columns]]
+    out = pd.concat([raw_df, new]).sort_index()
+    return out[~out.index.duplicated(keep="first")], int(len(new))
 
 
 def _resolve_ga_feature_list(symbol: str, dataset_name: str, provided: str | None) -> str | None:
@@ -114,6 +153,9 @@ def main() -> None:
     else:
         raw_df = raw_df.sort_values("timestamp").copy()
     raw_df = raw_df.set_index("timestamp")
+    if not args.no_fresh_topup:
+        raw_df, added = fresh_topup(raw_df, symbol=args.symbol)
+        print(f"[meta-cache] fresh top-up: {added:,} 1m rows after {raw_path.name}'s end (in memory only).")
 
     ga_feature_list = _resolve_ga_feature_list(args.symbol, args.ga_dataset_name, args.ga_feature_list)
     ga_predictor = None

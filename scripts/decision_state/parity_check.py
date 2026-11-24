@@ -11,6 +11,10 @@ References:
   meta_ranker, multi_ticker_swing_htf
                            signals/meta_context/meta_ranker/meta_ranker_matrix.parquet
   dealer_ranker            NOT_CHECKED: its rankings file is rewritten after the decision
+  spy_day_trader           the nightly full-history SPY meta matrix (update_live_meta_base_frame.py
+                           --rebuild, pre-stamp); it reads the runtime 1m cache the live loop keeps,
+                           so each archived session's cache is first checked against a fresh IEX pull
+                           and a mismatch fails the module (reference untrusted)
   multi_ticker_swing_30m   strategies.multi_ticker_swing.research_reference: the training feature
                            code on a FRESH Alpaca pull (never the live deque / RAW_30M_DIR), for a
                            seeded sample of tickers (--sample-30m), keyed by 30m bucket start
@@ -20,8 +24,10 @@ References:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import logging
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,9 +46,9 @@ FEATURES_4H = REPO / "strategies/momentum_expansion/data/processed/features_4h.p
 META_MATRIX = REPO / "signals/meta_context/meta_ranker/meta_ranker_matrix.parquet"
 DEALER_RANKINGS = REPO / "Data/dealer_positioning/rankings"
 REPORT_DIR = REPO / "Data/research/decision_state_parity"
-NOT_WIRED = {
-    "spy_day_trader": "no research reference wired (SPY features are rebuilt per bar from the 1m buffer)",
-}
+NOT_WIRED: dict[str, str] = {}
+SPY_MATRIX = REPO / "Data/inference/spy/10min/debug_matrices_warmup/spy/live_meta_matrix_on_trace_ts.parquet"
+SPY_1M_CACHE = REPO / "Data/raw/spy/spy_intraday_1min_runtime_rth_cache.parquet"
 SAMPLE_30M = 40     # tickers per run: each needs a ~400-day fresh 30m pull
 RTOL, ATOL = 1e-5, 1e-6
 # Rows decided before a module's parity fix went live are excluded (and counted):
@@ -51,6 +57,10 @@ RTOL, ATOL = 1e-5, 1e-6
 # features at 0 (fixed in code 2026-11-19; the intraday context refresh also
 # needs a combined-server restart, until which regime_vix_z can still differ).
 FIXED_FROM = {"momentum_expansion": pd.Timestamp("2026-11-19 14:00", tz="UTC")}
+# Rows written by a process whose code predates the fix commit (archive git_commit, read
+# once per process) document the old defect. spy_day_trader: forming 10m bar cached and
+# scored one minute in (320dccf7).
+FIXED_IN_COMMIT = {"spy_day_trader": "320dccf7"}
 # Row-level marker where a fix is visible in the archive itself. 30m swing (2026-11-23): REST
 # bar sync, bucket-start stamps, daily-scope history, training static ids and the nightly
 # daily context all ship together with the scanner's run_meta "bar_sync" field; it takes
@@ -59,6 +69,67 @@ PRE_FIX = {"multi_ticker_swing_30m":
            lambda df: ~df["run_meta_json"].fillna("").astype(str).str.contains('"bar_sync"')}
 NOT_WIRED["dealer_ranker"] = ("reference invalid: dealer_swing_rankings_<snapshot>.parquet is rewritten after "
                               "the 15:45 decision (11-18 file holds a 17:45 capture); the archive is the record")
+
+
+@functools.lru_cache(maxsize=256)
+def _has_commit(row_commit: str | None, fix: str) -> bool:
+    """True when ``row_commit`` contains ``fix`` (is it or a descendant)."""
+    if not row_commit:
+        return False
+    r = subprocess.run(["git", "merge-base", "--is-ancestor", fix, row_commit], cwd=REPO,
+                       capture_output=True, timeout=20)
+    return r.returncode == 0
+
+
+def pre_fix_mask(module: str, archived: pd.DataFrame) -> pd.Series | None:
+    """Rows decided by code that predates the module's parity fix, or None."""
+    masks = []
+    if module in FIXED_FROM:
+        masks.append(_utc(archived["decision_ts"]) < FIXED_FROM[module])
+    if module in PRE_FIX:
+        masks.append(PRE_FIX[module](archived))
+    if module in FIXED_IN_COMMIT:
+        fix = FIXED_IN_COMMIT[module]
+        commits = archived.get("git_commit", pd.Series(None, index=archived.index))
+        masks.append(~commits.map(lambda c: _has_commit(c if isinstance(c, str) else None, fix)).astype(bool))
+    if not masks:
+        return None
+    out = masks[0]
+    for m in masks[1:]:
+        out = out | m
+    return out
+
+
+def spy_cache_check(sessions: list, *, cache_path: Path = SPY_1M_CACHE, fetch=None) -> dict:
+    """The runtime 1m cache vs a fresh IEX pull, per NY session (the SPY reference's input)."""
+    if fetch is None:
+        from core.API.Alpaca_API.market_data.fetch_intraday import fetch_intraday
+
+        def fetch(start, end):
+            return fetch_intraday(ticker="SPY", start=start, end=end, timeframe="1Min", limit=None,
+                                  feed="IEX", save_path="")
+    cache = pd.read_parquet(cache_path)
+    cache["timestamp"] = pd.to_datetime(cache["timestamp"], utc=True)
+    cache = cache.set_index("timestamp").sort_index()
+    cols = ["open", "high", "low", "close", "volume"]
+    bad = {}
+    for day in sessions:
+        lo = pd.Timestamp(str(day), tz="America/New_York")
+        hi = lo + pd.Timedelta(days=1)
+        c = cache.loc[lo.tz_convert("UTC"):hi.tz_convert("UTC") - pd.Timedelta(seconds=1), cols]
+        f = fetch(lo.tz_convert("UTC").isoformat(), hi.tz_convert("UTC").isoformat())
+        f = f.set_index(pd.to_datetime(f["timestamp"], utc=True))[cols] if f is not None and not f.empty \
+            else pd.DataFrame(columns=cols)
+        j = c.join(f, rsuffix="_f", how="outer")
+        if c.empty:
+            # Not in the cache: the nightly rebuild takes this session from a fresh pull
+            # (update_live_meta_base_frame.fresh_topup), which needs no vouching.
+            continue
+        differ = int((~np.isclose(j[cols].to_numpy(float), j[[x + "_f" for x in cols]].to_numpy(float),
+                                  rtol=1e-6, equal_nan=False)).any(axis=1).sum())
+        if differ:
+            bad[str(day)] = {"cache_rows": int(len(c)), "fresh_rows": int(len(f)), "differ": differ}
+    return {"sessions": [str(d) for d in sessions], "bad_sessions": bad}
 
 
 def compare_vectors(archived: pd.DataFrame, reference: pd.DataFrame, *, keys: list[str]) -> tuple[pd.DataFrame, dict]:
@@ -143,6 +214,16 @@ def reference_for(module: str, archived: pd.DataFrame) -> tuple[pd.DataFrame | N
         return _reference_4h(FEATURES_4H, bars, tickers), ["bar_ts", "ticker"], str(FEATURES_4H)
     if module in ("meta_ranker", "multi_ticker_swing_htf"):
         return _reference_4h(META_MATRIX, bars, tickers), ["bar_ts", "ticker"], str(META_MATRIX)
+    if module == "spy_day_trader":
+        if not SPY_MATRIX.exists():
+            return None, [], f"SPY matrix missing: {SPY_MATRIX}"
+        m = pd.read_parquet(SPY_MATRIX)
+        m.index = pd.DatetimeIndex(m.index).tz_convert("UTC")
+        ref = m.loc[m.index.isin(pd.DatetimeIndex(bars))].copy()
+        ref.index.name = "bar_ts"
+        ref = ref.reset_index()
+        ref["ticker"] = "SPY"
+        return ref, ["bar_ts", "ticker"], str(SPY_MATRIX)
     if module == "multi_ticker_swing_30m":
         from strategies.multi_ticker_swing.research_reference import build_reference
         ref, info = build_reference(archived[["bar_ts", "ticker"]])
@@ -184,9 +265,8 @@ def run(*, days: int, root: Path, max_mismatch: float, modules: list[str] | None
         archived["bar_ts"] = _utc(archived["bar_ts"])
         archived["ticker"] = archived["ticker"].astype(str)
         excluded = 0
-        if module in FIXED_FROM or module in PRE_FIX:
-            pre = (_utc(archived["decision_ts"]) < FIXED_FROM[module] if module in FIXED_FROM
-                   else PRE_FIX[module](archived))
+        pre = pre_fix_mask(module, archived)
+        if pre is not None:
             excluded = int(pre.sum())
             archived = archived.loc[~pre]
             if archived.empty:
@@ -198,6 +278,17 @@ def run(*, days: int, root: Path, max_mismatch: float, modules: list[str] | None
             sampled = {"tickers": len(keep), "of": int(archived["ticker"].nunique())}
             archived = archived[archived["ticker"].isin(keep)]
         archived = normalize_keys(module, archived)
+        input_check = None
+        if module == "spy_day_trader":
+            sessions = sorted(set(_utc(archived["bar_ts"]).dt.tz_convert("America/New_York").dt.date))
+            input_check = spy_cache_check(sessions)
+            if input_check["bad_sessions"]:
+                failed = True
+                report["modules"][module] = {
+                    "status": "FAIL", "reason": "reference input (runtime 1m cache) differs from a fresh "
+                    "IEX pull; the matrix cannot vouch for these sessions", "input_check": input_check,
+                    "rows": int(len(archived)), "excluded_pre_fix_rows": excluded}
+                continue
         ref, keys, source = reference_for(module, archived)
         if ref is None:
             report["modules"][module] = {"status": "NOT_CHECKED", "reason": source, "rows": int(len(archived)),
@@ -207,12 +298,21 @@ def run(*, days: int, root: Path, max_mismatch: float, modules: list[str] | None
         dedup = archived.sort_values("decision_ts").drop_duplicates(keys, keep="first")
         table, cov = compare_vectors(dedup, ref, keys=keys)
         bad = table[table["share"] > max_mismatch]
+        # Per decision slot (NY date + hour): a known gap (the 16:25 4H decision cannot see
+        # the 16:00-17:00 bucket research puts in its 14:00 bar) must not hide a new one.
+        slot = _utc(dedup["decision_ts"]).dt.tz_convert("America/New_York").dt.strftime("%Y-%m-%d %H")
+        by_slot = []
+        for name, g in dedup.groupby(slot.to_numpy(), sort=True):
+            t, c = compare_vectors(g, ref, keys=keys)
+            by_slot.append({"slot": name, "rows": c["matched_rows"],
+                            "failing": int((t["share"] > max_mismatch).sum()) if c["matched_rows"] else None})
         status = "FAIL" if (len(bad) or cov["matched_rows"] == 0) else "PASS"
         failed |= status == "FAIL"
         report["modules"][module] = {
             "status": status, "reference": source, **cov, "excluded_pre_fix_rows": excluded,
             **({"sampled_tickers": sampled} if sampled else {}),
-            "worst": table.head(10).to_dict(orient="records"),
+            **({"input_check": input_check} if input_check else {}),
+            "worst": table.head(10).to_dict(orient="records"), "by_slot": by_slot,
             "failing_features": bad["feature"].tolist(),
         }
     passed = any(m.get("status") == "PASS" for m in report["modules"].values())
@@ -241,6 +341,8 @@ def main() -> int:
     for mod, r in report["modules"].items():
         extra = r.get("reason") or (f"matched {r.get('matched_rows')}/{r.get('archived_rows')} rows, "
                                     f"{len(r.get('failing_features', []))} failing features")
+        if r.get("by_slot"):
+            extra += "; by slot " + ", ".join(f"{x['slot'][5:]}h={x['failing']}" for x in r["by_slot"])
         print(f"{r['status']:12s} {mod}: {extra}")
     print(f"parity {report['status']} -> {out}")
     if report["status"] == "FAIL":
