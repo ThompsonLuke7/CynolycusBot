@@ -10,7 +10,10 @@ References:
   momentum_expansion       strategies/momentum_expansion/data/processed/features_4h.parquet
   meta_ranker, multi_ticker_swing_htf
                            signals/meta_context/meta_ranker/meta_ranker_matrix.parquet
-  dealer_ranker            Data/dealer_positioning/rankings/dealer_swing_rankings_<snapshot>.parquet
+  dealer_ranker            NOT_CHECKED: its rankings file is rewritten after the decision
+  multi_ticker_swing_30m   strategies.multi_ticker_swing.research_reference: the training feature
+                           code on a FRESH Alpaca pull (never the live deque / RAW_30M_DIR), for a
+                           seeded sample of tickers (--sample-30m), keyed by 30m bucket start
 
     .venv/bin/python -m scripts.decision_state.parity_check --days 7
 """
@@ -39,8 +42,8 @@ DEALER_RANKINGS = REPO / "Data/dealer_positioning/rankings"
 REPORT_DIR = REPO / "Data/research/decision_state_parity"
 NOT_WIRED = {
     "spy_day_trader": "no research reference wired (SPY features are rebuilt per bar from the 1m buffer)",
-    "multi_ticker_swing_30m": "no research reference wired (live builder vs research matrix not mapped yet)",
 }
+SAMPLE_30M = 40     # tickers per run: each needs a ~400-day fresh 30m pull
 RTOL, ATOL = 1e-5, 1e-6
 # Rows decided before a module's parity fix went live are excluded (and counted):
 # they document the old defect, not the current code. momentum: live daily
@@ -48,6 +51,12 @@ RTOL, ATOL = 1e-5, 1e-6
 # features at 0 (fixed in code 2026-11-19; the intraday context refresh also
 # needs a combined-server restart, until which regime_vix_z can still differ).
 FIXED_FROM = {"momentum_expansion": pd.Timestamp("2026-11-19 14:00", tz="UTC")}
+# Row-level marker where a fix is visible in the archive itself. 30m swing (2026-11-23): REST
+# bar sync, bucket-start stamps, daily-scope history, training static ids and the nightly
+# daily context all ship together with the scanner's run_meta "bar_sync" field; it takes
+# effect at the next combined-server restart.
+PRE_FIX = {"multi_ticker_swing_30m":
+           lambda df: ~df["run_meta_json"].fillna("").astype(str).str.contains('"bar_sync"')}
 NOT_WIRED["dealer_ranker"] = ("reference invalid: dealer_swing_rankings_<snapshot>.parquet is rewritten after "
                               "the 15:45 decision (11-18 file holds a 17:45 capture); the archive is the record")
 
@@ -101,6 +110,32 @@ def _reference_4h(path: Path, bars: list[pd.Timestamp], tickers: list[str]) -> p
     return df
 
 
+def normalize_keys(module: str, archived: pd.DataFrame) -> pd.DataFrame:
+    """Map archived bar stamps onto the reference's bar keys.
+
+    30m swing: live stamps a 30m bar with its last 1m bar (15:29, or 15:27 for a name that
+    did not print at :29); research bars are stamped at the bucket start (15:00)."""
+    if module == "multi_ticker_swing_30m":
+        from strategies.multi_ticker_swing.research_reference import bucket_start
+        archived = archived.copy()
+        archived["archived_bar_ts"] = archived["bar_ts"]
+        archived["bar_ts"] = bucket_start(archived["bar_ts"])
+    return archived
+
+
+def sample_tickers(archived: pd.DataFrame, n: int, *, seed: int = 0) -> list[str]:
+    """Every selected ticker plus a seeded random fill up to ``n`` (reproducible per seed)."""
+    tickers = sorted(archived["ticker"].astype(str).unique())
+    if n <= 0 or len(tickers) <= n:
+        return tickers
+    picked = sorted(archived.loc[archived.get("selected", pd.Series(False, index=archived.index)).fillna(False)
+                                 .astype(bool), "ticker"].astype(str).unique())[:n]
+    rest = [t for t in tickers if t not in set(picked)]
+    rng = np.random.default_rng(seed)
+    fill = list(rng.choice(rest, size=min(n - len(picked), len(rest)), replace=False)) if n > len(picked) else []
+    return sorted(set(picked) | {str(t) for t in fill})
+
+
 def reference_for(module: str, archived: pd.DataFrame) -> tuple[pd.DataFrame | None, list[str], str]:
     bars = sorted(pd.to_datetime(archived["bar_ts"].unique(), utc=True))
     tickers = sorted(archived["ticker"].astype(str).unique())
@@ -108,6 +143,12 @@ def reference_for(module: str, archived: pd.DataFrame) -> tuple[pd.DataFrame | N
         return _reference_4h(FEATURES_4H, bars, tickers), ["bar_ts", "ticker"], str(FEATURES_4H)
     if module in ("meta_ranker", "multi_ticker_swing_htf"):
         return _reference_4h(META_MATRIX, bars, tickers), ["bar_ts", "ticker"], str(META_MATRIX)
+    if module == "multi_ticker_swing_30m":
+        from strategies.multi_ticker_swing.research_reference import build_reference
+        ref, info = build_reference(archived[["bar_ts", "ticker"]])
+        if info["failed"]:
+            logger.warning("30m reference: %d tickers failed: %s", len(info["failed"]), info["failed"])
+        return ref, ["bar_ts", "ticker"], "fresh IEX/split 30m pull -> research builder"
     if module in NOT_WIRED:
         return None, [], NOT_WIRED[module]
     if module == "dealer_ranker":
@@ -128,7 +169,8 @@ def reference_for(module: str, archived: pd.DataFrame) -> tuple[pd.DataFrame | N
     return None, [], NOT_WIRED.get(module, "no research reference wired")
 
 
-def run(*, days: int, root: Path, max_mismatch: float, modules: list[str] | None) -> dict:
+def run(*, days: int, root: Path, max_mismatch: float, modules: list[str] | None,
+        sample_30m: int = SAMPLE_30M) -> dict:
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
     present = sorted(p.name for p in root.glob("*") if p.is_dir()) if root.exists() else []
     report: dict = {"checked_at": datetime.now(timezone.utc).isoformat(), "since": start,
@@ -142,13 +184,20 @@ def run(*, days: int, root: Path, max_mismatch: float, modules: list[str] | None
         archived["bar_ts"] = _utc(archived["bar_ts"])
         archived["ticker"] = archived["ticker"].astype(str)
         excluded = 0
-        if module in FIXED_FROM:
-            pre = _utc(archived["decision_ts"]) < FIXED_FROM[module]
+        if module in FIXED_FROM or module in PRE_FIX:
+            pre = (_utc(archived["decision_ts"]) < FIXED_FROM[module] if module in FIXED_FROM
+                   else PRE_FIX[module](archived))
             excluded = int(pre.sum())
             archived = archived.loc[~pre]
             if archived.empty:
                 report["modules"][module] = {"status": "NO_ARCHIVE", "excluded_pre_fix_rows": excluded}
                 continue
+        sampled = None
+        if module == "multi_ticker_swing_30m":
+            keep = sample_tickers(archived, sample_30m, seed=int(start.replace("-", "")))
+            sampled = {"tickers": len(keep), "of": int(archived["ticker"].nunique())}
+            archived = archived[archived["ticker"].isin(keep)]
+        archived = normalize_keys(module, archived)
         ref, keys, source = reference_for(module, archived)
         if ref is None:
             report["modules"][module] = {"status": "NOT_CHECKED", "reason": source, "rows": int(len(archived)),
@@ -162,8 +211,9 @@ def run(*, days: int, root: Path, max_mismatch: float, modules: list[str] | None
         failed |= status == "FAIL"
         report["modules"][module] = {
             "status": status, "reference": source, **cov, "excluded_pre_fix_rows": excluded,
+            **({"sampled_tickers": sampled} if sampled else {}),
             "worst": table.head(10).to_dict(orient="records"),
-            "failing_features": bad["feature"].tolist()[:50],
+            "failing_features": bad["feature"].tolist(),
         }
     passed = any(m.get("status") == "PASS" for m in report["modules"].values())
     report["status"] = "FAIL" if failed else ("PASS" if passed else "NOT_CHECKED")
@@ -178,10 +228,13 @@ def main() -> int:
     ap.add_argument("--max-mismatch", type=float, default=0.01,
                     help="Largest tolerated share of rows that disagree, per feature.")
     ap.add_argument("--report-dir", default=str(REPORT_DIR))
+    ap.add_argument("--sample-30m", type=int, default=SAMPLE_30M,
+                    help="30m swing tickers to rebuild per run (fresh pull each); 0 = all")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     root = Path(args.root) if args.root else archive_root()
-    report = run(days=args.days, root=root, max_mismatch=args.max_mismatch, modules=args.module)
+    report = run(days=args.days, root=root, max_mismatch=args.max_mismatch, modules=args.module,
+                 sample_30m=args.sample_30m)
     out = Path(args.report_dir) / f"parity_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, default=str))

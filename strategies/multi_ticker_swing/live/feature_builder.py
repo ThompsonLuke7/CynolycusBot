@@ -38,6 +38,7 @@ from strategies.multi_ticker_swing.config.pipeline_config import (
     RAW_30M_DIR,
     UNIVERSE_CSV,
 )
+from strategies.multi_ticker_swing.config.ticker_meta import training_meta
 from strategies.multi_ticker_swing.features.build_features import build_ticker_features, _build_sector_cap_encodings
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,99 @@ WINDOW_SIZE = 500
 # All tickers that need bars (universe + context)
 _CONTEXT_SET = set(CONTEXT_TICKERS)
 
+BAR_MINUTES = 30
+NY_TZ = "America/New_York"
+# A first sync replaces this much of the deque tail with REST bars: covers the previous
+# session's 16:00 bucket across a weekend and any partial bar a mid-session restart froze.
+SYNC_FIRST_LOOKBACK = timedelta(days=5)
+SYNC_BATCH = 500                    # symbols per multi-symbol request
+# Daily-scope features (daily EMA/RSI, 52-week and 60-day levels, gap fill rates) need far
+# more than WINDOW_SIZE bars; their prior-session daily bars are kept separately.
+DAILY_HISTORY_SESSIONS = 500
+_OHLCV = ["open", "high", "low", "close", "volume"]
+
 # Default knobs for the warmup
 DEFAULT_FRESHNESS_MINUTES = 30      # if last bar is younger than this, no gap fetch
 DEFAULT_GAP_LOOKBACK_DAYS = 60      # cap a gap fetch to this many days even if parquet is older
 DEFAULT_FETCH_WORKERS = 8           # parallel Alpaca fetch workers
+
+
+def bucket_start(ts) -> pd.Timestamp:
+    """UTC start of the NY-clock 30m bucket holding ``ts`` (naive = UTC)."""
+    t = pd.Timestamp(ts)
+    t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+    return t.tz_convert(NY_TZ).floor(f"{BAR_MINUTES}min").tz_convert("UTC")
+
+
+def fetch_research_bars_multi(symbols: list[str], start: datetime, end: datetime,
+                              client=None) -> pd.DataFrame:
+    """30m bars for many symbols under the TRAINING fetch rule (fetch_data.fetch_ticker):
+    IEX feed, split adjustment, bar starts 09:30-16:00 ET. Long frame: symbol, timestamp, OHLCV."""
+    from alpaca.data.enums import Adjustment, DataFeed
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+    from core.API.Alpaca_API.market_data.fetch_intraday import keep_regular_hours
+
+    if client is None:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from core.API.Alpaca_API.core.config import AlpacaConfig
+        cfg = AlpacaConfig.from_env()
+        client = StockHistoricalDataClient(api_key=cfg.key_id, secret_key=cfg.secret_key)
+    frames = []
+    for i in range(0, len(symbols), SYNC_BATCH):
+        df = client.get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=symbols[i:i + SYNC_BATCH], timeframe=TimeFrame(BAR_MINUTES, TimeFrameUnit.Minute),
+            start=start, end=end, adjustment=Adjustment.SPLIT, feed=DataFeed.IEX, limit=None)).df
+        if df is not None and not df.empty:
+            frames.append(keep_regular_hours(df.reset_index()))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def daily_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """Session (NY date, as a tz-aware midnight) daily bars from 30m bars, the way the
+    research daily features aggregate them: first open, max high, min low, last close, sum volume."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=_OHLCV)
+    idx = pd.DatetimeIndex(pd.to_datetime(df.index, utc=True))
+    session = idx.tz_convert(NY_TZ).normalize()
+    agg = df[_OHLCV].assign(_s=session).groupby("_s").agg(
+        open=("open", "first"), high=("high", "max"), low=("low", "min"),
+        close=("close", "last"), volume=("volume", "sum"))
+    agg.index.name = None
+    return agg.sort_index()
+
+
+def daily_scope_features(frame: pd.DataFrame, history: pd.DataFrame | None) -> dict[str, float]:
+    """Last-bar values of the research daily-scope features over the full daily history.
+
+    ``frame``: the live deque (UTC index, OHLCV). ``history``: daily bars for sessions up
+    to and including the deque's first session (which the deque may hold only part of).
+    Each prior session enters as ONE synthetic bar carrying its daily OHLCV, so the
+    research functions' session aggregation reproduces the true daily series exactly
+    while the intraday frame stays at WINDOW_SIZE bars."""
+    from signals.location_features import add_daily_high_low_gap_features
+    from strategies.multi_ticker_swing.features.build_features import _add_daily_context
+
+    if history is None or history.empty or frame is None or frame.empty:
+        return {}
+    idx = pd.DatetimeIndex(pd.to_datetime(frame.index, utc=True))
+    sess = idx.tz_convert(NY_TZ).normalize()
+    first = sess.min()
+    hist = history[history.index <= first]
+    synth = hist[_OHLCV].copy()
+    synth.index = (synth.index + pd.Timedelta(hours=9, minutes=30)).tz_convert("UTC")
+    live = frame[_OHLCV].copy()
+    live.index = idx
+    long = pd.concat([synth, live[sess > first]]).astype(float)
+    sd = pd.Series(long.index.tz_convert(NY_TZ).date, index=long.index)
+    daily = _add_daily_context(long.copy(), sd)
+    loc, loc_cols = add_daily_high_low_gap_features(long.copy())
+    out: dict[str, float] = {}
+    for src, cols in ((daily, [c for c in daily.columns if c.startswith("daily_")]), (loc, loc_cols)):
+        for c in cols:
+            v = src[c].iloc[-1]
+            out[c] = float(v) if pd.notna(v) else float("nan")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +192,11 @@ class LiveSwingFeatureBuilder:
         self._cap_ids = cap_ids
         self._type_ids = type_ids
         self._lock = threading.Lock()
+        # Last 30m bucket each ticker was synced through from REST (sync_recent_bars).
+        self._synced_through: dict[str, pd.Timestamp] = {}
+        self.last_sync: dict = {}
+        # Prior-session daily bars per ticker (daily_scope_features), from the full parquet.
+        self._daily_hist: dict[str, pd.DataFrame] = {}
 
     # ------------------------------------------------------------------
     # Cache state
@@ -293,6 +388,7 @@ class LiveSwingFeatureBuilder:
                         start=start,
                         end=ref,
                         timeframe="30Min",
+                        adjustment="split",   # the training fetch rule (fetch_data.fetch_ticker)
                         save_path="",  # don't write the per-ticker side parquet
                     )
                 except Exception as exc:
@@ -324,7 +420,7 @@ class LiveSwingFeatureBuilder:
                             gap_filled_count += 1
                             if save_back:
                                 try:
-                                    self._save_parquet(ticker)
+                                    self._save_parquet(ticker, complete_before=ref)
                                 except Exception as exc:
                                     logger.warning("[%s] parquet save_back failed: %s", ticker, exc)
                         st = self.cache_status(ticker)
@@ -372,7 +468,9 @@ class LiveSwingFeatureBuilder:
             if "timestamp" in df.columns:
                 df = df.set_index("timestamp")
             df.index = pd.to_datetime(df.index, utc=True)
-            df = df.sort_index().tail(WINDOW_SIZE)
+            df = df.sort_index()
+            hist = daily_ohlcv(df).tail(DAILY_HISTORY_SESSIONS)
+            df = df.tail(WINDOW_SIZE)
             buf = deque(
                 ({"timestamp": ts, **row.to_dict()} for ts, row in df.iterrows()),
                 maxlen=WINDOW_SIZE,
@@ -380,6 +478,7 @@ class LiveSwingFeatureBuilder:
             with self._lock:
                 self._bars[ticker] = buf
                 self._last_ts[ticker] = buf[-1]["timestamp"] if buf else None
+                self._daily_hist[ticker] = hist
             return len(buf), (buf[-1]["timestamp"] if buf else None), True
         except Exception as exc:
             logger.warning("[%s] parquet load failed: %s", ticker, exc)
@@ -417,9 +516,13 @@ class LiveSwingFeatureBuilder:
             self._last_ts[ticker] = last_ts
         return added
 
-    def _save_parquet(self, ticker: str) -> None:
+    def _save_parquet(self, ticker: str, complete_before: datetime | None = None) -> None:
         """
         Append new in-memory bars to the existing on-disk parquet.
+
+        ``complete_before``: write only bars that had closed by then. A gap fetch through
+        "now" returns the still-forming bar; writing it froze a partial bar into the
+        research raw store at every mid-session restart (2026-11 audit: 5-9 per ticker).
 
         Reads the existing parquet (if any), merges with the in-memory deque,
         deduplicates by timestamp, sorts, and writes the full history back.
@@ -434,6 +537,12 @@ class LiveSwingFeatureBuilder:
 
         new_df = pd.DataFrame(rows)
         new_df["timestamp"] = pd.to_datetime(new_df["timestamp"], utc=True)
+        if complete_before is not None:
+            cutoff = pd.Timestamp(complete_before)
+            cutoff = cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff.tz_convert("UTC")
+            new_df = new_df[new_df["timestamp"] + pd.Timedelta(minutes=BAR_MINUTES) <= cutoff]
+            if new_df.empty:
+                return
         new_df = new_df.set_index("timestamp")
 
         out_path = RAW_30M_DIR / f"{ticker}.parquet"
@@ -470,14 +579,98 @@ class LiveSwingFeatureBuilder:
         """
         Append a new 30m bar (from the aggregator) without computing features.
         bar must have keys: timestamp, open, high, low, close, volume.
+
+        The bar is stamped at its 30m bucket START, the stamp research bars carry; the
+        aggregator stamps it with its last 1m bar (15:29, or 15:27 for a name that did not
+        print at :29), which shifted the time features and the context-ticker alignment.
+        A bucket already at the tail (the forming bar a prefill fetched) is merged into, not
+        appended a second time; a bucket REST already synced is left to the REST bar.
         """
+        ts = bar.get("timestamp")
+        if ts is None:
+            return
+        b = bucket_start(ts)
+        new = {**bar, "timestamp": b.to_pydatetime()}
         with self._lock:
-            if ticker not in self._bars:
-                self._bars[ticker] = deque(maxlen=WINDOW_SIZE)
-            self._bars[ticker].append(bar)
-            ts = bar.get("timestamp")
-            if isinstance(ts, datetime):
-                self._last_ts[ticker] = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+            synced = self._synced_through.get(ticker)
+            if synced is not None and b <= synced:
+                return
+            buf = self._bars.setdefault(ticker, deque(maxlen=WINDOW_SIZE))
+            if buf and bucket_start(buf[-1]["timestamp"]) == b:
+                old = buf[-1]
+                buf[-1] = {**old, "high": max(old["high"], new["high"]), "low": min(old["low"], new["low"]),
+                           "close": new["close"], "volume": float(old.get("volume", 0.0)) + float(new.get("volume", 0.0))}
+            else:
+                buf.append(new)
+            self._last_ts[ticker] = b.to_pydatetime()
+
+    def sync_recent_bars(self, tickers: list[str], *, now: datetime | None = None,
+                         fetch: Callable[..., pd.DataFrame] = fetch_research_bars_multi) -> dict:
+        """Replace each ticker's recent 30m bars with REST bars under the training fetch rule.
+
+        The live aggregator's bars are not the bars the model was trained on: stamps differ,
+        a restart leaves a partial (or duplicated) bucket, live-built days have no 16:00
+        bucket, and stream gaps go unnoticed. Parity on 2026-11-17..23 failed on ~70% of
+        rows for core trend/volatility features from this alone. Complete REST bars replace
+        every deque bar of the buckets they cover; aggregator bars newer than REST's last
+        bucket (REST latency) are kept. First sync per ticker covers SYNC_FIRST_LOOKBACK,
+        later ones only buckets after the last synced. Never raises: on failure the deque is
+        left as it was and ``last_sync["error"]`` says why.
+        """
+        import time as _time
+
+        t0 = _time.time()
+        ref = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="UTC")
+        ref = ref.tz_localize("UTC") if ref.tzinfo is None else ref.tz_convert("UTC")
+        closed = bucket_start(ref) - pd.Timedelta(minutes=BAR_MINUTES)
+        groups: dict[pd.Timestamp, list[str]] = {}
+        for t in dict.fromkeys(tickers):
+            if not self._bars.get(t):
+                continue
+            synced = self._synced_through.get(t)
+            if synced is not None and synced >= closed:
+                continue
+            start = (synced + pd.Timedelta(minutes=BAR_MINUTES)) if synced is not None else ref - SYNC_FIRST_LOOKBACK
+            groups.setdefault(start, []).append(t)
+        stats = {"at": ref.isoformat(), "requested": sum(map(len, groups.values())), "synced": 0,
+                 "rest_bars": 0, "kept_newer": 0, "error": None}
+        try:
+            for start, group in groups.items():
+                df = fetch(sorted(group), start.to_pydatetime(), ref.to_pydatetime())
+                if df is None or df.empty:
+                    continue
+                df = df.copy()
+                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+                df = df[df["timestamp"] + pd.Timedelta(minutes=BAR_MINUTES) <= ref]
+                for sym, rows in df.groupby("symbol"):
+                    stats["kept_newer"] += self._splice_rest_bars(str(sym), rows.sort_values("timestamp"))
+                    stats["synced"] += 1
+                    stats["rest_bars"] += len(rows)
+        except Exception as exc:  # noqa: BLE001 - the scan runs on the deque as it is
+            stats["error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning("30m bar sync failed (scan uses the stream-built bars): %s", stats["error"])
+        stats["seconds"] = round(_time.time() - t0, 2)
+        self.last_sync = stats
+        return stats
+
+    def _splice_rest_bars(self, ticker: str, rows: pd.DataFrame) -> int:
+        """REST rows (one ticker, sorted, complete) into the deque; returns bars kept past REST."""
+        rest = [{"timestamp": ts.to_pydatetime(), "symbol": ticker,
+                 **{c: float(r[c]) for c in ("open", "high", "low", "close", "volume", "trade_count", "vwap")
+                    if c in rows.columns and pd.notna(r[c])}}
+                for ts, (_, r) in zip(rows["timestamp"], rows.iterrows())]
+        if not rest:
+            return 0
+        first, last = bucket_start(rest[0]["timestamp"]), bucket_start(rest[-1]["timestamp"])
+        with self._lock:
+            buf = list(self._bars.get(ticker, ()))
+            older = [x for x in buf if bucket_start(x["timestamp"]) < first]
+            newer = [x for x in buf if bucket_start(x["timestamp"]) > last]
+            merged = older + rest + newer
+            self._bars[ticker] = deque(merged[-WINDOW_SIZE:], maxlen=WINDOW_SIZE)
+            self._last_ts[ticker] = bucket_start(merged[-1]["timestamp"]).to_pydatetime()
+            self._synced_through[ticker] = last
+        return len(newer)
 
     def update(self, ticker: str, bar: dict) -> pd.Series | None:
         """
@@ -525,6 +718,10 @@ class LiveSwingFeatureBuilder:
                 "market_cap_bucket": self._cap_ids.get(r.get("market_cap_bucket", ""), 0),
                 "asset_type":        self._type_ids.get(r.get("type", ""), 0),
             }
+        # The values the ranker was trained on win (config/ticker_meta.py).
+        trained = training_meta(ticker)
+        if trained is not None:
+            meta = {**meta, **trained}
 
         try:
             feat_df = build_ticker_features(ticker, df_ticker, context_data, meta)
@@ -550,10 +747,7 @@ class LiveSwingFeatureBuilder:
             compute_bar_location, DailyContextLookup,
         )
         if not hasattr(self, "_daily_ctx"):
-            from strategies.multi_ticker_swing.config.pipeline_config import MODULE_ROOT
-            self._daily_ctx = DailyContextLookup(
-                MODULE_ROOT / "data" / "training_export" / "daily_context_features.parquet"
-            )
+            self._daily_ctx = DailyContextLookup()   # training export + nightly live rows
         frame = self._feature_frame(ticker)
         if frame is None:
             return None
@@ -563,9 +757,29 @@ class LiveSwingFeatureBuilder:
                 out[k] = v
         except Exception as exc:
             logger.warning("[%s] bar-location build failed: %s", ticker, exc)
+        try:
+            for k, v in daily_scope_features(frame, self._daily_history(ticker, frame)).items():
+                out[k] = v
+        except Exception as exc:
+            logger.warning("[%s] daily-scope features failed (500-bar values kept): %s", ticker, exc)
         for k, v in self._daily_ctx.get(ticker, frame.index[-1]).items():
             out[k] = v
         return out
+
+    def _daily_history(self, ticker: str, frame: pd.DataFrame) -> pd.DataFrame | None:
+        """Prior-session daily bars, extended with the deque's complete sessions so a
+        process that runs for days keeps the sessions that roll out of the deque."""
+        hist = self._daily_hist.get(ticker)
+        if hist is None or hist.empty:
+            return None
+        idx = pd.DatetimeIndex(pd.to_datetime(frame.index, utc=True))
+        sess = idx.tz_convert(NY_TZ).normalize()
+        done = frame[(sess > sess.min()) & (sess < sess.max())]   # skip partial first + current
+        if not done.empty:
+            hist = daily_ohlcv(done).combine_first(hist).tail(DAILY_HISTORY_SESSIONS)
+            with self._lock:
+                self._daily_hist[ticker] = hist
+        return hist
 
     def get_atr(self, ticker: str) -> float:
         """Return the ATR value at the last available bar (for SL computation)."""

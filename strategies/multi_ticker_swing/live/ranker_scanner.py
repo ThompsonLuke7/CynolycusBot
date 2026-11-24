@@ -133,6 +133,13 @@ class RankerSwingScanner:
         if not candidates:
             return []
 
+        # Training-rule REST bars for these names and the context tickers before scoring
+        # (LiveSwingFeatureBuilder.sync_recent_bars). Never raises.
+        from strategies.multi_ticker_swing.config.pipeline_config import CONTEXT_TICKERS
+        sync = getattr(self._fb, "sync_recent_bars", None)
+        if sync is not None:
+            sync(list(candidates) + list(CONTEXT_TICKERS))
+
         rows: list[tuple[str, pd.Series]] = []
         for ticker in candidates:
             if self._fb.get_last_bar(ticker) is None:
@@ -265,6 +272,7 @@ class RankerSwingScanner:
                 run_meta={"max_entries": self._max_entries, "min_conviction": self._min_conviction,
                           "catalyst_alpha": self._cat_alpha if self._catalyst is not None else None,
                           "skipped_busy": int(skipped),
+                          "bar_sync": dict(getattr(self._fb, "last_sync", {}) or {}),
                           "downstream": "signals still pass signal/risk policy and 5m confirmation"},
                 inference_start=inference_start,
                 inference_end=utc_now(),

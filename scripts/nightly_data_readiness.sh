@@ -259,6 +259,17 @@ fi
     fi
   fi
 
+  # 30m swing daily context for the next session (earnings/macro/treasury/news/theme), with
+  # the training export's own builder into a separate live file. Non-fatal: without it the
+  # live lookup serves no context older than 5 days (NaN), never the June-frozen export rows.
+  run_timed "30m swing daily context rows" \
+    "${READINESS_SWING_CONTEXT_TIMEOUT_SECONDS:-900}" \
+    "$PYTHON" -u -m strategies.multi_ticker_swing.live.refresh_daily_context
+  SWING_CONTEXT_STATUS=$?
+  if [ "$SWING_CONTEXT_STATUS" -ne 0 ]; then
+    echo "[$(ts)] WARNING: 30m swing daily context refresh failed (exit=$SWING_CONTEXT_STATUS); its context features go NaN after 5 days"
+  fi
+
   if [ "$STATUS" -eq 0 ]; then
     "$PYTHON" -m core.live_readiness --write-success --job nightly_data_readiness
     echo "[$(ts)] readiness stamp updated"

@@ -320,8 +320,11 @@ def _processed_frame_for_ticker(ticker: str) -> pd.DataFrame:
     return frame.sort_index()
 
 
-def _build_ticker_location_frame(ticker: str, timestamps: pd.Series) -> pd.DataFrame:
-    frame = _processed_frame_for_ticker(ticker)
+def _build_ticker_location_frame(ticker: str, timestamps: pd.Series,
+                                 frame: pd.DataFrame | None = None) -> pd.DataFrame:
+    """``frame``: a full-history 30m feature frame to use instead of the processed parquet
+    (the decision-state parity reference passes one built from a fresh pull)."""
+    frame = _processed_frame_for_ticker(ticker) if frame is None else frame.copy()
     if frame.empty:
         return pd.DataFrame()
     frame, daily_cols = add_daily_high_low_gap_features(frame)
@@ -343,8 +346,8 @@ def _build_ticker_location_frame(ticker: str, timestamps: pd.Series) -> pd.DataF
     return out[["timestamp", "ticker"] + cols]
 
 
-def _build_spy_location_context(index: pd.DatetimeIndex) -> pd.DataFrame:
-    spy = _processed_frame_for_ticker("SPY")
+def _build_spy_location_context(index: pd.DatetimeIndex, frame: pd.DataFrame | None = None) -> pd.DataFrame:
+    spy = _processed_frame_for_ticker("SPY") if frame is None else frame.copy()
     if spy.empty:
         return pd.DataFrame({"timestamp": index})
     spy, _daily_cols = add_daily_high_low_gap_features(spy, prefix="spy_")

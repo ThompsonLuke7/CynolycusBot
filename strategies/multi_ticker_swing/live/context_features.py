@@ -85,21 +85,39 @@ def compute_bar_location(price: pd.DataFrame, spy: pd.DataFrame | None) -> dict[
     return out
 
 
-class DailyContextLookup:
-    """As-of-prior-day lookup of the daily context features from the nightly parquet."""
+_MODULE = Path(__file__).resolve().parents[1]
+TRAINING_DAILY_CONTEXT = _MODULE / "data" / "training_export" / "daily_context_features.parquet"
+# Written nightly by live/refresh_daily_context.py; the training export is never rewritten.
+LIVE_DAILY_CONTEXT = _MODULE / "data" / "live" / "daily_context_features_live.parquet"
+MAX_CONTEXT_AGE_DAYS = 5
 
-    def __init__(self, path: Path | str) -> None:
-        self._ok = Path(path).exists()
+
+class DailyContextLookup:
+    """As-of-prior-day lookup of the daily context features.
+
+    Rows come from the training export plus the nightly live file (live wins on the same
+    ticker/date). A row older than ``max_age_days`` before the bar is NOT served: the
+    export ends 2026-06-03 and serving its last row made every November decision use
+    June earnings/treasury/news/theme values. Missing context is NaN (the model's
+    missing-value path), and the gap is logged once."""
+
+    def __init__(self, path: Path | str = TRAINING_DAILY_CONTEXT, live_path: Path | str | None = LIVE_DAILY_CONTEXT,
+                 max_age_days: int = MAX_CONTEXT_AGE_DAYS) -> None:
+        self._max_age = pd.Timedelta(days=max_age_days)
+        self._warned_stale = False
+        frames = [pd.read_parquet(p) for p in (path, live_path) if p is not None and Path(p).exists()]
+        self._ok = bool(frames)
         if not self._ok:
             logger.warning("DailyContextLookup: %s missing — daily context served as NaN", path)
             self._df = pd.DataFrame()
             self._cols: list[str] = []
             return
-        df = pd.read_parquet(path)
+        df = pd.concat(frames, ignore_index=True)
         df["ticker"] = df["ticker"].astype(str).str.upper().str.replace("$", "", regex=False)
         df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.tz_localize(None).dt.normalize()
         self._cols = [c for c in df.columns if c not in ("ticker", "date")]
-        # keep only the latest few rows per ticker for fast as-of lookup
+        # later frames (the live file) win on a duplicated (ticker, date)
+        df = df.drop_duplicates(["ticker", "date"], keep="last")
         self._df = df.sort_values(["ticker", "date"])
         self._max_date = df["date"].max()
         logger.info("DailyContextLookup: %d cols, latest date %s", len(self._cols), self._max_date)
@@ -117,4 +135,11 @@ class DailyContextLookup:
         if sub.empty:
             return {}
         row = sub.iloc[-1]
+        if asof - row["date"] > self._max_age:
+            if not self._warned_stale:
+                self._warned_stale = True
+                logger.warning("DailyContextLookup: newest context row for %s is %s, %s before the bar; "
+                               "not served (run live/refresh_daily_context.py)", ticker, row["date"].date(),
+                               asof - row["date"])
+            return {}
         return {c: float(row[c]) for c in self._cols if pd.notna(row[c])}
