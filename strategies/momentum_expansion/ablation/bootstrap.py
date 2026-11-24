@@ -12,7 +12,7 @@ import pandas as pd
 
 from scripts.confluence_discovery.search import bh_fdr  # re-exported, not reimplemented
 
-__all__ = ["bh_fdr", "week_block_bootstrap_ci", "week_of"]
+__all__ = ["bh_fdr", "mde_from_ci", "week_block_bootstrap_ci", "week_of"]
 
 
 def week_of(ts: pd.Series) -> pd.Series:
@@ -78,3 +78,16 @@ def week_block_bootstrap_ci(
         "n_weeks": n_weeks, "n_obs": len(df),
         "excludes_zero": bool(lo > 0 or hi < 0),
     }
+
+
+def mde_from_ci(ci: dict, *, alpha: float = 0.10, power: float = 0.80) -> float:
+    """Minimum detectable effect implied by a bootstrap CI: (z_{1-a/2} + z_power) x SE, with
+    SE backed out of the CI width. Report it beside every null (AGENTS.md)."""
+    from statistics import NormalDist
+
+    lo, hi = ci.get("ci_lo"), ci.get("ci_hi")
+    if lo is None or hi is None or not np.isfinite(lo) or not np.isfinite(hi):
+        return float("nan")
+    z_ci = NormalDist().inv_cdf(1 - alpha / 2)
+    se = (hi - lo) / (2 * z_ci)
+    return float((NormalDist().inv_cdf(1 - 0.05 / 2) + NormalDist().inv_cdf(power)) * se)
