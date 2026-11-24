@@ -700,6 +700,22 @@ def recompute_prob_derivatives(
     return out
 
 
+def complete_rows_only(frame: pd.DataFrame, *, last_minute: pd.Timestamp, rule: str) -> pd.DataFrame:
+    """Rows of a left-labelled ``rule`` bar frame whose last 1m bar has arrived.
+
+    ``last_minute`` is the newest 1m bar's start. A bar at T is complete once a minute at
+    or after T + rule - 1min exists: its own last minute, or any later minute when the
+    feed skipped it. The session's final flush (on the 15:59 minute) therefore counts."""
+    if frame.empty or last_minute is None or pd.isna(last_minute):
+        return frame
+    span = pd.Timedelta(rule) - pd.Timedelta(minutes=1)
+    idx = pd.DatetimeIndex(frame.index)
+    last = pd.Timestamp(last_minute)
+    if idx.tz is not None and last.tzinfo is not None:
+        last = last.tz_convert(idx.tz)
+    return frame.loc[idx + span <= last]
+
+
 def continue_origin_relative_columns(cached: pd.DataFrame, appended: pd.DataFrame) -> pd.DataFrame:
     """Renumber `appended`'s origin-relative columns to continue `cached`.
 
@@ -1440,6 +1456,14 @@ class LiveMetaXGBAgent:
             # trend phase, trend strength and dist_to_pdh, and to ~1e-5 for the
             # pivot and trend probabilities. 40, 80 and 160 days were no better.
             fresh = computed_tail.loc[computed_tail.index > cached_max]
+            # Only bars whose last minute is in the buffer. A bucket close fires when
+            # the NEXT bucket's first minute arrives, so the buffer always ends one
+            # minute into a forming bar; appending that row cached it, and rows at or
+            # before `cached_max` are never recomputed. Every decision on 2026-11-20
+            # scored its bar as it stood after one minute (decision-state parity,
+            # 2026-11-23: archived OHLC == the bucket's first 1m bar, 28/29 bars).
+            fresh = complete_rows_only(fresh, last_minute=raw.index.max(),
+                                       rule=self._label_timeframe_rule)
             if fresh.empty:
                 return self._remember_runtime_status(pre)
             if set(fresh.columns) != set(pre.columns):
