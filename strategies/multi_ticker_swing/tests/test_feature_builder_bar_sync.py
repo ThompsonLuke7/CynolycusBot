@@ -144,3 +144,45 @@ def test_daily_scope_from_synthetic_history_equals_full_history():
     for c in [c for c in want_daily.index if c.startswith("daily_")] + cols:
         want = want_daily[c] if c.startswith("daily_") else want_loc[c].iloc[-1]
         assert np.isclose(got[c], want, rtol=1e-9, equal_nan=True), (c, got[c], want)
+
+
+def test_daily_scope_cache_matches_uncached_within_a_session():
+    import numpy as np
+    rng = np.random.default_rng(3)
+    days = pd.bdate_range("2025-06-02", periods=80)
+    idx = pd.DatetimeIndex([pd.Timestamp(f"{d.date()} 09:30", tz="America/New_York") + pd.Timedelta(minutes=30 * i)
+                            for d in days for i in range(14)]).tz_convert("UTC")
+    c = 50 * np.exp(np.cumsum(rng.normal(0, 0.005, len(idx))))
+    full = pd.DataFrame({"open": c, "high": c * 1.003, "low": c * 0.997, "close": c, "volume": 1e4}, index=idx)
+    hist = fbm.daily_ohlcv(full)
+    cache = {}
+    for n in range(len(full) - 6, len(full) + 1):              # successive bars of the last session
+        frame = full.iloc[:n].tail(fbm.WINDOW_SIZE)
+        first = frame.index.tz_convert("America/New_York").normalize().min()
+        h = hist[hist.index <= first]
+        _same(fbm.daily_scope_features(frame, h, cache=cache, cache_key="X"), fbm.daily_scope_features(frame, h))
+    # a changed prior-session bar invalidates the cached daily values
+    frame = full.tail(fbm.WINDOW_SIZE).copy()
+    frame.iloc[-15, frame.columns.get_loc("close")] *= 1.5
+    first = frame.index.tz_convert("America/New_York").normalize().min()
+    h = hist[hist.index <= first]
+    _same(fbm.daily_scope_features(frame, h, cache=cache, cache_key="X"), fbm.daily_scope_features(frame, h))
+
+
+def _same(a: dict, b: dict) -> None:
+    import numpy as np
+    assert a.keys() == b.keys()
+    for k in a:
+        assert np.isclose(a[k], b[k], rtol=0, atol=0, equal_nan=True), (k, a[k], b[k])
+
+
+def test_spy_frame_is_reused_until_spy_or_context_bars_change(monkeypatch):
+    b = _builder()
+    calls = []
+    monkeypatch.setattr(b, "_feature_frame", lambda t: calls.append(t) or f"frame{len(calls)}", raising=False)
+    b.append_bar("SPY", _bar(_utc("2026-11-20 14:29")))
+    assert b._spy_feature_frame() == "frame1" and b._spy_feature_frame() == "frame1"
+    b.append_bar("QQQ", _bar(_utc("2026-11-20 14:29")))          # a context ticker moved
+    assert b._spy_feature_frame() == "frame2"
+    b.append_bar("SPY", _bar(_utc("2026-11-20 14:59")))
+    assert b._spy_feature_frame() == "frame3" and calls == ["SPY", "SPY", "SPY"]

@@ -111,7 +111,8 @@ def daily_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return agg.sort_index()
 
 
-def daily_scope_features(frame: pd.DataFrame, history: pd.DataFrame | None) -> dict[str, float]:
+def daily_scope_features(frame: pd.DataFrame, history: pd.DataFrame | None, *,
+                         cache: dict | None = None, cache_key: str | None = None) -> dict[str, float]:
     """Last-bar values of the research daily-scope features over the full daily history.
 
     ``frame``: the live deque (UTC index, OHLCV). ``history``: daily bars for sessions up
@@ -133,14 +134,29 @@ def daily_scope_features(frame: pd.DataFrame, history: pd.DataFrame | None) -> d
     live = frame[_OHLCV].copy()
     live.index = idx
     long = pd.concat([synth, live[sess > first]]).astype(float)
-    sd = pd.Series(long.index.tz_convert(NY_TZ).date, index=long.index)
-    daily = _add_daily_context(long.copy(), sd)
-    loc, loc_cols = add_daily_high_low_gap_features(long.copy())
     out: dict[str, float] = {}
-    for src, cols in ((daily, [c for c in daily.columns if c.startswith("daily_")]), (loc, loc_cols)):
-        for c in cols:
-            v = src[c].iloc[-1]
-            out[c] = float(v) if pd.notna(v) else float("nan")
+    # daily_* for the current bar are built from sessions BEFORE it (shifted one day), so
+    # they are fixed for the session; ``cache`` keys them on the prior session's bar, so
+    # a REST fix to yesterday (its 16:00 bucket) still recomputes.
+    long_sess = long.index.tz_convert(NY_TZ).normalize()
+    current = long_sess.max()
+    prior = long[long_sess < current]
+    key = (current, len(prior), hash(prior.to_numpy(float)[-28:].tobytes()))
+    hit = cache.get(cache_key) if cache is not None else None
+    if hit is not None and hit[0] == key:
+        out.update(hit[1])
+    else:
+        sd = pd.Series(long.index.tz_convert(NY_TZ).date, index=long.index)
+        daily = _add_daily_context(long.copy(), sd)
+        vals = {c: (float(daily[c].iloc[-1]) if pd.notna(daily[c].iloc[-1]) else float("nan"))
+                for c in daily.columns if c.startswith("daily_")}
+        out.update(vals)
+        if cache is not None:
+            cache[cache_key] = (key, vals)
+    loc, loc_cols = add_daily_high_low_gap_features(long.copy())
+    for c in loc_cols:
+        v = loc[c].iloc[-1]
+        out[c] = float(v) if pd.notna(v) else float("nan")
     return out
 
 
@@ -197,6 +213,7 @@ class LiveSwingFeatureBuilder:
         self.last_sync: dict = {}
         # Prior-session daily bars per ticker (daily_scope_features), from the full parquet.
         self._daily_hist: dict[str, pd.DataFrame] = {}
+        self._daily_scope_cache: dict = {}
 
     # ------------------------------------------------------------------
     # Cache state
@@ -753,18 +770,30 @@ class LiveSwingFeatureBuilder:
             return None
         out = frame.iloc[-1].copy()
         try:
-            for k, v in compute_bar_location(frame, self._feature_frame("SPY")).items():
+            for k, v in compute_bar_location(frame, self._spy_feature_frame()).items():
                 out[k] = v
         except Exception as exc:
             logger.warning("[%s] bar-location build failed: %s", ticker, exc)
         try:
-            for k, v in daily_scope_features(frame, self._daily_history(ticker, frame)).items():
+            for k, v in daily_scope_features(frame, self._daily_history(ticker, frame),
+                                             cache=self._daily_scope_cache, cache_key=ticker).items():
                 out[k] = v
         except Exception as exc:
             logger.warning("[%s] daily-scope features failed (500-bar values kept): %s", ticker, exc)
         for k, v in self._daily_ctx.get(ticker, frame.index[-1]).items():
             out[k] = v
         return out
+
+    def _spy_feature_frame(self) -> pd.DataFrame | None:
+        """SPY's feature frame, rebuilt only when SPY's or a context ticker's bars change.
+        It was rebuilt for every scanned ticker (~0.2 s x ~900 names per boundary scan)."""
+        key = tuple((t, len(self._bars.get(t, ())), self._last_ts.get(t)) for t in ["SPY", *CONTEXT_TICKERS])
+        cached = getattr(self, "_spy_frame_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        frame = self._feature_frame("SPY")
+        self._spy_frame_cache = (key, frame)
+        return frame
 
     def _daily_history(self, ticker: str, frame: pd.DataFrame) -> pd.DataFrame | None:
         """Prior-session daily bars, extended with the deque's complete sessions so a

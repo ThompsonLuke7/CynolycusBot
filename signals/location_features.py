@@ -282,22 +282,26 @@ def _zone_width(close: float, atr: float, zone_width_pct: float) -> float:
 
 
 def _nearest_gap_distances(daily: pd.DataFrame, gap_mid: pd.Series) -> tuple[pd.Series, pd.Series]:
-    above = pd.Series(np.nan, index=daily.index, dtype=float)
-    below = pd.Series(np.nan, index=daily.index, dtype=float)
+    """Per day, the nearest earlier unfilled-gap midpoint above and below the close
+    (the last 100 gaps). Array loop; the iterrows/.loc version cost ~170 ms per 500 days,
+    which the live 30m scan pays per ticker (2026-11-24)."""
+    closes = pd.to_numeric(daily["close"], errors="coerce").to_numpy(dtype=float)
+    mids = pd.to_numeric(gap_mid, errors="coerce").to_numpy(dtype=float)
+    above = np.full(len(closes), np.nan)
+    below = np.full(len(closes), np.nan)
     active: list[float] = []
-    for i, (dt, row) in enumerate(daily.iterrows()):
-        close = float(row["close"]) if np.isfinite(row["close"]) else np.nan
+    for i, close in enumerate(closes):
         if np.isfinite(close) and active:
-            arr = np.array(active, dtype=float)
+            arr = np.asarray(active, dtype=float)
             up = arr[arr >= close]
             dn = arr[arr <= close]
             if up.size:
-                above.loc[dt] = float(np.min(up))
+                above[i] = float(np.min(up))
             if dn.size:
-                below.loc[dt] = float(np.max(dn))
-        val = gap_mid.iloc[i]
+                below[i] = float(np.max(dn))
+        val = mids[i]
         if np.isfinite(val):
             active.append(float(val))
             if len(active) > 100:
                 active = active[-100:]
-    return above, below
+    return pd.Series(above, index=daily.index, dtype=float), pd.Series(below, index=daily.index, dtype=float)
