@@ -170,10 +170,41 @@ Start this first. Every day that goes unarchived is lost for good.
   - parity passed, and a 5%-corrupted copy failed it;
   - outcomes vs daily close-to-close returns: Spearman 0.975;
   - storage is about 15–25 MB a day.
-- **Still open:**
-  - parity for 30m swing and SPY is NOT_CHECKED (no research reference is wired);
-  - exits and SPY/30m/governed entries are not joined to fills (the known hole below);
-  - the "done" bar needs a week of archive.
+- **Still open (updated 2026-11-24):**
+  - 30m swing and SPY parity are wired (2026-11-23, see below). Both modules' archives are
+    pre-fix until the next combined-server restart, so they report NO_ARCHIVE until then;
+  - entries for SPY/30m/governed are not joined to fills: a **known hole**, by decision. The
+    fix (register ownership in `AlpacaOptionsClient.submit_order` with an owner-tagged
+    `client_order_id`) changes live order submission in six modules and waits for the user;
+  - momentum passes on every slot except the 16:25 4H decision. Its 14:00 bar lacks the
+    16:00-17:00 bucket that research includes, which is a bar-definition decision for the user;
+  - the "done" bar needs a week of post-fix archive (restart, then 5 sessions).
+
+**2026-11-23 parity findings (fixed in code; effective at the server restart):**
+- **30m swing** (`189c5a8d`): 169/190 features failed against a fresh-pull research reference.
+  - Stream-built bars were not the training bars: end-of-bucket stamps, restart partial or
+    duplicate buckets, no 16:00 bucket. Fixed by a REST sync of each scan's recent bars under
+    the training fetch rule.
+  - A 500-bar window truncated the daily EMA/RSI and 52w/60d levels. Fixed with a 500-session
+    daily history.
+  - `market_cap_bucket` was served as 0 instead of the training values. Fixed with
+    `config/training_ticker_meta.csv`.
+  - About 45 daily-context features came from an export frozen on 06-03. Fixed by a nightly
+    `live/refresh_daily_context.py` into a separate live file, and the lookup refuses rows
+    older than 5 days.
+  - After the fixes, a rebuilt live vector matches research on all features except 2, which
+    trace to holes and partial bars in `RAW_30M_DIR`. Repairing that raw store needs user
+    approval.
+- **SPY day trader** (`320dccf7`): every decision scored its 10m bar as it stood one minute in.
+  The forming row was cached and never recomputed; on 11-20, 28 of 29 decisions had archived
+  OHLC equal to the bucket's first 1m bar. The fix appends complete bars only. The nightly
+  SPY matrix now tops up fresh IEX minutes in memory (`e3d79aba`); the runtime cache only
+  updates at a server start.
+- **Upstream source drift** (not caught by parity, because live and research share the source):
+  - the economic calendar lost its impact field, so the high-impact macro features are empty;
+  - event counts are about 33 per day, against at most 1 in the 30m ranker's training export;
+  - earnings forward-date coverage is 33%, against about 90% through October.
+  - Both affect Meta and 30m.
 
 - [x] Schema `decision_state_v1`, one row per *scored candidate* (not only picks),
       per module and decision bar:
@@ -193,7 +224,7 @@ Start this first. Every day that goes unarchived is lost for good.
 - [~] Join to the fill registry and closed-trade ledgers (partial: `order_plan_actions` joins 4H-engine and dealer picks to route, contract, quote and disposition by `decision_run_id`). SPY, 30m and governed
       entries are still not registered (fill-reconciliation note); close that gap
       or record it as a known hole.
-- [~] Parity test (built; momentum/HTF/Meta/dealer wired, 30m/SPY NOT_CHECKED; green needs a week of live archive): rebuild features with the research builder at archived
+- [~] Parity test (built; all modules wired 2026-11-23, dealer NOT_CHECKED by design; per-slot breakdown; green needs a week of post-fix live archive): rebuild features with the research builder at archived
       timestamps and compare with the archived vector within a tolerance. Fail
       loudly on mismatch. This is the research/live parity check AGENTS.md
       requires.
@@ -208,22 +239,39 @@ Start this first. Every day that goes unarchived is lost for good.
 
 ### 0.3 Freeze the evaluator and the experiment manifest
 
-- [ ] Manifest fields:
+**Built 2026-11-24** (`2021f651`).
+- **Modules:** `ablation/manifest.py` and `ablation/evaluator.py`, with metrics added to
+  `metrics.py` and `bootstrap.py`.
+- **Gating:**
+  - `evaluate()` raises without a validated manifest;
+  - validation rows at or after 2026-05-15 are refused;
+  - the test needs `open_test` plus a reason, and every read is appended to
+    `Data/research/evaluator/test_reads.jsonl`, with reports flagging any read after the first.
+- **Statistics:** blocks are ceil(h/5) weeks, with 95% CIs and the MDE reported throughout.
+- **Validated:** it reproduces Stage 3 validation for L2_20__pit. Neutral IC is +0.0095
+  [+0.0025, +0.0167] against the recorded +0.0093 [+0.0023, +0.0166], and the per-year values
+  match.
+- **Not yet built:** an equity/option split of `cost_model` beyond named constants; finite-capital
+  P&L uses decision-day closes, an approximation stated in each report.
+
+- [x] Manifest fields:
   - dataset cutoff, universe version, feature schema hash and target version;
   - model family, hyperparameters and seed, plus calibration;
   - cost model version and execution policy;
   - git commit, and a log of every test-window read.
-- [ ] Extend `strategies/momentum_expansion/ablation/{metrics,folds,bootstrap}.py`
+- [x] Extend `strategies/momentum_expansion/ablation/{metrics,folds,bootstrap}.py`
       rather than starting a new harness. It should report:
   - within-bar IC, precision@1/3/5/10, and net expected return@K;
   - first-passage success, MFE/MAE and large-winner recall;
   - calibration and finite-capital P&L marked daily;
   - results by regime, the `__perm` delta, beta/liquidity-residualised top-k,
     and the MDE.
-- [ ] Define sealed chronological validation blocks (for example 2024 trend,
+- [x] Define sealed chronological validation blocks (frozen 2026-11-24: pre_2022, 2022_bear,
+      2023_recovery, 2024_trend, 2025_chop, 2026_rotation; for example 2024 trend,
       2025 chop, 2026 rotation). Regime and month dominate seed variance, so
       report per block.
-- [ ] Add regression tests for bugs we have already hit:
+- [x] Add regression tests for bugs we have already hit (`tests/test_evaluator_regressions.py`,
+      plus overlapping-label week blocks):
   - `run_bakeoff` embargo counted in hours instead of bars;
   - competition `choose_best` picking by `val_log_loss`;
   - HTF OOF future selection;
