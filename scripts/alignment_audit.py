@@ -91,7 +91,9 @@ REFERENCES: dict[str, list[Ref]] = {
 }
 
 # Forward labels some archives carry next to the inputs (NaN live by design).
-LABEL_COLUMNS = {"trend_persistence", "meta_good", "meta_upside"}
+# (build_meta_ranker_matrix: meta_label, trade_quality and meta_rank_quality are built from fwd_*.)
+LABEL_COLUMNS = {"trend_persistence", "meta_good", "meta_upside", "meta_label", "trade_quality",
+                 "meta_rank_quality"}
 
 
 def is_label(name: str) -> bool:
@@ -305,6 +307,7 @@ def check_drift(module: str, day: date | None, *, rebuild: bool = False) -> Chec
     prof = load_profile(module, feats, rebuild=rebuild)
     if prof is None:
         return Check(name, "SKIP", "no training reference configured or found")
+    prof = {**prof, "features": {f: v for f, v in prof["features"].items() if f in set(feats)}}
     multi = live["ticker"].nunique() > 1
     flags = drift_flags(live, prev, prof, multi_name=multi)
     hard = {k: v for k, v in flags.items() if v and k != "tail_shift"}

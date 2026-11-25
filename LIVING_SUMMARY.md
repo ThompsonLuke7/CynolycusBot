@@ -2693,3 +2693,7 @@ Next: user to add a FRED key; then E1/E2 (40y), E3, E5, E7, then E6 on Colab.
 {2026-11-24 15:32 ET} {agent: Claude} {Meta 14:20 stale-matrix abort: root cause + fix}
 Cause: complete-bar gate (11-22) lets the refresher append the 10:00 ET bar only after a catch-up fetched through 14:00 (~20 min) plus an ~8-11 min build: it landed 14:38 (11-23) and 14:37 (11-24). Meta read at 14:20 with no wait and aborted both days; HTF (waits 900 s from 14:25) traded it.
 Fix: shared core.live_readiness.wait_for_matrix_bar (HTF delegates); Meta runner waits up to 1500 s (900 s from 14:20 would time out at 14:35). Subprocess, so live from the next 14:20 run without a restart. Tests pass; test_mixed_routing_run fails on HEAD too (pre-existing).
+
+{2026-11-24 21:36 ET} {agent: Claude} {alignment audit; 30m raw repair; calendars/treasury; order ownership}
+RAW_30M_DIR repaired (515 files + 9 split/spin-off refetches; 4,194 sessions, 6,209 partial bars; 40-name fresh check identical). Econ calendar had collapsed to the TradingView feed (dedupe bug), earnings loader read snapshots only, treasury frozen 07-24: all fixed, treasury added to nightly readiness. Meta gives these 0 gain, 30m 0.6%.
+New scripts/alignment_audit.py (parity + per-model drift vs training) in daily/weekly skills; client owner= registers SPY/30m orders, intraday entries registered, order_fills() CLI. Server restarted 16:34 mid-repair: restart again before the open.

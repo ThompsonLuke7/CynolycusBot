@@ -200,6 +200,13 @@ its WARN/FAILs. After the refresh, `universe_px_freshness` and
 survived it, i.e. the per-session reset is not running. See
 `docs/INTEGRITY_CHECKLIST.md`.
 
+Then run the alignment audit (`.venv/bin/python -m scripts.alignment_audit`) and
+report every FAIL by module and feature. After a weekend refresh, `econ_calendar`
+and `swing30m_context` must PASS and no module may show `frozen` treasury or
+theme features that changed in training; a `parity` report older than 36 h means
+the nightly readiness did not run. Weekly is also when `--rebuild-profiles` is due
+after any retrain (profiles rebuild automatically when a training file changes).
+
 ### 7. Append a `LIVING_SUMMARY.md` entry
 
 Standard convention: `{YYYY-MM-DD HH:MM ET} {agent} {area}` + up to 3 lines —

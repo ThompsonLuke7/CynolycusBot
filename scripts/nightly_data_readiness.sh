@@ -259,6 +259,17 @@ fi
     fi
   fi
 
+  # Treasury yields (FRED + Treasury XML) for the treasury_* context features of the 30m
+  # swing, Meta and HTF rows. Only the opt-in `update_feeds --include-treasury` ran it, so
+  # the file froze at 2026-07-24 (10y 4.69 in every decision until 11-24). Non-fatal; the
+  # script itself refuses to keep serving a cache more than 30 days old.
+  run_timed "treasury yields" "${READINESS_TREASURY_TIMEOUT_SECONDS:-300}" \
+    "$PYTHON" -u scripts/fetch_treasury_rates.py
+  TREASURY_STATUS=$?
+  if [ "$TREASURY_STATUS" -ne 0 ]; then
+    echo "[$(ts)] WARNING: treasury yields refresh failed (exit=$TREASURY_STATUS)"
+  fi
+
   # 30m swing daily context for the next session (earnings/macro/treasury/news/theme), with
   # the training export's own builder into a separate live file. Non-fatal: without it the
   # live lookup serves no context older than 5 days (NaN), never the June-frozen export rows.

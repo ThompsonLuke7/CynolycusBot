@@ -39,6 +39,23 @@ say "nothing to report" instead.
    (setups stuck for weeks, undated reference prices, clocks counting the wrong
    interval, fallbacks buying far-OTM contracts, silent refresher failures) that
    P&L and per-module activity counts do not show.
+   **Then run the alignment audit** (read-only, ~1 min; first run builds cached
+   training profiles): `.venv/bin/python -m scripts.alignment_audit --date YYYY-MM-DD`.
+   The integrity audit checks plumbing; this checks whether each live model saw
+   the inputs it was trained on. It reads the nightly parity report (live vs a
+   fresh research recompute) and compares the day's archived feature vectors with
+   each model's training matrix: `null_jump`, `out_of_range`, `stuck` (one value for
+   every name), `frozen` (a daily feature unchanged since the last session) and
+   `tail_shift`; plus the economic calendar, earnings forward coverage and the 30m
+   daily context. Every FAIL goes into Operations And Bugs **with the module and
+   features named**, because a misaligned module's P&L does not test its model
+   (2026-11-24: the 30m swing, SPY day trader and momentum all ran for months on
+   inputs unlike their training data, and treasury yields were frozen at 07-24).
+   Before calling a flag harmless, check the feature's gain in that module's model.
+   **Then the order -> fill summary** (one broker read):
+   `.venv/bin/python -m core.broker_fill_reconciliation --since YYYY-MM-DD`. Report
+   the certificate status, any unattributed fill (an order no module owns), and
+   each module's filled / partial / unfilled counts.
 3. **Gather each module's data from source, not from memory of past reports.**
    Paths shift as the system evolves — verify each one exists before relying on
    it. As of the last time this skill was refreshed:

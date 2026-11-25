@@ -50,6 +50,26 @@ universe `px` and the matrix-refresh failures.
 8. Can two independent signals take the same exposure?
 9. Replay one real session through the change (old code vs new) and inspect what it actually does. Aggregate tests are not enough: the 11-23 replay showed 0 QQQ entries before the lifecycle fix and 30 after.
 
+## Model-data alignment (`scripts/alignment_audit.py`)
+
+The checks above cover plumbing. A second class is a model fed inputs unlike its
+training data: every piece runs, nothing errors, and the module's P&L silently
+stops testing its model. Run `.venv/bin/python -m scripts.alignment_audit` after
+the integrity audit.
+
+| Class | What it looked like (found 2026-11-23/24) | Check |
+|---|---|---|
+| Live recomputes a feature differently | 30m swing: stream-built bars, a 500-bar window for daily features; 169 of 190 features off research | `parity` (nightly fresh-pull recompute) |
+| Scoring a bar before it closes | SPY day trader scored each 10m bar one minute in since ~09-12; momentum's 4H bars held partial hours | `parity` |
+| A static id served as a default | `market_cap_bucket` 0 for every name (30m, Meta): live read a CSV with 212 rows | `drift: stuck` |
+| Context frozen at an old date | 30m daily context frozen at 06-03; treasury yields at 07-24 (opt-in fetch nobody ran) | `drift: frozen` |
+| A source changes definition | TradingView rows merged into the FOMC/NFP/CPI calendar: 33 events/day vs <= 1 in training | `drift: out_of_range`, `econ_calendar` |
+| A loader reads the wrong row kind | earnings loader read nightly snapshots only once both kinds shared a file: 35% coverage vs 95% | `drift: null_jump`, `earnings_forward` |
+| A counter beyond its training range | SPY `day_id` grows every session | `drift: out_of_range` |
+
+Rule: before trusting a module's results, its parity must PASS and its drift
+flags must be explained (or shown to carry no model gain).
+
 ## Adding a check
 
 Add it to `scripts/integrity_audit.py` (one function returning `Check`, plus a
