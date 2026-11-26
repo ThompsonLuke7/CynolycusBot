@@ -8,7 +8,12 @@ serves both model training (historical `days_to/since_earnings`) and live tradin
 Fetch / weekly refresh (idempotent — overwrites with the latest schedule):
 
     python -m signals.events.earnings_calendar --refresh           # whole universe
-    python -m signals.events.earnings_calendar --refresh --tickers NVDA AAPL
+    python -m signals.events.earnings_calendar --refresh --tickers NVDA AAPL   # DESTRUCTIVE: see below
+    python -m signals.events.earnings_calendar --refresh --union-history       # safe weekly refresh
+
+Plain ``--refresh`` REPLACES all history rows with this fetch, so any ticker that is not fetched
+(a ``--tickers`` subset, rate limits) loses its history, and rows older than 40 quarters go too.
+``--union-history`` keeps them and lets fetched rows win on overlap.
 
 Use in feature builders:
 
@@ -74,6 +79,22 @@ def merge_calendar_history(prior: pd.DataFrame | None, history: pd.DataFrame) ->
     return pd.concat([history, prior[_is_snapshot(prior)]], ignore_index=True)
 
 
+def merge_history_union(prior: pd.DataFrame | None, history: pd.DataFrame) -> pd.DataFrame:
+    """Union the fetched history into the prior history; snapshot rows pass through untouched.
+
+    A fetched (ticker, date) row wins over the prior one; prior rows the fetch did not return
+    are KEPT. ``merge_calendar_history`` instead drops them, so a full ``--refresh`` loses every
+    rate-limited ticker's history and everything older than yfinance's 40 quarters.
+    """
+    if prior is None or prior.empty:
+        return history.reset_index(drop=True)
+    snap = _is_snapshot(prior)
+    hist = (pd.concat([history, prior[~snap]], ignore_index=True)
+            .drop_duplicates(["ticker", "date"], keep="first")
+            .sort_values(["ticker", "date"]))
+    return pd.concat([hist, prior[snap]], ignore_index=True)
+
+
 # ── fetch ─────────────────────────────────────────────────────────────────────
 
 def _fetch_one(ticker: str, *, retries: int = 3) -> pd.DataFrame | None:
@@ -113,6 +134,7 @@ def fetch_earnings_calendar(
     max_workers: int = 8,
     throttle: float = 0.0,
     merge: bool = False,
+    union_history: bool = False,
 ) -> pd.DataFrame:
     """Pull earnings dates for every ticker and write one consolidated parquet.
 
@@ -158,7 +180,10 @@ def fetch_earnings_calendar(
            .drop_duplicates(["ticker", "date"])
            .sort_values(["ticker", "date"]).reset_index(drop=True))
     prior_raw = pd.read_parquet(out_path) if out_path.exists() else None
-    merge_calendar_history(prior_raw, cal).to_parquet(out_path, index=False)
+    merged = (merge_history_union if union_history else merge_calendar_history)(prior_raw, cal)
+    tmp = out_path.with_suffix(".tmp.parquet")
+    merged.to_parquet(tmp, index=False)
+    tmp.replace(out_path)
     logger.info(
         "Wrote %s  rows=%d  tickers=%d  range %s → %s  (%d had no data)",
         out_path, len(cal), cal["ticker"].nunique(),
@@ -267,6 +292,9 @@ def main() -> None:
     ap.add_argument("--tickers", nargs="*", help="explicit tickers (default: whole universe)")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--throttle", type=float, default=0.0, help="seconds between requests (avoid rate limits)")
+    ap.add_argument("--union-history", action="store_true",
+                    help="with --refresh: keep prior history rows the fetch did not return (failed tickers, "
+                         "rows older than yfinance's 40 quarters); fetched rows win on overlap")
     args = ap.parse_args()
 
     if not (args.refresh or args.missing_only):
@@ -275,7 +303,8 @@ def main() -> None:
         return
 
     tickers = [t.upper() for t in args.tickers] if args.tickers else _universe()
-    fetch_earnings_calendar(tickers, max_workers=args.workers, throttle=args.throttle, merge=args.missing_only)
+    fetch_earnings_calendar(tickers, max_workers=args.workers, throttle=args.throttle, merge=args.missing_only,
+                            union_history=args.union_history)
 
 
 if __name__ == "__main__":

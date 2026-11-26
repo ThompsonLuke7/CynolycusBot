@@ -1,0 +1,87 @@
+reactions {'reports_in': 95611, 'no_bars': 0, 'no_window': 917, 'px_lt_5': 4765, 'extreme': 284, 'reports_used': 89645}
+factor coverage {'gns': 0.995, 'bnb': 0.993, 'gns_tech': 0.983} GNS<0 share 0.0
+      peak     trough  drawdown price_flag  gns_neg_days_of_20  gns_mean_pre gns_leads  bnb_neg_days_of_20  bnb_mean_pre bnb_leads  gns_tech_neg_days_of_20  gns_tech_mean_pre gns_tech_leads   named
+2018-01-26 2018-02-08    -0.102 2018-02-07                 0.0      0.022253     False                20.0     -0.030774      True                      0.0           0.015210          False    None
+2018-03-12 2018-04-02    -0.104 2018-03-22                 0.0      0.022329     False                20.0     -0.026468      True                      0.0           0.018830          False    None
+2018-08-29 2018-12-24    -0.230 2018-10-15                 0.0      0.022742     False                20.0     -0.026370      True                      0.0           0.029368          False    None
+2019-05-03 2019-06-03    -0.111 2019-05-30                 0.0      0.021411     False                20.0     -0.028809      True                      0.0           0.020187          False    None
+2020-02-19 2020-03-20    -0.280 2020-02-25                 0.0      0.020484     False                20.0     -0.032414      True                      0.0           0.015244          False    None
+2020-09-02 2020-09-23    -0.128       None                 NaN           NaN       NaN                 NaN           NaN       NaN                      NaN                NaN            NaN    None
+2021-02-12 2021-03-08    -0.109       None                 NaN           NaN       NaN                 NaN           NaN       NaN                      NaN                NaN            NaN    None
+2021-11-19 2022-12-28    -0.356 2021-12-17                 0.0      0.013900     False                20.0     -0.033519      True                      0.0           0.031081          False    None
+2024-07-10 2024-08-07    -0.136 2024-07-24                 0.0      0.017091     False                20.0     -0.032886      True                      0.0           0.017473          False 2024-07
+2025-02-19 2025-04-08    -0.229 2025-03-04                 0.0      0.016403     False                20.0     -0.036095      True                      0.0           0.024207          False 2025-02
+2025-10-29 2026-03-30    -0.121 2026-03-06                 0.0      0.022068     False                20.0     -0.026671      True                      0.0           0.027412          False    None
+2026-06-02 2026-07-29    -0.113       None                 NaN           NaN       NaN                 NaN           NaN       NaN                      NaN                NaN            NaN    None
+2026-10-06 2026-11-20    -0.198 2026-11-05                 0.0      0.012185     False                20.0     -0.032233      True                      0.0           0.011963          False 2026-10
+{
+ "reaction_stats": {
+  "reports_in": 95611,
+  "no_bars": 0,
+  "no_window": 917,
+  "px_lt_5": 4765,
+  "extreme": 284,
+  "reports_used": 89645
+ },
+ "factor_base_rate_negative": {
+  "gns": 0.0,
+  "bnb": 1.0,
+  "gns_tech": 0.044543429844097995
+ },
+ "named_episode_leads": {
+  "gns": 0,
+  "bnb": 3,
+  "gns_tech": 0
+ },
+ "SHADOW_CANDIDATE": {
+  "gns": false,
+  "bnb": true,
+  "gns_tech": false
+ },
+ "predictive_secondary": {
+  "2020s": {
+   "improvement": 0.021314709607849425,
+   "null_p95": 0.005987321171896131
+  },
+  "all": {
+   "improvement": 0.021314709607849425,
+   "null_p95": 0.005987321171896131
+  }
+ },
+ "predictive_span": {
+  "first_row": "2016-01-27",
+  "first_test_year": 2021,
+  "rows_lost": 2
+ },
+ "followup": {
+  "base_rate_weak": {
+   "gns": 0.24798061389337642,
+   "bnb": 0.2583370386838595,
+   "gns_tech": 0.23670886075949368
+  },
+  "named_leads": {
+   "gns": 2,
+   "bnb": 0,
+   "gns_tech": 1
+  },
+  "named_evaluable": {
+   "gns": 3,
+   "bnb": 2,
+   "gns_tech": 2
+  },
+  "all_leads": {
+   "gns": "4/10",
+   "bnb": "1/8",
+   "gns_tech": "1/4"
+  },
+  "per_year_millinats": {
+   "2021": 9.9,
+   "2022": 80.1,
+   "2023": -3.0,
+   "2024": -12.9,
+   "2025": 4.0,
+   "2026": 56.3
+  },
+  "last_report_known_at": "2026-11-24"
+ }
+}

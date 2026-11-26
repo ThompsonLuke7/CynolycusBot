@@ -205,6 +205,19 @@ fi
   [ "$rc" -ne 0 ] && echo "[$(ts)] WARNING: momentum shadow ledger failed (exit=$rc); any due decision will be retried on the next run"
   record_stage "momentum_shadow_ledger" "$rc"
 
+  # Earnings REPORT history (reported EPS / surprise_pct). The nightly earnings stage only
+  # writes next-date snapshot rows, so before 2026-11-25 nothing refreshed the history and it
+  # froze at 2026-09-24. --union-history keeps every prior row the fetch does not return
+  # (rate-limited tickers, quarters older than yfinance's 40), so a partial fetch can never
+  # delete history. Non-fatal like the shadow ledger: research/feature context, not readiness.
+  echo "[$(ts)] earnings report history (union refresh, whole universe; non-fatal)"
+  timeout --signal=TERM --kill-after=60s "${WEEKLY_EARNINGS_HISTORY_TIMEOUT_SECONDS:-5400}s" \
+    "$PYTHON" -u -m signals.events.earnings_calendar --refresh --union-history --workers 6
+  rc=$?
+  echo "[$(ts)] earnings report history exit=$rc"
+  [ "$rc" -ne 0 ] && echo "[$(ts)] WARNING: earnings history refresh failed (exit=$rc); prior history is unchanged"
+  record_stage "earnings_report_history" "$rc"
+
   echo ""
   echo "----------------------------------------------------------------"
   echo "[$(ts)] weekly_refresh.sh DONE status=$STATUS"

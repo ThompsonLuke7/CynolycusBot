@@ -1,0 +1,101 @@
+hmm_r2 done 1991-01-02
+hmm_r3 done 1991-01-02
+hmm_m3 done
+sup_lgb_t1 done 1995-01-03
+sup_lr_t1 done 1995-01-03
+sup_lgb_t2 done 1995-01-03
+sup_lr_t2 done 1995-01-03
+sup_lgb_t1_sect done 2004-01-02
+fu_oofcut_lgb_t1 done 1995-01-03
+fu_oofcut_lr_t1 done 1995-01-03
+fu_oofcut_lgb_t2 done 1995-01-03
+fu_oofcut_lr_t2 done 1995-01-03
+hmm_r2 preferred_vs_vote True beats_voltarget False
+hmm_r3 preferred_vs_vote False beats_voltarget False
+hmm_m3 preferred_vs_vote False beats_voltarget False
+sup_lgb_t1 preferred_vs_vote False beats_voltarget False
+sup_lr_t1 preferred_vs_vote False beats_voltarget False
+sup_lgb_t2 preferred_vs_vote False beats_voltarget False
+sup_lr_t2 preferred_vs_vote False beats_voltarget False
+sup_lgb_t1_sect preferred_vs_vote False beats_voltarget False
+fu_oofcut_lgb_t1 preferred_vs_vote False beats_voltarget False
+fu_oofcut_lr_t1 preferred_vs_vote False beats_voltarget False
+fu_oofcut_lgb_t2 preferred_vs_vote False beats_voltarget False
+fu_oofcut_lr_t2 preferred_vs_vote False beats_voltarget False
+           model                      book      start  cagr  sharpe    mdd  invested                          sharpe_minus_vote_ci crash_wins_vs_vote                    sharpe_minus_voltarget_ci crash_wins_vs_voltarget  mdd_placebo_pct
+          hmm_r2                        bh 1991-01-02 0.146   0.547 -0.829     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_r2                 vote_size 1991-01-02 0.154   0.644 -0.727     0.930                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_r2             vote_longflat 1991-01-02 0.141   0.648 -0.641     0.815                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_r2               voltarget15 1991-01-02 0.130   0.712 -0.399     0.745                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_r2               hmm_r2_size 1991-01-02 0.140   0.723 -0.382     0.804   (-0.03951128574183416, 0.20938456280700762)                7/9  (-0.05646490911842232, 0.07805638568215006)                     3/9            100.0
+          hmm_r2           hmm_r2_longflat 1991-01-02 0.142   0.749 -0.317     0.745    (-0.13467442823849146, 0.3611970504287513)                8/9  (-0.14252452068525653, 0.20894227827346576)                     7/9            100.0
+          hmm_r3                        bh 1991-01-02 0.146   0.547 -0.829     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_r3                 vote_size 1991-01-02 0.154   0.644 -0.727     0.930                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_r3             vote_longflat 1991-01-02 0.141   0.648 -0.641     0.815                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_r3               voltarget15 1991-01-02 0.130   0.712 -0.399     0.745                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_r3               hmm_r3_size 1991-01-02 0.155   0.658 -0.690     0.939    (-0.0670974464575911, 0.10135932324213758)                4/9  (-0.13691890546031368, 0.03577092458126144)                     0/9             99.2
+          hmm_r3           hmm_r3_longflat 1991-01-02 0.157   0.662 -0.688     0.923   (-0.12080008850613816, 0.17127951273807862)                3/9   (-0.16670595717235903, 0.0796728924386373)                     1/9             98.0
+          hmm_m3                        bh 1995-01-03 0.140   0.529 -0.829     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_m3                 vote_size 1995-01-03 0.151   0.631 -0.727     0.924                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_m3             vote_longflat 1995-01-03 0.143   0.663 -0.641     0.801                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_m3               voltarget15 1995-01-03 0.129   0.719 -0.399     0.733                                           NaN                NaN                                          NaN                     NaN              NaN
+          hmm_m3               hmm_m3_size 1995-01-03 0.106   0.487 -0.771     0.840 (-0.27706974569130693, -0.021835550573505474)                4/9 (-0.38961017559197936, -0.08356037368163731)                     2/9             62.6
+          hmm_m3           hmm_m3_longflat 1995-01-03 0.095   0.438 -0.789     0.801     (-0.402687971262452, 0.00919395070906279)                4/9  (-0.4876911049490422, -0.08507709146170504)                     3/9             53.0
+      sup_lgb_t1                        bh 1995-01-03 0.140   0.529 -0.829     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+      sup_lgb_t1                 vote_size 1995-01-03 0.151   0.631 -0.727     0.924                                           NaN                NaN                                          NaN                     NaN              NaN
+      sup_lgb_t1             vote_longflat 1995-01-03 0.143   0.663 -0.641     0.801                                           NaN                NaN                                          NaN                     NaN              NaN
+      sup_lgb_t1               voltarget15 1995-01-03 0.129   0.719 -0.399     0.733                                           NaN                NaN                                          NaN                     NaN              NaN
+      sup_lgb_t1           sup_lgb_t1_size 1995-01-03 0.137   0.537 -0.795     0.962  (-0.20058071633262436, 0.002834004423930936)                1/9  (-0.3174250345760706, -0.03981618010294973)                     0/9             85.0
+      sup_lgb_t1       sup_lgb_t1_longflat 1995-01-03 0.144   0.581 -0.763     0.894   (-0.23838871342081883, 0.12834531940754723)                2/9   (-0.3216533026168385, 0.06334426001416014)                     0/9             82.2
+       sup_lr_t1                        bh 1995-01-03 0.140   0.529 -0.829     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+       sup_lr_t1                 vote_size 1995-01-03 0.151   0.631 -0.727     0.924                                           NaN                NaN                                          NaN                     NaN              NaN
+       sup_lr_t1             vote_longflat 1995-01-03 0.143   0.663 -0.641     0.801                                           NaN                NaN                                          NaN                     NaN              NaN
+       sup_lr_t1               voltarget15 1995-01-03 0.129   0.719 -0.399     0.733                                           NaN                NaN                                          NaN                     NaN              NaN
+       sup_lr_t1            sup_lr_t1_size 1995-01-03 0.133   0.540 -0.810     0.940  (-0.19562031450835216, 0.010423271099209342)                0/9 (-0.34073533601107475, -0.03548118655817197)                     0/9             65.8
+       sup_lr_t1        sup_lr_t1_longflat 1995-01-03 0.113   0.489 -0.777     0.852    (-0.3278082665107823, 0.06729674616108973)                3/9   (-0.424899417035855, -0.05127144631670541)                     1/9             72.0
+      sup_lgb_t2                        bh 1995-01-03 0.140   0.529 -0.829     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+      sup_lgb_t2                 vote_size 1995-01-03 0.151   0.631 -0.727     0.924                                           NaN                NaN                                          NaN                     NaN              NaN
+      sup_lgb_t2             vote_longflat 1995-01-03 0.143   0.663 -0.641     0.801                                           NaN                NaN                                          NaN                     NaN              NaN
+      sup_lgb_t2               voltarget15 1995-01-03 0.129   0.719 -0.399     0.733                                           NaN                NaN                                          NaN                     NaN              NaN
+      sup_lgb_t2           sup_lgb_t2_size 1995-01-03 0.133   0.514 -0.804     0.977 (-0.20451289125190997, -0.027655086903080574)                0/9  (-0.3516304965472635, -0.06642126965449537)                     0/9             87.4
+      sup_lgb_t2       sup_lgb_t2_longflat 1995-01-03 0.122   0.486 -0.802     0.933 (-0.27996673667199706, -0.007728429335400181)                1/9 (-0.39500253018032194, -0.06534909268235993)                     0/9             75.4
+       sup_lr_t2                        bh 1995-01-03 0.140   0.529 -0.829     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+       sup_lr_t2                 vote_size 1995-01-03 0.151   0.631 -0.727     0.924                                           NaN                NaN                                          NaN                     NaN              NaN
+       sup_lr_t2             vote_longflat 1995-01-03 0.143   0.663 -0.641     0.801                                           NaN                NaN                                          NaN                     NaN              NaN
+       sup_lr_t2               voltarget15 1995-01-03 0.129   0.719 -0.399     0.733                                           NaN                NaN                                          NaN                     NaN              NaN
+       sup_lr_t2            sup_lr_t2_size 1995-01-03 0.131   0.515 -0.772     0.961 (-0.21542016966516875, -0.016242938457514646)                2/9 (-0.34297213128036314, -0.07182415153500579)                     0/9             94.4
+       sup_lr_t2        sup_lr_t2_longflat 1995-01-03 0.125   0.511 -0.732     0.886   (-0.2802737758769369, 0.052245544810652196)                4/9  (-0.3841536442530756, -0.02589270019806684)                     2/9             88.6
+ sup_lgb_t1_sect                        bh 2004-01-02 0.135   0.604 -0.537     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+ sup_lgb_t1_sect                 vote_size 2004-01-02 0.137   0.710 -0.423     0.928                                           NaN                NaN                                          NaN                     NaN              NaN
+ sup_lgb_t1_sect             vote_longflat 2004-01-02 0.132   0.759 -0.287     0.817                                           NaN                NaN                                          NaN                     NaN              NaN
+ sup_lgb_t1_sect               voltarget15 2004-01-02 0.118   0.714 -0.279     0.816                                           NaN                NaN                                          NaN                     NaN              NaN
+ sup_lgb_t1_sect      sup_lgb_t1_sect_size 2004-01-02 0.129   0.598 -0.483     0.989 (-0.19905704966732515, -0.013636867284719438)                0/8 (-0.23877731431996035, 0.019027510274845803)                     0/8             98.0
+ sup_lgb_t1_sect  sup_lgb_t1_sect_longflat 2004-01-02 0.115   0.563 -0.441     0.956   (-0.31994803226508123, 0.01892420456294777)                2/8  (-0.3067175307197471, -0.01117310362949672)                     0/8             95.6
+fu_oofcut_lgb_t1                        bh 1995-01-03 0.140   0.529 -0.829     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+fu_oofcut_lgb_t1                 vote_size 1995-01-03 0.151   0.631 -0.727     0.924                                           NaN                NaN                                          NaN                     NaN              NaN
+fu_oofcut_lgb_t1             vote_longflat 1995-01-03 0.143   0.663 -0.641     0.801                                           NaN                NaN                                          NaN                     NaN              NaN
+fu_oofcut_lgb_t1               voltarget15 1995-01-03 0.129   0.719 -0.399     0.733                                           NaN                NaN                                          NaN                     NaN              NaN
+fu_oofcut_lgb_t1     fu_oofcut_lgb_t1_size 1995-01-03 0.139   0.569 -0.766     0.913  (-0.18856089950156973, 0.060991625113783254)                2/9   (-0.29847375722458674, 0.0030362829712575)                     0/9             80.6
+fu_oofcut_lgb_t1 fu_oofcut_lgb_t1_longflat 1995-01-03 0.143   0.622 -0.660     0.809    (-0.21518148959556793, 0.1966514732302678)                5/9   (-0.2920177625173564, 0.10254576565383704)                     2/9             89.8
+ fu_oofcut_lr_t1                        bh 1995-01-03 0.140   0.529 -0.829     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+ fu_oofcut_lr_t1                 vote_size 1995-01-03 0.151   0.631 -0.727     0.924                                           NaN                NaN                                          NaN                     NaN              NaN
+ fu_oofcut_lr_t1             vote_longflat 1995-01-03 0.143   0.663 -0.641     0.801                                           NaN                NaN                                          NaN                     NaN              NaN
+ fu_oofcut_lr_t1               voltarget15 1995-01-03 0.129   0.719 -0.399     0.733                                           NaN                NaN                                          NaN                     NaN              NaN
+ fu_oofcut_lr_t1      fu_oofcut_lr_t1_size 1995-01-03 0.145   0.599 -0.742     0.923   (-0.14024827301539022, 0.07645996123189265)                1/9  (-0.2636139872426885, 0.012311098936099515)                     0/9             91.4
+ fu_oofcut_lr_t1  fu_oofcut_lr_t1_longflat 1995-01-03 0.141   0.622 -0.619     0.818    (-0.20141966345709827, 0.1965385748753979)                5/9  (-0.26874221165116613, 0.08610475744365095)                     2/9             94.6
+fu_oofcut_lgb_t2                        bh 1995-01-03 0.140   0.529 -0.829     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+fu_oofcut_lgb_t2                 vote_size 1995-01-03 0.151   0.631 -0.727     0.924                                           NaN                NaN                                          NaN                     NaN              NaN
+fu_oofcut_lgb_t2             vote_longflat 1995-01-03 0.143   0.663 -0.641     0.801                                           NaN                NaN                                          NaN                     NaN              NaN
+fu_oofcut_lgb_t2               voltarget15 1995-01-03 0.129   0.719 -0.399     0.733                                           NaN                NaN                                          NaN                     NaN              NaN
+fu_oofcut_lgb_t2     fu_oofcut_lgb_t2_size 1995-01-03 0.133   0.527 -0.798     0.946  (-0.19534570588680883, -0.00898838006669366)                1/9  (-0.3357908263144464, -0.05004264744259505)                     0/9             72.2
+fu_oofcut_lgb_t2 fu_oofcut_lgb_t2_longflat 1995-01-03 0.137   0.562 -0.757     0.856   (-0.22467674575965402, 0.09185917591466874)                3/9  (-0.3420345069674959, 0.024488007526079027)                     2/9             73.2
+ fu_oofcut_lr_t2                        bh 1995-01-03 0.140   0.529 -0.829     1.000                                           NaN                NaN                                          NaN                     NaN              NaN
+ fu_oofcut_lr_t2                 vote_size 1995-01-03 0.151   0.631 -0.727     0.924                                           NaN                NaN                                          NaN                     NaN              NaN
+ fu_oofcut_lr_t2             vote_longflat 1995-01-03 0.143   0.663 -0.641     0.801                                           NaN                NaN                                          NaN                     NaN              NaN
+ fu_oofcut_lr_t2               voltarget15 1995-01-03 0.129   0.719 -0.399     0.733                                           NaN                NaN                                          NaN                     NaN              NaN
+ fu_oofcut_lr_t2      fu_oofcut_lr_t2_size 1995-01-03 0.133   0.518 -0.782     0.967  (-0.20266214592822346, -0.01799862332799461)                0/9  (-0.34258342673009784, -0.0630274875640782)                     0/9             95.4
+ fu_oofcut_lr_t2  fu_oofcut_lr_t2_longflat 1995-01-03 0.114   0.466 -0.721     0.885  (-0.3198831069041614, 0.0025695044633225316)                4/9   (-0.4263618259438677, -0.0719013803908904)                     2/9             91.0
+
+real	5m34.139s
+user	5m44.261s
+sys	0m2.470s

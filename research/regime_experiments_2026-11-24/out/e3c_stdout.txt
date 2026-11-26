@@ -1,0 +1,63 @@
+{'control': 'positive_s0.05', 'corr_with_label': 0.10975859162309862, 'inc_all': 0.005131876671104263, 'passes': 3, 'PASS': np.True_, 'inc_2000s': 0.005673882819894227, 'inc_2010s': 0.002881562518849745, 'inc_2020s': 0.00812782080671448, 'p95_2000s': 0.0027428500870274484, 'p95_2010s': 0.0010999103264054454, 'p95_2020s': 0.0019462089029551538}
+{'control': 'positive_s0.1', 'corr_with_label': 0.20553185833037715, 'inc_all': 0.019084639044062213, 'passes': 3, 'PASS': np.True_, 'inc_2000s': 0.020999501414364685, 'inc_2010s': 0.012529312287930305, 'inc_2020s': 0.03295260716824089, 'p95_2000s': 0.0015098178958425402, 'p95_2010s': 0.0012592134847140598, 'p95_2020s': 0.0017608648100271179}
+{'control': 'positive_s0.2', 'corr_with_label': 0.34771375131086857, 'inc_all': 0.042351817597375385, 'passes': 3, 'PASS': np.True_, 'inc_2000s': 0.04727378819187755, 'inc_2010s': 0.054507982521270426, 'inc_2020s': 0.040562144139109524, 'p95_2000s': 0.002123045089950036, 'p95_2010s': 0.002413759828496181, 'p95_2020s': 0.001530854547348942}
+{'control': 'positive_s0.4', 'corr_with_label': 0.6099718005147531, 'inc_all': 0.19028582248889214, 'passes': 3, 'PASS': np.True_, 'inc_2000s': 0.18677200382022868, 'inc_2010s': 0.1786999476657915, 'inc_2020s': 0.20713479137192797, 'p95_2000s': 0.0009868762595487003, 'p95_2010s': 0.0018658168599308162, 'p95_2020s': 0.0023006194963434805}
+noise_0 False -1.72
+noise_1 False -0.15
+noise_2 True 0.55
+noise_3 False -0.11
+noise_4 False -1.0
+noise_5 False -0.66
+noise_6 False -0.42
+noise_7 False -0.54
+noise_8 False -0.37
+noise_9 False -0.58
+noise_10 False -0.75
+noise_11 False -0.48
+noise_12 False -0.71
+noise_13 False -0.12
+noise_14 False -1.18
+noise_15 False -0.46
+noise_16 False -0.79
+noise_17 False -0.72
+noise_18 False -1.07
+noise_19 False -0.23
+{
+ "positive": [
+  {
+   "control": "positive_s0.05",
+   "corr_with_label": 0.10975859162309862,
+   "inc_all": 0.005131876671104263,
+   "passes": 3,
+   "PASS": true
+  },
+  {
+   "control": "positive_s0.1",
+   "corr_with_label": 0.20553185833037715,
+   "inc_all": 0.019084639044062213,
+   "passes": 3,
+   "PASS": true
+  },
+  {
+   "control": "positive_s0.2",
+   "corr_with_label": 0.34771375131086857,
+   "inc_all": 0.042351817597375385,
+   "passes": 3,
+   "PASS": true
+  },
+  {
+   "control": "positive_s0.4",
+   "corr_with_label": 0.6099718005147531,
+   "inc_all": 0.19028582248889214,
+   "passes": 3,
+   "PASS": true
+  }
+ ],
+ "noise_false_positives": 1,
+ "noise_n": 20,
+ "noise_decade_pass_rate": 0.06666666666666667
+}
+
+real	10m5.103s
+user	16m54.787s
+sys	0m4.769s

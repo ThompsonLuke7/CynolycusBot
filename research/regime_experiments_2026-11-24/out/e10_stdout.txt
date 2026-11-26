@@ -1,0 +1,54 @@
+{'target': 'T1', 'model': 'lr_base', 'window_years': 10, 'first_test_year': 1991, 'all_years': -0.005199288529535047, 'ci_lo': -0.020303956309307897, 'ci_hi': 0.01101477538326455, 'dec_1990s': 0.013607025857011418, 'dec_2000s': 0.013490319386079412, 'dec_2010s': -0.021160387479467184, 'dec_2020s': -0.03415530030265892, 'decade_wins_last3': 1, 'LESS_HISTORY_HELPS': False}
+{'target': 'T1', 'model': 'lr_base', 'window_years': 5, 'first_test_year': 1991, 'all_years': -0.05999087497169692, 'ci_lo': -0.09046392936733873, 'ci_hi': -0.028332627437519863, 'dec_1990s': -0.012182132616460948, 'dec_2000s': -0.09671336781676292, 'dec_2010s': -0.07803168579909255, 'dec_2020s': -0.04308138798867094, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T1', 'model': 'lr_base', 'window_years': 3, 'first_test_year': 1991, 'all_years': -0.23120239946954915, 'ci_lo': -0.3124523405646441, 'ci_hi': -0.15331591544467868, 'dec_1990s': -0.10864949027763703, 'dec_2000s': -0.323475522769006, 'dec_2010s': -0.322086044256713, 'dec_2020s': -0.12506337556579286, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T1', 'model': 'lr_long', 'window_years': 10, 'first_test_year': 1995, 'all_years': -0.07485481802556138, 'ci_lo': -0.12030501115767515, 'ci_hi': -0.03295017582220777, 'dec_1990s': 0.0, 'dec_2000s': -0.023462618373041328, 'dec_2010s': -0.14081702972254476, 'dec_2020s': -0.10859582891398716, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T1', 'model': 'lr_long', 'window_years': 5, 'first_test_year': 1995, 'all_years': -0.6214834263754502, 'ci_lo': -0.861475720335191, 'ci_hi': -0.41493378973686107, 'dec_1990s': -0.023577411918864775, 'dec_2000s': -1.133002573723825, 'dec_2010s': -0.46343387507709083, 'dec_2020s': -0.5435005277431149, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T1', 'model': 'lr_long', 'window_years': 3, 'first_test_year': 1995, 'all_years': -1.2413147774312754, 'ci_lo': -1.5322437274134861, 'ci_hi': -0.955240109962988, 'dec_1990s': -0.6726238146430169, 'dec_2000s': -1.7731595836665335, 'dec_2010s': -1.1148961426607964, 'dec_2020s': -1.065548315005616, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T1', 'model': 'lgb_long', 'window_years': 10, 'first_test_year': 1995, 'all_years': -0.046717057265895194, 'ci_lo': -0.08054889733389872, 'ci_hi': -0.015544087598122959, 'dec_1990s': 0.0, 'dec_2000s': -0.0041257715630095325, 'dec_2010s': -0.07947612112187255, 'dec_2020s': -0.09554956730553579, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T1', 'model': 'lgb_long', 'window_years': 5, 'first_test_year': 1995, 'all_years': -0.09143794233363756, 'ci_lo': -0.1364491322406633, 'ci_hi': -0.048561195008884124, 'dec_1990s': -0.0004654911870300768, 'dec_2000s': -0.11710172197834322, 'dec_2010s': -0.12016865964329002, 'dec_2020s': -0.0786417435242121, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T1', 'model': 'lgb_long', 'window_years': 3, 'first_test_year': 1995, 'all_years': -0.13929896358504268, 'ci_lo': -0.2225066095298717, 'ci_hi': -0.06353202145450708, 'dec_1990s': 0.0023233005499408758, 'dec_2000s': -0.21846238174474983, 'dec_2010s': -0.12136124659755894, 'dec_2020s': -0.1538288462404277, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T2', 'model': 'lr_base', 'window_years': 10, 'first_test_year': 1991, 'all_years': -0.035918553081455126, 'ci_lo': -0.10339023384170112, 'ci_hi': 0.03398675479192743, 'dec_1990s': -0.007764722255314155, 'dec_2000s': 0.10556712272370718, 'dec_2010s': -0.05973305013405986, 'dec_2020s': -0.2509538966866525, 'decade_wins_last3': 1, 'LESS_HISTORY_HELPS': False}
+{'target': 'T2', 'model': 'lr_base', 'window_years': 5, 'first_test_year': 1991, 'all_years': -0.2383990897843134, 'ci_lo': -0.3864160277325784, 'ci_hi': -0.09179159120289763, 'dec_1990s': -0.11311555738967462, 'dec_2000s': -0.15562610182409228, 'dec_2010s': -0.3700905229847571, 'dec_2020s': -0.33508872836582054, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T2', 'model': 'lr_base', 'window_years': 3, 'first_test_year': 1991, 'all_years': -0.891110837458458, 'ci_lo': -1.2478154694942252, 'ci_hi': -0.5606092646350807, 'dec_1990s': -0.4496859685421808, 'dec_2000s': -1.5729842802698846, 'dec_2010s': -0.5875230760862992, 'dec_2020s': -0.922865124033216, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T2', 'model': 'lr_long', 'window_years': 10, 'first_test_year': 1995, 'all_years': -0.2799246293866769, 'ci_lo': -0.4325691173128456, 'ci_hi': -0.15608299852646215, 'dec_1990s': 0.0, 'dec_2000s': -0.12735606695476984, 'dec_2010s': -0.4769437977475668, 'dec_2020s': -0.42422242737689225, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T2', 'model': 'lr_long', 'window_years': 5, 'first_test_year': 1995, 'all_years': -0.9331334555152687, 'ci_lo': -1.3141213652722707, 'ci_hi': -0.5767725050468772, 'dec_1990s': 0.3097060638551118, 'dec_2000s': -1.8778290723887097, 'dec_2010s': -0.7621804279044576, 'dec_2020s': -0.7084707637571365, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T2', 'model': 'lr_long', 'window_years': 3, 'first_test_year': 1995, 'all_years': -1.4317407874877008, 'ci_lo': -2.000575082042831, 'ci_hi': -0.8578155869279415, 'dec_1990s': 0.6564314100288199, 'dec_2000s': -2.0737061079719994, 'dec_2010s': -1.3913177750202768, 'dec_2020s': -2.1034988542818436, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T2', 'model': 'lgb_long', 'window_years': 10, 'first_test_year': 1995, 'all_years': -0.08187833334344671, 'ci_lo': -0.13473024676408032, 'ci_hi': -0.03058053450160292, 'dec_1990s': 0.0, 'dec_2000s': -0.0175574468438907, 'dec_2010s': -0.15291246367747913, 'dec_2020s': -0.13352558103683437, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T2', 'model': 'lgb_long', 'window_years': 5, 'first_test_year': 1995, 'all_years': -0.1846491024700812, 'ci_lo': -0.294473734682942, 'ci_hi': -0.08449164525258615, 'dec_1990s': -0.011336636195594158, 'dec_2000s': -0.17604676825762666, 'dec_2010s': -0.2650609091426619, 'dec_2020s': -0.20747610955537826, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+{'target': 'T2', 'model': 'lgb_long', 'window_years': 3, 'first_test_year': 1995, 'all_years': -0.27751949953345884, 'ci_lo': -0.46385429591181, 'ci_hi': -0.11348276159638072, 'dec_1990s': -0.04600957212155815, 'dec_2000s': -0.45711703496975026, 'dec_2010s': -0.15027380691009967, 'dec_2020s': -0.3736123306800119, 'decade_wins_last3': 0, 'LESS_HISTORY_HELPS': False}
+target    model  window_years  first_test_year  all_years   ci_lo   ci_hi  dec_1990s  dec_2000s  dec_2010s  dec_2020s  decade_wins_last3  LESS_HISTORY_HELPS
+    T1  lr_base            10             1991    -0.0052 -0.0203  0.0110     0.0136     0.0135    -0.0212    -0.0342                  1               False
+    T1  lr_base             5             1991    -0.0600 -0.0905 -0.0283    -0.0122    -0.0967    -0.0780    -0.0431                  0               False
+    T1  lr_base             3             1991    -0.2312 -0.3125 -0.1533    -0.1086    -0.3235    -0.3221    -0.1251                  0               False
+    T1  lr_long            10             1995    -0.0749 -0.1203 -0.0330     0.0000    -0.0235    -0.1408    -0.1086                  0               False
+    T1  lr_long             5             1995    -0.6215 -0.8615 -0.4149    -0.0236    -1.1330    -0.4634    -0.5435                  0               False
+    T1  lr_long             3             1995    -1.2413 -1.5322 -0.9552    -0.6726    -1.7732    -1.1149    -1.0655                  0               False
+    T1 lgb_long            10             1995    -0.0467 -0.0805 -0.0155     0.0000    -0.0041    -0.0795    -0.0955                  0               False
+    T1 lgb_long             5             1995    -0.0914 -0.1364 -0.0486    -0.0005    -0.1171    -0.1202    -0.0786                  0               False
+    T1 lgb_long             3             1995    -0.1393 -0.2225 -0.0635     0.0023    -0.2185    -0.1214    -0.1538                  0               False
+    T2  lr_base            10             1991    -0.0359 -0.1034  0.0340    -0.0078     0.1056    -0.0597    -0.2510                  1               False
+    T2  lr_base             5             1991    -0.2384 -0.3864 -0.0918    -0.1131    -0.1556    -0.3701    -0.3351                  0               False
+    T2  lr_base             3             1991    -0.8911 -1.2478 -0.5606    -0.4497    -1.5730    -0.5875    -0.9229                  0               False
+    T2  lr_long            10             1995    -0.2799 -0.4326 -0.1561     0.0000    -0.1274    -0.4769    -0.4242                  0               False
+    T2  lr_long             5             1995    -0.9331 -1.3141 -0.5768     0.3097    -1.8778    -0.7622    -0.7085                  0               False
+    T2  lr_long             3             1995    -1.4317 -2.0006 -0.8578     0.6564    -2.0737    -1.3913    -2.1035                  0               False
+    T2 lgb_long            10             1995    -0.0819 -0.1347 -0.0306     0.0000    -0.0176    -0.1529    -0.1335                  0               False
+    T2 lgb_long             5             1995    -0.1846 -0.2945 -0.0845    -0.0113    -0.1760    -0.2651    -0.2075                  0               False
+    T2 lgb_long             3             1995    -0.2775 -0.4639 -0.1135    -0.0460    -0.4571    -0.1503    -0.3736                  0               False
+             book  cagr  sharpe    mdd  invested  turnover_per_yr
+               bh 0.131   0.501 -0.829     1.000            0.000
+        vote_size 0.142   0.599 -0.727     0.921            4.271
+    vote_longflat 0.134   0.629 -0.641     0.796            9.301
+      voltarget15 0.121   0.678 -0.399     0.732            4.070
+    hmm_wexp_size 0.130   0.695 -0.382     0.785           10.381
+hmm_wexp_longflat 0.132   0.729 -0.317     0.713           11.375
+     hmm_w10_size 0.115   0.627 -0.411     0.751           11.534
+ hmm_w10_longflat 0.093   0.517 -0.337     0.666           14.292
+      hmm_w5_size 0.105   0.573 -0.543     0.725           12.508
+  hmm_w5_longflat 0.097   0.540 -0.445     0.635           14.972
+      hmm_w3_size 0.108   0.545 -0.677     0.749           12.982
+  hmm_w3_longflat 0.103   0.524 -0.650     0.672           16.657
+
+real	0m43.852s
+user	1m16.491s
+sys	0m0.666s

@@ -202,3 +202,237 @@ measured from prices: how the market *reacts* to good news. It is the leading ca
 
 Each script is written as it is run, with its pre-registered spec in the docstring, and results go
 in this folder's README.
+
+## 4. Addendum, pre-registered 2026-11-25 ~00:47 ET (after E1–E5, before any result below)
+
+Times in this section are approximate (between `date` readings of 00:45 and 01:02 ET). The order
+is exact: each block was written before its script first ran.
+
+The user asked whether E3's null means VIX, credit, the curve and term structure "don't matter",
+whether E3 was run correctly, and whether a trained model should determine the regime. Two
+experiments answer that. Neither changes E1–E5's recorded verdicts.
+
+### E3b Was E3's null an artifact of how it was tested? (local)
+E3 asked one narrow question: does a family add information beyond price and volatility, about one
+target (Nasdaq-100 20-session drawdown ≤ −5%), with one linear model. Each variant below relaxes
+one of those choices:
+- **Standalone vs incremental.** Each family *alone* vs climatology (the training base rate), next
+  to base+family vs base. A family can be informative on its own and still add nothing beyond price
+  and vol, because price and vol already carry the same information. **Overlap:** the out-of-sample
+  correlation between the family-only and base-only predicted probabilities.
+- **Horizons and tails:**
+  - T1: Nasdaq-100, 20-session drawdown ≤ −5% (E3's target);
+  - T2: Nasdaq-100, 60 sessions ≤ −10%;
+  - T3: Nasdaq-100, 120 sessions ≤ −15%;
+  - T4: Nasdaq-100, 20 sessions ≤ −10% (crash tail);
+  - T5: S&P 500, 20 sessions ≤ −5% (base features on the S&P itself);
+  - T6: S&P 500, 60 sessions ≤ −10%.
+  - The purge equals the horizon, and permutation blocks are max(60, horizon).
+- **Slow features,** the ones the literature uses at long horizons, as new families. E3's families
+  are left unchanged.
+  - `rates_slow`: share of the last 252 sessions with the curve inverted, and the 250-session curve
+    change.
+  - `credit_slow`: 120-session change in the Baa spread.
+- **Models:**
+  - logistic regression with features clipped to the training window's 1st/99th percentiles
+    (primary, since raw levels were shown to break it), with 100 permutation draws;
+  - LightGBM (E3's fixed parameters), with its own permutation null of 20 draws. E3 had no
+    LightGBM null.
+- **Decision, per target and family:** "adds beyond price and vol" if the clipped logistic beats its
+  permuted 95th percentile in ≥ 2 of the last 3 decades. LightGBM is reported beside it. "Matters
+  on its own" if the family-alone model beats its own permuted 95th percentile over all years.
+  Power: a 120-session target has about 20 independent outcomes per decade, so its MDE is stated
+  and a null there means "not measurable".
+
+### E9 A trained regime model vs the hand vote (local)
+- **Models,** all walk-forward with a yearly refit on an expanding window:
+  - **HMM-R:** a Gaussian hidden Markov model on Nasdaq-100 daily log returns (switching mean and
+    variance), K = 2 and K = 3, 1986+.
+  - **HMM-M:** a diagonal Gaussian HMM, K = 3, on daily Nasdaq-100 return and the 5-session changes
+    in log VIX, the Baa spread and the 10y−3m curve, 1991+.
+  - The states use FILTERED probabilities only (forward algorithm, data ≤ t). Never smoothed
+    probabilities or Viterbi over the sample, which would leak the future. States are ordered by
+    their training return variance. EM uses 5 random starts at the first fit, then warm starts.
+  - **SUP:** a supervised regime score. LightGBM and clipped logistic regression on base plus every
+    long-span family plus sector correlation, predicting E3's T1 and T2. The score is the predicted
+    probability.
+- **States and books** (the same execution as E2: decide at the close of t, trade at the close of
+  t+1, 2 bp, bills on cash):
+  - HMM: weight = 1 − 0.75·P(highest-variance state) (range 0.25–1, as the live multipliers);
+    long/flat = flat when that P > 0.5.
+  - SUP: the score's percentile within the training window maps to 1.0 (< 80th), 0.8 (80–90th),
+    0.5 (90–97th) and 0.25 (≥ 97th). These are about the vote's state frequencies. Long/flat = flat
+    above the 80th percentile.
+  - Benchmarks on the same out-of-sample span: buy-and-hold, the long-history vote with the live
+    multipliers, vote long/flat, and the 15% vol target.
+- **Description:** E1's eta² by decade for each model's 3-bucket state, with E1's placebo.
+- **Decision:** a trained model is PREFERRED over the hand vote if its sized book (i) has a Sharpe
+  above the vote book's with the 95% CI of the difference above zero, or (ii) beats the vote book's
+  crash MDD in ≥ 3 of 4 out-of-sample crashes with a Sharpe-difference CI not below zero.
+  Separately, it must beat the 15% vol target on the same terms to be worth its complexity. A tie
+  keeps the vote, because it is simpler and auditable.
+- **E9 specification details,** fixed 2026-11-25 ~00:52 ET before any E9 result:
+  - **Primary variants:** HMM-R K = 2 (the standard Markov-switching model on returns) and SUP
+    LightGBM on T1 without sector correlation (supervised, out-of-sample span from 1995). The
+    others are secondary: HMM-R K = 3, HMM-M K = 3, SUP logistic on T1, SUP LightGBM and logistic on
+    T2, and SUP with sector correlation (span from 2004). With about 8 variants, one secondary
+    passing at 95% by chance is likely (about 1 − 0.95⁸ ≈ 34%), so a secondary pass alone does
+    not displace the vote.
+  - **SUP percentile cutoffs** come from the model's in-sample scores on its own training window.
+
+### E7-M Momentum policy replay on Stage 3 validation, pre-registered 2026-11-25 ~00:56 ET (before running)
+- **Data:** Stage 3 out-of-fold scores of the momentum slot model L2_20__pit
+  (`stage3_results/oof_L2_20__pit.parquet`), aligned to the Stage 3 matrix by
+  `eval_stage2.load_panel`.
+  - Validation bars only, via `eval_stage2.partitions`. Bars on or after 2026-05-15 are dropped
+    before any statistic, so the sealed test is never read.
+- **Book:** at every 4H bar, go long the top 10 by score. Each trade earns its 20-session `fret_20`
+  minus the matrix cost.
+  - These are absolute returns, not SPY-relative, because the live module is long-only and
+    unhedged.
+  - The regime is the long-history Nasdaq vote from the prior session's close.
+  - The live 7-vote (2021-10+) is a secondary check.
+- **Policies:**
+  - P0 current: constant size.
+  - P1: the live multipliers by state (1 / 1 / 0.8 / 0.5 / 0.25).
+  - P2: no entries when the vote is ≥ 4.
+- **Primary metric:** return per unit of exposure, R = Σ w·r / Σ w. A regime profile helps only if
+  it cuts the bars that later lose, which raises R above P0's.
+- **Control:** circular shifts of the regime series (≥ 60 sessions, 1,000 draws). This preserves
+  how often each state occurs and how long it lasts. The bootstrap CI uses Stage 3's blocks,
+  ceil(20/5) = 4-week blocks of bars.
+- **Decision:** a profile goes to the E8 paper shadow only if R(P) − R(P0) > 0 and that
+  improvement is at or above the shuffled control's 95th percentile. It never goes straight to live.
+- **Out of scope tonight, and why:**
+  - HTF has no validated model (Stage 3 made no pick).
+  - Meta and the 30m swing have no out-of-fold scores here.
+  - The SPY daytrader needs its own execution engine.
+  - The intraday structure hold rule was designed on the only ledger that exists (08/09), so a
+    replay there would be in-sample. Its out-of-sample test is the forward data from 11-23 on.
+
+### E4 specifics, pre-registered 2026-11-25 ~00:59 ET (before running)
+The earnings history turned out longer than planned. Surprises go back to 1998 for 2,646 tickers;
+daily SIP returns start in 2016. So E4 runs on 2016-02..2026-11 instead of 2024–2026.
+- **Reports:** rows with a finite `surprise_pct`, dated before the last complete session.
+  - Beat: surprise ≥ +5%. Miss: surprise ≤ −5%.
+  - **Reaction:** close(d+1)/close(d−1) − 1 minus SPY's return over the same window. This covers
+    both before-open and after-close reports. It is known at the close of d+1.
+  - **Filters:** prior close ≥ $5. Reactions beyond ±40% are dropped (corporate actions or data
+    errors) and counted.
+  - **Returns:** split-adjusted SIP research bars through 2026-09-24, then live-cache daily
+    returns. Returns are spliced, not price levels.
+  - The universe is today's calendar tickers, so it is survivor-shaped. Stated, not fixed.
+- **Daily factors at the close of t,** from reports known by t in the last 60 sessions:
+  - GNS (good news sold): the mean beat reaction, needing ≥ 30 beats;
+  - BNB: the mean miss reaction, needing ≥ 15 misses;
+  - GNS_tech: GNS for tickers assigned to XLK, needing ≥ 10 beats (secondary).
+- **(a) Episode lead (the plan's decision):**
+  - For each Nasdaq-100 drawdown ≥ 10% since 2016-06, the price votes flag on the first day 3 of
+    4 are bearish (as in E3).
+  - GNS *leads* if it is < 0 on ≥ 10 of the 20 sessions before that flag. The base rate is the
+    share of all days with GNS < 0.
+  - The plan's three named episodes are 2024-07, 2025-02 and 2026-10. GNS goes to the E8 shadow
+    if it leads in ≥ 2 of them. All other episodes are reported too.
+- **(b) Predictive (secondary):**
+  - GNS and BNB added to E3's base model for T1 (Nasdaq 20d ≤ −5%), clipped logistic, walk-forward.
+  - The first test year is 2021 (4 training years), so only the 2020s can be scored. 100
+    block-permutation draws give the null and MDE.
+  - With one decade at most this is reported, not certified.
+- **E4 follow-up, 2026-11-25 ~01:01 ET, after the first run (labelled):**
+  - The pre-registered sign rule was degenerate. GNS was < 0 on 0.1% of days (beats beat SPY by
+    +2.0% on average), and BNB is negative on nearly every day.
+  - The follow-up uses a relative rule. GNS (or BNB) is "weak" when it is below its own trailing
+    252-session 20th percentile (BNB: below its 20th percentile, meaning misses are punished
+    unusually hard). It leads if weak on ≥ 10 of the 20 sessions before the flag. The base rate is
+    the share of all days weak.
+  - The predictive gain is also split by year.
+- **E4 data-validity fix, 2026-11-25 ~01:10 ET:**
+  - The shared calendar's reported EPS ends 2026-09-24. After that the window only shrank, so
+    Oct–Nov 2026 values were a stale, dwindling sample.
+  - Factors are now NaN when their newest report is more than 10 sessions old. Episodes with fewer
+    than 15 evaluable pre-flag days are "not evaluable".
+
+## 5. Addendum, pre-registered 2026-11-25 21:31 ET (before any result below)
+
+The user asked four things:
+- is too much (old) data hurting us in "unprecedented times";
+- should the 20-day target adapt to conditions;
+- predicted vs actual regime, and can a VIX "curl" predict a real spike;
+- does fading VIX spikes (short vol / buy equity) pay.
+
+Context for the reader: the E2/E9 books already re-decide every day. Only the E1/E3 *labels* are
+fixed 20-day windows.
+
+### E10 Less data: rolling windows vs all history (local)
+- **Models:** E3's clipped logistic regression on the base features, and on base + long-span
+  families. LightGBM on base + long-span families. HMM-R K=2 sizing (E9).
+- **Targets:** T1 (Nasdaq 20d ≤ −5%) and T2 (60d ≤ −10%).
+- **Windows,** for each yearly refit:
+  - expanding (all history; the current design);
+  - rolling 10, 5 and 3 years (the most recent years only).
+  - The purge is as in E3b.
+- **Metric:** out-of-sample log-loss improvement of each rolling window over expanding, by decade,
+  with a 60-session block-bootstrap CI over all years. For the HMM: book Sharpe and MDD
+  (E2 execution).
+- **Decision:** "less history helps" if a rolling window beats expanding in ≥ 2 of the last 3
+  decades AND its all-years CI is above 0. The 2020s cell answers the "unprecedented times"
+  question on its own and is reported separately.
+- The *feature* side of "less data" is already answered by E3 (adding families hurt) and E9 (the
+  7-input vote beat the 30-feature model). It is not re-run.
+
+### E11 Adaptive horizon: first-passage targets vs fixed 20 days (local)
+- **Targets** (Nasdaq-100, from the close of t; the purge is 60):
+  - T1 fixed: 20d path MDD ≤ −5%.
+  - **FP5 (primary):** first passage at fixed ±5% with at most 60 sessions. 1 if −5% is touched
+    before +5%. This adapts to conditions: it resolves in days in a fast tape and in weeks in a
+    calm one.
+  - FPσ (secondary): barriers at ±1·RV20·√20 (vol-scaled), max 60.
+  - Days-to-resolution are reported for each.
+- **Models:** clipped logistic regression and LightGBM on base + long-span families, walk-forward
+  (E3 spans).
+- **Books:** E9's out-of-fold-cutoff mapping (the follow-up method) for each target's score, on the
+  same span.
+- **Decision:** FP5 is preferred over T1 if its book beats T1's (Sharpe-difference CI above 0, or
+  ≥ 3 of 4 crash wins with the CI not below 0). Predictability (log-loss vs climatology) is
+  reported beside it.
+
+### E12 VIX: predicted vs actual, spike prediction, and fading spikes (local)
+- **E12a, predicted vs actual regime:**
+  - Predicted turbulent:
+    - long-history vote ≥ 4;
+    - HMM P(turbulent) > 0.5;
+    - live vote ≥ 4 (2021+).
+  - Actual turbulent (ex post): next-20-session realised vol above the trailing-252 75th
+    percentile of RV20. A second definition: a next-20-session drawdown ≤ −5%.
+  - Report precision P(actual | predicted), recall and the base rate, by decade. This is the
+    "60% vs 50%" view. It is descriptive.
+- **E12b, can a VIX spike be predicted?**
+  - Target S5: the max VIX over the next 5 sessions ≥ 1.25 × VIX_t. Secondary S10: the max over 10
+    sessions ≥ 1.40 × VIX_t.
+  - Features: E3 base; VIX "curl" (1d and 5d log change, VIX z, VRP); credit 20d change; sector
+    correlation; VIX/VIX3M (2007+, on its own span).
+  - Walk-forward clipped logistic regression and LightGBM. Spans: VIX 1991+ and sectors 1999+.
+  - Metrics:
+    - log-loss vs climatology;
+    - top-decile precision vs the base rate, with a block-bootstrap CI;
+    - "curl adds" = the curl features block-permuted (100 draws) inside the full model.
+  - **Decision:** spikes are "predictable" if the model beats climatology AND its top-decile
+    precision exceeds the base rate with a CI above 0, in ≥ 2 of 3 decades (1990s are included
+    where they exist).
+- **E12c, fading spikes** (entries at the close of t+1 after a signal at the close of t):
+  - **Signals:**
+    - M1 "spike": VIX_t / min(VIX over t−10..t) ≥ 1.5.
+    - M2 "spike, then the first down day": M1 true within the last 5 sessions, VIX_t < VIX_{t−1},
+      and VIX_t ≥ 1.3 × that 10-day min. M2 responds to the turn rather than predicting it.
+    - After an entry, signals are ignored for the holding period (no overlapping trades).
+  - **Trades:**
+    - (i) long the S&P 500 (index, 1990+) or Nasdaq-100;
+    - (ii) short vol = −1× the daily VIXY return minus a 1.35%/yr fee (SVIX-like), 2011+.
+  - **Holding periods:** 1, 5, 10 and 20 sessions. Report mean, median, hit rate, worst trade and
+    the trade list.
+  - **Control:** random entries with the same count and holding, avoiding signal-window overlap
+    (1,000 draws), plus the unconditional always-short-vol carry book.
+  - **Decision:** a fade is an E8 shadow candidate if its mean AND hit rate beat the random-entry
+    control's 95th percentile at the pre-registered primary holding (10 sessions), on both
+    instruments where they exist. Its worst trade is always reported, and the decision is made at
+    a size where that worst trade is survivable. This is not a live recommendation.

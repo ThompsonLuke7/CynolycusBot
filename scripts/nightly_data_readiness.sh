@@ -317,6 +317,24 @@ fi
   if [ "$PARITY_STATUS" -ne 0 ]; then
     echo "[$(ts)] WARNING: PARITY FAIL or error (exit=$PARITY_STATUS) -- see Data/research/decision_state_parity/"
   fi
+  # Regime experiments E8 forward shadow (research/regime_experiments_2026-11-24/README.md).
+  # Research only: no orders, nothing in live state is written. After the stamp and after
+  # 3/6 on purpose, so the row carries tonight's live vote. E0 fetches the 40-year Yahoo+FRED
+  # panel (a new immutable raw folder per run, ~8 MB); E8 appends ONE append-only row for the
+  # latest completed session (a date already logged is never rewritten; reruns are no-ops).
+  run_timed "post: regime shadow 1/2 long-history panel fetch (E0)" \
+    "${READINESS_REGIME_SHADOW_FETCH_TIMEOUT_SECONDS:-900}" \
+    "$PYTHON" -u research/regime_experiments_2026-11-24/e0_fetch_long_history.py
+  REGIME_SHADOW_STATUS=$?
+  if [ "$REGIME_SHADOW_STATUS" -eq 0 ]; then
+    run_timed "post: regime shadow 2/2 append-only log (E8)" \
+      "${READINESS_REGIME_SHADOW_TIMEOUT_SECONDS:-900}" \
+      "$PYTHON" -u -W ignore research/regime_experiments_2026-11-24/e8_shadow_log.py
+    REGIME_SHADOW_STATUS=$?
+  fi
+  if [ "$REGIME_SHADOW_STATUS" -ne 0 ]; then
+    echo "[$(ts)] WARNING: regime shadow log failed (exit=$REGIME_SHADOW_STATUS); research only, readiness unaffected"
+  fi
   echo "[$(ts)] nightly_data_readiness.sh complete status=$STATUS"
 } >> "$LOG_FILE" 2>&1
 

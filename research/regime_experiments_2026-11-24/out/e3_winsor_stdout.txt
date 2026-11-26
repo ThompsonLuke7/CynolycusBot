@@ -1,0 +1,121 @@
+vix {'first_row': '1990-12-28', 'first_test_year': 1995, 'rows': 9042, 'rows_lost_inside_span': 0, 'base_rate': 0.42263356240301486, 'decades_judged': ['2000s', '2010s', '2020s'], 'passes': 1, 'needed': 2, 'CRUCIAL_MISSING': False, 'all_years_improvement': -0.0072302680234609396}
+family decade  improvement  null_p95_mde  null_mean  beats_p95  placebo_pct  lgb_improvement
+   vix  1990s     -0.06062       0.00110   -0.02749      False          8.0          0.00822
+   vix  2000s     -0.00209       0.00630   -0.00969      False         74.0         -0.00846
+   vix  2010s     -0.00376       0.00533   -0.00363      False         46.0          0.01243
+   vix  2020s      0.01948       0.00739   -0.00249       True         99.0          0.00585
+   vix    all     -0.00723      -0.00158   -0.00905      False         64.0          0.00380
+term {'first_row': '2006-07-24', 'first_test_year': 2011, 'rows': 5118, 'rows_lost_inside_span': 0, 'base_rate': 0.33974107493134564, 'decades_judged': ['2010s', '2020s'], 'passes': 0, 'needed': 2, 'CRUCIAL_MISSING': False, 'all_years_improvement': -0.0032182356625726216}
+family decade  improvement  null_p95_mde  null_mean  beats_p95  placebo_pct  lgb_improvement
+  term  2010s     -0.00184       0.00241   -0.00486      False         79.0          0.00323
+  term  2020s     -0.00504       0.00324   -0.00251      False         20.0         -0.00653
+  term    all     -0.00322       0.00049   -0.00385      False         55.0         -0.00097
+credit {'first_row': '1986-12-31', 'first_test_year': 1991, 'rows': 10052, 'rows_lost_inside_span': 0, 'base_rate': 0.4178628389154705, 'decades_judged': ['2000s', '2010s', '2020s'], 'passes': 0, 'needed': 2, 'CRUCIAL_MISSING': False, 'all_years_improvement': -0.006234149670001687}
+family decade  improvement  null_p95_mde  null_mean  beats_p95  placebo_pct  lgb_improvement
+credit  1990s     -0.00819       0.00106   -0.00979      False         44.0          0.00388
+credit  2000s     -0.00871       0.00700   -0.00365      False         19.0          0.01274
+credit  2010s     -0.00170       0.00627   -0.00130      False         51.0          0.00414
+credit  2020s     -0.00666       0.00451   -0.00149      False         11.0         -0.00251
+credit    all     -0.00623      -0.00020   -0.00413      False         19.0          0.00521
+rates {'first_row': '1986-09-29', 'first_test_year': 1991, 'rows': 10117, 'rows_lost_inside_span': 0, 'base_rate': 0.4157670595226305, 'decades_judged': ['2000s', '2010s', '2020s'], 'passes': 0, 'needed': 2, 'CRUCIAL_MISSING': False, 'all_years_improvement': -0.010661384447892885}
+family decade  improvement  null_p95_mde  null_mean  beats_p95  placebo_pct  lgb_improvement
+ rates  1990s     -0.03746      -0.00442   -0.03507      False         40.0          0.00043
+ rates  2000s      0.00306       0.00600   -0.01045      False         89.0         -0.02041
+ rates  2010s     -0.00675       0.00552   -0.00495      False         40.0          0.00340
+ rates  2020s     -0.00096       0.00815   -0.00433      False         68.0          0.00785
+ rates    all     -0.01066      -0.00685   -0.01396      False         67.0         -0.00315
+dollar {'first_row': '1986-09-29', 'first_test_year': 1991, 'rows': 10117, 'rows_lost_inside_span': 0, 'base_rate': 0.4157670595226305, 'decades_judged': ['2000s', '2010s', '2020s'], 'passes': 1, 'needed': 2, 'CRUCIAL_MISSING': False, 'all_years_improvement': -0.003628492337348521}
+family decade  improvement  null_p95_mde  null_mean  beats_p95  placebo_pct  lgb_improvement
+dollar  1990s     -0.01864       0.00406   -0.00908      False         17.0         -0.00872
+dollar  2000s     -0.00192       0.00622   -0.00381      False         59.0         -0.00246
+dollar  2010s     -0.00379       0.00613   -0.00174      False         31.0         -0.00426
+dollar  2020s      0.01403       0.00545   -0.00097       True         98.0          0.02160
+dollar    all     -0.00363       0.00002   -0.00402      False         47.0          0.00003
+oil {'first_row': '2001-08-22', 'first_test_year': 2006, 'rows': 6350, 'rows_lost_inside_span': 2, 'base_rate': 0.3748815165876777, 'decades_judged': ['2000s', '2010s', '2020s'], 'passes': 0, 'needed': 2, 'CRUCIAL_MISSING': False, 'all_years_improvement': -0.009574019880696394}
+family decade  improvement  null_p95_mde  null_mean  beats_p95  placebo_pct  lgb_improvement
+   oil  2000s     -0.05682       0.01412   -0.01419      False          1.0          0.01547
+   oil  2010s     -0.00133       0.00322   -0.00469      False         74.0         -0.01732
+   oil  2020s      0.00611       0.00861   -0.00204      False         93.0         -0.00111
+   oil    all     -0.00957      -0.00026   -0.00565      False         15.0         -0.00571
+relative {'first_row': '1987-10-08', 'first_test_year': 1992, 'rows': 9857, 'rows_lost_inside_span': 0, 'base_rate': 0.42086001829826164, 'decades_judged': ['2000s', '2010s', '2020s'], 'passes': 0, 'needed': 2, 'CRUCIAL_MISSING': False, 'all_years_improvement': -0.0017933249481688618}
+  family decade  improvement  null_p95_mde  null_mean  beats_p95  placebo_pct  lgb_improvement
+relative  1990s     -0.00958       0.00060   -0.00955      False         45.0         -0.00371
+relative  2000s     -0.00220       0.00442   -0.00311      False         48.0          0.01059
+relative  2010s      0.00107       0.00477   -0.00180      False         84.0         -0.00079
+relative  2020s      0.00379       0.00493   -0.00143      False         92.0          0.00225
+relative    all     -0.00179      -0.00126   -0.00389      False         88.0          0.00240
+sectors {'first_row': '1999-03-22', 'first_test_year': 2004, 'rows': 6964, 'rows_lost_inside_span': 0, 'base_rate': 0.41748271889400923, 'decades_judged': ['2000s', '2010s', '2020s'], 'passes': 1, 'needed': 2, 'CRUCIAL_MISSING': False, 'all_years_improvement': 0.0022795623597872128}
+ family decade  improvement  null_p95_mde  null_mean  beats_p95  placebo_pct  lgb_improvement
+sectors  2000s     -0.00420       0.01302   -0.01370      False         77.0         -0.01751
+sectors  2010s     -0.00251       0.00417   -0.00426      False         67.0         -0.00490
+sectors  2020s      0.01503       0.00342   -0.00359       True         99.0          0.02202
+sectors    all      0.00228      -0.00055   -0.00654       True         99.0         -0.00018
+claims {'first_row': '1986-09-29', 'first_test_year': 1991, 'rows': 10117, 'rows_lost_inside_span': 0, 'base_rate': 0.4157670595226305, 'decades_judged': ['2000s', '2010s', '2020s'], 'passes': 0, 'needed': 2, 'CRUCIAL_MISSING': False, 'all_years_improvement': -0.0017136192754083623}
+family decade  improvement  null_p95_mde  null_mean  beats_p95  placebo_pct  lgb_improvement
+claims  1990s     -0.00005       0.00513   -0.00588      False         81.0         -0.00723
+claims  2000s      0.00416       0.00911   -0.00117      False         83.0         -0.00572
+claims  2010s     -0.00076       0.00246   -0.00134      False         51.0          0.00192
+claims  2020s     -0.01396       0.00292   -0.00197      False          1.0         -0.00717
+claims    all     -0.00171       0.00069   -0.00256      False         67.0         -0.00425
+sectors_breadth {'first_row': '1999-03-05', 'first_test_year': 2004, 'rows': 6975, 'rows_lost_inside_span': 0, 'base_rate': 0.4184040258806614, 'decades_judged': ['2000s', '2010s', '2020s'], 'passes': 0, 'needed': 2, 'CRUCIAL_MISSING': False, 'all_years_improvement': -0.0004510105313749735}
+         family decade  improvement  null_p95_mde  null_mean  beats_p95  placebo_pct  lgb_improvement
+sectors_breadth  2000s      0.00030       0.00808   -0.00553      False         76.0          0.00739
+sectors_breadth  2010s     -0.00001       0.00366   -0.00212      False         82.0          0.00020
+sectors_breadth  2020s     -0.00176       0.00333   -0.00152      False         37.0         -0.01076
+sectors_breadth    all     -0.00045       0.00095   -0.00284      False         86.0         -0.00118
+sectors_corr {'first_row': '1999-03-22', 'first_test_year': 2004, 'rows': 6964, 'rows_lost_inside_span': 0, 'base_rate': 0.41748271889400923, 'decades_judged': ['2000s', '2010s', '2020s'], 'passes': 1, 'needed': 2, 'CRUCIAL_MISSING': False, 'all_years_improvement': 0.0028326435914058923}
+      family decade  improvement  null_p95_mde  null_mean  beats_p95  placebo_pct  lgb_improvement
+sectors_corr  2000s     -0.00373       0.00209   -0.00908      False         64.0         -0.03016
+sectors_corr  2010s     -0.00302       0.00203   -0.00181      False         26.0         -0.00292
+sectors_corr  2020s      0.01722       0.00643   -0.00097       True        100.0          0.02128
+sectors_corr    all      0.00283       0.00050   -0.00347       True         99.0         -0.00286
+               arm    1990s    2000s    2010s   2020s      all
+          all_long -0.33667 -0.07432 -0.01242 0.02620 -0.07473
+      all_long_lgb -0.03188 -0.02680  0.00836 0.02091 -0.00635
+     all_minus_vix -0.19650 -0.05746 -0.01105 0.00905 -0.05057
+  all_minus_credit -0.30042 -0.04146 -0.00766 0.02759 -0.05690
+   all_minus_rates -0.34911  0.00128 -0.00914 0.01892 -0.05348
+  all_minus_dollar -0.17197 -0.08661 -0.01092 0.01495 -0.05455
+all_minus_relative -0.31770 -0.06217 -0.01238 0.02438 -0.06830
+  all_minus_claims -0.31772 -0.09268 -0.01328 0.03764 -0.07533
+      peak     trough  drawdown price_flag  base_logloss_episode  dp_credit  dp_rates  dp_dollar  dp_relative  dp_claims  dp_vix  dp_term  dp_oil  dp_sectors  dp_sectors_breadth  dp_sectors_corr
+1986-07-03 1986-09-15    -0.180 1986-07-08                   NaN        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+1987-10-05 1987-10-26    -0.399 1987-10-12                   NaN        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+1989-10-09 1990-01-30    -0.165 1989-10-26                   NaN        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+1990-07-16 1990-10-11    -0.329 1990-08-06                   NaN        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+1991-04-17 1991-06-24    -0.115       None                 0.715        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+1992-02-12 1992-06-26    -0.185 1992-03-30                 0.625      0.036    -0.026     -0.074       -0.009      0.003     NaN      NaN     NaN         NaN                 NaN              NaN
+1993-01-14 1993-04-26    -0.142 1993-02-16                 0.747      0.086    -0.010     -0.054        0.041     -0.055     NaN      NaN     NaN         NaN                 NaN              NaN
+1994-03-17 1994-06-24    -0.159 1994-03-24                 0.905     -0.085    -0.002      0.011        0.026      0.022     NaN      NaN     NaN         NaN                 NaN              NaN
+1995-09-11 1995-10-09    -0.103       None                 0.621        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+1995-11-03 1996-01-09    -0.140 1995-12-18                 0.521      0.056     0.095     -0.064        0.017      0.037   0.230      NaN     NaN         NaN                 NaN              NaN
+1996-06-05 1996-07-23    -0.144 1996-07-12                 0.885     -0.093    -0.030     -0.014       -0.069     -0.032   0.053      NaN     NaN         NaN                 NaN              NaN
+1997-01-22 1997-04-02    -0.153 1997-02-27                 0.370     -0.052    -0.093     -0.095        0.013     -0.005   0.022      NaN     NaN         NaN                 NaN              NaN
+1997-10-09 1997-12-24    -0.182 1997-10-27                 0.446      0.008    -0.021      0.020        0.005     -0.008  -0.067      NaN     NaN         NaN                 NaN              NaN
+1998-07-20 1998-10-08    -0.230 1998-08-14                 0.552      0.044     0.032      0.015        0.034      0.031  -0.044      NaN     NaN         NaN                 NaN              NaN
+1999-02-01 1999-03-02    -0.114       None                 0.226        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+1999-04-09 1999-04-19    -0.119       None                 0.187        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+1999-04-26 1999-05-25    -0.116       None                 0.222        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+1999-07-16 1999-08-10    -0.120 1999-08-06                 0.628     -0.045    -0.041      0.048        0.015     -0.012  -0.037      NaN     NaN         NaN                 NaN              NaN
+2000-01-03 2000-01-06    -0.119       None                 0.276        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+2000-01-21 2000-01-28    -0.105       None                 1.155        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+2000-03-27 2002-10-07    -0.829 2000-04-03                 0.433     -0.042    -0.029      0.014        0.001     -0.001  -0.032      NaN     NaN         NaN                 NaN              NaN
+2015-11-03 2016-02-09    -0.163 2015-12-22                 0.821      0.021    -0.006      0.016        0.004     -0.011  -0.014    0.004  -0.022       0.028               0.007            0.022
+2018-01-26 2018-02-08    -0.102 2018-02-07                 1.164     -0.018     0.020     -0.018        0.001     -0.028   0.033    0.001   0.017       0.068               0.005            0.064
+2018-03-12 2018-04-02    -0.104 2018-03-22                 0.821     -0.040    -0.002     -0.016        0.009     -0.077   0.011   -0.020   0.046       0.029               0.019            0.011
+2018-08-29 2018-12-24    -0.230 2018-10-15                 0.917      0.015     0.018      0.009        0.006     -0.028   0.028    0.006  -0.000       0.063               0.005            0.059
+2019-05-03 2019-06-03    -0.111 2019-05-30                 1.046      0.015     0.011      0.018        0.007     -0.015  -0.002    0.013   0.001       0.057               0.018            0.037
+2020-02-19 2020-03-20    -0.280 2020-02-25                 0.396     -0.014     0.026      0.017        0.016      0.012   0.013    0.030  -0.014       0.040               0.003            0.037
+2020-09-02 2020-09-23    -0.128       None                 0.707        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+2021-02-12 2021-03-08    -0.109       None                 0.894        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+2021-11-19 2022-12-28    -0.356 2021-12-17                 0.661     -0.007    -0.003      0.035        0.034     -0.106   0.044   -0.004   0.050       0.036              -0.005            0.041
+2024-07-10 2024-08-07    -0.136 2024-07-24                 0.926      0.004    -0.005      0.012       -0.008      0.012   0.034    0.005  -0.010       0.063               0.007            0.056
+2025-02-19 2025-04-08    -0.229 2025-03-04                 0.767     -0.005     0.009      0.028        0.009     -0.002   0.009    0.009  -0.034       0.080              -0.005            0.085
+2025-10-29 2026-03-30    -0.121 2026-03-06                 0.826      0.004     0.015     -0.018       -0.007     -0.000   0.006   -0.001  -0.016       0.126              -0.004            0.129
+2026-06-02 2026-07-29    -0.113       None                 0.704        NaN       NaN        NaN          NaN        NaN     NaN      NaN     NaN         NaN                 NaN              NaN
+2026-10-06 2026-11-20    -0.198 2026-11-05                 1.113     -0.017     0.000      0.054       -0.014     -0.004   0.036    0.000   0.020       0.169              -0.003            0.171
+{"vix": [1, 2, false], "term": [0, 2, false], "credit": [0, 2, false], "rates": [0, 2, false], "dollar": [1, 2, false], "oil": [0, 2, false], "relative": [0, 2, false], "sectors": [1, 2, false], "claims": [0, 2, false], "sectors_breadth": [0, 2, false], "sectors_corr": [1, 2, false]}
+
+real	3m12.180s
+user	8m9.190s
+sys	0m4.329s

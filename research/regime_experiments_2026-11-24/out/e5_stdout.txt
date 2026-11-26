@@ -1,0 +1,185 @@
+FOMC calendar check: days 86 median 14:00 bar / day median 4.33 share below 1.5x: 0.035
+VIXY rows 215652
+SPY rows 181627 sessions 2711 2016-02-02 2026-11-20 null share 0.0 vixy bar missing (carried) 0.0019
+{
+ "y_up": {
+  "fomc_rows": 1260,
+  "fomc_days": 70,
+  "e_vs_bsched_gain": -0.03958627377804804,
+  "e_vs_bsched_ci": [
+   -0.08805999843494215,
+   0.007737207770619092
+  ],
+  "sched_vs_b_gain": 0.0166466453969151,
+  "sched_vs_b_ci": [
+   -0.018545456017368168,
+   0.051732529363311186
+  ],
+  "d_vs_b_on_fomc_post14": -0.007521028688703308,
+  "coarsest_ge_80pct": null,
+  "followup_csched_vs_c_fomc_post14": {
+   "gain": 0.019523964500061903,
+   "ci": [
+    -0.022465249172165927,
+    0.060894619909994854
+   ]
+  },
+  "followup_csched_vs_c_all_rows": {
+   "gain": -0.0001036799289344314,
+   "ci": [
+    -0.001119875122297707,
+    0.001121371422541024
+   ]
+  },
+  "gains": {
+   "b": -0.0015742893386080858,
+   "c": -0.0024997202484019626,
+   "d": -0.0025810002876872013,
+   "e": -0.0024103196895508845
+  }
+ },
+ "y_range": {
+  "fomc_rows": 1260,
+  "fomc_days": 70,
+  "e_vs_bsched_gain": -0.2473798722129505,
+  "e_vs_bsched_ci": [
+   -0.3646738465379885,
+   -0.15121931946519762
+  ],
+  "sched_vs_b_gain": 0.5013514554039155,
+  "sched_vs_b_ci": [
+   0.3433766864297367,
+   0.6548238456494672
+  ],
+  "d_vs_b_on_fomc_post14": 0.24763873953411344,
+  "coarsest_ge_80pct": "c",
+  "followup_csched_vs_c_fomc_post14": {
+   "gain": 0.4204277228707551,
+   "ci": [
+    0.29574926800242624,
+    0.532607389558937
+   ]
+  },
+  "followup_csched_vs_c_all_rows": {
+   "gain": 0.018859481460675585,
+   "ci": [
+    0.01378466605993179,
+    0.02493812637289029
+   ]
+  },
+  "gains": {
+   "b": 0.022133608479365217,
+   "c": 0.05483562564886892,
+   "d": 0.060093881042367125,
+   "e": 0.03778657503292646
+  }
+ }
+}
+QQQ rows 181162 sessions 2704 2016-02-02 2026-11-20 null share 0.0 vixy bar missing (carried) 0.0011
+{
+ "y_up": {
+  "fomc_rows": 1260,
+  "fomc_days": 70,
+  "e_vs_bsched_gain": -0.03264229554206925,
+  "e_vs_bsched_ci": [
+   -0.06647720516444214,
+   -0.0030707693192002852
+  ],
+  "sched_vs_b_gain": -0.0017104042940151432,
+  "sched_vs_b_ci": [
+   -0.020754415768876544,
+   0.019530171893081993
+  ],
+  "d_vs_b_on_fomc_post14": -0.012050148213959819,
+  "coarsest_ge_80pct": "b",
+  "followup_csched_vs_c_fomc_post14": {
+   "gain": -0.0007371731738650564,
+   "ci": [
+    -0.018692698772043968,
+    0.0152119323582091
+   ]
+  },
+  "followup_csched_vs_c_all_rows": {
+   "gain": -0.0004986163994347493,
+   "ci": [
+    -0.0009469283802137857,
+    -2.6960213101483433e-05
+   ]
+  },
+  "gains": {
+   "b": 0.000927265625431682,
+   "c": 0.0007447852141538636,
+   "d": 0.0006822458619561418,
+   "e": 0.00034964450376078247
+  }
+ },
+ "y_range": {
+  "fomc_rows": 1260,
+  "fomc_days": 70,
+  "e_vs_bsched_gain": -0.31275748402783826,
+  "e_vs_bsched_ci": [
+   -0.4301564130206905,
+   -0.1996606473039047
+  ],
+  "sched_vs_b_gain": 0.5363407608104455,
+  "sched_vs_b_ci": [
+   0.36528788587707545,
+   0.6804709527005929
+  ],
+  "d_vs_b_on_fomc_post14": 0.2306339815188551,
+  "coarsest_ge_80pct": "c",
+  "followup_csched_vs_c_fomc_post14": {
+   "gain": 0.4530113055559849,
+   "ci": [
+    0.3243902976942572,
+    0.5693208458079161
+   ]
+  },
+  "followup_csched_vs_c_all_rows": {
+   "gain": 0.016051747544013718,
+   "ci": [
+    0.010929578892162168,
+    0.02129825975401619
+   ]
+  },
+  "gains": {
+   "b": 0.021619746965358188,
+   "c": 0.04860106998999661,
+   "d": 0.052768411148575535,
+   "e": 0.031838574283434326
+  }
+ }
+}
+symbol  target            arm   rows   loss_a      gain   gain_lo   gain_hi  share_of_d  share_of_d_lo  share_of_d_hi    gain_b    gain_c    gain_d
+   SPY    y_up              b 149268 0.694051 -0.001574 -0.003791  0.000604    0.609953      -1.543975       6.198996       NaN       NaN       NaN
+   SPY    y_up              c 149268 0.694051 -0.002500 -0.005185 -0.000042    0.968508      -2.637157       6.963520       NaN       NaN       NaN
+   SPY    y_up              d 149268 0.694051 -0.002581 -0.005144  0.000125    1.000000       1.000000       1.000000       NaN       NaN       NaN
+   SPY    y_up              e 149268 0.694051 -0.002410 -0.004985 -0.000140    0.933870      -2.338406       7.818108       NaN       NaN       NaN
+   SPY    y_up bucket_600_660  26736      NaN       NaN       NaN       NaN         NaN            NaN            NaN -0.002222 -0.003437 -0.003791
+   SPY    y_up bucket_660_780  53472      NaN       NaN       NaN       NaN         NaN            NaN            NaN -0.001615 -0.002371 -0.002292
+   SPY    y_up bucket_780_870  40102      NaN       NaN       NaN       NaN         NaN            NaN            NaN -0.001452 -0.002039 -0.002083
+   SPY    y_up bucket_870_931  28958      NaN       NaN       NaN       NaN         NaN            NaN            NaN -0.001070 -0.002510 -0.002687
+   SPY y_range              b 149268 0.259716  0.022134  0.015810  0.028512    0.368317       0.258220       0.485695       NaN       NaN       NaN
+   SPY y_range              c 149268 0.259716  0.054836  0.046795  0.062365    0.912499       0.744777       1.110461       NaN       NaN       NaN
+   SPY y_range              d 149268 0.259716  0.060094  0.051705  0.068164    1.000000       1.000000       1.000000       NaN       NaN       NaN
+   SPY y_range              e 149268 0.259716  0.037787  0.031117  0.043677    0.628792       0.505877       0.774641       NaN       NaN       NaN
+   SPY y_range bucket_600_660  26736      NaN       NaN       NaN       NaN         NaN            NaN            NaN  0.023541  0.034979  0.041917
+   SPY y_range bucket_660_780  53472      NaN       NaN       NaN       NaN         NaN            NaN            NaN  0.024351  0.053652  0.057230
+   SPY y_range bucket_780_870  40102      NaN       NaN       NaN       NaN         NaN            NaN            NaN  0.021073  0.058244  0.064371
+   SPY y_range bucket_870_931  28958      NaN       NaN       NaN       NaN         NaN            NaN            NaN  0.018208  0.070633  0.076242
+   QQQ    y_up              b 149070 0.692063  0.000927 -0.000905  0.002857    1.359137     -11.348331      19.988016       NaN       NaN       NaN
+   QQQ    y_up              c 149070 0.692063  0.000745 -0.001300  0.003005    1.091667     -11.362749      18.836704       NaN       NaN       NaN
+   QQQ    y_up              d 149070 0.692063  0.000682 -0.001650  0.002875    1.000000       1.000000       1.000000       NaN       NaN       NaN
+   QQQ    y_up              e 149070 0.692063  0.000350 -0.001972  0.002675    0.512490     -12.045916      15.172349       NaN       NaN       NaN
+   QQQ    y_up bucket_600_660  26700      NaN       NaN       NaN       NaN         NaN            NaN            NaN  0.001679  0.002051  0.001846
+   QQQ    y_up bucket_660_780  53400      NaN       NaN       NaN       NaN         NaN            NaN            NaN  0.002347  0.002549  0.002571
+   QQQ    y_up bucket_780_870  40048      NaN       NaN       NaN       NaN         NaN            NaN            NaN  0.000553  0.000327  0.000281
+   QQQ    y_up bucket_870_931  28922      NaN       NaN       NaN       NaN         NaN            NaN            NaN -0.001870 -0.003214 -0.003325
+   QQQ y_range              b 149070 0.239254  0.021620  0.014845  0.027321    0.409710       0.278218       0.556933       NaN       NaN       NaN
+   QQQ y_range              c 149070 0.239254  0.048601  0.041532  0.056086    0.921026       0.760724       1.129670       NaN       NaN       NaN
+   QQQ y_range              d 149070 0.239254  0.052768  0.045030  0.060177    1.000000       1.000000       1.000000       NaN       NaN       NaN
+   QQQ y_range              e 149070 0.239254  0.031839  0.026012  0.038524    0.603364       0.478043       0.776197       NaN       NaN       NaN
+   QQQ y_range bucket_600_660  26700      NaN       NaN       NaN       NaN         NaN            NaN            NaN  0.023117  0.031336  0.036800
+   QQQ y_range bucket_660_780  53400      NaN       NaN       NaN       NaN         NaN            NaN            NaN  0.022205  0.044993  0.047825
+   QQQ y_range bucket_780_870  40048      NaN       NaN       NaN       NaN         NaN            NaN            NaN  0.020491  0.052167  0.057221
+   QQQ y_range bucket_870_931  28922      NaN       NaN       NaN       NaN         NaN            NaN            NaN  0.020721  0.066264  0.070473

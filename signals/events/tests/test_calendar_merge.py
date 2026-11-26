@@ -36,3 +36,19 @@ def test_history_refresh_keeps_snapshot_rows_and_replaces_history():
     out = merge_calendar_history(prior, new_hist)
     assert out["snapshot_date"].isna().sum() == 2
     assert out["snapshot_date"].notna().sum() == 2
+
+
+def test_union_history_keeps_unfetched_rows_and_fresh_rows_win():
+    """--union-history: a refresh that misses a ticker (rate limit) or old quarters keeps them."""
+    from signals.events.earnings_calendar import merge_history_union
+
+    prior = merge_calendar_snapshot(_HIST.assign(surprise_pct=[1.0, 2.0, 3.0, 4.0, 5.0]), _snap("2026-09-24"))
+    fetched = pd.DataFrame({"ticker": ["AAA", "AAA"], "date": pd.to_datetime(["2024-07-10", "2024-10-10"]),
+                            "surprise_pct": [30.0, 40.0], "snapshot_date": pd.NaT})
+    out = merge_history_union(prior, fetched)
+    hist = out[out["snapshot_date"].isna()]
+    assert len(hist) == 6                                    # 5 prior + 1 new quarter
+    assert set(hist.loc[hist.ticker == "BBB", "date"]) == set(_HIST.loc[_HIST.ticker == "BBB", "date"])
+    assert hist.loc[(hist.ticker == "AAA") & (hist.date == "2024-07-10"), "surprise_pct"].item() == 30.0
+    assert hist.loc[(hist.ticker == "AAA") & (hist.date == "2024-01-10"), "surprise_pct"].item() == 1.0
+    assert out["snapshot_date"].notna().sum() == 2           # snapshot rows untouched
